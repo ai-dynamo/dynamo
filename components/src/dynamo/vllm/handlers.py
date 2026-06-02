@@ -2,18 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import base64
 import inspect
 import logging
 import os
 
 # MM kwargs NIXL transfer (frontend → backend pre-rendered path)
 import pickle
+import struct
 import tempfile
 import threading
 import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Final, Generic, Optional, TypeVar
 
 import torch
@@ -23,10 +24,15 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.outputs import RequestOutput
 from vllm.renderers.embed_utils import safe_load_prompt_embeds
-from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.sampling_params import (
+    RequestOutputKind,
+    SamplingParams,
+    StructuredOutputsParams,
+)
 from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo._core import Context
+from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
@@ -48,6 +54,7 @@ from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
+from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.llm import (
     KvEventPublisher,
@@ -92,6 +99,7 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
+_DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 
 
 class _DeferredAbort:
@@ -257,14 +265,6 @@ class VllmEngineQuiesceController:
         self._is_quiesced = False
 
 
-@dataclass(frozen=True)
-class LoRAInfo:
-    """Metadata for a loaded LoRA adapter."""
-
-    id: int
-    path: str
-
-
 def _compute_mm_uuids(
     multi_modal_data: Dict[str, Any] | None,
 ) -> Dict[str, list[str]] | None:
@@ -292,33 +292,6 @@ def _compute_mm_uuids(
     return {"image": uuids}
 
 
-# LoRAManager singleton - initialized lazily when DYN_LORA_ENABLED is set
-# None = not yet initialized, False = disabled/failed, LoRAManager = initialized
-_lora_manager = None
-
-
-def get_lora_manager():
-    """Get the LoRAManager singleton, initializing it on first call if enabled."""
-    global _lora_manager
-
-    if _lora_manager is not None:
-        return _lora_manager
-
-    if os.environ.get("DYN_LORA_ENABLED", "").lower() in ("true", "1", "yes"):
-        try:
-            from dynamo.common.lora import LoRAManager
-
-            _lora_manager = LoRAManager()
-            logger.info("LoRAManager initialized successfully")
-            return _lora_manager
-        except Exception as e:
-            logger.warning(
-                f"Failed to initialize LoRAManager: {e}. URI-based LoRA loading will be disabled."
-            )
-
-    return None
-
-
 def build_sampling_params(
     request: Dict[str, Any],
     default_sampling_params: Dict[str, Any],
@@ -336,7 +309,6 @@ def build_sampling_params(
         SamplingParams configured from the request
     """
     sampling_params = SamplingParams(**default_sampling_params)
-    sampling_params.detokenize = False
 
     # Handle guided_decoding - convert to StructuredOutputsParams
     sampling_options = request.get("sampling_options", {})
@@ -348,6 +320,9 @@ def build_sampling_params(
             choice=guided_decoding.get("choice"),
             grammar=guided_decoding.get("grammar"),
             whitespace_pattern=guided_decoding.get("whitespace_pattern"),
+            structural_tag=serialize_structural_tag(
+                guided_decoding.get("structural_tag")
+            ),
         )
 
     # Apply remaining sampling_options
@@ -425,6 +400,12 @@ def build_sampling_params(
         # Ensure at least 1 token generation by default when possible
         dynamic_default = max(1, model_max_len - input_length)
         sampling_params.max_tokens = dynamic_default
+
+    # Dynamo's internal token path consumes disjoint token deltas. This mirrors
+    # the SGLang integration and lets vLLM's stream_interval gate reduce backend
+    # bridge pressure before chunks cross into Dynamo.
+    sampling_params.detokenize = False
+    sampling_params.output_kind = _DELTA_REQUEST_OUTPUT_KIND
 
     return sampling_params
 
@@ -1949,6 +1930,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     def _build_completion_usage(
         request_output: RequestOutput,
         embedding_sequence_length: int | None = None,
+        completion_token_counts: dict[int, int] | None = None,
     ) -> Dict[str, Any]:
         """
         Build completion usage statistics.
@@ -1957,6 +1939,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             request_output: vLLM RequestOutput object
             embedding_sequence_length: If using prompt embeddings, the sequence length
                                      extracted from the embeddings tensor shape
+            completion_token_counts: Optional cumulative generated-token counts by
+                                     output index. DELTA-mode streams need this
+                                     because the final vLLM chunk is not cumulative.
 
         Returns:
             Dict with prompt_tokens, completion_tokens, total_tokens, prompt_tokens_details
@@ -1971,9 +1956,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         else:
             prompt_tokens = None
 
-        completion_tokens = sum(
-            len(output.token_ids) for output in request_output.outputs
-        )
+        if completion_token_counts is not None:
+            completion_tokens = sum(completion_token_counts.values())
+        else:
+            completion_tokens = sum(
+                len(output.token_ids) for output in request_output.outputs
+            )
 
         return {
             "prompt_tokens": prompt_tokens,
@@ -2009,8 +1997,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         if output.logprobs is None:
             return None, None
 
+        token_ids = list(output.token_ids or [])
+        if not token_ids or num_output_tokens_so_far >= len(token_ids):
+            return None, None
+
         # Get logprobs for new tokens only
         new_logprobs = output.logprobs[num_output_tokens_so_far:]
+        new_token_ids = token_ids[num_output_tokens_so_far:]
+        new_logprobs = new_logprobs[: len(new_token_ids)]
         if not new_logprobs:
             return None, None
 
@@ -2022,11 +2016,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 continue
 
             # Get the actual token_id that was generated at this position
-            actual_token_id = output.token_ids[num_output_tokens_so_far + token_idx]
+            actual_token_id = new_token_ids[token_idx]
 
             # Extract log probability for the selected token
             # vLLM guarantees the selected token is always in the logprobs dict
-            selected_logprob = token_logprobs_dict[actual_token_id]
+            selected_logprob = token_logprobs_dict.get(actual_token_id)
+            if selected_logprob is None:
+                continue
             log_probs.append(float(selected_logprob.logprob))
 
             # Build top_logprobs list for this token position
@@ -2124,7 +2120,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 ),
             )
 
-            num_output_tokens_so_far: dict[int, int] = {}
+            total_output_tokens_by_index: dict[int, int] = {}
             async for res in gen:
                 # res is vllm's RequestOutput
 
@@ -2143,34 +2139,51 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     }
                     break
 
+                prepared_outputs = []
                 for output in res.outputs:
                     output_idx = getattr(output, "index", 0) or 0
-                    previous_total_toks = num_output_tokens_so_far.get(output_idx, 0)
-                    next_total_toks = len(output.token_ids)
+                    token_ids = list(output.token_ids or [])
+                    total_output_tokens_by_index[
+                        output_idx
+                    ] = total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
+                    finish_reason = getattr(output, "finish_reason", None)
+                    stop_reason = getattr(output, "stop_reason", None)
+                    if not token_ids and not finish_reason and not stop_reason:
+                        continue
+                    prepared_outputs.append(
+                        (output, output_idx, token_ids, finish_reason, stop_reason)
+                    )
+
+                for (
+                    output,
+                    output_idx,
+                    token_ids,
+                    finish_reason,
+                    stop_reason,
+                ) in prepared_outputs:
                     out = {
                         "index": output_idx,
-                        "token_ids": output.token_ids[previous_total_toks:],
+                        "token_ids": token_ids,
                     }
 
-                    # Extract logprobs for new tokens if available
+                    # vLLM DELTA outputs already align token_ids/logprobs to this chunk.
                     tokenizer = getattr(self.engine_client, "tokenizer", None)
                     log_probs, top_logprobs = self._extract_logprobs(
-                        output, previous_total_toks, tokenizer=tokenizer
+                        output, 0, tokenizer=tokenizer
                     )
                     if log_probs is not None:
                         out["log_probs"] = log_probs
                     if top_logprobs is not None:
                         out["top_logprobs"] = top_logprobs
 
-                    if output.finish_reason:
-                        out["finish_reason"] = normalize_finish_reason(
-                            output.finish_reason
-                        )
+                    if finish_reason:
+                        out["finish_reason"] = normalize_finish_reason(finish_reason)
                         out[
                             "completion_usage"
                         ] = BaseWorkerHandler._build_completion_usage(
                             request_output=res,
                             embedding_sequence_length=embedding_sequence_length,
+                            completion_token_counts=total_output_tokens_by_index,
                         )
                         # Log completion with LoRA info (debug level to avoid log spam)
                         self._log_with_lora_context(
@@ -2178,13 +2191,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             "{output_tokens} output tokens, finish_reason={finish_reason}",
                             request_id,
                             lora_request,
-                            output_tokens=next_total_toks,
-                            finish_reason=output.finish_reason,
+                            output_tokens=total_output_tokens_by_index.get(
+                                output_idx, 0
+                            ),
+                            finish_reason=finish_reason,
                         )
-                    if output.stop_reason:
-                        out["stop_reason"] = output.stop_reason
+                    if stop_reason:
+                        out["stop_reason"] = stop_reason
                     yield out
-                    num_output_tokens_so_far[output_idx] = next_total_toks
 
         except EngineDeadError as e:
             logger.error(f"vLLM EngineDeadError: {e}")
@@ -2880,9 +2894,12 @@ class EmbeddingWorkerHandler:
         The Rust frontend forwards the request dict directly. Expected keys:
         ``model: str``, ``input: str | list[str] | list[int] | list[list[int]]``.
         Optional ``dimensions`` (Matryoshka truncation; first N floats of each
-        embedding). ``encoding_format=base64`` is not yet supported end-to-end
-        (the Rust response type rejects strings); tracked as a separate
-        follow-up.
+        embedding). Optional ``encoding_format`` (``"float"`` -- default --
+        or ``"base64"``); when ``"base64"`` is requested, each per-input
+        vector is serialized as a base64-encoded string of little-endian
+        ``f32`` bytes per the OpenAI spec, applied after any
+        ``dimensions`` truncation so the byte count matches the requested
+        dimensionality.
         """
         # Lazy import to avoid pulling PoolingParams into handlers.py at module
         # load time for non-embedding workers.
@@ -2912,6 +2929,13 @@ class EmbeddingWorkerHandler:
         if dimensions is not None and dimensions < 1:
             raise ValueError(f"dimensions must be >= 1, got {dimensions}")
 
+        encoding_format = request.get("encoding_format", "float")
+        if encoding_format not in ("float", "base64"):
+            raise ValueError(
+                f"Invalid 'encoding_format' value {encoding_format!r}; "
+                "expected 'float' or 'base64'"
+            )
+
         pooling_params = PoolingParams()
         # Use the per-request context id (same as the chat/completion paths
         # in this file) so concurrent embeddings never collide inside
@@ -2921,10 +2945,7 @@ class EmbeddingWorkerHandler:
         # unique enough to scope a vLLM ``request_id``.
         base_request_id = context.id()
 
-        embedding_objects: list[Dict[str, Any]] = []
-        prompt_tokens = 0
-
-        for idx, prompt in enumerate(prompts):
+        async def _encode_one(idx: int, prompt: Any):
             request_id = f"{base_request_id}-{idx}"
             encode_arg: Any = (
                 prompt
@@ -2939,12 +2960,35 @@ class EmbeddingWorkerHandler:
                     request_id=request_id,
                 ):
                     final_output = out
-
             if final_output is None:
                 raise RuntimeError(
                     f"vLLM engine.encode produced no output for input index {idx}"
                 )
+            return final_output
 
+        # Submit every prompt to the engine in the same event-loop tick so
+        # vLLM's continuous-batching scheduler can coalesce them into a
+        # single forward pass instead of N sequential ones. ``asyncio.gather``
+        # returns results in input order, so ``outputs[k]`` matches ``prompts[k]``
+        # regardless of engine completion order.
+        #
+        # Use explicit tasks + a ``finally`` cancellation pass so that if one
+        # ``_encode_one`` raises, we cancel siblings still in flight instead
+        # of leaving them running -- otherwise vLLM keeps consuming engine
+        # capacity for output that this handler will discard.
+        tasks = [asyncio.create_task(_encode_one(i, p)) for i, p in enumerate(prompts)]
+        try:
+            outputs = await asyncio.gather(*tasks)
+        finally:
+            pending = [t for t in tasks if not t.done()]
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+        embedding_objects: list[Dict[str, Any]] = []
+        prompt_tokens = 0
+        for idx, final_output in enumerate(outputs):
             embedding = _pooling_output_to_list(final_output.outputs.data)
             if dimensions is not None:
                 if dimensions > len(embedding):
@@ -2954,10 +2998,17 @@ class EmbeddingWorkerHandler:
                     )
                 embedding = embedding[:dimensions]
 
+            # Always emit base64 over the worker->frontend wire format. The
+            # Rust frontend decodes back to float when the client's
+            # ``encoding_format`` is float (or unset). 15x1024-float responses
+            # serialized as JSON arrays cost ~110 ms in Python json.dumps +
+            # Rust serde parse; base64 bytes are ~3x smaller and ~10x faster
+            # to (de)serialize. Client-visible wire format is preserved
+            # because Rust converts at the HTTP boundary.
             embedding_objects.append(
                 {
                     "object": "embedding",
-                    "embedding": embedding,
+                    "embedding": _encode_floats_to_base64(embedding),
                     "index": idx,
                 }
             )
@@ -3069,3 +3120,16 @@ def _pooling_output_to_list(data: Any) -> list[float]:
         f"Unsupported PoolingOutput.data type {type(data).__name__}; "
         "expected torch.Tensor or list"
     )
+
+
+def _encode_floats_to_base64(floats: list[float]) -> str:
+    """Encode an embedding vector as a base64 string per the OpenAI
+    ``encoding_format=base64`` spec: raw little-endian ``float32`` bytes
+    are concatenated and base64-encoded with the standard alphabet.
+
+    Mirrors the Rust ``encode_floats_to_base64`` helper in
+    ``lib/llm/src/preprocessor.rs`` so the two backend code paths
+    produce identical bytes for the same input.
+    """
+    packed = struct.pack(f"<{len(floats)}f", *floats)
+    return base64.b64encode(packed).decode("ascii")

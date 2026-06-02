@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -195,8 +195,25 @@ async fn unregister(
     }
 }
 
-async fn list_workers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    Json(state.registry.list())
+/// Optional query parameters for `GET /workers`.
+///
+/// Both fields are independent filters; omitting one skips that dimension.
+/// Example: `GET /workers?model_name=llama3&tenant_id=acme`
+#[derive(Deserialize)]
+struct WorkersQuery {
+    model_name: Option<String>,
+    tenant_id: Option<String>,
+}
+
+async fn list_workers(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<WorkersQuery>,
+) -> impl IntoResponse {
+    Json(
+        state
+            .registry
+            .list_filtered(params.model_name.as_deref(), params.tenant_id.as_deref()),
+    )
 }
 
 /// Build the [`ScoreResponse`] in both the flat (legacy) and per-instance
@@ -691,5 +708,121 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    // ── /workers endpoint tests ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_workers_returns_registered_workers_with_metadata() {
+        let registry = Arc::new(WorkerRegistry::new(1));
+        registry.signal_ready();
+
+        // Worker 20: llama3 / acme, block_size=4
+        registry
+            .register(
+                20,
+                "tcp://127.0.0.1:15590".to_string(),
+                0,
+                "llama3".to_string(),
+                "acme".to_string(),
+                4,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Worker 21: mistral / acme, block_size=8
+        registry
+            .register(
+                21,
+                "tcp://127.0.0.1:15591".to_string(),
+                0,
+                "mistral".to_string(),
+                "acme".to_string(),
+                8,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let app = create_router(Arc::new(AppState {
+            registry,
+            #[cfg(feature = "metrics")]
+            prom_registry: prometheus::Registry::new(),
+        }));
+
+        // Unfiltered: both workers
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/workers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let workers: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(workers.len(), 2);
+
+        let mut model_names: Vec<_> = workers
+            .iter()
+            .filter_map(|w| w["model_name"].as_str())
+            .collect();
+        model_names.sort();
+        assert_eq!(model_names, ["llama3", "mistral"]);
+
+        let llama = workers
+            .iter()
+            .find(|w| w["model_name"] == "llama3")
+            .unwrap();
+        assert_eq!(llama["block_size"], 4);
+        assert_eq!(llama["tenant_id"], "acme");
+
+        // Filtered by model_name=llama3: only one result
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/workers?model_name=llama3")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let filtered: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0]["model_name"], "llama3");
+
+        // Filtered by nonexistent model: empty array, not a 404
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/workers?model_name=nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let empty: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        assert!(empty.is_empty());
     }
 }

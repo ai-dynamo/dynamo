@@ -468,6 +468,9 @@ impl EntrypointArgs {
         aic_perf_config: Option<AicPerfConfig>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
+        if let Some(runtime_config) = &runtime_config {
+            runtime_config.validate_config()?;
+        }
         if (tls_cert_path.is_some() && tls_key_path.is_none())
             || (tls_cert_path.is_none() && tls_key_path.is_some())
         {

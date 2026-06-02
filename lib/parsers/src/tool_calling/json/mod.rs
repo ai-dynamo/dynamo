@@ -101,7 +101,7 @@ mod tests {
     /// all be captured by find_tool_call_end_position_json so that the jail passes the
     /// entire group to the parser rather than emitting the second (and later) calls
     /// as raw trailing text.
-    #[test] // PARSER.batch.2, helper
+    #[test] // TOOLCALLING.batch.2, helper
     fn test_find_tool_call_end_position_parallel_calls() {
         let config = JsonParserConfig {
             tool_call_start_tokens: vec!["<tool_call>".to_string()],
@@ -153,8 +153,8 @@ mod tests {
     // Recovery for missing outer </TOOLCALL> (max_tokens / EOS truncation):
     // when the inner JSON array is well-formed, treat EOF as the end token
     // and extract the call rather than silently dropping it.
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.5.a in tests/parity/parser/fixtures/nemotron_deci/PARSER.batch.5.yaml.
-    #[test] // PARSER.batch.5 — nemotron_deci
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.5.a in tests/parity/toolcalling/fixtures/nemotron_deci/TOOLCALLING.batch.5.yaml.
+    #[test] // TOOLCALLING.batch.5 — nemotron_deci
     fn test_parse_nemotron_deci_no_outer_close_recovers() {
         let config = JsonParserConfig {
             tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
@@ -178,8 +178,8 @@ mod tests {
     // but no parser-level test pinned it. This test makes the contract
     // visible at the per-parser surface so a JSON-family refactor can't
     // silently break parallel-call extraction without a per-parser failure.
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.a in tests/parity/parser/fixtures/nemotron_deci/PARSER.batch.2.yaml.
-    #[test] // PARSER.batch.2 — nemotron_deci
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.a in tests/parity/toolcalling/fixtures/nemotron_deci/TOOLCALLING.batch.2.yaml.
+    #[test] // TOOLCALLING.batch.2 — nemotron_deci
     fn test_parse_nemotron_deci_multiple_calls() {
         let config = JsonParserConfig {
             tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
@@ -200,8 +200,8 @@ mod tests {
     // `"city":"NYC` with no closing quote, brace, or array bracket). The
     // base parser balances unclosed strings/braces and retries the parse,
     // surfacing the call rather than silently dropping it.
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.b in tests/parity/parser/fixtures/nemotron_deci/PARSER.batch.4.yaml.
-    #[test] // PARSER.batch.4 — nemotron_deci
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.b in tests/parity/toolcalling/fixtures/nemotron_deci/TOOLCALLING.batch.4.yaml.
+    #[test] // TOOLCALLING.batch.4 — nemotron_deci
     fn test_parse_nemotron_deci_truncated_json_recovers() {
         let config = JsonParserConfig {
             tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
@@ -222,6 +222,8 @@ mod tests {
         JsonParserConfig {
             tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
             tool_call_end_tokens: vec!["</TOOLCALL>".to_string()],
+            // Mirror the production nemotron_deci config (Config::nemotron_deci).
+            strip_markup_on_recovery: true,
             ..Default::default()
         }
     }
@@ -240,10 +242,10 @@ mod tests {
         assert_eq!(calls.len(), 1);
     }
 
-    /// PARSER.batch.6 — empty args. A no-arg call (`{}`) must still be returned
+    /// TOOLCALLING.batch.6 — empty args. A no-arg call (`{}`) must still be returned
     /// with the function name intact.
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.6.a in tests/parity/parser/fixtures/nemotron_deci/PARSER.batch.6.yaml.
-    #[test] // PARSER.batch.6 — nemotron_deci
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.6.a in tests/parity/toolcalling/fixtures/nemotron_deci/TOOLCALLING.batch.6.yaml.
+    #[test] // TOOLCALLING.batch.6 — nemotron_deci
     fn test_parse_nemotron_deci_empty_args() {
         let config = nemotron_deci_config();
         let input = r#"<TOOLCALL>[{"name":"current_time","arguments":{}}]</TOOLCALL>"#;
@@ -254,10 +256,43 @@ mod tests {
         assert_eq!(args, serde_json::json!({}));
     }
 
-    /// PARSER.batch.9 — empty / null content variants. Truly-empty (zero bytes)
+    /// Strict recovery with a leading preamble + orphan close tag. The model
+    /// emits prose, then a complete JSON array, then a stray `</TOOLCALL>` with
+    /// no opener: `Let me check.[{...}]</TOOLCALL>`. The extraction stages split
+    /// this into normal_text="Let me check." and json="[{...}]</TOOLCALL>", so
+    /// recovery must strip markers off `json` (not the re-glued full message) to
+    /// salvage the call. Regression for dropping recoverable calls when a
+    /// preamble is present.
+    #[test]
+    fn test_parse_nemotron_deci_preamble_orphan_close_recovers() {
+        // Mirror the finalize/batch path: the with-recovery dispatcher flips
+        // `allow_eof_recovery=true`, which is the only path strict recovery runs on.
+        let config = JsonParserConfig {
+            allow_eof_recovery: true,
+            ..nemotron_deci_config()
+        };
+        let input =
+            r#"Let me check.[{"name":"get_weather","arguments":{"location":"NYC"}}]</TOOLCALL>"#;
+        let (calls, normal) = try_tool_call_parse_json(input, &config, None).unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "preamble must not drop the recoverable call"
+        );
+        assert_eq!(calls[0].function.name, "get_weather");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args, serde_json::json!({"location": "NYC"}));
+        assert_eq!(
+            normal.as_deref(),
+            Some(""),
+            "wrapper markers and preamble are stripped, not leaked into normal_text"
+        );
+    }
+
+    /// TOOLCALLING.batch.9 — empty / null content variants. Truly-empty (zero bytes)
     /// and whitespace-only inputs must yield no tool calls; normal_text
     /// collapses to the empty string.
-    #[test] // PARSER.batch.9 — nemotron_deci
+    #[test] // TOOLCALLING.batch.9 — nemotron_deci
     fn test_parse_nemotron_deci_empty_and_whitespace_inputs() {
         let config = nemotron_deci_config();
         for input in &["", " ", "\n", "\t\n  \t"] {
@@ -276,10 +311,10 @@ mod tests {
         }
     }
 
-    /// PARSER.batch.10 — duplicate calls (same function name twice in one section).
+    /// TOOLCALLING.batch.10 — duplicate calls (same function name twice in one section).
     /// JSON-array form pin parser-level behavior — both calls returned with
     /// distinct ids.
-    #[test] // PARSER.batch.10 — nemotron_deci
+    #[test] // TOOLCALLING.batch.10 — nemotron_deci
     fn test_parse_nemotron_deci_duplicate_calls_same_name() {
         let config = nemotron_deci_config();
         let input = r#"<TOOLCALL>[{"name":"get_weather","arguments":{"city":"NYC"}},{"name":"get_weather","arguments":{"city":"LA"}}]</TOOLCALL>"#;

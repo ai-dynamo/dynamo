@@ -61,9 +61,9 @@ you need.
 searchStrategy: rapid
 ```
 
-Uses the **AI Configurator (AIC)** to simulate GPU performance without
-running real inference. Completes in ~30 seconds with no GPU resources consumed
-during profiling.
+Uses AIC-backed DynoSim-style performance modeling to search deployment
+configurations without running real inference. Completes in ~30 seconds with no
+GPU resources consumed during profiling.
 
 **Use rapid when:**
 - Getting started or iterating quickly
@@ -313,7 +313,7 @@ backend explicitly in these cases:
 | MoE models (DeepSeek-R1, Qwen3-MoE) | `sglang` (full MoE support) |
 | Using `searchStrategy: thorough` | Any except `auto` (required) |
 | TensorRT-LLM compilation caching | `trtllm` (add a compilation cache PVC) |
-| Need load-based planner scaling (FPM) | `vllm` (only backend with ForwardPassMetrics) |
+| Need load-based planner scaling (FPM) | `vllm` (any config) or `trtllm` (non-attention-DP only). SGLang FPM is wired in Dynamo but the upstream module is not in the 1.2.0 runtime image. |
 
 > [!WARNING]
 > TensorRT-LLM does not support Python 3.11. If your environment uses

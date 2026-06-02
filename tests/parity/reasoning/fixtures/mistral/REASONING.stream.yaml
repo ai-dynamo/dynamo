@@ -4,10 +4,12 @@
 family: mistral
 model_label: Mistral / Magistral
 mode: stream
+refs:
+  upstream: &upstream_ref 'inspired by vLLM Mistral reasoning tests: https://github.com/vllm-project/vllm/blob/39910f2b25aacc09f5e7f166cdf0030b19f8b9e8/tests/reasoning/test_mistral_reasoning_parser.py; local taxonomy: lib/parsers/REASONING_CASES.md'
 cases:
   REASONING.stream.1.a:
     description: Empty stream chunk
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - ''
     expected:
@@ -15,14 +17,13 @@ cases:
         reasoning_text: ''
         normal_text: ''
       vllm: *d_s0
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
+      sglang: *d_s0
   REASONING.stream.2.a:
     description: Mistral THINK block across chunks
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - '[THINK]thin'
-    - 'king[/THINK]answer'
+    - king[/THINK]answer
     expected:
       dynamo: &d_s1
         reasoning_text: thinking
@@ -30,30 +31,30 @@ cases:
       vllm:
         reasoning_text: '[THINK]thinking'
         normal_text: answer
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
+      sglang: *d_s1
   REASONING.stream.2.b:
     description: Multiple Mistral THINK spans across chunks
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - '[THINK]first[/THINK]'
     - ' middle '
     - '[THINK]second[/THINK] done'
     expected:
-      dynamo: &d_s5
+      dynamo:
         reasoning_text: firstsecond
         normal_text: ' middle  done'
       vllm:
         reasoning_text: first
         normal_text: ' middle [THINK]second[/THINK] done'
       sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
+        reasoning_text: first
+        normal_text: ' middle [THINK]second[/THINK] done'
   REASONING.stream.3.a:
     description: Start marker split across chunks
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - '[TH'
-    - 'INK]thinking[/THINK]answer'
+    - INK]thinking[/THINK]answer
     expected:
       dynamo: &d_s2
         reasoning_text: thinking
@@ -61,26 +62,26 @@ cases:
       vllm:
         reasoning_text: ''
         normal_text: '[THINK]thinking[/THINK]answer'
-      sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
+      sglang: *d_s2
   REASONING.stream.3.b:
     description: End marker split across chunks
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - '[THINK]thinking[/TH'
-    - 'INK]answer'
+    - INK]answer
     expected:
-      dynamo: &d_s3
+      dynamo:
         reasoning_text: thinking
         normal_text: answer
       vllm:
         reasoning_text: '[THINK]thinking[/THINK]answer'
         normal_text: ''
       sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
+        reasoning_text: thinking[/THINK]answer
+        normal_text: ''
   REASONING.stream.3.c:
     description: Partial start-marker prefix later resolves as force-reasoning text
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - plain [TH
     - ESIS answer
@@ -93,10 +94,11 @@ cases:
         normal_text: plain [THESIS answer
         reason: vLLM Mistral streaming parser only enters reasoning after an explicit start marker.
       sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
+        reasoning_text: ''
+        normal_text: plain [THESIS answer
   REASONING.stream.1.b:
     description: Plain text stays in force-reasoning mode until an end marker
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - plain
     - ' answer'
@@ -109,4 +111,5 @@ cases:
         normal_text: plain answer
         reason: vLLM Mistral streaming parser only enters reasoning after an explicit start marker.
       sglang:
-        unavailable: SGLang peer not wired for Dynamo parser family 'mistral'
+        reasoning_text: ''
+        normal_text: plain answer

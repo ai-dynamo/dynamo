@@ -6,7 +6,7 @@ that aren't parser-internal but aren't request-time gating either.
 
 Sibling files:
 
-- **Tool-call parsers**: `PARSER_CASES.md`
+- **Tool-call parsers**: `TOOLCALLING_CASES.md`
 - **Reasoning parsers**: `REASONING_CASES.md`
 - **Frontend gating**:
   `components/src/dynamo/frontend/tests/FRONTEND_CASES.md`
@@ -25,7 +25,7 @@ landed, parsers must not "trust" that signal — they must extract calls
 based purely on the text. Conversely, when the engine reports
 `finish_reason=length` (truncation), parsers must still recover any
 complete calls that fit before the truncation point (see also
-`PARSER.batch.5`).
+`TOOLCALLING.batch.5`).
 
 The parser's job is to map `text → (calls, normal_text)`; the mapping
 from `(calls, finish_reason)` to the response wire format

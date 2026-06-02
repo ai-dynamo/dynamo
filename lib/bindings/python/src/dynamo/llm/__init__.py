@@ -50,6 +50,19 @@ from dynamo._core import unregister_model as unregister_model
 
 from .exceptions import HttpError
 
+try:
+    from dynamo._core import AicEngineConfig as AicEngineConfig
+    from dynamo._core import EngineCapacity as EngineCapacity
+    from dynamo._core import EngineCapacityRequest as EngineCapacityRequest
+    from dynamo._core import EnginePerfLimits as EnginePerfLimits
+    from dynamo._core import OptimizationTarget as OptimizationTarget
+    from dynamo._core import RustEnginePerfModel as RustEnginePerfModel
+    from dynamo._core import RustEnginePerfOptions as RustEnginePerfOptions
+except ImportError:
+    # These classes are available only when the Python extension is built with
+    # the optional `aic-forward-pass` Cargo feature.
+    pass
+
 
 class RoutedEngine(Protocol):
     async def generate(self, request: Any, **kwargs: Any) -> AsyncIterator[Any]:

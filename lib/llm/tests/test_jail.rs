@@ -1919,6 +1919,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_jailed_stream_harmony_bare_commentary_marker_split() {
+        // TOOLCALLING.stream.3: gpt-oss may start a tool call directly at the
+        // commentary channel marker, and the marker can split across chunks.
+        let chunks = vec![
+            create_mock_response_chunk("<|".to_string(), 0),
+            create_mock_response_chunk("cha".to_string(), 0),
+            create_mock_response_chunk("nnel|".to_string(), 0),
+            create_mock_response_chunk(">commentary".to_string(), 0),
+            create_mock_response_chunk(" to=functions.get_w".to_string(), 0),
+            create_mock_response_chunk("ea".to_string(), 0),
+            create_mock_response_chunk("the".to_string(), 0),
+            create_mock_response_chunk("r <|c".to_string(), 0),
+            create_mock_response_chunk("onstrain|>j".to_string(), 0),
+            create_mock_response_chunk("son<|message|>{\"loc".to_string(), 0),
+            create_mock_response_chunk("at".to_string(), 0),
+            create_mock_response_chunk("ion".to_string(), 0),
+            create_mock_response_chunk("\":\"NY".to_string(), 0),
+            create_mock_response_chunk("C\"}<|call|>".to_string(), 0),
+        ];
+
+        let input_stream = stream::iter(chunks);
+        let jail = JailedStream::builder().tool_call_parser("harmony").build();
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        let content = test_utils::reconstruct_content(&results);
+        assert_eq!(content, "");
+        assert!(!content.contains("<|channel|>"));
+        let tool_call_idx = results
+            .iter()
+            .position(test_utils::has_tool_call)
+            .expect("Should have a tool call result");
+        test_utils::assert_tool_call(
+            &results[tool_call_idx],
+            "get_weather",
+            json!({"location": "NYC"}),
+        );
+    }
+
+    #[tokio::test]
     async fn test_jailed_stream_harmony_analysis_only_drops_content() {
         let chunks = vec![create_mock_response_chunk(
             "<|channel|>analysis<|message|>Need to inspect the request.<|end|>".to_string(),
@@ -2180,6 +2219,7 @@ mod tests {
                     "filter": {"type": "string"},
                 },
             })),
+            strict: None,
         }];
 
         let input_stream = stream::iter(chunks);
@@ -3300,6 +3340,7 @@ fahrenheit
             Some("qwen3_coder".to_string()),
             Some(ChatCompletionToolChoiceOption::Required),
             None,
+            false,
             input_stream,
         )
         .collect()
@@ -3387,6 +3428,7 @@ fahrenheit
                 "get_weather".to_string().into(),
             )),
             None,
+            false,
             input_stream,
         )
         .collect()
@@ -3479,6 +3521,7 @@ fahrenheit
             Some("minimax_m2".to_string()),
             Some(ChatCompletionToolChoiceOption::Required),
             None,
+            false,
             stream::iter(input_chunks),
         )
         .collect()
@@ -3537,6 +3580,452 @@ fahrenheit
         }
     }
 
+    /// MiniMax recovers complete inner invokes even when the outer wrapper is
+    /// damaged. Incomplete paired XML fences still do not recover a call, and
+    /// the jail must not surface raw MiniMax protocol markers as content.
+    #[tokio::test]
+    async fn test_minimax_m2_stream_finalize_recovers_complete_inner_invokes() {
+        // These are jail/finalize regression checks for existing parser parity cases:
+        // the first and prefix-preservation rows cover TOOLCALLING.stream.4.a, and
+        // the mid-call body truncation row covers TOOLCALLING.stream.4.b.
+        let cases = [
+            (
+                "complete body without outer close",
+                "<minimax:tool_call>\n\
+                 <invoke name=\"get_weather\">\n\
+                 <parameter name=\"location\">NYC</parameter>\n\
+                 </invoke>",
+                "",
+                1,
+            ),
+            (
+                "mid-call body truncation",
+                "<minimax:tool_call>\n\
+                 <invoke name=\"get_weather\">\n\
+                 <parameter name=\"location\">NY",
+                "",
+                0,
+            ),
+            (
+                "pre-marker prose before truncated call",
+                "I will check that. <minimax:tool_call>\n\
+                 <invoke name=\"get_weather\">\n\
+                 <parameter name=\"location\">NYC</parameter>\n\
+                 </invoke>",
+                "I will check that. ",
+                1,
+            ),
+        ];
+
+        for (label, partial_tool_call, expected_content, expected_tool_call_count) in cases {
+            let input_chunks = vec![
+                test_utils::create_mock_response_chunk(partial_tool_call.to_string(), 0),
+                test_utils::create_final_response_chunk(0),
+            ];
+
+            let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+                Some("minimax_m2".to_string()),
+                None,
+                None,
+                false,
+                stream::iter(input_chunks),
+            )
+            .collect()
+            .await;
+
+            let tool_call_count: usize = results
+                .iter()
+                .map(|r| {
+                    r.data.as_ref().map_or(0, |d| {
+                        d.inner
+                            .choices
+                            .iter()
+                            .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
+                            .sum::<usize>()
+                    })
+                })
+                .sum();
+            assert_eq!(
+                tool_call_count, expected_tool_call_count,
+                "{label}: unexpected recovered MiniMax tool call count"
+            );
+
+            let content = test_utils::reconstruct_content(&results);
+            assert!(
+                !content.contains("<minimax:tool_call>") && !content.contains("<invoke"),
+                "{label}: MiniMax protocol markup leaked into content: {content:?}"
+            );
+            assert_eq!(
+                content, expected_content,
+                "{label}: unexpected residual content"
+            );
+        }
+    }
+
+    fn tool_call_names(results: &[Annotated<NvCreateChatCompletionStreamResponse>]) -> Vec<String> {
+        results
+            .iter()
+            .flat_map(|r| r.data.as_ref().into_iter())
+            .flat_map(|d| d.inner.choices.iter())
+            .flat_map(|c| c.delta.tool_calls.iter().flatten())
+            .filter_map(|tc| {
+                tc.function
+                    .as_ref()
+                    .and_then(|function| function.name.clone())
+            })
+            .collect()
+    }
+
+    fn assert_content_omits_markers(
+        label: &str,
+        results: &[Annotated<NvCreateChatCompletionStreamResponse>],
+        markers: &[&str],
+    ) {
+        let content = test_utils::reconstruct_content(results);
+        for marker in markers {
+            assert!(
+                !content.contains(marker),
+                "{label}: marker {marker:?} leaked into content: {content:?}"
+            );
+        }
+    }
+
+    /// Bare-body recovery must also work when the recovery marker itself is
+    /// split across stream chunks. Otherwise the jail emits protocol bytes as
+    /// normal content before the aggregate parser gets a chance to recover.
+    #[tokio::test]
+    async fn test_partial_marker_buffer_flushes_at_stream_end() {
+        for suffix in ["c", "ca", "cal", "call"] {
+            let expected = format!("I will {suffix}");
+            let input_chunks = vec![test_utils::create_mock_response_chunk(expected.clone(), 0)];
+            let jail = JailedStream::builder().tool_call_parser("gemma4").build();
+            let results: Vec<_> = jail
+                .apply_with_finish_reason(stream::iter(input_chunks))
+                .collect()
+                .await;
+
+            assert_eq!(test_utils::reconstruct_content(&results), expected);
+            assert!(tool_call_names(&results).is_empty());
+        }
+
+        let expected = "I will call";
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(expected.to_string(), 0),
+            test_utils::create_final_response_chunk(0),
+        ];
+        let jail = JailedStream::builder().tool_call_parser("gemma4").build();
+        let results: Vec<_> = jail
+            .apply_with_finish_reason(stream::iter(input_chunks))
+            .collect()
+            .await;
+
+        assert_eq!(test_utils::reconstruct_content(&results), expected);
+        let finish_chunks: Vec<_> = results
+            .iter()
+            .filter_map(|result| result.data.as_ref())
+            .flat_map(|data| data.inner.choices.iter())
+            .filter(|choice| choice.finish_reason.is_some())
+            .collect();
+        assert_eq!(finish_chunks.len(), 1);
+        let content = finish_chunks[0]
+            .delta
+            .content
+            .as_ref()
+            .expect("partial marker buffer should flush with the final finish chunk");
+        assert_eq!(test_utils::extract_text(content), "call");
+
+        let mut terminal_content_chunk =
+            test_utils::create_mock_response_chunk(expected.to_string(), 0);
+        terminal_content_chunk.data.as_mut().unwrap().inner.choices[0].finish_reason =
+            Some(FinishReason::Stop);
+        let jail = JailedStream::builder().tool_call_parser("gemma4").build();
+        let results: Vec<_> = jail
+            .apply_with_finish_reason(stream::iter(vec![terminal_content_chunk]))
+            .collect()
+            .await;
+        let content_chunks: Vec<_> = results
+            .iter()
+            .filter_map(|result| result.data.as_ref())
+            .flat_map(|data| data.inner.choices.iter())
+            .filter_map(|choice| {
+                choice
+                    .delta
+                    .content
+                    .as_ref()
+                    .map(|content| (test_utils::extract_text(content), choice.finish_reason))
+            })
+            .collect();
+        assert_eq!(
+            content_chunks,
+            vec![("I will ", None), ("call", Some(FinishReason::Stop))]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_gemma4_call_prefix_prose_passes_without_waiting_for_eof() {
+        let expected = "I will call: you tomorrow";
+        let cases = [
+            vec![expected],
+            vec!["I will ca", "ll: you tomorrow"],
+            vec!["I will call:", " you tomorrow"],
+        ];
+
+        for chunks in cases {
+            let input_chunks = chunks
+                .into_iter()
+                .map(|chunk| test_utils::create_mock_response_chunk(chunk.to_string(), 0))
+                .chain(std::iter::once(test_utils::create_final_response_chunk(0)));
+            let jail = JailedStream::builder().tool_call_parser("gemma4").build();
+            let results: Vec<_> = jail
+                .apply_with_finish_reason(stream::iter(input_chunks))
+                .collect()
+                .await;
+
+            assert_eq!(test_utils::reconstruct_content(&results), expected);
+            let content_before_finish: String = results
+                .iter()
+                .filter_map(|result| result.data.as_ref())
+                .flat_map(|data| data.inner.choices.iter())
+                .filter(|choice| choice.finish_reason.is_none())
+                .filter_map(|choice| choice.delta.content.as_ref())
+                .map(test_utils::extract_text)
+                .collect();
+            assert_eq!(content_before_finish, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_gemma4_trailing_partial_after_unjail_is_buffered() {
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(
+                "<|tool_call>call:get_weather{location:<|\"|>NYC<|\"|>}<tool_call|> ca".to_string(),
+                0,
+            ),
+            test_utils::create_mock_response_chunk(
+                "ll:get_weather{location:<|\"|>Boston<|\"|>}<tool_call|>".to_string(),
+                0,
+            ),
+        ];
+        let jail = JailedStream::builder().tool_call_parser("gemma4").build();
+        let results: Vec<_> = jail
+            .apply_with_finish_reason(stream::iter(input_chunks))
+            .collect()
+            .await;
+
+        assert_eq!(
+            tool_call_names(&results),
+            vec!["get_weather".to_string(), "get_weather".to_string()]
+        );
+        let content = test_utils::reconstruct_content(&results);
+        assert_eq!(content, " ");
+        assert_content_omits_markers(
+            "Gemma 4 trailing partial",
+            &results,
+            &["call:get_weather", "ca", "ll:get_weather", "<tool_call|>"],
+        );
+    }
+
+    #[tokio::test]
+    async fn test_split_bare_recovery_markers_are_jailed() {
+        let cases = [
+            (
+                "minimax_m2",
+                "MiniMax",
+                vec![
+                    "I will check that. <inv",
+                    "oke name=\"get_weather\">\n<parameter name=\"location\">NYC</parameter>\n</invoke>\n</minimax:tool_call>",
+                ],
+                &["<invoke", "</minimax:tool_call>"][..],
+            ),
+            (
+                "minimax_m2",
+                "MiniMax delayed outer close",
+                vec![
+                    "I will check that. <invoke name=\"get_weather\">\n<parameter name=\"location\">NYC</parameter>\n",
+                    "</invoke>",
+                    "\n</minimax:tool_call>",
+                ],
+                &["<invoke", "</minimax:tool_call>"][..],
+            ),
+            (
+                "qwen3_coder",
+                "Qwen3-Coder delayed outer close",
+                vec![
+                    "I will check that. <function=get_weather>\n<parameter=location>NYC</parameter>\n",
+                    "</function>",
+                    "\n</tool_call>",
+                ],
+                &["<function=", "</tool_call>"][..],
+            ),
+            (
+                "deepseek_v4",
+                "DeepSeek V4",
+                vec![
+                    "I will check that. <｜DSML｜inv",
+                    "oke name=\"get_weather\">\n<｜DSML｜parameter name=\"location\" string=\"true\">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
+                ],
+                &["<｜DSML｜invoke", "</｜DSML｜tool_calls>"][..],
+            ),
+            (
+                "deepseek_v4",
+                "DeepSeek V4 delayed outer close",
+                vec![
+                    "I will check that. <｜DSML｜invoke name=\"get_weather\">\n<｜DSML｜parameter name=\"location\" string=\"true\">NYC</｜DSML｜parameter>\n",
+                    "</｜DSML｜invoke>",
+                    "\n</｜DSML｜tool_calls>",
+                ],
+                &["<｜DSML｜invoke", "</｜DSML｜tool_calls>"][..],
+            ),
+            (
+                "kimi_k2",
+                "Kimi K2",
+                vec![
+                    "I will check that. <|tool_call_beg",
+                    "in|>functions.get_weather:0<|tool_call_argument_begin|>{\"location\":\"NYC\"}<|tool_call_end|><|tool_calls_section_end|>",
+                ],
+                &["<|tool_call_begin|>", "<|tool_calls_section_end|>"][..],
+            ),
+            (
+                "gemma4",
+                "Gemma 4",
+                vec![
+                    "I will check that. ca",
+                    "ll:get_weather{location:<|\"|>NYC<|\"|>}<tool_call|>",
+                ],
+                &["call:get_weather", "<tool_call|>"][..],
+            ),
+            (
+                "gemma4",
+                "Gemma 4 split after call prefix",
+                vec![
+                    "I will check that. call:",
+                    "get_weather{location:<|\"|>NYC<|\"|>}<tool_call|>",
+                ],
+                &["call:get_weather", "<tool_call|>"][..],
+            ),
+        ];
+
+        for (parser, label, chunks, markers) in cases {
+            let input_chunks = chunks
+                .into_iter()
+                .map(|chunk| test_utils::create_mock_response_chunk(chunk.to_string(), 0));
+            let jail = JailedStream::builder().tool_call_parser(parser).build();
+            let results: Vec<_> = jail
+                .apply_with_finish_reason(stream::iter(input_chunks))
+                .collect()
+                .await;
+
+            assert_eq!(
+                tool_call_names(&results),
+                vec!["get_weather".to_string()],
+                "{label}: expected recovered get_weather call"
+            );
+            assert_eq!(
+                test_utils::reconstruct_content(&results),
+                "I will check that. ",
+                "{label}: expected only prefix prose as content"
+            );
+            assert_content_omits_markers(label, &results, markers);
+        }
+    }
+
+    /// GLM-4.7's bare-call marker starts at `<arg_key>`, after the function
+    /// name. The stream jail therefore needs parser-aware tool-name patterns
+    /// so a split between the function name and `<arg_key>` does not leak the
+    /// function name as user-visible content.
+    #[tokio::test]
+    async fn test_glm47_split_bare_call_jails_function_name_suffix() {
+        use dynamo_parsers::tool_calling::ToolDefinition;
+
+        let tool_defs = vec![ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"},
+                },
+            })),
+            strict: None,
+        }];
+
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk("I will check that. get_weat".to_string(), 0),
+            test_utils::create_mock_response_chunk(
+                "her<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>".to_string(),
+                0,
+            ),
+        ];
+
+        let jail = JailedStream::builder()
+            .tool_call_parser("glm47")
+            .tool_definitions(tool_defs)
+            .build();
+        let results: Vec<_> = jail
+            .apply_with_finish_reason(stream::iter(input_chunks))
+            .collect()
+            .await;
+
+        assert_eq!(tool_call_names(&results), vec!["get_weather".to_string()]);
+        assert_eq!(
+            test_utils::reconstruct_content(&results),
+            "I will check that. "
+        );
+        assert_content_omits_markers(
+            "GLM-4.7",
+            &results,
+            &["get_weather<arg_key>", "<arg_value>", "</tool_call>"],
+        );
+    }
+
+    #[tokio::test]
+    async fn test_glm47_trailing_split_bare_call_stays_jailed() {
+        use dynamo_parsers::tool_calling::ToolDefinition;
+
+        let tool_defs = vec![ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"},
+                },
+            })),
+            strict: None,
+        }];
+
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(
+                "get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>get_weat"
+                    .to_string(),
+                0,
+            ),
+            test_utils::create_mock_response_chunk(
+                "her<arg_key>location</arg_key><arg_value>Boston</arg_value></tool_call>"
+                    .to_string(),
+                0,
+            ),
+        ];
+
+        let jail = JailedStream::builder()
+            .tool_call_parser("glm47")
+            .tool_definitions(tool_defs)
+            .build();
+        let results: Vec<_> = jail
+            .apply_with_finish_reason(stream::iter(input_chunks))
+            .collect()
+            .await;
+
+        assert_eq!(
+            tool_call_names(&results),
+            vec!["get_weather".to_string(), "get_weather".to_string()]
+        );
+        assert_eq!(test_utils::reconstruct_content(&results), "");
+        assert_content_omits_markers(
+            "GLM-4.7 trailing split",
+            &results,
+            &["get_weat", "her<arg_key>", "<arg_value>", "</tool_call>"],
+        );
+    }
+
     /// tool_choice=required with the alternate `arguments` key (SGLang's
     /// JsonArrayParser and some vLLM paths emit this variant).  The
     /// base_json_parser accepts either `parameters` or `arguments`.
@@ -3553,6 +4042,7 @@ fahrenheit
             Some("hermes".to_string()),
             Some(ChatCompletionToolChoiceOption::Required),
             None,
+            false,
             stream::iter(input_chunks),
         )
         .collect()
@@ -3606,6 +4096,7 @@ fahrenheit
                 "get_weather".to_string().into(),
             )),
             None,
+            false,
             stream::iter(input_chunks),
         )
         .collect()
@@ -3664,6 +4155,7 @@ fahrenheit
                 "get_weather".to_string().into(),
             )),
             None,
+            false,
             stream::iter(input_chunks),
         )
         .collect()
@@ -3709,6 +4201,7 @@ fahrenheit
                 "get_weather".to_string().into(),
             )),
             None,
+            false,
             stream::iter(input_chunks),
         )
         .collect()

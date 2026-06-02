@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: mistral
+model_label: Mistral series
+mode: stream
+cases:
+  TOOLCALLING.stream.3:
+    description: Complete single tool call with a grammar token split across chunk boundaries
+    ref: derived from TOOLCALLING.batch.1
+    chunks:
+    - delta_text: '[T'
+    - delta_text: OOL
+    - delta_text: _CALL
+    - delta_text: 'S][{"name":'
+    - delta_text: ' "get_weather", "ar'
+    - delta_text: gu
+    - delta_text: men
+    - delta_text: 'ts": '
+    - delta_text: '{"location"'
+    - delta_text: ': "NYC"}}][/TOOL_CA'
+    - delta_text: LL
+    - delta_text: S]
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: '[/TOOL_CALLS]'
+      sglang:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '[TOOL_CALL'

@@ -8,42 +8,13 @@ use std::collections::HashMap;
 
 use num_traits::ToPrimitive;
 use regex::Regex;
-use serde::Serialize;
 use serde_json::Value;
-use serde_json::value::RawValue;
 use uuid::Uuid;
 
 use super::super::ToolDefinition;
 use super::super::config::XmlParserConfig;
+use super::parsed_value::{ParsedValue, is_integer_literal, raw_number_literal};
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
-
-enum ParsedParamValue {
-    Json(Value),
-    RawNumber(Box<RawValue>),
-}
-
-impl From<Value> for ParsedParamValue {
-    fn from(value: Value) -> Self {
-        Self::Json(value)
-    }
-}
-
-impl Serialize for ParsedParamValue {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match self {
-            Self::Json(value) => value.serialize(serializer),
-            Self::RawNumber(raw) => raw.serialize(serializer),
-        }
-    }
-}
-
-fn is_integer_literal(value: &str) -> bool {
-    let value = value.strip_prefix('-').unwrap_or(value);
-    !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit())
-}
 
 /// Build a `<start>name>(body)<end>` regex pattern. When `strict` is false,
 /// missing `<end>` falls back to end-of-block so truncated input still parses
@@ -84,9 +55,11 @@ pub fn detect_tool_call_start_xml(chunk: &str, config: &XmlParserConfig) -> bool
     }
 
     // Check for partial match at the end of the chunk (for streaming).
-    for i in 1..start_token.len() {
-        if chunk.ends_with(&start_token[..i]) {
-            return true;
+    for token in [start_token, &config.function_start_token] {
+        for i in 1..token.len() {
+            if chunk.ends_with(&token[..i]) {
+                return true;
+            }
         }
     }
 
@@ -123,6 +96,18 @@ pub fn find_tool_call_end_position_xml(chunk: &str, config: &XmlParserConfig) ->
     loop {
         let rest = &chunk[cursor..];
         let trimmed = rest.trim_start();
+        if config.is_bare_function_mode(chunk) && trimmed.starts_with(end_token.as_str()) {
+            let trim_offset = rest.len() - trimmed.len();
+            cursor += trim_offset + end_token.len();
+            continue;
+        }
+        if config.is_bare_function_mode(chunk)
+            && trimmed.starts_with(config.tool_call_end_token.as_str())
+        {
+            let trim_offset = rest.len() - trimmed.len();
+            cursor += trim_offset + config.tool_call_end_token.len();
+            break;
+        }
         if !trimmed.starts_with(start_token.as_str()) {
             break;
         }
@@ -150,26 +135,26 @@ pub fn try_tool_call_parse_xml(
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
     // Qwen3-Coder-style passthrough: if the function-start token is absent
     // anywhere in the input, the reference parser returns the raw input as
-    // content with no tool calls. Gated so it only fires for parsers that
-    // opt in (e.g. qwen3_coder, nemotron_nano); other XML-style families
-    // (minimax_m2, kimi_k2 alias paths) keep their stricter behavior.
+    // content with no tool calls. Gated so it only fires for parsers that opt
+    // in (e.g. qwen3_coder, nemotron_nano).
     if config.passthrough_when_no_function
         && !message.contains(config.function_start_token.as_str())
+        && !message.contains(config.tool_call_start_token.as_str())
     {
         return Ok((vec![], Some(message.to_string())));
     }
 
-    // Qwen3-Coder-style back-off: outer wrapper missing but `<function=...>`
-    // tags are present — parse the whole input as a single tool-call block
-    // (mirrors `qwen3coder_tool_parser._get_function_calls`'s fallback).
+    // Back-off: outer wrapper missing but function/invoke tags are present —
+    // parse the whole input as a single tool-call block. Qwen3-Coder uses this
+    // in its reference parser. MiniMax uses the same path to recover complete
+    // inner invokes when the outer wrapper opener is missing.
     //
-    // Gated on `function_end_token` being present OR `allow_eof_recovery` set,
-    // mirroring the wrapped path's recovery gate in `extract_tool_calls`. The
-    // lenient inner regex has a `|$` fallback that would otherwise match a
-    // partial `<function=...>` block mid-stream and cause `should_exit_jail_
-    // early` to release the jail before the closing tag arrives.
+    // Streaming recovery needs the orphan outer close marker as well as the
+    // inner close marker. Otherwise a split `</tool_call>` / MiniMax close can
+    // arrive after the jail has already released.
     if config.is_bare_function_mode(message)
         && (message.contains(config.function_end_token.as_str()) || config.allow_eof_recovery)
+        && (message.contains(config.tool_call_end_token.as_str()) || config.allow_eof_recovery)
     {
         let calls = parse_tool_call_block(message, config, tools).unwrap_or_default();
         if !calls.is_empty() {
@@ -181,6 +166,13 @@ pub fn try_tool_call_parse_xml(
                 .unwrap_or_default();
             return Ok((calls, Some(prefix)));
         }
+    }
+
+    if config.strict_match
+        && !message.contains(config.tool_call_start_token.as_str())
+        && let Some(prefix) = prefix_before_orphan_xml_marker(message, config)
+    {
+        return Ok((vec![], Some(prefix)));
     }
 
     let (normal_text, tool_calls) = extract_tool_calls(message, config, tools)?;
@@ -200,7 +192,7 @@ fn extract_tool_calls(
     config: &XmlParserConfig,
     tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<(String, Vec<ToolCallResponse>)> {
-    let mut normal_parts = Vec::new();
+    let mut normal_text = String::new();
     let mut calls = Vec::new();
     let mut cursor = 0;
 
@@ -211,14 +203,22 @@ fn extract_tool_calls(
         // Find next tool call start.
         if let Some(start_pos) = text[cursor..].find(start_token.as_str()) {
             let abs_start = cursor + start_pos;
+            let gap = &text[cursor..abs_start];
+            if let Some((prefix, mut recovered_calls)) =
+                recover_bare_xml_calls_in_span(gap, config, tools)?
+            {
+                if calls.is_empty() {
+                    normal_text.push_str(&prefix);
+                }
+                calls.append(&mut recovered_calls);
+            } else if calls.is_empty() {
+                normal_text.push_str(gap);
+            }
 
             // Qwen3-Coder-style templates allow natural language before the
             // tool call, but text after the tool-call block is not response
             // content. Keep scanning for additional calls, but only surface
             // normal text that precedes the first parsed call.
-            if calls.is_empty() {
-                normal_parts.push(&text[cursor..abs_start]);
-            }
 
             // Find the corresponding end token.
             if let Some(end_pos) = text[abs_start..].find(end_token.as_str()) {
@@ -234,42 +234,101 @@ fn extract_tool_calls(
             } else {
                 // Recovery: outer end token absent (max_tokens / EOS truncation).
                 // Gated on `allow_eof_recovery` so streaming early-exit doesn't
-                // fire mid-stream. Recovery also requires the trailing slice
-                // to contain a function-start opener — structural signal that
-                // a real tool call was emitted, so plain text starting with
-                // `<tool_call>` is preserved verbatim.
+                // fire mid-stream. Strict XML families still require paired
+                // inner invoke/parameter fences before a call is recovered.
+                // Recovery also requires the trailing slice to contain a
+                // function-start opener — structural signal that a real tool
+                // call was emitted, so plain text starting with `<tool_call>`
+                // is preserved verbatim.
                 let block = &text[abs_start..];
                 let function_start = &config.function_start_token;
+                let looks_like_tool_call = block.contains(function_start.as_str())
+                    || block.contains(config.parameter_start_token.as_str());
                 if config.allow_eof_recovery
-                    && !config.strict_match
-                    && block.contains(function_start.as_str())
+                    && looks_like_tool_call
                     && let Ok(mut parsed_calls) = parse_tool_call_block(block, config, tools)
                     && !parsed_calls.is_empty()
                 {
                     calls.append(&mut parsed_calls);
                     break;
                 }
-                if calls.is_empty() {
-                    normal_parts.push(&text[abs_start..]);
+                if calls.is_empty() && !looks_like_tool_call {
+                    normal_text.push_str(&text[abs_start..]);
                 }
                 break;
             }
         } else {
             // No more tool calls.
-            if calls.is_empty() {
-                normal_parts.push(&text[cursor..]);
+            let gap = &text[cursor..];
+            if let Some((prefix, mut recovered_calls)) =
+                recover_bare_xml_calls_in_span(gap, config, tools)?
+            {
+                if calls.is_empty() {
+                    normal_text.push_str(&prefix);
+                }
+                calls.append(&mut recovered_calls);
+            } else if calls.is_empty() {
+                normal_text.push_str(gap);
             }
             break;
         }
     }
 
-    let normal_text = normal_parts.join("");
     let normal_text = if calls.is_empty() {
         normal_text.trim().to_string()
     } else {
         normal_text
     };
     Ok((normal_text, calls))
+}
+
+fn prefix_before_orphan_xml_marker(text: &str, config: &XmlParserConfig) -> Option<String> {
+    [
+        config.tool_call_end_token.as_str(),
+        config.function_start_token.as_str(),
+        config.function_end_token.as_str(),
+        config.parameter_start_token.as_str(),
+        config.parameter_end_token.as_str(),
+    ]
+    .into_iter()
+    .filter_map(|marker| text.find(marker))
+    .min()
+    .map(|idx| text[..idx].trim().to_string())
+}
+
+fn recover_bare_xml_calls_in_span(
+    span: &str,
+    config: &XmlParserConfig,
+    tools: Option<&[ToolDefinition]>,
+) -> anyhow::Result<Option<(String, Vec<ToolCallResponse>)>> {
+    if !config.backoff_when_no_wrapper {
+        return Ok(None);
+    }
+
+    let Some(marker_idx) = span.find(config.function_start_token.as_str()) else {
+        return Ok(None);
+    };
+
+    let tail = &span[marker_idx..];
+    let has_inner_close = tail.contains(config.function_end_token.as_str());
+    let has_outer_close = tail.contains(config.tool_call_end_token.as_str());
+    if (!has_inner_close || !has_outer_close) && !config.allow_eof_recovery {
+        return Ok(None);
+    }
+
+    let calls = parse_tool_call_block(tail, config, tools)?;
+    if calls.is_empty() {
+        return Ok(None);
+    }
+
+    tracing::warn!(
+        why = "bare_function_gap_recovery",
+        recovered_calls = calls.len(),
+        recovered_bytes = tail.len(),
+        kept_prefix_bytes = marker_idx,
+        "XML recovery: recovered complete bare function block(s) before a later outer wrapper"
+    );
+    Ok(Some((span[..marker_idx].to_string(), calls)))
 }
 
 /// Parse a single tool call block
@@ -308,7 +367,7 @@ fn parse_tool_call_block(
         let param_config = get_arguments_config(function_name, tools);
 
         // Parse parameters from the function body.
-        let mut parameters: HashMap<String, ParsedParamValue> = HashMap::new();
+        let mut parameters: HashMap<String, ParsedValue> = HashMap::new();
 
         for param_cap in parameter_regex.captures_iter(function_body) {
             let param_name_raw = param_cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
@@ -466,7 +525,7 @@ fn convert_param_value(
     param_name: &str,
     param_config: &HashMap<String, Value>,
     func_name: &str,
-) -> ParsedParamValue {
+) -> ParsedValue {
     // HTML unescape and trim
     let param_value = html_unescape(param_value.trim());
 
@@ -548,8 +607,8 @@ fn convert_param_value(
             if is_integer_literal(&param_value) {
                 if let Ok(int_val) = param_value.parse::<i64>() {
                     Value::Number(int_val.into()).into()
-                } else if let Ok(raw) = RawValue::from_string(param_value.clone()) {
-                    ParsedParamValue::RawNumber(raw)
+                } else if let Some(raw) = raw_number_literal(&param_value) {
+                    raw
                 } else {
                     Value::String(param_value).into()
                 }
@@ -559,8 +618,8 @@ fn convert_param_value(
                         if float_val.fract() == 0.0 && float_val.is_finite() {
                             if let Some(int_val) = float_val.to_i64() {
                                 Value::Number(int_val.into()).into()
-                            } else if let Ok(raw) = RawValue::from_string(param_value.clone()) {
-                                ParsedParamValue::RawNumber(raw)
+                            } else if let Some(raw) = raw_number_literal(&param_value) {
+                                raw
                             } else {
                                 Value::String(param_value).into()
                             }
@@ -754,7 +813,7 @@ mod tests {
     /// all be captured by find_tool_call_end_position_xml so that the jail passes the
     /// entire group to extract_tool_calls rather than emitting the second (and later)
     /// calls as raw trailing text.
-    #[test] // PARSER.batch.2, helper
+    #[test] // TOOLCALLING.batch.2, helper
     fn test_find_tool_call_end_position_parallel_calls() {
         let config = XmlParserConfig::default();
 
@@ -812,11 +871,12 @@ mod tests {
                     "precise_count": {"type": "number"}
                 }
             })),
+            strict: None,
         }];
 
         let (calls, normal) =
             try_tool_call_parse_xml(input, &XmlParserConfig::default(), Some(&tools)).unwrap();
-        let args: HashMap<String, Box<RawValue>> =
+        let args: HashMap<String, Box<serde_json::value::RawValue>> =
             serde_json::from_str(&calls[0].function.arguments).unwrap();
 
         assert_eq!(normal, Some("".to_string()));
@@ -851,8 +911,8 @@ mod tests {
         assert_eq!(html_unescape(input), expected);
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.1 in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.yaml.
-    #[test] // PARSER.batch.1
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.1 in tests/parity/toolcalling/fixtures/qwen3_coder/TOOLCALLING.batch.yaml.
+    #[test] // TOOLCALLING.batch.1
     fn test_parse_simple_tool_call() {
         let input = r#"<tool_call>
 <function=execute_bash>
@@ -872,8 +932,8 @@ pwd && ls
         assert_eq!(args["command"], "pwd && ls");
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.1, PARSER.batch.7.d in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.7.yaml, tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.yaml.
-    #[test] // PARSER.batch.1, PARSER.batch.7
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.1, TOOLCALLING.batch.7.d in tests/parity/toolcalling/fixtures/qwen3_coder/TOOLCALLING.batch.7.yaml, tests/parity/toolcalling/fixtures/qwen3_coder/TOOLCALLING.batch.yaml.
+    #[test] // TOOLCALLING.batch.1, TOOLCALLING.batch.7
     fn test_parse_multiple_parameters() {
         let input = r#"<tool_call>
 <function=get_weather>
@@ -899,8 +959,8 @@ fahrenheit
         assert_eq!(args["unit"], "fahrenheit");
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.8.c in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.8.yaml.
-    #[test] // PARSER.batch.8
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.8.c in tests/parity/toolcalling/fixtures/qwen3_coder/TOOLCALLING.batch.8.yaml.
+    #[test] // TOOLCALLING.batch.8
     fn test_parse_with_normal_text() {
         let input = r#"I'll help you with that. <tool_call>
 <function=get_weather>
@@ -917,8 +977,8 @@ Dallas
         assert_eq!(normal, Some("I'll help you with that. ".to_string()));
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.b in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.2.yaml.
-    #[test] // PARSER.batch.2
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.b in tests/parity/toolcalling/fixtures/qwen3_coder/TOOLCALLING.batch.2.yaml.
+    #[test] // TOOLCALLING.batch.2
     fn test_parse_multiple_tool_calls() {
         let input = r#"<tool_call>
 <function=get_weather>
@@ -946,8 +1006,8 @@ Orlando
         assert_eq!(args1["city"], "Orlando");
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.d in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.7.yaml.
-    #[test] // PARSER.batch.7
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.d in tests/parity/toolcalling/fixtures/qwen3_coder/TOOLCALLING.batch.7.yaml.
+    #[test] // TOOLCALLING.batch.7
     fn test_parse_json_parameter_value() {
         // With schema-aware parsing, we need to provide a schema to parse JSON objects
         let tools = vec![ToolDefinition {
@@ -958,6 +1018,7 @@ Orlando
                     "config": {"type": "object"}
                 }
             })),
+            strict: None,
         }];
 
         let input = r#"<tool_call>
@@ -978,7 +1039,7 @@ Orlando
         assert_eq!(args["config"]["count"], 42);
     }
 
-    #[test] // PARSER.batch.3
+    #[test] // TOOLCALLING.batch.3
     fn test_parse_no_tool_calls() {
         let input = "This is just normal text without any tool calls.";
         let (calls, normal) =
@@ -987,8 +1048,8 @@ Orlando
         assert_eq!(normal, Some(input.to_string()));
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.d in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.4.yaml.
-    #[test] // PARSER.batch.4
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.d in tests/parity/toolcalling/fixtures/qwen3_coder/TOOLCALLING.batch.4.yaml.
+    #[test] // TOOLCALLING.batch.4
     fn test_parse_malformed_tool_call() {
         let input = r#"<tool_call>
 <function=incomplete>
@@ -1001,8 +1062,8 @@ value
         assert!(result.is_ok());
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.d in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.4.yaml.
-    #[test] // PARSER.batch.4
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.d in tests/parity/toolcalling/fixtures/qwen3_coder/TOOLCALLING.batch.4.yaml.
+    #[test] // TOOLCALLING.batch.4
     fn test_parse_missing_parameter_closing_tag() {
         let input = r#"<tool_call>
 <function=execute_bash>
@@ -1019,8 +1080,8 @@ ls -la
         assert_eq!(args["command"], "ls -la");
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.d in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.4.yaml.
-    #[test] // PARSER.batch.4
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.d in tests/parity/toolcalling/fixtures/qwen3_coder/TOOLCALLING.batch.4.yaml.
+    #[test] // TOOLCALLING.batch.4
     fn test_parse_missing_function_closing_tag() {
         let input = r#"<tool_call>
 <function=get_weather>
@@ -1037,8 +1098,8 @@ Boston
         assert_eq!(args["city"], "Boston");
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.d in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.4.yaml.
-    #[test] // PARSER.batch.4
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.d in tests/parity/toolcalling/fixtures/qwen3_coder/TOOLCALLING.batch.4.yaml.
+    #[test] // TOOLCALLING.batch.4
     fn test_parse_missing_both_closing_tags() {
         let input = r#"<tool_call>
 <function=run_query>
@@ -1055,8 +1116,8 @@ SELECT * FROM users
         assert_eq!(args["sql"], "SELECT * FROM users\n</tool_call>");
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.d in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.4.yaml.
-    #[test] // PARSER.batch.4
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.d in tests/parity/toolcalling/fixtures/qwen3_coder/TOOLCALLING.batch.4.yaml.
+    #[test] // TOOLCALLING.batch.4
     fn test_parse_multiple_parameters_missing_closing_tags() {
         let input = r#"<tool_call>
 <function=search>
@@ -1081,8 +1142,8 @@ rust programming
     // token and extract the call. Recovery is gated on a function-start
     // opener in the trailing slice so plain text that happens to start with
     // `<tool_call>` is preserved verbatim.
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.5.a in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.5.yaml.
-    #[test] // PARSER.batch.5 — qwen3_coder
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.5.a in tests/parity/toolcalling/fixtures/qwen3_coder/TOOLCALLING.batch.5.yaml.
+    #[test] // TOOLCALLING.batch.5 — qwen3_coder
     fn test_parse_qwen3_no_outer_close_recovers() {
         let input = r#"<tool_call>
 <function=get_weather>
@@ -1124,10 +1185,21 @@ NYC
     }
 
     #[test]
-    fn test_parse_qwen3_bare_function_complete_streaming_recovers() {
-        // Same scenario but `</function>` has arrived — back-off should fire
-        // even with recovery off (streaming-complete path).
+    fn test_parse_qwen3_bare_function_complete_without_outer_close_waits_in_streaming() {
+        // `</function>` alone is not enough for streaming recovery: the orphan
+        // `</tool_call>` may still arrive in a later chunk and must stay jailed.
         let input = "<function=get_weather>\n<parameter=city>\nNYC\n</parameter>\n</function>";
+        let config = XmlParserConfig {
+            backoff_when_no_wrapper: true,
+            ..XmlParserConfig::default()
+        };
+        let (calls, _) = try_tool_call_parse_xml(input, &config, None).unwrap();
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_parse_qwen3_bare_function_outer_close_streaming_recovers() {
+        let input = "<function=get_weather>\n<parameter=city>\nNYC\n</parameter>\n</function>\n</tool_call>";
         let config = XmlParserConfig {
             backoff_when_no_wrapper: true,
             ..XmlParserConfig::default()
@@ -1167,14 +1239,11 @@ NYC
         assert_eq!(normal, Some("".to_string()));
     }
 
-    #[test] // PARSER.batch.5.a — minimax_m2 spec-strict
-    fn test_parse_minimax_m2_no_outer_close_drops_call() {
-        // MiniMax-M2's reference parser (huggingface.co/MiniMaxAI/MiniMax-M2)
-        // requires both outer fences — missing `</minimax:tool_call>` means
-        // the regex does not match and zero calls are recovered. Strict-match
-        // mode opts into that behavior even when `allow_eof_recovery=true`
-        // would otherwise apply (and the binding-layer override is also
-        // suppressed for strict configs).
+    #[test] // TOOLCALLING.batch.5.a — minimax_m2
+    fn test_parse_minimax_m2_no_outer_close_recovers_complete_inner_call() {
+        // Finalize recovery may accept a missing outer MiniMax wrapper close,
+        // but strict_match still requires complete inner invoke/parameter
+        // fences before surfacing a call.
         let config = XmlParserConfig {
             tool_call_start_token: "<minimax:tool_call>".to_string(),
             tool_call_end_token: "</minimax:tool_call>".to_string(),
@@ -1185,15 +1254,15 @@ NYC
             allow_eof_recovery: true,
             strict_match: true,
             passthrough_when_no_function: false,
-            backoff_when_no_wrapper: false,
+            backoff_when_no_wrapper: true,
         };
         let input = r#"<minimax:tool_call><invoke name="get_weather"><parameter name="city">NYC</parameter></invoke>"#;
 
         let (calls, _) = try_tool_call_parse_xml(input, &config, None).unwrap();
-        assert!(
-            calls.is_empty(),
-            "strict_match config must not recover when outer </minimax:tool_call> is absent"
-        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["city"], "NYC");
     }
 
     #[test] // helper
@@ -1216,6 +1285,7 @@ NYC
                 },
                 "required": ["param1", "param2", "param3", "param4", "param5", "param6", "param7", "param8"]
             })),
+            strict: None,
         }];
 
         let input = r#"<tool_call>
@@ -1279,6 +1349,7 @@ NYC
                     "bool_param": {"type": "boolean"}
                 }
             })),
+            strict: None,
         }];
 
         let input = r#"<tool_call>
@@ -1332,6 +1403,7 @@ NYC
                     }
                 }
             })),
+            strict: None,
         }];
 
         let input = r#"<tool_call>
@@ -1378,9 +1450,9 @@ NYC
         assert_eq!(args["param3"], "hello");
     }
 
-    /// Helper for the new corner-case tests below (PARSER.batch.6 / PIPELINE.finish_reason / PARSER.batch.9
-    /// / PARSER.batch.10) — matches the production `ToolCallConfig::minimax_m2()`
-    /// factory: strict-match per MiniMax's reference parser.
+    /// Helper for the new corner-case tests below (TOOLCALLING.batch.6 / PIPELINE.finish_reason / TOOLCALLING.batch.9
+    /// / TOOLCALLING.batch.10) — matches the production `ToolCallConfig::minimax_m2()`
+    /// factory: strict inner blocks plus bare-invoke recovery.
     fn minimax_m2_config() -> XmlParserConfig {
         XmlParserConfig {
             tool_call_start_token: "<minimax:tool_call>".to_string(),
@@ -1392,14 +1464,14 @@ NYC
             allow_eof_recovery: false,
             strict_match: true,
             passthrough_when_no_function: false,
-            backoff_when_no_wrapper: false,
+            backoff_when_no_wrapper: true,
         }
     }
 
-    /// PARSER.batch.6 — empty args. A no-arg call (no `<parameter=...>` block)
+    /// TOOLCALLING.batch.6 — empty args. A no-arg call (no `<parameter=...>` block)
     /// must still surface the function name with empty arguments.
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.6.a in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.6.yaml.
-    #[test] // PARSER.batch.6 — qwen3_coder
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.6.a in tests/parity/toolcalling/fixtures/qwen3_coder/TOOLCALLING.batch.6.yaml.
+    #[test] // TOOLCALLING.batch.6 — qwen3_coder
     fn test_parse_qwen3_empty_args() {
         let input = r#"<tool_call>
 <function=current_time>
@@ -1412,9 +1484,9 @@ NYC
         assert_eq!(args, serde_json::json!({}));
     }
 
-    /// PARSER.batch.6 — empty args, minimax_m2 format.
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.6.a in tests/parity/parser/fixtures/minimax_m2/PARSER.batch.6.yaml.
-    #[test] // PARSER.batch.6 — minimax_m2
+    /// TOOLCALLING.batch.6 — empty args, minimax_m2 format.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.6.a in tests/parity/toolcalling/fixtures/minimax_m2/TOOLCALLING.batch.6.yaml.
+    #[test] // TOOLCALLING.batch.6 — minimax_m2
     fn test_parse_minimax_m2_empty_args() {
         let config = minimax_m2_config();
         let input =
@@ -1455,12 +1527,12 @@ NYC
         assert_eq!(calls.len(), 1);
     }
 
-    /// PARSER.batch.9 — empty / null content variants. Truly-empty (zero bytes)
+    /// TOOLCALLING.batch.9 — empty / null content variants. Truly-empty (zero bytes)
     /// and whitespace-only inputs must yield no tool calls; normal_text
     /// collapses to the empty string. Tested under both qwen3_coder and
     /// minimax_m2 configs.
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.9 in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.yaml.
-    #[test] // PARSER.batch.9 — qwen3_coder
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.9 in tests/parity/toolcalling/fixtures/qwen3_coder/TOOLCALLING.batch.yaml.
+    #[test] // TOOLCALLING.batch.9 — qwen3_coder
     fn test_parse_qwen3_empty_and_whitespace_inputs() {
         for input in &["", " ", "\n", "\t\n  \t"] {
             let (calls, normal) =
@@ -1479,8 +1551,8 @@ NYC
         }
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.9 in tests/parity/parser/fixtures/minimax_m2/PARSER.batch.yaml.
-    #[test] // PARSER.batch.9 — minimax_m2
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.9 in tests/parity/toolcalling/fixtures/minimax_m2/TOOLCALLING.batch.yaml.
+    #[test] // TOOLCALLING.batch.9 — minimax_m2
     fn test_parse_minimax_m2_empty_and_whitespace_inputs() {
         let config = minimax_m2_config();
         for input in &["", " ", "\n", "\t\n  \t"] {
@@ -1499,11 +1571,11 @@ NYC
         }
     }
 
-    /// PARSER.batch.10 — duplicate calls (same function name twice). qwen3_coder
+    /// TOOLCALLING.batch.10 — duplicate calls (same function name twice). qwen3_coder
     /// format; pin parser-level behavior — both calls must come back with
     /// distinct ids.
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.10 in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.yaml.
-    #[test] // PARSER.batch.10 — qwen3_coder
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.10 in tests/parity/toolcalling/fixtures/qwen3_coder/TOOLCALLING.batch.yaml.
+    #[test] // TOOLCALLING.batch.10 — qwen3_coder
     fn test_parse_qwen3_duplicate_calls_same_name() {
         let input = r#"<tool_call>
 <function=get_weather>
@@ -1531,11 +1603,11 @@ LA
         assert_eq!(args1["city"], "LA");
     }
 
-    /// PARSER.batch.10 — duplicate calls (same function name twice). minimax_m2
+    /// TOOLCALLING.batch.10 — duplicate calls (same function name twice). minimax_m2
     /// format; pin parser-level behavior — both calls must come back with
     /// distinct ids.
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.10 in tests/parity/parser/fixtures/minimax_m2/PARSER.batch.yaml.
-    #[test] // PARSER.batch.10 — minimax_m2
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.10 in tests/parity/toolcalling/fixtures/minimax_m2/TOOLCALLING.batch.yaml.
+    #[test] // TOOLCALLING.batch.10 — minimax_m2
     fn test_parse_minimax_m2_duplicate_calls_same_name() {
         let config = minimax_m2_config();
         let input = r#"<minimax:tool_call><invoke name="get_weather"><parameter name="city">NYC</parameter></invoke><invoke name="get_weather"><parameter name="city">LA</parameter></invoke></minimax:tool_call>"#;

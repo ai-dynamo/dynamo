@@ -1,7 +1,6 @@
 package secrets
 
 import (
-	"context"
 	"slices"
 	"testing"
 
@@ -53,8 +52,8 @@ func TestDockerSecretIndexer_RefreshIndex(t *testing.T) {
 		WithObjects(&mockSecrets[0], &mockSecrets[1], &mockSecrets[2]).
 		Build()
 
-	i := NewDockerSecretIndexer(fakeClient)
-	if err := i.RefreshIndex(context.Background()); err != nil {
+	i := NewDockerSecretIndexer(fakeClient, "")
+	if err := i.RefreshIndex(t.Context()); err != nil {
 		t.Errorf("DockerSecretIndexer.RefreshIndex() error = %v, wantErr %v", err, nil)
 	}
 
@@ -124,8 +123,8 @@ func TestDockerSecretIndexer_DeterministicSecrets(t *testing.T) {
 		WithObjects(&mockSecrets[0], &mockSecrets[1]).
 		Build()
 
-	i := NewDockerSecretIndexer(fakeClient)
-	if err := i.RefreshIndex(context.Background()); err != nil {
+	i := NewDockerSecretIndexer(fakeClient, "")
+	if err := i.RefreshIndex(t.Context()); err != nil {
 		t.Fatalf("DockerSecretIndexer.RefreshIndex() error = %v", err)
 	}
 
@@ -144,5 +143,56 @@ func TestDockerSecretIndexer_DeterministicSecrets(t *testing.T) {
 	}
 	if got, want := secrets, []string{"secret-a", "secret-b"}; !slices.Equal(got, want) {
 		t.Fatalf("DockerSecretIndexer.GetSecrets() after caller mutation = %v, want %v", got, want)
+	}
+}
+
+func TestDockerSecretIndexer_RefreshIndexRespectsNamespaceScope(t *testing.T) {
+	mockSecrets := []corev1.Secret{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "target-secret",
+				Namespace: "target",
+			},
+			Type: corev1.SecretTypeDockerConfigJson,
+			Data: map[string][]byte{
+				".dockerconfigjson": []byte(`{"auths":{"target-registry.io/team":{}}}`),
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "malformed-secret",
+				Namespace: "other",
+			},
+			Type: corev1.SecretTypeDockerConfigJson,
+			Data: map[string][]byte{
+				".dockerconfigjson": []byte(`not-json`),
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithObjects(&mockSecrets[0], &mockSecrets[1]).
+		Build()
+
+	i := NewDockerSecretIndexer(fakeClient, "target")
+	if err := i.RefreshIndex(t.Context()); err != nil {
+		t.Fatalf("DockerSecretIndexer.RefreshIndex() error = %v", err)
+	}
+
+	secrets, err := i.GetSecrets("target", "target-registry.io")
+	if err != nil {
+		t.Fatalf("DockerSecretIndexer.GetSecrets() error = %v", err)
+	}
+	if got, want := secrets, []string{"target-secret"}; !slices.Equal(got, want) {
+		t.Fatalf("DockerSecretIndexer.GetSecrets() = %v, want %v", got, want)
+	}
+
+	secrets, err = i.GetSecrets("other", "target-registry.io")
+	if err != nil {
+		t.Fatalf("DockerSecretIndexer.GetSecrets() error = %v", err)
+	}
+	if len(secrets) != 0 {
+		t.Fatalf("DockerSecretIndexer.GetSecrets() = %v, want no out-of-scope secrets", secrets)
 	}
 }
