@@ -371,15 +371,11 @@ def estimate_num_gpu_blocks(
     moe_ep_size: int | None = None,
     attention_dp_size: int | None = None,
 ) -> int:
-    """Estimate rank-local KV cache blocks for mocker/replay AIC configs.
-
-    Intentionally spec-dec-blind: the session is constructed without ``nextn``,
-    so AIC's draft-token activation/weight inflation (over-counted in
-    ``trtllm_backend._get_memory_usage``) doesn't drag the KV budget negative.
-    Spec-dec speedup is applied separately on the latency path via
-    :class:`AicSession` constructed with ``nextn`` / ``nextn_accept_rates``.
-    """
+    """Estimate rank-local KV cache blocks for mocker/replay AIC configs."""
     _validate_kv_capacity_backend(backend_name)
+    # TODO: account for whether specdec is enabled, (i.e. pass in `nextn=...`
+    #   to `create_session``). Currently omitted to downstream AIC calculation
+    #   bug causing `_get_memory_usage` to predict negative KV capacity w/ Eagle.
     session = create_session(
         backend_name=backend_name,
         system=system,
