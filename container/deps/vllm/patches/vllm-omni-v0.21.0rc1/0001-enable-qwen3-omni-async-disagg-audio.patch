@@ -160,6 +160,142 @@ diff -rN -u vllm_omni/distributed/omni_connectors/transfer_adapter/chunk_transfe
                              merged_sub[sk] = sv
                          info[key] = merged_sub
                          continue
+diff -rN -u vllm_omni/worker/gpu_ar_model_runner.py vllm_omni/worker/gpu_ar_model_runner.py
+--- vllm_omni/worker/gpu_ar_model_runner.py	2026-06-02 17:05:00.000000000 +0200
++++ vllm_omni/worker/gpu_ar_model_runner.py	2026-06-02 17:05:00.000000000 +0200
+@@ -19,12 +19,26 @@
+ from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+ from vllm.forward_context import set_forward_context
+ from vllm.logger import init_logger
+-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+-    extract_routed_experts_for_current_batch,
+-    get_global_experts_capturer,
+-    issue_routing_d2h_copy,
+-)
+ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
++try:
++    from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
++        extract_routed_experts_for_current_batch,
++        get_global_experts_capturer,
++        issue_routing_d2h_copy,
++    )
++except ImportError:
++    # vLLM 0.22 removed the vLLM 0.21 routed-experts helper API used by
++    # vllm-omni 0.21.0rc1. Routed-experts output is optional telemetry;
++    # skip it instead of failing worker import.
++    def extract_routed_experts_for_current_batch(*args, **kwargs):
++        return None
++
++    def get_global_experts_capturer():
++        return None
++
++    def issue_routing_d2h_copy(*args, **kwargs):
++        return None
++
+ from vllm.v1.outputs import AsyncModelRunnerOutput, make_empty_encoder_model_runner_output
+ from vllm.v1.spec_decode.dflash import DFlashProposer
+ from vllm.v1.spec_decode.draft_model import DraftModelProposer
+@@ -1057,7 +1071,7 @@
+                 ec_connector_output=ec_connector_output if self.supports_mm_inputs else None,
+                 num_nans_in_logits=num_nans_in_logits,
+                 cudagraph_stats=cudagraph_stats,
+-                routed_experts_dict=routed_experts_dict,
++                routed_experts=routed_experts_dict,
+             )
+             output.kv_extracted_req_ids = kv_extracted_req_ids
+             output.omni_connector_output = self.get_omni_connector_output()
+diff -rN -u vllm_omni/worker/gpu_generation_model_runner.py vllm_omni/worker/gpu_generation_model_runner.py
+--- vllm_omni/worker/gpu_generation_model_runner.py	2026-06-02 17:05:00.000000000 +0200
++++ vllm_omni/worker/gpu_generation_model_runner.py	2026-06-02 17:05:00.000000000 +0200
+@@ -17,12 +17,26 @@
+ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
+ from vllm.distributed.parallel_state import get_pp_group
+ from vllm.forward_context import set_forward_context
+-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+-    extract_routed_experts_for_current_batch,
+-    get_global_experts_capturer,
+-    issue_routing_d2h_copy,
+-)
+ from vllm.utils.math_utils import cdiv
++try:
++    from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
++        extract_routed_experts_for_current_batch,
++        get_global_experts_capturer,
++        issue_routing_d2h_copy,
++    )
++except ImportError:
++    # vLLM 0.22 removed the vLLM 0.21 routed-experts helper API used by
++    # vllm-omni 0.21.0rc1. Routed-experts output is optional telemetry;
++    # skip it instead of failing worker import.
++    def extract_routed_experts_for_current_batch(*args, **kwargs):
++        return None
++
++    def get_global_experts_capturer():
++        return None
++
++    def issue_routing_d2h_copy(*args, **kwargs):
++        return None
++
+ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+ from vllm.v1.outputs import AsyncModelRunnerOutput, make_empty_encoder_model_runner_output
+ from vllm.v1.spec_decode.dflash import DFlashProposer
+@@ -476,7 +490,7 @@
+             num_nans_in_logits={},
+             cudagraph_stats=cudagraph_stats,
+             ec_connector_output=ec_connector_output if self.supports_mm_inputs else None,
+-            routed_experts_dict=routed_experts_dict,
++            routed_experts=routed_experts_dict,
+         )
+         output.omni_connector_output = self.get_omni_connector_output()
+
+diff -rN -u vllm_omni/engine/output_processor.py vllm_omni/engine/output_processor.py
+--- vllm_omni/engine/output_processor.py	2026-06-02 16:44:00.000000000 +0200
++++ vllm_omni/engine/output_processor.py	2026-06-02 16:44:00.000000000 +0200
+@@ -3,9 +3,6 @@
+ import numpy as np
+ import torch
+ from vllm.logger import init_logger
+-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+-    split_routed_experts,
+-)
+ from vllm.outputs import PoolingRequestOutput
+ from vllm.sampling_params import RequestOutputKind
+ from vllm.tokenizers import TokenizerLike
+@@ -26,6 +23,34 @@
+ logger = init_logger(__name__)
+
+
++def split_routed_experts(
++    routed_experts: np.ndarray,
++    prompt_len: int,
++    num_output_tokens: int | None = None,
++) -> tuple[np.ndarray | None, np.ndarray | None]:
++    """Split routing data into prompt and generation portions.
++
++    vLLM 0.21 exposed this helper from routed_experts_capturer, but vLLM
++    0.22 removed it while vllm-omni 0.21.0rc1 still imports it.
++    """
++    prompt_routed_experts = routed_experts[:prompt_len]
++    gen_routed_experts = routed_experts[prompt_len:]
++
++    if (
++        num_output_tokens is not None
++        and gen_routed_experts.shape[0] > num_output_tokens
++        and num_output_tokens > 0
++    ):
++        gen_routed_experts = gen_routed_experts[:num_output_tokens]
++
++    if prompt_routed_experts.size == 0:
++        prompt_routed_experts = None
++    if gen_routed_experts.size == 0:
++        gen_routed_experts = None
++
++    return prompt_routed_experts, gen_routed_experts
++
++
+ class OmniRequestState(RequestState):
+     """Request state for omni models, tracking multimodal outputs.
+
 diff -rN -u vllm_omni/engine/stage_pool.py vllm_omni/engine/stage_pool.py
 --- vllm_omni/engine/stage_pool.py	2026-06-01 18:32:53.480503115 +0200
 +++ vllm_omni/engine/stage_pool.py	2026-06-01 18:32:54.041972355 +0200
@@ -227,3 +363,24 @@ diff -rN -u vllm_omni/engine/stage_pool.py vllm_omni/engine/stage_pool.py
          processed = processor.process_outputs(
              raw_outputs.outputs,
              raw_outputs.timestamp,
+
+diff -rN -u vllm_omni/model_executor/models/qwen3_omni/qwen3_omni.py vllm_omni/model_executor/models/qwen3_omni/qwen3_omni.py
+--- vllm_omni/model_executor/models/qwen3_omni/qwen3_omni.py	2026-06-02 17:13:00.000000000 +0200
++++ vllm_omni/model_executor/models/qwen3_omni/qwen3_omni.py	2026-06-02 17:13:00.000000000 +0200
+@@ -210,6 +210,16 @@
+         self.make_empty_intermediate_tensors = (
+             self.thinker.make_empty_intermediate_tensors if self.model_stage == "thinker" else lambda: None
+         )
++
++    def get_language_model(self) -> nn.Module:
++        """Return the active language model when the current stage has one."""
++        get_language_model = getattr(self.model, "get_language_model", None)
++        if get_language_model is not None:
++            try:
++                return get_language_model()
++            except NotImplementedError:
++                pass
++        return getattr(self.model, "language_model", self.model)
+
+     @classmethod
+     async def buffer_realtime_audio(
