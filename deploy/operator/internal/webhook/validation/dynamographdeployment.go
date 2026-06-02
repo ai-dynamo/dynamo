@@ -99,6 +99,11 @@ func (v *DynamoGraphDeploymentValidator) Validate(ctx context.Context) (admissio
 		return nil, err
 	}
 
+	// Validate priority class pass-through
+	if err := v.validatePriorityClassName(); err != nil {
+		return nil, err
+	}
+
 	// Validate topology constraints
 	if err := v.validateTopologyConstraints(ctx); err != nil {
 		return nil, err
@@ -558,6 +563,17 @@ func (v *DynamoGraphDeploymentValidator) validateRestartStrategyOrder() error {
 	}
 
 	return err
+}
+
+func (v *DynamoGraphDeploymentValidator) validatePriorityClassName() error {
+	if v.deployment.Spec.PriorityClassName == "" || v.isGrovePathway() {
+		return nil
+	}
+	if !v.groveEnabled {
+		return fmt.Errorf("spec.priorityClassName requires the Grove pathway, but Grove is disabled at the operator level (global.grove.enabled=false)")
+	}
+	return fmt.Errorf("spec.priorityClassName requires the Grove pathway; remove or unset the %q annotation (currently %q)",
+		consts.KubeAnnotationEnableGrove, v.deployment.Annotations[consts.KubeAnnotationEnableGrove])
 }
 
 // validateAnnotations validates known DGD annotations have valid values.

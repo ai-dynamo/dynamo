@@ -662,6 +662,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `annotations` _object (keys:string, values:string)_ | Annotations to propagate to all child resources (PCS, DCD, Deployments, and pod templates).<br />Service-level annotations take precedence over these values. |  | Optional: \{\} <br /> |
 | `labels` _object (keys:string, values:string)_ | Labels to propagate to all child resources (PCS, DCD, Deployments, and pod templates).<br />Service-level labels take precedence over these values. |  | Optional: \{\} <br /> |
+| `priorityClassName` _string_ | PriorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.<br />Requires the Grove pathway. |  | Optional: \{\} <br /> |
 | `pvcs` _[PVC](#pvc) array_ | PVCs defines a list of persistent volume claims that can be referenced by components.<br />Each PVC must have a unique name that can be referenced in component specifications. |  | MaxItems: 100 <br />Optional: \{\} <br /> |
 | `services` _object (keys:string, values:[DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec))_ | Services are the services to deploy as part of this deployment. |  | MaxProperties: 25 <br />Optional: \{\} <br /> |
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs are environment variables applied to all services in the deployment unless<br />overridden by service-specific configuration. |  | Optional: \{\} <br /> |
@@ -2064,6 +2065,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `annotations` _object (keys:string, values:string)_ | annotations to propagate to all child resources (PCS, DCD, Deployments,<br />and pod templates). Component-level (`podTemplate`) values take precedence<br />on conflict. |  | Optional: \{\} <br /> |
 | `labels` _object (keys:string, values:string)_ | labels to propagate to all child resources. Same precedence rules as `annotations`. |  | Optional: \{\} <br /> |
+| `priorityClassName` _string_ | priorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.<br />Requires the Grove pathway. |  | Optional: \{\} <br /> |
 | `components` _[DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec) array_ | components are the components deployed as part of this graph. Each entry<br />carries its own stable logical `name`, and names must be unique within<br />the list. Component types are generally repeatable, except `type: epp`<br />which may appear at most once. |  | MaxItems: 25 <br />Optional: \{\} <br /> |
 | `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | env is prepended to every component's environment. Component-specific<br />env entries with the same name take precedence and may reference values<br />from this list. |  | Optional: \{\} <br /> |
 | `backendFramework` _string_ | backendFramework specifies the backend framework (e.g. "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br /> |

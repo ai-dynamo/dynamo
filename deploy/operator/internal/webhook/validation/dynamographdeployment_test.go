@@ -67,6 +67,70 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:         "priorityClassName is valid on Grove pathway",
+			groveEnabled: true,
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					PriorityClassName: "high-priority",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Replicas: &validReplicas,
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "priorityClassName requires Grove pathway when DGD opts out",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+					Annotations: map[string]string{
+						consts.KubeAnnotationEnableGrove: "false",
+					},
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					PriorityClassName: "high-priority",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Replicas: &validReplicas,
+						},
+					},
+				},
+			},
+			groveEnabled: true,
+			wantErr:      true,
+			errContains:  true,
+			errMsg:       "spec.priorityClassName requires the Grove pathway",
+		},
+		{
+			name: "priorityClassName requires Grove pathway when operator disables Grove",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					PriorityClassName: "high-priority",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Replicas: &validReplicas,
+						},
+					},
+				},
+			},
+			groveEnabled: false,
+			wantErr:      true,
+			errContains:  true,
+			errMsg:       "spec.priorityClassName requires the Grove pathway",
+		},
+		{
 			name: "no services",
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
