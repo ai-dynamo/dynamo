@@ -7,6 +7,7 @@ import importlib
 import inspect
 import json
 import logging
+import os
 import random
 import threading
 from abc import ABC, abstractmethod
@@ -910,8 +911,6 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             body: Dict with "session_id", optional "timeout" (default 120),
                   and optional "capacity_of_str_len" (default 65536).
         """
-        import os
-
         from sglang.srt.managers.io_struct import OpenSessionReqInput
 
         session_id = body.get("session_id")
