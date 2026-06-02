@@ -1,0 +1,807 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: internlm
+model_label: InternLM
+mode: batch
+cases:
+  TOOLCALLING.batch.1:
+    description: Single tool call with parameters (happy path)
+    model_text: '<|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "NYC"}}<|action_end|>'
+    tools: &id001
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.2.a:
+    description: Two adjacent action/plugin calls
+    model_text: '<|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "NYC"}}<|action_end|><|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "LA"}}<|action_end|>'
+    tools: *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm:
+        reason: vLLM's batch InternLM parser splits on "<|action_start|><|plugin|>" expecting one action block, so multiple action wrappers raise ValueError instead of extracting every valid call.
+        error: 'ValueError: too many values to unpack'
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.2.b:
+    description: Adjacent action/plugin calls with no prose separator
+    model_text: '<|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "NYC"}}<|action_end|><|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "Boston"}}<|action_end|>'
+    tools: *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: ''
+      vllm:
+        reason: vLLM's batch InternLM parser splits on "<|action_start|><|plugin|>" expecting one action block, so adjacent action wrappers raise ValueError instead of extracting both calls.
+        error: 'ValueError: too many values to unpack'
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.2.c:
+    description: Multiple action/plugin calls with surrounding narration
+    model_text: 'Both: <|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "NYC"}}<|action_end|><|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "LA"}}<|action_end|> Done.'
+    tools: *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: 'Both:'
+      vllm:
+        reason: vLLM's batch InternLM parser splits on "<|action_start|><|plugin|>" expecting one action block, so multiple action wrappers raise ValueError instead of extracting both calls.
+        error: 'ValueError: too many values to unpack'
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.2.d:
+    description: Multi-call ID / index distinctness is not part of the InternLM2 action/plugin grammar
+    reason: The InternLM action/plugin JSON body has name and parameters fields, but no model-emitted call ID or index to preserve.
+  TOOLCALLING.batch.3:
+    description: No tool call (plain text)
+    model_text: Hello, how can I help you today?
+    tools: *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: Hello, how can I help you today?
+      vllm:
+        calls: []
+        normal_text: Hello, how can I help you today?
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.4.a:
+    description: Generic malformed body inside action/plugin wrapper
+    model_text: <|action_start|><|plugin|>not json<|action_end|>
+    tools: *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        reason: vLLM's Internlm2ToolParser calls json.loads on the action body and lets JSONDecodeError escape instead of treating malformed marker-wrapped content as no call.
+        error: 'JSONDecodeError: Expecting value'
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.4.b:
+    description: Invalid JSON syntax inside action/plugin wrapper
+    model_text: '<|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "NYC",}}<|action_end|>'
+    tools: *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        reason: vLLM's Internlm2ToolParser calls json.loads on the action body and lets JSONDecodeError escape instead of treating invalid marker-wrapped JSON as no call.
+        error: 'JSONDecodeError: Expecting property name enclosed in double quotes'
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.4.c:
+    description: Missing required name key inside action/plugin object
+    model_text: '<|action_start|><|plugin|>{"parameters": {"location": "NYC"}}<|action_end|>'
+    tools: *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        reason: vLLM's Internlm2ToolParser assumes action_dict["name"] exists and lets KeyError escape when the JSON object is missing the required name key.
+        error: 'KeyError: ''name'''
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.4.d:
+    description: Malformed wrapper missing the plugin marker
+    model_text: '<|action_start|>{"name": "get_weather", "parameters": {"location": "NYC"}}<|action_end|>'
+    tools: *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        reason: vLLM preserves malformed InternLM marker text in normal_text when the plugin marker is missing; Dynamo suppresses
+          the malformed wrapper and recovers the JSON tool body.
+        calls: []
+        normal_text: '<|action_start|>{"name": "get_weather", "parameters": {"location": "NYC"}}<|action_end|>'
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.4.e:
+    description: Malformed prefix followed by a valid action/plugin object
+    model_text: '<|action_start|><|plugin|>not json<|action_end|><|action_start|><|plugin|>{"name": "get_weather", "parameters":
+      {"location": "NYC"}}<|action_end|>'
+    tools: *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        reason: vLLM's batch InternLM parser splits on "<|action_start|><|plugin|>" expecting one action block, so multiple action blocks raise ValueError instead of recovering or suppressing malformed content.
+        error: 'ValueError: too many values to unpack'
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.4.f:
+    description: Tool-name XML tag case is not part of the InternLM2 action/plugin grammar
+    reason: InternLM2 uses a JSON object after <|action_start|><|plugin|>. It does not encode the tool name as an XML-style
+      tag.
+  TOOLCALLING.batch.5.a:
+    description: Missing closing action_end marker after complete action/plugin JSON
+    model_text: '<|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "NYC"}}'
+    tools: *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.5.b:
+    description: Orphan closing action_end marker without action/plugin opener
+    model_text: '{"name": "get_weather", "parameters": {"location": "NYC"}}<|action_end|>'
+    tools: *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        reason: vLLM preserves an orphan InternLM action_end marker in normal_text; Dynamo strips the orphan marker and recovers
+          the JSON tool body.
+        calls: []
+        normal_text: '{"name": "get_weather", "parameters": {"location": "NYC"}}<|action_end|>'
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.5.c:
+    description: Truncated mid-call body
+    model_text: '<|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "NY'
+    tools: *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NY
+        normal_text: ''
+      vllm:
+        reason: vLLM calls json.loads on the truncated action body and lets JSONDecodeError escape instead of suppressing the incomplete tool-call block.
+        error: 'JSONDecodeError: Unterminated string'
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.5.d:
+    description: Multiple action/plugin calls with the final action_end marker missing
+    model_text: '<|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "NYC"}}<|action_end|><|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "LA"}}'
+    tools: *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm:
+        reason: vLLM's batch InternLM parser splits on "<|action_start|><|plugin|>" expecting one action block, so multiple action wrappers raise ValueError before it can recover the missing final end marker.
+        error: 'ValueError: too many values to unpack'
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.5.e:
+    description: Multiple action/plugin calls with the trailing call truncated mid-argument
+    model_text: '<|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "NYC"}}<|action_end|><|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "NY'
+    tools: *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: NY
+        normal_text: ''
+      vllm:
+        reason: vLLM's batch InternLM parser splits on "<|action_start|><|plugin|>" expecting one action block, so multiple action wrappers raise ValueError before it can recover the truncated trailing call.
+        error: 'ValueError: too many values to unpack'
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.6.a:
+    description: Canonical empty parameters object
+    model_text: '<|action_start|><|plugin|>{"name": "refresh", "parameters": {}}<|action_end|>'
+    tools: &id002
+    - name: refresh
+      parameters:
+        type: object
+        properties: {}
+    expected:
+      dynamo:
+        calls:
+        - name: refresh
+          arguments: {}
+        normal_text: ''
+      vllm:
+        calls:
+        - name: refresh
+          arguments: {}
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.6.b:
+    description: Empty parameters object with whitespace and newlines
+    model_text: |-
+      <|action_start|><|plugin|>{
+        "name": "refresh",
+        "parameters": {
+        }
+      }<|action_end|>
+    tools: *id002
+    expected:
+      dynamo:
+        calls:
+        - name: refresh
+          arguments: {}
+        normal_text: ''
+      vllm:
+        calls:
+        - name: refresh
+          arguments: {}
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.6.c:
+    description: Missing parameters / arguments key for parameterless tool
+    model_text: '<|action_start|><|plugin|>{"name": "refresh"}<|action_end|>'
+    tools: *id002
+    expected:
+      dynamo:
+        calls:
+        - name: refresh
+          arguments: {}
+        normal_text: ''
+      vllm:
+        calls:
+        - name: refresh
+          arguments: {}
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.7.a:
+    description: Standard scalar and container argument types
+    model_text: '<|action_start|><|plugin|>{"name": "test_function", "parameters": {"string_field": "hello", "int_field":
+      42, "float_field": 3.14, "bool_field": true, "null_field": null, "array_field": ["a", "b"], "object_field": {"nested":
+      "value"}}}<|action_end|>'
+    tools: &id003
+    - name: test_function
+      parameters:
+        type: object
+        properties:
+          string_field:
+            type: string
+          int_field:
+            type: integer
+          float_field:
+            type: number
+          bool_field:
+            type: boolean
+          null_field:
+            type: string
+          array_field:
+            type: array
+            items:
+              type: string
+          object_field:
+            type: object
+    expected:
+      dynamo:
+        calls:
+        - name: test_function
+          arguments:
+            string_field: hello
+            int_field: 42
+            float_field: 3.14
+            bool_field: true
+            null_field: null
+            array_field:
+            - a
+            - b
+            object_field:
+              nested: value
+        normal_text: ''
+      vllm:
+        calls:
+        - name: test_function
+          arguments:
+            string_field: hello
+            int_field: 42
+            float_field: 3.14
+            bool_field: true
+            null_field: null
+            array_field:
+            - a
+            - b
+            object_field:
+              nested: value
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.7.b:
+    description: Escaped and special string values
+    model_text: '<|action_start|><|plugin|>{"name": "test_function", "parameters": {"quoted": "He said \"hello\"", "path":
+      "C:\\Users\\file.txt", "newline": "line1\nline2", "html": "<b>bold</b>"}}<|action_end|>'
+    tools: *id003
+    expected:
+      dynamo:
+        calls:
+        - name: test_function
+          arguments:
+            quoted: He said "hello"
+            path: C:\Users\file.txt
+            newline: |-
+              line1
+              line2
+            html: <b>bold</b>
+        normal_text: ''
+      vllm:
+        calls:
+        - name: test_function
+          arguments:
+            quoted: He said "hello"
+            path: C:\Users\file.txt
+            newline: |-
+              line1
+              line2
+            html: <b>bold</b>
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.7.c:
+    description: Schema mismatch preserves string value
+    model_text: '<|action_start|><|plugin|>{"name": "set_temperature", "parameters": {"celsius": "20"}}<|action_end|>'
+    tools:
+    - name: set_temperature
+      parameters:
+        type: object
+        properties:
+          celsius:
+            type: integer
+    expected:
+      dynamo:
+        calls:
+        - name: set_temperature
+          arguments:
+            celsius: '20'
+        normal_text: ''
+      vllm:
+        calls:
+        - name: set_temperature
+          arguments:
+            celsius: '20'
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.7.d:
+    description: Multiple arguments with nested object and array values
+    model_text: '<|action_start|><|plugin|>{"name": "book_trip", "parameters": {"city": "Tokyo", "days": 3, "options": {"hotel":
+      true, "tags": ["business", "wifi"]}}}<|action_end|>'
+    tools:
+    - name: book_trip
+      parameters:
+        type: object
+        properties:
+          city:
+            type: string
+          days:
+            type: integer
+          options:
+            type: object
+    expected:
+      dynamo:
+        calls:
+        - name: book_trip
+          arguments:
+            city: Tokyo
+            days: 3
+            options:
+              hotel: true
+              tags:
+              - business
+              - wifi
+        normal_text: ''
+      vllm:
+        calls:
+        - name: book_trip
+          arguments:
+            city: Tokyo
+            days: 3
+            options:
+              hotel: true
+              tags:
+              - business
+              - wifi
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.7.e:
+    description: Larger nested payload with null and empty containers
+    model_text: '<|action_start|><|plugin|>{"name": "submit_payload", "parameters": {"items": [{"id": 1, "meta": {"tags":
+      [], "note": null}}, {"id": 2, "meta": {"tags": ["x"], "note": "ok"}}], "empty_object": {}, "empty_array": []}}<|action_end|>'
+    tools:
+    - name: submit_payload
+      parameters:
+        type: object
+        properties:
+          items:
+            type: array
+          empty_object:
+            type: object
+          empty_array:
+            type: array
+    expected:
+      dynamo:
+        calls:
+        - name: submit_payload
+          arguments:
+            items:
+            - id: 1
+              meta:
+                tags: []
+                note: null
+            - id: 2
+              meta:
+                tags:
+                - x
+                note: ok
+            empty_object: {}
+            empty_array: []
+        normal_text: ''
+      vllm:
+        calls:
+        - name: submit_payload
+          arguments:
+            items:
+            - id: 1
+              meta:
+                tags: []
+                note: null
+            - id: 2
+              meta:
+                tags:
+                - x
+                note: ok
+            empty_object: {}
+            empty_array: []
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.7.f:
+    description: Numeric precision edge
+    model_text: '<|action_start|><|plugin|>{"name": "record_number", "parameters": {"value": 9007199254740993}}<|action_end|>'
+    tools:
+    - name: record_number
+      parameters:
+        type: object
+        properties:
+          value:
+            type: integer
+    expected:
+      dynamo:
+        calls:
+        - name: record_number
+          arguments:
+            value: 9007199254740993
+        normal_text: ''
+      vllm:
+        calls:
+        - name: record_number
+          arguments:
+            value: 9007199254740993
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.8.a:
+    description: Text before tool call
+    model_text: 'Let me check.<|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "NYC"}}<|action_end|>'
+    tools: *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: Let me check.
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: Let me check.
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.8.b:
+    description: Text after tool call
+    model_text: '<|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "NYC"}}<|action_end|>Done.'
+    tools: *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.8.c:
+    description: Text before and after tool call
+    model_text: 'Let me check.<|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "NYC"}}<|action_end|>Done.'
+    tools: *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: Let me check.
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: Let me check.
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.8.d:
+    description: Narration between multiple action/plugin calls
+    model_text: 'I will check the weather. <|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "NYC"}}<|action_end|> Then check LA weather. <|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "LA"}}<|action_end|>'
+    tools: *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: I will check the weather.
+      vllm:
+        reason: vLLM's batch InternLM parser splits on "<|action_start|><|plugin|>" expecting one action block, so narration between multiple action wrappers raises ValueError instead of extracting both calls.
+        error: 'ValueError: too many values to unpack'
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.9.a:
+    description: Empty model text
+    model_text: ''
+    tools: *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.9.b:
+    description: Blank / whitespace-only model text
+    model_text: '   '
+    tools: *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.10:
+    description: Duplicate action/plugin calls
+    model_text: '<|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "NYC"}}<|action_end|><|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "NYC"}}<|action_end|>'
+    tools: *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        reason: vLLM's batch InternLM parser splits on "<|action_start|><|plugin|>" expecting one action block, so duplicate action wrappers raise ValueError instead of preserving both calls.
+        error: 'ValueError: too many values to unpack'
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.13.a:
+    description: Unknown-only action/plugin call
+    model_text: '<|action_start|><|plugin|>{"name": "unknown_tool", "parameters": {"location": "NYC"}}<|action_end|>'
+    tools: *id001
+    expected:
+      dynamo:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.13.c:
+    description: Mixed known and unknown action/plugin calls
+    model_text: '<|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "NYC"}}<|action_end|><|action_start|><|plugin|>{"name": "unknown_tool", "parameters": {"location": "LA"}}<|action_end|>'
+    tools: *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: unknown_tool
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm:
+        reason: vLLM's batch InternLM parser splits on "<|action_start|><|plugin|>" expecting one action block, so mixed known and unknown action wrappers raise ValueError instead of extracting both calls.
+        error: 'ValueError: too many values to unpack'
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.30.a:
+    description: Call separator character inside an argument string is not part of the InternLM2 action/plugin grammar
+    reason: InternLM2 uses one JSON object rather than a delimiter-separated multi-call grammar, so there is no call separator
+      for this family.
+  TOOLCALLING.batch.30.b:
+    description: JSON structural delimiters inside one argument string value
+    model_text: '<|action_start|><|plugin|>{"name": "run_query", "parameters": {"sql": "SELECT value WHERE note has brace
+      } and bracket ]"}}<|action_end|>'
+    tools: &id004
+    - name: run_query
+      parameters:
+        type: object
+        properties:
+          sql:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT value WHERE note has brace } and bracket ]
+        normal_text: ''
+      vllm:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT value WHERE note has brace } and bracket ]
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.30.c:
+    description: Action/plugin marker text inside one argument string value
+    model_text: '<|action_start|><|plugin|>{"name": "run_query", "parameters": {"sql": "SELECT ''<|action_start|><|plugin|>not
+      a call<|action_end|>'' as marker"}}<|action_end|>'
+    tools: *id004
+    expected:
+      dynamo:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT '<|action_start|><|plugin|>not a call<|action_end|>' as marker
+        normal_text: ''
+      vllm:
+        reason: vLLM splits on the marker string inside the argument value and raises ValueError instead of treating marker-looking text inside JSON strings as data.
+        error: 'ValueError: too many values to unpack'
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.batch.31.a:
+    description: Multi-call separator character case is not part of the InternLM2 action/plugin grammar
+    reason: InternLM action/plugin calls are separated by structural markers, not by a call separator character. TOOLCALLING.batch.31.b covers the applicable multi-call structural-marker case.
+  TOOLCALLING.batch.31.b:
+    description: Multiple action/plugin calls with JSON structural delimiters inside one argument string
+    model_text: '<|action_start|><|plugin|>{"name": "run_query", "parameters": {"sql": "SELECT value WHERE note has brace } and bracket ]"}}<|action_end|><|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "NYC"}}<|action_end|>'
+    tools:
+    - name: run_query
+      parameters:
+        type: object
+        properties:
+          sql:
+            type: string
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT value WHERE note has brace } and bracket ]
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        reason: vLLM's batch InternLM parser splits on "<|action_start|><|plugin|>" expecting one action block, so multiple wrappers raise ValueError even when marker-looking structural characters are only JSON string data.
+        error: 'ValueError: too many values to unpack'
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'

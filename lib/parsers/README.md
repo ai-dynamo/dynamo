@@ -94,6 +94,8 @@ Reasoning parsers:
 
 ## Adding a new parser
 
+Workspace agents should use the `dyn-create-parser` skill for this workflow. This README keeps the repo-local checklist and file paths available for humans and agents that do not have the skill loaded.
+
 1. **Pick the family** from the cheat sheet above. If an existing config-driven
    family fits, add a `ToolCallConfig::<your_model>()` constructor in
    `tool_calling/config.rs`, register it in `tool_calling/parsers.rs`. Done —
@@ -107,11 +109,9 @@ Reasoning parsers:
    grammar truly diverges (append-think, Harmony channels). Most new models
    use plain `<think>...</think>` and can share.
 
-4. **Write tests.** Minimum viable set is in [`TOOLCALLING_CASES.md`](./TOOLCALLING_CASES.md) (`TOOLCALLING.*`
-   taxonomy). At minimum: `TOOLCALLING.1`/`TOOLCALLING.2`/`TOOLCALLING.3` for correctness,
-   `TOOLCALLING.5` for truncation behavior, `TOOLCALLING.8`/`TOOLCALLING.9` for streaming
-   with reasoning, and `TOOLCALLING.13` for interleaved text. `N/A` categories
-   should be explicitly called out in a comment rather than silently skipped.
+4. **Write parity fixtures.** Day-0 model imports should try every column/case in [`TOOLCALLING_CASES.md`](./TOOLCALLING_CASES.md), not only the minimum happy path. Add real fixtures where the grammar can express the case, and add explicit `N/A`, `unavailable`, or reasoned expected entries when the case does not apply or a peer parser cannot run. Avoid leaving `—` cells as silent TODOs; if a column stays blank, call out the blocker in the PR.
+
+5. **Log recovery.** If Dynamo intentionally recovers from malformed wrapper syntax, missing end markers, orphan markers, truncation, resync after bad JSON, or marker suppression, emit a structured `tracing::warn!` with a stable `why` field and small counts such as `skipped_bytes`, `recovered_bytes`, or `repaired_bytes`. Do not dump raw model text or full arguments into logs.
 
 ## Related docs
 

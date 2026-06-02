@@ -1,0 +1,170 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: internlm
+model_label: InternLM
+mode: stream
+cases:
+  TOOLCALLING.stream.1.a:
+    description: Complete tool-call payload delivered in one content chunk
+    chunks:
+    - delta_text: '<|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "NYC"}}<|action_end|>'
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools: &id001
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls:
+        - name: get_weather
+          arguments: {}
+        normal_text: ''
+        reason: vLLM Internlm2ToolParser emits the tool name first, then logs ValueError while trying to stream arguments
+          from the same completed JSON payload. The returned call keeps empty arguments.
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.stream.1.b:
+    description: Complete tool call split across parser-significant boundaries
+    chunks:
+    - delta_text: <|action_start|><|plugin|>
+    - delta_text: '{"name": "get_weather", '
+    - delta_text: '"parameters": {"location": "NYC"}}'
+    - delta_text: <|action_end|>
+      finish_reason: tool_calls
+    tools: *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls:
+        - name: get_weather
+          arguments: {}
+        normal_text: ''
+        reason: vLLM Internlm2ToolParser emits the tool name first, then logs ValueError when the later delta text does not
+          appear in json.dumps(parameters). The returned call keeps empty arguments.
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.stream.2:
+    description: Multiple streaming action/plugin calls
+    chunks:
+    - delta_text: '<|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "NYC"}}<|action_end|>'
+    - delta_text: '<|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "LA"}}<|action_end|>'
+      finish_reason: tool_calls
+    tools: *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm:
+        reason: vLLM's streaming InternLM parser splits the accumulated text on "<|action_start|><|plugin|>" expecting one action block, so multiple action wrappers raise ValueError instead of extracting both calls.
+        error: 'ValueError: too many values to unpack'
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.stream.3:
+    description: Start marker split across chunks
+    chunks:
+    - delta_text: <|action
+    - delta_text: '_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "NYC"}}'
+    - delta_text: <|action_end|>
+      finish_reason: tool_calls
+    tools: *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: <|action
+        reason: vLLM flushes the partial start marker as normal content before the full <|action_start|><|plugin|> marker
+          is available, so the later chunks no longer reconstruct a call.
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.stream.4.a:
+    description: Stream ends after complete JSON but before action_end marker
+    chunks:
+    - delta_text: '<|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "NYC"}}'
+      finish_reason: length
+    tools: *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls:
+        - name: get_weather
+          arguments: {}
+        normal_text: ''
+        reason: vLLM can emit the tool name from the complete JSON object before action_end arrives, but its streaming argument-delta
+          path does not emit the parameters.
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.stream.4.b:
+    description: Stream ends mid-call body
+    chunks:
+    - delta_text: '<|action_start|><|plugin|>{"name": "get_weather", "parameters": {"location": "NY'
+      finish_reason: length
+    tools: *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NY
+        normal_text: ''
+      vllm:
+        calls:
+        - name: get_weather
+          arguments: {}
+        normal_text: ''
+        reason: vLLM can emit the tool name from the partial JSON object, but the truncated argument string is not emitted
+          through its streaming argument-delta path.
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'
+  TOOLCALLING.stream.4.c:
+    description: Inner JSON body without required action/plugin wrapper plus orphan close markers
+    chunks:
+    - delta_text: '{"name": "get_weather", "parameters": {"location": "NYC"}}'
+    - delta_text: <|action_end|><|action_end|>
+      finish_reason: stop
+    tools: *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        reason: vLLM preserves orphan InternLM action_end markers in normal_text; Dynamo strips the orphan markers and recovers
+          the JSON tool body.
+        calls: []
+        normal_text: '{"name": "get_weather", "parameters": {"location": "NYC"}}<|action_end|><|action_end|>'
+      sglang:
+        unavailable: SGLang has no detector for family='internlm'

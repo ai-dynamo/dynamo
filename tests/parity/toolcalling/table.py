@@ -589,7 +589,8 @@ _TOOL_CALL_MARKUP_RE = re.compile(
     r"</?tool_call|</?tool_calls|<\|tool_call|<\|tool_calls|"
     r"<\|(?:channel|message|call|python_tag)\|>|"
     r"</?TOOLCALL|TOOL_CALLS|<｜(?:DSML｜)?(?:tool|tool▁call|tool▁calls)|"
-    r"<｜DSML｜|</?minimax:tool_call|</?invoke|</?arg_key|</?arg_value"
+    r"<｜DSML｜|</?minimax:tool_call|</?invoke|</?arg_key|</?arg_value|"
+    r"<\|action_(?:start|end)\|>|<\|plugin\|>"
 )
 
 
@@ -816,7 +817,10 @@ def _format_output_block_html(block, family: str | None = None) -> str:
     if block.get("unavailable"):
         return html_lib.escape(f"unavailable: {block['unavailable']}")
     if "error" in block:
-        return html_lib.escape(f"error matching {block['error']!r}")
+        lines = [f"expected error: {block['error']}"]
+        if block.get("reason"):
+            lines.append(f"reason: {block['reason']}")
+        return html_lib.escape("\n".join(lines))
     nt = block.get("normal_text", "") or ""
     calls = block.get("calls") or []
     if calls:
@@ -915,7 +919,8 @@ def _tooltip_for(case: dict, dyn: dict) -> str:
     Each non-matching, non-unavailable peer contributes one line:
       vllm: <reason>                        # `reason:` field present
       vllm: UNKNOWN — divergent ...         # divergent, no reason
-      vllm: expected error matching '...'   # `error:` field present
+      vllm: expected error: ...             # `error:` field present
+      vllm: <reason> (expected error: ...)  # `error:` plus `reason:`
     """
     parts: list[str] = []
     n_dyn = {
@@ -930,7 +935,12 @@ def _tooltip_for(case: dict, dyn: dict) -> str:
             continue
         name = _IMPL_DISPLAY.get(impl, impl)
         if "error" in block:
-            parts.append(f"{name}: expected error matching {block['error']!r}")
+            if block.get("reason"):
+                parts.append(
+                    f"{name}: {block['reason']} (expected error: {block['error']})"
+                )
+            else:
+                parts.append(f"{name}: expected error: {block['error']}")
             continue
         # Don't rely on PyYAML preserving anchor identity (the `block is dyn`
         # check above is the fast path; value equality is the safety net).

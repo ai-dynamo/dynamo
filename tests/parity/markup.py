@@ -67,6 +67,19 @@ _HARMONY_SEGMENT_CLASS = {
     "call": "tt-h-call",
 }
 
+_INTERNLM_ACTION_OPEN = "action_start"
+_INTERNLM_ACTION_CLOSE = "action_end"
+_INTERNLM_ACTION_PLUGIN = "plugin"
+_INTERNLM_ACTION_PAIR = "__internlm_action"
+_FIXED_COLOR_CLASSES = {
+    _INTERNLM_ACTION_PAIR: "tt-c0",
+    _INTERNLM_ACTION_PLUGIN: "tt-c0",
+}
+
+
+def _stable_color_class_for(name: str) -> str:
+    return _FIXED_COLOR_CLASSES.get(name) or _singleton_class_for(name)
+
 
 def _colorize_harmony(text: str) -> str:
     """Color Harmony's linear token segments as `<|token|>related-text`.
@@ -136,6 +149,12 @@ def _tag_kind_and_name(inner: str) -> tuple[str | None, str, str | None]:
     ends_pipe = inner[-1:] in _PIPES
     if starts_pipe and ends_pipe and len(inner) >= 2:
         middle = inner[1:-1]
+        if middle == _INTERNLM_ACTION_OPEN:
+            return ("open", _INTERNLM_ACTION_PAIR, _INTERNLM_ACTION_PAIR)
+        if middle == _INTERNLM_ACTION_CLOSE:
+            return ("close", _INTERNLM_ACTION_PAIR, _INTERNLM_ACTION_PAIR)
+        if middle == _INTERNLM_ACTION_PLUGIN:
+            return ("singleton", _INTERNLM_ACTION_PLUGIN, None)
         stripped = _strip_suffix(middle, _BEGIN_SUFFIXES)
         if stripped is not None:
             return ("open", stripped, None)
@@ -171,7 +190,7 @@ def _colorize_xml(text: str) -> str:
     their orphan-ness without poisoning the surrounding pairs.
     """
     pieces: list[str] = []
-    stack: list[tuple[str, int]] = []
+    stack: list[tuple[str, int, str | None]] = []
     last = 0
     for m in _TAG_RE.finditer(text):
         if m.start() > last:
@@ -182,7 +201,7 @@ def _colorize_xml(text: str) -> str:
         if kind is None:
             pieces.append(f'<span class="tt-orphan">{esc}</span>')
         elif kind == "singleton":
-            cls = _singleton_class_for(pair_id)
+            cls = _stable_color_class_for(pair_id)
             pieces.append(f'<span class="{cls}">{esc}</span>')
         elif kind == "close":
             match_at = -1
@@ -191,18 +210,20 @@ def _colorize_xml(text: str) -> str:
                     match_at = i
                     break
             if match_at >= 0:
-                for _, unmatched_idx in stack[match_at + 1 :]:
+                for _, unmatched_idx, _ in stack[match_at + 1 :]:
                     pieces[
                         unmatched_idx
                     ] = f'<span class="tt-orphan">{pieces[unmatched_idx]}</span>'
                 open_idx = stack[match_at][1]
-                # Per-instance color: every matched pair gets a fresh palette
-                # index, so two `<tool_call>...</tool_call>` (or two
-                # `<|start|>...<|call|>`) blocks in the same input render as
-                # different colors. (color_override unused on the paired
-                # path — kept on the singleton-flavor branch only.)
-                _ = color_override
-                cls = _next_color_class()
+                stable_pair = color_override or stack[match_at][2]
+                # Most pairs get per-instance colors so adjacent tool-call
+                # blocks remain easy to distinguish. Family-specific marker
+                # pairs can opt into stable colors across tooltip sections.
+                cls = (
+                    _stable_color_class_for(stable_pair)
+                    if stable_pair
+                    else _next_color_class()
+                )
                 pieces[open_idx] = f'<span class="{cls}">{pieces[open_idx]}</span>'
                 pieces.append(f'<span class="{cls}">{esc}</span>')
                 del stack[match_at:]
@@ -210,9 +231,9 @@ def _colorize_xml(text: str) -> str:
                 pieces.append(f'<span class="tt-orphan">{esc}</span>')
         else:
             pieces.append(esc)
-            stack.append((pair_id, len(pieces) - 1))
+            stack.append((pair_id, len(pieces) - 1, color_override))
         last = m.end()
-    for _, idx in stack:
+    for _, idx, _ in stack:
         pieces[idx] = f'<span class="tt-orphan">{pieces[idx]}</span>'
     if last < len(text):
         pieces.append(html_lib.escape(text[last:]))
@@ -221,16 +242,16 @@ def _colorize_xml(text: str) -> str:
 
 def _xml_token_intervals(text: str) -> list[dict[str, Any]]:
     intervals: list[dict[str, Any]] = []
-    stack: list[tuple[str, int]] = []
+    stack: list[tuple[str, int, str | None]] = []
     for match in _TAG_RE.finditer(text):
         idx = len(intervals)
         tok = match.group(0)
-        kind, pair_id, _color_override = _tag_kind_and_name(tok[1:-1])
+        kind, pair_id, color_override = _tag_kind_and_name(tok[1:-1])
         intervals.append({"start": match.start(), "end": match.end(), "class": None})
         if kind is None:
             intervals[idx]["class"] = "tt-orphan"
         elif kind == "singleton":
-            intervals[idx]["class"] = _singleton_class_for(pair_id)
+            intervals[idx]["class"] = _stable_color_class_for(pair_id)
         elif kind == "close":
             match_at = -1
             for i in range(len(stack) - 1, -1, -1):
@@ -238,17 +259,22 @@ def _xml_token_intervals(text: str) -> list[dict[str, Any]]:
                     match_at = i
                     break
             if match_at >= 0:
-                for _, unmatched_idx in stack[match_at + 1 :]:
+                for _, unmatched_idx, _ in stack[match_at + 1 :]:
                     intervals[unmatched_idx]["class"] = "tt-orphan"
-                cls = _next_color_class()
+                stable_pair = color_override or stack[match_at][2]
+                cls = (
+                    _stable_color_class_for(stable_pair)
+                    if stable_pair
+                    else _next_color_class()
+                )
                 intervals[stack[match_at][1]]["class"] = cls
                 intervals[idx]["class"] = cls
                 del stack[match_at:]
             else:
                 intervals[idx]["class"] = "tt-orphan"
         else:
-            stack.append((pair_id, idx))
-    for _, idx in stack:
+            stack.append((pair_id, idx, color_override))
+    for _, idx, _ in stack:
         intervals[idx]["class"] = "tt-orphan"
     return intervals
 

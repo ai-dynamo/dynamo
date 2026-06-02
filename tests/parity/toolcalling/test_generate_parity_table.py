@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.parity.markup import colorize_markup, colorize_stream_deltas
+
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.pre_merge,
@@ -50,6 +52,8 @@ def test_generate_parser_parity_table_html() -> None:
     assert "<html" in html.lower()
     assert "<table" in html.lower()
     assert "Dynamo Tool Calling Parser - Parity Table" in html
+    assert "td.cell.err        { color: #222; }" in html
+    assert '<span style="color:#222">!</span> expected-error suffix' in html
     assert re.search(
         r'data-col-toggle="model"[^>]+data-default-visible="true"[^>]+aria-pressed="true"',
         html,
@@ -189,6 +193,19 @@ def test_generate_combined_parity_table_html() -> None:
 
 
 @pytest.mark.timeout(60)
+def test_toolcalling_html_shows_reason_for_expected_vllm_python_error() -> None:
+    html = _render_html("--mode", "batch")
+
+    assert "TOOLCALLING.batch.4.c — internlm" in html
+    assert "expected error: KeyError: &#x27;name&#x27;" in html
+    assert (
+        "vLLM&#x27;s Internlm2ToolParser assumes action_dict[&quot;name&quot;] exists"
+        in html
+    )
+    assert "(expected error: KeyError: &#x27;name&#x27;)" in html
+
+
+@pytest.mark.timeout(60)
 def test_generate_reasoning_parity_table_leak_markers_are_parser_specific() -> None:
     html = _render_html_for("reasoning")
 
@@ -231,6 +248,56 @@ def test_generate_reasoning_parity_table_leak_markers_are_parser_specific() -> N
         r'<div class="ttip"><div class="ttip-head">REASONING\.batch\.3\.a — minimax_append_think',
         html,
     )
+
+
+def test_internlm_action_markers_are_colorized_as_tool_call_markup() -> None:
+    html = colorize_markup(
+        '<|action_start|><|plugin|>{"name": "refresh"}<|action_end|>',
+        "internlm",
+    )
+    second_html = colorize_markup(
+        '<|action_start|><|plugin|>{"parameters": {"location": "NYC"}}<|action_end|>',
+        "internlm",
+    )
+
+    assert "tt-orphan" not in html
+    start = re.search(r'<span class="(tt-c\d+)">&lt;\|action_start\|&gt;</span>', html)
+    end = re.search(r'<span class="(tt-c\d+)">&lt;\|action_end\|&gt;</span>', html)
+    plugin = re.search(r'<span class="(tt-c\d+)">&lt;\|plugin\|&gt;</span>', html)
+    second_start = re.search(
+        r'<span class="(tt-c\d+)">&lt;\|action_start\|&gt;</span>',
+        second_html,
+    )
+    second_plugin = re.search(
+        r'<span class="(tt-c\d+)">&lt;\|plugin\|&gt;</span>',
+        second_html,
+    )
+    assert start is not None
+    assert end is not None
+    assert plugin is not None
+    assert second_start is not None
+    assert second_plugin is not None
+    assert start.group(1) == end.group(1)
+    assert start.group(1) == plugin.group(1)
+    assert start.group(1) == second_start.group(1)
+    assert plugin.group(1) == second_plugin.group(1)
+
+
+def test_internlm_split_action_marker_is_colorized_across_stream_chunks() -> None:
+    chunks = [
+        {"delta_text": "<|action"},
+        {"delta_text": '_start|><|plugin|>{"name": "refresh"}'},
+        {"delta_text": "<|action_end|>"},
+    ]
+
+    rendered = colorize_stream_deltas(chunks, "internlm")
+
+    assert "tt-orphan" not in "".join(rendered)
+    first = re.search(r'<span class="(tt-c\d+)">&lt;\|action</span>', rendered[0])
+    second = re.search(r'<span class="(tt-c\d+)">_start\|&gt;</span>', rendered[1])
+    assert first is not None
+    assert second is not None
+    assert first.group(1) == second.group(1)
 
 
 def _render_html(*extra_args: str) -> str:

@@ -13,6 +13,11 @@ pub struct JsonParserConfig {
     pub tool_call_start_tokens: Vec<String>,
     /// End token for individual tool calls (e.g., `</TOOLCALL>`)
     pub tool_call_end_tokens: Vec<String>,
+    /// Marker tokens that belong to the family grammar but are not complete
+    /// tool-call start tokens by themselves. If parsing fails, these markers
+    /// should still be suppressed rather than leaked as normal text.
+    #[serde(default)]
+    pub tool_call_sentinel_tokens: Vec<String>,
     /// Separator tokens between function name and arguments
     /// (e.g., "<｜tool▁sep｜>" for DeepSeek v3.1)
     /// Used by some models to separate function name from arguments
@@ -64,6 +69,29 @@ pub struct JsonParserConfig {
     /// trailing marker as leaked text on the next chunk.
     #[serde(default)]
     pub strip_markup_on_recovery: bool,
+
+    /// Allow recovery from a valid raw JSON call followed only by orphan end
+    /// tokens. This is opt-in because most grammars require an opening marker.
+    #[serde(default)]
+    pub recover_orphan_end_token: bool,
+
+    /// Treat `{"name": ...}` as an empty-argument tool call when the tool
+    /// schema allows no required arguments. This is opt-in because most
+    /// established parser families require an explicit arguments object.
+    #[serde(default)]
+    pub allow_name_only_tool_calls: bool,
+
+    /// Use JSON-aware wrapper extraction that can skip malformed wrappers and
+    /// resynchronize at the next start marker. This is opt-in because older
+    /// parser families have recorded behavior for malformed framed content.
+    #[serde(default)]
+    pub recover_malformed_wrappers: bool,
+
+    /// Suppress family marker tokens when parsing fails instead of returning
+    /// them as normal text. This should be enabled only when the family grammar
+    /// is known and marker leaks are never useful user-visible content.
+    #[serde(default)]
+    pub suppress_marker_tokens_on_parse_failure: bool,
 }
 
 impl Default for JsonParserConfig {
@@ -71,6 +99,7 @@ impl Default for JsonParserConfig {
         Self {
             tool_call_start_tokens: vec!["<TOOLCALL>".to_string(), "<|python_tag|>".to_string()],
             tool_call_end_tokens: vec!["</TOOLCALL>".to_string(), "".to_string()],
+            tool_call_sentinel_tokens: vec![],
             tool_call_separator_tokens: vec![],
             function_name_keys: vec!["name".to_string()],
             arguments_keys: vec!["arguments".to_string(), "parameters".to_string()],
@@ -78,6 +107,10 @@ impl Default for JsonParserConfig {
             bare_json_mode: false,
             allow_eof_recovery: false,
             strip_markup_on_recovery: false,
+            recover_orphan_end_token: false,
+            allow_name_only_tool_calls: false,
+            recover_malformed_wrappers: false,
+            suppress_marker_tokens_on_parse_failure: false,
         }
     }
 }
@@ -447,6 +480,29 @@ impl ToolCallConfig {
         }
     }
 
+    pub fn internlm() -> Self {
+        Self {
+            parser_config: ParserConfig::Json(JsonParserConfig {
+                tool_call_start_tokens: vec![
+                    "<|action_start|><|plugin|>".to_string(),
+                    "<|action_start|>".to_string(),
+                ],
+                tool_call_end_tokens: vec!["<|action_end|>".to_string()],
+                tool_call_sentinel_tokens: vec![
+                    "<|action_start|>".to_string(),
+                    "<|plugin|>".to_string(),
+                    "<|action_end|>".to_string(),
+                ],
+                recover_orphan_end_token: true,
+                allow_name_only_tool_calls: true,
+                recover_malformed_wrappers: true,
+                suppress_marker_tokens_on_parse_failure: true,
+                ..Default::default()
+            }),
+            structural_tag_builder: None,
+        }
+    }
+
     pub fn phi4() -> Self {
         Self {
             parser_config: ParserConfig::Json(JsonParserConfig {
@@ -693,6 +749,19 @@ mod tests {
         assert_eq!(cfg.block_start, "<｜DSML｜function_calls>");
         assert_eq!(cfg.block_end, "</｜DSML｜function_calls>");
         assert_eq!(cfg.invoke_start_prefix, "<｜DSML｜invoke name=");
+    }
+
+    #[test]
+    fn json_config_deserializes_without_sentinel_tokens() {
+        let legacy = serde_json::json!({
+            "tool_call_start_tokens": ["<tool_call>"],
+            "tool_call_end_tokens": ["</tool_call>"],
+            "tool_call_separator_tokens": [],
+            "function_name_keys": ["name"],
+            "arguments_keys": ["arguments"],
+        });
+        let cfg: JsonParserConfig = serde_json::from_value(legacy).unwrap();
+        assert!(cfg.tool_call_sentinel_tokens.is_empty());
     }
 
     #[test]

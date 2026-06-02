@@ -233,6 +233,7 @@ _FAMILY_TO_VLLM_KEY = {
     "mistral": "mistral",
     "jamba": "jamba",
     "llama3_json": "llama3_json",
+    "internlm": "internlm",
     "phi4": "phi4_mini_json",
     "harmony": "openai",  # gpt-oss / harmony parser registered as "openai"
     "pythonic": "pythonic",

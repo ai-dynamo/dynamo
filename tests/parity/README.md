@@ -919,23 +919,20 @@ real value-add is the cross-implementation half (vLLM and SGLang).
 
 ## Adding a new parser family
 
+Workspace agents should use the `dyn-create-parser` skill for this workflow. This section is the parity-fixture checklist that the skill points back to.
+
 1. Add the family name to Dynamo's parser registry (Rust side).
-2. Author a fixture YAML at
-   `tests/parity/toolcalling/fixtures/<family>/TOOLCALLING.batch.yaml` covering
-   the `TOOLCALLING.batch.<n>` cases that apply (mirror an existing
-   family's case shape — see `fixtures/kimi_k2/TOOLCALLING.batch.yaml`).
-   Each case minimally needs `description`, `ref`, `model_text`,
-   and `tools`. Author by hand or copy-edit from an upstream test.
-   AI can draft case shells, but humans must review them against
-   `TOOLCALLING_CASES.md` and the model format before merging.
-3. Run `python3 -m tests.parity.toolcalling.capture_toolcalling_outputs --impl dynamo --merge`
+2. Author a fixture YAML at `tests/parity/toolcalling/fixtures/<family>/TOOLCALLING.batch.yaml` and try to cover every table column/case from `lib/parsers/TOOLCALLING_CASES.md`, not just the cases that look likely to pass. Mirror an existing family's case shape — see `fixtures/kimi_k2/TOOLCALLING.batch.yaml`. Each case minimally needs `description`, `ref`, `model_text`, and `tools`. Author by hand or copy-edit from an upstream test. AI can draft case shells, but humans must review them against `TOOLCALLING_CASES.md` and the model format before merging.
+3. For cases that do not apply, cannot be expressed by the model grammar, or cannot be captured in a peer engine yet, add explicit `n/a`, `unavailable`, or reasoned expected entries. Do not leave `—` cells as silent TODOs unless the PR calls out the blocker.
+4. If a case depends on Dynamo recovering from malformed wrapper syntax, missing end markers, orphan markers, truncation, resync after bad JSON, or marker suppression, the parser code should emit a structured `tracing::warn!` with a stable `why` field. The fixture captures the API contract; the log makes the recovery visible in production.
+5. Run `python3 -m tests.parity.toolcalling.capture_toolcalling_outputs --impl dynamo --merge`
    to fill in each case's `expected.dynamo` by running Dynamo against
    `model_text` + `tools`. Cases that already have `expected.dynamo`
    are left alone.
-4. Add the family's vLLM and SGLang dispatch entries to
+6. Add the family's vLLM and SGLang dispatch entries to
    `_FAMILY_TO_VLLM_KEY` (`vllm.py`) and
    `_FAMILY_TO_SGLANG_DETECTOR` (`sglang.py`).
-5. Populate vLLM and SGLang outputs for the new family by running
+7. Populate vLLM and SGLang outputs for the new family by running
    `python3 -m tests.parity.toolcalling.capture_toolcalling_outputs --impl <vllm|sglang> --merge`
    inside each engine's container. The merge writes anchor refs to
    dynamo for matching engines, concrete `{calls, normal_text}` for
@@ -946,4 +943,4 @@ real value-add is the cross-implementation half (vLLM and SGLang).
    rather than the full volatile message. Add a `reason:` field to
    intentional divergences so they show as `V`/`S` not `V?`/`S?` in the
    table.
-6. Regenerate the table: `python3 tests/parity/generate_parity_table.py toolcalling --html > tests/parity/toolcalling/PARITY.html`.
+8. Regenerate the table: `python3 tests/parity/generate_parity_table.py toolcalling --html > tests/parity/toolcalling/PARITY.html`.

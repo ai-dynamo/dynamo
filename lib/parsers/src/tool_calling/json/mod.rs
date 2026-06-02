@@ -130,13 +130,107 @@ pub fn find_tool_call_end_position_json(
                 chunk.len()
             }
         }
+        "internlm" => find_internlm_tool_call_end_position(chunk, config).unwrap_or(chunk.len()),
         _ => chunk.len(),
     }
+}
+
+fn find_internlm_tool_call_end_position(chunk: &str, config: &JsonParserConfig) -> Option<usize> {
+    let end_token = config
+        .tool_call_end_tokens
+        .iter()
+        .find(|token| !token.is_empty())?
+        .as_str();
+    let mut start_tokens: Vec<&str> = config
+        .tool_call_start_tokens
+        .iter()
+        .map(String::as_str)
+        .filter(|token| !token.is_empty())
+        .collect();
+    start_tokens.sort_by_key(|token| std::cmp::Reverse(token.len()));
+
+    let mut cursor = 0;
+    let mut last_complete_end = None;
+
+    loop {
+        let Some((start_pos, start_token)) = find_next_internlm_start(chunk, cursor, &start_tokens)
+        else {
+            return last_complete_end;
+        };
+
+        if last_complete_end.is_some() && !chunk[cursor..start_pos].chars().all(char::is_whitespace)
+        {
+            return last_complete_end;
+        }
+
+        let body_pos = start_pos + start_token.len();
+        let Some(end_pos) = find_internlm_wrapper_end(chunk, body_pos, end_token) else {
+            if last_complete_end.is_some() {
+                return last_complete_end;
+            }
+            cursor = body_pos;
+            continue;
+        };
+
+        last_complete_end = Some(end_pos);
+        cursor = end_pos;
+    }
+}
+
+fn find_next_internlm_start<'a>(
+    chunk: &str,
+    search_from: usize,
+    start_tokens: &'a [&'a str],
+) -> Option<(usize, &'a str)> {
+    start_tokens
+        .iter()
+        .filter_map(|token| {
+            chunk[search_from..]
+                .find(token)
+                .map(|pos| (search_from + pos, *token))
+        })
+        .min_by_key(|(pos, token)| (*pos, std::cmp::Reverse(token.len())))
+}
+
+fn find_internlm_wrapper_end(chunk: &str, body_pos: usize, end_token: &str) -> Option<usize> {
+    let body = &chunk[body_pos..];
+    let trimmed_body = body.trim_start();
+    let leading_ws = body.len() - trimmed_body.len();
+    let json_pos = body_pos + leading_ws;
+
+    if trimmed_body.starts_with('{') || trimmed_body.starts_with('[') {
+        let mut stream = serde_json::Deserializer::from_str(trimmed_body)
+            .into_iter::<Box<serde_json::value::RawValue>>();
+        if let Some(Ok(raw)) = stream.next() {
+            let raw_json = raw.get();
+            let after_raw = &trimmed_body[raw_json.len()..];
+            let after_raw_trimmed = after_raw.trim_start();
+            let raw_trailing_ws = after_raw.len() - after_raw_trimmed.len();
+            if after_raw_trimmed.starts_with(end_token) {
+                return Some(json_pos + raw_json.len() + raw_trailing_ws + end_token.len());
+            }
+        }
+        return None;
+    }
+
+    body.find(end_token)
+        .map(|pos| body_pos + pos + end_token.len())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn internlm_config() -> JsonParserConfig {
+        JsonParserConfig {
+            tool_call_start_tokens: vec![
+                "<|action_start|><|plugin|>".to_string(),
+                "<|action_start|>".to_string(),
+            ],
+            tool_call_end_tokens: vec!["<|action_end|>".to_string()],
+            ..Default::default()
+        }
+    }
 
     /// Regression test for issue #6822: parallel tool calls in a single chunk must
     /// all be captured by find_tool_call_end_position_json so that the jail passes the
@@ -230,6 +324,79 @@ mod tests {
         assert!(
             incomplete[pos_inc..].starts_with("<｜tool▁call▁begin｜>"),
             "incomplete trailing call must remain unconsumed"
+        );
+    }
+
+    #[test]
+    fn test_find_tool_call_end_position_internlm_stops_before_incomplete_next_action() {
+        let config = internlm_config();
+        let complete =
+            r#"<|action_start|><|plugin|>{"name":"first","parameters":{}}<|action_end|>"#;
+        let input = format!("{complete}<|action_start|><|plugin|>{{\"name\":\"second\"");
+
+        let pos = find_tool_call_end_position_json(&input, "internlm", &config);
+        assert_eq!(pos, complete.len());
+        assert_eq!(
+            &input[pos..],
+            r#"<|action_start|><|plugin|>{"name":"second""#
+        );
+    }
+
+    #[test]
+    fn test_find_tool_call_end_position_internlm_captures_consecutive_actions() {
+        let config = internlm_config();
+        let actions = concat!(
+            r#"<|action_start|><|plugin|>{"name":"first","parameters":{"x":1}}<|action_end|>"#,
+            r#"  <|action_start|>{"name":"second","parameters":{"y":2}}<|action_end|>"#
+        );
+        let input = format!("{actions} trailing");
+
+        let pos = find_tool_call_end_position_json(&input, "internlm", &config);
+        assert_eq!(pos, actions.len());
+        assert_eq!(&input[pos..], " trailing");
+    }
+
+    #[test]
+    fn test_find_tool_call_end_position_internlm_ignores_end_marker_inside_json_string() {
+        let config = internlm_config();
+        let action = r#"<|action_start|><|plugin|>{"name":"run_query","parameters":{"sql":"SELECT '<|action_end|>' as marker"}}<|action_end|>"#;
+        let input = format!("{action} done");
+
+        let pos = find_tool_call_end_position_json(&input, "internlm", &config);
+        assert_eq!(pos, action.len());
+        assert_eq!(&input[pos..], " done");
+    }
+
+    #[test]
+    fn test_find_tool_call_end_position_internlm_ignores_end_marker_inside_incomplete_json_string()
+    {
+        let config = internlm_config();
+        let complete =
+            r#"<|action_start|><|plugin|>{"name":"first","parameters":{}}<|action_end|>"#;
+        let input = format!(
+            "{complete}<|action_start|><|plugin|>{{\"name\":\"second\",\"parameters\":{{\"text\":\"partial <|action_end|>"
+        );
+
+        let pos = find_tool_call_end_position_json(&input, "internlm", &config);
+        assert_eq!(pos, complete.len());
+        assert_eq!(
+            &input[pos..],
+            r#"<|action_start|><|plugin|>{"name":"second","parameters":{"text":"partial <|action_end|>"#
+        );
+    }
+
+    #[test]
+    fn test_find_tool_call_end_position_internlm_resyncs_after_malformed_json_wrapper() {
+        let config = internlm_config();
+        let malformed = r#"<|action_start|><|plugin|>{"name":"broken"<|action_end|>"#;
+        let valid = r#"<|action_start|><|plugin|>{"name":"first","parameters":{}}<|action_end|>"#;
+        let input = format!("{malformed}{valid}<|action_start|><|plugin|>{{\"name\":\"second\"");
+
+        let pos = find_tool_call_end_position_json(&input, "internlm", &config);
+        assert_eq!(pos, malformed.len() + valid.len());
+        assert_eq!(
+            &input[pos..],
+            r#"<|action_start|><|plugin|>{"name":"second""#
         );
     }
 

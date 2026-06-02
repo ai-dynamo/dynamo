@@ -944,20 +944,117 @@ impl JailedStream {
         first_marker.map(|pos| &content[..pos])
     }
 
+    fn first_parser_tool_call_marker_pos(&self, content: &str) -> Option<usize> {
+        self.first_parser_tool_call_marker(content)
+            .map(|(pos, _)| pos)
+    }
+
+    fn first_parser_tool_call_marker(&self, content: &str) -> Option<(usize, usize)> {
+        let parser_name = self.tool_call_parser.as_deref()?;
+        let config = get_tool_parser_map().get(parser_name)?;
+
+        config
+            .parser_config
+            .tool_call_start_tokens()
+            .iter()
+            .filter(|marker| !marker.is_empty())
+            .filter_map(|marker| content.find(marker).map(|pos| (pos, marker.len())))
+            .min_by_key(|(pos, _)| *pos)
+    }
+
+    fn suppress_parser_markers_on_parse_failure(&self) -> bool {
+        let Some(parser_name) = self.tool_call_parser.as_deref() else {
+            return false;
+        };
+        let Some(config) = get_tool_parser_map().get(parser_name) else {
+            return false;
+        };
+
+        match &config.parser_config {
+            ParserConfig::Json(config) | ParserConfig::Harmony(config) => {
+                config.suppress_marker_tokens_on_parse_failure
+            }
+            _ => false,
+        }
+    }
+
+    fn should_use_json_aware_end_marker_fallback(&self, accumulated_content: &str) -> bool {
+        if self.tool_call_parser.as_deref() != Some("internlm") {
+            return false;
+        }
+
+        let Some((marker_pos, marker_len)) =
+            self.first_parser_tool_call_marker(accumulated_content)
+        else {
+            return false;
+        };
+
+        accumulated_content[marker_pos + marker_len..]
+            .trim_start()
+            .starts_with(['{', '['])
+    }
+
+    fn find_end_marker_outside_json_string(
+        &self,
+        accumulated_content: &str,
+    ) -> Option<(usize, String)> {
+        let (_, marker_len) = self.first_parser_tool_call_marker(accumulated_content)?;
+        let marker_pos = self.first_parser_tool_call_marker_pos(accumulated_content)?;
+        let scan_start = marker_pos + marker_len;
+        let mut in_string = false;
+        let mut escape = false;
+
+        for (offset, ch) in accumulated_content[scan_start..].char_indices() {
+            let pos = scan_start + offset;
+            if !in_string {
+                for seq in self.jail_end_sequences.iter().filter(|seq| !seq.is_empty()) {
+                    if accumulated_content[pos..].starts_with(seq) {
+                        return Some((pos + seq.len(), seq.clone()));
+                    }
+                }
+            }
+
+            if escape {
+                escape = false;
+                continue;
+            }
+            if in_string {
+                match ch {
+                    '\\' => escape = true,
+                    '"' => in_string = false,
+                    _ => {}
+                }
+            } else if ch == '"' {
+                in_string = true;
+            }
+        }
+
+        None
+    }
+
+    fn end_marker_info(&self, accumulated_content: &str) -> Option<(usize, String)> {
+        if self.jail_end_sequences.is_empty() {
+            return None;
+        }
+
+        if self.should_use_json_aware_end_marker_fallback(accumulated_content) {
+            return self.find_end_marker_outside_json_string(accumulated_content);
+        }
+
+        self.jail_end_sequences.iter().find_map(|seq| {
+            accumulated_content
+                .find(seq)
+                .map(|pos| (pos + seq.len(), seq.clone()))
+        })
+    }
+
     /// Check if accumulated content should end jail
     async fn should_end_jail(&self, accumulated_content: &str) -> (bool, usize) {
         match &self.jail_mode {
             JailMode::MarkerBased => {
-                // Path 1: End sequence detected via naive string search.
-                let end_marker_info = if !self.jail_end_sequences.is_empty() {
-                    self.jail_end_sequences.iter().find_map(|seq| {
-                        accumulated_content
-                            .find(seq)
-                            .map(|pos| (pos + seq.len(), seq.clone()))
-                    })
-                } else {
-                    None
-                };
+                // Path 1: End sequence fallback. InternLM uses JSON wrappers,
+                // so ignore marker-looking text while inside JSON strings.
+                let end_marker_info = self.end_marker_info(accumulated_content);
 
                 // Path 2: Complete tool call(s) can be parsed (early exit)
                 let early_exit = self.should_exit_jail_early(accumulated_content).await;
@@ -1150,6 +1247,17 @@ impl JailedStream {
                                 .unwrap_or("")
                         } else if normal_text.as_deref() == Some("") {
                             ""
+                        } else if self.suppress_parser_markers_on_parse_failure()
+                            && normal_text.as_deref() == Some(accumulated_content)
+                            && let Some(parser_marker_pos) =
+                                self.first_parser_tool_call_marker_pos(accumulated_content)
+                            && let Some(prefix) =
+                                self.prefix_before_first_tool_call_marker(accumulated_content)
+                            && prefix.len() <= parser_marker_pos
+                        {
+                            // Only opt-in parsers suppress marker-looking text here. Legacy parser
+                            // families intentionally preserve malformed wrapped content as text.
+                            prefix
                         } else if is_harmony_parser(self.tool_call_parser.as_deref())
                             && contains_harmony_protocol(accumulated_content)
                         {
@@ -1997,6 +2105,35 @@ mod tests {
             "Missing get_time tool call. Got: {:?}",
             names
         );
+    }
+
+    #[tokio::test]
+    async fn test_internlm_stream_keeps_end_marker_inside_argument_string() {
+        let jail = JailedStream::builder().tool_call_parser("internlm").build();
+
+        let chunks = vec![
+            text_chunk(
+                r#"<|action_start|><|plugin|>{"name":"get_weather","parameters":{"location":"NYC <|action_end|>"#,
+            ),
+            text_chunk(r#" still inside string"}}<|action_end|>"#),
+        ];
+
+        let input_stream = Box::pin(stream::iter(chunks));
+        let output_stream = jail.apply_with_finish_reason(input_stream);
+
+        let responses: Vec<_> = output_stream.collect().await;
+        let tool_calls = collect_tool_calls(&responses);
+        assert_eq!(
+            tool_calls.len(),
+            1,
+            "Expected one InternLM tool call, got {:?}",
+            tool_calls
+        );
+        assert_eq!(tool_calls[0].0, "get_weather");
+
+        let args: serde_json::Value = serde_json::from_str(&tool_calls[0].1).unwrap();
+        assert_eq!(args["location"], "NYC <|action_end|> still inside string");
+        assert_eq!(collect_text_content(&responses), "");
     }
 
     #[tokio::test]
