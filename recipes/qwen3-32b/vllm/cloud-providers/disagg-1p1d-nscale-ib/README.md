@@ -6,7 +6,6 @@ This is the **Nscale managed K8s** member of the cross-provider benchmark family
 
 | Override | Value |
 |---|---|
-| **Container image** | `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1` (standard image; vLLM v0.19.0 / CUDA 12.9 supports B200 SM 10.0) |
 | **RDMA resource** | `rdma/ib: "1"` per pod (Network Operator shared-device plugin slot; grants all 8 HCAs via `/dev/infiniband/*`) |
 | **NIXL backend selection** | Defaults — UCX backend (no `DYN_KVBM_NIXL_BACKEND_*` env overrides) |
 | **Transport env** | `UCX_NET_DEVICES=mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_10:1,mlx5_11:1` (the 8 compute-fabric NICs only). **Explicit list is load-bearing on Nscale**  The side fabric `mlx5_6..9` (MTU 512, different IB subnet) must also be excluded — mixing fabrics causes `NIXL_ERR_REMOTE_DISCONNECT` at first transfer (observed historically with `mlx5_0..7` list). **No `UCX_TLS`** — let UCX auto-probe transports (allowlists break wireup AM selection). |
