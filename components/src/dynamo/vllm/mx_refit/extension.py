@@ -250,11 +250,25 @@ class MxRefitWorkerExtension:
                     mx_server_url=mx_config.mx_server_url,
                     worker_rank=rank,
                 )
-                self._mx_receiver.initialize(model_tensors=None)
+                # When tree_scale_out is on, register the model's
+                # named_parameters with NIXL at init so the post-refit
+                # publish_self_as_source has buffers to advertise.
+                # receive_weights_scratch still allocates its own temp
+                # buffers — the registered ones are read-only from the
+                # receiver's perspective until we republish ourselves
+                # as a v2 inference_replica.
+                self_publish_tensors = (
+                    dict(self.model_runner.model.named_parameters())
+                    if mx_config.tree_scale_out
+                    else None
+                )
+                self._mx_receiver.initialize(model_tensors=self_publish_tensors)
                 logger.info(
-                    "[mx] receiver initialized (scratch path): rank=%d device=%d",
+                    "[mx] receiver initialized (scratch path): rank=%d device=%d "
+                    "publish_buffers=%d",
                     rank,
                     self.device.index,
+                    len(self_publish_tensors or {}),
                 )
 
             # ---- Discover, pick source, RDMA pull ----
