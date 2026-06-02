@@ -67,6 +67,9 @@ pub struct CachedTokenizer {
     inner: Arc<dyn Tokenizer>,
     l1: L1Cache,
     special_tokens: Vec<String>,
+    /// When true, cache the newly-tokenized suffix on a partial hit so the next turn
+    /// of a growing conversation hits deeper (see [`L1Cache::extend_after_match`]).
+    extend_on_hit: bool,
 }
 
 impl CachedTokenizer {
@@ -88,7 +91,17 @@ impl CachedTokenizer {
             inner,
             l1: L1Cache::new(max_memory_bytes),
             special_tokens,
+            extend_on_hit: false,
         }
+    }
+
+    /// Enable partial-hit extension. When on, a partial cache hit also caches the
+    /// freshly-tokenized suffix at its deepest special-token boundary, so each turn of
+    /// a growing multi-turn conversation hits deeper than the last and per-turn
+    /// tokenization cost stops growing with conversation length. Default off.
+    pub fn with_extend(mut self, enabled: bool) -> Self {
+        self.extend_on_hit = enabled;
+        self
     }
 
     /// Install hit/miss callbacks so each L1 lookup pushes an event into the
@@ -135,6 +148,17 @@ impl Encoder for CachedTokenizer {
             let suffix = &input[prefix_len..];
             if suffix.is_empty() {
                 return Ok(Encoding::Sp(prefix_tokens));
+            }
+            if self.extend_on_hit {
+                // Cache the new suffix at its deepest boundary so the next turn hits
+                // deeper, then return the full merged tokens.
+                return Ok(Encoding::Sp(self.l1.extend_after_match(
+                    input,
+                    prefix_tokens,
+                    prefix_len,
+                    self.inner.as_ref(),
+                    &specials,
+                )?));
             }
             let suffix_enc = self.inner.encode(suffix)?;
             let mut merged: Vec<TokenIdType> = prefix_tokens;

@@ -282,3 +282,96 @@ fn cache_disabled_by_empty_specials_is_transparent() {
         );
     }
 }
+
+/// Build an append-only multi-turn conversation in TinyLlama format. `turns[i]` is the
+/// full history at turn `i`: the system prompt plus `i + 1` completed user/assistant
+/// exchanges. Every turn is a well-formed sequence of `<s>role\ncontent</s>` blocks (so
+/// the per-family `render` fns accept it), and `turns[i]` is a strict prefix of
+/// `turns[i + 1]`.
+fn growing_chat_turns(n: usize) -> Vec<String> {
+    let mut convo = String::from("<s>system\nYou are a helpful assistant.</s>");
+    let mut turns = Vec::with_capacity(n);
+    for i in 0..n {
+        convo.push_str(&format!(
+            "<s>user\nQuestion {i} please answer it.</s><s>assistant\nDetailed answer {i} follows here.</s>"
+        ));
+        turns.push(convo.clone());
+    }
+    turns
+}
+
+#[test]
+fn extend_on_hit_matches_uncached_across_growing_turns() {
+    // With extend enabled, a growing conversation is encoded turn-by-turn: turn 0 is a
+    // miss, every later turn is a partial hit that also deepens the cache. Each turn's
+    // tokens must stay byte-exact against an uncached encode, on both tokenizer families
+    // (mock-llama-3.1's empty-BPE vocab surfaces any seg_a/seg_b split off-by-one).
+    let turns = growing_chat_turns(12);
+    for setup in SETUPS {
+        let base = Arc::new(
+            HuggingFaceTokenizer::from_file(setup.path)
+                .unwrap_or_else(|e| panic!("load tokenizer {}: {e}", setup.path)),
+        );
+        let specials: Vec<String> = setup.specials.iter().map(|s| (*s).to_string()).collect();
+        let cached =
+            CachedTokenizer::new(base.clone(), specials, 50 * 1024 * 1024).with_extend(true);
+
+        for (i, raw_turn) in turns.iter().enumerate() {
+            let turn = (setup.render)(raw_turn);
+            let plain = base.encode(&turn).unwrap().token_ids().to_vec();
+
+            // First encode (miss path on turn 0, extend hit-path afterward).
+            let first = cached.encode(&turn).unwrap().token_ids().to_vec();
+            assert_eq!(
+                first, plain,
+                "[{}] turn {i}: extend-on first encode != uncached",
+                setup.name
+            );
+
+            // Second encode exercises the fully-cached prefix + extend path.
+            let second = cached.encode(&turn).unwrap().token_ids().to_vec();
+            assert_eq!(
+                second, plain,
+                "[{}] turn {i}: extend-on second encode != uncached",
+                setup.name
+            );
+        }
+
+        assert!(
+            cached.cache_stats().hits > 0,
+            "[{}] expected L1 hits with extend on",
+            setup.name
+        );
+    }
+}
+
+#[test]
+fn default_off_hits_never_insert() {
+    // Default (extend off): partial hits must NOT mutate the cache — preserving today's
+    // behavior byte-for-byte. After turn 0 populates the cache, encoding the rest of the
+    // growing conversation produces hits but adds zero entries.
+    let turns = growing_chat_turns(10);
+    for setup in SETUPS {
+        let (_base, cached) = build_cached_setup(setup); // extend off by default
+
+        let _ = cached.encode(&(setup.render)(&turns[0])).unwrap();
+        let entries_after_turn0 = cached.cache_stats().entries;
+        let hits_after_turn0 = cached.cache_stats().hits;
+
+        for raw_turn in &turns[1..] {
+            let _ = cached.encode(&(setup.render)(raw_turn)).unwrap();
+        }
+
+        let after = cached.cache_stats();
+        assert_eq!(
+            after.entries, entries_after_turn0,
+            "[{}] extend-off: hits must not add cache entries (was {}, now {})",
+            setup.name, entries_after_turn0, after.entries
+        );
+        assert!(
+            after.hits > hits_after_turn0,
+            "[{}] later turns should have produced hits",
+            setup.name
+        );
+    }
+}
