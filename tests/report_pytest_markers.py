@@ -176,6 +176,8 @@ STUB_MODULES = [
     "sglang.srt.function_call.function_call_parser",
     "sglang.srt.function_call.json_array_parser",
     "sglang.srt.function_call.utils",
+    "sglang.srt.managers",
+    "sglang.srt.managers.io_struct",
     "sglang.srt.parser",
     "sglang.srt.parser.conversation",
     "sglang.srt.parser.reasoning_parser",

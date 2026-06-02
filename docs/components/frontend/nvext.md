@@ -108,6 +108,9 @@ The `agent_hints` sub-object carries per-request hints that the router uses for 
 
 When `--router-queue-threshold` is set and the queue is active, higher-priority requests are shifted earlier in the router queue. Once dispatched, Dynamo forwards the same semantic priority to the backend engine for queue ordering, preemption, and KV cache eviction. Dynamo normalizes backend-specific polarity internally, including vLLM's lower-is-higher convention.
 
+For layer-by-layer behavior and backend requirements, see
+[Priority Scheduling](../../agents/priority-scheduling.md).
+
 ```json
 {
     "nvext": {
@@ -158,8 +161,8 @@ How it works:
 
 Backend details:
 
-- **SGLang**: Requires `--enable-priority-scheduling` for queue ordering and `--radix-eviction-policy priority` for priority-based eviction.
-- **vLLM**: Requires `--scheduling-policy priority`.
+- **SGLang**: Requires [`--enable-priority-scheduling`](../../backends/sglang/agents.md#priority-scheduling) for queue ordering and [`--radix-eviction-policy priority`](../../backends/sglang/agents.md#priority-based-kv-cache-eviction) for priority-based eviction.
+- **vLLM**: Requires [`--scheduling-policy priority`](../../backends/vllm/vllm-reference-guide.md#priority-scheduling).
 - **TensorRT-LLM**: Does not currently support per-request priority.
 
 ```json

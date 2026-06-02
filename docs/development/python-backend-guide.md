@@ -76,6 +76,7 @@ Lifecycle and runtime:
 - `drain()` hook for pre-cleanup work (e.g. in-flight NIXL transfers)
 - `DynamoException` error chain wrapping
 - Finish reason normalization (handled by the Rust layer)
+- Engine control plumbing, with per-backend profiling, quiesce/resume, and supported weight-update controls
 
 Observability:
 - Health-check canary via `health_check_payload()` (plus
@@ -120,7 +121,6 @@ Request handling:
 | Multimodal | Images / video / embeddings, NIXL embedding transfer, separate encode workers, `ENCODE` disaggregation role |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path |
 | LoRA adapters | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization locks, per-request adapter threading on prefill |
-| Engine routes | Profile start/stop, sleep / wake / quiesce, weight updates (disk / tensor / distributed / IPC), KV block clearing, prefix cache reset |
 | Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload |
 
 If you need one of these features today, keep that workload on the

@@ -420,3 +420,13 @@ def test_deserialize_unknown_kind_raises():
     dropping a processor."""
     with pytest.raises(ValueError):
         deserialize_logits_processor_entries([{"kind": "mystery", "data": 1}])
+
+
+async def test_default_engine_controls_are_empty():
+    """Engines opt into management controls explicitly."""
+    engine = _Complete()
+    assert engine.supported_controls() == set()
+    assert await engine.engine_control("sleep", {}) == {
+        "status": "error",
+        "message": "unsupported engine control: sleep",
+    }

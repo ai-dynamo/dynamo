@@ -532,8 +532,8 @@ def test_router_rust_mm_logs_lightseek_initialization(
     )
     log_text = router_proc.read_logs()
     assert (
-        "MM-aware KV routing enabled (lightseek)" in log_text
-    ), "frontend should emit lightseek init log line on model registration"
+        "MM-aware KV routing enabled" in log_text
+    ), "frontend should emit MM-routing init log line on model registration"
     assert (
         "resolved image-placeholder token id" in log_text
     ), "image_token resolver should log which tier produced the hit"

@@ -437,6 +437,7 @@ Lifecycle and runtime:
 - `drain()` hook for pre-cleanup work
 - `DynamoException` error chain wrapping
 - Finish reason normalization handled by the Rust layer
+- Engine control plumbing, with per-backend profiling, quiesce/resume, and supported weight-update controls
 - **Disaggregated serving** (`agg`/`prefill`/`decode`) — KV transfer
   uses NIXL across all three engines; SGLang exchanges a Dynamo-level
   bootstrap address, vLLM and TRT-LLM use an engine-internal handshake.
@@ -491,7 +492,6 @@ Request handling:
 | Multimodal | Images / video / embeddings, NIXL embedding transfer, encode workers. `worker.py:_to_rust_disaggregation_mode` rejects the `ENCODE` role. |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path. |
 | LoRA adapters | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization locks, per-request adapter threading on prefill. |
-| Engine routes | Profile start/stop, sleep / wake / quiesce, weight updates (disk / tensor / distributed / IPC), KV block clearing, prefix cache reset. |
 | Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload. |
 
 ### vLLM-specific gaps

@@ -30,6 +30,11 @@ def local_dp_rank_bounds(server_args: Any) -> tuple[int, int]:
     return 0, 1
 
 
+def model_card_dp_rank_bounds(server_args: Any) -> tuple[int, int]:
+    dp_size = getattr(server_args, "dp_size", 1) or 1
+    return 0, dp_size
+
+
 def per_rank_max_running_requests(server_args: Any) -> int | None:
     max_running_requests = getattr(server_args, "max_running_requests", None)
     if max_running_requests is None:
