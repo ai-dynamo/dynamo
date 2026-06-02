@@ -1482,6 +1482,8 @@ class AicPerfConfig:
         aic_moe_tp_size: Optional[int] = None,
         aic_moe_ep_size: Optional[int] = None,
         aic_attention_dp_size: Optional[int] = None,
+        aic_nextn: Optional[int] = None,
+        aic_nextn_accept_rates: Optional[str] = None,
     ) -> None:
         ...
 
@@ -1813,6 +1815,8 @@ class MockEngineArgs:
         aic_moe_tp_size: Optional[int] = None,
         aic_moe_ep_size: Optional[int] = None,
         aic_attention_dp_size: Optional[int] = None,
+        aic_nextn: Optional[int] = None,
+        aic_nextn_accept_rates: Optional[str] = None,
         gpu_memory_utilization: Optional[float] = None,
         mem_fraction_static: Optional[float] = None,
         enable_local_indexer: bool = False,
@@ -1953,6 +1957,18 @@ class MockEngineArgs:
     def aic_attention_dp_size(self, value: Optional[int]) -> None: ...
 
     @property
+    def aic_nextn(self) -> Optional[int]: ...
+
+    @aic_nextn.setter
+    def aic_nextn(self, value: Optional[int]) -> None: ...
+
+    @property
+    def aic_nextn_accept_rates(self) -> Optional[str]: ...
+
+    @aic_nextn_accept_rates.setter
+    def aic_nextn_accept_rates(self, value: Optional[str]) -> None: ...
+
+    @property
     def gpu_memory_utilization(self) -> Optional[float]: ...
 
     @gpu_memory_utilization.setter
@@ -1989,6 +2005,8 @@ class MockEngineArgs:
         aic_moe_tp_size: Optional[int] = None,
         aic_moe_ep_size: Optional[int] = None,
         aic_attention_dp_size: Optional[int] = None,
+        aic_nextn: Optional[int] = None,
+        aic_nextn_accept_rates: Optional[str] = None,
         gpu_memory_utilization: Optional[float] = None,
         mem_fraction_static: Optional[float] = None,
         enable_prefix_caching: Optional[bool] = None,

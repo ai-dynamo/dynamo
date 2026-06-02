@@ -63,6 +63,8 @@ def test_aic_perf_moe_cli_flows_to_binding_kwargs() -> None:
         "aic_moe_tp_size": 2,
         "aic_moe_ep_size": 1,
         "aic_attention_dp_size": 1,
+        "aic_nextn": None,
+        "aic_nextn_accept_rates": None,
     }
 
 

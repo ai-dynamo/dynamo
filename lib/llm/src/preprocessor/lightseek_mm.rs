@@ -146,7 +146,20 @@ impl LightseekMmCounter {
 /// - `tokenizer.json` or `config.json` is missing or unparseable, or
 /// - no `ModelProcessorSpec` matches the model (caller should fall back to
 ///   text-prefix routing).
+///
+/// Standalone wrapper around [`resolve_image_token_id_with_config`]. Prefer
+/// [`resolve_routing_tokens`] when also fetching the chat-template placeholder
+/// or BOS token (one config-parse pass instead of two).
 pub fn resolve_image_token_id(model_id: &str, model_dir: &Path) -> Option<TokenIdType> {
+    let config = read_json(model_dir, "config.json")?;
+    resolve_image_token_id_with_config(model_id, model_dir, &config)
+}
+
+fn resolve_image_token_id_with_config(
+    model_id: &str,
+    model_dir: &Path,
+    config: &serde_json::Value,
+) -> Option<TokenIdType> {
     // Try the HuggingFace fast tokenizer first; fall back to a no-op
     // tokenizer when `tokenizer.json` is missing (Kimi-K2.5 ships only
     // `tiktoken.model`, for example). Specs that read the placeholder
@@ -174,34 +187,10 @@ pub fn resolve_image_token_id(model_id: &str, model_dir: &Path) -> Option<TokenI
         None => &null_tokenizer,
     };
 
-    let config_path = model_dir.join("config.json");
-    let config_json = std::fs::read_to_string(&config_path)
-        .map_err(|e| {
-            tracing::warn!(
-                target: "mm_routing",
-                config = %config_path.display(),
-                err = %e,
-                "lightseek: failed to read config.json"
-            );
-            e
-        })
-        .ok()?;
-    let config: serde_json::Value = serde_json::from_str(&config_json)
-        .map_err(|e| {
-            tracing::warn!(
-                target: "mm_routing",
-                config = %config_path.display(),
-                err = %e,
-                "lightseek: failed to parse config.json"
-            );
-            e
-        })
-        .ok()?;
-
     let metadata = ModelMetadata {
         model_id,
         tokenizer,
-        config: &config,
+        config,
     };
 
     let spec = MODEL_REGISTRY.lookup(&metadata)?;
@@ -225,6 +214,122 @@ pub fn resolve_image_token_id(model_id: &str, model_dir: &Path) -> Option<TokenI
         "resolved image-placeholder token id"
     );
     Some(id as TokenIdType)
+}
+
+/// Bundle of routing-side token info resolved from a model's HF JSON
+/// configs. All fields default to `None` when the corresponding lookup
+/// fails — callers disable the respective routing path without erroring.
+///
+/// Built by [`resolve_routing_tokens`]; reads `config.json` and
+/// `tokenizer_config.json` at most once each.
+pub struct RoutingTokens {
+    /// Image-placeholder token id resolved via `ModelProcessorSpec`
+    /// (per-family `config.json` field). `None` disables MM-aware routing.
+    pub image_token_id: Option<TokenIdType>,
+    /// Token id the chat template emits per image. Read from `config.json`'s
+    /// literal `image_token_id` field, falling back to `image_token_id`
+    /// above. Equals `image_token_id` for most VLMs; Qwen2-VL / Qwen2.5-VL
+    /// emit `<|image_pad|>` here while the per-patch id is `<|vision_pad|>`.
+    pub chat_placeholder_token_id: Option<TokenIdType>,
+    /// `bos_token` string from `tokenizer_config.json` when
+    /// `add_bos_token: true`. Caller encodes via its model tokenizer to
+    /// produce the routing-side prepend id. `None` for models that don't
+    /// prepend BOS.
+    pub bos_token_string: Option<String>,
+}
+
+/// Resolve all routing-side token info from a model directory in a single
+/// pass. Reads `config.json` once for the per-spec image id + chat-template
+/// placeholder, and `tokenizer_config.json` once for BOS. Replaces the
+/// in-`preprocessor.rs` `read_image_token_id_from_config` /
+/// `read_bos_token_from_config` helpers so config parsing lives next to
+/// the rest of the MM-routing token resolution.
+pub fn resolve_routing_tokens(model_id: &str, model_dir: &Path) -> RoutingTokens {
+    let config = read_json(model_dir, "config.json");
+    let tokenizer_config = read_json(model_dir, "tokenizer_config.json");
+
+    let image_token_id = config
+        .as_ref()
+        .and_then(|c| resolve_image_token_id_with_config(model_id, model_dir, c));
+    let chat_placeholder_token_id = config
+        .as_ref()
+        .and_then(extract_chat_placeholder_from_config)
+        .or(image_token_id);
+    let bos_token_string = tokenizer_config
+        .as_ref()
+        .and_then(extract_bos_token_from_tokenizer_config);
+
+    RoutingTokens {
+        image_token_id,
+        chat_placeholder_token_id,
+        bos_token_string,
+    }
+}
+
+/// Read + parse a JSON file under `model_dir`. Warns on read or parse
+/// failure (missing files are silent — many models legitimately lack
+/// `tokenizer_config.json`). Returns `None` on any error.
+fn read_json(model_dir: &Path, filename: &str) -> Option<serde_json::Value> {
+    let path = model_dir.join(filename);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            tracing::warn!(
+                target: "mm_routing",
+                path = %path.display(),
+                err = %e,
+                "lightseek: failed to read {filename}"
+            );
+            return None;
+        }
+    };
+    match serde_json::from_str(&raw) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::warn!(
+                target: "mm_routing",
+                path = %path.display(),
+                err = %e,
+                "lightseek: failed to parse {filename}"
+            );
+            None
+        }
+    }
+}
+
+/// Read the literal `image_token_id` field from a pre-parsed `config.json`.
+/// Used by Qwen2-VL / Qwen2.5-VL where the chat-template-emitted placeholder
+/// differs from the per-patch expansion token returned by the spec.
+fn extract_chat_placeholder_from_config(config: &serde_json::Value) -> Option<TokenIdType> {
+    config
+        .get("image_token_id")
+        .and_then(|x| x.as_u64())
+        .and_then(|id| u32::try_from(id).ok())
+}
+
+/// Return the `bos_token` string from a pre-parsed `tokenizer_config.json`
+/// when `add_bos_token: true`. The routing-side sequence must prepend it to
+/// match the backend's HF-processor output (Phi-3-vision and other
+/// `LlamaTokenizer`-family models). Returns `None` otherwise.
+fn extract_bos_token_from_tokenizer_config(cfg: &serde_json::Value) -> Option<String> {
+    if !cfg
+        .get("add_bos_token")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    // `bos_token` is usually a plain string ("<s>") but the HF schema also
+    // allows it to be an `AddedToken` dict — handle both.
+    cfg.get("bos_token").and_then(|x| match x {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Object(o) => o
+            .get("content")
+            .and_then(|c| c.as_str())
+            .map(|s| s.to_owned()),
+        _ => None,
+    })
 }
 
 #[cfg(test)]
