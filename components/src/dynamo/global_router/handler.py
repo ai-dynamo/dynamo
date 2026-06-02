@@ -17,6 +17,10 @@ import json
 import logging
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
+from dynamo.common.global_router_protocol import (
+    get_global_router_retry_attempt,
+    make_global_router_retry_control,
+)
 from dynamo.runtime import Client, DistributedRuntime
 
 from .pool_selection import get_priority_retry_order, load_config
@@ -101,6 +105,28 @@ class GlobalRouterHandler:
             pool_priorities=pool_priorities,
             enable_priority_retry=self.config.enable_priority_retry,
         )
+        if response_connection_info is not None:
+            retry_attempt = get_global_router_retry_attempt(request)
+            if retry_attempt is not None:
+                async for output in self._forward_delegated_retry_attempt(
+                    request=request,
+                    request_type=request_type,
+                    retry_attempt=retry_attempt,
+                    pool_order=pool_order,
+                    namespaces=namespaces,
+                    clients=clients,
+                    response_connection_info=response_connection_info,
+                    context=context,
+                ):
+                    yield output
+                return
+
+        should_delegate_response = response_connection_info is not None and len(pool_order) == 1
+        if response_connection_info is not None and not should_delegate_response:
+            logger.info(
+                f"Priority retry enabled for {request_type}; relaying response stream "
+                f"through global router to preserve retry semantics: retry_order={pool_order}"
+            )
 
         for attempt_idx, pool_idx in enumerate(pool_order):
             namespace = namespaces[pool_idx]
@@ -108,7 +134,7 @@ class GlobalRouterHandler:
             yielded_output = False
 
             try:
-                if response_connection_info is not None:
+                if should_delegate_response:
                     request_id = context.id() if context is not None else None
                     logger.info(
                         f"Delegating {request_type} response stream directly to downstream "
@@ -167,6 +193,77 @@ class GlobalRouterHandler:
                     f"({namespace}): {e}; retrying faster pool {next_pool_idx} "
                     f"({next_namespace})"
                 )
+
+    async def _forward_delegated_retry_attempt(
+        self,
+        request: Dict[str, Any],
+        request_type: str,
+        retry_attempt: int,
+        pool_order: List[int],
+        namespaces: List[str],
+        clients: Dict[str, Client],
+        response_connection_info: Dict[str, Any],
+        context: Optional[Any] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Forward exactly one delegated-response attempt.
+
+        The frontend adapter owns the retry loop in this mode. The global router
+        returns a control item only when dispatch fails before the delegated
+        response stream is established.
+        """
+        if retry_attempt >= len(pool_order):
+            raise RuntimeError(
+                f"global router retry attempt {retry_attempt} exceeds retry order "
+                f"for {request_type}: retry_order={pool_order}"
+            )
+
+        pool_idx = pool_order[retry_attempt]
+        namespace = namespaces[pool_idx]
+        client = clients[namespace]
+        request_id = context.id() if context is not None else None
+
+        try:
+            logger.info(
+                f"Delegating {request_type} response stream directly to downstream "
+                f"router: request_id={request_id}, namespace={namespace}, "
+                f"retry_attempt={retry_attempt}, "
+                f"transport={response_connection_info.get('transport')}, "
+                f"response_subject={_connection_subject(response_connection_info)}"
+            )
+            await client.forward(request, response_connection_info, context=context)
+            logger.info(
+                f"Delegated {request_type} request to {namespace}; global router "
+                f"will not publish response stream: request_id={request_id}, "
+                f"retry_attempt={retry_attempt}"
+            )
+            return
+        except Exception as e:
+            if retry_attempt == len(pool_order) - 1:
+                logger.error(
+                    f"Error forwarding delegated {request_type} request to "
+                    f"{namespace}; no priority retry pools remain: {e}"
+                )
+                raise
+
+            next_retry_attempt = retry_attempt + 1
+            next_pool_idx = pool_order[next_retry_attempt]
+            next_namespace = namespaces[next_pool_idx]
+            logger.warning(
+                f"Error forwarding delegated {request_type} request to pool "
+                f"{pool_idx} ({namespace}): {e}; asking frontend to retry pool "
+                f"{next_pool_idx} ({next_namespace})"
+            )
+            yield make_global_router_retry_control(
+                request_type=request_type,
+                retry_attempt=retry_attempt,
+                next_retry_attempt=next_retry_attempt,
+                failed_pool=pool_idx,
+                failed_namespace=namespace,
+                next_pool=next_pool_idx,
+                next_namespace=next_namespace,
+                error=str(e),
+            )
 
     async def initialize(self) -> None:
         """

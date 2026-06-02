@@ -19,6 +19,7 @@ from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo._internal import ModelDeploymentCard
 from dynamo.frontend.frontend_args import FrontendConfig
+from dynamo.frontend.routed_engine_adapters import wrap_routed_engine
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine, fetch_model
 from dynamo.llm.exceptions import InvalidArgument, Unknown
 
@@ -688,6 +689,8 @@ class SglangEngineFactory:
             )
 
         logger.info("SGLang processor stream_interval=%d", self.stream_interval)
+
+        routed_engine = wrap_routed_engine(self.config, routed_engine)
 
         gen = SglangProcessor(
             tokenizer,

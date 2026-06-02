@@ -34,6 +34,7 @@ from dynamo.common.multimodal.mm_kwargs_transfer import (
 from dynamo.common.multimodal.routing_utils import build_mm_routing_info_from_features
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.frontend.frontend_args import FrontendConfig
+from dynamo.frontend.routed_engine_adapters import wrap_routed_engine
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine, fetch_model
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
@@ -832,6 +833,8 @@ class EngineFactory:
             reasoning_parser_class = None
 
         block_size = self.config.kv_cache_block_size or 16
+
+        routed_engine = wrap_routed_engine(self.config, routed_engine)
 
         gen = VllmProcessor(
             tokenizer,
