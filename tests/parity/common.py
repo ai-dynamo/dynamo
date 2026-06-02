@@ -189,7 +189,7 @@ def parity_cell_class(marker: str) -> str:
         return "missing"
     if marker == "n/a":
         return "na"
-    if marker == "D":
+    if marker in {"D", "·"}:
         return "donly"
     if "!" in marker:
         return "err"

@@ -12,6 +12,7 @@ cases:
   REASONING.batch.1.b:
     description: Plain text stays in force-reasoning mode
     ref: *upstream_ref
+    spec_ref: lib/parsers/REASONING_CASES.md; https://api-docs.deepseek.com/guides/thinking_mode; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo
     model_text: plain answer
     expected:
       dynamo: &d_0
@@ -21,6 +22,7 @@ cases:
       sglang:
         reasoning_text: ''
         normal_text: plain answer
+        reason: Dynamo/vLLM treat DeepSeek V3 as force-reasoning when thinking is enabled; SGLang only enters reasoning after an explicit start marker.
   REASONING.batch.2.a:
     description: DeepSeek V3.x thinking output with explicit think tags
     ref: *upstream_ref
@@ -69,6 +71,7 @@ cases:
   REASONING.batch.4:
     description: Thinking-mode completion exits on a dangling end marker
     ref: *upstream_ref
+    spec_ref: lib/parsers/REASONING_CASES.md; https://api-docs.deepseek.com/guides/thinking_mode; https://docs.nvidia.com/dynamo/dev/user-guides/reasoning/reasoning-parsing-dynamo
     model_text: normal</think>answer
     expected:
       dynamo: &d_4
@@ -78,6 +81,7 @@ cases:
       sglang:
         reasoning_text: ''
         normal_text: normal</think>answer
+        reason: Dynamo/vLLM treat a dangling end marker as the close for force-reasoning content; SGLang only enters reasoning after an explicit start marker.
   REASONING.batch.5:
     description: Missing end marker keeps the remaining text as reasoning
     ref: *upstream_ref
@@ -142,3 +146,4 @@ cases:
       sglang:
         reasoning_text: first
         normal_text: ' middle <think>second</think> done'
+        reason: Dynamo extracts every complete reasoning span and concatenates them; SGLang exits reasoning at the first end marker and leaves the later span in normal_text.

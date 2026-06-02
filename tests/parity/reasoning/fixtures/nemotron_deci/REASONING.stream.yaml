@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 family: nemotron_deci
-model_label: Nemotron Deci / GLM 4.5
+model_label: Nemotron Deci v1 / GLM 4.5
 mode: stream
 refs:
   upstream: &upstream_ref 'inspired by vLLM GLM/Nemotron think-tag reasoning tests: https://github.com/vllm-project/vllm/blob/39910f2b25aacc09f5e7f166cdf0030b19f8b9e8/tests/reasoning/test_glm4_moe_reasoning_parser.py and https://github.com/vllm-project/vllm/blob/39910f2b25aacc09f5e7f166cdf0030b19f8b9e8/tests/reasoning/test_nemotron_v3_reasoning_parser.py; local taxonomy: lib/parsers/REASONING_CASES.md'

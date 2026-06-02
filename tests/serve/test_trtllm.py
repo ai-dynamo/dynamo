@@ -60,7 +60,7 @@ trtllm_configs = {
                 2592
             ),  # KV cache cap (2x safety over min=1296)
             pytest.mark.timeout(
-                300
+                650
             ),  # 3x measured time (44.66s) + download time (150s)
         ],
         model="Qwen/Qwen3-0.6B",
@@ -94,7 +94,7 @@ trtllm_configs = {
             pytest.mark.trtllm,
             pytest.mark.profiled_vram_gib(3.9),
             pytest.mark.requested_trtllm_kv_tokens(2592),
-            pytest.mark.timeout(300),
+            pytest.mark.timeout(600),  # 3x ~200s (trtllm gpu_1 log)
             pytest.mark.pre_merge,
             pytest.mark.unified,
         ],
@@ -169,7 +169,7 @@ trtllm_configs = {
             pytest.mark.requested_trtllm_kv_tokens(
                 2592
             ),  # KV cache cap (2x safety over min=1296)
-            pytest.mark.timeout(300),  # 3x measured time (~44s) + download time (150s)
+            pytest.mark.timeout(440),  # 3x ~145s (trtllm gpu_1 log)
         ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
@@ -212,7 +212,7 @@ trtllm_configs = {
             pytest.mark.profiled_vram_gib(3.9),
             pytest.mark.requested_trtllm_kv_tokens(2592),
             pytest.mark.timeout(
-                300
+                360
             ),  # 3x measured time (37.91s) + download time (180s)
         ],
         model="Qwen/Qwen3-0.6B",

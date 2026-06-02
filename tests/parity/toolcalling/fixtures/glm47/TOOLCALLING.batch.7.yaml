@@ -62,5 +62,22 @@ cases:
     description: Large / deep JSON-edge payload test 7.e — not yet authored for this family
     reason: Large/deep JSON-edge payload test 7.e not yet authored for glm47; existing batch.7 coverage remains in 7.a-d.
   TOOLCALLING.batch.7.f:
-    description: Numeric precision edge test 7.f — not yet authored for this family
-    reason: Numeric precision edge test 7.f not yet authored for glm47; Qwen3-Coder coverage is provided by qwen3_coder 7.f.
+    description: Numeric precision edge preserves integer-like number literal
+    ref: inferhub live capture on nvidia/zai-org/glm-5.1; format follows https://huggingface.co/zai-org/GLM-4.7/blob/main/chat_template.jinja
+    model_text: <tool_call>set_limit<arg_key>count</arg_key><arg_value>9007199254740993</arg_value></tool_call>
+    tools:
+    - name: set_limit
+      parameters:
+        type: object
+        properties:
+          count:
+            type: number
+    expected:
+      dynamo: &d_7_f
+        calls:
+        - name: set_limit
+          arguments:
+            count: 9007199254740993
+        normal_text: ''
+      vllm: *d_7_f
+      sglang: *d_7_f

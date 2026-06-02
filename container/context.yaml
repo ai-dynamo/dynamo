@@ -39,6 +39,10 @@ dynamo:
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   ffmpeg_version: "8.1"
+  # ffmpeg build inputs (only consumed when ENABLE_MEDIA_FFMPEG=true).
+  nv_codec_headers_ref: "n13.0.19.0"
+  libvpx_ref: "v1.14.1"
+  sccache_version: "v0.14.0"
   efa_version: 1.47.0
 
 vllm:
@@ -71,6 +75,8 @@ vllm:
   enable_kvbm: "true"
   enable_modelexpress_p2p: "false"
   modelexpress_ref: "76fc5d7f06c37121ee8789a29fac6f9b08c4743a"  # v0.3.0
+  # aws-sdk-cpp tag for the NIXL OBJ / S3 backend (built in wheel_builder).
+  aws_sdk_cpp_version: "1.11.760"
 
 sglang:
   cuda12.9:
