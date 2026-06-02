@@ -178,6 +178,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 			break
 		}
 	}
+
 	assert.Nil(t, podNameEnv)
 
 	// Seccomp profile
