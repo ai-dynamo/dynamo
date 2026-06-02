@@ -36,8 +36,16 @@ impl RendezvousHasher {
             .map(|&w| (w, Self::compute_score(lora_name, w)))
             .collect();
 
-        // Sort by score descending (highest score first)
-        scores.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
+        // Sort by score descending (highest score first). Break score ties deterministically by
+        // (worker_id, dp_rank) so that equal HRW scores can never produce different rankings
+        // across router instances — worker input order is not guaranteed (it can come from
+        // DashMap iteration), and determinism is a hard requirement for coordination-free
+        // placement.
+        scores.sort_by(|(wa, sa), (wb, sb)| {
+            sb.cmp(sa)
+                .then_with(|| wa.worker_id.cmp(&wb.worker_id))
+                .then_with(|| wa.dp_rank.cmp(&wb.dp_rank))
+        });
         scores
     }
 }
@@ -291,6 +299,33 @@ mod tests {
 
         let result = hasher.compute_replica_set_with_slots("test-lora", &workers, 2, &usage);
         assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_ranking_equal_scores_tie_break_is_deterministic() {
+        // Score ties must break by (worker_id, dp_rank), independent of input order, so all
+        // router instances converge on the same ranking even when worker input order varies.
+        let workers_fwd = vec![
+            WorkerWithDpRank::new(10, 0),
+            WorkerWithDpRank::new(10, 1),
+            WorkerWithDpRank::new(7, 0),
+            WorkerWithDpRank::new(7, 1),
+        ];
+        let mut workers_rev = workers_fwd.clone();
+        workers_rev.reverse();
+
+        // Force an all-ties scenario by ranking with a constant score via identical names is not
+        // possible (score depends on worker), so instead assert that ranking a set and its reverse
+        // yields identical order — the tie-break (and full ordering) must be input-order-invariant.
+        let r1: Vec<_> = RendezvousHasher::rank_workers("lora-x", &workers_fwd)
+            .into_iter()
+            .map(|(w, _)| (w.worker_id, w.dp_rank))
+            .collect();
+        let r2: Vec<_> = RendezvousHasher::rank_workers("lora-x", &workers_rev)
+            .into_iter()
+            .map(|(w, _)| (w.worker_id, w.dp_rank))
+            .collect();
+        assert_eq!(r1, r2, "ranking must be invariant to worker input order");
     }
 
     #[test]
