@@ -911,6 +911,13 @@ enum EngineControlPolicy {
 }
 
 fn engine_control_policy(control: &str) -> EngineControlPolicy {
+    // This policy only governs discovery (un)registration ordering. Draining
+    // in-flight work before memory is freed is delegated to each backend's
+    // quiesce controller: vLLM and SGLang call the engine-native
+    // pause_generation() before sleep/release_memory_occupation, while TRT-LLM
+    // rejects new requests and waits for inflight requests to finish. The
+    // UnregisterBefore step here is an additional guard (stop new routing), not
+    // the drain itself.
     match control {
         // Quiesce controls make the engine unsafe for new requests, so remove
         // the endpoint before they mutate engine state. Resume controls make
@@ -1021,8 +1028,13 @@ fn wrap_engine_control_callback(
                     if !control_response_is_error(&response)
                         && let Err(e) = endpoint.register_endpoint_instance().await
                     {
+                        // The engine is awake but absent from discovery. The
+                        // operation is idempotent: retrying /engine/{control_name}
+                        // re-registers without re-waking the engine (the controller
+                        // short-circuits "already awake"), so surface that it is
+                        // safe to retry.
                         return Ok(control_error_response(format!(
-                            "failed to register endpoint after /engine/{control_name}: {e}"
+                            "engine resumed but re-registration failed after /engine/{control_name}: {e}; retry /engine/{control_name} to rejoin discovery"
                         )));
                     }
                     Ok(response)

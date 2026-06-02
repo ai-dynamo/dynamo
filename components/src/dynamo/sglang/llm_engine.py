@@ -477,7 +477,7 @@ class SglangLLMEngine(LLMEngine):
                         else "Memory released"
                     ),
                 }
-            except (asyncio.TimeoutError, RuntimeError) as e:
+            except Exception as e:
                 logger.warning("Failed to release memory occupation: %s", e)
                 return {"status": "error", "message": str(e)}
 
@@ -506,7 +506,7 @@ class SglangLLMEngine(LLMEngine):
                         else "Memory resumed"
                     ),
                 }
-            except (asyncio.TimeoutError, RuntimeError) as e:
+            except Exception as e:
                 logger.warning("Failed to resume memory occupation: %s", e)
                 return {"status": "error", "message": str(e)}
 
