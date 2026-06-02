@@ -48,6 +48,15 @@ func DetectLWSAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 	return detectAPIGroupAvailability(ctx, mgr, "leaderworkerset.x-k8s.io", nil)
 }
 
+// DetectDisaggregatedSetAvailability checks if DisaggregatedSet is available
+// by checking if the disaggregatedset.x-k8s.io API group is registered. DS
+// owns N LWSes per resource, so a working DS installation implies a working
+// LWS installation. Volcano is NOT a prerequisite for DS (DS handles its own
+// gang scheduling across roles).
+func DetectDisaggregatedSetAvailability(ctx context.Context, mgr ctrl.Manager) bool {
+	return detectAPIGroupAvailability(ctx, mgr, "disaggregatedset.x-k8s.io", nil)
+}
+
 // DetectVolcanoAvailability checks if Volcano is available by checking if the Volcano API group is registered
 func DetectVolcanoAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 	return detectAPIGroupAvailability(ctx, mgr, "scheduling.volcano.sh", nil)

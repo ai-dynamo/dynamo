@@ -59,6 +59,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	lwsscheme "sigs.k8s.io/lws/client-go/clientset/versioned/scheme"
+	disaggv1alpha1 "sigs.k8s.io/disaggregatedset/api/v1alpha1"
 	volcanoscheme "volcano.sh/apis/pkg/client/clientset/versioned/scheme"
 
 	semver "github.com/Masterminds/semver/v3"
@@ -150,6 +151,8 @@ func initCRDSchemes() {
 	utilruntime.Must(nvidiacomv1beta1.AddToScheme(crdScheme))
 
 	utilruntime.Must(lwsscheme.AddToScheme(crdScheme))
+
+	utilruntime.Must(disaggv1alpha1.AddToScheme(crdScheme))
 
 	utilruntime.Must(volcanoscheme.AddToScheme(crdScheme))
 
@@ -426,6 +429,25 @@ func main() {
 		runtimeConfig.LWSEnabled = false
 	}
 
+	// DisaggregatedSet (DS) auto-detection. Unlike LWS, DS does not require
+	// Volcano - DS handles its own gang scheduling across roles. So the
+	// detection here is just "is the DS API group registered in the cluster".
+	setupLog.Info("Detecting DisaggregatedSet availability...")
+	dsDetected := commonController.DetectDisaggregatedSetAvailability(mainCtx, mgr)
+	switch {
+	case operatorCfg.Orchestrators.DisaggregatedSet.Enabled == nil:
+		runtimeConfig.DisaggregatedSetEnabled = dsDetected
+	case *operatorCfg.Orchestrators.DisaggregatedSet.Enabled:
+		if !dsDetected {
+			setupLog.Error(nil, "DisaggregatedSet is explicitly enabled in config but the disaggregatedset.x-k8s.io API group was not detected in the cluster")
+			os.Exit(1)
+		}
+		runtimeConfig.DisaggregatedSetEnabled = true
+	default:
+		setupLog.Info("DisaggregatedSet is explicitly disabled via config override")
+		runtimeConfig.DisaggregatedSetEnabled = false
+	}
+
 	// Detect Kai-scheduler availability using discovery client
 	setupLog.Info("Detecting Kai-scheduler availability...")
 	kaiSchedulerDetected := commonController.DetectKaiSchedulerAvailability(mainCtx, mgr)
@@ -470,6 +492,7 @@ func main() {
 	setupLog.Info("Detected orchestrators availability",
 		"grove", runtimeConfig.GroveEnabled,
 		"lws", runtimeConfig.LWSEnabled,
+		"disaggregatedset", runtimeConfig.DisaggregatedSetEnabled,
 		"volcano", volcanoDetected,
 		"kai-scheduler", runtimeConfig.KaiSchedulerEnabled,
 		"dra", runtimeConfig.DRAEnabled,

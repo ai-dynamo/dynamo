@@ -105,6 +105,8 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=networking.istio.io,resources=destinationrules,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=resourceclaimtemplates,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=deviceclasses,verbs=get;list;watch
+// +kubebuilder:rbac:groups=disaggregatedset.x-k8s.io,resources=disaggregatedsets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=disaggregatedset.x-k8s.io,resources=disaggregatedsets/status,verbs=get
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
@@ -412,10 +414,28 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 		}
 	}
 
-	// return error early if Grove and LWS is not available for multinode
-	if !r.isGrovePathway(dynamoDeployment) && hasMultinode && !r.RuntimeConfig.LWSEnabled {
+	// return error early if neither the chosen pathway nor LWS is available for multinode
+	if !r.isGrovePathway(dynamoDeployment) &&
+		!dynamo.IsDisaggregatedSetPathwaySelected(dynamoDeployment.Annotations, r.RuntimeConfig) &&
+		hasMultinode &&
+		!r.RuntimeConfig.LWSEnabled {
 		err := fmt.Errorf("no multinode orchestrator available")
-		logger.Error(err, err.Error(), "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.LWSEnabled)
+		logger.Error(err, err.Error(),
+			"hasMultinode", hasMultinode,
+			"lwsEnabled", r.RuntimeConfig.LWSEnabled,
+			"dsEnabled", r.RuntimeConfig.DisaggregatedSetEnabled)
+		return ReconcileResult{}, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
+	}
+
+	// When the DGD opts into the DS pathway, require DS to actually be
+	// enabled at the operator level. If the user annotated the DGD but the
+	// cluster has no DS API, we fail fast rather than silently dropping to
+	// the LWS pathway - the user asked for DS specifically.
+	if dynamoDeployment.Annotations != nil &&
+		strings.ToLower(dynamoDeployment.Annotations[consts.KubeAnnotationEnableDisaggregatedSet]) == "true" &&
+		!r.RuntimeConfig.DisaggregatedSetEnabled {
+		err := fmt.Errorf("DGD opts into DisaggregatedSet (nvidia.com/enable-disaggregatedset=true) but the operator has DS disabled (DisaggregatedSetEnabled=false)")
+		logger.Error(err, err.Error())
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
 	}
 
@@ -427,10 +447,14 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	}
 
 	var result ReconcileResult
-	if r.isGrovePathway(dynamoDeployment) {
+	switch {
+	case r.isGrovePathway(dynamoDeployment):
 		logger.Info("Reconciling Grove resources", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.LWSEnabled)
 		result, err = r.reconcileGroveResources(ctx, dynamoDeployment, restartState, checkpointInfos)
-	} else {
+	case dynamo.IsDisaggregatedSetPathwaySelected(dynamoDeployment.Annotations, r.RuntimeConfig):
+		logger.Info("Reconciling DisaggregatedSet", "hasMultinode", hasMultinode, "dsEnabled", r.RuntimeConfig.DisaggregatedSetEnabled)
+		result, err = r.reconcileDisaggregatedSet(ctx, dynamoDeployment, restartState, checkpointInfos)
+	default:
 		logger.Info("Reconciling Dynamo components deployments", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.LWSEnabled)
 		result, err = r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment, restartState)
 	}
@@ -2322,4 +2346,46 @@ func ptrInt64Equal(a, b *int64) bool {
 		return false
 	}
 	return *a == *b
+}
+
+// reconcileDisaggregatedSet is the DGD-level entry point for the
+// DisaggregatedSet orchestrator pathway. It generates one
+// DisaggregatedSet resource per DGD (with one role per spec.services
+// entry), creates or updates it, and reports readiness based on the
+// aggregate DS roleStatuses[].
+//
+// This is a Phase-1 implementation focused on the create/update path.
+// Restart state propagation, per-role checkpoint wiring, and DGD
+// status aggregation mirroring the Grove path are tracked as follow-ups.
+func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSet(
+	ctx context.Context,
+	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	restartState *dynamo.RestartState,
+	checkpointInfos map[string]*checkpoint.CheckpointInfo,
+) (ReconcileResult, error) {
+	logger := log.FromContext(ctx)
+	logger.Info("Reconciling DisaggregatedSet", "dgd", dynamoDeployment.Name)
+
+	ds, err := dynamo.GenerateDisaggregatedSet(ctx, dynamoDeployment)
+	if err != nil {
+		return ReconcileResult{}, fmt.Errorf("failed to generate DisaggregatedSet: %w", err)
+	}
+
+	// Apply the DisaggregatedSet. controller-runtime handles
+	// create-vs-update based on whether the resource already exists.
+	// Per-role LeaderWorkerSetSpec is filled in by a follow-up PR
+	// (see DisaggregatedSetRoleSpecForService in internal/dynamo).
+	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, ds, func() error {
+		return nil
+	}); err != nil {
+		return ReconcileResult{}, fmt.Errorf("failed to create or update DisaggregatedSet %q: %w", ds.Name, err)
+	}
+
+	ready, reason := dynamo.CheckDisaggregatedSetReady(ctx, r.Client, ds.Name, ds.Namespace)
+	if !ready {
+		return ReconcileResult{}, fmt.Errorf("DisaggregatedSet %q not ready: %s", ds.Name, reason)
+	}
+
+	logger.Info("DisaggregatedSet is ready", "name", ds.Name)
+	return ReconcileResult{}, nil
 }

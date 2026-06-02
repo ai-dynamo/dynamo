@@ -176,6 +176,11 @@ type OrchestratorConfiguration struct {
 	Grove GroveConfiguration `json:"grove"`
 	// LWS orchestrator configuration
 	LWS LWSConfiguration `json:"lws"`
+	// DisaggregatedSet orchestrator configuration.
+	// DisaggregatedSet layers on top of LWS and is the recommended orchestrator
+	// for prefill/decode disaggregation. It is opt-in per DGD via the
+	// nvidia.com/enable-disaggregatedset annotation.
+	DisaggregatedSet DisaggregatedSetConfiguration `json:"disaggregatedset"`
 	// KaiScheduler configuration
 	KaiScheduler KaiSchedulerConfiguration `json:"kaiScheduler"`
 }
@@ -192,6 +197,20 @@ type GroveConfiguration struct {
 // LWSConfiguration holds LWS orchestrator settings.
 type LWSConfiguration struct {
 	// Enabled overrides auto-detection. nil = auto-detect.
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// DisaggregatedSetConfiguration holds DisaggregatedSet orchestrator settings.
+// The DS pathway is opt-in per DGD via annotation; this config controls
+// whether the operator treats DS as available at all.
+type DisaggregatedSetConfiguration struct {
+	// Enabled overrides auto-detection. nil = auto-detect.
+	// When true, the operator enables the DS pathway; if the DS API group
+	// is not detected in the cluster, startup fails (consistent with LWS).
+	// When false, the DS pathway is never used, regardless of DGD annotations.
+	// When nil, the operator auto-detects: the DS pathway is available iff
+	// the disaggregatedset.x-k8s.io API group is registered. Unlike LWS,
+	// DS does not require Volcano.
 	Enabled *bool `json:"enabled,omitempty"`
 }
 

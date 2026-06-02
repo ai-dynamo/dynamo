@@ -42,6 +42,17 @@ const (
 
 	KubeAnnotationEnableGrove = "nvidia.com/enable-grove"
 
+	// KubeAnnotationEnableDisaggregatedSet opts a DynamoGraphDeployment into the
+	// DisaggregatedSet orchestrator pathway. Unset or not "true": the existing
+	// orchestrator-selection logic (Grove, then LWS fallback) is used. "true":
+	// the operator generates a DisaggregatedSet per DGD, with one role per
+	// spec.services entry. DisaggregatedSet is mutually exclusive with the
+	// Grove pathway - the user opts out of Grove by setting this annotation
+	// or by leaving nvidia.com/enable-grove unset / not "false". When DS is
+	// requested but the DS API is not detected in the cluster, the operator
+	// falls back to the LWS pathway.
+	KubeAnnotationEnableDisaggregatedSet = "nvidia.com/enable-disaggregatedset"
+
 	// KubeAnnotationIstioSidecarInject is the standard Istio annotation that
 	// controls whether the mutating webhook injects an istio-proxy sidecar into
 	// a pod. Setting it to "false" opts the pod out of sidecar injection even
@@ -251,8 +262,9 @@ const (
 type MultinodeDeploymentType string
 
 const (
-	MultinodeDeploymentTypeGrove MultinodeDeploymentType = "grove"
-	MultinodeDeploymentTypeLWS   MultinodeDeploymentType = "lws"
+	MultinodeDeploymentTypeGrove           MultinodeDeploymentType = "grove"
+	MultinodeDeploymentTypeLWS             MultinodeDeploymentType = "lws"
+	MultinodeDeploymentTypeDisaggregatedSet MultinodeDeploymentType = "disaggregatedset"
 )
 
 // GroupVersionResources for external APIs
@@ -274,5 +286,12 @@ var (
 		Group:    "scheduling.run.ai",
 		Version:  "v2",
 		Resource: "queues",
+	}
+
+	// DisaggregatedSet GroupVersionResource for status checks.
+	DisaggregatedSetGVR = schema.GroupVersionResource{
+		Group:    "disaggregatedset.x-k8s.io",
+		Version:  "v1alpha1",
+		Resource: "disaggregatedsets",
 	}
 )

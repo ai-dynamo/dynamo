@@ -1334,6 +1334,11 @@ func MultinodeDeployerFactory(multinodeDeploymentType commonconsts.MultinodeDepl
 		return &GroveMultinodeDeployer{}
 	case commonconsts.MultinodeDeploymentTypeLWS:
 		return &LWSMultinodeDeployer{}
+	case commonconsts.MultinodeDeploymentTypeDisaggregatedSet:
+		// DS uses the same env-var expansion as standalone LWS (the kubelet
+		// still injects LWS_LEADER_ADDRESS etc. on the LWS that backs each
+		// role), so the LWS deployer is the right choice here.
+		return &DSMultinodeDeployer{}
 	default:
 		return nil
 	}

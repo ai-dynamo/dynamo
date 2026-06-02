@@ -30,7 +30,7 @@ import (
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
 // ComponentKind represents the type of underlying Kubernetes resource.
-// +kubebuilder:validation:Enum=PodClique;PodCliqueScalingGroup;Deployment;LeaderWorkerSet
+// +kubebuilder:validation:Enum=PodClique;PodCliqueScalingGroup;Deployment;LeaderWorkerSet;DisaggregatedSet
 type ComponentKind string
 
 const (
@@ -42,6 +42,11 @@ const (
 	ComponentKindDeployment ComponentKind = "Deployment"
 	// ComponentKindLeaderWorkerSet represents a LeaderWorkerSet resource.
 	ComponentKindLeaderWorkerSet ComponentKind = "LeaderWorkerSet"
+	// ComponentKindDisaggregatedSet represents a DisaggregatedSet resource.
+	// Each role within the DisaggregatedSet is backed by an LWS, so the
+	// per-component status surface is the underlying LeaderWorkerSet; the
+	// DS-level status is the roleStatuses[] aggregate.
+	ComponentKindDisaggregatedSet ComponentKind = "DisaggregatedSet"
 )
 
 // +kubebuilder:validation:Enum=initializing;pending;successful;failed

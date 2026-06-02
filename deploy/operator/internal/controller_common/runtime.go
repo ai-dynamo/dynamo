@@ -24,6 +24,11 @@ type RuntimeConfig struct {
 	GroveEnabled bool
 	// LWSEnabled is the resolved LWS availability (config override merged with auto-detection)
 	LWSEnabled bool
+	// DisaggregatedSetEnabled is the resolved DisaggregatedSet availability
+	// (config override merged with auto-detection). DisaggregatedSet is the
+	// opt-in DS pathway layered on top of LWS; unlike LWS, it does not
+	// require Volcano to be installed.
+	DisaggregatedSetEnabled bool
 	// KaiSchedulerEnabled is the resolved Kai-scheduler availability (config override merged with auto-detection)
 	KaiSchedulerEnabled bool
 	// DRAEnabled indicates whether Dynamic Resource Allocation (resource.k8s.io/v1) is available

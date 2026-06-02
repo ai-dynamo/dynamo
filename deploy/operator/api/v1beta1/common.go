@@ -481,7 +481,7 @@ type KvTransferPolicy struct {
 }
 
 // ComponentKind represents the type of underlying Kubernetes resource backing a DGD component.
-// +kubebuilder:validation:Enum=PodClique;PodCliqueScalingGroup;Deployment;LeaderWorkerSet
+// +kubebuilder:validation:Enum=PodClique;PodCliqueScalingGroup;Deployment;LeaderWorkerSet;DisaggregatedSet
 type ComponentKind string
 
 const (
@@ -489,6 +489,11 @@ const (
 	ComponentKindPodCliqueScalingGroup ComponentKind = "PodCliqueScalingGroup"
 	ComponentKindDeployment            ComponentKind = "Deployment"
 	ComponentKindLeaderWorkerSet       ComponentKind = "LeaderWorkerSet"
+	// ComponentKindDisaggregatedSet represents a DisaggregatedSet resource.
+	// Each role within the DisaggregatedSet is backed by an LWS, so the
+	// per-component status surface is the underlying LeaderWorkerSet; the
+	// DS-level status is the roleStatuses[] aggregate.
+	ComponentKindDisaggregatedSet ComponentKind = "DisaggregatedSet"
 )
 
 // DGDState is the high-level lifecycle state of a DynamoGraphDeployment.

@@ -1,0 +1,12 @@
+Local placeholder for sigs.k8s.io/disaggregatedset api types.
+
+The DisaggregatedSet module (https://github.com/kubernetes-sigs/lws/tree/main/disaggregatedset)
+is not yet published to the Go module proxy. Until the upstream module is
+tagged, this directory contains a vendored copy of the api/v1alpha1 types so
+that the Dynamo operator can build and use them. The operator's go.mod uses
+a `replace` directive to map sigs.k8s.io/disaggregatedset to this path.
+
+When the upstream module is published, this directory should be removed and
+the `replace` directive deleted in favour of a normal `require`.
+
+Vendored from commit: see go.sum or refer to the lws repo for the source.

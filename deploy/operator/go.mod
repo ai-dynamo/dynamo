@@ -34,9 +34,16 @@ require (
 	sigs.k8s.io/lws v0.6.1
 	sigs.k8s.io/yaml v1.6.0
 	volcano.sh/apis v1.12.2
+	sigs.k8s.io/disaggregatedset v0.1.0
 )
 
-replace github.com/ai-dynamo/dynamo/deploy/snapshot => ../snapshot
+replace (
+	github.com/ai-dynamo/dynamo/deploy/snapshot => ../snapshot
+
+	// Local placeholder for sigs.k8s.io/disaggregatedset until the upstream
+	// module is tagged and published. See ./disaggregatedset/NOTICE.
+	sigs.k8s.io/disaggregatedset => ./disaggregatedset
+)
 
 require (
 	cel.dev/expr v0.25.1 // indirect
