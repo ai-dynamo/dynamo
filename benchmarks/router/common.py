@@ -160,8 +160,6 @@ def get_common_aiperf_flags():
     return [
         "--endpoint-type",
         "chat",
-        "--endpoint",
-        "v1/chat/completions",
         "--streaming",
         "--extra-inputs",
         "ignore_eos:true",

@@ -119,10 +119,18 @@ impl KvEventPublishers {
 /// schema in `components/src/dynamo/common/forward_pass_metrics.py`.
 ///
 /// Produced by the scheduler core after each `execute_pass_internal()` call.
-/// The runtime-dependent layer (`lib/llm`) wraps this with identity fields
-/// (worker_id, dp_rank, counter_id) and serializes to msgpack for the event plane.
+/// Runtime publishers may either stamp identity at serialization time or fill
+/// the identity fields directly when snapshots are consumed in-process.
 #[derive(Debug, Clone, Default)]
 pub struct ForwardPassSnapshot {
+    // -- identity --
+    // `Default::default()` leaves `version == 0` and identity fields empty or
+    // zero, which means an unstamped local snapshot. Runtime publishers may
+    // stamp or overwrite these fields at the serialization boundary.
+    pub version: u32,
+    pub worker_id: String,
+    pub dp_rank: u32,
+    pub counter_id: u64,
     // -- scheduled requests (executed this iteration) --
     pub num_prefill_requests: u32,
     pub sum_prefill_tokens: u64,
