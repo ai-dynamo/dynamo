@@ -64,7 +64,7 @@ cases:
     # <tool_call> start. Known limitation (not asserted here): when narration
     # and the <tool_call> start land in the SAME delta, the narration is
     # dropped -- prepost.py buffers post-</think> content but not plain
-    # pre-tool narration. See DIS-2064 notes.
+    # pre-tool narration.
     description: narration before the tool call is preserved as content
     model_text: |-
       Let me check that for you.

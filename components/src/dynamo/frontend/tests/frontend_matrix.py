@@ -47,7 +47,7 @@ STAGE_NAMES = {
     "8": "error surface",
     "9": "reasoning<->tool orchestration",
 }
-# Settled n/a cells (documented in FRONTEND_CASES.md / DIS-2064 notes).
+# Settled n/a cells (documented in FRONTEND_CASES.md).
 NA_CELLS = {("7", "vllm")}
 BACKENDS = ["vllm", "sglang"]
 

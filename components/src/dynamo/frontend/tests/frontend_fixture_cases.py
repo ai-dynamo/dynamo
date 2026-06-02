@@ -93,8 +93,8 @@ def normalize(choices: list[dict[str, Any]]) -> dict[str, Any]:
     finish_reason}``. Streaming tool-call deltas sharing an ``index`` are
     merged (name from whichever delta carries it, arguments concatenated) the
     way an OpenAI client does; ``arguments`` is JSON-parsed when possible."""
-    content = ""
-    reasoning_content = ""
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
     finish_reason = None
     by_index: dict[int, dict[str, Any]] = {}
     order: list[int] = []
@@ -102,9 +102,9 @@ def normalize(choices: list[dict[str, Any]]) -> dict[str, Any]:
     for choice in choices:
         delta = choice.get("delta", {}) or {}
         if delta.get("content"):
-            content += delta["content"]
+            content_parts.append(delta["content"])
         if delta.get("reasoning_content"):
-            reasoning_content += delta["reasoning_content"]
+            reasoning_parts.append(delta["reasoning_content"])
         for tc in delta.get("tool_calls", []) or []:
             idx = tc.get("index", 0)
             fn = tc.get("function", {}) or {}
@@ -129,8 +129,8 @@ def normalize(choices: list[dict[str, Any]]) -> dict[str, Any]:
 
     return {
         "tool_calls": tool_calls,
-        "content": content,
-        "reasoning_content": reasoning_content,
+        "content": "".join(content_parts),
+        "reasoning_content": "".join(reasoning_parts),
         "finish_reason": finish_reason,
     }
 

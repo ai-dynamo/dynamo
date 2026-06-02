@@ -21,7 +21,7 @@ cases:
     single_chunk: true
     expected:
       tool_calls: []
-      content_contains: It is sunny in NYC today.
+      content: It is sunny in NYC today.
       finish_reason: stop
 
   plain_text_streamed:
@@ -30,7 +30,7 @@ cases:
     batch_sizes: [20, 5, 2]
     expected:
       tool_calls: []
-      content_contains: The quick brown fox jumps over the lazy dog.
+      content: The quick brown fox jumps over the lazy dog.
       finish_reason: stop
 
   plain_text_with_markup_like_chars:
@@ -39,5 +39,5 @@ cases:
     batch_sizes: [20, 4]
     expected:
       tool_calls: []
-      content_contains: '{"city": "NYC"}'
+      content: 'Use the format {"city": "NYC"} or a list like [1, 2, 3].'
       finish_reason: stop

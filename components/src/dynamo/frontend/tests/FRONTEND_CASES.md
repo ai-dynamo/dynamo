@@ -6,7 +6,7 @@ The **frontend (FE)** is the node between the OpenAI HTTP API and the inference 
 
 Per-request pipeline (vllm path shown; sglang mirrors it with `sglang_prepost.py` / `sglang_processor.py`):
 
-```
+```text
 USER REQUEST (OpenAI /chat/completions)
   -> preprocess_chat_request   validate, pick tool parser, run chat template, tokenize  -> prompt_token_ids
   -> routed_engine.generate    engine streams raw outputs (token_ids + text + finish_reason)
@@ -58,7 +58,7 @@ Example — multi-turn with a prior assistant tool call (the FRONTEND.1 normaliz
 
 **2. The engine output stream** — one output object per `output.index` (`n>1` interleaves choices). Each carries `token_ids` (delta), `text` (delta, already stop-trimmed by the engine), `finish_reason` (raw engine/router string), `logprobs`. Conceptually:
 
-```
+```text
 output(index=0, text="<tool_call>{\"name\":\"get_weather\"",            token_ids=[...], finish_reason=None)
 output(index=0, text=",\"arguments\":{\"location\":\"NYC\"}}</tool_call>", token_ids=[...], finish_reason="stop")
 ```
@@ -129,7 +129,7 @@ Backends covered by this taxonomy: **vllm** (`prepost.py` + `vllm_processor.py`)
 
 ## The FRONTEND.* cases
 
-The taxonomy splits the FE into 9 stages along the pipeline above: stages 1-3 shape the request on the way in, stages 4-9 assemble the response on the way out. Each stage is a distinct contract with its own failure modes. A test declares which stage(s) it covers with a trailing `# FRONTEND.N` comment (see Annotation convention below), so `grep -r 'FRONTEND.5' tests/` returns every test for that stage across both backends. Coverage is tracked as a stage x backend matrix (vllm, sglang); a cell is either covered or a justified `n/a` (e.g. FRONTEND.7 is n/a for vllm, which preprocesses in-process rather than in a subprocess).
+The taxonomy splits the FE into 9 stages along the pipeline above: stages 1-3 shape the request on the way in, stages 4-9 assemble the response on the way out. Each stage is a distinct contract with its own failure modes. A test declares which stage(s) it covers with a trailing `# FRONTEND.N` comment (see Annotation convention below), so `grep -r 'FRONTEND.5' components/src/dynamo/frontend/tests/` returns every test for that stage across both backends. Coverage is tracked as a stage x backend matrix (vllm, sglang); a cell is either covered or a justified `n/a` (e.g. FRONTEND.7 is n/a for vllm, which preprocesses in-process rather than in a subprocess).
 
 ## Quick reference
 

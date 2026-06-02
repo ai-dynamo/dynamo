@@ -39,7 +39,7 @@ def replay(
     tokenizer, model_text: str, batch_size: int | None, *, with_tools: bool
 ) -> list[dict]:
     post = build_postprocessor(tokenizer, with_tools=with_tools)
-    token_ids = tokenizer.encode(model_text)
+    token_ids = tokenizer.encode(model_text, add_special_tokens=False)
     if batch_size is None:  # single-chunk: whole response + finish in one call
         batch_size = len(token_ids) or 1
 
