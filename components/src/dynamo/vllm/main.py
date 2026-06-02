@@ -49,6 +49,10 @@ from .cache_info import get_configured_kv_event_block_size
 from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
+from .instrumented_scheduler import (
+    ENV_FPM_BENCHMARK_OUTPUT_PATH,
+    ENV_FPM_WORKER_ID,
+)
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 from .snapshot import prepare_snapshot_engine
 
@@ -560,7 +564,7 @@ def setup_vllm_engine(
     # Pass runtime-only worker identity to InstrumentedScheduler via the
     # environment so it does not perturb vLLM's config hash.
     if fpm_worker_id is not None:
-        os.environ["DYN_FPM_WORKER_ID"] = fpm_worker_id
+        os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
 
     # Pass benchmark config to InstrumentedScheduler via additional_config.
     if hasattr(config, "_benchmark_additional_config"):
@@ -568,7 +572,7 @@ def setup_vllm_engine(
         if fpm_worker_id and bench["output_path"] == "/tmp/benchmark_results.json":
             short_id = fpm_worker_id[-8:]
             os.environ[
-                "DYN_FPM_BENCHMARK_OUTPUT_PATH"
+                ENV_FPM_BENCHMARK_OUTPUT_PATH
             ] = f"/tmp/benchmark_results_{short_id}.json"
         vllm_config.additional_config["benchmark"] = bench
         logger.info("Benchmark config injected into additional_config")

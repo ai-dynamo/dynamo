@@ -273,7 +273,7 @@ class InstrumentedScheduler(AsyncScheduler):
         )
 
         dp_rank = self._resolve_dp_rank(vllm_config.parallel_config)
-        self._fpm_worker_id = os.environ.get(ENV_FPM_WORKER_ID)
+        self._fpm_worker_id = os.environ.get(ENV_FPM_WORKER_ID, "")
         self._fpm_dp_rank = dp_rank
 
         self._schedule_times: deque[float] = deque()
