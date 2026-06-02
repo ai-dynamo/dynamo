@@ -4,7 +4,7 @@
 # `|2+` simply means a single newline ("\n"); see tests/parity/README.md for the full decode.
 
 family: nemotron_nano
-model_label: Nemotron Nano
+model_label: Nemotron Nano v3
 mode: stream
 cases:
   TOOLCALLING.stream.2:

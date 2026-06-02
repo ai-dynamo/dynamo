@@ -24,6 +24,9 @@ glob pattern. The converter emits Chrome Trace Event JSON:
 - one tool slice per harness `tool_end`/`tool_error`; explicit
   `started_at_unix_ms`/`ended_at_unix_ms` are preferred, then `duration_ms`,
   then paired `tool_start` timing when both records are present
+- finish metadata on request slices, including final finish reason, backend
+  finish reason, stop reason, per-choice finish summaries, and complete
+  tool-call names
 - optional first-token markers with `--include-markers`
 
 Use `--no-stages` for a compact request-only view. Use
@@ -51,6 +54,11 @@ emits one independent Mooncake request row per Dynamo `request_end`, with an
 absolute `timestamp` from Dynamo's request-arrival time and no `session_id`.
 Stable trace `input_sequence_hashes` are compacted to Mooncake `hash_ids`
 during conversion.
+
+Mooncake replay intentionally ignores non-replay request fields such as
+`finish_reason_metadata`. Use the Perfetto converter when you want to inspect
+whether a request stopped for tool calls, hit a backend stop reason, or emitted
+complete tool-call metadata.
 
 For what replay covers today and what remains on the roadmap (cache movement
 fidelity, output token reconstruction, causal tool/turn dependencies, end-to-end

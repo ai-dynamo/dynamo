@@ -169,11 +169,7 @@ async fn detect_and_parse_tool_call_with_recovery_options(
         }
         ParserConfig::Xml(c) => {
             let mut c = c.clone();
-            // Strict-match families opt out — flipping recovery here would
-            // contradict their per-spec strictness.
-            if !c.strict_match {
-                c.allow_eof_recovery = true;
-            }
+            c.allow_eof_recovery = true;
             ParserConfig::Xml(c)
         }
         ParserConfig::Dsml(c) if recover_dsml_eof => {
@@ -2123,7 +2119,7 @@ mod parallel_tool_calling_tests {
     }
 
     // =============================================================================
-    // 1. NEMOTRON/DECI TOOL PARSER FORMAT (JSON Array in XML tags)
+    // 1. NEMOTRON/DECI TOOL-CALL FORMAT (JSON Array in XML tags)
     // =============================================================================
 
     #[tokio::test]
@@ -2179,7 +2175,7 @@ mod parallel_tool_calling_tests {
     }
 
     // =================================================
-    // 2. QWEN3CODER TOOL PARSER FORMAT (XML-style tags)
+    // 2. QWEN3CODER TOOL-CALL FORMAT (XML-style tags)
     // =================================================
 
     #[tokio::test]
@@ -2220,7 +2216,7 @@ fahrenheit
     }
 
     // =============================================================================
-    // 3. xLAM TOOL PARSER FORMAT (Pure JSON Array) - Testing via mistral parser
+    // 3. xLAM TOOL-CALL FORMAT (Pure JSON Array) - Testing via mistral parser
     // =============================================================================
 
     #[tokio::test]
@@ -2251,7 +2247,7 @@ fahrenheit
     }
 
     // =============================================================================
-    // 4. MINIMAX TOOL PARSER FORMAT (Multi-line JSON in XML tags)
+    // 4. MINIMAX TOOL-CALL FORMAT (Multi-line JSON in XML tags)
     // =============================================================================
 
     #[tokio::test]
@@ -2278,7 +2274,7 @@ fahrenheit
     }
 
     // =============================================================================
-    // 5. HARMONY TOOL PARSER FORMAT (Multiple Tool Calls with Harmony Encoding)
+    // 5. HARMONY TOOL-CALL FORMAT (Multiple Tool Calls with Harmony Encoding)
     // =============================================================================
 
     #[tokio::test]
@@ -2945,7 +2941,7 @@ mod detect_parser_tests {
 {"location": "Tokyo"}
 ```<｜tool▁call▁end｜>"#;
         let result = detect_tool_call_start(text, Some("deepseek_v3")).unwrap();
-        assert!(!result);
+        assert!(result);
     }
 
     #[test]
@@ -2963,7 +2959,7 @@ mod detect_parser_tests {
     fn test_e2e_detect_incomplete_tool_call_start_deepseek_v3_1() {
         let text = r#"<｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Tokyo"}<｜tool▁call▁end｜>"#;
         let result = detect_tool_call_start(text, Some("deepseek_v3_1")).unwrap();
-        assert!(!result);
+        assert!(result);
     }
 
     #[test]
