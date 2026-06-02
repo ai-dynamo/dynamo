@@ -114,8 +114,9 @@ agent.
 ## Reproducing the MiniMax-M2 results
 
 The headline numbers — program-aware scheduling vs KV-routing-only on the
-same hardware — come from driving SWE-bench-Lite through pi via a Harbor
-adapter, against two TP4 MiniMax-M2 replicas on a single 8×H100 node.
+same hardware — come from driving SWE-bench-Lite through **mini-SWE-agent** at
+128 concurrent workers, against two TP4 MiniMax-M2 replicas on a single 8×H100
+node.
 
 ### 1. Bring up Dynamo (2× TP4 MiniMax-M2)
 
@@ -133,42 +134,39 @@ For the **KV-routing-only baseline** arm, drop the `thunderagent_router` line
 from the script and run the frontend in KV-router mode against the same two
 workers (`--router-mode kv`).
 
-### 2. Run pi + Harbor
+### 2. Run mini-SWE-agent
 
-The Harbor pi adapter lives on the `feat/harbor-pi-adapter` branch of the
-fork. It installs `pi-dynamo-provider` into each trial container and injects
-`nvext.agent_context` so each Harbor trial maps to one ThunderAgent program.
+mini-SWE-agent talks to the Dynamo frontend directly (no proxy) through its
+`MSWEA_BACKEND=dynamo` path, which injects `nvext.agent_context` so each
+SWE-bench instance maps to one ThunderAgent program. Point it at `:8100` and
+drive SWE-bench-Lite at 128 concurrent workers:
 
 ```bash
-# Clone the fork and the provider side by side.
-git clone -b feat/harbor-pi-adapter https://github.com/ishandhanani/ThunderAgent
-git clone https://github.com/ai-dynamo/pi-dynamo-provider
-export PI_DYNAMO_PROVIDER_PATH="$PWD/pi-dynamo-provider"
+export OPENAI_BASE_URL="http://localhost:8100/v1"
+export OPENAI_API_KEY="DUMMY"
+export MSWEA_BACKEND="dynamo"
+export MSWEA_SESSION_TYPE_ID="swebench-lite"
 
-cd ThunderAgent/examples/datagen/harbor
-uv venv && source .venv/bin/activate && uv pip install -e .
-
-harbor run \
-  --path datasets/swebench \
-  --agent pi \
-  --model 'dynamo/MiniMaxAI/MiniMax-M2' \
-  --ak api_base='http://127.0.0.1:8100/v1' \
-  --n-tasks 30 --n-concurrent 128 \
-  --network-mode host --override-cpus 2 --override-memory-mb 8192 \
-  -v "$PI_DYNAMO_PROVIDER_PATH:/opt/pi-dynamo-provider:ro" \
-  --jobs-dir /tmp/harbor-jobs --job-name ta-run --quiet
+# mini-SWE-agent's bundled SWE-bench config, with its base_url pointed at :8100.
+mini-extra swebench \
+  --config src/minisweagent/config/extra/swebench.yaml \
+  --subset lite --split test --workers 128 \
+  --model 'MiniMaxAI/MiniMax-M2' \
+  --output ./swebench_out --redo-existing
 ```
+
+For the **KV-routing-only baseline** arm, bring Dynamo up in KV-router mode
+(step 1, `--router-mode kv`, no `thunderagent_router`) and rerun the same
+command against the same two workers.
 
 ### Expected
 
-On 8×H100 with 30 SWE-bench-Lite tasks (20 astropy + 10 django) at
-`n_concurrent=128`, the Pi + Dynamo setup shows a **12-16% throughput
-improvement** from program-aware scheduling over the KV-routing-only baseline.
-Pass-rate deltas on this slice are within run-to-run noise.
-
-Pointing `--ak api_base` at a stock `vllm serve` instead of the Dynamo
-frontend also works — `nvext.agent_context` is silently dropped — which is how
-the non-Dynamo control arm is run.
+Over the 10–67 min steady-state window, program-aware routing
+(`thunderagent_router`) sustains **≈27.5 steps/min** versus **≈23.7** for the
+KV-routing-only baseline on the same two workers — an **8–16% throughput
+improvement** (≈16% at the steady-state peak; ≈8.8% in the stricter matched-A/B
+framing). Throughput (steps/min over the window), not resolved-rate, is the
+metric at this concurrency; resolved-rate deltas are within run-to-run noise.
 
 ## Citation
 
