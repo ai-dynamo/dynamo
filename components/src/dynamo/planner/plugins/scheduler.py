@@ -201,13 +201,27 @@ class PluginScheduler:
 
     @staticmethod
     def _is_due(plugin: RegisteredPlugin, now: float) -> bool:
-        # First-ever tick: last_call_at == -inf → due regardless of interval.
-        if plugin.last_call_at == -math.inf:
-            return True
-        # Zero interval means "every tick".
+        # Zero interval means "every tick" — anchor doesn't matter.
         if plugin.execution_interval_seconds <= 0.0:
             return True
-        return (now - plugin.last_call_at) >= plugin.execution_interval_seconds
+        # Anchor: ``registered_at`` for the first-ever call,
+        # ``last_call_at`` for every call after.  Pre-fix the first-
+        # ever branch returned True unconditionally, which broke PSM
+        # cadence parity: PSM's ``initial_tick(start_s)`` schedules the
+        # first throughput-cadence fire at ``start_s + interval`` (not
+        # at ``start_s``).  A builtin throughput plugin (``interval=
+        # 180s``) firing on the first pipeline tick at T=5 would then
+        # bump ``last_call_at`` to 5, so the *next* due moment becomes
+        # T=185 — permanently 5s ahead of PSM's T=180/360/540 cadence.
+        # Anchoring on ``registered_at`` makes "fire every N seconds"
+        # mean "first fire N seconds after registration" — matching
+        # PSM and aligning with what most operators intuitively expect.
+        anchor = (
+            plugin.registered_at
+            if plugin.last_call_at == -math.inf
+            else plugin.last_call_at
+        )
+        return (now - anchor) >= plugin.execution_interval_seconds
 
     # ------------------------------------------------------------------
     # Per-tick bookkeeping + HOLD_LAST cache

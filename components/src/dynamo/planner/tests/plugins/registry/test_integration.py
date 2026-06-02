@@ -136,7 +136,10 @@ async def test_full_lifecycle_register_tick_unregister(stub_transport):
     assert info.circuit_state == CircuitState.CLOSED
     assert info.is_builtin is False
 
-    # 2. First tick: plugin is triggered.
+    # 2. First fire happens after interval elapses since registration
+    # (PSM-parity anchor on registered_at — see
+    # test_first_fire_anchored_on_registration_time in test_active_set).
+    clock.advance(10.0)
     active = scheduler.compute_active_set(clock.monotonic(), "propose")
     assert [p.plugin_id for p in active.triggered] == ["load-scaler"]
     scheduler.record_evaluation("load-scaler", clock.monotonic())

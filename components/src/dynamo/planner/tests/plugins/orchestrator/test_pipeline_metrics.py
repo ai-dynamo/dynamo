@@ -319,6 +319,9 @@ async def test_held_over_plugin_emits_held_over_counter(ctx_factory, metrics):
         is_builtin=True,
     )
 
+    # Advance to first-fire moment (PSM-parity anchor: first call
+    # happens ``interval`` seconds after registration).
+    ctx["clock"].advance(60.0)
     # Tick 1: plugin evaluates, result cached.
     await ctx["orchestrator"].tick(PipelineContext(), {PREFILL: 3})
     # VirtualClock advances 1s (much less than 60s interval)
@@ -553,7 +556,9 @@ async def test_tick_skipped_total_fires_when_plugin_not_due(ctx_factory, metrics
         is_builtin=True,
     )
 
-    # Tick 1: first-ever call, is_due=True → triggered, no skip
+    # Advance to first-fire moment (PSM-parity anchor on registered_at).
+    ctx["clock"].advance(60.0)
+    # Tick 1: first call, is_due=True → triggered, no skip
     await ctx["orchestrator"].tick(PipelineContext(), {PREFILL: 3})
     assert (
         _counter_value(metrics.tick_skipped_total, plugin_id="cadenced") == 0
@@ -606,11 +611,13 @@ async def test_tick_lag_seconds_set_when_plugin_evaluated(ctx_factory, metrics):
         is_builtin=True,
     )
 
-    # Tick 1: first-ever call → lag=0
+    # Advance to first-fire moment (PSM-parity anchor on registered_at).
+    ctx["clock"].advance(5.0)
+    # Tick 1: first call → lag=0 (no prior due_at to be late against)
     await ctx["orchestrator"].tick(PipelineContext(), {PREFILL: 3})
     assert _gauge_value(metrics.tick_lag_seconds, plugin_id="timed") == 0.0
 
-    # Advance 7s → due was at 5s, we're 2s late
+    # Advance 7s → due was at 5s past last_call_at, we're 2s late
     ctx["clock"].advance(7.0)
     await ctx["orchestrator"].tick(PipelineContext(), {PREFILL: 3})
     lag = _gauge_value(metrics.tick_lag_seconds, plugin_id="timed")

@@ -296,7 +296,8 @@ async def test_hold_last_cache_inherits_on_idle_tick(ctx_factory):
     ctx = ctx_factory()
     orchestrator = ctx["orchestrator"]
     clock = ctx["clock"]
-    # execution_interval=10s, HOLD_LAST → first tick runs, mid-interval tick inherits.
+    # execution_interval=10s, HOLD_LAST → first tick fires after interval
+    # elapses (PSM-parity anchor), mid-interval tick inherits cache.
     orchestrator.register_internal(
         plugin_id="propose",
         plugin_type="propose",
@@ -305,7 +306,9 @@ async def test_hold_last_cache_inherits_on_idle_tick(ctx_factory):
         execution_interval_seconds=10.0,
         hold_policy=HoldPolicy.HOLD_LAST,
     )
-    # First tick → triggered.
+    # Advance to the first-fire moment (interval seconds since
+    # registration — see test_first_fire_anchored_on_registration_time).
+    clock.advance(10.0)
     first = await orchestrator.tick(PipelineContext(), {PREFILL: 3})
     assert first.final_proposal.targets[0].replicas == 7
     # Advance 5s: not due; HOLD_LAST inherits cached (7).
@@ -649,13 +652,16 @@ async def test_predict_plugin_throttled_by_execution_interval(ctx_factory):
         hold_policy=HoldPolicy.ACCEPT_WHEN_IDLE,
         is_builtin=True,
     )
-    # First tick: due (last_call_at == -inf).
+    # First fire happens when interval elapses since registration
+    # (PSM-parity anchor — see test_first_fire_anchored_on_registration
+    # _time).  Pre-PR-1 fix: first-ever fired on tick 1 regardless.
+    ctx["clock"].advance(60.0)
     await ctx["orchestrator"].tick(PipelineContext(), {PREFILL: 3})
     assert stub.call_counts["Predict"] == 1
     # Second tick 1s later: must be throttled (interval is 60s).
     ctx["clock"].advance(1.0)
     await ctx["orchestrator"].tick(PipelineContext(), {PREFILL: 3})
-    assert stub.call_counts["Predict"] == 1   # ← pre-fix this was 2
+    assert stub.call_counts["Predict"] == 1   # ← pre-throttle-fix this was 2
     # After 60s: due again.
     ctx["clock"].advance(60.0)
     await ctx["orchestrator"].tick(PipelineContext(), {PREFILL: 3})
