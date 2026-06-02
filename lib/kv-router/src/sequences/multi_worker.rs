@@ -20,6 +20,7 @@ use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use super::PrefillTokenDeltas;
+use super::prefill_tracker::PrefillTimeLoad;
 #[cfg(any(test, feature = "bench"))]
 use super::prompt_membership_trie::lookup_live_hashes;
 use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
@@ -612,6 +613,37 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.prompt_registry.active_tokens(decay_now)
     }
 
+    /// Return modeled remaining prefill time by worker from the derived read model.
+    ///
+    /// Values are non-negative milliseconds. For workers whose active prefills
+    /// all have modeled durations, the formula is:
+    /// `total_modeled_prefill_ms.saturating_sub(elapsed_since_oldest_anchor_ms)`.
+    ///
+    /// Elapsed time from the oldest active prefill can reduce later modeled
+    /// backlog, then the final worker backlog is clipped at zero. This accounts
+    /// for engines that batch or overlap multiple prefills.
+    ///
+    /// `Err(MissingExpectedDuration)` is expected for workers with any active
+    /// prefill that lacks an AIC prediction, including the default no-AIC path or
+    /// failed predictions. Replica-synced remote values are receive-time anchored
+    /// advisory reads, not producer-time truth.
+    #[allow(dead_code)]
+    pub(crate) fn modeled_remaining_prefill_time_loads_at(
+        &self,
+        now: Instant,
+    ) -> Vec<PrefillTimeLoad> {
+        self.prompt_registry
+            .modeled_remaining_prefill_times_ms(now)
+            .into_iter()
+            .map(
+                |(worker, modeled_remaining_prefill_time_ms)| PrefillTimeLoad {
+                    worker,
+                    modeled_remaining_prefill_time_ms,
+                },
+            )
+            .collect()
+    }
+
     /// Return true if any worker satisfies the provided predicate on active token count.
     pub fn any_worker_matches_active_tokens(
         &self,
@@ -928,6 +960,7 @@ mod tests {
         ActiveSequenceEvent, ActiveSequenceEventData, BlockHashOptions, PrefillLoadHint,
         compute_block_hash_for_seq, compute_seq_hash_for_block,
     };
+    use crate::sequences::prefill_tracker::PrefillTimeLoadError;
     use crate::test_utils::NoopSequencePublisher;
 
     fn make_sequences() -> ActiveSequencesMultiWorker<NoopSequencePublisher> {
@@ -1022,6 +1055,24 @@ mod tests {
         })
     }
 
+    fn modeled_hint(tokens: usize, duration_secs: u64) -> Option<PrefillLoadHint> {
+        Some(PrefillLoadHint {
+            initial_effective_prefill_tokens: tokens,
+            expected_prefill_duration: Some(Duration::from_secs(duration_secs)),
+        })
+    }
+
+    fn modeled_time_loads_by_worker(
+        sequences: &ActiveSequencesMultiWorker<NoopSequencePublisher>,
+        now: Instant,
+    ) -> HashMap<WorkerWithDpRank, Result<u64, PrefillTimeLoadError>> {
+        sequences
+            .modeled_remaining_prefill_time_loads_at(now)
+            .into_iter()
+            .map(|load| (load.worker, load.modeled_remaining_prefill_time_ms))
+            .collect()
+    }
+
     struct VecSubscriber {
         events: VecDeque<anyhow::Result<ActiveSequenceEvent>>,
     }
@@ -1058,6 +1109,143 @@ mod tests {
         assert_eq!(
             sequences.active_tokens(decay_now).get(&worker).copied(),
             Some(0)
+        );
+    }
+
+    #[test]
+    fn modeled_remaining_prefill_time_loads_follow_multi_worker_projection() {
+        let sequences = make_multi_sequences();
+        let worker_a = WorkerWithDpRank::new(1, 0);
+        let worker_b = WorkerWithDpRank::new(2, 0);
+        let start = Instant::now();
+        let a_oldest = "a-oldest".to_string();
+
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: a_oldest.clone(),
+                    token_sequence: Some(vec![1, 2, 3]),
+                    track_prefill_tokens: true,
+                    expected_output_tokens: None,
+                    prefill_load_hint: modeled_hint(100, 10),
+                    worker: worker_a,
+                    lora_name: None,
+                },
+                start,
+            )
+            .unwrap();
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: "a-later".to_string(),
+                    token_sequence: Some(vec![4, 5, 6]),
+                    track_prefill_tokens: true,
+                    expected_output_tokens: None,
+                    prefill_load_hint: modeled_hint(60, 4),
+                    worker: worker_a,
+                    lora_name: None,
+                },
+                start + Duration::from_secs(1),
+            )
+            .unwrap();
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: "b-unmodeled".to_string(),
+                    token_sequence: Some(vec![7, 8, 9]),
+                    track_prefill_tokens: true,
+                    expected_output_tokens: None,
+                    prefill_load_hint: tracking_hint(12),
+                    worker: worker_b,
+                    lora_name: None,
+                },
+                start,
+            )
+            .unwrap();
+
+        let query = start + Duration::from_secs(3);
+        let loads = modeled_time_loads_by_worker(&sequences, query);
+        assert_eq!(loads.get(&worker_a).copied(), Some(Ok(11_000)));
+        assert_eq!(
+            loads.get(&worker_b).copied(),
+            Some(Err(PrefillTimeLoadError::MissingExpectedDuration))
+        );
+
+        sequences.mark_prefill_completed(&a_oldest, query).unwrap();
+
+        let loads = modeled_time_loads_by_worker(&sequences, query + Duration::from_secs(2));
+        assert_eq!(loads.get(&worker_a).copied(), Some(Ok(2_000)));
+        assert_eq!(
+            loads.get(&worker_b).copied(),
+            Some(Err(PrefillTimeLoadError::MissingExpectedDuration))
+        );
+    }
+
+    #[test]
+    fn free_nonanchor_modeled_prefill_applies_anchor_credit() {
+        let sequences = make_sequences();
+        let worker = WorkerWithDpRank::new(1, 0);
+        let start = Instant::now();
+        let later = "later".to_string();
+
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: "oldest".to_string(),
+                    token_sequence: Some(vec![1, 2, 3]),
+                    track_prefill_tokens: true,
+                    expected_output_tokens: None,
+                    prefill_load_hint: modeled_hint(100, 10),
+                    worker,
+                    lora_name: None,
+                },
+                start,
+            )
+            .unwrap();
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: later.clone(),
+                    token_sequence: Some(vec![4, 5, 6]),
+                    track_prefill_tokens: true,
+                    expected_output_tokens: None,
+                    prefill_load_hint: modeled_hint(40, 4),
+                    worker,
+                    lora_name: None,
+                },
+                start,
+            )
+            .unwrap();
+
+        let completion_time = start + Duration::from_secs(5);
+        assert_eq!(
+            sequences
+                .active_tokens(completion_time)
+                .get(&worker)
+                .copied(),
+            Some(90)
+        );
+        assert_eq!(
+            modeled_time_loads_by_worker(&sequences, completion_time)
+                .get(&worker)
+                .copied(),
+            Some(Ok(9_000))
+        );
+
+        sequences.free(&later, completion_time).unwrap();
+
+        assert_eq!(
+            sequences
+                .active_tokens(completion_time)
+                .get(&worker)
+                .copied(),
+            Some(90)
+        );
+        assert_eq!(
+            modeled_time_loads_by_worker(&sequences, completion_time)
+                .get(&worker)
+                .copied(),
+            Some(Ok(9_000))
         );
     }
 
@@ -1414,6 +1602,186 @@ mod tests {
         assert!(sequences.request_index.is_empty());
         assert!(sequences.prompt_registry.is_block_index_empty());
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn replica_sync_modeled_remaining_prefill_time_uses_receive_time_and_clears() {
+        let sequences = ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            4,
+            HashMap::from([(1_u64, (0_u32, 1_u32))]),
+            true,
+            0,
+            "test",
+        );
+        let worker = WorkerWithDpRank::new(1, 0);
+
+        sequences
+            .run_replica_sync(
+                VecSubscriber {
+                    events: VecDeque::from(vec![Ok(ActiveSequenceEvent {
+                        request_id: "req-1".to_string(),
+                        worker,
+                        data: ActiveSequenceEventData::AddRequest {
+                            token_sequence: Some(vec![1, 2, 3]),
+                            track_prefill_tokens: true,
+                            expected_output_tokens: None,
+                            prefill_load_hint: modeled_hint(12, 10),
+                        },
+                        router_id: 99,
+                        lora_name: None,
+                    })]),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        let loads = modeled_time_loads_by_worker(&sequences, Instant::now());
+        assert_eq!(loads.get(&worker).copied(), Some(Ok(10_000)));
+
+        sequences
+            .run_replica_sync(
+                VecSubscriber {
+                    events: VecDeque::from(vec![Ok(ActiveSequenceEvent {
+                        request_id: "req-1".to_string(),
+                        worker,
+                        data: ActiveSequenceEventData::MarkPrefillCompleted,
+                        router_id: 99,
+                        lora_name: None,
+                    })]),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        let loads = modeled_time_loads_by_worker(&sequences, Instant::now());
+        assert_eq!(loads.get(&worker).copied(), Some(Ok(0)));
+
+        sequences
+            .run_replica_sync(
+                VecSubscriber {
+                    events: VecDeque::from(vec![Ok(ActiveSequenceEvent {
+                        request_id: "req-2".to_string(),
+                        worker,
+                        data: ActiveSequenceEventData::AddRequest {
+                            token_sequence: Some(vec![4, 5, 6]),
+                            track_prefill_tokens: true,
+                            expected_output_tokens: None,
+                            prefill_load_hint: modeled_hint(12, 6),
+                        },
+                        router_id: 99,
+                        lora_name: None,
+                    })]),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        let loads = modeled_time_loads_by_worker(&sequences, Instant::now());
+        assert_eq!(loads.get(&worker).copied(), Some(Ok(6_000)));
+
+        sequences
+            .run_replica_sync(
+                VecSubscriber {
+                    events: VecDeque::from(vec![Ok(ActiveSequenceEvent {
+                        request_id: "req-2".to_string(),
+                        worker,
+                        data: ActiveSequenceEventData::Free,
+                        router_id: 99,
+                        lora_name: None,
+                    })]),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        let loads = modeled_time_loads_by_worker(&sequences, Instant::now());
+        assert_eq!(loads.get(&worker).copied(), Some(Ok(0)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn replica_sync_nonanchor_free_applies_receive_time_anchor_credit() {
+        let sequences = ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            4,
+            HashMap::from([(1_u64, (0_u32, 1_u32))]),
+            true,
+            0,
+            "test",
+        );
+        let worker = WorkerWithDpRank::new(1, 0);
+        let later = "later".to_string();
+
+        sequences
+            .run_replica_sync(
+                VecSubscriber {
+                    events: VecDeque::from(vec![
+                        Ok(ActiveSequenceEvent {
+                            request_id: "oldest".to_string(),
+                            worker,
+                            data: ActiveSequenceEventData::AddRequest {
+                                token_sequence: Some(vec![1, 2, 3]),
+                                track_prefill_tokens: true,
+                                expected_output_tokens: None,
+                                prefill_load_hint: modeled_hint(100, 10),
+                            },
+                            router_id: 99,
+                            lora_name: None,
+                        }),
+                        Ok(ActiveSequenceEvent {
+                            request_id: later.clone(),
+                            worker,
+                            data: ActiveSequenceEventData::AddRequest {
+                                token_sequence: Some(vec![4, 5, 6]),
+                                track_prefill_tokens: true,
+                                expected_output_tokens: None,
+                                prefill_load_hint: modeled_hint(40, 4),
+                            },
+                            router_id: 99,
+                            lora_name: None,
+                        }),
+                    ]),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let completion_time = Instant::now();
+        assert_eq!(
+            modeled_time_loads_by_worker(&sequences, completion_time)
+                .get(&worker)
+                .copied(),
+            Some(Ok(9_000))
+        );
+
+        sequences
+            .run_replica_sync(
+                VecSubscriber {
+                    events: VecDeque::from(vec![Ok(ActiveSequenceEvent {
+                        request_id: later,
+                        worker,
+                        data: ActiveSequenceEventData::Free,
+                        router_id: 99,
+                        lora_name: None,
+                    })]),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            modeled_time_loads_by_worker(&sequences, completion_time)
+                .get(&worker)
+                .copied(),
+            Some(Ok(9_000))
+        );
     }
 
     #[tokio::test]
