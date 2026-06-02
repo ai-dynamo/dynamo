@@ -152,10 +152,15 @@ fn preprocessed_backend_engine(
 {
     let engine: ServiceEngine<_, _> = match router_mode {
         RouterMode::Direct => {
+            // Direct routing dispatches to a caller-supplied worker id and calls inner.direct(),
+            // bypassing BOTH the LoRA filter and non-KV load tracking. With LoRA serving enabled
+            // that lets a request reach a worker outside the adapter's allocated/loaded set and
+            // hides its load from the controller, so fail fast (consistent with the advanced
+            // non-KV modes below): LoRA-aware routing requires KV, Random, or RoundRobin.
             if model_manager.lora_filter().is_some() {
                 anyhow::bail!(
-                    "RouterMode::Direct is unsupported when DYN_LORA_ENABLED is set; \
-                     use KV, Random, or RoundRobin"
+                    "LoRA serving (DYN_LORA_ENABLED) is not supported with router mode Direct; \
+                     use KV, Random, or RoundRobin for LoRA-aware routing, or disable LoRA serving."
                 );
             }
             Arc::new(SessionAffinityPushRouter::new(
