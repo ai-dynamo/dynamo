@@ -19,4 +19,5 @@ flash-attn
 xformers
 lmcache
 nixl
+nixl-cu12
 nixl-cu13

@@ -12,9 +12,9 @@
 # 100% pod utilization across any number of BuildKit pods.
 #
 # CACHE GROUPS (3 distinct groups, one cache domain per framework):
-#   - Group 0 (vllm-cuda-dl-base-13):   vLLM (CUDA 13.x)
-#   - Group 1 (sglang-cuda-dl-base-13): SGLang (CUDA 13.x)
-#   - Group 2 (general-trt-combined):   TRT-LLM & General Builds
+#   - Group 0 (vllm):                 vLLM
+#   - Group 1 (sglang):               SGLang
+#   - Group 2 (general-trt-combined): TRT-LLM & General Builds
 #
 # ALGORITHM:
 # 1. SCORING: Each group key is hashed with every active pod index (SHA-256)
@@ -28,19 +28,19 @@
 #    This guarantees every active pod appears in at least one group's pool.
 # 5. RANDOM PICK: ONE pod is randomly selected from the candidate pool.
 #
-# LOAD DISTRIBUTION (SHA-256 rendezvous, amd64 example, all pods utilized):
+# LOAD DISTRIBUTION (cksum-based, all pods utilized):
 # +------+------+-------------------+-------------------+---------------------+
 # | Pods | Pool | G0: vLLM          | G1: SGLang        | G2: TRT-LLM/General |
 # +------+------+-------------------+-------------------+---------------------+
 # |  1   |  1   | {0}               | {0}               | {0}                 |
-# |  2   |  1   | {0}               | {1}               | {0}                 |
-# |  3   |  1   | {0}               | {1}               | {2}                 |
-# |  4   |  2   | {0, 2}            | {3, 1}            | {1, 0}              |
-# |  5   |  2   | {0, 2}            | {3, 1}            | {4, 0}              |
-# |  6   |  2   | {0, 4}            | {5, 1}            | {3, 2}              |
-# |  7   |  3   | {6, 4, 2}         | {5, 3, 6}         | {0, 1, 6}           |
-# |  8   |  3   | {6, 4, 2}         | {5, 3, 1}         | {0, 7, 6}           |
-# |  9   |  3   | {6, 8, 4}         | {5, 3, 1}         | {0, 7, 2}           |
+# |  2   |  1   | {0}               | {1}               | {1}                 |
+# |  3   |  1   | {0}               | {2}               | {1}                 |
+# |  4   |  2   | {0, 3}            | {2, 1}            | {1, 2}             |
+# |  5   |  2   | {0, 3}            | {2, 4}            | {1, 2}             |
+# |  6   |  2   | {0, 3}            | {5, 1}            | {2, 4}             |
+# |  7   |  3   | {0, 3, 4}         | {5, 1, 2}         | {2, 6, 5}          |
+# |  8   |  3   | {7, 0, 3}         | {5, 1, 4}         | {2, 6, 5}          |
+# |  9   |  3   | {7, 0, 3}         | {8, 5, 1}         | {2, 6, 4}          |
 # +------+------+-------------------+-------------------+---------------------+
 #
 # =============================================================================
@@ -174,11 +174,11 @@ get_active_indices() {
   echo "${active_indices[@]}"
 }
 
-GROUP_KEYS=("vllm-cuda-dl-base-13" "sglang-cuda-dl-base-13" "general-trt-combined")
+GROUP_KEYS=("vllm" "sglang" "general-trt-combined")
 
 # Map a flavor to a group index (0, 1, or 2). One cache domain per framework:
-# vLLM and SGLang each get a dedicated group (both on cuda-dl-base-13); TRT-LLM
-# and general builds share the third.
+# vLLM and SGLang each get a dedicated group; TRT-LLM and general builds share
+# the third.
 flavor_to_group() {
   local flavor=$1
   case "$flavor" in
