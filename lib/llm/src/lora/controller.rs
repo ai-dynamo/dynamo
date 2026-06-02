@@ -216,57 +216,79 @@ impl LoraController {
             workers.iter().copied().collect();
 
         // Capacity-dropped active LoRAs: active (load>0) but truncated out of this tick's budget
-        // by the R3 cap, so they received no fresh allocation. We must NOT keep their full prior
-        // replica set verbatim — if the adapter has since been evicted from those workers (likely,
-        // since the worker dropped it to host higher-load LoRAs), the filter's lazy-load fallback
-        // (`replica_set ∩ available`) would reload it there, a NEW load that defeats the cap; and
-        // if no prior worker is available it widens to all workers (scatter). Instead narrow each
-        // such entry to the workers where it is STILL warm (prior set ∩ loaded ∩ live), keeping it
-        // routable on existing adapters with zero new loads. If nothing is warm, remove the entry
-        // and let the filter's runtime loaded-worker fallback handle it. Narrowing only rewrites
-        // when the warm set actually shrank, so a still-warm dropped LoRA stays churn-free.
+        // by the R3 cap, so they received no fresh allocation. Each must stay routable (REQ 7)
+        // without triggering uncontrolled loads that defeat the cap:
+        //   * If still warm somewhere (prior set ∩ loaded ∩ live non-empty), keep ONLY those
+        //     workers — routes to existing adapters with zero new loads. (Rewrites only when the
+        //     warm set shrank, so a still-warm dropped LoRA stays churn-free.)
+        //   * Otherwise (adapter evicted everywhere, OR a brand-new over-budget active LoRA with
+        //     no entry at all), pin it to a SINGLE deterministic slot-aware HRW worker. This bounds
+        //     the unavoidable load to one worker and is identical across router instances, instead
+        //     of removing the entry — which would scatter to all workers via the filter's no-table
+        //     path (returns all when nothing is loaded).
+        // Pin worker selection is slot-aware against this tick's PROJECTED usage (the in-budget
+        // HRW/MCF placements already written to the routing table, plus earlier dropped pins), so a
+        // pin never targets a slot already claimed this tick.
         let dropped_active: Vec<&str> = active_loras
             .iter()
             .map(|(n, _)| n.as_str())
             .filter(|n| !active_replica_counts.contains_key(*n))
             .collect();
-        for name in dropped_active {
-            let Some(prior) = self.routing_table.get_config(name).map(|c| c.replica_set) else {
-                continue; // no entry to narrow; loaded-worker fallback applies
-            };
-            let loaded = self.state_tracker.get_loaded_workers(name);
-            let warm: Vec<WorkerWithDpRank> = prior
-                .iter()
-                .copied()
-                .filter(|w| loaded.contains(w) && live_workers.contains(w))
-                .collect();
-            if warm.is_empty() {
-                // No warm host left for this still-active LoRA. Removing the entry would drop it
-                // to the filter's no-table path, which scatters to ALL workers when nothing is
-                // loaded — an uncontrolled, non-deterministic multi-worker load. Instead pin it to
-                // a single deterministic HRW worker (slot-aware, so it prefers a non-full one):
-                // this keeps it routable (REQ 7), bounds the unavoidable load to one worker, and
-                // is identical across router instances. The pin is stable across ticks, so once
-                // the adapter loads there it becomes "warm" and the narrow branch keeps it put.
-                let pin = self.allocator.compute_replica_set_with_slots(
-                    name,
-                    &workers,
-                    1,
-                    &worker_slot_usage,
-                );
-                if pin.is_empty() {
+        if !dropped_active.is_empty() {
+            let dropped_set: std::collections::HashSet<&str> =
+                dropped_active.iter().copied().collect();
+            let caps = self.state_tracker.get_worker_capacities();
+            // Committed placements this tick, excluding the dropped LoRAs themselves (their entries
+            // are stale and re-decided below).
+            let mut projected: HashMap<WorkerWithDpRank, usize> = HashMap::new();
+            for (name, cfg) in self.routing_table.snapshot_configs() {
+                if dropped_set.contains(name.as_str()) {
+                    continue;
+                }
+                for w in &cfg.replica_set {
+                    *projected.entry(*w).or_insert(0) += 1;
+                }
+            }
+
+            for &name in &dropped_active {
+                let prior = self
+                    .routing_table
+                    .get_config(name)
+                    .map(|c| c.replica_set)
+                    .unwrap_or_default();
+                let loaded = self.state_tracker.get_loaded_workers(name);
+                let warm: Vec<WorkerWithDpRank> = prior
+                    .iter()
+                    .copied()
+                    .filter(|w| loaded.contains(w) && live_workers.contains(w))
+                    .collect();
+
+                let chosen = if !warm.is_empty() {
+                    warm
+                } else {
+                    let proj_usage: HashMap<WorkerWithDpRank, (usize, usize)> = workers
+                        .iter()
+                        .map(|w| {
+                            let used = projected.get(w).copied().unwrap_or(0);
+                            let cap = caps.get(w).copied().unwrap_or(0) as usize;
+                            (*w, (used, cap))
+                        })
+                        .collect();
+                    self.allocator
+                        .compute_replica_set_with_slots(name, &workers, 1, &proj_usage)
+                };
+
+                if chosen.is_empty() {
                     self.routing_table.remove_lora(name);
                     self.hysteresis.remove(name);
-                } else {
-                    self.update_routing_entry(name, 1, pin, true);
-                    tracing::debug!(
-                        lora = name,
-                        "Capacity-dropped LoRA has no warm worker; pinned to a single HRW worker"
-                    );
+                    continue;
                 }
-            } else if warm.len() != prior.len() {
-                // Some prior workers lost the adapter; narrow to the warm subset (no new loads).
-                self.update_routing_entry(name, warm.len(), warm, true);
+                // Charge the chosen workers so later dropped pins see them occupied.
+                for w in &chosen {
+                    *projected.entry(*w).or_insert(0) += 1;
+                }
+                // No-ops when nothing changed (still-warm, unchanged set) — keeps churn at zero.
+                self.update_routing_entry(name, chosen.len(), chosen, true);
             }
         }
 
@@ -1094,5 +1116,36 @@ mod tests {
             "pinned to the only live worker w1, not the stale w2"
         );
         assert!(cfg_b.is_active, "the LoRA is still active");
+    }
+
+    #[test]
+    fn test_new_cap_dropped_active_lora_without_entry_is_pinned_not_scattered() {
+        // R3-1: a brand-new active LoRA that is dropped by the budget cap and has NO routing entry
+        // must still get a single bounded pin — not be skipped (which would let the filter's
+        // no-table path scatter it across all workers).
+        let (mut controller, st, le, rt) = setup_controller();
+        let w1 = make_worker(1);
+        let w2 = make_worker(2);
+        // Two cap=1 workers (budget = 2). lora-a and lora-c are the high-load in-budget adapters;
+        // lora-b is new, low-load, no prior entry, not loaded anywhere.
+        st.handle_mdc_addition(w1, &make_lora_info("lora-a", 1));
+        st.handle_mdc_addition(w2, &make_lora_info("lora-c", 1));
+        for _ in 0..5 {
+            le.increment_load("lora-a");
+            le.increment_load("lora-c");
+        }
+        le.increment_load("lora-b"); // active but lowest load -> dropped by the budget=2 cap
+
+        controller.recompute_now();
+
+        let cfg_b = rt
+            .get_config("lora-b")
+            .expect("new cap-dropped active LoRA must get a bounded pin, not be skipped");
+        assert_eq!(
+            cfg_b.replica_set.len(),
+            1,
+            "must be pinned to a single worker, not scattered across all"
+        );
+        assert!(cfg_b.is_active);
     }
 }
