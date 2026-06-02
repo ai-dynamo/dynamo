@@ -34,8 +34,8 @@ SGLANG_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         payload=make_image_payload_cached_tokens(
                             ["green"],
                             min_cached_tokens=0,
-                            require_lightseek_init=True,
-                            min_routing_total_blocks=10,
+                            require_rust_processor_init=True,
+                            min_avg_kv_hit_rate=0.9,
                         )
                     )
                 ],
@@ -57,8 +57,8 @@ SGLANG_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         payload=make_image_payload_cached_tokens(
                             ["green"],
                             min_cached_tokens=0,
-                            require_lightseek_init=True,
-                            min_routing_total_blocks=10,
+                            require_rust_processor_init=True,
+                            min_avg_kv_hit_rate=0.9,
                         )
                     )
                 ],
@@ -80,8 +80,8 @@ SGLANG_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         payload=make_image_payload_cached_tokens(
                             ["green"],
                             min_cached_tokens=0,
-                            require_lightseek_init=True,
-                            min_routing_total_blocks=10,
+                            require_rust_processor_init=True,
+                            min_avg_kv_hit_rate=0.9,
                         )
                     )
                 ],
