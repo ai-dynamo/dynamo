@@ -515,6 +515,7 @@ fn generate_diurnal_schedules(
 /// LoRAs, followed by a rapid taper.  The key stress test: how much
 /// unnecessary churn does each algorithm produce during the spike and
 /// how quickly does it stabilize during the decay?
+#[allow(clippy::too_many_arguments)]
 fn generate_flash_crowd_schedules(
     total_loras: usize,
     total_ticks: usize,
@@ -538,9 +539,9 @@ fn generate_flash_crowd_schedules(
     let decay_rate = (0.5_f64).ln() / decay_half_life; // negative
     let mut multipliers = vec![1.0_f64; total_ticks];
     for &ft in flash_ticks {
-        for t in ft..total_ticks {
+        for (t, m) in multipliers.iter_mut().enumerate().skip(ft) {
             let elapsed = (t - ft) as f64;
-            multipliers[t] += (spike_multiplier - 1.0) * (decay_rate * elapsed).exp();
+            *m += (spike_multiplier - 1.0) * (decay_rate * elapsed).exp();
         }
     }
 
@@ -603,7 +604,6 @@ fn generate_mmpp_schedules(
 ) -> (Vec<LoraLoadSchedule>, Vec<usize>) {
     let mut rng = StdRng::seed_from_u64(seed);
     let h = harmonic_number(total_loras, zipf_s);
-    let n_states = state_rates.len();
 
     let weights: Vec<f64> = (1..=total_loras)
         .map(|k| 1.0 / ((k as f64).powf(zipf_s) * h))
@@ -617,8 +617,8 @@ fn generate_mmpp_schedules(
         // Transition
         let r: f64 = rng.random();
         let mut cumulative = 0.0;
-        for next in 0..n_states {
-            cumulative += transition_matrix[current_state][next];
+        for (next, &prob) in transition_matrix[current_state].iter().enumerate() {
+            cumulative += prob;
             if r < cumulative {
                 current_state = next;
                 break;
