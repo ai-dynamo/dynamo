@@ -146,14 +146,17 @@ workers:
 ```bash
 git clone -b feat/mini-swe-direct-dynamo https://github.com/ishandhanani/ThunderAgent
 cd ThunderAgent/examples/inference/mini-swe-agent
-uv venv && source .venv/bin/activate && uv pip install -e .
+# [full] pulls the swebench extras (datasets + swe-rex); a bare `-e .` can't run swebench.
+uv venv && source .venv/bin/activate && uv pip install -e ".[full]"
 
-export OPENAI_BASE_URL="http://localhost:8100/v1"   # the Dynamo frontend
-export OPENAI_API_KEY="DUMMY"
-export MSWEA_BACKEND="dynamo"
+# The bundled config defaults base_url to :8000; point it at step 1's frontend (:8100).
+sed -i 's#http://localhost:8000/v1#http://localhost:8100/v1#' \
+  src/minisweagent/config/extra/swebench.yaml
+
+export OPENAI_API_KEY="DUMMY"          # any non-empty value; the frontend ignores it
+export MSWEA_BACKEND="dynamo"          # inject nvext.agent_context natively
 export MSWEA_SESSION_TYPE_ID="swebench-lite"
 
-# The bundled config carries the base_url; it already points at the frontend.
 mini-extra swebench \
   --config src/minisweagent/config/extra/swebench.yaml \
   --subset lite --split test --workers 128 \
