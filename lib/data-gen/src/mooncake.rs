@@ -507,6 +507,48 @@ mod tests {
     }
 
     #[test]
+    fn row_alias_input_round_trips_to_canonical_fields() {
+        let raw = r#"{"input_tokens":8,"output_tokens":2,"created_time":12.5,"delay_ms":3.0}"#;
+        let mut row: MooncakeRow = serde_json::from_str(raw).unwrap();
+
+        let tokens: Vec<u32> = (0..row.input_length.unwrap() as u32).collect();
+        let mut mapper = RollingHashIdMapper::new(4);
+        row.hash_ids = Some(mapper.hash_token_blocks(&tokens));
+
+        let rendered: Value = serde_json::to_value(&row).unwrap();
+        assert_eq!(rendered["input_length"], json!(8));
+        assert_eq!(rendered["output_length"], json!(2));
+        assert_eq!(rendered["timestamp"], json!(12.5));
+        assert_eq!(rendered["delay"], json!(3.0));
+        assert_eq!(rendered["hash_ids"], json!([0, 1]));
+        assert!(rendered.get("input_tokens").is_none());
+        assert!(rendered.get("output_tokens").is_none());
+        assert!(rendered.get("created_time").is_none());
+        assert!(rendered.get("delay_ms").is_none());
+    }
+
+    #[test]
+    fn row_canonical_input_round_trips_without_renaming() {
+        let raw = r#"{"input_length":8,"output_length":2,"timestamp":12.5,"delay":3.0}"#;
+        let mut row: MooncakeRow = serde_json::from_str(raw).unwrap();
+
+        let tokens: Vec<u32> = (0..row.input_length.unwrap() as u32).collect();
+        let mut mapper = RollingHashIdMapper::new(4);
+        row.hash_ids = Some(mapper.hash_token_blocks(&tokens));
+
+        let rendered: Value = serde_json::to_value(&row).unwrap();
+        assert_eq!(rendered["input_length"], json!(8));
+        assert_eq!(rendered["output_length"], json!(2));
+        assert_eq!(rendered["timestamp"], json!(12.5));
+        assert_eq!(rendered["delay"], json!(3.0));
+        assert_eq!(rendered["hash_ids"], json!([0, 1]));
+        assert!(rendered.get("input_tokens").is_none());
+        assert!(rendered.get("output_tokens").is_none());
+        assert!(rendered.get("created_time").is_none());
+        assert!(rendered.get("delay_ms").is_none());
+    }
+
+    #[test]
     fn row_deserializes_with_missing_optional_fields() {
         let raw = r#"{"output_length":2}"#;
         let row: MooncakeRow = serde_json::from_str(raw).unwrap();
