@@ -374,7 +374,6 @@ vllm_configs = {
         env={"DYN_MM_ALLOW_INTERNAL": "1"},
         delayed_start=0,
         timeout=600,
-        env={"DYN_MM_ALLOW_INTERNAL": "1"},
         request_payloads=[
             ToolCallingChatPayload(
                 body={
