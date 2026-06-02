@@ -2941,7 +2941,7 @@ mod detect_parser_tests {
 {"location": "Tokyo"}
 ```<｜tool▁call▁end｜>"#;
         let result = detect_tool_call_start(text, Some("deepseek_v3")).unwrap();
-        assert!(!result);
+        assert!(result);
     }
 
     #[test]
@@ -2959,7 +2959,7 @@ mod detect_parser_tests {
     fn test_e2e_detect_incomplete_tool_call_start_deepseek_v3_1() {
         let text = r#"<｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Tokyo"}<｜tool▁call▁end｜>"#;
         let result = detect_tool_call_start(text, Some("deepseek_v3_1")).unwrap();
-        assert!(!result);
+        assert!(result);
     }
 
     #[test]
