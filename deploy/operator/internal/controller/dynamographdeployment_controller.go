@@ -100,6 +100,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups,verbs=get;list;watch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=grove.io,resources=clustertopologies,verbs=get;list;watch
+// +kubebuilder:rbac:groups=disaggregatedset.x-k8s.io,resources=disaggregatedsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.istio.io,resources=destinationrules,verbs=get;list;watch;create;update;patch;delete
@@ -426,17 +427,38 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 		return ReconcileResult{}, err
 	}
 
+	useDisaggregatedSet, disaggregatedSetFallbackReason := r.shouldUseDisaggregatedSet(dynamoDeployment)
+
 	var result ReconcileResult
 	if r.isGrovePathway(dynamoDeployment) {
 		logger.Info("Reconciling Grove resources", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.LWSEnabled)
+		if r.RuntimeConfig.DisaggregatedSetEnabled {
+			if err := r.deleteDisaggregatedSetIfExists(ctx, dynamoDeployment); err != nil {
+				return ReconcileResult{}, err
+			}
+		}
 		result, err = r.reconcileGroveResources(ctx, dynamoDeployment, restartState, checkpointInfos)
+	} else if useDisaggregatedSet {
+		logger.Info("Reconciling DisaggregatedSet resources", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.LWSEnabled)
+		result, err = r.reconcileDisaggregatedSetResources(ctx, dynamoDeployment, restartState)
 	} else {
+		if r.RuntimeConfig.DisaggregatedSetEnabled {
+			if err := r.deleteDisaggregatedSetIfExists(ctx, dynamoDeployment); err != nil {
+				return ReconcileResult{}, err
+			}
+		}
+		if r.wantsDisaggregatedSet(dynamoDeployment) && disaggregatedSetFallbackReason != "" {
+			logger.Info("DisaggregatedSet requested but falling back to DynamoComponentDeployment resources", "reason", disaggregatedSetFallbackReason)
+			if r.Recorder != nil {
+				r.Recorder.Eventf(dynamoDeployment, corev1.EventTypeWarning, "DisaggregatedSetFallback", "DisaggregatedSet requested but falling back to DynamoComponentDeployments: %s", disaggregatedSetFallbackReason)
+			}
+		}
 		logger.Info("Reconciling Dynamo components deployments", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.LWSEnabled)
 		result, err = r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment, restartState)
 	}
 	if err != nil {
-		logger.Error(err, "Failed to reconcile Dynamo components deployments")
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
+		logger.Error(err, "Failed to reconcile workload resources")
+		return ReconcileResult{}, fmt.Errorf("failed to reconcile workload resources: %w", err)
 	}
 	result.RestartStatus = restartStatus
 	return result, nil
@@ -457,6 +479,9 @@ func (r *DynamoGraphDeploymentReconciler) isGrovePathway(dgd *nvidiacomv1beta1.D
 func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgress(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment, inProgress []string) []string {
 	if r.isGrovePathway(dgd) {
 		return r.getUpdatedInProgressForGrove(ctx, dgd, inProgress)
+	}
+	if useDisaggregatedSet, _ := r.shouldUseDisaggregatedSet(dgd); useDisaggregatedSet {
+		return r.getUpdatedInProgressForDisaggregatedSet(ctx, dgd, inProgress)
 	}
 	return r.getUpdatedInProgressForComponent(ctx, dgd, inProgress)
 }
@@ -1396,6 +1421,54 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForComponent(ctx c
 	return updatedInProgress
 }
 
+// getUpdatedInProgressForDisaggregatedSet checks selected components against
+// DisaggregatedSet role status and falls back to DCD readiness for components
+// still reconciled outside the DisaggregatedSet.
+func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForDisaggregatedSet(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment, inProgress []string) []string {
+	logger := log.FromContext(ctx)
+
+	selection, reason := selectDisaggregatedSetComponents(dgd)
+	if reason != "" {
+		logger.V(1).Info("failed to select DisaggregatedSet components for restart progress", "reason", reason)
+		return inProgress
+	}
+
+	ds := newDisaggregatedSetObject()
+	dsErr := r.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(dgd), Namespace: dgd.Namespace}, ds)
+	if dsErr != nil && !errors.IsNotFound(dsErr) {
+		logger.V(1).Info("failed to get DisaggregatedSet for restart progress", "error", dsErr)
+	}
+
+	updatedInProgress := make([]string, 0, len(inProgress))
+	for _, componentName := range inProgress {
+		if _, selected := selection.componentToRole[componentName]; !selected {
+			isFullyUpdated, reason := r.checkComponentFullyUpdated(ctx, dgd, componentName)
+			if !isFullyUpdated {
+				logger.V(1).Info("component not fully updated", "componentName", componentName, "reason", reason)
+				updatedInProgress = append(updatedInProgress, componentName)
+			}
+			continue
+		}
+
+		if dsErr != nil {
+			reason := "resource not found"
+			if !errors.IsNotFound(dsErr) {
+				reason = dsErr.Error()
+			}
+			logger.V(1).Info("DisaggregatedSet component not fully updated", "componentName", componentName, "reason", reason)
+			updatedInProgress = append(updatedInProgress, componentName)
+			continue
+		}
+
+		isFullyUpdated, reason := checkDisaggregatedSetComponentReady(ds, selection, componentName)
+		if !isFullyUpdated {
+			logger.V(1).Info("DisaggregatedSet component not fully updated", "componentName", componentName, "reason", reason)
+			updatedInProgress = append(updatedInProgress, componentName)
+		}
+	}
+	return updatedInProgress
+}
+
 func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(resources []Resource) ReconcileResult {
 	// Sort resources by name to ensure deterministic ordering
 	sort.Slice(resources, func(i, j int) bool {
@@ -2152,6 +2225,14 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return false },
+		}))
+	}
+	if r.RuntimeConfig.DisaggregatedSetEnabled {
+		ctrlBuilder = ctrlBuilder.Owns(newDisaggregatedSetObject(), builder.WithPredicates(predicate.Funcs{
+			CreateFunc:  func(ce event.CreateEvent) bool { return false },
+			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+			UpdateFunc:  func(ue event.UpdateEvent) bool { return disaggregatedSetStatusChanged(ue.ObjectOld, ue.ObjectNew) },
+			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		}))
 	}
 	if r.RuntimeConfig.GroveEnabled {

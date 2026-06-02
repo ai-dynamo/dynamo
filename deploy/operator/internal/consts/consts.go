@@ -41,6 +41,12 @@ const (
 	KubeLabelDynamoSelector = "nvidia.com/selector"
 
 	KubeAnnotationEnableGrove = "nvidia.com/enable-grove"
+	// KubeAnnotationEnableDisaggregatedSet opts a non-Grove DGD into rendering
+	// one DisaggregatedSet for multinode worker roles instead of independent
+	// DynamoComponentDeployment-backed LeaderWorkerSets. The path is guarded by
+	// runtime CRD detection because DisaggregatedSet is not in the stable LWS
+	// release used by the operator yet.
+	KubeAnnotationEnableDisaggregatedSet = "nvidia.com/enable-disaggregatedset"
 
 	// KubeAnnotationIstioSidecarInject is the standard Istio annotation that
 	// controls whether the mutating webhook injects an istio-proxy sidecar into

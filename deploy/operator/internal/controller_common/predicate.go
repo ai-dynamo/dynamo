@@ -48,6 +48,14 @@ func DetectLWSAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 	return detectAPIGroupAvailability(ctx, mgr, "leaderworkerset.x-k8s.io", nil)
 }
 
+// DetectDisaggregatedSetAvailability checks if the LWS DisaggregatedSet API is
+// available. Dynamo targets v1 because older standalone DisaggregatedSet code
+// used v1alpha1 while the integrated LWS mainline API uses v1.
+func DetectDisaggregatedSetAvailability(ctx context.Context, mgr ctrl.Manager) bool {
+	version := "v1"
+	return detectAPIGroupAvailability(ctx, mgr, "disaggregatedset.x-k8s.io", &version)
+}
+
 // DetectVolcanoAvailability checks if Volcano is available by checking if the Volcano API group is registered
 func DetectVolcanoAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 	return detectAPIGroupAvailability(ctx, mgr, "scheduling.volcano.sh", nil)

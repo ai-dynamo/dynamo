@@ -81,6 +81,7 @@ var _ = BeforeSuite(func() {
 			filepath.Join(".", "testing", "volcano.sh"),
 			filepath.Join(".", "testing", "run.ai"),
 			filepath.Join(".", "testing", "nvidia"),
+			filepath.Join(".", "testing", "disaggregatedset"),
 		},
 		ErrorIfCRDPathMissing: false,
 

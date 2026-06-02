@@ -405,6 +405,8 @@ func main() {
 
 	setupLog.Info("Detecting LWS availability...")
 	lwsDetected := commonController.DetectLWSAvailability(mainCtx, mgr)
+	setupLog.Info("Detecting DisaggregatedSet availability...")
+	runtimeConfig.DisaggregatedSetEnabled = commonController.DetectDisaggregatedSetAvailability(mainCtx, mgr)
 	setupLog.Info("Detecting Volcano availability...")
 	volcanoDetected := commonController.DetectVolcanoAvailability(mainCtx, mgr)
 	// LWS for multinode deployment usage depends on both LWS and Volcano availability
@@ -470,6 +472,7 @@ func main() {
 	setupLog.Info("Detected orchestrators availability",
 		"grove", runtimeConfig.GroveEnabled,
 		"lws", runtimeConfig.LWSEnabled,
+		"disaggregatedset", runtimeConfig.DisaggregatedSetEnabled,
 		"volcano", volcanoDetected,
 		"kai-scheduler", runtimeConfig.KaiSchedulerEnabled,
 		"dra", runtimeConfig.DRAEnabled,

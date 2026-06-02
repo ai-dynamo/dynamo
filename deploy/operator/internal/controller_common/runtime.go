@@ -24,6 +24,10 @@ type RuntimeConfig struct {
 	GroveEnabled bool
 	// LWSEnabled is the resolved LWS availability (config override merged with auto-detection)
 	LWSEnabled bool
+	// DisaggregatedSetEnabled is true when the LWS DisaggregatedSet API is available.
+	// It is independent from LWSEnabled because current Dynamo depends on a stable
+	// LWS release while DisaggregatedSet is only available in newer LWS installs.
+	DisaggregatedSetEnabled bool
 	// KaiSchedulerEnabled is the resolved Kai-scheduler availability (config override merged with auto-detection)
 	KaiSchedulerEnabled bool
 	// DRAEnabled indicates whether Dynamic Resource Allocation (resource.k8s.io/v1) is available
