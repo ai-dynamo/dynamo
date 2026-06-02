@@ -1182,6 +1182,74 @@ mod tests {
     }
 
     #[test]
+    fn free_nonanchor_modeled_prefill_applies_anchor_credit() {
+        let sequences = make_sequences();
+        let worker = WorkerWithDpRank::new(1, 0);
+        let start = Instant::now();
+        let later = "later".to_string();
+
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: "oldest".to_string(),
+                    token_sequence: Some(vec![1, 2, 3]),
+                    track_prefill_tokens: true,
+                    expected_output_tokens: None,
+                    prefill_load_hint: modeled_hint(100, 10),
+                    worker,
+                    lora_name: None,
+                },
+                start,
+            )
+            .unwrap();
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: later.clone(),
+                    token_sequence: Some(vec![4, 5, 6]),
+                    track_prefill_tokens: true,
+                    expected_output_tokens: None,
+                    prefill_load_hint: modeled_hint(40, 4),
+                    worker,
+                    lora_name: None,
+                },
+                start,
+            )
+            .unwrap();
+
+        let completion_time = start + Duration::from_secs(5);
+        assert_eq!(
+            sequences
+                .active_tokens(completion_time)
+                .get(&worker)
+                .copied(),
+            Some(90)
+        );
+        assert_eq!(
+            modeled_time_loads_by_worker(&sequences, completion_time)
+                .get(&worker)
+                .copied(),
+            Some(Ok(9_000))
+        );
+
+        sequences.free(&later, completion_time).unwrap();
+
+        assert_eq!(
+            sequences
+                .active_tokens(completion_time)
+                .get(&worker)
+                .copied(),
+            Some(90)
+        );
+        assert_eq!(
+            modeled_time_loads_by_worker(&sequences, completion_time)
+                .get(&worker)
+                .copied(),
+            Some(Ok(9_000))
+        );
+    }
+
+    #[test]
     fn block_membership_index_matches_naive_loads_with_output_blocks_and_prefill_updates() {
         let sequences = make_multi_sequences();
         let worker_a = WorkerWithDpRank::new(1, 0);
@@ -1633,6 +1701,87 @@ mod tests {
 
         let loads = modeled_time_loads_by_worker(&sequences, Instant::now());
         assert_eq!(loads.get(&worker).copied(), Some(Ok(0)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn replica_sync_nonanchor_free_applies_receive_time_anchor_credit() {
+        let sequences = ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            4,
+            HashMap::from([(1_u64, (0_u32, 1_u32))]),
+            true,
+            0,
+            "test",
+        );
+        let worker = WorkerWithDpRank::new(1, 0);
+        let later = "later".to_string();
+
+        sequences
+            .run_replica_sync(
+                VecSubscriber {
+                    events: VecDeque::from(vec![
+                        Ok(ActiveSequenceEvent {
+                            request_id: "oldest".to_string(),
+                            worker,
+                            data: ActiveSequenceEventData::AddRequest {
+                                token_sequence: Some(vec![1, 2, 3]),
+                                track_prefill_tokens: true,
+                                expected_output_tokens: None,
+                                prefill_load_hint: modeled_hint(100, 10),
+                            },
+                            router_id: 99,
+                            lora_name: None,
+                        }),
+                        Ok(ActiveSequenceEvent {
+                            request_id: later.clone(),
+                            worker,
+                            data: ActiveSequenceEventData::AddRequest {
+                                token_sequence: Some(vec![4, 5, 6]),
+                                track_prefill_tokens: true,
+                                expected_output_tokens: None,
+                                prefill_load_hint: modeled_hint(40, 4),
+                            },
+                            router_id: 99,
+                            lora_name: None,
+                        }),
+                    ]),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let completion_time = Instant::now();
+        assert_eq!(
+            modeled_time_loads_by_worker(&sequences, completion_time)
+                .get(&worker)
+                .copied(),
+            Some(Ok(9_000))
+        );
+
+        sequences
+            .run_replica_sync(
+                VecSubscriber {
+                    events: VecDeque::from(vec![Ok(ActiveSequenceEvent {
+                        request_id: later,
+                        worker,
+                        data: ActiveSequenceEventData::Free,
+                        router_id: 99,
+                        lora_name: None,
+                    })]),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            modeled_time_loads_by_worker(&sequences, completion_time)
+                .get(&worker)
+                .copied(),
+            Some(Ok(9_000))
+        );
     }
 
     #[tokio::test]

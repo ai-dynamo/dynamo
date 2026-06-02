@@ -20,10 +20,12 @@ pub(super) struct PrefillLoadState {
 pub(super) struct AnchoredPrefillSnapshot {
     pub(super) initial_effective_prefill_tokens: usize,
     pub(super) expected_prefill_duration: Option<Duration>,
-    /// When the oldest active prefill became the decay anchor.
+    /// Effective decay anchor time for the oldest active prefill.
     ///
-    /// The elapsed time from this front request is applied to the aggregate
-    /// all-modeled backlog, allowing spillover into later prefills.
+    /// This usually starts as the router time when the request became oldest,
+    /// but it may be shifted forward when modeled non-anchor prefills complete
+    /// out of order. The elapsed time from this effective anchor is applied to
+    /// the aggregate all-modeled backlog.
     pub(super) anchored_since: Instant,
 }
 
@@ -201,10 +203,11 @@ pub(super) struct PrefillLoadTracker {
     pub(super) prefill_order: VecDeque<RequestId>,
     pub(super) prefill_full_tokens_sum: usize,
     pub(super) unmodeled_prefill_count: usize,
-    /// The front of `prefill_order` plus the local time it became front.
+    /// The front of `prefill_order` plus its effective decay anchor time.
     ///
-    /// This anchors both token decay and modeled-time decay. When the anchor is
-    /// removed, the next queued prefill is re-anchored at that removal time.
+    /// This anchors both token decay and modeled-time decay. It starts as the
+    /// local time the front request became oldest, may shift forward when a
+    /// modeled non-front prefill is removed, and is capped at that removal time.
     pub(super) anchored_prefill: Option<(RequestId, Instant)>,
 }
 
@@ -250,6 +253,9 @@ impl PrefillLoadTracker {
         } else {
             self.prefill_order
                 .retain(|queued_request_id| queued_request_id != request_id);
+            if let Some(expected_prefill_duration) = prefill.expected_prefill_duration {
+                self.shift_anchor_forward(expected_prefill_duration, decay_now);
+            }
         }
         if self
             .anchored_prefill
@@ -259,6 +265,16 @@ impl PrefillLoadTracker {
             self.set_anchor_to_front(decay_now);
         }
         Some(prefill)
+    }
+
+    fn shift_anchor_forward(&mut self, duration: Duration, max_anchor_time: Instant) {
+        let Some((_, anchored_since)) = self.anchored_prefill.as_mut() else {
+            return;
+        };
+        let shifted = anchored_since
+            .checked_add(duration)
+            .unwrap_or(max_anchor_time);
+        *anchored_since = shifted.min(max_anchor_time);
     }
 
     pub(super) fn set_anchor_to_front(&mut self, now: Instant) {
@@ -576,6 +592,119 @@ mod tests {
     }
 
     #[test]
+    fn nonfront_modeled_removal_preserves_time_and_token_continuity() {
+        let epoch = Instant::now();
+        let mut tracker = PrefillLoadTracker::default();
+        let r1 = "r1".to_string();
+        let r2 = "r2".to_string();
+
+        let p1 = prefill_state(100, 10);
+        let p2 = prefill_state(40, 4);
+        tracker.insert(&r1, p1, epoch);
+        tracker.insert(&r2, p2, epoch);
+
+        let completion_time = epoch + Duration::from_secs(5);
+        let before = tracker.snapshot();
+        assert_eq!(before.active_tokens_at(completion_time), 90);
+        assert_eq!(
+            before.modeled_remaining_prefill_time_ms_at(completion_time),
+            Ok(9_000)
+        );
+
+        assert_eq!(tracker.remove(&r2, completion_time), Some(p2));
+
+        assert_eq!(tracker.prefill_order, VecDeque::from([r1.clone()]));
+        assert!(
+            tracker
+                .anchored_prefill
+                .as_ref()
+                .is_some_and(|(request_id, anchored_since)| {
+                    request_id == &r1 && *anchored_since == epoch + Duration::from_secs(4)
+                })
+        );
+
+        let after = tracker.snapshot();
+        assert_eq!(after.active_tokens_at(completion_time), 90);
+        assert_eq!(
+            after.modeled_remaining_prefill_time_ms_at(completion_time),
+            Ok(9_000)
+        );
+    }
+
+    #[test]
+    fn nonfront_modeled_removal_caps_anchor_shift_at_removal_time() {
+        let epoch = Instant::now();
+        let mut tracker = PrefillLoadTracker::default();
+        let r1 = "r1".to_string();
+        let r2 = "r2".to_string();
+
+        let p1 = prefill_state(100, 10);
+        let p2 = prefill_state(40, 4);
+        tracker.insert(&r1, p1, epoch);
+        tracker.insert(&r2, p2, epoch);
+
+        let completion_time = epoch + Duration::from_secs(2);
+        assert_eq!(tracker.remove(&r2, completion_time), Some(p2));
+
+        assert!(
+            tracker
+                .anchored_prefill
+                .as_ref()
+                .is_some_and(|(request_id, anchored_since)| {
+                    request_id == &r1 && *anchored_since == completion_time
+                })
+        );
+
+        let snapshot = tracker.snapshot();
+        assert_eq!(snapshot.active_tokens_at(completion_time), 100);
+        assert_eq!(
+            snapshot.modeled_remaining_prefill_time_ms_at(completion_time),
+            Ok(10_000)
+        );
+        assert_eq!(
+            snapshot.active_tokens_at(completion_time + Duration::from_secs(1)),
+            90
+        );
+        assert_eq!(
+            snapshot.modeled_remaining_prefill_time_ms_at(completion_time + Duration::from_secs(1)),
+            Ok(9_000)
+        );
+    }
+
+    #[test]
+    fn nonfront_unmodeled_removal_does_not_shift_anchor() {
+        let epoch = Instant::now();
+        let mut tracker = PrefillLoadTracker::default();
+        let r1 = "r1".to_string();
+        let r2 = "r2".to_string();
+
+        let p1 = prefill_state(100, 10);
+        let p2 = unmodeled_prefill_state(40);
+        tracker.insert(&r1, p1, epoch);
+        tracker.insert(&r2, p2, epoch);
+
+        assert_eq!(
+            tracker.remove(&r2, epoch + Duration::from_secs(5)),
+            Some(p2)
+        );
+
+        assert!(
+            tracker
+                .anchored_prefill
+                .as_ref()
+                .is_some_and(|(request_id, anchored_since)| {
+                    request_id == &r1 && *anchored_since == epoch
+                })
+        );
+        assert_eq!(
+            tracker
+                .snapshot()
+                .active_tokens_at(epoch + Duration::from_secs(5)),
+            50
+        );
+    }
+
+    #[test]
     fn removing_anchored_prefill_reanchors_front_and_resets_decay() {
         let epoch = Instant::now();
         let mut tracker = PrefillLoadTracker::default();
@@ -616,7 +745,7 @@ mod tests {
     }
 
     #[test]
-    fn removing_nonfront_prefill_preserves_existing_anchor() {
+    fn removing_nonfront_modeled_prefill_shifts_existing_anchor() {
         let epoch = Instant::now();
         let mut tracker = PrefillLoadTracker::default();
         let r1 = "r1".to_string();
@@ -638,13 +767,17 @@ mod tests {
                 .anchored_prefill
                 .as_ref()
                 .is_some_and(|(request_id, anchored_since)| {
-                    request_id == &r1 && *anchored_since == epoch
+                    request_id == &r1 && *anchored_since == epoch + Duration::from_secs(2)
                 })
         );
 
         let snapshot = tracker.snapshot();
         assert_eq!(
             snapshot.active_tokens_at(epoch + Duration::from_secs(2)),
+            30
+        );
+        assert_eq!(
+            snapshot.active_tokens_at(epoch + Duration::from_secs(4)),
             20
         );
     }

@@ -81,6 +81,14 @@ The active-token load view uses the same aggregate spillover only when all activ
 modeled durations. If any active prefill lacks an expected duration, token load falls back to
 anchor-only decay so unmodeled no-AIC/default requests do not decay. A zero-duration anchor is treated
 as completing its own tokens immediately without inventing token spillover into later requests.
+This token-load approximation assumes active modeled prefills have roughly uniform tokens/sec.
+
+If a modeled non-anchor prefill is removed before the anchor, the tracker credits that completed work
+by shifting the effective anchor forward by the removed request's modeled duration, capped at the
+removal time. This keeps completed non-anchor work from also counting as elapsed progress against the
+remaining modeled backlog. `Free` keeps its existing implicit prefill-completion cleanup behavior and
+applies the same credit when the prefill is still tracked. Replica-synced state remains advisory and
+receive-time anchored.
 
 When any active prefill for a worker lacks an expected duration, the modeled-time read returns
 `Err(MissingExpectedDuration)`. That is the normal default/no-AIC or prediction-failed state, and the
