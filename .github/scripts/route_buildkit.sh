@@ -11,10 +11,10 @@
 # Routing is optimized for Docker layer caching, linear scaling, and
 # 100% pod utilization across any number of BuildKit pods.
 #
-# CACHE GROUPS (3 distinct groups to maximize layer reuse):
-#   - Group 0 (cuda-dl-base-13):    vLLM & SGLang (CUDA 13.x)
-#   - Group 1 (cuda-dl-base-12):    vLLM & SGLang (CUDA 12.x)
-#   - Group 2 (general-trt-combined): TRT-LLM & General Builds
+# CACHE GROUPS (3 distinct groups, one cache domain per framework):
+#   - Group 0 (vllm-cuda-dl-base-13):   vLLM (CUDA 13.x)
+#   - Group 1 (sglang-cuda-dl-base-13): SGLang (CUDA 13.x)
+#   - Group 2 (general-trt-combined):   TRT-LLM & General Builds
 #
 # ALGORITHM:
 # 1. SCORING: Each group key is hashed with every active pod index (SHA-256)
@@ -28,19 +28,19 @@
 #    This guarantees every active pod appears in at least one group's pool.
 # 5. RANDOM PICK: ONE pod is randomly selected from the candidate pool.
 #
-# LOAD DISTRIBUTION (cksum-based, all pods utilized):
+# LOAD DISTRIBUTION (SHA-256 rendezvous, amd64 example, all pods utilized):
 # +------+------+-------------------+-------------------+---------------------+
-# | Pods | Pool | G0: vLLM/SGL C13  | G1: vLLM/SGL C12  | G2: TRT-LLM/General |
+# | Pods | Pool | G0: vLLM          | G1: SGLang        | G2: TRT-LLM/General |
 # +------+------+-------------------+-------------------+---------------------+
 # |  1   |  1   | {0}               | {0}               | {0}                 |
-# |  2   |  1   | {0}               | {1}               | {1}                 |
-# |  3   |  1   | {0}               | {2}               | {1}                 |
-# |  4   |  2   | {0, 3}            | {2, 1}            | {1, 2}             |
-# |  5   |  2   | {0, 3}            | {2, 4}            | {1, 2}             |
-# |  6   |  2   | {0, 3}            | {5, 1}            | {2, 4}             |
-# |  7   |  3   | {0, 3, 4}         | {5, 1, 2}         | {2, 6, 5}          |
-# |  8   |  3   | {7, 0, 3}         | {5, 1, 4}         | {2, 6, 5}          |
-# |  9   |  3   | {7, 0, 3}         | {8, 5, 1}         | {2, 6, 4}          |
+# |  2   |  1   | {0}               | {1}               | {0}                 |
+# |  3   |  1   | {0}               | {1}               | {2}                 |
+# |  4   |  2   | {0, 2}            | {3, 1}            | {1, 0}              |
+# |  5   |  2   | {0, 2}            | {3, 1}            | {4, 0}              |
+# |  6   |  2   | {0, 4}            | {5, 1}            | {3, 2}              |
+# |  7   |  3   | {6, 4, 2}         | {5, 3, 6}         | {0, 1, 6}           |
+# |  8   |  3   | {6, 4, 2}         | {5, 3, 1}         | {0, 7, 6}           |
+# |  9   |  3   | {6, 8, 4}         | {5, 3, 1}         | {0, 7, 2}           |
 # +------+------+-------------------+-------------------+---------------------+
 #
 # =============================================================================
@@ -68,7 +68,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     *)
-      echo "❌ Error: Unknown argument '$1'. Use --arch <amd64|arm64|all> --flavor <vllm|trtllm|sglang|general|all> [--cuda <12.9|13.0>]."
+      echo "❌ Error: Unknown argument '$1'. Use --arch <amd64|arm64|all> --flavor <vllm|trtllm|sglang|general|all> [--cuda <13.0|13.1>]."
       exit 1
       ;;
   esac
@@ -86,7 +86,7 @@ fi
 
 # CUDA version is required for all flavors except "general"
 if [ -z "$CUDA_VERSION" ] && [ "$FLAVOR_INPUT" != "general" ]; then
-  echo "❌ Error: Must specify --cuda <12.9|13.0> for flavor '$FLAVOR_INPUT'."
+  echo "❌ Error: Must specify --cuda <13.0|13.1> for flavor '$FLAVOR_INPUT'."
   exit 1
 fi
 
@@ -111,9 +111,9 @@ esac
 # Validate CUDA version input (allow empty for general flavor)
 if [ -n "$CUDA_VERSION" ]; then
   case $CUDA_VERSION in
-    12.9|13.0|13.1) ;;
+    13.0|13.1) ;;
     *)
-      echo "❌ Error: Invalid CUDA version '$CUDA_VERSION'. Must be 12.9, 13.0, or 13.1."
+      echo "❌ Error: Invalid CUDA version '$CUDA_VERSION'. Must be 13.0 or 13.1."
       exit 1
       ;;
   esac
@@ -174,19 +174,16 @@ get_active_indices() {
   echo "${active_indices[@]}"
 }
 
-GROUP_KEYS=("cuda-dl-base-13" "cuda-dl-base-12" "general-trt-combined")
+GROUP_KEYS=("vllm-cuda-dl-base-13" "sglang-cuda-dl-base-13" "general-trt-combined")
 
-# Map a flavor + CUDA version to a group index (0, 1, or 2)
+# Map a flavor to a group index (0, 1, or 2). One cache domain per framework:
+# vLLM and SGLang each get a dedicated group (both on cuda-dl-base-13); TRT-LLM
+# and general builds share the third.
 flavor_to_group() {
   local flavor=$1
-  local cuda_major=${2%%.*}
   case "$flavor" in
-    vllm|sglang)
-      case "$cuda_major" in
-        13) echo 0 ;;
-        *)  echo 1 ;;
-      esac
-      ;;
+    vllm)  echo 0 ;;
+    sglang) echo 1 ;;
     trtllm|general|*) echo 2 ;;
   esac
 }

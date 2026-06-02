@@ -279,7 +279,7 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      cuda_version: '["12.9"]'
+      cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       make_efa: true
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
@@ -294,7 +294,7 @@ jobs:
     with:
       framework: sglang
       target: runtime
-      cuda_version: '["12.9"]'
+      cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       make_efa: true
       builder_name: ${{ needs.changed-files.outputs.builder_name }}

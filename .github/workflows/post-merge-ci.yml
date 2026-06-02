@@ -164,7 +164,7 @@ jobs:
       framework: vllm
       target: runtime
       platform: 'linux/amd64,linux/arm64'
-      cuda_version: '["12.9"]'
+      cuda_version: '["13.0"]'
       make_efa: true
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 120
@@ -217,7 +217,7 @@ jobs:
       framework: sglang
       target: runtime
       platform: 'linux/amd64,linux/arm64'
-      cuda_version: '["12.9"]'
+      cuda_version: '["13.0"]'
       make_efa: true
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 120
@@ -363,7 +363,7 @@ jobs:
       test_type: CPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.vllm-efa-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]'
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
