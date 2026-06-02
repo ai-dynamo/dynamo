@@ -179,6 +179,7 @@ RUN set -eux; \
 # constraining packages already solved in the upstream vLLM image.
 RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target=/tmp/vllm_omni_protected_packages.txt \
     --mount=type=bind,source=./container/deps/vllm/install_vllm_omni.sh,target=/tmp/install_vllm_omni.sh \
+    --mount=type=bind,source=./container/deps/vllm/patches,target=/tmp/vllm_patches,readonly \
     --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \

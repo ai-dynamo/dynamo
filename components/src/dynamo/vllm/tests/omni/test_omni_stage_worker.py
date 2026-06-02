@@ -14,6 +14,8 @@ import yaml
 
 try:
     from dynamo.vllm.omni.stage_worker import (
+        _ASYNC_PREWARM_KEY,
+        _ASYNC_PREWARM_READY_KEY,
         OmniStageWorker,
         _ensure_stage_connectors,
         _normalize_single_stage_runtime_devices,
@@ -80,6 +82,7 @@ def _make_stage_config(**overrides):
         final_output=False,
         final_output_type="text",
         engine_input_source=[],
+        engine_args=SimpleNamespace(async_chunk=False),
     )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -241,6 +244,102 @@ async def test_stage_connector_refs_with_processor():
     assert processor_calls[0]["requires_mm"] is False
     assert engine.received_prompt == processed_prompt
     assert chunks[0]["stage_connector_refs"]["1"] == {"name": "ref1"}
+
+
+def test_process_stage_inputs_accepts_prompt_alias_processor():
+    """vLLM-Omni processors may name the original prompt argument ."""
+    fetched_output = {"latents": [0.1, 0.2]}
+    processed_prompt = {"processed": True}
+    processor_calls = []
+
+    def mock_processor(source_outputs, prompt, requires_multimodal_data):
+        processor_calls.append(
+            {
+                "source_outputs": source_outputs,
+                "prompt": prompt,
+                "requires_multimodal_data": requires_multimodal_data,
+            }
+        )
+        return [processed_prompt]
+
+    worker = OmniStageWorker(
+        engine=_MockEngine(),
+        stage_config=_make_stage_config(
+            custom_process_input_func=None,
+            engine_input_source=[0],
+            requires_multimodal_data=True,
+        ),
+        connectors={},
+        stage_id=1,
+    )
+    worker._processor = mock_processor
+
+    prompt = worker._process_stage_inputs(
+        [_Proxy(engine_outputs=[fetched_output])],
+        {"prompt": "hi"},
+    )
+
+    assert prompt == [processed_prompt]
+    assert processor_calls == [
+        {
+            "source_outputs": [fetched_output],
+            "prompt": {"prompt": "hi"},
+            "requires_multimodal_data": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_async_prewarm_preserves_explicit_empty_prompt_token_ids():
+    """Final async generation stages must be allowed to wait on upstream chunks."""
+    engine = _MockEngine()
+    worker = _make_worker(
+        engine=engine,
+        stage_id=2,
+        stage_config=_make_stage_config(
+            engine_args=SimpleNamespace(async_chunk=True),
+            default_sampling_params={"temperature": 0.0, "max_tokens": 1},
+        ),
+    )
+    built_prompt = SimpleNamespace(prompt_token_ids=[])
+
+    with patch.object(
+        worker, "_build_engine_core_request_from_tokens", return_value=built_prompt
+    ) as build_request:
+        chunks = [
+            chunk
+            async for chunk in worker.generate(
+                {
+                    "request_id": "req-code2wav",
+                    "prompt_token_ids": [],
+                    "final_stage_id": 2,
+                    "sampling_params_list": {"max_tokens": 1},
+                    _ASYNC_PREWARM_KEY: True,
+                },
+                _MockContext(),
+            )
+        ]
+
+    assert build_request.call_args.args[0] == []
+    assert any(chunk.get(_ASYNC_PREWARM_READY_KEY) for chunk in chunks)
+
+
+def test_stage_config_to_dict_can_preserve_async_stage_topology():
+    result = _stage_config_to_dict(
+        SimpleNamespace(
+            stage_id=2,
+            engine_args=SimpleNamespace(model_stage="code2wav", async_chunk=True),
+            input_connectors={"from_stage_1": "connector_of_shared_memory"},
+            output_connectors={"to_stage_3": "connector_of_shared_memory"},
+            final_output_type="audio",
+        ),
+        "llm",
+        preserve_stage_id=True,
+    )
+
+    assert result["stage_id"] == 2
+    assert result["input_connectors"] == {"from_stage_1": "connector_of_shared_memory"}
+    assert result["output_connectors"] == {"to_stage_3": "connector_of_shared_memory"}
 
 
 def test_process_stage_inputs_ignores_var_kwargs_for_dispatch():
