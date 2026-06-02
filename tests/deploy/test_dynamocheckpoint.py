@@ -9,8 +9,10 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+import aiohttp
 import pytest
 import requests
+from kubernetes_asyncio.client import exceptions as k8s_exceptions
 
 from tests.utils.client import send_request, wait_for_model_availability
 from tests.utils.managed_deployment import (
@@ -20,6 +22,12 @@ from tests.utils.managed_deployment import (
 )
 
 logger = logging.getLogger(__name__)
+
+TRANSIENT_K8S_EXCEPTIONS = (
+    aiohttp.ClientError,
+    asyncio.TimeoutError,
+    k8s_exceptions.ApiException,
+)
 
 DGD_PLURAL = "dynamographdeployments"
 CHECKPOINT_PLURAL = "dynamocheckpoints"
@@ -125,14 +133,25 @@ async def _wait_for(
 ) -> Any:
     deadline = time.monotonic() + timeout_s
     last_value: Any = None
+    last_error: Exception | None = None
     while time.monotonic() < deadline:
-        last_value = fn()
-        if hasattr(last_value, "__await__"):
-            last_value = await last_value
-        if predicate(last_value):
-            return last_value
+        try:
+            last_value = fn()
+            if hasattr(last_value, "__await__"):
+                last_value = await last_value
+            last_error = None
+            if predicate(last_value):
+                return last_value
+        except TRANSIENT_K8S_EXCEPTIONS as exc:
+            last_error = exc
+            logger.warning(
+                "Transient error while waiting for %s: %s", description, exc
+            )
         await asyncio.sleep(interval_s)
-    raise AssertionError(f"timed out waiting for {description}; last={last_value!r}")
+    message = f"timed out waiting for {description}; last={last_value!r}"
+    if last_error is not None:
+        message += f"; last_error={last_error!r}"
+    raise AssertionError(message)
 
 
 async def _get_dgd(deployment: ManagedDeployment) -> dict[str, Any]:
