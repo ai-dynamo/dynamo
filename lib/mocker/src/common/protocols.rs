@@ -590,10 +590,13 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub aic_attention_dp_size: Option<usize>,
 
-    /// MTP/Eagle speculative-decoding draft-token count (max 5). When set,
+    /// MTP/Eagle speculative-decoding draft-token count (1..=5). When set,
     /// AIC's perf model applies the spec-dec speedup to decode latency.
+    /// Validated here so the mocker/replay JSON path shares the same 1..=5
+    /// contract as `AicPerfConfig` (omit to disable spec dec).
     #[serde(skip)]
     #[builder(default = "None")]
+    #[validate(range(min = 1, max = 5))]
     pub aic_nextn: Option<usize>,
 
     /// Per-position accept rates for MTP draft tokens, comma-separated
@@ -1281,6 +1284,29 @@ mod tests {
             missing_g2.to_string().contains("requires num_g2_blocks"),
             "unexpected error: {missing_g2}",
         );
+    }
+
+    #[test]
+    fn test_normalized_rejects_out_of_range_aic_nextn() {
+        // The mocker/replay JSON path must share AicPerfConfig's 1..=5 contract.
+        for bad in [0_usize, 6] {
+            let err = MockEngineArgs::builder()
+                .aic_nextn(Some(bad))
+                .build()
+                .unwrap()
+                .normalized()
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("aic_nextn"),
+                "unexpected error for nextn={bad}: {err}",
+            );
+        }
+        MockEngineArgs::builder()
+            .aic_nextn(Some(3))
+            .build()
+            .unwrap()
+            .normalized()
+            .expect("in-range aic_nextn should validate");
     }
 
     #[test]

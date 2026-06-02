@@ -66,6 +66,12 @@ def _pad_nextn_accept_rates(
     if not nextn_accept_rates:
         return list(_DEFAULT_NEXTN_ACCEPT_RATES)
     rates = list(nextn_accept_rates)
+    # Rates are acceptance probabilities; out-of-range or non-finite values
+    # would silently skew calc_expectation rather than surface a config error.
+    if any(not math.isfinite(r) or not 0.0 <= r <= 1.0 for r in rates):
+        raise ValueError(
+            f"aic_nextn_accept_rates must be finite floats in [0, 1], got {rates}"
+        )
     if len(rates) < _NEXTN_ACCEPT_RATES_LEN:
         rates = rates + [0.0] * (_NEXTN_ACCEPT_RATES_LEN - len(rates))
     elif len(rates) > _NEXTN_ACCEPT_RATES_LEN:
@@ -140,10 +146,11 @@ class AicSession:
             attention_dp_size=attention_dp_size or 1,
         )
         if nextn:
-            if nextn > _NEXTN_ACCEPT_RATES_LEN:
-                # AIC indexes accept_rates up to nextn; >5 would IndexError.
+            # Mirror the Rust 1..=5 contract; AIC indexes accept_rates up to
+            # nextn, so >5 would IndexError in calc_expectation.
+            if not 1 <= nextn <= _NEXTN_ACCEPT_RATES_LEN:
                 raise ValueError(
-                    f"nextn must be <= {_NEXTN_ACCEPT_RATES_LEN} when set, got {nextn}"
+                    f"nextn must be 1..={_NEXTN_ACCEPT_RATES_LEN} when set, got {nextn}"
                 )
             model_config_kwargs["nextn"] = nextn
             model_config_kwargs["nextn_accept_rates"] = _pad_nextn_accept_rates(
