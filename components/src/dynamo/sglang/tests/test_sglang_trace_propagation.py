@@ -59,6 +59,8 @@ def _make_engine(async_generate, enable_trace: bool) -> SglangLLMEngine:
     engine.engine = SimpleNamespace(async_generate=async_generate)
     engine.serving_mode = DisaggregationMode.AGGREGATED
     engine.enable_trace = enable_trace
+    engine.server_args = SimpleNamespace(reasoning_parser=None)
+    engine.dynamo_args = SimpleNamespace(dyn_reasoning_parser=None)
     # Single-rank defaults: validate_global_dp_rank(None, 0, 1, ...) -> None.
     engine._dp_start = 0
     engine._dp_size = 1
@@ -68,8 +70,10 @@ def _make_engine(async_generate, enable_trace: bool) -> SglangLLMEngine:
     return engine
 
 
-async def _drain(engine: SglangLLMEngine, ctx: _FakeContext) -> None:
-    async for _ in engine.generate({"token_ids": [1, 2, 3]}, ctx):
+async def _drain(
+    engine: SglangLLMEngine, ctx: _FakeContext, request: dict | None = None
+) -> None:
+    async for _ in engine.generate(request or {"token_ids": [1, 2, 3]}, ctx):
         pass
 
 
@@ -108,3 +112,28 @@ async def test_gates_off_when_enable_trace_false():
 
     # kwarg omitted (engine_trace_kwargs returns {} when enabled=False).
     assert "external_trace_header" not in captured
+
+
+async def test_sets_require_reasoning_context_from_frontend_extra_args():
+    from dynamo.sglang.reasoning import _DYN_REQUIRE_REASONING_CV
+
+    observed: list[bool] = []
+
+    async def fake_async_generate(**kwargs):
+        observed.append(_DYN_REQUIRE_REASONING_CV.get())
+        return _empty_async_iter()
+
+    engine = _make_engine(fake_async_generate, enable_trace=False)
+    engine.server_args = SimpleNamespace(reasoning_parser="qwen3")
+
+    await _drain(
+        engine,
+        _FakeContext(),
+        {
+            "token_ids": [1, 2, 3],
+            "extra_args": {"prompt_injected_reasoning": True},
+        },
+    )
+
+    assert observed == [True]
+    assert _DYN_REQUIRE_REASONING_CV.get() is False

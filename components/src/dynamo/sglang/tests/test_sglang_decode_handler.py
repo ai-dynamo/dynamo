@@ -7,6 +7,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from dynamo.sglang.reasoning import (
+    _DYN_REQUIRE_REASONING_CV,
+    install_require_reasoning_proxy,
+    request_requires_reasoning,
+)
 from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
     _extract_media_urls,
@@ -119,6 +124,93 @@ def test_openai_stop_sampling_params_maps_token_id_stop_array():
     assert _openai_stop_sampling_params({"stop_token_ids": [32, 34]}) == {
         "stop_token_ids": [32, 34]
     }
+
+
+def test_validate_parser_flags_allows_matching_reasoning_parsers():
+    from dynamo.sglang.args import _validate_parser_flags
+
+    _validate_parser_flags("qwen3", "qwen3", "reasoning-parser")
+    _validate_parser_flags("kimi_k2", "kimi_k25", "reasoning-parser")
+
+
+def test_validate_parser_flags_rejects_mismatched_reasoning_parsers():
+    from dynamo.sglang.args import _validate_parser_flags
+
+    with pytest.raises(SystemExit):
+        _validate_parser_flags("qwen3", "glm45", "reasoning-parser")
+
+
+def test_mirror_dyn_reasoning_parser_to_sglang():
+    from dynamo.sglang.args import _mirror_dyn_reasoning_parser_to_sglang
+
+    parsed_args = SimpleNamespace(reasoning_parser=None)
+    dynamo_config = SimpleNamespace(dyn_reasoning_parser="qwen3")
+
+    _mirror_dyn_reasoning_parser_to_sglang(parsed_args, dynamo_config)
+
+    assert parsed_args.reasoning_parser == "qwen3"
+
+
+def test_mirror_dyn_reasoning_parser_to_sglang_translates_alias():
+    from dynamo.sglang.args import _mirror_dyn_reasoning_parser_to_sglang
+
+    parsed_args = SimpleNamespace(reasoning_parser=None)
+    dynamo_config = SimpleNamespace(dyn_reasoning_parser="nemotron_deci")
+
+    _mirror_dyn_reasoning_parser_to_sglang(parsed_args, dynamo_config)
+
+    assert parsed_args.reasoning_parser == "glm45"
+
+
+def test_request_requires_reasoning_from_frontend_extra_args():
+    assert request_requires_reasoning(
+        True,
+        {"extra_args": {"prompt_injected_reasoning": True}},
+        {"input_ids": [1, 2, 3]},
+    )
+    assert request_requires_reasoning(
+        True,
+        {"extra_args": {"require_reasoning": True}},
+        {"input_ids": [1, 2, 3]},
+    )
+    assert not request_requires_reasoning(
+        False,
+        {"extra_args": {"prompt_injected_reasoning": True}},
+        {"prompt": "<think>"},
+    )
+
+
+def test_request_requires_reasoning_prompt_fallback():
+    assert request_requires_reasoning(True, {}, {"prompt": "hello\n<think>"})
+    assert not request_requires_reasoning(True, {}, {"prompt": "hello\n</think>"})
+
+
+class _GenerateReqInputStub:
+    require_reasoning = False
+
+
+class _TokenizerManagerStub:
+    def __init__(self):
+        self.last_obj = None
+
+    def generate_request(self, obj, request):
+        self.last_obj = obj
+        return object()
+
+
+def test_require_reasoning_proxy_sets_sglang_request_flag():
+    tm = _TokenizerManagerStub()
+    engine = SimpleNamespace(tokenizer_manager=tm)
+    install_require_reasoning_proxy(engine)
+
+    token = _DYN_REQUIRE_REASONING_CV.set(True)
+    try:
+        obj = _GenerateReqInputStub()
+        tm.generate_request(obj, object())
+    finally:
+        _DYN_REQUIRE_REASONING_CV.reset(token)
+
+    assert obj.require_reasoning is True
 
 
 def _new_decode_handler(*, use_sglang_tokenizer: bool = False):

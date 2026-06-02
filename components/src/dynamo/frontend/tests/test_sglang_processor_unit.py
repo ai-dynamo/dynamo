@@ -112,6 +112,18 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         )
         assert result["sampling_options"]["top_k"] == 50
 
+    def test_require_reasoning_forwards_backend_extra_args(self):
+        """Reasoning-gated guided decoding must reach the SGLang backend."""
+        result = _build_dynamo_preproc(
+            {"model": "test"},
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_id=None,
+            require_reasoning=True,
+        )
+        assert result["extra_args"]["require_reasoning"] is True
+        assert "prompt_injected_reasoning" not in result["extra_args"]
+
     def test_sampling_options_from_request(self):
         """All sampling fields are projected from request."""
         request = {

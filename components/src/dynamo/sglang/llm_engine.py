@@ -59,6 +59,10 @@ from dynamo.sglang.capacity import (
     runtime_capacity,
 )
 from dynamo.sglang.publisher import format_zmq_endpoint
+from dynamo.sglang.reasoning import (
+    install_require_reasoning_proxy,
+    require_reasoning_context,
+)
 
 if TYPE_CHECKING:
     from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
@@ -149,6 +153,7 @@ class SglangLLMEngine(LLMEngine):
         del worker_id  # SGLang bootstrap uses host/port/room triples
 
         self.engine = sgl.Engine(server_args=self.server_args)
+        install_require_reasoning_proxy(self.engine)
 
         tokenizer = (
             self.engine.tokenizer_manager.tokenizer
@@ -289,19 +294,22 @@ class SglangLLMEngine(LLMEngine):
             "SGLang",
         )
 
-        stream = await self.engine.async_generate(
-            **input_param,
-            sampling_params=sampling_params,
-            stream=True,
-            rid=context.trace_id,
-            data_parallel_rank=sgl_dp_rank,
-            **telemetry.engine_trace_kwargs(
-                context,
-                kwarg_name="external_trace_header",
-                enabled=self.enable_trace,
-            ),
-            **bootstrap_kwargs,
-        )
+        with require_reasoning_context(
+            self._has_reasoning_parser(), dict(request), input_param
+        ):
+            stream = await self.engine.async_generate(
+                **input_param,
+                sampling_params=sampling_params,
+                stream=True,
+                rid=context.trace_id,
+                data_parallel_rank=sgl_dp_rank,
+                **telemetry.engine_trace_kwargs(
+                    context,
+                    kwarg_name="external_trace_header",
+                    enabled=self.enable_trace,
+                ),
+                **bootstrap_kwargs,
+            )
 
         # ORDER MATTERS: async_generate must register the room (the await
         # above) before we yield the bootstrap chunk — otherwise the
@@ -719,3 +727,9 @@ class SglangLLMEngine(LLMEngine):
         return {
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
         }
+
+    def _has_reasoning_parser(self) -> bool:
+        return bool(
+            getattr(self.server_args, "reasoning_parser", None)
+            or getattr(self.dynamo_args, "dyn_reasoning_parser", None)
+        )

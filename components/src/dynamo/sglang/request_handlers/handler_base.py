@@ -44,6 +44,10 @@ from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
+from dynamo.sglang.reasoning import (
+    install_require_reasoning_proxy,
+    require_reasoning_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -694,6 +698,7 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         self.enable_trace = getattr(config.server_args, "enable_trace", False)
 
         if engine is not None:
+            install_require_reasoning_proxy(engine)
             self.input_param_manager = InputParamManager(
                 self.engine.tokenizer_manager.tokenizer
                 if self.use_sglang_tokenizer
@@ -1032,6 +1037,19 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         return {
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
         }
+
+    def _has_reasoning_parser(self) -> bool:
+        return bool(
+            getattr(self.config.server_args, "reasoning_parser", None)
+            or getattr(self.config.dynamo_args, "dyn_reasoning_parser", None)
+        )
+
+    def _require_reasoning_context(
+        self, request: Dict[str, Any], input_param: Dict[str, Any]
+    ):
+        return require_reasoning_context(
+            self._has_reasoning_parser(), request, input_param
+        )
 
     def _session_kwargs(self, request: Dict[str, Any]) -> Dict[str, Any]:
         if not getattr(self.config.server_args, "enable_streaming_session", False):

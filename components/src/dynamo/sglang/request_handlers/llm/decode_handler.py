@@ -466,22 +466,23 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             routing = request.get("routing") or {}
             dp_rank = routing.get("dp_rank")
 
-            decode = await self.engine.async_generate(
-                **input_param,
-                sampling_params=sampling_params,
-                stream=True,
-                **self._routed_experts_kwargs,
-                bootstrap_host=bootstrap_info["bootstrap_host"],
-                bootstrap_port=bootstrap_info["bootstrap_port"],
-                bootstrap_room=bootstrap_info["bootstrap_room"],
-                external_trace_header=trace_header,
-                rid=trace_id,
-                data_parallel_rank=dp_rank,
-                **self._session_kwargs(request),
-                lora_path=lora_path,
-                **logprob_kwargs,
-                **self._priority_kwargs(priority),
-            )
+            with self._require_reasoning_context(request, input_param):
+                decode = await self.engine.async_generate(
+                    **input_param,
+                    sampling_params=sampling_params,
+                    stream=True,
+                    **self._routed_experts_kwargs,
+                    bootstrap_host=bootstrap_info["bootstrap_host"],
+                    bootstrap_port=bootstrap_info["bootstrap_port"],
+                    bootstrap_room=bootstrap_info["bootstrap_room"],
+                    external_trace_header=trace_header,
+                    rid=trace_id,
+                    data_parallel_rank=dp_rank,
+                    **self._session_kwargs(request),
+                    lora_path=lora_path,
+                    **logprob_kwargs,
+                    **self._priority_kwargs(priority),
+                )
 
             if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(
@@ -525,21 +526,22 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             routing = request.get("routing") or {}
             dp_rank = routing.get("dp_rank")
 
-            agg = await self.engine.async_generate(
-                **input_param,
-                image_data=image_data,
-                video_data=video_data,
-                sampling_params=sampling_params,
-                stream=True,
-                **self._routed_experts_kwargs,
-                external_trace_header=trace_header,
-                rid=trace_id,
-                data_parallel_rank=dp_rank,
-                **self._session_kwargs(request),
-                lora_path=lora_path,
-                **logprob_kwargs,
-                **self._priority_kwargs(priority),
-            )
+            with self._require_reasoning_context(request, input_param):
+                agg = await self.engine.async_generate(
+                    **input_param,
+                    image_data=image_data,
+                    video_data=video_data,
+                    sampling_params=sampling_params,
+                    stream=True,
+                    **self._routed_experts_kwargs,
+                    external_trace_header=trace_header,
+                    rid=trace_id,
+                    data_parallel_rank=dp_rank,
+                    **self._session_kwargs(request),
+                    lora_path=lora_path,
+                    **logprob_kwargs,
+                    **self._priority_kwargs(priority),
+                )
             if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(
                     agg,
