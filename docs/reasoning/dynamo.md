@@ -9,7 +9,10 @@ Some models emit reasoning or thinking content separately from their final respo
 
 This page covers parser names for the default Dynamo-native path. If Dynamo
 does not list a parser for your model, see
-[Reasoning Parsing (Engine Fallback)](engine-fallback.md).
+[Reasoning Parsing (Engine Fallback)](engine-fallback.md). For how
+`--dyn-reasoning-parser` combines with `--dyn-chat-processor` and
+`--dyn-tool-call-parser` (and which combinations are invalid), see
+[Parser Configuration](../parser-configuration.md).
 
 ## Prerequisites
 

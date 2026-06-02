@@ -165,6 +165,8 @@ navigation:
         path: components/router/router-guide.md
       - page: KV Cache Offloading
         path: components/kvbm/kvbm-guide.md
+      - page: Parser Configuration
+        path: parser-configuration.md
       - section: Tool Calling
         slug: tool-calling
         path: tool-calling/README.md

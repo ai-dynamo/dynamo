@@ -15,7 +15,10 @@ parameters.
 
 This page covers parser names for the default Dynamo-native path. If Dynamo
 does not list a parser for your model, see
-[Tool Call Parsing (Engine Fallback)](engine-fallback.md).
+[Tool Call Parsing (Engine Fallback)](engine-fallback.md). For how
+`--dyn-tool-call-parser` combines with `--dyn-chat-processor` and
+`--dyn-reasoning-parser` (and which combinations are invalid), see
+[Parser Configuration](../parser-configuration.md).
 
 ## Prerequisites
 

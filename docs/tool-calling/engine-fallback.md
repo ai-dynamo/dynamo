@@ -9,30 +9,14 @@ When Dynamo's registry does not list a tool-call parser for your model, fall
 back to the upstream engine's parser via a **chat-processor swap**, which
 keeps frontend tokenization and KV routing.
 
-For Dynamo-native parsers, see [Tool Call Parsing (Dynamo)](dynamo.md). For
-the equivalent reasoning fallback, see
-[Reasoning Parsing (Engine Fallback)](../reasoning/engine-fallback.md).
+This is the **engine-fallback** path. For the Dynamo-native default, see [Tool Call Parsing (Dynamo)](dynamo.md).
 
-> [!WARNING]
-> **Known Issue:** Engine-fallback tool call parsing does not currently work
-> with [disaggregated serving](../features/disaggregated-serving/README.md)
-> (support coming soon). Use the [Dynamo-native tool call parser](dynamo.md)
-> for disaggregated deployments today.
+> [!IMPORTANT]
+> How `--dyn-chat-processor` combines with the parser flags — and which combinations are invalid (engine fallback does **not** support disaggregated serving or TRT-LLM yet) — is documented once in [Parser Configuration](../parser-configuration.md). Read that first; this page covers only the tool-call specifics.
 
-## Configurations
+## Configuration
 
-| | Frontend flags | Worker flags | KV routing | Notes |
-|---|---|---|---|---|
-| **vLLM chat processor** | `--dyn-chat-processor vllm --tool-call-parser <name>` | *(none)* | Yes | Parsing runs in vLLM's Python preprocessor. See [vLLM Chat Processor](../backends/vllm/vllm-chat-processor.md). |
-| **SGLang chat processor** | `--dyn-chat-processor sglang --tool-call-parser <name>` | *(none)* | Yes | Parsing runs in SGLang's Python preprocessor. See [SGLang Chat Processor](../backends/sglang/sglang-chat-processor.md). |
-| **TRTLLM chat processor** | *(work in progress)* | *(work in progress)* | -- | Engine-fallback support for TRTLLM is in progress. Use the [Dynamo-native tool call parser](dynamo.md) for TRTLLM today. |
-
-> [!NOTE]
-> `--dyn-tool-call-parser` selects the **Dynamo-native** parser path, while
-> `--tool-call-parser` selects the **engine fallback** (vLLM or SGLang)
-> parser path. The accepted values for each flag come from a different
-> registry and may differ slightly based on the definitions from each
-> framework (e.g., SGLang's `deepseekv3` vs Dynamo's `deepseek_v3`).
+Engine fallback selects the parser with the **frontend** flag `--tool-call-parser <name>` (the engine's own flag), paired with `--dyn-chat-processor vllm` or `sglang`. This is distinct from the Dynamo-native `--dyn-tool-call-parser`, and the accepted names come from the engine's registry — they may differ from Dynamo's (e.g. SGLang `deepseekv3` vs Dynamo `deepseek_v3`).
 
 ## Examples
 
@@ -54,6 +38,7 @@ python -m dynamo.frontend --dyn-chat-processor sglang --tool-call-parser kimi_k2
 
 ## See Also
 
+- [Parser Configuration](../parser-configuration.md) -- how the chat-processor and parser flags combine, and which combinations are invalid (start here)
 - [Troubleshooting Tool Calls](troubleshooting.md) -- capture raw model output with `logprobs` so tool-call issues can be localized
 - [Tool Call Parsing (Dynamo)](dynamo.md) -- Dynamo-native parsers and request examples
 - [Reasoning Parsing (Engine Fallback)](../reasoning/engine-fallback.md) -- Equivalent fallback for reasoning

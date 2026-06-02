@@ -39,6 +39,9 @@ Python GIL bottlenecks.
 
 ## See Also
 
+- [Parser Configuration](../parser-configuration.md) -- how `--dyn-chat-processor`,
+  `--dyn-reasoning-parser`, and `--dyn-tool-call-parser` combine, and which
+  combinations are invalid.
 - [Tool Calling](../tool-calling/README.md) -- parse tool calls out of model
   output. Several models need both a reasoning parser and a tool-call parser
   configured together.

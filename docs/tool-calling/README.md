@@ -55,6 +55,9 @@ You can optionally turn on **xgrammar structural tags** so guided decoding match
 
 ## See Also
 
+- [Parser Configuration](../parser-configuration.md) -- how `--dyn-chat-processor`,
+  `--dyn-tool-call-parser`, and `--dyn-reasoning-parser` combine, and which
+  combinations are invalid.
 - [Troubleshooting Tool Calls](troubleshooting.md) -- capture raw model
   output with `logprobs` so tool-call issues can be localized.
 - [Reasoning](../reasoning/README.md) -- separate `reasoning_content` from
