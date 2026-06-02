@@ -105,7 +105,7 @@ jobs:
       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     outputs:
       trtllm_commit: ${{ steps.resolve-ref.outputs.trtllm_commit }}
-      ecr_repo: ${{ steps.image-tags.outputs.ecr_repo }}
+      trtllm_version: ${{ steps.resolve-ref.outputs.trtllm_version }}
       image_tag: ${{ steps.image-tags.outputs.image_tag }}
       ecr_image: ${{ steps.image-tags.outputs.ecr_image }}
       acr_image: ${{ steps.image-tags.outputs.acr_image }}
@@ -139,10 +139,16 @@ jobs:
         id: resolve-ref
         shell: bash
         working-directory: TensorRT-LLM
+        env:
+          TRTLLM_SOURCE_REF: ${{ inputs.trtllm_source_ref }}
         run: |
           set -euo pipefail
           TRTLLM_COMMIT="$(git rev-parse HEAD)"
+          TRTLLM_COMMIT_SHORT="${TRTLLM_COMMIT:0:12}"
+          SANITIZED_REF="$(echo "${TRTLLM_SOURCE_REF}" | sed 's/[^a-zA-Z0-9._-]/-/g' | sed 's/^-//;s/-$//' | cut -c1-40)"
+          TRTLLM_VERSION="${SANITIZED_REF:-source}-${TRTLLM_COMMIT_SHORT}"
           echo "trtllm_commit=${TRTLLM_COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "trtllm_version=${TRTLLM_VERSION}" >> "$GITHUB_OUTPUT"
           echo "Resolved TensorRT-LLM ${{ inputs.trtllm_source_ref }} to ${TRTLLM_COMMIT}"
       - name: Calculate TensorRT-LLM base image tags
         id: image-tags
@@ -169,6 +175,7 @@ jobs:
             --target release \
             --build-arg BUILD_WHEEL_ARGS="--clean --benchmarks --cuda_architectures ${{ inputs.trtllm_cuda_archs }}" \
             --build-arg GIT_COMMIT="${{ steps.resolve-ref.outputs.trtllm_commit }}" \
+            --build-arg TRT_LLM_VER="${{ steps.resolve-ref.outputs.trtllm_version }}" \
             --tag "${{ steps.image-tags.outputs.ecr_image }}" \
             --tag "${{ steps.image-tags.outputs.acr_image }}" \
             --file docker/Dockerfile.multi .
@@ -177,6 +184,7 @@ jobs:
             echo ""
             echo "- TensorRT-LLM ref: \`${{ inputs.trtllm_source_ref }}\`"
             echo "- TensorRT-LLM commit: \`${{ steps.resolve-ref.outputs.trtllm_commit }}\`"
+            echo "- TensorRT-LLM version arg: \`${{ steps.resolve-ref.outputs.trtllm_version }}\`"
             echo "- CUDA archs: \`${{ inputs.trtllm_cuda_archs }}\`"
             echo "- ECR image: \`${{ steps.image-tags.outputs.ecr_image }}\`"
             echo "- ACR image: \`${{ steps.image-tags.outputs.acr_image }}\`"
@@ -195,7 +203,7 @@ jobs:
       builder_name: ${{ needs.init.outputs.builder_name }}
       build_timeout_minutes: 120
       extra_build_args: |
-        RUNTIME_IMAGE=${{ needs.trtllm-source-base.outputs.ecr_repo }}
+        RUNTIME_IMAGE=dynamoci.azurecr.io/ai-dynamo/dynamo
         RUNTIME_IMAGE_TAG=${{ needs.trtllm-source-base.outputs.image_tag }}
     secrets: inherit
 
