@@ -5,6 +5,7 @@
 The NVIDIA Dynamo project uses containerized development and deployment to maintain consistent environments across different AI inference frameworks and deployment scenarios. This directory contains the tools for building and running Dynamo containers:
 
 ### Rendering Requirements:
+
 - Python
 - Python Packages:
   - pyyaml
@@ -12,63 +13,61 @@ The NVIDIA Dynamo project uses containerized development and deployment to maint
 
 ### Core Components
 
-- **`render.py`** - A render script used to generate Dockerfiles for AI inference frameworks (vLLM, TensorRT-LLM, SGLang) and the frontend image. The generated Dockerfile includes the needed multi-stage steps for development vs production configurations.
-
-- **`run.sh`** - A container runtime manager that launches Docker containers with proper GPU access, volume mounts, and environment configurations. It supports different development workflows from root-based legacy setups to user-based development environments.
+- `**render.py**` - A render script used to generate Dockerfiles for AI inference frameworks (vLLM, TensorRT-LLM, SGLang) and the frontend image. The generated Dockerfile includes the needed multi-stage steps for development vs production configurations.
+- `**run.sh**` - A container runtime manager that launches Docker containers with proper GPU access, volume mounts, and environment configurations. It supports different development workflows from root-based legacy setups to user-based development environments.
 
 ### Stage Summary for Frameworks
 
-<details>
-<summary>Show Stage Summary Table</summary>
-Dockerfile General Structure
+Show Stage Summary Table Dockerfile General Structure
 
 Below is a summary of the general file structure for the framework Dockerfile stages. Some exceptions exist.
 
-| Stage/Filepath | Target |
-| --- | --- |
-| **STAGE dynamo_base** | **FROM ${BASE_IMAGE}** |
-| /bin/uv, /bin/uvx | COPY from ghcr.io/astral-sh/uv:latest (→ framework, runtime) |
-|  /usr/bin/nats-server | Downloaded from GitHub (→ runtime) |
-|  /usr/local/bin/etcd/ | Downloaded from GitHub (→ runtime) |
-|  /usr/local/rustup/ | Installed via rustup-init (→ wheel_builder, dev) |
-|  /usr/local/cargo/ | Installed via rustup-init (→ wheel_builder, dev) |
-|  /usr/local/cuda/ | Inherited from BASE_IMAGE (→ wheel_builder, runtime) |
-| **STAGE: wheel_builder** | **FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT}** |
-|  /usr/local/ucx/ | Built from source (→ runtime)
-|  /opt/nvidia/nvda_nixl/ | Built from source (→ runtime)
-|  /opt/nvidia/nvda_nixl/lib64/ | Built from source (→ runtime)
-|  /opt/dynamo/target/ | Cargo build output (→ runtime)
-|  /opt/dynamo/dist/*.whl | Built wheels (→ runtime)
-|  /opt/dynamo/dist/nixl/ | Built nixl wheels (→ runtime)
-| **STAGE: runtime** | **FROM ${RUNTIME_IMAGE} (multi-arch upstream runtime image)** |
-|  /usr/bin/nats-server | COPY from dynamo_base |
-|  /usr/local/bin/etcd/ | COPY from dynamo_base |
-|  /opt/dynamo/wheelhouse/ | COPY from wheel_builder |
-|  upstream Python/site-packages | inherited from the upstream runtime image — `vllm/vllm-openai` (vLLM; multi-arch amd64/arm64, separate tag per CUDA family), `lmsysorg/sglang` (SGLang; multi-arch amd64/arm64), or `nvcr.io/nvidia/tensorrt-llm/release` (TRT-LLM; multi-arch amd64/arm64) |
-|  /workspace/ | COPY from build context — subset varies by framework (see note below) |
-| **STAGE: dev** | **FROM runtime (via dev/Dockerfile.dev)** |
-|  /usr/bin/, /usr/lib/, etc. | COPY from dynamo_tools (dev utilities, git, sudo, etc.) |
-|  /usr/local/rustup/ | COPY from dynamo_tools |
-|  /usr/local/cargo/ | COPY from dynamo_tools |
-|  /usr/local/bin/maturin | COPY from dynamo_tools |
-|  /opt/dynamo/venv/ | For SGLang: created with --system-site-packages, includes uv and maturin |
-|  /workspace/ | Full source code copied from build context with editable install |
-|  **💡 Recommendation** | **Use --mount-workspace with run.sh** for live editing (bind mount overrides baked-in code) |
-|  PATH | Includes /opt/dynamo/venv/bin:/usr/local/cargo/bin |
-|  umask 002 | Login shell sources /etc/profile.d/00-umask.sh for group-writable files |
-| **STAGE: local-dev** | **FROM dev (via dev/Dockerfile.dev)** |
-|  /home/dynamo/.rustup/ | COPY from /usr/local/rustup (user-writable) |
-|  USER | dynamo (UID/GID remapped to match host user) |
-|  **💡 Recommendation** | **Use --mount-workspace with run.sh** for live editing (bind mount overrides baked-in code) |
-|  RUSTUP_HOME | /home/dynamo/.rustup |
-|  CARGO_HOME | /home/dynamo/.cargo |
+
+| Stage/Filepath                | Target                                                                                                                                                                                                                                                      |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **STAGE dynamo_base**         | **FROM ${BASE_IMAGE}**                                                                                                                                                                                                                                      |
+| /bin/uv, /bin/uvx             | COPY from ghcr.io/astral-sh/uv:latest (→ framework, runtime)                                                                                                                                                                                                |
+| /usr/bin/nats-server          | Downloaded from GitHub (→ runtime)                                                                                                                                                                                                                          |
+| /usr/local/bin/etcd/          | Downloaded from GitHub (→ runtime)                                                                                                                                                                                                                          |
+| /usr/local/rustup/            | Installed via rustup-init (→ wheel_builder, dev)                                                                                                                                                                                                            |
+| /usr/local/cargo/             | Installed via rustup-init (→ wheel_builder, dev)                                                                                                                                                                                                            |
+| /usr/local/cuda/              | Inherited from BASE_IMAGE (→ wheel_builder, runtime)                                                                                                                                                                                                        |
+| **STAGE: wheel_builder**      | **FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT}**                                                                                                                                                                                                            |
+| /usr/local/ucx/               | Built from source (→ runtime)                                                                                                                                                                                                                               |
+| /opt/nvidia/nvda_nixl/        | Built from source (→ runtime)                                                                                                                                                                                                                               |
+| /opt/nvidia/nvda_nixl/lib64/  | Built from source (→ runtime)                                                                                                                                                                                                                               |
+| /opt/dynamo/target/           | Cargo build output (→ runtime)                                                                                                                                                                                                                              |
+| /opt/dynamo/dist/*.whl        | Built wheels (→ runtime)                                                                                                                                                                                                                                    |
+| /opt/dynamo/dist/nixl/        | Built nixl wheels (→ runtime)                                                                                                                                                                                                                               |
+| **STAGE: runtime**            | **FROM ${RUNTIME_IMAGE} (multi-arch upstream runtime image)**                                                                                                                                                                                               |
+| /usr/bin/nats-server          | COPY from dynamo_base                                                                                                                                                                                                                                       |
+| /usr/local/bin/etcd/          | COPY from dynamo_base                                                                                                                                                                                                                                       |
+| /opt/dynamo/wheelhouse/       | COPY from wheel_builder                                                                                                                                                                                                                                     |
+| upstream Python/site-packages | inherited from the upstream runtime image — `vllm/vllm-openai` (vLLM; multi-arch amd64/arm64, separate tag per CUDA family), `lmsysorg/sglang` (SGLang; multi-arch amd64/arm64), or `nvcr.io/nvidia/tensorrt-llm/release` (TRT-LLM; multi-arch amd64/arm64) |
+| /workspace/                   | COPY from build context — subset varies by framework (see note below)                                                                                                                                                                                       |
+| **STAGE: dev**                | **FROM runtime (via dev/Dockerfile.dev)**                                                                                                                                                                                                                   |
+| /usr/bin/, /usr/lib/, etc.    | COPY from dynamo_tools (dev utilities, git, sudo, etc.)                                                                                                                                                                                                     |
+| /usr/local/rustup/            | COPY from dynamo_tools                                                                                                                                                                                                                                      |
+| /usr/local/cargo/             | COPY from dynamo_tools                                                                                                                                                                                                                                      |
+| /usr/local/bin/maturin        | COPY from dynamo_tools                                                                                                                                                                                                                                      |
+| /opt/dynamo/venv/             | For SGLang: created with --system-site-packages, includes uv and maturin                                                                                                                                                                                    |
+| /workspace/                   | Full source code copied from build context with editable install                                                                                                                                                                                            |
+| **💡 Recommendation**         | **Use --mount-workspace with run.sh** for live editing (bind mount overrides baked-in code)                                                                                                                                                                 |
+| PATH                          | Includes /opt/dynamo/venv/bin:/usr/local/cargo/bin                                                                                                                                                                                                          |
+| umask 002                     | Login shell sources /etc/profile.d/00-umask.sh for group-writable files                                                                                                                                                                                     |
+| **STAGE: local-dev**          | **FROM dev (via dev/Dockerfile.dev)**                                                                                                                                                                                                                       |
+| /home/dynamo/.rustup/         | COPY from /usr/local/rustup (user-writable)                                                                                                                                                                                                                 |
+| USER                          | dynamo (UID/GID remapped to match host user)                                                                                                                                                                                                                |
+| **💡 Recommendation**         | **Use --mount-workspace with run.sh** for live editing (bind mount overrides baked-in code)                                                                                                                                                                 |
+| RUSTUP_HOME                   | /home/dynamo/.rustup                                                                                                                                                                                                                                        |
+| CARGO_HOME                    | /home/dynamo/.cargo                                                                                                                                                                                                                                         |
+
 
 **Note on `/workspace/` COPY set:**
 
 - Common to all three frameworks: `tests`, `examples`, `dev`, `components/src/dynamo/{common,frontend,<framework>}`
 - vLLM and TRT-LLM additionally copy `lib`; SGLang and TRT-LLM additionally copy `deploy` and `components/src/dynamo/mocker`; SGLang additionally copies `recipes`.
 - See each framework's `templates/<framework>_runtime.Dockerfile` for the exact list.
-</details>
 
 ### Why Containerization?
 
@@ -79,6 +78,7 @@ The scripts in this directory abstract away the complexity of Docker commands wh
 ### Convenience Scripts vs Direct Docker Commands
 
 The `run.sh` script and rendering scripts are conveniences that simplify common Docker operations. They automatically handle:
+
 - GPU access configuration and runtime selection
 - Volume mount setup for development workflows
 - Environment variable management
@@ -90,15 +90,17 @@ The `run.sh` script and rendering scripts are conveniences that simplify common 
 
 **Note**: In Dynamo, "targets" and "Docker stages" are synonymous. Each target corresponds to a stage in the multi-stage Docker build. Similarly, "frameworks" and "engines" are synonymous (vLLM, TensorRT-LLM, SGLang).
 
-| Feature | **runtime + `run.sh`** | **local-dev (`run.sh` or Dev Container)** | **dev + `run.sh`** (legacy) |
-|---------|----------------------|-------------------------------------------|--------------------------|
-| **Usage** | Benchmarking inference and deployments, non-root | Development, compilation, testing locally | Legacy workflows, root user, use with caution |
-| **User** | dynamo (UID 1000) | dynamo (UID=host user) with sudo | root (UID 0, use with caution) |
-| **Home Directory** | `/home/dynamo` | `/home/dynamo` | `/root` |
-| **Working Directory** | `/workspace` (in-container or mounted) | `/workspace` (baked-in, optionally mounted w/ `--mount-workspace`) | `/workspace` (baked-in, optionally mounted w/ `--mount-workspace`) |
-| **Rust Toolchain** | None (uses pre-built wheels) | System install (`/usr/local/rustup`, `/usr/local/cargo`) | System install (`/usr/local/rustup`, `/usr/local/cargo`) |
-| **Cargo Target** | None | `/workspace/target` | `/workspace/target` |
-| **Python Env** | system site-packages for vllm/sglang; venv (`/opt/dynamo/venv` with `--system-site-packages`) for trtllm | venv (`/opt/dynamo/venv`) for all frameworks (with --system-site-packages where the runtime image uses system Python) | venv (`/opt/dynamo/venv`) for all frameworks (with --system-site-packages where the runtime image uses system Python) |
+
+| Feature               | **runtime + `run.sh`**                                                                                   | **local-dev (`run.sh` or Dev Container)**                                                                             | **dev + `run.sh`** (legacy)                                                                                           |
+| --------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| **Usage**             | Benchmarking inference and deployments, non-root                                                         | Development, compilation, testing locally                                                                             | Legacy workflows, root user, use with caution                                                                         |
+| **User**              | dynamo (UID 1000)                                                                                        | dynamo (UID=host user) with sudo                                                                                      | root (UID 0, use with caution)                                                                                        |
+| **Home Directory**    | `/home/dynamo`                                                                                           | `/home/dynamo`                                                                                                        | `/root`                                                                                                               |
+| **Working Directory** | `/workspace` (in-container or mounted)                                                                   | `/workspace` (baked-in, optionally mounted w/ `--mount-workspace`)                                                    | `/workspace` (baked-in, optionally mounted w/ `--mount-workspace`)                                                    |
+| **Rust Toolchain**    | None (uses pre-built wheels)                                                                             | System install (`/usr/local/rustup`, `/usr/local/cargo`)                                                              | System install (`/usr/local/rustup`, `/usr/local/cargo`)                                                              |
+| **Cargo Target**      | None                                                                                                     | `/workspace/target`                                                                                                   | `/workspace/target`                                                                                                   |
+| **Python Env**        | system site-packages for vllm/sglang; venv (`/opt/dynamo/venv` with `--system-site-packages`) for trtllm | venv (`/opt/dynamo/venv`) for all frameworks (with --system-site-packages where the runtime image uses system Python) | venv (`/opt/dynamo/venv`) for all frameworks (with --system-site-packages where the runtime image uses system Python) |
+
 
 **Note (vLLM/TRT-LLM/SGLang)**: All three runtime images inherit upstream Python solves. vLLM and SGLang install Dynamo wheels into the upstream system site-packages with `--system --no-deps`; the TRT-LLM runtime creates `/opt/dynamo/venv` with `--system-site-packages` and installs Dynamo wheels into that venv with `uv pip install --no-deps`, so upstream packages stay importable but Dynamo's wheels live in their own namespace. The `dev`/`local-dev` images also create `/opt/dynamo/venv` (with `--system-site-packages` where the runtime image uses system Python) so build tooling like `maturin` and `uv` is available without re-solving the framework Python stack.
 
@@ -112,27 +114,33 @@ The `run.sh` script and rendering scripts are conveniences that simplify common 
 ## Example Commands
 
 ### 1. runtime target (runs as non-root dynamo user):
+
 ```bash
 # Build runtime image
-container/render.py --framework vllm --target runtime --output-short-filename
-docker build -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
+container/render.py --framework trtllm --target runtime --output-short-filename --platform arm64 --cuda-version 13.1
+docker build -t dynamo:latest-trtllm-runtime-condp -f container/rendered.Dockerfile .
+docker tag dynamo:latest-trtllm-runtime-condp nvcr.io/nvidian/dynamo-dev/karenc:dynamo-1.2.1-rc16-condp-v1-6ef4f183a-arm
+docker push nvcr.io/nvidian/dynamo-dev/karenc:dynamo-1.2.1-rc16-condp-v1-6ef4f183a-arm
 
 # Run runtime container
 container/run.sh --image dynamo:latest-vllm-runtime -it
 ```
 
 ### 2. test image (layers test deps on top of runtime):
+
 ```bash
 # Build test image from a runtime image (for running tests locally)
 docker build -f container/Dockerfile.test --build-arg BASE_IMAGE=dynamo:latest-vllm-runtime -t dynamo:latest-vllm-test .
 ```
 
 ### 3. local-dev + `run.sh` (runs as dynamo user with matched host UID/GID):
+
 ```bash
 run.sh --mount-workspace -it --image dynamo:latest-vllm-local-dev ...
 ```
 
 ### 3. local-dev + Dev Container Extension:
+
 Use VS Code/Cursor Dev Container Extension with devcontainer.json configuration. The `dynamo` user UID is automatically matched to your local user.
 
 ## Build and Run Scripts Overview
@@ -142,12 +150,14 @@ Use VS Code/Cursor Dev Container Extension with devcontainer.json configuration.
 The `render.py` script is responsible for generating Dockerfiles for different AI inference frameworks. It supports multiple frameworks and configurations:
 
 **Purpose:**
+
 - Generates Dockerfiles for NVIDIA Dynamo with support for vLLM, TensorRT-LLM, SGLang, or standalone configurations
 - Handles framework-specific dependencies and optimizations
 - Manages build contexts, caching, and multi-stage builds
 - Configures development vs production targets
 
 **Key Features:**
+
 - **Framework Support**: vLLM (default when --framework not specified), TensorRT-LLM, SGLang, or NONE (standalone Dynamo)
 - **Multi-stage Builds**: Build process with base images
 - **Development Targets**: Supports `dev`, `runtime`, and `local-dev` targets via `render.py`.
@@ -159,12 +169,14 @@ The `render.py` script is responsible for generating Dockerfiles for different A
 The framework Dockerfiles use BuildKit cache mounts (`RUN --mount=type=cache,...`) to reduce repeated downloads across builds. These caches are stored in Docker/BuildKit’s cache storage on the host (not in your host `~/.cache`), and are shared across builds that use the same builder.
 
 Common cache mount targets:
+
 - `--mount=type=cache,target=/root/.cache/uv`: `uv` download cache (wheels/sdists, git checkouts used by `uv`, etc.)
 - `--mount=type=cache,target=/var/cache/apt,sharing=locked`: apt download cache (`sharing=locked` avoids apt/dpkg races with concurrent builds)
 - `--mount=type=cache,target=/var/cache/{yum,dnf},sharing=locked`: yum/dnf metadata cache (`sharing=locked` avoids corruption with concurrent builds)
 - `--mount=type=cache,target=/root/.cargo/{registry,git}`: Cargo crate/git download caches (Cargo has its own locking; no `sharing=locked` needed)
 
 To inspect cache usage:
+
 ```bash
 docker buildx du
 docker info --format 'DockerRootDir: {{.DockerRootDir}}'
@@ -173,23 +185,27 @@ docker info --format 'DockerRootDir: {{.DockerRootDir}}'
 ##### Inspecting BuildKit cache on the host (quick checklist)
 
 1. Quick summary:
+
 ```bash
 docker buildx du | tail -5
 ```
 
-2. Find Docker root:
+1. Find Docker root:
+
 ```bash
 docker info | grep "Docker Root Dir"
 # Output example: Docker Root Dir: /var/lib/docker
 ```
 
-3. Check executor storage size:
+1. Check executor storage size:
+
 ```bash
 DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}')"
 sudo du -sh "${DOCKER_ROOT}/buildkit/executor" 2>/dev/null || true
 ```
 
-4. Find specific caches (example: uv cache under BuildKit executor rootfs):
+1. Find specific caches (example: uv cache under BuildKit executor rootfs):
+
 ```bash
 DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}')"
 sudo sh -c 'find '"${DOCKER_ROOT}"'/buildkit/executor/*/rootfs/root/.cache/uv -type d 2>/dev/null | while read -r dir; do
@@ -198,13 +214,15 @@ sudo sh -c 'find '"${DOCKER_ROOT}"'/buildkit/executor/*/rootfs/root/.cache/uv -t
 done'
 ```
 
-5. List all large cache directories:
+1. List all large cache directories:
+
 ```bash
 DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}')"
 sudo sh -c 'du -sh '"${DOCKER_ROOT}"'/buildkit/executor/* 2>/dev/null | sort -h | tail -10'
 ```
 
 Cleanup commands:
+
 ```bash
 # Safe: clean only reclaimable cache
 docker buildx prune
@@ -217,6 +235,7 @@ docker buildx prune --filter until=72h
 ```
 
 Current cache types (as mounted in various Dockerfiles):
+
 1. `/root/.cache/uv` and `/home/dynamo/.cache/uv` - Python packages (uv; match the current `USER`)
 2. `/root/.cargo/registry` - Rust crates
 3. `/root/.cargo/git` - Rust git deps
@@ -241,6 +260,7 @@ docker build -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
 ```
 
 After building, use `run.sh` to launch the container (see [run.sh - Container Runtime Manager](#runsh---container-runtime-manager) below for full options):
+
 ```bash
 # Launch local-dev container with workspace mounted for live editing
 container/run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -it
@@ -251,6 +271,7 @@ container/run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -it
 The frontend image is a specialized container that includes the Dynamo components (Dynamo, NIXL, etc) along with the Endpoint Picker (EPP) for Kubernetes Gateway API Inference Extension integration. This image is primarily used for inference gateway deployments.
 
 **Build EPP Image**
+
 ```bash
 sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler libclang-dev
 curl --retry 5 --retry-delay 3 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
@@ -266,6 +287,7 @@ EPP_IMAGE="dynamo/dynamo-epp:${EPP_GIT_TAG}"
 ```
 
 **Build Frontend Image**
+
 ```bash
 # Build the frontend image (automatically builds EPP image as a dependency)
 container/render.py --framework=dynamo --target=frontend --output-short-filename
@@ -273,15 +295,17 @@ docker build -t dynamo:frontend --build-arg EPP_IMAGE=${EPP_IMAGE} -f container/
 ```
 
 The build process automatically:
+
 1. Builds the Dynamo static library for EPP KV-aware routing
 2. Builds the custom EPP Docker image using `make all` from `deploy/inference-gateway/epp/Makefile`
 3. Builds the frontend image with the EPP binary and Dynamo runtime components
 
-For more details, see [`deploy/inference-gateway/README.md`](../deploy/inference-gateway/README.md).
+For more details, see `[deploy/inference-gateway/README.md](../deploy/inference-gateway/README.md)`.
 
 #### Frontend Image Contents
 
 The frontend image includes:
+
 - **EPP (Endpoint Picker)**: Handles request routing and load balancing for inference gateway
 - **Dynamo Runtime**: Core platform components and routing logic
 - **NIXL**: NVIDIA InfiniBand Library for high-performance network communication
@@ -290,19 +314,21 @@ The frontend image includes:
 
 #### Deployment
 
-The frontend image is designed for Kubernetes deployment with the Gateway API Inference Extension. See [`deploy/inference-gateway/README.md`](../deploy/inference-gateway/README.md) for complete deployment instructions using Helm charts.
+The frontend image is designed for Kubernetes deployment with the Gateway API Inference Extension. See `[deploy/inference-gateway/README.md](../deploy/inference-gateway/README.md)` for complete deployment instructions using Helm charts.
 
 ### run.sh - Container Runtime Manager
 
 The `run.sh` script launches Docker containers with the appropriate configuration for development and inference workloads.
 
 **Purpose:**
+
 - Runs pre-built Dynamo Docker images with proper GPU access
 - Configures volume mounts, networking, and environment variables
 - Supports different development workflows (root vs user-based)
 - Manages container lifecycle and resource allocation
 
 **Key Features:**
+
 - **GPU Management**: Automatic GPU detection and allocation
 - **Volume Mounting**: Workspace and HuggingFace cache mounting
 - **User Management**: Non-root `dynamo` user execution (UID 1000, GID 0), with optional `--user` flag to override
@@ -349,12 +375,15 @@ container/run.sh --image dynamo:latest-vllm --user dynamo -v $HOME/.cache:/home/
 The `run.sh` script supports different networking modes via the `--network` flag (defaults to `host`):
 
 #### Host Networking (Default)
+
 ```bash
 # Examples with dynamo user
 container/run.sh --image dynamo:latest-vllm-local-dev --network host -v $HOME/.cache:/home/dynamo/.cache
 container/run.sh --image dynamo:latest-vllm-local-dev -v $HOME/.cache:/home/dynamo/.cache
 ```
+
 **Use cases:**
+
 - High-performance ML inference (default for GPU workloads)
 - Services that need direct host port access
 - Maximum network performance with minimal overhead
@@ -363,11 +392,14 @@ container/run.sh --image dynamo:latest-vllm-local-dev -v $HOME/.cache:/home/dyna
 **⚠️ Port Sharing Limitation:** Host networking shares all ports with the host machine, which means you can only run **one instance** of services like NATS (port 4222) or etcd (port 2379) across all containers and the host.
 
 #### Bridge Networking (Isolated)
+
 ```bash
 # CI/testing with isolated bridge networking and host cache sharing (no -it for automated CI)
 container/run.sh --image dynamo:latest-vllm --mount-workspace --network bridge -v $HOME/.cache:/home/dynamo/.cache
 ```
+
 **Use cases:**
+
 - Secure isolation from host network
 - CI/CD pipelines requiring complete isolation
 - When you need absolute control of ports
@@ -376,6 +408,7 @@ container/run.sh --image dynamo:latest-vllm --mount-workspace --network bridge -
 **Note:** For port sharing with the host, use the `--port` or `-p` option with format `host_port:container_port` (e.g., `--port 8000:8000` or `-p 9081:8081`) to expose specific container ports to the host.
 
 #### No Networking ⚠️ **LIMITED FUNCTIONALITY**
+
 ```bash
 # Complete network isolation - no external connectivity
 container/run.sh --image dynamo:latest-vllm --network none --mount-workspace -it -v $HOME/.cache:/home/dynamo/.cache
@@ -383,7 +416,9 @@ container/run.sh --image dynamo:latest-vllm --network none --mount-workspace -it
 # Same with local-dev image (dynamo user with matched host UID/GID)
 container/run.sh --image dynamo:latest-vllm-local-dev --network none --mount-workspace -it -v $HOME/.cache:/home/dynamo/.cache
 ```
+
 **⚠️ WARNING: `--network none` severely limits Dynamo functionality:**
+
 - **No model downloads** - HuggingFace models cannot be downloaded
 - **No API access** - Cannot reach external APIs or services
 - **No distributed inference** - Multi-node setups won't work
@@ -391,13 +426,16 @@ container/run.sh --image dynamo:latest-vllm-local-dev --network none --mount-wor
 - **Limited debugging** - Cannot access external debugging tools
 
 **Very limited use cases:**
+
 - Pre-downloaded models with purely local processing
 - Air-gapped security environments (models must be pre-staged)
 
 #### Container Network Sharing
+
 Use `--network container:name` to share the network namespace with another container.
 
 **Use cases:**
+
 - Sidecar patterns (logging, monitoring, caching)
 - Service mesh architectures
 - Sharing network namespaces between related containers
@@ -405,9 +443,11 @@ Use `--network container:name` to share the network namespace with another conta
 See Docker documentation for `--network container:name` usage.
 
 #### Custom Networks
+
 Use custom Docker networks for multi-container applications. Create with `docker network create` and specify with `--network network-name`.
 
 **Use cases:**
+
 - Multi-container applications
 - Service discovery by container name
 
@@ -415,17 +455,20 @@ See Docker documentation for custom network creation and management.
 
 #### Network Mode Comparison
 
-| Mode | Performance | Security | Use Case | Dynamo Compatibility | Port Sharing | Port Publishing |
-|------|-------------|----------|----------|---------------------|---------------|-----------------|
-| `host` | Highest | Lower | ML/GPU workloads, high-performance services | ✅ Full | ⚠️ **Shared with host** (one NATS/etcd only) | ❌ Not needed |
-| `bridge` | Good | Higher | General web services, controlled port exposure | ✅ Full | ✅ Isolated ports | ✅ `-p host:container` |
-| `none` | N/A | Highest | Air-gapped environments only | ⚠️ **Very Limited** | ✅ No network | ❌ No network |
-| `container:name` | Good | Medium | Sidecar patterns, shared network stacks | ✅ Full | ⚠️ Shared with target container | ❌ Use target's ports |
-| Custom networks | Good | Medium | Multi-container applications | ✅ Full | ✅ Isolated ports | ✅ `-p host:container` |
+
+| Mode             | Performance | Security | Use Case                                       | Dynamo Compatibility | Port Sharing                                 | Port Publishing       |
+| ---------------- | ----------- | -------- | ---------------------------------------------- | -------------------- | -------------------------------------------- | --------------------- |
+| `host`           | Highest     | Lower    | ML/GPU workloads, high-performance services    | ✅ Full               | ⚠️ **Shared with host** (one NATS/etcd only) | ❌ Not needed          |
+| `bridge`         | Good        | Higher   | General web services, controlled port exposure | ✅ Full               | ✅ Isolated ports                             | ✅ `-p host:container` |
+| `none`           | N/A         | Highest  | Air-gapped environments only                   | ⚠️ **Very Limited**  | ✅ No network                                 | ❌ No network          |
+| `container:name` | Good        | Medium   | Sidecar patterns, shared network stacks        | ✅ Full               | ⚠️ Shared with target container              | ❌ Use target's ports  |
+| Custom networks  | Good        | Medium   | Multi-container applications                   | ✅ Full               | ✅ Isolated ports                             | ✅ `-p host:container` |
+
 
 ## Workflow Examples
 
 ### Development Workflow
+
 ```bash
 # 1. Build local-dev image (builds runtime, then dev as intermediate, then local-dev as final image)
 container/render.py --framework=vllm --target=local-dev --output-short-filename
@@ -449,6 +492,7 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.20 &
 ```
 
 ### Production Workflow
+
 ```bash
 # 1. Build production runtime image (runs as non-root dynamo user)
 container/render.py --framework=vllm --target=runtime --output-short-filename
@@ -459,6 +503,7 @@ container/run.sh --image dynamo:latest-vllm-runtime --gpus all -v $HOME/.cache:/
 ```
 
 ### Testing Workflow
+
 ```bash
 # 1. Build dev image
 container/render.py --framework=vllm --target=dev --output-short-filename
@@ -501,6 +546,8 @@ DYN_SYSTEM_PORT=8081 python -m dynamo.trtllm --model Qwen/Qwen3-0.6B --free-gpu-
 ```
 
 **Framework-Specific GPU Memory Arguments:**
+
 - **vLLM**: `--gpu-memory-utilization 0.20` (use 20% GPU memory), `--enforce-eager` (disable CUDA graphs), `--no-enable-prefix-caching` (save memory), `--max-num-seqs 64` (max concurrent sequences)
 - **SGLang**: `--mem-fraction-static 0.20` (20% GPU memory for static allocation), `--max-running-requests 64` (max concurrent requests)
 - **TensorRT-LLM**: `--free-gpu-memory-fraction 0.20` (reserve 20% GPU memory), `--max-num-tokens 8192` (max tokens in batch), `--max-batch-size 64` (max batch size)
+

@@ -10,6 +10,8 @@ import math
 
 logger = logging.getLogger(__name__)
 
+_NEXTN_ACCEPT_RATES_LEN = 5
+
 DEFAULT_BACKEND_VERSIONS = {
     "vllm": "0.14.0",
     "sglang": "0.5.6.post2",
@@ -36,6 +38,30 @@ def resolve_backend_version(backend_name: str, backend_version: str | None) -> s
     if backend_version is not None:
         return backend_version
     return DEFAULT_BACKEND_VERSIONS.get(backend_name, DEFAULT_BACKEND_VERSIONS["vllm"])
+
+
+def _pad_nextn_accept_rates(
+    nextn_accept_rates: list[float] | str | None,
+) -> list[float]:
+    """Normalize accept-rates to AIC's fixed length-5 slot.
+
+    AIC caps MTP draft tokens at 5 (``ModelConfig.nextn`` "at most mtp5",
+    ``sdk/config.py:28``) and ``calc_expectation`` indexes into the list up
+    to ``nextn``. AIC's own CLI normalizes to length 5 with trailing zeros
+    (``cli/main.py:795``); we mirror that so callers can pass a shorter list
+    or a comma-separated string without tripping over IndexError or
+    schema-mismatch downstream.
+    """
+    if isinstance(nextn_accept_rates, str):
+        nextn_accept_rates = [
+            float(x) for x in nextn_accept_rates.split(",") if x.strip()
+        ]
+    rates = list(nextn_accept_rates) if nextn_accept_rates else []
+    if len(rates) < _NEXTN_ACCEPT_RATES_LEN:
+        rates = rates + [0.0] * (_NEXTN_ACCEPT_RATES_LEN - len(rates))
+    elif len(rates) > _NEXTN_ACCEPT_RATES_LEN:
+        rates = rates[:_NEXTN_ACCEPT_RATES_LEN]
+    return rates
 
 
 def _load_aiconfigurator():
@@ -78,6 +104,8 @@ class AicSession:
         moe_tp_size: int | None = None,
         moe_ep_size: int | None = None,
         attention_dp_size: int | None = None,
+        nextn: int | None = None,
+        nextn_accept_rates: list[float] | str | None = None,
     ):
         aic = _load_aiconfigurator()
         version = resolve_backend_version(backend_name, backend_version)
@@ -96,12 +124,18 @@ class AicSession:
                 f"Supported versions for this system/backend: {supported_versions}"
             )
 
-        model_config = aic["config"].ModelConfig(
+        model_config_kwargs: dict = dict(
             tp_size=tp_size,
             moe_tp_size=moe_tp_size,
             moe_ep_size=moe_ep_size,
             attention_dp_size=attention_dp_size or 1,
         )
+        if nextn:
+            model_config_kwargs["nextn"] = nextn
+            model_config_kwargs["nextn_accept_rates"] = _pad_nextn_accept_rates(
+                nextn_accept_rates
+            )
+        model_config = aic["config"].ModelConfig(**model_config_kwargs)
         model = aic["get_model"](
             model_path=model_path,
             model_config=model_config,
@@ -291,6 +325,8 @@ def create_session(
     moe_tp_size: int | None = None,
     moe_ep_size: int | None = None,
     attention_dp_size: int | None = None,
+    nextn: int | None = None,
+    nextn_accept_rates: list[float] | str | None = None,
 ) -> AicSession:
     """Factory function called from Rust via PyO3."""
     return AicSession(
@@ -302,6 +338,8 @@ def create_session(
         moe_tp_size,
         moe_ep_size,
         attention_dp_size,
+        nextn=nextn,
+        nextn_accept_rates=nextn_accept_rates,
     )
 
 
@@ -319,7 +357,14 @@ def estimate_num_gpu_blocks(
     moe_ep_size: int | None = None,
     attention_dp_size: int | None = None,
 ) -> int:
-    """Estimate rank-local KV cache blocks for mocker/replay AIC configs."""
+    """Estimate rank-local KV cache blocks for mocker/replay AIC configs.
+
+    Intentionally spec-dec-blind: the session is constructed without ``nextn``,
+    so AIC's draft-token activation/weight inflation (over-counted in
+    ``trtllm_backend._get_memory_usage``) doesn't drag the KV budget negative.
+    Spec-dec speedup is applied separately on the latency path via
+    :class:`AicSession` constructed with ``nextn`` / ``nextn_accept_rates``.
+    """
     _validate_kv_capacity_backend(backend_name)
     session = create_session(
         backend_name=backend_name,
