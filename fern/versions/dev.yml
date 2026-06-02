@@ -150,6 +150,8 @@ navigation:
             contents:
               - page: GKE Setup
                 path: ../pages-dev/kubernetes/cloud-providers/gke/gke.md
+      - page: API Reference
+        path: ../pages-dev/kubernetes/api-reference.md
   # ==================== User Guides ====================
   - section: User Guides
     contents:
@@ -452,8 +454,6 @@ navigation:
           - page: RDMA Metadata
             path: ../pages-dev/api/nixl-connect/rdma-metadata.md
       # -- Kubernetes (hidden sub-pages) --
-      - page: API Reference (K8s)
-        path: ../pages-dev/kubernetes/api-reference.md
       - page: Creating Deployments
         path: ../pages-dev/kubernetes/deployment/create-deployment.md
       - page: FluxCD
