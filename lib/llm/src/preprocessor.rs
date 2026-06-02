@@ -223,7 +223,7 @@ struct PreprocessRequestOptions {
 ///
 /// Resolved once at `OpenAIPreprocessor` construction from
 /// `runtime_config.backend_framework`. Unknown / missing values warn and
-/// fall back to `Vllm` (the historical default).
+/// disable MM-aware routing (text-prefix fallback).
 #[cfg(feature = "lightseek-mm")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MmRoutingProtocol {
@@ -260,28 +260,21 @@ fn pad_value_for_sglang(mm_hash: u64) -> crate::protocols::TokenIdType {
 
 #[cfg(feature = "lightseek-mm")]
 impl MmRoutingProtocol {
-    /// Resolve from `runtime_config.backend_framework`. Both `dynamo.sglang`
-    /// and `dynamo.vllm` set this field at registration time
-    /// (`components/src/dynamo/sglang/register.py:277`,
-    /// `components/src/dynamo/vllm/main.py:637`); an unset or
-    /// unrecognized value means upstream registration didn't run or a new
-    /// backend forgot to wire the label. Warn loudly and fall back to
-    /// the vLLM protocol (historical default) rather than silently
-    /// breaking routing.
-    fn from_backend_framework(value: Option<&str>) -> Self {
+    /// Resolve from `runtime_config.backend_framework`. Returns `None` for
+    /// missing or unrecognized values so MM-aware routing disables itself
+    /// (text-prefix fallback) instead of silently picking a wire shape.
+    fn from_backend_framework(value: Option<&str>) -> Option<Self> {
         match value {
-            Some(s) if s.eq_ignore_ascii_case("sglang") => Self::Sglang,
-            Some(s) if s.eq_ignore_ascii_case("vllm") => Self::Vllm,
+            Some(s) if s.eq_ignore_ascii_case("sglang") => Some(Self::Sglang),
+            Some(s) if s.eq_ignore_ascii_case("vllm") => Some(Self::Vllm),
             other => {
                 tracing::warn!(
                     target: "mm_routing",
                     backend_framework = ?other,
-                    "runtime_config.backend_framework is missing or unrecognized; \
-                     defaulting MM-routing protocol to vllm. Set it explicitly via \
-                     the backend component (sglang/register.py or vllm/main.py) to \
-                     silence this warning and pick the correct routing wire format."
+                    "backend_framework missing or unrecognized; \
+                     MM-aware routing disabled (text-prefix fallback)."
                 );
-                Self::Vllm
+                None
             }
         }
     }
@@ -301,12 +294,11 @@ pub struct OpenAIPreprocessor {
     media_loader: Option<MediaLoader>,
     /// Max context length (in tokens) this model can handle, from ModelDeploymentCard
     context_length: u32,
-    /// Backend protocol the MM-routing fill path matches against. Resolved
-    /// once at construction from `runtime_config.backend_framework` so the
-    /// hot path doesn't re-parse the string per request. Each backend has
-    /// its own routing-side wire shape (see [`MmRoutingProtocol`]).
+    /// Backend protocol the MM-routing fill path matches against. `None`
+    /// when `runtime_config.backend_framework` is missing or unrecognized
+    /// — MM-aware routing then falls back to text-prefix routing.
     #[cfg(feature = "lightseek-mm")]
-    mm_routing_protocol: MmRoutingProtocol,
+    mm_routing_protocol: Option<MmRoutingProtocol>,
     /// Per-image token-count engine. `None` when the feature is disabled, the
     /// model isn't covered by the registry, or `preprocessor_config.json` is
     /// unreadable.
@@ -1230,8 +1222,11 @@ impl OpenAIPreprocessor {
             // positions the backend derives from `multi_modal_data`, and
             // the wrong UUIDs would get injected onto the wrong images.
             #[cfg(feature = "lightseek-mm")]
-            if !mm_image_entries.is_empty() && mm_image_entries.len() == total_image_count {
-                let sglang_mode = self.mm_routing_protocol == MmRoutingProtocol::Sglang;
+            if let Some(protocol) = self.mm_routing_protocol
+                && !mm_image_entries.is_empty()
+                && mm_image_entries.len() == total_image_count
+            {
+                let sglang_mode = protocol == MmRoutingProtocol::Sglang;
                 const HEX_PAD: &str = "000000000000000000000000000000000000000000000000";
                 let hexes: Vec<serde_json::Value> = mm_image_entries
                     .iter()
@@ -1245,7 +1240,7 @@ impl OpenAIPreprocessor {
                     })
                     .collect();
                 extra_args["mm_hashes"] = serde_json::Value::Array(hexes);
-            } else if !mm_image_entries.is_empty() {
+            } else if !mm_image_entries.is_empty() && self.mm_routing_protocol.is_some() {
                 tracing::warn!(
                     target: "mm_routing",
                     resolved = mm_image_entries.len(),
@@ -1283,6 +1278,13 @@ impl OpenAIPreprocessor {
         if mm_image_entries.is_empty() {
             return Ok(());
         }
+        let Some(protocol) = self.mm_routing_protocol else {
+            tracing::debug!(
+                target: "mm_routing",
+                "mm_routing_protocol unset; skipping MM routing info"
+            );
+            return Ok(());
+        };
         let Some(find_token_id) = self.routing_image_token_id else {
             tracing::debug!(
                 target: "mm_routing",
@@ -1375,7 +1377,7 @@ impl OpenAIPreprocessor {
         // path (Cow::Borrowed = raw tokenized prompt) needs the caller to
         // prepend BOS here. Avoids the prior split-brain where the leading
         // push was here and the mid-segment pushes lived inside the helper.
-        let sglang_pad_value_mode = self.mm_routing_protocol == MmRoutingProtocol::Sglang;
+        let sglang_pad_value_mode = protocol == MmRoutingProtocol::Sglang;
         let splice_owns_bos = matches!(normalized_token_ids, std::borrow::Cow::Owned(_));
         let bos_extra = (!splice_owns_bos && self.routing_prepend_bos.is_some()) as usize;
         let mut expanded: Vec<crate::protocols::TokenIdType> =
