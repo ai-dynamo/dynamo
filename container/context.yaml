@@ -39,6 +39,11 @@ dynamo:
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   ffmpeg_version: "8.1"
+  # ffmpeg CLI build inputs: NVENC API headers (H.264 HW encoder) and the
+  # BSD-licensed libvpx VP9 encoder, so wheel_builder can build an LGPL-only
+  # ffmpeg CLI to replace the GPL binary shipped by imageio-ffmpeg / the base.
+  nv_codec_headers_ref: "n13.0.19.0"
+  libvpx_ref: "v1.14.1"
   efa_version: 1.47.0
 
 vllm:
