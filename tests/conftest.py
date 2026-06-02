@@ -632,7 +632,8 @@ def _maybe_apply_sglang_mm_hashes_patch(items) -> None:
     res = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
     _logger.info(
         "sglang mm_hashes auto-patch: %s",
-        "applied" if res.returncode == 0
+        "applied"
+        if res.returncode == 0
         else f"skipped ({(res.stderr or res.stdout).strip()})",
     )
 
