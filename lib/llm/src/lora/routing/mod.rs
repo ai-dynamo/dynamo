@@ -42,6 +42,26 @@ pub trait LoraAllocator: Send + Sync {
         self.compute_replica_set(lora_name, workers, replica_factor)
     }
 
+    /// Stability-preserving slot-aware variant: like [`compute_replica_set_with_slots`],
+    /// but retains workers from `prior` (the LoRA's current placement) when they are still
+    /// present and not at capacity, before filling remaining slots from the ranked list.
+    ///
+    /// This keeps per-worker capacity safety (the caller charges residual usage across
+    /// LoRAs within a tick) without letting transient sibling activity move a LoRA whose
+    /// own inputs are unchanged — preserving the HRW churn-minimization guarantee.
+    ///
+    /// Default implementation ignores `prior` and delegates to the non-sticky variant.
+    fn compute_replica_set_with_slots_sticky(
+        &self,
+        lora_name: &str,
+        workers: &[WorkerWithDpRank],
+        replica_factor: usize,
+        worker_slot_usage: &HashMap<WorkerWithDpRank, (usize, usize)>,
+        _prior: &[WorkerWithDpRank],
+    ) -> Vec<WorkerWithDpRank> {
+        self.compute_replica_set_with_slots(lora_name, workers, replica_factor, worker_slot_usage)
+    }
+
     /// Name of this algorithm (for logging/metrics)
     fn name(&self) -> &str;
 }

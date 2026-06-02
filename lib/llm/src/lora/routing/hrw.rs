@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::LoraAllocator;
 use dynamo_kv_router::protocols::WorkerWithDpRank;
@@ -92,6 +92,65 @@ impl LoraAllocator for RendezvousHasher {
         // the count, accept the smaller set rather than placing on at-capacity workers
         // (REQ 6: skip full workers). Only when EVERY worker is full (result is empty) do we
         // fall back to basic HRW, so the LoRA still has at least one routable home (REQ 7).
+        if result.is_empty() {
+            return self.compute_replica_set(lora_name, workers, replica_factor);
+        }
+
+        result
+    }
+
+    fn compute_replica_set_with_slots_sticky(
+        &self,
+        lora_name: &str,
+        workers: &[WorkerWithDpRank],
+        replica_factor: usize,
+        worker_slot_usage: &HashMap<WorkerWithDpRank, (usize, usize)>,
+        prior: &[WorkerWithDpRank],
+    ) -> Vec<WorkerWithDpRank> {
+        if workers.is_empty() || replica_factor == 0 {
+            return Vec::new();
+        }
+
+        let ranked = Self::rank_workers(lora_name, workers);
+        let prior_set: HashSet<WorkerWithDpRank> = prior.iter().copied().collect();
+        let mut result = Vec::with_capacity(replica_factor);
+        let mut chosen: HashSet<WorkerWithDpRank> = HashSet::new();
+
+        let is_full = |w: &WorkerWithDpRank| {
+            worker_slot_usage
+                .get(w)
+                .map(|&(used, cap)| used >= cap)
+                .unwrap_or(false)
+        };
+
+        // Pass 1 (stickiness): retain workers the LoRA already occupies, in HRW-ranked order,
+        // as long as they are still present and not full. This anchors a stable LoRA on its
+        // existing placement so flickering sibling activity within the tick cannot move it.
+        for (worker, _score) in &ranked {
+            if result.len() >= replica_factor {
+                break;
+            }
+            if prior_set.contains(worker) && !is_full(worker) {
+                result.push(*worker);
+                chosen.insert(*worker);
+            }
+        }
+
+        // Pass 2: fill any remaining slots from the HRW-ranked list, skipping full and
+        // already-chosen workers (REQ 6: skip workers at capacity).
+        for (worker, _score) in &ranked {
+            if result.len() >= replica_factor {
+                break;
+            }
+            if chosen.contains(worker) || is_full(worker) {
+                continue;
+            }
+            result.push(*worker);
+            chosen.insert(*worker);
+        }
+
+        // Only when EVERY worker is full do we fall back to basic HRW so the LoRA keeps at
+        // least one routable home (REQ 7).
         if result.is_empty() {
             return self.compute_replica_set(lora_name, workers, replica_factor);
         }
@@ -232,5 +291,61 @@ mod tests {
 
         let result = hasher.compute_replica_set_with_slots("test-lora", &workers, 2, &usage);
         assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_sticky_retains_prior_placement() {
+        // Stickiness: when the LoRA's prior workers are still present and not full, the sticky
+        // variant keeps them even though a clean HRW pass would pick a different (top-ranked)
+        // set. This is what prevents transient sibling activity from moving a stable LoRA.
+        let hasher = RendezvousHasher;
+        let workers = make_workers(5);
+        let usage: HashMap<_, _> = workers.iter().map(|w| (*w, (0usize, 4usize))).collect();
+
+        // Natural slot-aware top-2 (no prior hint).
+        let natural = hasher.compute_replica_set_with_slots("lora-x", &workers, 2, &usage);
+        assert_eq!(natural.len(), 2);
+
+        // Choose a prior set of two workers that are NOT the natural top-2.
+        let prior: Vec<_> = workers
+            .iter()
+            .filter(|w| !natural.contains(w))
+            .copied()
+            .take(2)
+            .collect();
+        assert_eq!(prior.len(), 2);
+
+        let sticky =
+            hasher.compute_replica_set_with_slots_sticky("lora-x", &workers, 2, &usage, &prior);
+        let sset: HashSet<_> = sticky.iter().copied().collect();
+        let pset: HashSet<_> = prior.iter().copied().collect();
+        assert_eq!(
+            sset, pset,
+            "sticky must retain the prior (non-full) placement"
+        );
+    }
+
+    #[test]
+    fn test_sticky_replaces_full_prior_worker() {
+        // A prior worker that is now at capacity must be dropped and replaced; a non-full prior
+        // worker is retained. Capacity safety (REQ 6) is preserved alongside stickiness.
+        let hasher = RendezvousHasher;
+        let workers = make_workers(5);
+        let prior = vec![workers[0], workers[1]];
+
+        let mut usage: HashMap<_, _> = workers.iter().map(|w| (*w, (0usize, 4usize))).collect();
+        usage.insert(workers[0], (4, 4)); // prior[0] is full
+
+        let sticky =
+            hasher.compute_replica_set_with_slots_sticky("lora-x", &workers, 2, &usage, &prior);
+        assert_eq!(sticky.len(), 2);
+        assert!(
+            !sticky.contains(&workers[0]),
+            "a full prior worker must be dropped"
+        );
+        assert!(
+            sticky.contains(&workers[1]),
+            "a non-full prior worker must be retained"
+        );
     }
 }

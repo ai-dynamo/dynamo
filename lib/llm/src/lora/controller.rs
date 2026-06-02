@@ -209,33 +209,31 @@ impl LoraController {
             );
         }
 
-        // Cleanup stale entries
+        // Cleanup stale entries: remove routing entries only for LoRAs that are no longer known
+        // at all (neither loaded nor receiving traffic).
+        //
+        // Capacity-dropped active LoRAs (active but truncated out of this tick's budget by the
+        // R3 cap) are intentionally LEFT in place. Their existing entry already points at workers
+        // that host the adapter, so it remains a valid, warm route; the cap only bounds *new*
+        // allocations (a dropped LoRA simply keeps its last placement instead of getting a fresh
+        // one) and does not require evicting an already-placed adapter. Removing and re-adding the
+        // entry as the marginal tail crosses the budget boundary each tick would otherwise produce
+        // continuous load/unload churn for no benefit (and requests already fall back to the
+        // runtime loaded-worker path when no entry exists).
         let known_set: std::collections::HashSet<&str> =
             all_loras.iter().map(|s| s.as_str()).collect();
-        // Active LoRAs that received no allocation this tick because they fell outside the slot
-        // budget (capacity cap). Their prior routing-table entry must also be removed, or the
-        // filter would keep routing via the stale replica set and defeat the cap (R4-1). With no
-        // entry, requests fall back to the runtime loaded-worker path.
-        let dropped_active: std::collections::HashSet<&str> = active_loras
-            .iter()
-            .map(|(n, _)| n.as_str())
-            .filter(|n| !active_replica_counts.contains_key(*n))
-            .collect();
         let table_snapshot = self.routing_table.snapshot_configs();
 
         for (name, _) in &table_snapshot {
-            if !known_set.contains(name.as_str()) || dropped_active.contains(name.as_str()) {
+            if !known_set.contains(name.as_str()) {
                 self.routing_table.remove_lora(name);
                 self.hysteresis.remove(name);
-                tracing::debug!(
-                    lora = name,
-                    "Removed stale/capacity-dropped routing table entry"
-                );
+                tracing::debug!(lora = name, "Removed stale routing table entry");
             }
         }
 
         // Re-snapshot after cleanup so the logs and Prometheus gauges below reflect the
-        // post-cleanup table and don't surface a capacity-dropped/stale LoRA for an extra tick (RF-1).
+        // post-cleanup table and don't surface a stale LoRA for an extra tick (RF-1).
         let table_snapshot = self.routing_table.snapshot_configs();
 
         // Prune the load estimator of LoRAs that are no longer loaded (and any
@@ -295,15 +293,23 @@ impl LoraController {
         for (lora_name, desired_replicas) in active_sorted {
             let current = self.routing_table.get_config(lora_name);
             let current_replicas = current.as_ref().map(|c| c.replica_factor).unwrap_or(0);
+            // Anchor on the LoRA's existing placement so transient sibling activity within
+            // this tick cannot move a LoRA whose own inputs are unchanged (preserves the HRW
+            // churn-minimization guarantee while still charging residual capacity below).
+            let prior: Vec<WorkerWithDpRank> = current
+                .as_ref()
+                .map(|c| c.replica_set.clone())
+                .unwrap_or_default();
 
             let final_replicas =
                 self.apply_hysteresis(lora_name, *desired_replicas, current_replicas);
 
-            let replica_set = self.allocator.compute_replica_set_with_slots(
+            let replica_set = self.allocator.compute_replica_set_with_slots_sticky(
                 lora_name,
                 workers,
                 final_replicas,
                 &residual_usage,
+                &prior,
             );
 
             // Charge this LoRA's placements against residual capacity for later LoRAs.
@@ -438,7 +444,7 @@ impl LoraController {
         );
 
         match solve_result {
-            Ok(mut result) => {
+            Ok(result) => {
                 let total_loads: usize = result.loads.values().map(|s| s.len()).sum();
                 let total_unloads: usize = result.unloads.values().map(|s| s.len()).sum();
 
@@ -487,15 +493,21 @@ impl LoraController {
                 }
 
                 // F8: the MCF solver omits fully-overflowed LoRAs from `assignment`. A
-                // still-loaded LoRA left unplaced would otherwise keep a stale entry (or have
-                // no route at all). Give each a deterministic HRW cold-start pin so it stays
-                // routable (REQ 7), and record it in the assignment so next tick's delta
-                // detection doesn't see phantom churn.
-                // Only LoRAs we actually intended to place (active with allocated demand, or
-                // inactive cold-start) may receive a fallback pin. LoRAs intentionally dropped by
-                // the capacity cap (active but truncated out of active_replica_counts) must NOT be
-                // re-pinned (RR3-1) — they rely on the runtime loaded-worker fallback, exactly as
-                // in the HRW path; pinning them would reintroduce min-1 placement past the budget.
+                // still-loaded LoRA left unplaced must stay routable (REQ 7) without thrashing
+                // the routing table or polluting the solver's keep/delta state:
+                //   * Continuity first — if the LoRA already has a routing entry (it was placed
+                //     on a recent tick, so its adapter is likely still warm there), leave it
+                //     untouched. No write means no churn, and the prior workers remain a valid
+                //     route. The filter's runtime loaded-worker fallback (N5) also keeps these
+                //     reachable.
+                //   * Only a brand-new unplaced LoRA (no entry at all) gets a deterministic HRW
+                //     cold-start pin so it has at least one home.
+                //   * Crucially, fallback pins are NEVER inserted into `result.assignment`: that
+                //     value becomes `prev_assignment`, and feeding it phantom (non-MCF) placements
+                //     corrupts the keep-reward/delta logic on the next tick and inflates churn.
+                // LoRAs intentionally dropped by the capacity cap (active but truncated out of
+                // active_replica_counts) must NOT be re-pinned (RR3-1) — they rely on the runtime
+                // loaded-worker fallback, exactly as in the HRW path.
                 let intended: std::collections::HashSet<&str> = active_replica_counts
                     .keys()
                     .map(String::as_str)
@@ -509,6 +521,10 @@ impl LoraController {
                     .cloned()
                     .collect();
                 for lora_name in unplaced {
+                    // Continuity: an existing entry is already a valid route; preserve it.
+                    if self.routing_table.get_config(&lora_name).is_some() {
+                        continue;
+                    }
                     let pin = self.allocator.compute_replica_set(&lora_name, workers, 1);
                     if pin.is_empty() {
                         continue;
@@ -518,15 +534,12 @@ impl LoraController {
                         tracing::warn!(
                             lora = %lora_name,
                             pinned_worker_id = ?pin.first().map(|w| w.worker_id),
-                            "MCF left LoRA unplaced (capacity overflow); applied HRW fallback pin"
+                            "MCF left new LoRA unplaced (capacity overflow); applied HRW cold-start pin"
                         );
                     }
-                    result
-                        .assignment
-                        .insert(lora_name, pin.into_iter().collect());
                 }
 
-                // Store state for next tick
+                // Store state for next tick (pure MCF assignment; no fallback pins injected)
                 self.prev_assignment = result.assignment;
                 self.prev_workers = current_workers;
                 self.prev_replica_counts = lora_inputs
@@ -673,7 +686,8 @@ impl LoraController {
         // would otherwise sum past `total_slots`). Rank by load (desc, tie by name for
         // determinism) and keep only the top `total_slots`; the remainder get no allocation
         // here and rely on the runtime loaded-worker fallback. This avoids forcing min-1
-        // placements onto already-full workers.
+        // placements onto already-full workers, and (by keeping the placed set to a stable
+        // top-by-load) also stabilizes the MCF solver's input across ticks.
         let mut ranked: Vec<(String, usize)> = active_loras.to_vec();
         ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         if ranked.len() > total_slots {
