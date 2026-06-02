@@ -43,3 +43,11 @@ dependencies:
     version: v0.1.0-alpha.8
     repository: oci://ghcr.io/ai-dynamo/grove
     condition: global.grove.install
+  - name: disaggregatedset
+    version: 0.1.0
+    # Vendored from sigs.k8s.io/disaggregatedset until the upstream chart is
+    # published to an OCI registry. Track upstream at
+    # https://github.com/kubernetes-sigs/lws/tree/main/disaggregatedset/charts/disaggregatedset
+    # and bump this revision when bumping the vendored copy.
+    repository: file://components/disaggregatedset
+    condition: global.disaggregatedset.install

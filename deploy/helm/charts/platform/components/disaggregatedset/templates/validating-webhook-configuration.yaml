@@ -1,0 +1,29 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "disaggregatedset.fullname" . }}-validating-webhook-configuration
+  annotations:
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "disaggregatedset.fullname" . }}-
+  labels:
+  {{- include "disaggregatedset.labels" . | nindent 4 }}
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: '{{ include "disaggregatedset.fullname" . }}-webhook-service'
+      namespace: '{{ .Release.Namespace }}'
+      path: /validate-disaggregatedset-x-k8s-io-v1alpha1-disaggregatedset
+  failurePolicy: Fail
+  name: vdisaggregatedset.kb.io
+  rules:
+  - apiGroups:
+    - disaggregatedset.x-k8s.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - disaggregatedsets
+  sideEffects: None

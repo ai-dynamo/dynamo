@@ -1,0 +1,103 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "disaggregatedset.fullname" . }}-manager-role
+  labels:
+  {{- include "disaggregatedset.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - admissionregistration.k8s.io
+  resources:
+  - validatingwebhookconfigurations
+  verbs:
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - disaggregatedset.x-k8s.io
+  resources:
+  - disaggregatedsets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - disaggregatedset.x-k8s.io
+  resources:
+  - disaggregatedsets/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - disaggregatedset.x-k8s.io
+  resources:
+  - disaggregatedsets/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - leaderworkerset.x-k8s.io
+  resources:
+  - leaderworkersets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - leaderworkerset.x-k8s.io
+  resources:
+  - leaderworkersets/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "disaggregatedset.fullname" . }}-manager-rolebinding
+  labels:
+  {{- include "disaggregatedset.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: '{{ include "disaggregatedset.fullname" . }}-manager-role'
+subjects:
+- kind: ServiceAccount
+  name: '{{ include "disaggregatedset.fullname" . }}-controller-manager'
+  namespace: '{{ .Release.Namespace }}'

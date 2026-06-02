@@ -1,0 +1,25 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "disaggregatedset.fullname" . }}-disaggregatedset-editor-role
+  labels:
+  {{- include "disaggregatedset.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - disaggregatedset.x-k8s.io
+  resources:
+  - disaggregatedsets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - disaggregatedset.x-k8s.io
+  resources:
+  - disaggregatedsets/status
+  verbs:
+  - get

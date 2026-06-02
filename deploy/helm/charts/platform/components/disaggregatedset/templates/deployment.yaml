@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "disaggregatedset.fullname" . }}-controller-manager
+  labels:
+    control-plane: controller-manager
+  {{- include "disaggregatedset.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.controllerManager.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: disaggregatedset
+      control-plane: controller-manager
+    {{- include "disaggregatedset.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: disaggregatedset
+        control-plane: controller-manager
+      {{- include "disaggregatedset.selectorLabels" . | nindent 8 }}
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+    spec:
+      containers:
+      - args: {{- toYaml .Values.controllerManager.manager.args | nindent 8 }}
+        command:
+        - /manager
+        env:
+        - name: KUBERNETES_CLUSTER_DOMAIN
+          value: {{ quote .Values.kubernetesClusterDomain }}
+        image: {{ .Values.controllerManager.manager.image.repository }}:{{ .Values.controllerManager.manager.image.tag
+          | default .Chart.AppVersion }}
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        name: manager
+        ports:
+        - containerPort: 9443
+          name: webhook-server
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources: {{- toYaml .Values.controllerManager.manager.resources | nindent 10
+          }}
+        securityContext: {{- toYaml .Values.controllerManager.manager.containerSecurityContext
+          | nindent 10 }}
+        volumeMounts:
+        - mountPath: /tmp/k8s-webhook-server/serving-certs
+          name: cert
+          readOnly: true
+      securityContext: {{- toYaml .Values.controllerManager.podSecurityContext | nindent
+        8 }}
+      serviceAccountName: {{ include "disaggregatedset.fullname" . }}-controller-manager
+      terminationGracePeriodSeconds: 10
+      volumes:
+      - name: cert
+        secret:
+          defaultMode: 420
+          secretName: {{ include "disaggregatedset.fullname" . }}-webhook-server-cert

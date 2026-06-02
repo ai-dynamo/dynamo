@@ -1,0 +1,9 @@
+This chart is vendored from sigs.k8s.io/disaggregatedset, a Kubernetes-sigs
+project licensed under Apache License 2.0. It is included in the Dynamo platform
+chart as a subchart dependency for the DisaggregatedSet operator.
+
+Upstream: https://github.com/kubernetes-sigs/lws/tree/main/disaggregatedset/charts/disaggregatedset
+
+This vendored copy will be removed once the upstream chart is published to an
+OCI registry and the Dynamo platform chart can depend on it directly. Bump the
+`version` in `Chart.yaml` (and this `NOTICE`) when updating the vendored copy.
