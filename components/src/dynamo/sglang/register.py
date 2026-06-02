@@ -27,7 +27,7 @@ from dynamo.llm import (
 from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig
-from dynamo.sglang.capacity import local_dp_rank_bounds, runtime_capacity
+from dynamo.sglang.capacity import model_card_dp_rank_bounds, runtime_capacity
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 
@@ -291,13 +291,13 @@ async def _get_runtime_config(
         dynamo_args.enable_local_indexer and not is_decode_worker
     )
 
-    start_dp_rank, end_dp_rank = local_dp_rank_bounds(server_args)
-    local_dp_size = end_dp_rank - start_dp_rank
+    start_dp_rank, end_dp_rank = model_card_dp_rank_bounds(server_args)
+    registered_dp_size = end_dp_rank - start_dp_rank
     runtime_config.data_parallel_start_rank = start_dp_rank
-    runtime_config.data_parallel_size = local_dp_size
-    if local_dp_size > 1:
+    runtime_config.data_parallel_size = registered_dp_size
+    if registered_dp_size > 1:
         logging.info(
-            "Registering with local data_parallel rank range [%s, %s)",
+            "Registering with routable data_parallel rank range [%s, %s)",
             start_dp_rank,
             end_dp_rank,
         )
