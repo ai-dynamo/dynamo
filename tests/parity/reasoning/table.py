@@ -114,6 +114,7 @@ PARSER_TO_REASONING_FAMILY = {
 # by the legend note (see `_legend_html`).
 _REASONING_LABEL_OVERRIDES = {"nemotron_nano": "Nemotron V3‡"}
 _REASONING_TOP_N_APPEND = ["nemotron_nano"]
+# nemotron_deci: for older nemotron v2 models, hide to avoid confusion with nemotron v3 models
 _REASONING_HIDDEN_TOOL_FAMILIES = {"nemotron_deci"}
 
 
