@@ -35,6 +35,7 @@ from gpu_memory_service.snapshot.backends.pinned_host import (
     close_pinned_copy_slots,
     make_pinned_copy_slots,
 )
+from gpu_memory_service.snapshot.backends.rust_nixl_posix import RustNixlPosixContext
 from gpu_memory_service.snapshot.transfer import (
     FileTransferSource,
     GMSSnapshotConfig,
@@ -56,11 +57,20 @@ NixlGroupingFn = Callable[
 class _PreparedNixlGroup:
     group_name: str
     file_groups: Sequence[NixlFileGroup]
-    agent: object
+    agent: Optional[object]
     agent_name: str
     slots: List[PinnedCopySlot]
     prep_elapsed_s: float
+    rust_context: Optional[RustNixlPosixContext] = None
     closed: bool = False
+
+
+def _truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 class NixlPosixStagingTransferBackend:
@@ -93,20 +103,38 @@ class NixlPosixStagingTransferBackend:
             self._posix_backend_params.update(
                 {str(key): str(value) for key, value in posix_backend_params.items()}
             )
-        self._api_pool = ThreadPoolExecutor(max_workers=1)
-        self._api_future = self._api_pool.submit(load_nixl_api)
+        self._use_rust_posix = _truthy(
+            os.environ.get("GMS_NIXL_POSIX_RUST")
+        ) or _truthy(config.backend_config.get("rust_nixl_posix"))
+        self._api_pool: Optional[ThreadPoolExecutor]
+        self._api_future: Optional[Future[object]]
+        if self._use_rust_posix:
+            self._api_pool = None
+            self._api_future = None
+            import_message = (
+                "Rust NIXL POSIX helper is enabled; skipping background "
+                "nixl._api import"
+            )
+        else:
+            self._api_pool = ThreadPoolExecutor(max_workers=1)
+            self._api_future = self._api_pool.submit(load_nixl_api)
+            import_message = (
+                "NIXL import is running in the background and agent setup "
+                "starts in start_restore() so it can overlap manifest planning, "
+                "RW connect, and restore target allocation"
+            )
         self._group_sources = group_sources
         self._group_kind = group_kind
         self._warn_under_parallelized = warn_under_parallelized
         logger.info(
             "%s configured for device %d with %d workers using NIXL POSIX "
-            "staging backend_params=%s; NIXL import is running in the "
-            "background and agent setup starts in start_restore() so it can "
-            "overlap manifest planning, RW connect, and restore target allocation",
+            "staging backend_params=%s rust_nixl_posix=%s; %s",
             backend_name,
             self._device,
             self._max_workers,
             self._posix_backend_params,
+            self._use_rust_posix,
+            import_message,
         )
 
     def start_restore(self, sources: Sequence[FileTransferSource]) -> TransferSession:
@@ -120,10 +148,12 @@ class NixlPosixStagingTransferBackend:
             posix_backend_params=self._posix_backend_params,
             sources=sources,
             api_future=self._api_future,
+            use_rust_posix=self._use_rust_posix,
         )
 
     def close(self) -> None:
-        self._api_pool.shutdown(wait=True, cancel_futures=True)
+        if self._api_pool is not None:
+            self._api_pool.shutdown(wait=True, cancel_futures=True)
 
 
 class _NixlPosixStagingTransferSession:
@@ -139,6 +169,7 @@ class _NixlPosixStagingTransferSession:
         posix_backend_params: Mapping[str, str],
         sources: Sequence[FileTransferSource],
         api_future: Optional[Future[object]] = None,
+        use_rust_posix: bool = False,
     ) -> None:
         self._backend_name = backend_name
         self._device = device
@@ -147,6 +178,7 @@ class _NixlPosixStagingTransferSession:
         self._posix_backend_params = dict(posix_backend_params)
         self._sources = list(sources)
         self._api_future = api_future
+        self._use_rust_posix = bool(use_rust_posix)
         self._agent_name_base = (
             f"gms_{backend_name.replace('-', '_')}_{device}_{os.getpid()}_{id(self):x}"
         )
@@ -334,16 +366,20 @@ class _NixlPosixStagingTransferSession:
         prep_t0 = time.monotonic()
         slots: List[PinnedCopySlot] = []
         agent: Optional[object] = None
+        rust_context: Optional[RustNixlPosixContext] = None
         agent_name = f"{self._agent_name_base}_{worker_index}"
         try:
             if self._cancel_event.is_set():
                 raise CancelledError(f"{self._backend_name} cancelled")
             api_t0 = time.monotonic()
-            api = (
-                self._api_future.result()
-                if self._api_future is not None
-                else load_nixl_api()
-            )
+            if self._use_rust_posix:
+                api = None
+            else:
+                api = (
+                    self._api_future.result()
+                    if self._api_future is not None
+                    else load_nixl_api()
+                )
             api_elapsed = time.monotonic() - api_t0
             if self._cancel_event.is_set():
                 raise CancelledError(f"{self._backend_name} cancelled")
@@ -351,12 +387,29 @@ class _NixlPosixStagingTransferSession:
             cuda_utils.cuda_runtime_set_device(self._device)
             set_device_elapsed = time.monotonic() - set_device_t0
             agent_t0 = time.monotonic()
-            agent = create_nixl_agent(
-                api,
-                agent_name=agent_name,
-                backend_name=NIXL_POSIX_BACKEND,
-                backend_params=self._posix_backend_params,
-            )
+            if self._use_rust_posix:
+                rust_context = RustNixlPosixContext(
+                    agent_name,
+                    backend_params=self._posix_backend_params,
+                )
+                context_stats = rust_context.stats
+                profile_log(
+                    logger,
+                    "%s Rust NIXL POSIX context created agent=%s "
+                    "dlopen=%.6fs create_agent_backend=%.6fs total=%.6fs",
+                    self._backend_name,
+                    agent_name,
+                    context_stats.dlopen_s,
+                    context_stats.create_agent_backend_s,
+                    context_stats.total_s,
+                )
+            else:
+                agent = create_nixl_agent(
+                    api,
+                    agent_name=agent_name,
+                    backend_name=NIXL_POSIX_BACKEND,
+                    backend_params=self._posix_backend_params,
+                )
             agent_elapsed = time.monotonic() - agent_t0
             if self._cancel_event.is_set():
                 raise CancelledError(f"{self._backend_name} cancelled")
@@ -398,6 +451,7 @@ class _NixlPosixStagingTransferSession:
                 agent_name=agent_name,
                 slots=slots,
                 prep_elapsed_s=prep_elapsed_s,
+                rust_context=rust_context,
             )
         except Exception:
             close_pinned_copy_slots(
@@ -405,6 +459,8 @@ class _NixlPosixStagingTransferSession:
                 logger,
                 "failed to release prepared NIXL pinned copy slot",
             )
+            if rust_context is not None:
+                rust_context.close()
             raise
 
     def _restore_prepared_group(
@@ -420,6 +476,8 @@ class _NixlPosixStagingTransferSession:
                 backend_name=self._backend_name,
                 agent=prepared.agent,
                 agent_name=prepared.agent_name,
+                rust_context=prepared.rust_context,
+                use_rust_posix=self._use_rust_posix,
                 file_groups=prepared.file_groups,
                 targets=targets,
                 cancel_event=self._cancel_event,
@@ -446,6 +504,9 @@ class _NixlPosixStagingTransferSession:
         if prepared.closed:
             return
         prepared.closed = True
+        if prepared.rust_context is not None:
+            prepared.rust_context.close()
+            prepared.rust_context = None
         close_pinned_copy_slots(
             prepared.slots,
             logger,
@@ -456,8 +517,10 @@ class _NixlPosixStagingTransferSession:
 def restore_file_groups_with_nixl_staging(
     *,
     backend_name: str,
-    agent: object,
+    agent: Optional[object],
     agent_name: str,
+    rust_context: Optional[RustNixlPosixContext] = None,
+    use_rust_posix: bool = False,
     file_groups: Sequence[NixlFileGroup],
     targets: Mapping[str, GMSTransferTarget],
     cancel_event: Optional[threading.Event] = None,
@@ -501,6 +564,8 @@ def restore_file_groups_with_nixl_staging(
                         _read_file_to_dram(
                             agent,
                             agent_name,
+                            rust_context,
+                            use_rust_posix,
                             fd,
                             file_path,
                             source.file_offset + done,
@@ -547,8 +612,10 @@ def restore_file_groups_with_nixl_staging(
 
 
 def _read_file_to_dram(
-    agent: object,
+    agent: Optional[object],
     agent_name: str,
+    rust_context: Optional[RustNixlPosixContext],
+    use_rust_posix: bool,
     fd: int,
     file_path: str,
     file_offset: int,
@@ -556,6 +623,35 @@ def _read_file_to_dram(
     size: int,
     backend_name: str,
 ) -> None:
+    if use_rust_posix:
+        if rust_context is None:
+            raise RuntimeError("Rust NIXL POSIX staging requested without a context")
+        stats = rust_context.read(
+            fd=fd,
+            file_offset=file_offset,
+            host_ptr=host_ptr,
+            size=size,
+        )
+        profile_log(
+            logger,
+            "%s Rust file->dram chunk setup: file=%s offset=%d size=%d "
+            "file_register=%.6fs host_register=%.6fs initialize_xfer=%.6fs "
+            "transfer_wait=%.6fs cleanup=%.6fs total=%.6fs",
+            backend_name,
+            file_path,
+            file_offset,
+            size,
+            stats.register_file_s,
+            stats.register_host_s,
+            stats.create_req_s,
+            stats.transfer_s,
+            stats.cleanup_s,
+            stats.total_s,
+        )
+        return
+
+    if agent is None:
+        raise RuntimeError("NIXL POSIX staging requested without a Python agent")
     file_reg = None
     host_reg = None
     handle = None

@@ -9,15 +9,24 @@ The _allocator_ext extension only requires Python headers (no CUDA or PyTorch ne
 Following the torch_memory_saver pattern of using pure setuptools for extension building.
 """
 
+import os
+import pathlib
+import shutil
+import subprocess
+
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
 
 
 class BuildExtension(build_ext):
-    """Custom build extension for C++ modules."""
+    """Custom build extension for C++ and optional Rust helper modules."""
+
+    def initialize_options(self):
+        super().initialize_options()
+        self._rust_outputs = []
 
     def build_extensions(self):
-        import os
+        self._build_rust_posix_helper()
 
         # Use CXX environment variable if set, otherwise default to g++
         cxx = os.environ.get("CXX", "g++")
@@ -26,6 +35,73 @@ class BuildExtension(build_ext):
         self.compiler.set_executable("linker_so", f"{cxx} -shared")
 
         build_ext.build_extensions(self)
+
+    def get_outputs(self):
+        return build_ext.get_outputs(self) + self._rust_outputs
+
+    def _build_rust_posix_helper(self):
+        """Build the optional in-process Rust NIXL/POSIX helper.
+
+        Runtime images have Rust in the wheel builder, but local editable
+        installs may not.  Missing rustc leaves the Python fallback path intact.
+        """
+        rustc = os.environ.get("RUSTC") or shutil.which("rustc")
+        if not rustc:
+            self.announce(
+                "rustc not found; skipping optional GMS Rust NIXL POSIX helper",
+                level=3,
+            )
+            return
+
+        source = (
+            pathlib.Path(__file__).parent
+            / "snapshot"
+            / "backends"
+            / "rust_src"
+            / "gms_nixl_posix.rs"
+        )
+        if not source.exists():
+            self.announce(
+                f"{source} not found; skipping optional GMS Rust NIXL POSIX helper",
+                level=3,
+            )
+            return
+
+        output_dir = (
+            pathlib.Path(self.build_lib)
+            / "gpu_memory_service"
+            / "snapshot"
+            / "backends"
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output = output_dir / "libgms_nixl_posix.so"
+        cmd = [
+            rustc,
+            "--crate-type",
+            "cdylib",
+            "-C",
+            "opt-level=3",
+            "-C",
+            "debuginfo=0",
+            str(source),
+            "-o",
+            str(output),
+        ]
+        self.announce(
+            "building optional GMS Rust NIXL POSIX helper: " + " ".join(cmd),
+            level=3,
+        )
+        try:
+            subprocess.check_call(cmd)
+            self._rust_outputs.append(str(output))
+        except subprocess.CalledProcessError as exc:
+            if os.environ.get("GMS_REQUIRE_RUST_NIXL", "0") == "1":
+                raise
+            self.announce(
+                "failed to build optional GMS Rust NIXL POSIX helper "
+                f"({exc}); Python fallback remains available",
+                level=3,
+            )
 
 
 def _create_ext_modules():
@@ -104,6 +180,7 @@ setup(
     },
     package_data={
         "gpu_memory_service.client.torch.extensions": ["*.cpp"],
+        "gpu_memory_service.snapshot.backends": ["libgms_nixl_posix.so"],
     },
     entry_points={
         "console_scripts": [
