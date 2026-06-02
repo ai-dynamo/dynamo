@@ -898,12 +898,20 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         }
 
     async def open_session(self, body: dict) -> dict:
-        """Open a streaming session for subagent KV isolation.
+        """Open a session for subagent KV isolation.
+
+        Default mode pins KV in a streaming slot. With SGLANG_SESSION_RADIX_NATIVE=1
+        on the worker, the session instead holds ordinary evictable radix KV
+        (tagged + floor-priority + bulk-evicted on close): it cannot deadlock on
+        non-evictable KV, and `streaming` is forced off so SGLang takes the
+        full-context (no slot, no reconstruction) path.
 
         Args:
             body: Dict with "session_id", optional "timeout" (default 120),
                   and optional "capacity_of_str_len" (default 65536).
         """
+        import os
+
         from sglang.srt.managers.io_struct import OpenSessionReqInput
 
         session_id = body.get("session_id")
@@ -911,11 +919,12 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             return {"status": "error", "message": "session_id required"}
         timeout = body.get("timeout", 120)
         capacity = body.get("capacity_of_str_len", 65536)
+        radix_native = os.environ.get("SGLANG_SESSION_RADIX_NATIVE") == "1"
         try:
             obj = OpenSessionReqInput(
                 capacity_of_str_len=capacity,
                 session_id=session_id,
-                streaming=True,
+                streaming=not radix_native,
                 timeout=float(timeout),
             )
             result = await self.engine.tokenizer_manager.open_session(obj, None)
