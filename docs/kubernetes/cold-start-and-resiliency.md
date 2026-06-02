@@ -79,10 +79,11 @@ Dynamo Snapshot uses CRIU and NVIDIA's `cuda-checkpoint` utility to capture a wo
 
 | Backend | Single GPU | Multi-GPU, Single Node | Multinode |
 | :--- | :---: | :---: | :---: |
-| **vLLM** | ✅ | ✅ (unstable) | 🚧 |
+| **vLLM** | ✅ | ✅ (highly experimental) | 🚧 |
 | **SGLang** | ✅ | 🚧 | 🚧 |
 | **TensorRT-LLM** | 🚧 | 🚧 | 🚧 |
 
 **Notes:**
 - GMS integration is currently gated on a pending driver release.
 - CRIU performance is only optimal with the following patches folded into criu-dev: [AIO support](https://github.com/checkpoint-restore/criu/pull/3022) and [parallel memfd support](https://github.com/checkpoint-restore/criu/pull/3021)
+- Multi-GPU, Single Node is available in a highly experimental/slightly limited path that uses legacy IPC only for P2P.
