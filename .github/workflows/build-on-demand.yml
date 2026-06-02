@@ -98,7 +98,7 @@ jobs:
     needs: [init]
     if: inputs.build_trtllm
     runs-on: prod-builder-v3
-    timeout-minutes: 240
+    timeout-minutes: 360
     env:
       IMAGE_REGISTRY: ai-dynamo
       IMAGE_REPOSITORY: dynamo
@@ -119,6 +119,11 @@ jobs:
           flavor: trtllm
           arch: linux/amd64
           cuda_version: '13.1'
+          fresh_builder: true
+          ephemeral_storage: 800Gi
+          requests_cpu: '32'
+          requests_memory: 96Gi
+          limits_memory: 120Gi
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
