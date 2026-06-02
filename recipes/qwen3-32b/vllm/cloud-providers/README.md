@@ -25,7 +25,7 @@ Each subdirectory ships:
 | VllmPrefillWorker | 1 | **4** | one GPU node |
 | VllmDecodeWorker | 1 | **4** | **different** GPU node — pod anti-affinity on `kubernetes.io/hostname` |
 
-We set pod anti-affinity is load-bearing to forces KV transfer across the provider's RDMA fabric, not the intra-node NVLink/CUDA-IPC shortcut.
+The pod anti-affinity is load-bearing: it forces KV transfer across the provider's RDMA fabric, not the intra-node NVLink/CUDA-IPC shortcut.
 
 ## What differs per variant
 
