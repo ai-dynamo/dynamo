@@ -78,6 +78,36 @@ message RegisterRequest {
   // policy (NEVER reuse a deleted tag). A future PR may re-introduce a
   // per-plugin timeout at a new tag with the missing plumbing.
   reserved 11, 12;
+
+  // Fire-gating dependencies (scale_interval cadence model). Plugin only
+  // fires this tick if every listed dot-path resolves to a non-None value
+  // in the current PipelineContext. Used to chain throttled plugins, e.g.
+  // ``throughput_propose`` declaring ``requires_produced_fields=
+  // ["predictions"]`` skips its turn whenever ``predict_load`` didn't
+  // produce predictions on the same tick (preventing stale-input fire).
+  //
+  // Empty/unset = no gating (plugin fires whenever its own
+  // ``execution_interval_seconds`` throttle permits).
+  repeated string requires_produced_fields = 13;
+
+  // Observation aggregation window (scale_interval cadence model). For
+  // each observation type listed in ``needs`` that supports time-windowed
+  // aggregation (currently ``observations.traffic``), this declares how
+  // much history the plugin wants Prometheus to aggregate over.
+  //
+  // 0.0 (default) — observation taken with ``scale_interval`` window
+  //                 (per-tick freshness, matches the pipeline cadence).
+  // N > 0         — Prometheus query uses ``[Ns]`` window; aggregated
+  //                 value (avg / sum) covers the last N seconds of source
+  //                 data. Plugin sees ``ctx.observations.<type>
+  //                 .duration_s == N``.
+  //
+  // Constraint: must be 0 OR a positive multiple of
+  // ``SchedulingConfig.scale_interval_seconds`` so windows align to tick
+  // boundaries. Validator rejects otherwise. Field is silently ignored
+  // when the plugin's ``needs`` does not list any windowed observation
+  // type (a config validator may warn on this combination).
+  float observation_window_seconds = 14;
 }
 
 enum HoldPolicy {

@@ -167,6 +167,8 @@ class PluginRegistryServer:
             execution_interval_seconds=req.execution_interval_seconds,
             hold_policy=req.hold_policy,
             needs=list(req.needs),
+            requires_produced_fields=list(req.requires_produced_fields),
+            observation_window_seconds=req.observation_window_seconds,
             is_builtin=False,
             transport=transport,
             transport_type=transport_type,
@@ -355,6 +357,8 @@ class PluginRegistryServer:
         is_builtin: bool = True,
         version: str = "builtin",
         needs: Optional[list[str]] = None,
+        requires_produced_fields: Optional[list[str]] = None,
+        observation_window_seconds: float = 0.0,
     ) -> RegisteredPlugin:
         """Register without auth / protocol checks; wrap ``instance`` in
         ``InProcessTransport`` via the factory.
@@ -383,6 +387,8 @@ class PluginRegistryServer:
             execution_interval_seconds=execution_interval_seconds,
             hold_policy=hold_policy,
             needs=list(needs or []),
+            requires_produced_fields=list(requires_produced_fields or []),
+            observation_window_seconds=observation_window_seconds,
             is_builtin=is_builtin,
             transport=transport,
             transport_type="in_process",

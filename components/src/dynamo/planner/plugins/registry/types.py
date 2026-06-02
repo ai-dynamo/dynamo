@@ -80,6 +80,21 @@ class RegisteredPlugin:
     last_call_at: float = field(default=-math.inf)
     evaluations_total: int = 0
     enabled: bool = True
+    # ``requires_produced_fields``: scale_interval cadence model — plugin
+    # fires only if every listed dot-path resolves non-None in the current
+    # PipelineContext. Consumed by ``PluginScheduler.compute_active_set``
+    # in commit 16 (see design doc §4.6). Empty = no gating; the field is
+    # ignored by current orchestrator-path code in this commit (schema-
+    # only surface; behaviour change lands separately).
+    requires_produced_fields: list[str] = field(default_factory=list)
+    # ``observation_window_seconds``: scale_interval cadence model —
+    # plugin's declared Prometheus aggregation window for windowed
+    # observation types (currently ``observations.traffic``). Consumed by
+    # ``OrchestratorEngineAdapter._compute_next_scheduled_tick`` in commit
+    # 17 to drive lazy pull. 0.0 = scale_interval freshness; N > 0 = N-
+    # second aggregation. Field is ignored by current orchestrator-path
+    # code in this commit.
+    observation_window_seconds: float = 0.0
 
 
 __all__ = [

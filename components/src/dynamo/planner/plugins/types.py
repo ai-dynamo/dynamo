@@ -90,6 +90,17 @@ class RegisterRequest(_ProtoMirror):
     needs: list[str] = Field(default_factory=list)
     protocol_version: str = ""
     auth_token: str = ""
+    # ``requires_produced_fields``: scale_interval cadence model. Plugin only
+    # fires this tick when every listed dot-path resolves non-None in the
+    # current PipelineContext. Empty/unset = no gating.
+    requires_produced_fields: list[str] = Field(default_factory=list)
+    # ``observation_window_seconds``: scale_interval cadence model. For each
+    # windowed observation type in ``needs`` (currently
+    # ``observations.traffic``), declares the aggregation window the plugin
+    # wants. 0.0 = scale_interval freshness; N > 0 = Prometheus aggregates
+    # over N seconds. Must be 0 or a positive multiple of
+    # ``scale_interval_seconds`` (enforced at registration time).
+    observation_window_seconds: float = 0.0
 
 
 class RegisterResponse(_ProtoMirror):
