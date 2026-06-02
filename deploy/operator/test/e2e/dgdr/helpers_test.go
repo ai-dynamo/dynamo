@@ -31,7 +31,9 @@ import (
 	. "github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -245,9 +247,57 @@ func uniqueName(prefix string) string {
 }
 
 // createAndCleanup creates a DGDR and registers it for cleanup via DeferCleanup.
+// Cleanup deletes both the DGDR and its child DGD, then waits for all associated
+// pods to terminate so the next test starts with a clean slate (no GPU contention).
 func createAndCleanup(dgdr *v1beta1.DynamoGraphDeploymentRequest) {
 	Expect(k8sClient.Create(ctx, dgdr)).To(Succeed(), "failed to create DGDR %s", dgdr.Name)
 	DeferCleanup(func() {
+		// Fetch the DGDR to discover its child DGD name before deleting.
+		var current v1beta1.DynamoGraphDeploymentRequest
+		if err := k8sClient.Get(ctx, client.ObjectKey{
+			Namespace: dgdr.Namespace,
+			Name:      dgdr.Name,
+		}, &current); err == nil && current.Status.DGDName != "" {
+			dgdName := current.Status.DGDName
+
+			// Delete the DGD (it is not owned by the DGDR, so it won't be
+			// garbage-collected automatically).
+			dgd := &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdName,
+					Namespace: dgdr.Namespace,
+				},
+			}
+			_ = k8sClient.Delete(ctx, dgd)
+
+			// Wait for the DGD object to be fully removed.
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, client.ObjectKey{
+					Namespace: dgdr.Namespace,
+					Name:      dgdName,
+				}, &v1alpha1.DynamoGraphDeployment{})
+				return apierrors.IsNotFound(err)
+			}, 5*time.Minute, 5*time.Second).Should(BeTrue(),
+				"DGD %s should be fully deleted", dgdName)
+
+			// Wait for all pods belonging to this DGD to terminate.
+			dgdLabel := labels.SelectorFromSet(labels.Set{
+				"nvidia.com/dynamo-graph-deployment-name": dgdName,
+			})
+			Eventually(func() int {
+				var pods corev1.PodList
+				if err := k8sClient.List(ctx, &pods,
+					client.InNamespace(dgdr.Namespace),
+					client.MatchingLabelsSelector{Selector: dgdLabel},
+				); err != nil {
+					return -1
+				}
+				return len(pods.Items)
+			}, 5*time.Minute, 5*time.Second).Should(Equal(0),
+				"all pods for DGD %s should be terminated", dgdName)
+		}
+
+		// Delete the DGDR itself.
 		_ = k8sClient.Delete(ctx, dgdr)
 	})
 }
@@ -424,6 +474,38 @@ func verifyDGDServices(dgdName string, expectations map[string]ServiceExpectatio
 				Expect(*svcStatus.ReadyReplicas).To(Equal(svcStatus.Replicas),
 					"service %q readyReplicas should match replicas", svcName)
 			}
+		}
+	}
+}
+
+// verifyDGDPodsReady independently verifies that the actual K8s pods backing a DGD
+// are Running with all containers ready. This catches cases where the DGD status
+// reports Ready/Successful but the underlying pods are not actually healthy.
+func verifyDGDPodsReady(dgdName string) {
+	dgdLabel := labels.SelectorFromSet(labels.Set{
+		"nvidia.com/dynamo-graph-deployment-name": dgdName,
+	})
+	var pods corev1.PodList
+	Expect(k8sClient.List(ctx, &pods,
+		client.InNamespace(flagNamespace),
+		client.MatchingLabelsSelector{Selector: dgdLabel},
+	)).To(Succeed(), "failed to list pods for DGD %s", dgdName)
+
+	Expect(pods.Items).NotTo(BeEmpty(),
+		"DGD %s should have at least one pod", dgdName)
+
+	for _, pod := range pods.Items {
+		// Skip completed pods (e.g. profiling jobs)
+		if pod.Status.Phase == corev1.PodSucceeded {
+			continue
+		}
+		By(fmt.Sprintf("Verifying pod %s is Running and Ready", pod.Name))
+		Expect(pod.Status.Phase).To(Equal(corev1.PodRunning),
+			"pod %s should be Running but is %s", pod.Name, pod.Status.Phase)
+
+		for _, cs := range pod.Status.ContainerStatuses {
+			Expect(cs.Ready).To(BeTrue(),
+				"container %s in pod %s should be ready", cs.Name, pod.Name)
 		}
 	}
 }

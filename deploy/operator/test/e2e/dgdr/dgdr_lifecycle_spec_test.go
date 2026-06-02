@@ -171,7 +171,11 @@ func DGDRLifecycleSpec(ctx context.Context, inputGetter func() DGDRLifecycleInpu
 	dgd := waitForDGDSuccessful(dgdrResult.Status.DGDName, dgdTimeout)
 	Expect(dgd).NotTo(BeNil())
 
-	// Step 6: Verify individual DGD services
+	// Step 6: Verify actual pod readiness (independent of DGD status)
+	By("Verifying DGD pods are Running and Ready")
+	verifyDGDPodsReady(dgdrResult.Status.DGDName)
+
+	// Step 7: Verify individual DGD services
 	if len(input.VerifyServices) > 0 {
 		By("Verifying DGD service replica status")
 		verifyDGDServices(dgdrResult.Status.DGDName, input.VerifyServices)
