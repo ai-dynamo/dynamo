@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500" viewBox="0 0 500 500">
+  <defs>
+    <filter id="shadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#0A0F25" flood-opacity="0.12"/>
+    </filter>
+  </defs>
+  <style type="text/css"><![CDATA[
+    .fill-N1 { fill: #0A0F25; }
+    .fill-N7 { fill: transparent; }
+    .fill-B1 { fill: #0D32B2; }
+    .fill-B5 { fill: #EDF0FD; }
+    .stroke-B1 { stroke: #0D32B2; }
+    .fill-white { fill: #FFFFFF; }
+
+    .label {
+      font-family: "NVIDIA Sans", "Inter", "Segoe UI", Arial, sans-serif;
+      font-size: 18px;
+      font-weight: 700;
+      text-anchor: middle;
+    }
+    .sublabel {
+      font-family: "NVIDIA Sans", "Inter", "Segoe UI", Arial, sans-serif;
+      font-size: 14px;
+      font-weight: 700;
+      text-anchor: middle;
+    }
+    .center-label {
+      font-family: "NVIDIA Sans", "Inter", "Segoe UI", Arial, sans-serif;
+      font-size: 20px;
+      font-weight: 700;
+      text-anchor: middle;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      .fill-N1 { fill: #F2F2F2; }
+      .fill-N7 { fill: transparent; }
+      .fill-B1 { fill: #4A6FF3; }
+      .fill-B5 { fill: #252535; }
+      .stroke-B1 { stroke: #6B9FFF; }
+      .fill-white { fill: #F2F2F2; }
+    }
+  ]]></style>
+
+  <rect width="100%" height="100%" class="fill-N7"/>
+
+  <circle cx="250" cy="155" r="110" class="fill-B5 stroke-B1" style="stroke-width:1" filter="url(#shadow)" />
+  <circle cx="150" cy="330" r="110" class="fill-B5 stroke-B1" style="stroke-width:1" filter="url(#shadow)" />
+  <circle cx="350" cy="330" r="110" class="fill-B5 stroke-B1" style="stroke-width:1" filter="url(#shadow)" />
+
+  <circle cx="250" cy="275" r="90" class="fill-B1 stroke-B1" style="stroke-width:1" filter="url(#shadow)" />
+
+  <text x="250" y="118" class="label fill-N1">Scheduling</text>
+  <text x="250" y="138" class="sublabel fill-N1">(Dynamo)</text>
+
+  <text x="115" y="325" class="label fill-N1">Memory</text>
+  <text x="115" y="347" class="label fill-N1">Management</text>
+  <text x="115" y="370" class="sublabel fill-N1">(KVBM)</text>
+
+  <text x="385" y="325" class="label fill-N1">Data</text>
+  <text x="385" y="347" class="label fill-N1">Transfer</text>
+  <text x="385" y="370" class="sublabel fill-N1">(NIXL)</text>
+
+  <text x="250" y="268" class="center-label fill-white">Disaggregated</text>
+  <text x="250" y="292" class="center-label fill-white">Serving</text>
+</svg>
