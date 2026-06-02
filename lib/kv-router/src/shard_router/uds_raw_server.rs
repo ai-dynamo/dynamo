@@ -110,9 +110,11 @@ async fn handle_connection<S: AsyncShardHandle>(stream: UnixStream, shard: Arc<S
                 let shard = Arc::clone(&shard);
                 let writer = Arc::clone(&writer);
                 // Process each request inline (not spawned) to preserve ordering
-                // for fire-and-forget writes.  RPCs that need `await` are awaited
-                // directly here; the single-connection model means we naturally
-                // serialise requests, which is fine for the bench scenario.
+                // for fire-and-forget writes.  This serialises all requests on
+                // the single connection, making it intentionally minimal: one
+                // in-flight RPC at a time.  That is the head-of-line bottleneck
+                // visible in benchmark results.  Pipelining or per-request task
+                // spawning would reduce it but is out of scope for this baseline.
                 process_request(req, shard, writer).await;
             }
             Ok(None) => break, // client disconnected cleanly

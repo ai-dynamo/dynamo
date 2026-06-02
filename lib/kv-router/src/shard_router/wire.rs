@@ -58,7 +58,11 @@ pub enum ShardRequest {
     RemoveWorker(WorkerId),
     /// Remove state for a specific `(worker_id, dp_rank)` pair.
     RemoveWorkerDpRank(WorkerId, DpRank),
-    /// Ask the server to shut down gracefully.
+    /// Signal the shard's internal worker queue to stop accepting new work.
+    ///
+    /// This does **not** terminate the server process or close the socket.
+    /// The accept loop continues running until the connection closes or the
+    /// process is killed externally.
     Shutdown,
 
     // ── request-response ────────────────────────────────────────────────
@@ -359,6 +363,36 @@ mod tests {
         ];
         for req in &rpc_cases {
             assert!(!req.is_fire_and_forget(), "{req:?} should be RPC");
+        }
+    }
+
+    /// `read_msg` returns an error on a 1–3 byte truncated header (not a clean EOF).
+    ///
+    /// Regression test for the partial-header path: a peer that writes the first
+    /// 1, 2, or 3 bytes of the 4-byte length prefix before disconnecting must be
+    /// treated as a framing error, not a clean close.
+    #[tokio::test]
+    async fn read_msg_truncated_header_is_error() {
+        for truncated_len in 1usize..=3 {
+            // Write `truncated_len` bytes then drop the write half to signal EOF.
+            let (client, server) = tokio::io::duplex(16);
+            let (server_read, _server_write) = tokio::io::split(server);
+            let (_, mut client_write) = tokio::io::split(client);
+
+            // Partial length header — valid length value doesn't matter, it's never fully read.
+            let partial = &[0x01u8, 0x00, 0x00, 0x00][..truncated_len];
+            tokio::io::AsyncWriteExt::write_all(&mut client_write, partial)
+                .await
+                .unwrap();
+            drop(client_write); // EOF after partial header
+
+            let mut reader = BufReader::new(server_read);
+            let result: anyhow::Result<Option<ShardRequest>> = read_msg(&mut reader).await;
+            assert!(
+                result.is_err(),
+                "truncated header of {} byte(s) should be an error, got Ok",
+                truncated_len
+            );
         }
     }
 
