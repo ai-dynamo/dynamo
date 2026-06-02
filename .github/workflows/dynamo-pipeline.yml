@@ -183,6 +183,44 @@ jobs:
         run: |
           MYPYPATH=lib/bindings/python/src mypy -p dynamo
 
+  wheel-smoke:
+    needs: image
+    runs-on: ${{ matrix.platform == 'linux/amd64' && 'prod-builder-v3' || 'prod-tester-arm-v2' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+      - name: Install pytest
+        shell: bash
+        run: python -m pip install pytest
+      - name: Run wheel smoke tests
+        env:
+          DYNAMO_WHEEL_SMOKE_EXTRAS: mocker,vllm,sglang,trtllm
+          DYNAMO_WHEEL_SMOKE_IMAGE: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ (inputs.cuda_version != '' && !startsWith(inputs.cuda_version, '13.')) && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || inputs.cuda_version) || '' }}${{ inputs.image_tag_suffix }}
+          DYNAMO_WHEEL_SMOKE_PLATFORM: ${{ matrix.platform }}
+        shell: bash
+        run: python -m pytest tests/wheels -m wheel_smoke -s -vv
+
   # TODO: real xdist parallelism port conflicts. cpu_parallel_mode='none'
   # below runs -n 0, so this job is NOT actually parallel right now.
   parallel:
@@ -198,7 +236,7 @@ jobs:
       platform: '["amd64", "arm64"]'
       run_sanity_check: false
       run_cpu_only_tests: true
-      cpu_only_test_markers: ${{ inputs.cpu_parallel_test_markers }}
+      cpu_only_test_markers: ${{ format('({0}) and not wheel_smoke', inputs.cpu_parallel_test_markers) }}
       cpu_only_test_timeout_minutes: 30
       cpu_parallel_mode: 'none'
       run_gpu_tests: false
@@ -219,7 +257,7 @@ jobs:
       platform: '["amd64", "arm64"]'
       run_sanity_check: false
       run_cpu_only_tests: true
-      cpu_only_test_markers: ${{ inputs.cpu_sequential_test_markers }}
+      cpu_only_test_markers: ${{ format('({0}) and not wheel_smoke', inputs.cpu_sequential_test_markers) }}
       cpu_only_test_timeout_minutes: 30
       cpu_parallel_mode: 'none'
       run_gpu_tests: false
