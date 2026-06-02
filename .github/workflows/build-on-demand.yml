@@ -112,34 +112,13 @@ jobs:
     steps:
       - name: Checkout Dynamo code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - name: Initialize isolated amd64 BuildKit builder
-        shell: bash
-        run: |
-          set -euo pipefail
-          BUILDER_NAME="${{ needs.init.outputs.builder_name }}"
-          docker buildx rm "${BUILDER_NAME}" || true
-          docker buildx create --use --name "${BUILDER_NAME}" \
-            --driver kubernetes \
-            --platform=linux/amd64 \
-            --driver-opt=requests.ephemeral-storage=800Gi \
-            --driver-opt=namespace=buildkit \
-            --driver-opt=loadbalance=sticky \
-            --driver-opt=replicas=1 \
-            --driver-opt=requests.cpu=16 \
-            --driver-opt=requests.memory=64Gi \
-            --driver-opt=limits.memory=80Gi \
-            '--driver-opt="nodeselector=kubernetes.io/arch=amd64,role=dynamo-builder-fallback"' \
-            '--driver-opt="tolerations=key=buildkit-fallback-worker,value=true,operator=Equal,effect=NoSchedule"'
-          for i in 1 2 3 4; do
-            if docker buildx inspect "${BUILDER_NAME}" --bootstrap; then
-              echo "Bootstrap succeeded on attempt ${i}"
-              exit 0
-            fi
-            echo "::warning::Bootstrap attempt ${i} failed, retrying in 10s"
-            sleep 10
-          done
-          echo "::error::Bootstrap failed after 4 attempts"
-          exit 1
+      - name: Initialize BuildKit builder
+        uses: ./.github/actions/init-dynamo-builder
+        with:
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          flavor: trtllm
+          arch: linux/amd64
+          cuda_version: '13.0'
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
