@@ -31,28 +31,8 @@ GKE A4X GB200 + 4-NIC ConnectX-7 RoCE
 | Benchmark wall-clock duration | 3555 sec |
 | Request throughput | 3.38 req/s (kept pace with 3.23 req/s arrival, no queue buildup) |
 | Successful request count | **12,031 / 12,031 (100%)** |
-
-### TTFT (NOT queue-bound — first cluster in family to achieve this on 1P1D)
-
-| Statistic | Value |
-|---|---|
-| Mean TTFT | 3,733 ms (~3.7 s) |
-| P50 TTFT | 2,599 ms |
-| P90 TTFT | 8,975 ms |
-| P99 TTFT | 16,074 ms |
-| Min TTFT | 78 ms |
-| Max TTFT | 21,161 ms |
-
-### ITL + per-user (steady-state decode)
-
-| Statistic | Value |
-|---|---|
-| Mean ITL | 11.38 ms |
-| P50 ITL | 10.09 ms |
-| P99 ITL | 30.45 ms |
-| Mean per-user throughput | 96.53 tok/s |
-| P50 per-user throughput | 99.13 tok/s |
-| Total output throughput (aggregate) | 1140.85 tok/s |
+| mean TTFT |  3,733 ms (P50: 2,599, P90: 8,975, P99: 16,074) |
+| mean ITL  | 11.38 ms (P50: 10.09, P99: 30.45) |
 
 ### Goodput
 

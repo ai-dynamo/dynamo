@@ -31,12 +31,19 @@ We set pod anti-affinity is load-bearing to forces KV transfer across the provid
 
 Each variant overrides **only** what its fabric requires:
 
-1. **Container image** — `vllm-runtime:1.1.1` everywhere except AWS (`1.1.1-efa-amd64` for libfabric)
-2. **K8s RDMA resource key** — `vpc.amazonaws.com/efa: N` (AWS), `rdma/ib: 1` or `rdma/shared_ib: 1` (Azure/Nebius/Nscale), Multus `networking.gke.io/interfaces` (GKE)
-3. **NIXL backend** — `DYN_KVBM_NIXL_BACKEND_LIBFABRIC=true` on AWS; UCX default elsewhere
-4. **Transport env** — `FI_PROVIDER=efa` + `LD_LIBRARY_PATH` (AWS); `UCX_NET_DEVICES=mlx5_*:1` (IB/RoCE)
-5. **Hostpath mounts** — `/dev/infiniband` on IB variants; AWS device plugin handles it
-6. **PVC name** — model cache name differs per cluster
+| Dimension | AWS (EFA) | GKE (RoCE) | Nebius (IB) | Nscale (IB) | AKS (IB) |
+|---|---|---|---|---|---|
+| **HW** | H100 | GB200 (A4X) | H200 | B200 | A100 |
+| **NIXL backend** | **LIBFABRIC** (`DYN_KVBM_NIXL_BACKEND_LIBFABRIC=true`, `_UCX=false`) | UCX | UCX | UCX | UCX |
+| **RDMA resource** | `vpc.amazonaws.com/efa: "32"` | `networking.gke.io.networks/rdma-0..3` (+`.IP`) + `interfaces` annotation + per-net tolerations | `rdma/ib: "1"` | `rdma/ib: "1"` | `rdma/shared_ib: "1"` ⚠️ |
+| **`UCX_NET_DEVICES`** | — (n/a) | `mlx5_0:1..3` (4) | `mlx5_0:1..7` (8) | `mlx5_0..5,10,11` (8, subset) ⚠️ | `mlx5_0:1..3` (4) |
+| **Device/lib mounts** | EFA libs in image (`/opt/amazon/efa/lib*`) | host `gib`+`nvidia` hostPaths → `/usr/local/gib`,`/nvidia` | `/dev/infiniband` + `/dev/shm` | `/dev/infiniband` + `/dev/shm` | `/dev/infiniband` |
+| **EFA-only env** | `FI_PROVIDER=efa`, `FI_EFA_USE_DEVICE_RDMA=1`, `FI_EFA_ENABLE_SHM_TRANSFER=0` | — | — | — | — |
+
+**⚠️ Two cells are easy to get wrong if you template from another variant:**
+
+1. **AKS uses `rdma/shared_ib`, not `rdma/ib`.** AKS schedules RDMA through the NVIDIA Network Operator's *shared* IB device plugin, so the resource key differs from Nebius/Nscale (`rdma/ib`). Same `"1"` slot convention, different key — copying the Nebius/Nscale value leaves the pod without its RDMA resource.
+2. **Nscale's `UCX_NET_DEVICES` is a non-contiguous subset (`mlx5_0..5,10,11`).** Its nodes expose a mixed fabric; the listed NICs are the compute fabric and deliberately exclude the side-fabric NICs (`mlx5_6..9`, smaller MTU / different subnet). Listing the "obvious" `mlx5_0..7` (like Nebius) puts transfers on the side fabric and breaks the cross-rank handshake. This value must be derived from `ibv_devinfo` on the actual nodes — it cannot be copied from another CSP.
 
 Everything else (vLLM args, anti-affinity, `IPC_LOCK`, NIXL telemetry, Prometheus annotations, etcd/NATS discovery) is identical and copied verbatim.
 
