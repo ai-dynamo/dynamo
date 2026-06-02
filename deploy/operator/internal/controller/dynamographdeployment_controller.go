@@ -2354,9 +2354,12 @@ func ptrInt64Equal(a, b *int64) bool {
 // entry), creates or updates it, and reports readiness based on the
 // aggregate DS roleStatuses[].
 //
-// This is a Phase-1 implementation focused on the create/update path.
-// Restart state propagation, per-role checkpoint wiring, and DGD
-// status aggregation mirroring the Grove path are tracked as follow-ups.
+// For each role we resolve the per-service backend framework and build
+// the embedded LeaderWorkerSetSpec (leader/worker pod templates, group
+// size, replicas) using the same pod-spec rendering pipeline that the
+// DCD controller uses for the standalone-LWS pathway. Each role's LWS
+// spec is built by dynamo.DisaggregatedSetRoleSpecForService, which
+// keeps the per-pod hostname/rank expansion logic single-sourced.
 func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSet(
 	ctx context.Context,
 	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -2373,9 +2376,44 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSet(
 
 	// Apply the DisaggregatedSet. controller-runtime handles
 	// create-vs-update based on whether the resource already exists.
-	// Per-role LeaderWorkerSetSpec is filled in by a follow-up PR
-	// (see DisaggregatedSetRoleSpecForService in internal/dynamo).
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, ds, func() error {
+		// Fill in each role's embedded LeaderWorkerSetSpec on every
+		// reconcile, not just on create. The spec is the source of
+		// truth for what the DS controller should manage, so it must
+		// be re-applied whenever a dependent (component, backend
+		// framework, checkpoint) changes.
+		for i := range ds.Spec.Roles {
+			role := &ds.Spec.Roles[i]
+			componentName := role.Name
+			component := findComponentByName(dynamoDeployment, componentName)
+			if component == nil {
+				// Should be unreachable: GenerateDisaggregatedSet
+				// builds one role per spec.services entry, so a
+				// missing component is a programmer error.
+				return fmt.Errorf("role %q has no matching spec.services entry", componentName)
+			}
+
+			backendFramework, err := dynamo.GetBackendFrameworkFromComponent(component, dynamoDeployment)
+			if err != nil {
+				return fmt.Errorf("failed to resolve backend framework for role %q: %w", componentName, err)
+			}
+
+			checkpointInfo := checkpointInfos[componentName]
+
+			spec, err := dynamo.DisaggregatedSetRoleSpecForService(
+				ctx,
+				component,
+				backendFramework,
+				r.DockerSecretRetriever,
+				dynamoDeployment,
+				r.Config,
+				checkpointInfo,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to build LeaderWorkerSetSpec for role %q: %w", componentName, err)
+			}
+			role.LeaderWorkerSetSpec = spec
+		}
 		return nil
 	}); err != nil {
 		return ReconcileResult{}, fmt.Errorf("failed to create or update DisaggregatedSet %q: %w", ds.Name, err)
@@ -2388,4 +2426,16 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSet(
 
 	logger.Info("DisaggregatedSet is ready", "name", ds.Name)
 	return ReconcileResult{}, nil
+}
+
+// findComponentByName looks up a service in a DGD by its component
+// name. Returns nil if no match; callers turn that into a reconcile
+// error.
+func findComponentByName(dgd *nvidiacomv1beta1.DynamoGraphDeployment, name string) *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
+	for i := range dgd.Spec.Components {
+		if dgd.Spec.Components[i].ComponentName == name {
+			return &dgd.Spec.Components[i]
+		}
+	}
+	return nil
 }

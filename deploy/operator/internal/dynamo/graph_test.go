@@ -5162,26 +5162,26 @@ func TestGetBackendFrameworkFromComponent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := getBackendFrameworkFromComponent(betaComponent(t, tt.component), betaDGD(t, tt.deployment))
+			result, err := GetBackendFrameworkFromComponent(betaComponent(t, tt.component), betaDGD(t, tt.deployment))
 
 			if tt.expectError {
 				if err == nil {
-					t.Errorf("getBackendFrameworkFromComponent() expected error, got none")
+					t.Errorf("GetBackendFrameworkFromComponent() expected error, got none")
 					return
 				}
 				if tt.errorContains != "" && !strings.Contains(err.Error(), tt.errorContains) {
-					t.Errorf("getBackendFrameworkFromComponent() error = %v, should contain %q", err, tt.errorContains)
+					t.Errorf("GetBackendFrameworkFromComponent() error = %v, should contain %q", err, tt.errorContains)
 				}
 				return
 			}
 
 			if err != nil {
-				t.Errorf("getBackendFrameworkFromComponent() unexpected error: %v", err)
+				t.Errorf("GetBackendFrameworkFromComponent() unexpected error: %v", err)
 				return
 			}
 
 			if result != tt.expected {
-				t.Errorf("getBackendFrameworkFromComponent() = %v, want %v", result, tt.expected)
+				t.Errorf("GetBackendFrameworkFromComponent() = %v, want %v", result, tt.expected)
 			}
 		})
 	}

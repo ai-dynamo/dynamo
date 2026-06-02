@@ -317,7 +317,7 @@ func backendFrameworkForGeneratedDCDs(parentDGD *v1beta1.DynamoGraphDeployment) 
 			continue
 		}
 
-		backendFramework, err := getBackendFrameworkFromComponent(component, parentDGD)
+		backendFramework, err := GetBackendFrameworkFromComponent(component, parentDGD)
 		if err != nil {
 			return "", fmt.Errorf("failed to determine backend framework for component %s: %w", component.ComponentName, err)
 		}
@@ -2166,7 +2166,7 @@ func GenerateGrovePodCliqueSet(
 		podTemplate := ensurePodTemplate(component)
 		podTemplate.Labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
 		// Determine backend framework using hybrid approach
-		backendFramework, err := getBackendFrameworkFromComponent(component, dynamoDeployment)
+		backendFramework, err := GetBackendFrameworkFromComponent(component, dynamoDeployment)
 		if err != nil {
 			return nil, fmt.Errorf("failed to determine backend framework for component %s: %w", componentName, err)
 		}
@@ -2542,12 +2542,16 @@ func determineBackendFramework(
 	return BackendFrameworkNoop, nil
 }
 
-// getBackendFrameworkFromComponent attempts to determine backend framework using hybrid approach:
+// GetBackendFrameworkFromComponent attempts to determine backend framework using hybrid approach:
 // 1. Check if component is a worker - if not, return noop
 // 2. For workers: try to detect from command/args, fall back to explicit config
 // 3. Return error if worker has neither detection nor explicit config
-// Also validates consistency between detected and explicit if both exist
-func getBackendFrameworkFromComponent(
+// Also validates consistency between detected and explicit if both exist.
+//
+// Exported so that the DGD controller can resolve a framework for each
+// service in a DGD that uses the DisaggregatedSet orchestrator pathway
+// (one LeaderWorkerSet spec per role).
+func GetBackendFrameworkFromComponent(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
 ) (BackendFramework, error) {
