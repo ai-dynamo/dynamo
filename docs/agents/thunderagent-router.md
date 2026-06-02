@@ -224,9 +224,9 @@ live in the
 
 ## References
 
-- ThunderAgent paper: <https://arxiv.org/abs/2602.13692>
-- Upstream ThunderAgent reference: <https://github.com/HaoKang-Timmy/ThunderAgent>
-- Repro fork (mini-swe-agent + agent_context injector): <https://github.com/ishandhanani/ThunderAgent>
+- ThunderAgent paper: [arxiv.org/abs/2602.13692](https://arxiv.org/abs/2602.13692)
+- Upstream ThunderAgent reference: [HaoKang-Timmy/ThunderAgent](https://github.com/HaoKang-Timmy/ThunderAgent)
+- Repro fork (mini-swe-agent + agent_context injector): [ishandhanani/ThunderAgent](https://github.com/ishandhanani/ThunderAgent)
 - Dynamo KV router: [Router Guide](../components/router/router-guide.md)
 - `nvext.agent_context` schema: [nvext reference](../components/frontend/nvext.md#agent-context)
 - [Agent Tracing](agent-tracing.md) and [Agent Hints](agent-hints.md)
