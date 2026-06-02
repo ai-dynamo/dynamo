@@ -38,7 +38,11 @@ RESTORE_TARGET_LABEL = "nvidia.com/snapshot-is-restore-target"
 TARGET_CONTAINERS_ANNOTATION = "nvidia.com/snapshot-target-containers"
 RESTORE_STATUS_ANNOTATION = f"nvidia.com/snapshot-restore-status.{TARGET_CONTAINER}"
 
-GPU_NODE_SELECTOR = {"nvidia.com/gpu.present": "true"}
+# CUDA checkpointing can OOM on 10GB MIG slices; run this test on full GPUs.
+GPU_NODE_SELECTOR = {
+    "nvidia.com/gpu.present": "true",
+    "nvidia.com/mig.config": "all-disabled",
+}
 GPU_TOLERATIONS = [
     {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"},
     {"key": "dedicated", "operator": "Exists", "effect": "NoSchedule"},

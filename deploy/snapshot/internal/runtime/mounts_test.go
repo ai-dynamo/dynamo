@@ -158,6 +158,22 @@ func TestBuildMountPolicy(t *testing.T) {
 			wantExt: map[string]string{"/proc/acpi": "/proc/acpi"},
 		},
 		{
+			name: "binfmt_misc is skipped even when OCI-managed",
+			mounts: []types.MountInfo{
+				{MountPoint: "/proc/sys/fs/binfmt_misc", FSType: "binfmt_misc", IsOCIManaged: true},
+			},
+			wantSkipped:  []string{"/proc/sys/fs/binfmt_misc"},
+			wantNotInExt: []string{"/proc/sys/fs/binfmt_misc"},
+		},
+		{
+			name: "binfmt_misc filesystem type is skipped outside /proc path",
+			mounts: []types.MountInfo{
+				{MountPoint: "/custom/binfmt", FSType: "binfmt_misc", IsOCIManaged: true},
+			},
+			wantSkipped:  []string{"/custom/binfmt"},
+			wantNotInExt: []string{"/custom/binfmt"},
+		},
+		{
 			name: "/dev/shm tmpfs is not externalized",
 			mounts: []types.MountInfo{
 				{MountPoint: "/dev/shm", FSType: "tmpfs"},

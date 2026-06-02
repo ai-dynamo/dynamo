@@ -72,6 +72,7 @@ func ClassifyMounts(mounts []types.MountInfo, ociSpec *specs.Spec, rootFS string
 //
 // Policy (evaluated top to bottom):
 //  1. Skip: non-OCI /proc/*, /sys/*, /run/* submounts (virtual/runtime, not in placeholder)
+//     and binfmt_misc mounts (host/kernel state that CRIU should not recreate)
 //  2. Native: /dev/shm tmpfs (CRIU saves and restores content)
 //  3. Masked: OCI masked non-directory paths that exist under rootFS → /dev/null
 //  4. Externalize: everything else (OCI mounts the runtime recreates in placeholder)
@@ -84,8 +85,15 @@ func BuildMountPolicy(mounts []types.MountInfo, rootFS string, maskedPaths []str
 			continue
 		}
 
-		// Skip non-OCI virtual/runtime mounts — these won't exist in the placeholder
+		// Skip non-OCI virtual/runtime mounts — these won't exist in the placeholder.
 		if !m.IsOCIManaged && (strings.HasPrefix(m.MountPoint, "/proc/") || strings.HasPrefix(m.MountPoint, "/sys/") || strings.HasPrefix(m.MountPoint, "/run/")) {
+			skipped = append(skipped, m.MountPoint)
+			continue
+		}
+
+		// binfmt_misc is kernel-managed host state. In vcluster-like
+		// environments, CRIU can fail trying to recreate this filesystem.
+		if m.FSType == "binfmt_misc" || m.MountPoint == "/proc/sys/fs/binfmt_misc" {
 			skipped = append(skipped, m.MountPoint)
 			continue
 		}
