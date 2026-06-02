@@ -613,33 +613,47 @@ impl LoraController {
                     .collect();
                 for lora_name in unplaced {
                     let is_active = active_set.contains(lora_name.as_str());
-                    // Continuity: an existing entry is already a valid (warm) route — keep its
-                    // replica set rather than re-pinning. But its `is_active` flag must still track
-                    // reality: an inactive cold-start entry that has since gone active (yet was
-                    // omitted by the solver this tick) would otherwise stay `is_active=false`,
-                    // sending the filter down the cold-start single-pin path and reporting a wrong
-                    // LORA_IS_ACTIVE gauge. So re-stamp is_active on the existing replica set when
-                    // it flipped (update_routing_entry no-ops when nothing changed).
-                    if let Some(cfg) = self.routing_table.get_config(&lora_name) {
-                        if cfg.is_active != is_active {
-                            self.update_routing_entry(
-                                &lora_name,
-                                cfg.replica_set.len(),
-                                cfg.replica_set,
-                                is_active,
-                            );
-                        }
+                    // The solver produced NO placement for this LoRA (capacity overflow), but it
+                    // must stay routable (REQ 7) without bypassing that decision. We must NOT keep
+                    // its full prior entry: the filter's tier-2 lazy-load path (`replica_set ∩
+                    // available`) would reload the adapter onto a still-live replica it was evicted
+                    // from, defeating the overflow cap. So narrow any existing entry to the workers
+                    // where it is STILL warm (prior set ∩ loaded ∩ live) — pure existing routes, no
+                    // new load. If nothing is warm, fall back to a single deterministic HRW
+                    // cold-start pin (bounded, cross-instance-consistent). Fallback pins are never
+                    // inserted into `result.assignment`, so `prev_assignment` stays the pure solver
+                    // output.
+                    let loaded = self.state_tracker.get_loaded_workers(&lora_name);
+                    let warm: Vec<WorkerWithDpRank> = self
+                        .routing_table
+                        .get_config(&lora_name)
+                        .map(|c| c.replica_set)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|w| current_workers.contains(w) && loaded.contains(w))
+                        .collect();
+
+                    let chosen = if !warm.is_empty() {
+                        warm
+                    } else {
+                        self.allocator.compute_replica_set(&lora_name, workers, 1)
+                    };
+                    if chosen.is_empty() {
+                        // No live worker at all — drop any stale entry rather than keep a dead route.
+                        self.routing_table.remove_lora(&lora_name);
+                        self.hysteresis.remove(&lora_name);
                         continue;
                     }
-                    let pin = self.allocator.compute_replica_set(&lora_name, workers, 1);
-                    if pin.is_empty() {
-                        continue;
-                    }
-                    if self.update_routing_entry(&lora_name, 1, pin.clone(), is_active) {
+                    if self.update_routing_entry(
+                        &lora_name,
+                        chosen.len(),
+                        chosen.clone(),
+                        is_active,
+                    ) {
                         tracing::warn!(
                             lora = %lora_name,
-                            pinned_worker_id = ?pin.first().map(|w| w.worker_id),
-                            "MCF left new LoRA unplaced (capacity overflow); applied HRW cold-start pin"
+                            workers = ?chosen.iter().map(|w| w.worker_id).collect::<Vec<_>>(),
+                            "MCF left LoRA unplaced (capacity overflow); narrowed to warm workers or HRW pin"
                         );
                     }
                 }
