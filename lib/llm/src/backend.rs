@@ -390,7 +390,7 @@ impl
                     disaggregated_params: data.disaggregated_params,
                     worker_trace_link: data.worker_trace_link,
                     engine_data: data.engine_data,
-                    extra_args: data.extra_args,
+                    routing_data: data.routing_data,
                 })
             })
         });

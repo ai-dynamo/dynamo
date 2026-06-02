@@ -175,12 +175,16 @@ pub struct RequestTracker {
     external_timing: OnceLock<TimingInfo>,
 }
 
-/// Namespace under an engine output's `extra_args` for Dynamo framework metadata,
-/// kept separate from engine-owned payloads (`disaggregated_params`, `engine_data`).
-pub const EXTRA_ARGS_DYNAMO_NS: &str = "dynamo";
-
-/// Key under `extra_args["dynamo"]` carrying a standalone router's `TimingInfo`.
-pub const ROUTER_TIMING_KEY: &str = "router_timing";
+/// Data a standalone router (running the `PushRouter` bindings in its own process)
+/// hands back to the frontend on the engine output's `routing_data` field,
+/// so router-side measurements join the frontend's per-request trace/metrics. Plain
+/// data, so it survives the Rust->Python->Rust router round-trip (annotations don't).
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct RoutingData {
+    /// Per-request timing measured by the router (prefill/ttft/kv_hit/queue/total).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<TimingInfo>,
+}
 
 impl RequestTracker {
     /// Create a new request tracker, capturing the current time as request received.

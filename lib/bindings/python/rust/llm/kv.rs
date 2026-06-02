@@ -25,7 +25,7 @@ use tracing;
 
 use llm_rs::kv_router::KvPushRouter as RsKvPushRouter;
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
-use llm_rs::protocols::common::timing::{EXTRA_ARGS_DYNAMO_NS, ROUTER_TIMING_KEY, RequestTracker};
+use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use serde_json::json;
 
@@ -819,26 +819,15 @@ fn inject_worker_id_from_tracker(
     }
 }
 
-/// Merge the request's timing into `extra_args["dynamo"]["router_timing"]` so it
-/// survives the Rust->Python->Rust router path to the frontend (data survives,
-/// annotations don't). Framework namespace, not engine-owned fields. Non-clobbering.
+/// Attach the request's timing to `routing_data` so it survives the
+/// Rust->Python->Rust router path to the frontend (data survives, annotations don't).
 fn inject_timing_from_tracker(
     data: &mut llm_rs::protocols::common::llm_backend::LLMEngineOutput,
     tracker: &RequestTracker,
 ) {
-    let timing_json = serde_json::to_value(tracker.get_timing_info())
-        .expect("TimingInfo serialization should not fail");
-
-    let root = data.extra_args.get_or_insert_with(|| json!({}));
-    // Only merge into an object payload; never overwrite a non-object extra_args.
-    if let Some(root_obj) = root.as_object_mut() {
-        let ns = root_obj
-            .entry(EXTRA_ARGS_DYNAMO_NS)
-            .or_insert_with(|| json!({}));
-        if let Some(ns_obj) = ns.as_object_mut() {
-            ns_obj.insert(ROUTER_TIMING_KEY.to_string(), timing_json);
-        }
-    }
+    data.routing_data
+        .get_or_insert_with(Default::default)
+        .timing = Some(tracker.get_timing_info());
 }
 
 // TODO: can this reuse the stream conversion method in Client bindings?

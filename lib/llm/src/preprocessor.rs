@@ -159,21 +159,12 @@ impl LLMMetricAnnotation {
     }
 }
 
-/// Take a standalone router's `TimingInfo` out of `extra_args["dynamo"]["router_timing"]`
-/// (see `inject_timing_from_tracker`). Removing it keeps the field off the client wire.
+/// Take a standalone router's timing out of `routing_data` (see
+/// `inject_timing_from_tracker`). Removing it keeps the field off the client wire.
 fn take_router_timing(
     data: &mut Option<BackendOutput>,
 ) -> Option<crate::protocols::common::timing::TimingInfo> {
-    use crate::protocols::common::timing::{EXTRA_ARGS_DYNAMO_NS, ROUTER_TIMING_KEY};
-    let ns = data
-        .as_mut()?
-        .extra_args
-        .as_mut()?
-        .as_object_mut()?
-        .get_mut(EXTRA_ARGS_DYNAMO_NS)?
-        .as_object_mut()?;
-    let value = ns.remove(ROUTER_TIMING_KEY)?;
-    serde_json::from_value(value).ok()
+    data.as_mut()?.routing_data.take()?.timing
 }
 
 // Reasoning State for reasoning parsing transformation step
