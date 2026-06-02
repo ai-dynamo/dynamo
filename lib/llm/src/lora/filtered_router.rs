@@ -159,13 +159,18 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .and_then(|r| r.lora_name.as_deref())
             .map(|s| s.to_string());
 
-        let guard = lora_name.as_ref().map(|name| {
-            self.load_estimator.increment_load(name);
-            LoadGuard {
-                estimator: self.load_estimator.clone(),
-                lora_name: name.clone(),
-            }
-        });
+        // Base-model (non-LoRA) request: nothing to filter or load-track. Delegate straight to
+        // the inner load-aware push router so base traffic on a LoRA-enabled deployment keeps the
+        // unmodified hot path (no avail/free scans, no set allocation, no LoadGuard).
+        let Some(lora_name) = lora_name else {
+            return self.inner.generate(request).await;
+        };
+
+        self.load_estimator.increment_load(&lora_name);
+        let guard = LoadGuard {
+            estimator: self.load_estimator.clone(),
+            lora_name: lora_name.clone(),
+        };
 
         // Stage 1: narrow to the LoRA's replica set against the FULL routable set, so the
         // intended replicas are always represented even when they are currently busy.
@@ -178,7 +183,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let routable = self.inner.client.instance_ids_avail();
         let replica_candidates = self
             .filter
-            .filter_worker_ids_for_lora(lora_name.as_deref(), &routable);
+            .filter_worker_ids_for_lora(Some(lora_name.as_str()), &routable);
 
         // Stage 2: among the replica candidates, prefer free (non-overloaded) workers to match
         // PushRouter's load-aware selection. Only when every replica candidate is busy do we fall
@@ -199,7 +204,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         if candidates.is_empty() {
             return Err(anyhow::anyhow!(
-                "No workers available after LoRA filtering (lora={:?})",
+                "No workers available after LoRA filtering (lora={})",
                 lora_name
             ));
         }
@@ -208,7 +213,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .select_from(&candidates)
             .expect("candidates is non-empty");
         tracing::debug!(
-            lora = ?lora_name,
+            lora = %lora_name,
             worker_id = target,
             candidates = candidates.len(),
             routable = routable.len(),
@@ -217,16 +222,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         );
 
         let response_stream = self.inner.direct(request, target).await?;
-
-        match guard {
-            Some(guard) => {
-                let tracking = LoadTrackingStream {
-                    inner: response_stream,
-                    _guard: guard,
-                };
-                Ok(Box::pin(tracking))
-            }
-            None => Ok(response_stream),
-        }
+        let tracking = LoadTrackingStream {
+            inner: response_stream,
+            _guard: guard,
+        };
+        Ok(Box::pin(tracking))
     }
 }

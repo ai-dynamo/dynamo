@@ -283,11 +283,18 @@ impl LoadEstimator {
     /// Prune tracking data (and predictors) for any LoRA not in `known`. Bounds memory
     /// against unloaded adapters and unknown/typo request names that never get allocated.
     pub fn retain_known(&self, known: &std::collections::HashSet<&str>) {
-        self.data.retain(|name, _| known.contains(name.as_str()));
+        // Keep an entry if it is known OR still has in-flight requests. Pruning a LoRA with a
+        // nonzero active_count (e.g. one whose arrival raced this controller tick, before its MDC
+        // reached the state tracker) would drop live tracking and make the matching LoadGuard /
+        // Free-event decrement a silent no-op, losing that arrival. Unknown/typo names with no
+        // in-flight requests are still pruned, so memory stays bounded.
+        self.data.retain(|name, data| {
+            known.contains(name.as_str()) || data.active_count.load(Ordering::Relaxed) > 0
+        });
         self.predictors
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|name, _| known.contains(name.as_str()));
+            .retain(|name, _| known.contains(name.as_str()) || self.data.contains_key(name));
     }
 
     /// Update the rate window at runtime.

@@ -53,10 +53,13 @@ impl LoraFilter {
             // allocation (the controller) is disabled.
             let loaded = self.state_tracker.get_loaded_workers(lora_name);
             if !loaded.is_empty() {
+                // O(1) membership instead of scanning `loaded` per available worker
+                // (this fallback runs on every LoRA request when allocation is disabled).
+                let loaded_ids_set: HashSet<u64> = loaded.iter().map(|w| w.worker_id).collect();
                 let loaded_ids: Vec<u64> = available
                     .iter()
                     .copied()
-                    .filter(|id| loaded.iter().any(|w| w.worker_id == *id))
+                    .filter(|id| loaded_ids_set.contains(id))
                     .collect();
                 if !loaded_ids.is_empty() {
                     tracing::debug!(
