@@ -20,6 +20,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 from dynamo.common.global_router_protocol import (
     get_global_router_retry_attempt,
     make_global_router_retry_control,
+    make_global_router_retry_exhausted_control,
 )
 from dynamo.runtime import Client, DistributedRuntime
 
@@ -53,12 +54,14 @@ class GlobalRouterHandler:
         model_name: str,
         default_ttft_target_ms: Optional[float] = None,
         default_itl_target_ms: Optional[float] = None,
+        enable_delegated_response_stream: bool = False,
     ):
         self.runtime = runtime
         self.config = load_config(config_path)
         self.model_name = model_name
         self.default_ttft_target_ms = default_ttft_target_ms
         self.default_itl_target_ms = default_itl_target_ms
+        self.enable_delegated_response_stream = enable_delegated_response_stream
 
         # Clients to local routers in each pool namespace
         # Will be populated in initialize()
@@ -105,7 +108,10 @@ class GlobalRouterHandler:
             pool_priorities=pool_priorities,
             enable_priority_retry=self.config.enable_priority_retry,
         )
-        if response_connection_info is not None:
+        if (
+            self.enable_delegated_response_stream
+            and response_connection_info is not None
+        ):
             retry_attempt = get_global_router_retry_attempt(request)
             if retry_attempt is not None:
                 async for output in self._forward_delegated_retry_attempt(
@@ -122,12 +128,22 @@ class GlobalRouterHandler:
                 return
 
         should_delegate_response = (
-            response_connection_info is not None and len(pool_order) == 1
+            self.enable_delegated_response_stream
+            and response_connection_info is not None
+            and len(pool_order) == 1
         )
         if response_connection_info is not None and not should_delegate_response:
+            if self.enable_delegated_response_stream:
+                retry_attempt = get_global_router_retry_attempt(request)
+                if retry_attempt is None:
+                    raise RuntimeError(
+                        "global-router delegated response streaming with priority "
+                        "retry requires frontend "
+                        "--dyn-routed-engine-adapter=global-router"
+                    )
             logger.info(
-                f"Priority retry enabled for {request_type}; relaying response stream "
-                f"through global router to preserve retry semantics: retry_order={pool_order}"
+                f"Relaying {request_type} response stream through global router "
+                f"to preserve retry semantics: retry_order={pool_order}"
             )
 
         for attempt_idx, pool_idx in enumerate(pool_order):
@@ -215,10 +231,17 @@ class GlobalRouterHandler:
         response stream is established.
         """
         if retry_attempt >= len(pool_order):
-            raise RuntimeError(
+            error = (
                 f"global router retry attempt {retry_attempt} exceeds retry order "
                 f"for {request_type}: retry_order={pool_order}"
             )
+            logger.error(error)
+            yield make_global_router_retry_exhausted_control(
+                request_type=request_type,
+                retry_attempt=retry_attempt,
+                error=error,
+            )
+            return
 
         pool_idx = pool_order[retry_attempt]
         namespace = namespaces[pool_idx]
@@ -247,7 +270,14 @@ class GlobalRouterHandler:
                     f"{namespace}; no priority retry pools remain: {e}"
                 )
                 logger.error(message)
-                raise RuntimeError(message) from e
+                yield make_global_router_retry_exhausted_control(
+                    request_type=request_type,
+                    retry_attempt=retry_attempt,
+                    failed_pool=pool_idx,
+                    failed_namespace=namespace,
+                    error=message,
+                )
+                return
 
             next_retry_attempt = retry_attempt + 1
             next_pool_idx = pool_order[next_retry_attempt]

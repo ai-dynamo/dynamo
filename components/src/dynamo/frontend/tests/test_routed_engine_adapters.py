@@ -10,6 +10,7 @@ import pytest
 from dynamo.common.global_router_protocol import (
     GLOBAL_ROUTER_RETRY_ATTEMPT_KEY,
     make_global_router_retry_control,
+    make_global_router_retry_exhausted_control,
 )
 from dynamo.frontend.routed_engine_adapters import GlobalRouterRoutedEngineAdapter
 
@@ -25,7 +26,7 @@ class FakeRoutedItem:
 
 
 class SequenceRoutedEngine:
-    def __init__(self, streams: list[list[FakeRoutedItem]]):
+    def __init__(self, streams: list[Any]):
         self._streams = list(streams)
         self.requests: list[dict[str, Any]] = []
         self.kwargs: list[dict[str, Any]] = []
@@ -34,9 +35,13 @@ class SequenceRoutedEngine:
         self.requests.append(request)
         self.kwargs.append(kwargs)
         items = self._streams.pop(0)
+        if isinstance(items, Exception):
+            raise items
 
         async def stream():
             for item in items:
+                if isinstance(item, Exception):
+                    raise item
                 yield item
 
         return stream()
@@ -137,3 +142,82 @@ async def test_global_router_adapter_rejects_retry_control_after_output():
     stream = await adapter.generate({"token_ids": [1]})
     with pytest.raises(RuntimeError, match="after response streaming started"):
         await _collect(stream)
+
+
+@pytest.mark.asyncio
+async def test_global_router_adapter_retries_generate_failure_before_output():
+    routed_engine = SequenceRoutedEngine(
+        streams=[
+            RuntimeError("response prologue failed"),
+            [FakeRoutedItem({"done": True})],
+        ]
+    )
+    adapter = GlobalRouterRoutedEngineAdapter(routed_engine)
+
+    stream = await adapter.generate({"token_ids": [1]})
+    outputs = await _collect(stream)
+
+    assert outputs == [{"done": True}]
+    assert [
+        request["routing"][GLOBAL_ROUTER_RETRY_ATTEMPT_KEY]
+        for request in routed_engine.requests
+    ] == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_global_router_adapter_retries_stream_failure_before_output():
+    routed_engine = SequenceRoutedEngine(
+        streams=[
+            [RuntimeError("stream failed before output")],
+            [FakeRoutedItem({"done": True})],
+        ]
+    )
+    adapter = GlobalRouterRoutedEngineAdapter(routed_engine)
+
+    stream = await adapter.generate({"token_ids": [1]})
+    outputs = await _collect(stream)
+
+    assert outputs == [{"done": True}]
+    assert [
+        request["routing"][GLOBAL_ROUTER_RETRY_ATTEMPT_KEY]
+        for request in routed_engine.requests
+    ] == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_global_router_adapter_does_not_retry_stream_failure_after_output():
+    routed_engine = SequenceRoutedEngine(
+        streams=[
+            [
+                FakeRoutedItem({"token_ids": [101], "index": 0}),
+                RuntimeError("stream failed after output"),
+            ],
+            [FakeRoutedItem({"done": True})],
+        ]
+    )
+    adapter = GlobalRouterRoutedEngineAdapter(routed_engine)
+
+    stream = await adapter.generate({"token_ids": [1]})
+    with pytest.raises(RuntimeError, match="stream failed after output"):
+        await _collect(stream)
+
+    assert len(routed_engine.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_global_router_adapter_raises_retry_exhausted_control():
+    control = make_global_router_retry_exhausted_control(
+        request_type="prefill",
+        retry_attempt=3,
+        failed_pool=0,
+        failed_namespace="prefill-fast",
+        error="no priority retry pools remain",
+    )
+    routed_engine = SequenceRoutedEngine(streams=[[FakeRoutedItem(control)]])
+    adapter = GlobalRouterRoutedEngineAdapter(routed_engine)
+
+    stream = await adapter.generate({"token_ids": [1]})
+    with pytest.raises(RuntimeError, match="no priority retry pools remain"):
+        await _collect(stream)
+
+    assert len(routed_engine.requests) == 1

@@ -9,6 +9,7 @@ GLOBAL_ROUTER_CONTROL_FIELD = "global_router_control"
 GLOBAL_ROUTER_RETRY_ATTEMPT_KEY = "global_router_retry_attempt"
 
 GLOBAL_ROUTER_ACTION_RETRY = "retry"
+GLOBAL_ROUTER_ACTION_EXHAUSTED = "exhausted"
 
 
 def get_global_router_retry_attempt(request: Mapping[str, Any]) -> Optional[int]:
@@ -48,6 +49,26 @@ def make_global_router_retry_control(
             "failed_namespace": failed_namespace,
             "next_pool": next_pool,
             "next_namespace": next_namespace,
+            "error": error,
+        }
+    }
+
+
+def make_global_router_retry_exhausted_control(
+    *,
+    request_type: str,
+    retry_attempt: int,
+    error: str,
+    failed_pool: Optional[int] = None,
+    failed_namespace: Optional[str] = None,
+) -> dict[str, Any]:
+    return {
+        GLOBAL_ROUTER_CONTROL_FIELD: {
+            "action": GLOBAL_ROUTER_ACTION_EXHAUSTED,
+            "request_type": request_type,
+            "retry_attempt": retry_attempt,
+            "failed_pool": failed_pool,
+            "failed_namespace": failed_namespace,
             "error": error,
         }
     }

@@ -7,6 +7,7 @@ import logging
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
 from dynamo.common.global_router_protocol import (
+    GLOBAL_ROUTER_ACTION_EXHAUSTED,
     GLOBAL_ROUTER_ACTION_RETRY,
     GLOBAL_ROUTER_RETRY_ATTEMPT_KEY,
     get_global_router_control,
@@ -27,6 +28,14 @@ VALID_ROUTED_ENGINE_ADAPTERS = {
 }
 
 _MAX_GLOBAL_ROUTER_RETRY_CONTROLS = 32
+
+
+class _GlobalRouterControlError(RuntimeError):
+    pass
+
+
+class _GlobalRouterRetryExhausted(_GlobalRouterControlError):
+    pass
 
 
 def wrap_routed_engine(config: Any, routed_engine: RoutedEngine) -> RoutedEngine:
@@ -58,44 +67,84 @@ class GlobalRouterRoutedEngineAdapter:
         retry_controls = 0
 
         while True:
-            stream = await self._routed_engine.generate(
-                _request_for_retry_attempt(request, attempt), **kwargs
-            )
             yielded_output = False
             next_attempt = None
+            retry_error = None
 
-            async for output in stream:
-                data = output.data() if hasattr(output, "data") else output
-                control = get_global_router_control(data)
-                if control is not None:
-                    if yielded_output:
-                        raise RuntimeError(
-                            "global router retry control received after response "
-                            "streaming started"
+            try:
+                stream = await self._routed_engine.generate(
+                    _request_for_retry_attempt(request, attempt), **kwargs
+                )
+
+                async for output in stream:
+                    data = output.data() if hasattr(output, "data") else output
+                    control = get_global_router_control(data)
+                    if control is not None:
+                        if yielded_output:
+                            raise RuntimeError(
+                                "global router retry control received after response "
+                                "streaming started"
+                            )
+                        action = control.get("action")
+                        if action == GLOBAL_ROUTER_ACTION_EXHAUSTED:
+                            raise _GlobalRouterRetryExhausted(
+                                _retry_exhausted_message(control)
+                            )
+                        next_attempt = _next_retry_attempt(control)
+                        logger.warning(
+                            "Retrying global-router request via next pool: "
+                            "attempt=%s next_attempt=%s failed_namespace=%s "
+                            "next_namespace=%s error=%s",
+                            attempt,
+                            next_attempt,
+                            control.get("failed_namespace"),
+                            control.get("next_namespace"),
+                            control.get("error"),
                         )
-                    next_attempt = _next_retry_attempt(control)
-                    logger.warning(
-                        "Retrying global-router request via next pool: "
-                        "attempt=%s next_attempt=%s failed_namespace=%s "
-                        "next_namespace=%s error=%s",
-                        attempt,
-                        next_attempt,
-                        control.get("failed_namespace"),
-                        control.get("next_namespace"),
-                        control.get("error"),
-                    )
-                    break
+                        break
 
-                yielded_output = True
-                yield output
+                    yielded_output = True
+                    yield output
+            except _GlobalRouterControlError:
+                raise
+            except Exception as exc:
+                if yielded_output:
+                    raise
+                next_attempt = attempt + 1
+                retry_error = exc
+                logger.warning(
+                    "Retrying global-router request after pre-output delegated "
+                    "response failure: attempt=%s next_attempt=%s error=%s",
+                    attempt,
+                    next_attempt,
+                    exc,
+                )
 
             if next_attempt is None:
                 return
+            if next_attempt <= attempt:
+                raise RuntimeError(
+                    "global router retry attempt did not increase: "
+                    f"attempt={attempt} next_attempt={next_attempt}"
+                )
 
             retry_controls += 1
             if retry_controls > _MAX_GLOBAL_ROUTER_RETRY_CONTROLS:
-                raise RuntimeError("global router retry control loop exceeded limit")
+                raise RuntimeError(
+                    "global router retry control loop exceeded limit"
+                ) from retry_error
             attempt = next_attempt
+
+
+def _retry_exhausted_message(control: Any) -> str:
+    error = control.get("error")
+    if error:
+        return str(error)
+    return (
+        "global router retry attempts exhausted: "
+        f"request_type={control.get('request_type')} "
+        f"retry_attempt={control.get('retry_attempt')}"
+    )
 
 
 def _request_for_retry_attempt(request: Any, retry_attempt: int) -> Any:
@@ -110,16 +159,22 @@ def _request_for_retry_attempt(request: Any, retry_attempt: int) -> Any:
 
 def _next_retry_attempt(control: Any) -> int:
     if control.get("action") != GLOBAL_ROUTER_ACTION_RETRY:
-        raise RuntimeError(f"unsupported global router control action: {control!r}")
+        raise _GlobalRouterControlError(
+            f"unsupported global router control action: {control!r}"
+        )
     value = control.get("next_retry_attempt")
     if isinstance(value, bool):
-        raise RuntimeError(f"invalid global router next retry attempt: {value!r}")
+        raise _GlobalRouterControlError(
+            f"invalid global router next retry attempt: {value!r}"
+        )
     try:
         next_attempt = int(value)
     except (TypeError, ValueError) as exc:
-        raise RuntimeError(
+        raise _GlobalRouterControlError(
             f"invalid global router next retry attempt: {value!r}"
         ) from exc
     if next_attempt < 0:
-        raise RuntimeError(f"invalid global router next retry attempt: {value!r}")
+        raise _GlobalRouterControlError(
+            f"invalid global router next retry attempt: {value!r}"
+        )
     return next_attempt

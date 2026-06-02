@@ -240,6 +240,22 @@ If the grid selects `prefill-slow` (pool `2`) and that request fails, the global
 
 In disaggregated mode, prefill and decode retry are independent. A prefill failure retries through `prefill_pool_priorities`; a decode failure retries through `decode_pool_priorities`. If a failed decode attempt already caused the prefill engine to retire or drop the request's KV cache, the retry is still allowed; the backend should handle any resulting cache miss or failure on the new attempt. Current Dynamo backends do not support this yet.
 
+### Delegated Response Streams
+
+By default, the global router relays response streams through itself. To allow downstream local routers to stream responses directly to the frontend, start the global router with:
+
+```bash
+--enable-delegated-response-stream
+```
+
+When delegated response streaming is enabled with priority retry, the frontend must also use the global-router routed-engine adapter:
+
+```bash
+--dyn-routed-engine-adapter=global-router
+```
+
+The adapter lets the frontend reissue the request with the next retry attempt if the delegated response path fails before any output has been streamed. If priority retry has multiple candidate pools and the frontend adapter is not enabled, the global router rejects the request instead of falling back to a relayed stream with delayed response-stream setup.
+
 ### Passing SLA Targets
 
 Clients can pass TTFT and ITL targets via `nvext.router` in the request:

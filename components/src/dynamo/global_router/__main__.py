@@ -69,6 +69,7 @@ async def worker(runtime: DistributedRuntime):
         model_name=config.model_name,
         default_ttft_target_ms=config.default_ttft_target_ms,
         default_itl_target_ms=config.default_itl_target_ms,
+        enable_delegated_response_stream=config.enable_delegated_response_stream,
     )
 
     # Initialize connections to local routers
@@ -134,7 +135,7 @@ async def _serve_disagg(
                     ("service", "global_router"),
                     ("type", "prefill"),
                 ],
-                defer_response_stream=True,
+                defer_response_stream=config.enable_delegated_response_stream,
             ),
             decode_endpoint.serve_endpoint(
                 handler.handle_decode,
@@ -143,7 +144,7 @@ async def _serve_disagg(
                     ("service", "global_router"),
                     ("type", "decode"),
                 ],
-                defer_response_stream=True,
+                defer_response_stream=config.enable_delegated_response_stream,
             ),
         )
     except Exception as e:
@@ -186,7 +187,7 @@ async def _serve_agg(
                 ("service", "global_router"),
                 ("type", "agg"),
             ],
-            defer_response_stream=True,
+            defer_response_stream=config.enable_delegated_response_stream,
         )
     except Exception as e:
         logger.error(f"Failed to serve agg endpoint: {e}")
