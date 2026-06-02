@@ -17,8 +17,14 @@
 //! guarantee correctness: `tokenize(prefix) + tokenize(suffix) == tokenize(prefix + suffix)`.
 //!
 //! No fallback to whitespace/punctuation — better to not cache than risk corruption.
+//!
+//! Storage and eviction are delegated to a weighted [`moka`] `sync::Cache` (W-TinyLFU):
+//! entries are keyed by the blake3 digest of `input[0..boundary]` and weighed by their
+//! resident token-vector bytes, so the byte budget is enforced — and recency/frequency
+//! tracked — by moka rather than by hand.
 
 use std::{
+    hash::BuildHasherDefault,
     mem::size_of_val,
     sync::{
         Arc,
@@ -26,15 +32,20 @@ use std::{
     },
 };
 
-use dashmap::DashMap;
+use moka::sync::Cache;
+use rustc_hash::FxHasher;
 
 use crate::{TokenIdType, traits::Encoder};
 
 /// Hash type for cache keys
 type Blake3Hash = [u8; 32];
 
-/// Number of shards for concurrent access
-const NUM_SHARDS: usize = 16;
+/// Keys are blake3 digests (already uniformly distributed), so a fast non-DoS-resistant
+/// hasher suffices — no need for the default SipHash.
+type PrefixHasher = BuildHasherDefault<FxHasher>;
+
+/// Weighted W-TinyLFU cache mapping a prefix's blake3 digest to its cumulative tokens.
+type PrefixCache = Cache<Blake3Hash, Arc<[TokenIdType]>, PrefixHasher>;
 
 /// Find ALL special token boundaries in the text.
 ///
@@ -65,65 +76,39 @@ fn find_special_token_boundaries(text: &str, special_tokens: &[&str]) -> Vec<usi
     boundaries
 }
 
-/// A cached prefix entry. Tokens are held behind `Arc<[T]>` for zero-copy cloning.
-#[derive(Debug, Clone)]
-struct CachedPrefix {
-    tokens: Arc<[TokenIdType]>,
-    last_accessed: Arc<AtomicU64>,
-    size_bytes: usize,
-}
-
-impl CachedPrefix {
-    /// Resident byte cost charged against the cache budget: the token vector only. The
-    /// prefix text is hashed and discarded (never stored), and the 32 B key + Arc/bucket
-    /// overhead is a small per-entry constant we deliberately ignore — negligible against
-    /// the token data for the long-prefix workloads this cache targets. Available without
-    /// constructing the entry so the budget can be summed before deciding eviction.
-    fn byte_size(tokens: &[TokenIdType]) -> usize {
-        size_of_val(tokens)
-    }
-
-    /// Build an entry, deriving `size_bytes` from the tokens (see [`Self::byte_size`]).
-    fn new(tokens: Arc<[TokenIdType]>, last_accessed: u64) -> Self {
-        let size_bytes = Self::byte_size(&tokens);
-        Self {
-            tokens,
-            last_accessed: Arc::new(AtomicU64::new(last_accessed)),
-            size_bytes,
-        }
-    }
-}
-
 /// Optional per-event observer. `on_hit` runs after each cache hit, `on_miss`
 /// after each miss — wired by `CachedTokenizer::with_observer` to push events
 /// straight into Prometheus counters without a periodic sampling step.
 pub type CacheEventFn = Arc<dyn Fn() + Send + Sync>;
 
-/// L1 cache: prefix matching at special-token boundaries.
+/// L1 cache: prefix matching at special-token boundaries, backed by a weighted W-TinyLFU
+/// [`moka`] cache that owns storage, recency/frequency tracking, and eviction. Hit/miss
+/// counts (our notion of a *prefix* hit) are tracked separately for metrics.
 pub struct L1Cache {
-    /// Sharded maps for concurrent access. Key: Blake3 hash of `input[0..boundary]`.
-    shards: Vec<Arc<DashMap<Blake3Hash, CachedPrefix>>>,
-    max_memory: usize,
-    current_memory: AtomicU64,
+    /// Prefix entries keyed by the blake3 digest of `input[0..boundary]`.
+    cache: PrefixCache,
     hits: AtomicU64,
     misses: AtomicU64,
-    /// Monotonic counter for LRU timestamps.
-    access_counter: AtomicU64,
     on_hit: Option<CacheEventFn>,
     on_miss: Option<CacheEventFn>,
 }
 
 impl L1Cache {
     pub fn new(max_memory: usize) -> Self {
-        let shards = (0..NUM_SHARDS).map(|_| Arc::new(DashMap::new())).collect();
+        // Capacity is the byte budget; each entry weighs its resident token-vector bytes
+        // (the prefix text is hashed and discarded, never stored). moka's W-TinyLFU policy
+        // admits/evicts to keep the weighted size within budget.
+        let cache = Cache::builder()
+            .max_capacity(max_memory as u64)
+            .weigher(|_k: &Blake3Hash, tokens: &Arc<[TokenIdType]>| -> u32 {
+                size_of_val(tokens.as_ref()).min(u32::MAX as usize) as u32
+            })
+            .build_with_hasher(PrefixHasher::default());
 
         Self {
-            shards,
-            max_memory,
-            current_memory: AtomicU64::new(0),
+            cache,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
-            access_counter: AtomicU64::new(0),
             on_hit: None,
             on_miss: None,
         }
@@ -172,19 +157,15 @@ impl L1Cache {
             last_pos = boundary_pos;
         }
 
-        // Search from the longest boundary down — return first hit.
+        // Search from the longest boundary down — return first hit. moka updates recency
+        // and frequency on `get`, so no manual timestamp bookkeeping is needed.
         for (boundary_pos, hash_bytes) in prefix_hashes.into_iter().rev() {
-            let shard_idx = hash_bytes[0] as usize % NUM_SHARDS;
-
-            if let Some(entry) = self.shards[shard_idx].get(&hash_bytes) {
-                let timestamp = self.access_counter.fetch_add(1, Ordering::Relaxed);
-                entry.last_accessed.store(timestamp, Ordering::Relaxed);
-
+            if let Some(tokens) = self.cache.get(&hash_bytes) {
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 if let Some(cb) = &self.on_hit {
                     cb();
                 }
-                return Some((entry.tokens.to_vec(), boundary_pos, deepest_boundary));
+                return Some((tokens.to_vec(), boundary_pos, deepest_boundary));
             }
         }
 
@@ -215,7 +196,6 @@ impl L1Cache {
         let mut hasher = blake3::Hasher::new();
         let mut running_tokens: Vec<TokenIdType> = Vec::new();
         let mut last_pos = 0;
-        let mut entries_to_insert = Vec::with_capacity(boundaries.len());
         let bytes = input.as_bytes();
 
         for &boundary_pos in boundaries.iter() {
@@ -231,78 +211,16 @@ impl L1Cache {
             let segment_encoding = tokenizer.encode(delta_text)?;
             running_tokens.extend_from_slice(segment_encoding.token_ids());
 
-            // 3. Snapshot prefix tokens as Arc<[T]> for cheap sharing on hits. The byte
-            //    cost is derived in `CachedPrefix` at insert time (see `CachedPrefix::new`).
+            // 3. Snapshot the cumulative prefix as Arc<[T]> for cheap sharing on hits and
+            //    hand it to moka (the weigher charges its token bytes against the budget;
+            //    admission/eviction is moka's responsibility).
             let prefix_tokens: Arc<[TokenIdType]> = running_tokens.as_slice().into();
-            entries_to_insert.push((hash_bytes, prefix_tokens));
+            self.cache.insert(hash_bytes, prefix_tokens);
 
             last_pos = boundary_pos;
         }
 
-        self.insert_entries(entries_to_insert);
         Ok(())
-    }
-
-    /// Commit a batch of `(key, tokens)` entries: enforce the byte budget (skip if the
-    /// batch can't fit an empty cache; otherwise evict only the deficit), then insert with
-    /// memory accounting. Each entry's byte cost is derived from its tokens via
-    /// [`CachedPrefix`]. Shared by the miss path ([`insert_at_boundaries`]) and the
-    /// partial-hit path ([`extend_after_match`]).
-    fn insert_entries(&self, entries: Vec<(Blake3Hash, Arc<[TokenIdType]>)>) {
-        if entries.is_empty() {
-            return;
-        }
-
-        let total_size_needed: usize = entries
-            .iter()
-            .map(|(_, tokens)| CachedPrefix::byte_size(tokens))
-            .sum();
-
-        // If this batch can't fit even into an empty cache, skip it rather than
-        // evicting everything for a guaranteed overflow.
-        if total_size_needed > self.max_memory {
-            return;
-        }
-
-        // Evict only the deficit, not the full batch size — otherwise a large batch
-        // against a near-empty cache would over-evict, and (worse) a large batch
-        // against a populated cache could still leave us over budget after insert
-        // because the eviction target was wrong.
-        let current = self.current_memory.load(Ordering::Relaxed) as usize;
-        let deficit = current
-            .saturating_add(total_size_needed)
-            .saturating_sub(self.max_memory);
-        if deficit > 0 {
-            self.evict_lru(deficit);
-        }
-
-        // Insert all entries, accounting for replaced entries in memory tracking.
-        let current_timestamp = self.access_counter.load(Ordering::Relaxed);
-        for (hash_bytes, prefix_tokens) in entries {
-            let shard_idx = hash_bytes[0] as usize % NUM_SHARDS;
-
-            let cached = CachedPrefix::new(prefix_tokens, current_timestamp);
-            let size_bytes = cached.size_bytes;
-
-            if let Some(old) = self.shards[shard_idx].insert(hash_bytes, cached) {
-                // Replaced an existing entry — adjust delta only. The counter update is
-                // not atomic with the shard insert, so concurrent replacements of the
-                // same key can briefly skew the counter. Benign — eviction is best-effort
-                // and the drift is bounded to a single entry's size per race.
-                let old_size = old.size_bytes as u64;
-                let new_size = size_bytes as u64;
-                if new_size >= old_size {
-                    self.current_memory
-                        .fetch_add(new_size - old_size, Ordering::Relaxed);
-                } else {
-                    self.current_memory
-                        .fetch_sub(old_size - new_size, Ordering::Relaxed);
-                }
-            } else {
-                self.current_memory
-                    .fetch_add(size_bytes as u64, Ordering::Relaxed);
-            }
-        }
     }
 
     /// Extend the cache on a *partial* hit so the next turn of a growing conversation
@@ -360,7 +278,7 @@ impl L1Cache {
         let hash_bytes: Blake3Hash = *hasher.finalize().as_bytes();
 
         let tokens: Arc<[TokenIdType]> = cumulative.as_slice().into();
-        self.insert_entries(vec![(hash_bytes, tokens)]);
+        self.cache.insert(hash_bytes, tokens);
 
         // Tokenize the trailing segment after `deepest` for the returned result.
         let seg_b = tokenizer.encode(&input[deepest..])?;
@@ -369,52 +287,20 @@ impl L1Cache {
         Ok(merged)
     }
 
-    /// Approximate LRU via random sampling: sample K random entries, evict the oldest,
-    /// repeat. O(samples) per eviction round — no full scan.
-    fn evict_lru(&self, space_needed: usize) {
-        const SAMPLE_SIZE: usize = 32;
-        let mut freed = 0usize;
-        let mut iteration = 0usize;
-
-        while freed < space_needed {
-            let mut samples: Vec<(usize, Blake3Hash, u64, usize)> = Vec::with_capacity(SAMPLE_SIZE);
-
-            for i in 0..SAMPLE_SIZE {
-                let shard_idx = (iteration * SAMPLE_SIZE + i) % NUM_SHARDS;
-                if let Some(entry) = self.shards[shard_idx].iter().next() {
-                    let hash = *entry.key();
-                    let timestamp = entry.value().last_accessed.load(Ordering::Relaxed);
-                    let size = entry.value().size_bytes;
-                    samples.push((shard_idx, hash, timestamp, size));
-                }
-            }
-
-            if samples.is_empty() {
-                break;
-            }
-
-            if let Some((shard_idx, hash, _, _)) =
-                samples.iter().min_by_key(|(_, _, ts, _)| ts).copied()
-                && let Some((_, removed)) = self.shards[shard_idx].remove(&hash)
-            {
-                freed += removed.size_bytes;
-                self.current_memory
-                    .fetch_sub(removed.size_bytes as u64, Ordering::Relaxed);
-            }
-
-            iteration += 1;
-        }
-    }
-
+    /// Number of live entries. Flushes moka's deferred maintenance first so the count is
+    /// exact rather than lagging behind pending inserts/evictions.
     pub fn len(&self) -> usize {
-        self.shards.iter().map(|s| s.len()).sum()
+        self.cache.run_pending_tasks();
+        self.cache.entry_count() as usize
     }
 
     pub fn is_empty(&self) -> bool {
-        self.shards.iter().all(|s| s.is_empty())
+        self.len() == 0
     }
 
     pub fn stats(&self) -> L1CacheStats {
+        // Flush moka's deferred maintenance so entry_count / weighted_size are accurate.
+        self.cache.run_pending_tasks();
         let hits = self.hits.load(Ordering::Relaxed);
         let misses = self.misses.load(Ordering::Relaxed);
         let total_requests = hits + misses;
@@ -422,8 +308,8 @@ impl L1Cache {
         L1CacheStats {
             hits,
             misses,
-            entries: self.len(),
-            memory_bytes: self.current_memory.load(Ordering::Relaxed) as usize,
+            entries: self.cache.entry_count() as usize,
+            memory_bytes: self.cache.weighted_size() as usize,
             hit_rate: if total_requests > 0 {
                 hits as f64 / total_requests as f64
             } else {
@@ -433,10 +319,8 @@ impl L1Cache {
     }
 
     pub fn clear(&self) {
-        for shard in &self.shards {
-            shard.clear();
-        }
-        self.current_memory.store(0, Ordering::Relaxed);
+        self.cache.invalidate_all();
+        self.cache.run_pending_tasks();
         self.hits.store(0, Ordering::Relaxed);
         self.misses.store(0, Ordering::Relaxed);
     }
