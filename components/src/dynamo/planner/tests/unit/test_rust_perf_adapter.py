@@ -56,10 +56,12 @@ class _FakeCapacityRequest:
 
 class _FakeRustFactory:
     next_model = None
+    last_kwargs = None
 
     @classmethod
-    def best_available(cls, **_kwargs):
+    def best_available(cls, **kwargs):
         assert cls.next_model is not None
+        cls.last_kwargs = kwargs
         return cls.next_model
 
 
@@ -87,6 +89,7 @@ class _FakeRustModel:
 
 def _install_fake_rust(monkeypatch, fake_model: _FakeRustModel) -> None:
     _FakeRustFactory.next_model = fake_model
+    _FakeRustFactory.last_kwargs = None
     monkeypatch.setattr(rust_adapter, "_RUST_SHIM_AVAILABLE", True)
     monkeypatch.setattr(rust_adapter, "AicEngineConfig", _FakeAicConfig)
     monkeypatch.setattr(rust_adapter, "EnginePerfLimits", _FakeLimits)
@@ -165,6 +168,33 @@ def test_rust_diagnostics_gate_sufficient_data(monkeypatch):
 
     fake._diagnostics["readiness"] = "ready"
     assert model.has_sufficient_data()
+
+
+def test_missing_capability_fields_use_rust_shim_defaults(monkeypatch):
+    fake = _FakeRustModel(
+        diagnostics={
+            "source": "fallback_regression",
+            "readiness": "insufficient_data",
+            "retained_observations": 0,
+            "correction_ready_buckets": 0,
+            "last_warning": None,
+        }
+    )
+    _install_fake_rust(monkeypatch, fake)
+
+    PlannerEnginePerfModel(
+        worker_type="prefill",
+        config=_config(),
+        capabilities=EngineCapabilities(max_num_batched_tokens=2048),
+    )
+
+    assert _FakeRustFactory.last_kwargs is not None
+    limits = _FakeRustFactory.last_kwargs["limits"]
+    assert limits.kwargs == {
+        "max_num_batched_tokens": 2048,
+        "max_num_seqs": rust_adapter.DEFAULT_MAX_NUM_SEQS,
+        "max_kv_tokens": rust_adapter.DEFAULT_MAX_KV_TOKENS,
+    }
 
 
 def test_rust_none_result_remains_unavailable(monkeypatch):

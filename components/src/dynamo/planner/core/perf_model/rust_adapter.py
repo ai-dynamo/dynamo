@@ -57,6 +57,10 @@ except ImportError:  # pragma: no cover - exercised in pure-Python planner tests
 
 _RUST_SHIM_FALLBACK_EXCEPTIONS = (RuntimeError, ValueError, TypeError)
 
+DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
+DEFAULT_MAX_NUM_SEQS = 512
+DEFAULT_MAX_KV_TOKENS = 2_000_000
+
 
 @dataclass(frozen=True)
 class PlannerEngineCapacity:
@@ -191,18 +195,23 @@ class PlannerEnginePerfModel:
         caps = self._capabilities
         if caps is None:
             return None
-        max_num_batched_tokens = caps.max_num_batched_tokens
-        max_num_seqs = caps.max_num_seqs
-        max_kv_tokens = caps.max_kv_tokens
-        if (
-            max_num_batched_tokens is None
-            or max_num_seqs is None
-            or max_kv_tokens is None
-            or max_num_batched_tokens <= 0
-            or max_num_seqs <= 0
-            or max_kv_tokens <= 0
-        ):
+        if caps.max_num_batched_tokens is not None and caps.max_num_batched_tokens <= 0:
             return None
+        if caps.max_num_seqs is not None and caps.max_num_seqs <= 0:
+            return None
+        if caps.max_kv_tokens is not None and caps.max_kv_tokens <= 0:
+            return None
+
+        # Match the Rust shim's MockEngineArgs defaults when the planner has a
+        # capability object but an individual runtime limit has not been
+        # published yet. This keeps the FPM regression path usable for tests
+        # and partial worker metadata while still rejecting explicit invalid
+        # values above.
+        max_num_batched_tokens = (
+            caps.max_num_batched_tokens or DEFAULT_MAX_NUM_BATCHED_TOKENS
+        )
+        max_num_seqs = caps.max_num_seqs or DEFAULT_MAX_NUM_SEQS
+        max_kv_tokens = caps.max_kv_tokens or DEFAULT_MAX_KV_TOKENS
         return (max_num_batched_tokens, max_num_seqs, max_kv_tokens)
 
     def _build_limits(self) -> Optional[Any]:
