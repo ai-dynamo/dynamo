@@ -9,7 +9,6 @@ authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-readme.workspace = true
 description = "Dynamo LLM Library"
 
 [features]
@@ -32,6 +31,7 @@ media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile"]
 bench = ["dynamo-kv-router/bench"]
 kv-router-stress = ["dep:clap", "dep:indicatif", "bench"]
 lightseek-mm = ["dep:llm-multimodal", "dep:llm-tokenizer"]
+agent-trace-bench = []
 
 [[bench]]
 name = "tokenizer_simple"
@@ -51,14 +51,19 @@ name = "kv_router_bench"
 harness = false
 required-features = ["kv-router-stress"]
 
+[[bench]]
+name = "agent_trace_finish_metadata"
+harness = false
+required-features = ["agent-trace-bench"]
+
 [dependencies]
 # repo
-dynamo-config = { workspace = true }
 dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols"] }
 dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true }
 dynamo-runtime = { workspace = true }
 dynamo-tokenizers = { workspace = true }
+dynamo-renderer = { workspace = true }
 dynamo-tokens = { workspace = true }
 
 # workspace
@@ -162,7 +167,6 @@ galil-seiferas = { version = "0.1" }
 # preprocessor
 bs62 = { version = "0.1" }
 minijinja = { version = "2.20.0", features = ["loader", "loop_controls"] }
-minijinja-contrib = { version = "2.20.0", features = ["pycompat"] }
 json-five = { version = "0.3" }
 
 # media loading in the preprocessor

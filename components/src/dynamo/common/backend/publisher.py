@@ -1,9 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Source descriptors returned by :meth:`LLMEngine.kv_event_sources` and
-:meth:`LLMEngine.metrics_sources`. Worker constructs one publisher per
-descriptor — engines never instantiate publishers themselves."""
+"""KV-event source descriptors returned by :meth:`LLMEngine.kv_event_sources`
+plus the :class:`ComponentSnapshot` payload engines push into the
+framework-owned :class:`SnapshotPublisher` (declared via
+:meth:`LLMEngine.component_metrics_dp_ranks` + received via
+:meth:`LLMEngine.attach_snapshot_publisher`). Worker constructs the
+publisher; engines never instantiate one themselves."""
 
 from __future__ import annotations
 
@@ -33,29 +36,36 @@ class PushSource:
     dp_rank: int = 0
 
 
-@dataclass(frozen=True)
-class SnapshotSource:
-    """``snapshot`` is invoked under the GIL on a fixed interval. Keep it to a
-    member-field read; return ``None`` to skip publishing for that tick."""
+@dataclass
+class ComponentSnapshot:
+    """Rich per-rank snapshot the engine pushes into the Rust-owned
+    :class:`SnapshotPublisher` from its stat-logger thread.
 
-    snapshot: Callable[[], Optional["Metrics"]]
-    dp_rank: int = 0
+    ``SnapshotPublisher.publish(rank, snap)`` atomically updates the
+    per-rank ``dynamo_component_*`` gauges (``total_blocks``,
+    ``gpu_cache_usage_percent``, ``kv_cache_hit_rate``) AND fires the
+    router-input signal (``kv_used_blocks``) inline — no GIL on the
+    framework reader side, no polling.
+
+    ``kv_cache_hit_rate`` is tri-state:
+    - ``None``: engine hasn't observed requests yet OR has no prefix
+      cache (gauge skipped — distinguishes "no measurement" from "0%").
+    - ``0.0``: legitimate measurement (no hits).
+    """
+
+    kv_used_blocks: int
+    kv_total_blocks: int
+    gpu_cache_usage: float
+    dp_rank: int
+    kv_cache_hit_rate: Optional[float] = None
 
 
 KvEventSource = Union[ZmqSource, PushSource]
 
 
-@dataclass
-class Metrics:
-    """Router input. Lower ``kv_used_blocks`` = more free capacity."""
-
-    kv_used_blocks: Optional[int] = None
-
-
 __all__ = [
+    "ComponentSnapshot",
     "KvEventSource",
-    "Metrics",
     "PushSource",
-    "SnapshotSource",
     "ZmqSource",
 ]

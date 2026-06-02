@@ -1122,21 +1122,55 @@ impl KvRouter {
         let update_states = request_id.is_some();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let (best_worker, overlap_blocks) = chooser
-                .find_best_match(
+            let outcome = chooser
+                .find_best_match_details(
                     request_id.as_deref(),
                     &token_ids,
                     block_mm_infos.as_deref(),
                     router_config_override.as_ref(),
                     update_states,
+                    false,
                     lora_name.clone(),
                     0.0,
+                    None,
                     None,
                     None, // allowed_worker_ids: pass via RoutingHints in PreprocessedRequest path
                     routing_constraints.map(Into::into).unwrap_or_default(),
                 )
                 .await
                 .map_err(to_pyerr)?;
+            let (best_worker, overlap_blocks) = match outcome {
+                llm_rs::kv_router::FindBestMatchOutcome::Routed {
+                    worker,
+                    overlap_blocks,
+                    ..
+                } => (worker, overlap_blocks),
+                llm_rs::kv_router::FindBestMatchOutcome::Backpressure {
+                    reason,
+                    queued_isl_tokens,
+                    max_queued_isl_tokens,
+                } => {
+                    // Note: Backpressure is currently treated as Unavailable and falls through
+                    // to the error path. Distinguishing backpressure from regular errors in Python
+                    // would require returning a structured result type instead of raising an exception,
+                    // which is a breaking API change. For now, callers should treat any error from
+                    // best_worker as potentially transient and implement retry logic accordingly.
+                    // The backpressure info (reason, queued_isl_tokens, max_queued_isl_tokens) is logged but
+                    // not exposed to Python callers.
+                    tracing::warn!(
+                        reason = ?reason,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens = ?max_queued_isl_tokens,
+                        "Router backpressure - treating as unavailable"
+                    );
+                    return Err(to_pyerr(anyhow::anyhow!(
+                        "router backpressure: {:?} (queued_isl_tokens={}, max_queued_isl_tokens={:?})",
+                        reason,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens
+                    )));
+                }
+            };
 
             if update_indexer {
                 let cfg = chooser.kv_router_config();

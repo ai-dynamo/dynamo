@@ -59,6 +59,7 @@ class EmbeddingRequest(BaseModel):
     dimensions: Optional[
         int
     ] = None  # only supported in text-embedding-3 and later models from OpenAI
+    encoding_format: Literal["float", "base64"] = "float"
 
 
 class DisaggPreprocessedRequest(BaseModel):

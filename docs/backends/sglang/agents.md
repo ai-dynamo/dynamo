@@ -17,7 +17,7 @@ Agentic workloads (tool-calling loops, multi-turn reasoning, code generation pip
 - **Priority-sensitive**: Some requests (user-facing agent turns) matter more than background tasks.
 - **Long-lived**: Conversations span minutes to hours. Cache eviction under memory pressure can destroy accumulated KV state.
 
-Dynamo's agent hints give the router per-request metadata. SGLang's engine flags control how that metadata affects scheduling and eviction on the worker.
+Dynamo's agent hints give the router per-request metadata. SGLang's engine flags control how that metadata affects scheduling and eviction on the worker. For the cross-layer Dynamo priority semantics, see [Priority Scheduling](../../agents/priority-scheduling.md).
 
 ## SGLang Engine Flags
 
@@ -37,6 +37,10 @@ python -m dynamo.sglang \
 | `--enable-priority-scheduling` | Enables priority-based request scheduling instead of FCFS. |
 
 When priority scheduling is enabled, the engine uses the `priority` field from `nvext.agent_hints` to order requests in its internal queue. Requests with higher effective priority are scheduled before lower-priority ones. Ties are broken by arrival time.
+
+Router queue priority is configured separately on the frontend with
+`--router-queue-threshold`; see
+[Router Configuration and Tuning](../../components/router/router-configuration.md#routing-behavior).
 
 ### Priority-Based KV Cache Eviction
 
@@ -165,11 +169,11 @@ Key behaviors:
 - **Turns 2+** skip the radix tree entirely. KV is restored from the `SessionSlot` in O(1).
 - **Session KV is invisible to eviction**. It cannot be evicted -- only freed by explicit close or inactivity timeout.
 - **Deterministic cleanup**: On close, session KV is freed immediately.
-- **Router-side affinity**: The `StickySessionRouter` maintains a `session_id -> worker_id` mapping with sliding-window TTL. Clients only need to send `session_id`.
+- **Router-side affinity**: The `StickySessionRouter` maintains a `session_id -> (worker_id, dp_rank)` mapping with sliding-window TTL. Clients can use `action: "bind"` for router-only sticky routing, or `action: "open"` for SGLang streaming-session KV isolation; both route later turns to the pinned worker/rank.
 
 ### Enabling Session Control
 
-Session control is request-driven. The router's `AgentController` (session lifecycle RPCs) and `StickySessionRouter` (session affinity) activate automatically when a request carries `nvext.session_control` -- no additional frontend flags are needed beyond `--router-mode kv`. On the worker side, streaming sessions must be explicitly enabled.
+Session control is request-driven. The `StickySessionRouter` activates automatically when a request carries `nvext.session_control` -- no additional frontend flags are needed beyond `--router-mode kv`. Use `action: "bind"` for router-only sticky routing without calling SGLang. On the worker side, streaming sessions must be explicitly enabled only for `action: "open"` / `action: "close"` lifecycle RPCs and session KV isolation.
 
 > [!NOTE]
 > Session control is currently supported only on the SGLang backend. vLLM and TensorRT-LLM do not yet expose the streaming session API.
@@ -226,8 +230,8 @@ Include `session_control` with `action: "open"` on the first request:
 | Field                        | Type      | Description                                                                   |
 | ---------------------------- | --------- | ----------------------------------------------------------------------------- |
 | `session_control.session_id` | `string`  | Unique session identifier. Present on every turn.                             |
-| `session_control.action`     | `string`  | `"open"` or `"close"`. Omit on intermediate turns.                            |
-| `session_control.timeout`    | `integer` | Inactivity timeout in seconds (default 300). Only used with `action: "open"`. |
+| `session_control.action`     | `string`  | `"bind"`, `"open"`, or `"close"`. Omit on intermediate turns.                 |
+| `session_control.timeout`    | `integer` | Inactivity timeout in seconds (default 300). Used with `action: "bind"` and `action: "open"`. |
 
 #### Subsequent turns
 

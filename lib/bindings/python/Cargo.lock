@@ -32,6 +32,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aiconfigurator-core"
+version = "0.9.0"
+source = "git+https://github.com/ai-dynamo/aiconfigurator.git?rev=69b3cff352303b95e5196a28966ae1ee4a3a3955#69b3cff352303b95e5196a28966ae1ee4a3a3955"
+dependencies = [
+ "csv",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "aligned"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1614,6 +1625,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "csv"
+version = "1.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52cd9d68cf7efc6ddfaaee42e7288d3a99d613d4b50f76ce9827ae0c6e14f938"
+dependencies = [
+ "csv-core",
+ "itoa",
+ "ryu",
+ "serde_core",
+]
+
+[[package]]
+name = "csv-core"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "704a3c26996a80471189265814dbc2c257598b96b8a7feae2d31ace646bb9782"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "cudarc"
 version = "0.19.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2027,7 +2059,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dynamo-backend-common"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2037,23 +2069,20 @@ dependencies = [
  "dynamo-protocols",
  "dynamo-runtime",
  "futures",
+ "opentelemetry",
+ "parking_lot",
+ "prometheus",
  "serde",
  "serde_json",
  "tokio",
  "tokio-util",
  "tracing",
-]
-
-[[package]]
-name = "dynamo-config"
-version = "1.2.0"
-dependencies = [
- "anyhow",
+ "tracing-opentelemetry",
 ]
 
 [[package]]
 name = "dynamo-data-gen"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2065,7 +2094,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-router"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2096,7 +2125,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "aho-corasick",
  "aligned-vec",
@@ -2119,12 +2148,12 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dialoguer",
- "dynamo-config",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
  "dynamo-parsers",
  "dynamo-protocols",
+ "dynamo-renderer",
  "dynamo-runtime",
  "dynamo-tokenizers",
  "dynamo-tokens",
@@ -2143,7 +2172,6 @@ dependencies = [
  "lru 0.12.5",
  "memfile",
  "minijinja",
- "minijinja-contrib",
  "modelexpress-client",
  "modelexpress-common",
  "moka",
@@ -2188,7 +2216,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -2204,9 +2232,11 @@ dependencies = [
 
 [[package]]
 name = "dynamo-mocker"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
+ "aiconfigurator-core",
  "anyhow",
+ "bytes",
  "dashmap",
  "derive-getters",
  "derive_builder",
@@ -2223,11 +2253,13 @@ dependencies = [
  "ndarray-interp",
  "ndarray-npy",
  "rand 0.9.4",
+ "rmp-serde",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
  "serde_path_to_error",
  "slotmap",
+ "tmq",
  "tokio",
  "tokio-timerfd",
  "tokio-util",
@@ -2239,10 +2271,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
- "dynamo-protocols",
  "num-traits",
  "openai-harmony",
  "regex",
@@ -2256,7 +2287,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2271,8 +2302,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-py3"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
+ "aiconfigurator-core",
  "anyhow",
  "async-stream",
  "async-trait",
@@ -2283,9 +2315,11 @@ dependencies = [
  "dynamo-llm",
  "dynamo-mocker",
  "dynamo-parsers",
+ "dynamo-protocols",
  "dynamo-runtime",
  "futures",
  "once_cell",
+ "opentelemetry",
  "parking_lot",
  "pyo3",
  "pyo3-async-runtimes",
@@ -2298,13 +2332,30 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
 ]
 
 [[package]]
+name = "dynamo-renderer"
+version = "1.3.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dynamo-protocols",
+ "dynamo-tokenizers",
+ "either",
+ "minijinja",
+ "minijinja-contrib",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-runtime"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2322,7 +2373,6 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
- "dynamo-config",
  "educe",
  "either",
  "etcd-client",
@@ -2372,10 +2422,12 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "blake3",
+ "dashmap",
  "fastokens",
  "rayon",
  "rustc-hash 1.1.0",
@@ -2389,7 +2441,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "bs58",
  "bytemuck",
@@ -2659,9 +2711,9 @@ dependencies = [
 
 [[package]]
 name = "fastokens"
-version = "0.1.1"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d32240c0737afda27afb5c55c5e56b24b0d9e7d5058bf7f61898d83e9f01e32"
+checksum = "796a262ed47d1458a4b40d0ed831c927e6f54d5b9c1de2683bb4ac9b04f4c7cc"
 dependencies = [
  "daachorse",
  "fancy-regex 0.17.0",
@@ -4097,7 +4149,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-common"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "dynamo-tokens",
  "serde",
@@ -4105,7 +4157,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-config"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "dynamo-memory",
@@ -4121,7 +4173,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-engine"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "aws-config",
@@ -4153,14 +4205,14 @@ dependencies = [
 
 [[package]]
 name = "kvbm-kernels"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "cudarc",
 ]
 
 [[package]]
 name = "kvbm-logical"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4185,7 +4237,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-physical"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "aligned-vec",
  "anyhow",

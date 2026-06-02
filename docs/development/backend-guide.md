@@ -14,10 +14,15 @@ subtitle: Create custom Python workers and engines for Dynamo
 > [unified Python backend](python-backend-guide.md) (or
 > [unified Rust backend](rust-backend-guide.md)) — those put the
 > framework in charge of lifecycle, signal handling, cancellation
-> monitoring, and registration. Stay on this path for workloads that
-> depend on multimodal, LoRA, logprobs, guided decoding, metrics,
-> OTEL tracing, or engine routes — features the unified backend does
-> not yet cover.
+> monitoring, and model registration, and ship plumbing for Prometheus
+> metrics, KV event publishing, KV-aware routing, OpenTelemetry
+> tracing, health-check canaries, guided decoding, and custom Jinja
+> chat templates. Stay on this path for workloads that depend on
+> multimodal, LoRA, logprob extraction, engine routes (sleep/wake,
+> profiling, weight updates), text-in-text-out, snapshot/CRIU, or
+> diffusion — features the unified backend does not yet cover. See
+> the [unified-path feature gaps](python-backend-guide.md#feature-gaps)
+> for the current matrix.
 
 This guide explains how to create your own Python worker in Dynamo.
 

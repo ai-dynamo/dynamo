@@ -159,6 +159,14 @@ pub fn query_lower_tiers(
     sequence: &[LocalBlockHash],
     device_matches: &MatchDetails,
 ) -> HashMap<StorageTier, LowerTierMatchDetails> {
+    // No lower-tier indexers are allocated, so there is no continuation
+    // work to perform. Return before validating device score/hash lockstep;
+    // that invariant only matters when a lower tier will consume the
+    // continuations.
+    if indexers.indexers.read().unwrap().is_empty() {
+        return HashMap::new();
+    }
+
     let mut continuations = LowerTierMatchDetails::default().next_continuations;
     for (worker, matched_blocks) in &device_matches.overlap_scores.scores {
         let Some(last_hash) = device_matches.last_matched_hashes.get(worker).copied() else {
@@ -206,4 +214,31 @@ pub fn query_lower_tiers(
     }
 
     lower_tier_matches
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::{LocalBlockHash, OverlapScores, WorkerWithDpRank};
+
+    #[test]
+    fn query_lower_tiers_returns_empty_when_no_tiers_allocated() {
+        let indexers = LowerTierIndexers::new(1, 4);
+
+        // Mismatched device_matches: a score entry with no paired
+        // `last_matched_hashes` entry. Would `debug_assert!`-panic in the
+        // old body; the early-return must skip the seeding loop entirely.
+        let mut overlap_scores = OverlapScores::new();
+        overlap_scores
+            .scores
+            .insert(WorkerWithDpRank::new(99, 0), 3);
+        let device_matches = MatchDetails {
+            overlap_scores,
+            last_matched_hashes: Default::default(),
+        };
+
+        let sequence = vec![LocalBlockHash(1), LocalBlockHash(2)];
+        let result = query_lower_tiers(&indexers, &sequence, &device_matches);
+        assert!(result.is_empty());
+    }
 }
