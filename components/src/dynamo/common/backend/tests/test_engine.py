@@ -31,9 +31,11 @@ from dynamo.common.backend.engine import (  # noqa: E402
     LLMEngine,
     LogitsProcessorSpec,
     PythonProcessorSpec,
+    deserialize_logits_processor_entries,
     is_generation_stage,
     logits_processors_for_request,
     resolve_test_logits_processor_spec,
+    serialize_logits_processor_entries,
 )
 from dynamo.common.constants import DisaggregationMode  # noqa: E402
 
@@ -377,3 +379,44 @@ def test_python_processor_spec_is_carried_through():
         spec, disaggregation_mode=DisaggregationMode.DECODE
     )
     assert activation == [desc]
+
+
+# ---------------------------------------------------------------------------
+# Serializable wire format (vLLM / SGLang request boundary)
+# ---------------------------------------------------------------------------
+
+
+def test_serialize_forced_token_sequence_round_trips():
+    """ForcedTokenSequenceSpec survives serialize → deserialize unchanged.
+    This is the contract vLLM (`extra_args`) and SGLang (`custom_params`)
+    rely on to carry per-request activation across the engine boundary."""
+    entries = [
+        ForcedTokenSequenceSpec(token_ids=(7, 8, 9), eos_token_id=2),
+        ForcedTokenSequenceSpec(token_ids=(1,), eos_token_id=0),
+    ]
+    payload = serialize_logits_processor_entries(entries)
+    # Payload is plain JSON-safe data (lists/ints), not tuples.
+    assert payload == [
+        {"kind": "forced_sequence", "token_ids": [7, 8, 9], "eos_token_id": 2},
+        {"kind": "forced_sequence", "token_ids": [1], "eos_token_id": 0},
+    ]
+    assert deserialize_logits_processor_entries(payload) == entries
+
+
+def test_serialize_empty_entries_is_empty():
+    assert serialize_logits_processor_entries([]) == []
+    assert deserialize_logits_processor_entries([]) == []
+
+
+def test_serialize_rejects_python_processor_spec():
+    """PythonProcessorSpec wraps a live callable — not serializable. This
+    is how vLLM/SGLang reject the TRT-LLM-only in-process escape hatch."""
+    with pytest.raises(TypeError):
+        serialize_logits_processor_entries([PythonProcessorSpec(factory=lambda: None)])
+
+
+def test_deserialize_unknown_kind_raises():
+    """A forward-incompatible entry kind fails loudly rather than silently
+    dropping a processor."""
+    with pytest.raises(ValueError):
+        deserialize_logits_processor_entries([{"kind": "mystery", "data": 1}])
