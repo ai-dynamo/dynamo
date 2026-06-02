@@ -228,6 +228,55 @@ struct PreprocessRequestOptions {
     preserve_omitted_max_tokens: bool,
 }
 
+/// Backend-specific MM-routing wire shape. Each variant corresponds to a
+/// distinct on-the-wire format for image-position fill tokens + KV-event
+/// hash forwarding; see the call sites in `gather_mm_exact_routing_info`
+/// for the per-protocol behavior.
+///
+/// Resolved once at `OpenAIPreprocessor` construction from
+/// `runtime_config.backend_framework`. Unknown / missing values warn and
+/// fall back to `Vllm` (the historical default).
+#[cfg(feature = "lightseek-mm")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MmRoutingProtocol {
+    /// SGLang: image positions filled with `pad_value(mm_hash)`; no
+    /// `block_mm_infos` emitted (matches sglang's `BlockStored` event bytes).
+    Sglang,
+    /// vLLM: image positions filled with `image_token_id`; per-image
+    /// 64-char-hex mm_hashes forwarded via `multi_modal_uuids` in
+    /// `extra_args` (matches vLLM's mm_uuid event format).
+    Vllm,
+}
+
+#[cfg(feature = "lightseek-mm")]
+impl MmRoutingProtocol {
+    /// Resolve from `runtime_config.backend_framework`. Both `dynamo.sglang`
+    /// and `dynamo.vllm` set this field at registration time
+    /// (`components/src/dynamo/sglang/register.py:277`,
+    /// `components/src/dynamo/vllm/main.py:637`); an unset or
+    /// unrecognized value means upstream registration didn't run or a new
+    /// backend forgot to wire the label. Warn loudly and fall back to
+    /// the vLLM protocol (historical default) rather than silently
+    /// breaking routing.
+    fn from_backend_framework(value: Option<&str>) -> Self {
+        match value {
+            Some(s) if s.eq_ignore_ascii_case("sglang") => Self::Sglang,
+            Some(s) if s.eq_ignore_ascii_case("vllm") => Self::Vllm,
+            other => {
+                tracing::warn!(
+                    target: "mm_routing",
+                    backend_framework = ?other,
+                    "runtime_config.backend_framework is missing or unrecognized; \
+                     defaulting MM-routing protocol to vllm. Set it explicitly via \
+                     the backend component (sglang/register.py or vllm/main.py) to \
+                     silence this warning and pick the correct routing wire format."
+                );
+                Self::Vllm
+            }
+        }
+    }
+}
+
 pub struct OpenAIPreprocessor {
     mdcsum: String,
     formatter: Arc<dyn OAIPromptFormatter>,
@@ -242,6 +291,12 @@ pub struct OpenAIPreprocessor {
     media_loader: Option<MediaLoader>,
     /// Max context length (in tokens) this model can handle, from ModelDeploymentCard
     context_length: u32,
+    /// Backend protocol the MM-routing fill path matches against. Resolved
+    /// once at construction from `runtime_config.backend_framework` so the
+    /// hot path doesn't re-parse the string per request. Each backend has
+    /// its own routing-side wire shape (see [`MmRoutingProtocol`]).
+    #[cfg(feature = "lightseek-mm")]
+    mm_routing_protocol: MmRoutingProtocol,
     /// Per-image token-count engine. `None` when the feature is disabled, the
     /// model isn't covered by the registry, or `preprocessor_config.json` is
     /// unreadable.
@@ -382,6 +437,13 @@ impl OpenAIPreprocessor {
         let runtime_config = mdc.runtime_config.clone();
         let kv_cache_block_size = mdc.kv_cache_block_size as usize;
 
+        // Resolve the backend label once at startup; used by the MM-routing
+        // hot path to pick between sglang pad_value substitution and vLLM
+        // mm_hashes forwarding without re-checking per request.
+        #[cfg(feature = "lightseek-mm")]
+        let mm_routing_protocol =
+            MmRoutingProtocol::from_backend_framework(runtime_config.backend_framework.as_deref());
+
         // Capture MM-routing inputs before mdc is partially moved into MediaLoader.
         // model_type comes from config.json (e.g. "qwen3_vl") and lets the
         // lightseek registry resolve fine-tunes loaded from custom-named
@@ -492,6 +554,8 @@ impl OpenAIPreprocessor {
             tool_call_parser,
             media_loader,
             context_length,
+            #[cfg(feature = "lightseek-mm")]
+            mm_routing_protocol,
             #[cfg(feature = "lightseek-mm")]
             image_token_counter,
             #[cfg(feature = "lightseek-mm")]
@@ -1042,12 +1106,7 @@ impl OpenAIPreprocessor {
             // the wrong UUIDs would get injected onto the wrong images.
             #[cfg(feature = "lightseek-mm")]
             if !mm_image_entries.is_empty() && mm_image_entries.len() == total_image_count {
-                let sglang_mode = self
-                    .runtime_config
-                    .backend_framework
-                    .as_deref()
-                    .map(|v| v.eq_ignore_ascii_case("sglang"))
-                    .unwrap_or(false);
+                let sglang_mode = self.mm_routing_protocol == MmRoutingProtocol::Sglang;
                 const HEX_PAD: &str = "000000000000000000000000000000000000000000000000";
                 let hexes: Vec<serde_json::Value> = mm_image_entries
                     .iter()
@@ -1195,13 +1254,9 @@ impl OpenAIPreprocessor {
 
         // For sglang-backed models, substitute per-image pad_value at image
         // positions and emit no block_mm_infos to match sglang's BlockStored
-        // event bytes. Default (vllm or unreported) keeps vLLM's protocol.
-        let sglang_pad_value_mode = self
-            .runtime_config
-            .backend_framework
-            .as_deref()
-            .map(|v| v.eq_ignore_ascii_case("sglang"))
-            .unwrap_or(false);
+        // event bytes. vLLM (or unreported, with prior startup warn) keeps
+        // vLLM's protocol.
+        let sglang_pad_value_mode = self.mm_routing_protocol == MmRoutingProtocol::Sglang;
         // Mirrors sglang's _compute_pad_value; must follow upstream if either
         // constant changes.
         const MM_PAD_SHIFT_VALUE: u64 = 1_000_000;
