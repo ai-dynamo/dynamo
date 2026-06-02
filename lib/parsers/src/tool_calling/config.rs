@@ -45,6 +45,25 @@ pub struct JsonParserConfig {
     /// isn't silently dropped.
     #[serde(default)]
     pub allow_eof_recovery: bool,
+
+    /// Strict recovery: never leak wrapper markers (e.g. `<TOOLCALL>` /
+    /// `</TOOLCALL>`) into `normal_text`. When the normal parse path produces
+    /// no tool call, strip all configured start/end tokens from the raw text
+    /// and retry a strict parse of the remaining payload. If it yields one or
+    /// more tool calls, surface them (the model just emitted malformed framing,
+    /// e.g. an orphan close tag); otherwise drop the content entirely (empty
+    /// `normal_text`). Either way the wrapper markers never reach the user, and
+    /// a `tracing::warn!` records what was recovered or dropped so the loss is
+    /// debuggable. Default `false` keeps every other JSON family's existing
+    /// impl-defined recovery (which may leave raw text in `normal_text`)
+    /// unchanged. Only `nemotron_deci` opts in today.
+    ///
+    /// Only takes effect when `allow_eof_recovery` is also true (finalize /
+    /// non-streaming aggregate paths). On a mid-stream chunk it would otherwise
+    /// claim a complete call before the end token arrives and strand the
+    /// trailing marker as leaked text on the next chunk.
+    #[serde(default)]
+    pub strip_markup_on_recovery: bool,
 }
 
 impl Default for JsonParserConfig {
@@ -58,6 +77,7 @@ impl Default for JsonParserConfig {
             parser_type: JsonParserType::Basic,
             bare_json_mode: false,
             allow_eof_recovery: false,
+            strip_markup_on_recovery: false,
         }
     }
 }
@@ -392,6 +412,11 @@ impl ToolCallConfig {
             parser_config: ParserConfig::Json(JsonParserConfig {
                 tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
                 tool_call_end_tokens: vec!["</TOOLCALL>".to_string()],
+                // Nemotron Ultra/Deci is an agent target where leaking a bare
+                // <TOOLCALL> envelope into message.content breaks OpenAI-shaped
+                // clients (they read tool_calls, never the content body). Strip
+                // the markers on recovery and either surface the call or drop it.
+                strip_markup_on_recovery: true,
                 ..Default::default()
             }),
             structural_tag_builder: None,

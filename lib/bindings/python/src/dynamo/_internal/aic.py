@@ -10,6 +10,10 @@ import math
 
 logger = logging.getLogger(__name__)
 
+_NEXTN_ACCEPT_RATES_LEN = 5
+# AIC CLI default when accept-rates are omitted (``cli/main.py:795``).
+_DEFAULT_NEXTN_ACCEPT_RATES = [0.85, 0.3, 0.0, 0.0, 0.0]
+
 DEFAULT_BACKEND_VERSIONS = {
     "vllm": "0.14.0",
     "sglang": "0.5.6.post2",
@@ -36,6 +40,43 @@ def resolve_backend_version(backend_name: str, backend_version: str | None) -> s
     if backend_version is not None:
         return backend_version
     return DEFAULT_BACKEND_VERSIONS.get(backend_name, DEFAULT_BACKEND_VERSIONS["vllm"])
+
+
+def _pad_nextn_accept_rates(
+    nextn_accept_rates: list[float] | str | None,
+) -> list[float]:
+    """Normalize accept-rates to AIC's fixed length-5 slot.
+
+    AIC caps MTP draft tokens at 5 (``ModelConfig.nextn`` "at most mtp5",
+    ``sdk/config.py:28``) and ``calc_expectation`` indexes into the list up
+    to ``nextn``. When rates are omitted entirely we fall back to AIC's CLI
+    default (``cli/main.py:795``); an explicit shorter list is zero-padded and
+    a longer one is truncated, so callers never trip over IndexError downstream.
+    """
+    if isinstance(nextn_accept_rates, str):
+        try:
+            nextn_accept_rates = [
+                float(x) for x in nextn_accept_rates.split(",") if x.strip()
+            ]
+        except ValueError as exc:
+            raise ValueError(
+                "aic_nextn_accept_rates must be comma-separated floats, got "
+                f"{nextn_accept_rates!r}"
+            ) from exc
+    if not nextn_accept_rates:
+        return list(_DEFAULT_NEXTN_ACCEPT_RATES)
+    rates = list(nextn_accept_rates)
+    # Rates are acceptance probabilities; out-of-range or non-finite values
+    # would silently skew calc_expectation rather than surface a config error.
+    if any(not math.isfinite(r) or not 0.0 <= r <= 1.0 for r in rates):
+        raise ValueError(
+            f"aic_nextn_accept_rates must be finite floats in [0, 1], got {rates}"
+        )
+    if len(rates) < _NEXTN_ACCEPT_RATES_LEN:
+        rates = rates + [0.0] * (_NEXTN_ACCEPT_RATES_LEN - len(rates))
+    elif len(rates) > _NEXTN_ACCEPT_RATES_LEN:
+        rates = rates[:_NEXTN_ACCEPT_RATES_LEN]
+    return rates
 
 
 def _load_aiconfigurator():
@@ -78,6 +119,8 @@ class AicSession:
         moe_tp_size: int | None = None,
         moe_ep_size: int | None = None,
         attention_dp_size: int | None = None,
+        nextn: int | None = None,
+        nextn_accept_rates: list[float] | str | None = None,
     ):
         aic = _load_aiconfigurator()
         version = resolve_backend_version(backend_name, backend_version)
@@ -96,12 +139,24 @@ class AicSession:
                 f"Supported versions for this system/backend: {supported_versions}"
             )
 
-        model_config = aic["config"].ModelConfig(
+        model_config_kwargs: dict = dict(
             tp_size=tp_size,
             moe_tp_size=moe_tp_size,
             moe_ep_size=moe_ep_size,
             attention_dp_size=attention_dp_size or 1,
         )
+        if nextn:
+            # Mirror the Rust 1..=5 contract; AIC indexes accept_rates up to
+            # nextn, so >5 would IndexError in calc_expectation.
+            if not 1 <= nextn <= _NEXTN_ACCEPT_RATES_LEN:
+                raise ValueError(
+                    f"nextn must be 1..={_NEXTN_ACCEPT_RATES_LEN} when set, got {nextn}"
+                )
+            model_config_kwargs["nextn"] = nextn
+            model_config_kwargs["nextn_accept_rates"] = _pad_nextn_accept_rates(
+                nextn_accept_rates
+            )
+        model_config = aic["config"].ModelConfig(**model_config_kwargs)
         model = aic["get_model"](
             model_path=model_path,
             model_config=model_config,
@@ -291,6 +346,8 @@ def create_session(
     moe_tp_size: int | None = None,
     moe_ep_size: int | None = None,
     attention_dp_size: int | None = None,
+    nextn: int | None = None,
+    nextn_accept_rates: list[float] | str | None = None,
 ) -> AicSession:
     """Factory function called from Rust via PyO3."""
     return AicSession(
@@ -302,6 +359,8 @@ def create_session(
         moe_tp_size,
         moe_ep_size,
         attention_dp_size,
+        nextn=nextn,
+        nextn_accept_rates=nextn_accept_rates,
     )
 
 
@@ -321,6 +380,9 @@ def estimate_num_gpu_blocks(
 ) -> int:
     """Estimate rank-local KV cache blocks for mocker/replay AIC configs."""
     _validate_kv_capacity_backend(backend_name)
+    # TODO: account for whether specdec is enabled, (i.e. pass in `nextn=...`
+    #   to `create_session``). Currently omitted to downstream AIC calculation
+    #   bug causing `_get_memory_usage` to predict negative KV capacity w/ Eagle.
     session = create_session(
         backend_name=backend_name,
         system=system,

@@ -135,3 +135,24 @@ cases:
         normal_text: call:get_weather{location:<|"|>NYC<|"|>}<tool_call|>
         reason: vLLM and SGLang treat the bare Gemma call before the first <|tool_call> marker as content; Dynamo recovers it as the first structured call before parsing the wrapped call.
       sglang: *id004
+  TOOLCALLING.batch.5.g:
+    description: Closing <tool_call|> without matching <|tool_call> open after prefix prose
+    ref: dynamo
+    model_text: 'I will check that. call:get_weather{location:<|"|>NYC<|"|>}<tool_call|>'
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: I will check that.
+      vllm:
+        calls: []
+        normal_text: 'I will check that. call:get_weather{location:<|"|>NYC<|"|>}<tool_call|>'
+        reason: vLLM leaks the tool call tag into normal_text on the recovery path; Dynamo preserves the prefix prose, recovers the complete call body, and strips the orphan start marker.
+      sglang:
+        calls: []
+        normal_text: 'I will check that. call:get_weather{location:<|"|>NYC<|"|>}<tool_call|>'
+        reason: SGLang leaks the tool call tag into normal_text on the recovery path; Dynamo preserves the prefix prose, recovers the complete call body, and strips the orphan start marker.
