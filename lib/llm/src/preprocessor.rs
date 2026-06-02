@@ -160,20 +160,23 @@ impl LLMMetricAnnotation {
 }
 
 /// Extract and remove a `TimingInfo` injected by a standalone KV-router into the
-/// terminal chunk's `disaggregated_params[ROUTER_TIMING_KEY]` (routing and frontend
-/// in separate processes; see `inject_timing_from_tracker` in the kv bindings).
-/// Timing rides the data payload because annotations are stripped crossing the
+/// terminal chunk's `extra_args["dynamo"]["router_timing"]` (routing and frontend in
+/// separate processes; see `inject_timing_from_tracker` in the kv bindings). Timing
+/// rides the data payload because annotations are stripped crossing the
 /// Rust->Python->Rust boundary. Removing the key keeps this internal routing field
 /// off the wire to clients. Returns None for normal items.
 fn take_router_timing(
     data: &mut Option<BackendOutput>,
 ) -> Option<crate::protocols::common::timing::TimingInfo> {
-    let obj = data
+    use crate::protocols::common::timing::{EXTRA_ARGS_DYNAMO_NS, ROUTER_TIMING_KEY};
+    let ns = data
         .as_mut()?
-        .disaggregated_params
+        .extra_args
         .as_mut()?
+        .as_object_mut()?
+        .get_mut(EXTRA_ARGS_DYNAMO_NS)?
         .as_object_mut()?;
-    let value = obj.remove(crate::protocols::common::timing::ROUTER_TIMING_KEY)?;
+    let value = ns.remove(ROUTER_TIMING_KEY)?;
     serde_json::from_value(value).ok()
 }
 

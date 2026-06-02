@@ -25,7 +25,7 @@ use tracing;
 
 use llm_rs::kv_router::KvPushRouter as RsKvPushRouter;
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
-use llm_rs::protocols::common::timing::{ROUTER_TIMING_KEY, RequestTracker};
+use llm_rs::protocols::common::timing::{EXTRA_ARGS_DYNAMO_NS, ROUTER_TIMING_KEY, RequestTracker};
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use serde_json::json;
 
@@ -820,11 +820,13 @@ fn inject_worker_id_from_tracker(
 }
 
 /// Inject this request's `TimingInfo` from the tracker into the terminal chunk's
-/// disaggregated_params. A router built on these bindings runs in its own process,
-/// so the only way its timing reaches the frontend is by riding the data payload:
-/// annotations are stripped crossing the Rust->Python->Rust boundary, data is not.
-/// Same mechanism as `inject_worker_id_from_tracker`, but done once on the final
-/// chunk (finish_reason set) where the tracker's ttft/total timing is complete.
+/// `extra_args["dynamo"]["router_timing"]`. A router built on these bindings runs in
+/// its own process, so the only way its timing reaches the frontend is by riding the
+/// data payload (annotations are stripped crossing the Rust->Python->Rust boundary,
+/// data is not). It goes under the framework-owned `dynamo` namespace in `extra_args`
+/// — never `disaggregated_params`/`engine_data`, which are engine-owned. Done once on
+/// the final chunk (finish_reason set) where the tracker's ttft/total timing is
+/// complete. The merge is non-clobbering: a non-object `extra_args` is left untouched.
 fn inject_timing_from_tracker(
     data: &mut llm_rs::protocols::common::llm_backend::LLMEngineOutput,
     tracker: &RequestTracker,
@@ -832,14 +834,15 @@ fn inject_timing_from_tracker(
     let timing_json = serde_json::to_value(tracker.get_timing_info())
         .expect("TimingInfo serialization should not fail");
 
-    if let Some(obj) = data
-        .disaggregated_params
-        .as_mut()
-        .and_then(|p| p.as_object_mut())
-    {
-        obj.insert(ROUTER_TIMING_KEY.to_string(), timing_json);
-    } else {
-        data.disaggregated_params = Some(json!({ ROUTER_TIMING_KEY: timing_json }));
+    let root = data.extra_args.get_or_insert_with(|| json!({}));
+    // Only merge into an object payload; never overwrite a non-object extra_args.
+    if let Some(root_obj) = root.as_object_mut() {
+        let ns = root_obj
+            .entry(EXTRA_ARGS_DYNAMO_NS)
+            .or_insert_with(|| json!({}));
+        if let Some(ns_obj) = ns.as_object_mut() {
+            ns_obj.insert(ROUTER_TIMING_KEY.to_string(), timing_json);
+        }
     }
 }
 

@@ -374,6 +374,7 @@ mod tests {
             })),
             worker_trace_link: None,
             engine_data: None,
+            extra_args: None,
         }
     }
 
@@ -418,6 +419,7 @@ mod tests {
                 "disaggregated_kv_transfer_time_ms": 8.1,
                 "prefill_compute_time_ms": 45.6
             })),
+            extra_args: None,
         }
     }
 
@@ -687,6 +689,7 @@ mod tests {
             disaggregated_params: None,
             worker_trace_link: None,
             engine_data: None, // engine didn't provide any data
+            extra_args: None,
         };
 
         let response = generator

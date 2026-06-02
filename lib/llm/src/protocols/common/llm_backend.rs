@@ -136,6 +136,15 @@ pub struct BackendOutput {
     /// Dynamo does not inspect this field; it is serialized as-is into `nvext.engine_data`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_data: Option<serde_json::Value>,
+
+    /// Additional arguments for extensibility — symmetric with
+    /// [`LLMEngineOutput::extra_args`]. Framework metadata is namespaced under the
+    /// `dynamo` key (e.g. `extra_args["dynamo"]["router_timing"]`) so a standalone
+    /// KV-router's per-request timing survives the Rust→Python→Rust router path to
+    /// the frontend without touching engine-owned fields. Dynamo-internal: consumed
+    /// by the frontend, not surfaced to clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_args: Option<serde_json::Value>,
 }
 
 /// The LLM engine and backnd with manage it's own state, specifically translating how a
