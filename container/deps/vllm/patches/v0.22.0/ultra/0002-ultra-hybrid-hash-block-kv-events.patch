@@ -1,0 +1,228 @@
+diff --git a/vllm/platforms/interface.py b/vllm/platforms/interface.py
+index cf774b7bd..9661a5664 100644
+--- a/vllm/platforms/interface.py
++++ b/vllm/platforms/interface.py
+@@ -645,11 +645,17 @@ class Platform:
+             )
+ 
+         if cache_config.block_size < attn_block_size:
++            # Preserve request-hashing granularity before inflating physical
++            # blocks for hybrid Mamba/attention page compatibility.
++            if cache_config.hash_block_size is None:
++                cache_config.hash_block_size = cache_config.block_size
+             cache_config.block_size = attn_block_size
+             logger.info(
+                 "Setting attention block size to %d tokens "
+-                "to ensure that attention page size is >= mamba page size.",
++                "to ensure that attention page size is >= mamba page size "
++                "(hash block size %d).",
+                 attn_block_size,
++                cache_config.hash_block_size,
+             )
+ 
+         if cache_config.mamba_cache_mode == "align":
+diff --git a/vllm/v1/core/single_type_kv_cache_manager.py b/vllm/v1/core/single_type_kv_cache_manager.py
+index e29919022..ac1540812 100644
+--- a/vllm/v1/core/single_type_kv_cache_manager.py
++++ b/vllm/v1/core/single_type_kv_cache_manager.py
+@@ -4,13 +4,17 @@ import itertools
+ from abc import ABC, abstractmethod
+ from collections import defaultdict
+ from collections.abc import Sequence
++from typing import Any
+ 
++from vllm.distributed.kv_events import BlockStored, MEDIUM_GPU
+ from vllm.utils.math_utils import cdiv
+ from vllm.v1.core.block_pool import BlockPool
+ from vllm.v1.core.kv_cache_utils import (
+     BlockHashList,
+     BlockHashWithGroupId,
+     KVCacheBlock,
++    generate_block_hash_extra_keys,
++    maybe_convert_block_hash,
+ )
+ from vllm.v1.kv_cache_interface import (
+     ChunkedLocalAttentionSpec,
+@@ -78,6 +82,8 @@ class SingleTypeKVCacheManager(ABC):
+         # This is only used to track the RUNNING requests, we do not track the
+         # data for preempted ones.
+         self.num_cached_block: dict[str, int] = {}
++        # Per-request cursor for synthetic hash-block KV events.
++        self._last_emitted_hash_block: dict[str, int] = {}
+ 
+         self.kv_cache_group_id = kv_cache_group_id
+         self._null_block = block_pool.null_block
+@@ -298,27 +304,95 @@ class SingleTypeKVCacheManager(ABC):
+         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
+         num_full_blocks = num_tokens // self.block_size
+ 
+-        if num_cached_blocks >= num_full_blocks:
++        if num_full_blocks > num_cached_blocks:
++            # Fast path: when the coordinator imposes no alignment constraint
++            if alignment_tokens is None or alignment_tokens <= self.block_size:
++                block_mask = None
++            else:
++                block_mask = self._cache_block_mask(
++                    num_cached_blocks, num_full_blocks, alignment_tokens
++                )
++            self.block_pool.cache_full_blocks(
++                request=request,
++                blocks=self.req_to_blocks[request.request_id],
++                num_cached_blocks=num_cached_blocks,
++                num_full_blocks=num_full_blocks,
++                block_size=self.block_size,
++                kv_cache_group_id=self.kv_cache_group_id,
++                block_mask=block_mask,
++            )
++
++            self.num_cached_block[request.request_id] = num_full_blocks
++
++        self._maybe_emit_sub_block_events(request, num_tokens)
++
++    def _maybe_emit_sub_block_events(
++        self, request: Request, num_tokens: int
++    ) -> None:
++        """Emit hash-block KV events before an inflated block is full.
++
++        Hybrid Mamba models may inflate physical attention blocks above the
++        user/request hash block size. The normal cache_full_blocks() path emits
++        only after a full physical block is complete. Dynamo routing needs
++        FullAttention events at request hash granularity, including prompts
++        shorter than the inflated physical block.
++        """
++        if type(self.kv_cache_spec) not in (FullAttentionSpec, TQFullAttentionSpec):
++            return
++        block_pool = self.block_pool
++        if not block_pool.enable_kv_cache_events:
++            return
++        hash_block_size = block_pool.hash_block_size
++        if hash_block_size >= self.block_size:
+             return
+ 
+-        # Fast path: when the coordinator imposes no alignment constraint
+-        if alignment_tokens is None or alignment_tokens <= self.block_size:
+-            block_mask = None
+-        else:
+-            block_mask = self._cache_block_mask(
+-                num_cached_blocks, num_full_blocks, alignment_tokens
++        num_hash_blocks = num_tokens // hash_block_size
++        last_emitted = self._last_emitted_hash_block.get(request.request_id, 0)
++        if num_hash_blocks <= last_emitted:
++            return
++        if len(request.block_hashes) < num_hash_blocks:
++            return
++
++        block_hashes = [
++            maybe_convert_block_hash(request.block_hashes[i])
++            for i in range(last_emitted, num_hash_blocks)
++        ]
++        parent_block_hash = (
++            maybe_convert_block_hash(request.block_hashes[last_emitted - 1])
++            if last_emitted > 0
++            else None
++        )
++        start_token_idx = last_emitted * hash_block_size
++        end_token_idx = num_hash_blocks * hash_block_size
++
++        extra_keys_list: list[tuple[Any, ...] | None] = []
++        curr_mm_idx = 0
++        for block_idx in range(last_emitted, num_hash_blocks):
++            block_start = block_idx * hash_block_size
++            block_end = block_start + hash_block_size
++            extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
++                request, block_start, block_end, curr_mm_idx
++            )
++            extra_keys_list.append(extra_keys)
++
++        block_pool.kv_event_queue.append(
++            BlockStored(
++                block_hashes=block_hashes,
++                parent_block_hash=parent_block_hash,
++                token_ids=request.all_token_ids[start_token_idx:end_token_idx],
++                block_size=hash_block_size,
++                lora_id=request.lora_request.adapter_id
++                if request.lora_request
++                else None,
++                medium=MEDIUM_GPU,
++                lora_name=request.lora_request.name
++                if request.lora_request
++                else None,
++                extra_keys=extra_keys_list if extra_keys_list else None,
++                group_idx=self.kv_cache_group_id,
+             )
+-        self.block_pool.cache_full_blocks(
+-            request=request,
+-            blocks=self.req_to_blocks[request.request_id],
+-            num_cached_blocks=num_cached_blocks,
+-            num_full_blocks=num_full_blocks,
+-            block_size=self.block_size,
+-            kv_cache_group_id=self.kv_cache_group_id,
+-            block_mask=block_mask,
+         )
+-
+-        self.num_cached_block[request.request_id] = num_full_blocks
++        self._last_emitted_hash_block[request.request_id] = num_hash_blocks
+ 
+     def _cache_block_mask(
+         self,
+@@ -351,6 +425,7 @@ class SingleTypeKVCacheManager(ABC):
+ 
+         self.block_pool.free_blocks(ordered_blocks)
+         self.num_cached_block.pop(request_id, None)
++        self._last_emitted_hash_block.pop(request_id, None)
+ 
+     @abstractmethod
+     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
+diff --git a/vllm/v1/engine/core.py b/vllm/v1/engine/core.py
+index c9503e46d..af6aa4ee0 100644
+--- a/vllm/v1/engine/core.py
++++ b/vllm/v1/engine/core.py
+@@ -144,6 +144,9 @@ class EngineCore:
+         scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
+             kv_cache_config, vllm_config
+         )
++        # Retain request-hashing granularity for external routing metadata when
++        # hybrid models inflate physical KV block sizes.
++        self._kv_cache_metadata_block_size = hash_block_size
+ 
+         self.scheduler: SchedulerInterface = Scheduler(
+             vllm_config=vllm_config,
+@@ -276,6 +279,13 @@ class EngineCore:
+         vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
+         kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
+         if kv_cache_groups:
++            # Preserve the original configured block size as the hash/event
++            # granularity before worker-side hybrid block inflation flows back
++            # into the engine cache config.
++            if vllm_config.cache_config.hash_block_size is None:
++                vllm_config.cache_config.hash_block_size = (
++                    vllm_config.cache_config.block_size
++                )
+             vllm_config.cache_config.block_size = min(
+                 g.kv_cache_spec.block_size for g in kv_cache_groups
+             )
+@@ -321,14 +331,23 @@ class EngineCore:
+         if kv_cache_config is None:
+             return []
+ 
++        metadata_block_size = getattr(self, "_kv_cache_metadata_block_size", None)
+         metadata: list[dict[str, int | str | None]] = []
+         for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
+             spec = group.kv_cache_spec
++            # Dynamo router metadata must use request hash/event granularity,
++            # not the inflated physical KV block size.
++            effective_block_size = (
++                metadata_block_size
++                if metadata_block_size is not None
++                and metadata_block_size < spec.block_size
++                else spec.block_size
++            )
+             metadata.append(
+                 {
+                     "group_idx": group_idx,
+                     "kind": get_kv_cache_spec_kind(spec).value,
+-                    "block_size": spec.block_size,
++                    "block_size": effective_block_size,
+                     "sliding_window": getattr(spec, "sliding_window", None),
+                 }
+             )

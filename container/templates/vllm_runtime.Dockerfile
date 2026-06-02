@@ -36,9 +36,12 @@ COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
 
-# Create dynamo user with group 0 for OpenShift compatibility
+# Create dynamo user with group 0 for OpenShift compatibility.
+# Pin -u 1000 explicitly: the vllm/vllm-openai >=0.22 image ships a `vllm` user at
+# UID 2000, so after freeing 1000 (ubuntu) useradd would otherwise auto-assign the
+# next-highest UID (2001) and fail the `id -u dynamo` == 1000 assertion below.
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
-    && useradd -m -s /bin/bash -g 0 dynamo \
+    && useradd -u 1000 -m -s /bin/bash -g 0 dynamo \
     && [ `id -u dynamo` -eq 1000 ] \
     && mkdir -p /home/dynamo/.cache /opt/dynamo \
     && ln -sf /usr/bin/python3 /usr/local/bin/python \
@@ -86,6 +89,26 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
     bash /tmp/install_vllm_omni.sh
+
+{% if cuda_version == "13.0" %}
+RUN --mount=type=bind,source=./container/deps/vllm/patches/v0.22.0/ultra,target=/tmp/nemotron-ultra-vllm-patches,readonly \
+    --mount=type=bind,source=./container/deps/vllm/validate_nemotron_ultra_runtime.py,target=/tmp/validate_nemotron_ultra_runtime.py,readonly \
+    set -eux; \
+    installed_vllm_version="$(python3 -c 'import importlib.metadata as md; print(md.version("vllm"))')"; \
+    test "${installed_vllm_version}" = "0.22.0"; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends patch; \
+    site_parent="$(python3 -c 'import pathlib, vllm; print(pathlib.Path(vllm.__file__).resolve().parent.parent)')"; \
+    for patch_file in /tmp/nemotron-ultra-vllm-patches/*.patch; do \
+        echo "Applying ${patch_file}"; \
+        patch --batch --forward -p1 -d "${site_parent}" < "${patch_file}"; \
+    done; \
+    apt-get purge -y patch; \
+    rm -rf /var/lib/apt/lists/*; \
+    python3 -m pip install --no-cache-dir 'humming-kernels[cu13]==0.1.0'; \
+    python3 /tmp/validate_nemotron_ultra_runtime.py
+
+{% endif %}
 
 {% endif %}
 {% endif %}
