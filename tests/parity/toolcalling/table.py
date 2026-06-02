@@ -28,7 +28,7 @@ Cell markers (per peer, vllm + sglang):
         (research-needed; we observed it but haven't classified it)
   V!/S! peer has `error: <substring>` (expected to crash)
   VS, V?S, VS!, etc. — combinations
-  D     Dynamo-only fixture; both peer blocks are `unavailable`
+  ·     Dynamo-only fixture; both peer blocks are `unavailable`
   n/a   family/case doesn't apply
   —     no fixture entry exists for this family/case yet
 
@@ -587,6 +587,7 @@ def peer_status(case: dict, dyn: dict, impl: str) -> tuple[str, bool]:
 
 _TOOL_CALL_MARKUP_RE = re.compile(
     r"</?tool_call|</?tool_calls|<\|tool_call|<\|tool_calls|"
+    r"<\|(?:channel|message|call|python_tag)\|>|"
     r"</?TOOLCALL|TOOL_CALLS|<｜(?:DSML｜)?(?:tool|tool▁call|tool▁calls)|"
     r"<｜DSML｜|</?minimax:tool_call|</?invoke|</?arg_key|</?arg_value"
 )
@@ -599,6 +600,114 @@ def _dynamo_tool_call_leak(dyn: dict) -> str | None:
     if not _TOOL_CALL_MARKUP_RE.search(normal_text):
         return None
     return str(dyn["reason"])
+
+
+def _block_tool_call_leaks(block: dict) -> bool:
+    normal_text = block.get("normal_text")
+    return isinstance(normal_text, str) and bool(
+        _TOOL_CALL_MARKUP_RE.search(normal_text)
+    )
+
+
+def _overview_status(case: dict | None, impl: str) -> str:
+    if case is None or "expected" not in case:
+        return "na"
+    block = case.get("expected", {}).get(impl)
+    if not isinstance(block, dict) or "unavailable" in block:
+        return "na"
+    if "error" in block or _block_tool_call_leaks(block):
+        return "problem"
+    return "ok"
+
+
+def _overview_status_attrs(case: dict | None) -> str:
+    return " ".join(
+        f'data-status-{impl}="{_overview_status(case, impl)}"'
+        for impl in ("dynamo", "vllm", "sglang")
+    )
+
+
+def _canonical_tool_output(block: object) -> dict | None:
+    if not isinstance(block, dict) or "unavailable" in block or "error" in block:
+        return None
+    if "calls" not in block and "normal_text" not in block:
+        return None
+    return {
+        "calls": block.get("calls") or [],
+        "normal_text": block.get("normal_text") or "",
+    }
+
+
+def _selected_parity_marker(case: dict | None, impl: str) -> str | None:
+    if case is None or "expected" not in case:
+        return None
+    expected = case.get("expected", {})
+    outputs = {
+        impl: _canonical_tool_output(expected.get(impl))
+        for impl in ("dynamo", "vllm", "sglang")
+    }
+    if any(value is None for value in outputs.values()):
+        return None
+    if outputs["dynamo"] == outputs["vllm"] == outputs["sglang"]:
+        return "="
+    selected = outputs[impl]
+    peers = (
+        ("dynamo", "D"),
+        ("vllm", "V"),
+        ("sglang", "S"),
+    )
+    marker = "".join(
+        letter for peer, letter in peers if peer != impl and outputs[peer] != selected
+    )
+    return marker or "="
+
+
+def _selected_parity_suffix(case: dict | None, impl: str) -> str:
+    if case is None or "expected" not in case:
+        return ""
+    block = case.get("expected", {}).get(impl)
+    if isinstance(block, dict) and _block_tool_call_leaks(block):
+        return "↯"
+    return ""
+
+
+def _parity_marker(case: dict | None, impl: str) -> str:
+    marker = _selected_parity_marker(case, impl)
+    if marker is None:
+        return _parser_marker(case, impl)
+    return _selected_parity_suffix(case, impl) + marker
+
+
+def _parser_marker(case: dict | None, impl: str) -> str:
+    if case is None:
+        return "—"
+    if "expected" not in case:
+        return "n/a"
+    expected = case.get("expected", {})
+    block = expected.get(impl)
+    if not isinstance(block, dict) or "unavailable" in block:
+        return "n/a"
+    if "error" in block:
+        return "!"
+    if _block_tool_call_leaks(block):
+        return "↯"
+    if impl == "dynamo":
+        peers = (expected.get("vllm"), expected.get("sglang"))
+        if all(isinstance(peer, dict) and "unavailable" in peer for peer in peers):
+            return "·"
+    return ""
+
+
+def _parser_marker_attrs(case: dict | None) -> str:
+    attrs = [
+        f'data-marker-{impl}="{html_lib.escape(_parser_marker(case, impl))}"'
+        for impl in ("dynamo", "vllm", "sglang")
+    ]
+    attrs.extend(
+        f'data-marker-parity-{impl}="{html_lib.escape(_parity_marker(case, impl))}"'
+        for impl in ("dynamo", "vllm", "sglang")
+    )
+    return " ".join(attrs)
 
 
 def cell_for(case: dict | None) -> str:
@@ -626,7 +735,7 @@ def cell_for(case: dict | None) -> str:
     # markup, so don't mark those as `↯`.
     if isinstance(dyn, dict) and _dynamo_tool_call_leak(dyn):
         if v_kind == "unavail" and s_kind == "unavail":
-            return "↯D"
+            return "↯·"
         if parts:
             return "↯" + "".join(parts)
         return "↯"
@@ -634,7 +743,7 @@ def cell_for(case: dict | None) -> str:
     if parts:
         return "".join(parts)
     if v_kind == "unavail" and s_kind == "unavail":
-        return "D"
+        return "·"
     return "="
 
 
@@ -655,7 +764,7 @@ def render_row(
 _LEGEND_MD = (
     "**Legend:** "
     "`=` all captured peers match Dynamo · "
-    "`D` Dynamo-only fixture (both peers unavailable) · "
+    "`·` Dynamo-only fixture (both peers unavailable) · "
     "`V`/`S` divergence (V = vLLM, S = SGLang; intentional, has `reason:`) · "
     "`?` research-needed suffix (e.g. V?, S? — diverges with no `reason:` yet) · "
     "`↯` Dynamo leaks tool call markup into `normal_text` "
@@ -848,7 +957,7 @@ def _build_na_tooltip_html(case: dict) -> str:
     reason = case.get("reason") or "n/a (no reason given)"
     return build_parity_tooltip_html(
         head=head,
-        extra_sections=[("Why n/a", linkify_text_html(str(reason)))],
+        extra_sections=[("Why not applicable", linkify_text_html(str(reason)))],
         refs=[("Ref", case.get("ref")), ("Spec ref", case.get("spec_ref"))],
     )
 
@@ -881,7 +990,12 @@ def render_cell_html(case: dict | None, mode: str, family: str, sub: str) -> str
     cls = parity_cell_class(text)
     band_cls = _subcase_band_class(mode, sub)
     col_group = html_lib.escape(_subcase_group_key(mode, sub))
-    td_open = f'<td class="cell {cls} {band_cls}" data-col-hide-group="{col_group}">'
+    status_attrs = _overview_status_attrs(case)
+    marker_attrs = _parser_marker_attrs(case)
+    td_open = (
+        f'<td class="cell {cls} {band_cls}" data-col-hide-group="{col_group}" '
+        f"{status_attrs} {marker_attrs}>"
+    )
     if case is None:
         ttip = _build_missing_tooltip_html(mode, family, sub)
         return f"{td_open}{text}{ttip}</td>"
@@ -1330,7 +1444,7 @@ def _compute_stats(
             s["real"] += 1
             if text == "=":
                 s["parity"] += 1
-            elif text == "D":
+            elif text in {"D", "·"}:
                 s["dynamo_only"] += 1
             elif "!" in text:
                 s["errors"] += 1

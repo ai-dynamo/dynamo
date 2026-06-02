@@ -69,6 +69,13 @@ For Kimi-style TP-only MoE runs, use `--aic-moe-tp-size` equal to `--aic-tp-size
 - `--router-reset-states`: Only applies in JetStream mode (`--router-durable-kv-events`). Resets the router state on startup by clearing both the JetStream event stream and NATS object store, starting from a fresh state.
 - `--router-snapshot-threshold`: Only applies in JetStream mode (`--router-durable-kv-events`). Sets the number of messages in JetStream before triggering a snapshot.
 
+## Topology-Aware KV Transfer
+
+Topology-aware KV transfer is configured on workers through runtime metadata, not with frontend router flags. In Kubernetes, use `spec.experimental.kvTransferPolicy` on the `DynamoGraphDeployment`; the operator injects the worker environment and topology files. Outside Kubernetes, set `DYN_TOPOLOGY_ENABLED`, `DYN_TOPOLOGY_MOUNT_PATH`, `DYN_KV_TRANSFER_DOMAIN`, `DYN_KV_TRANSFER_ENFORCEMENT`, and `DYN_KV_TRANSFER_PREFERRED_WEIGHT` on workers.
+
+For the full runtime contract and routing behavior, see [Topology-Aware KV Transfer](topology-aware-kv-transfer.md).
+For Kubernetes deployment examples, see [Kubernetes Topology-Aware KV Transfer](../../kubernetes/topology-aware-kv-transfer.md).
+
 ## Block Tracking
 
 - `--no-router-track-active-blocks`: Disables tracking of active blocks used for ongoing generation or decode phases. Disable this when routing to workers that only perform prefill.

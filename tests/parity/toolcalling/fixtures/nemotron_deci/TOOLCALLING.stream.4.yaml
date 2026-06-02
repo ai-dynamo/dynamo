@@ -48,7 +48,7 @@ cases:
     expected:
       dynamo:
         calls: []
-        normal_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"loc'
+        normal_text: ''
       sglang:
         unavailable: SGLang has no detector for family='nemotron_deci'
       vllm:
