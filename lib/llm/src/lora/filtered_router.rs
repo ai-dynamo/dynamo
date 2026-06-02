@@ -167,17 +167,35 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             }
         });
 
-        // Prefer free (non-overloaded) workers, matching PushRouter's load-aware random/
-        // round-robin selection; fall back to all routable workers only if every worker is
-        // currently overloaded (so we degrade rather than hard-fail).
-        let mut available = self.inner.client.instance_ids_free();
-        if available.is_empty() {
-            available = self.inner.client.instance_ids_avail();
-        }
-
-        let candidates = self
+        // Stage 1: narrow to the LoRA's replica set against the FULL routable set, so the
+        // intended replicas are always represented even when they are currently busy.
+        //
+        // Filtering the "free" subset first would be wrong: if a LoRA's replicas are all busy
+        // but some unrelated worker is free, the filter would see no replica intersection in the
+        // free set and fall back to returning those unrelated free workers — scattering adapter
+        // traffic off the replica set exactly when it is saturated (and forcing a cold adapter
+        // load on a non-replica worker). Filtering the routable set keeps the replica constraint.
+        let routable = self.inner.client.instance_ids_avail();
+        let replica_candidates = self
             .filter
-            .filter_worker_ids_for_lora(lora_name.as_deref(), &available);
+            .filter_worker_ids_for_lora(lora_name.as_deref(), &routable);
+
+        // Stage 2: among the replica candidates, prefer free (non-overloaded) workers to match
+        // PushRouter's load-aware selection. Only when every replica candidate is busy do we fall
+        // back to the (busy) replica set itself, rather than degrading to non-replica workers —
+        // so the replica-set constraint is preserved even under saturation.
+        let free: std::collections::HashSet<u64> =
+            self.inner.client.instance_ids_free().into_iter().collect();
+        let free_replica_candidates: Vec<u64> = replica_candidates
+            .iter()
+            .copied()
+            .filter(|id| free.contains(id))
+            .collect();
+        let candidates = if free_replica_candidates.is_empty() {
+            replica_candidates
+        } else {
+            free_replica_candidates
+        };
 
         if candidates.is_empty() {
             return Err(anyhow::anyhow!(
@@ -193,7 +211,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             lora = ?lora_name,
             worker_id = target,
             candidates = candidates.len(),
-            available = available.len(),
+            routable = routable.len(),
+            free = free.len(),
             "LoRA-filtered router selected worker"
         );
 
