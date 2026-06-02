@@ -199,3 +199,76 @@ fn no_evict_admission_cap_matches_hardware() {
         "the rest must stay queued, not dropped"
     );
 }
+
+fn drain(core: &mut VllmCore) -> usize {
+    let mut collector = crate::replay::TraceCollector::default();
+    let mut now_ms = 0.0;
+    let mut completed = 0usize;
+    for _ in 0..100 {
+        if core.state().requests.is_empty() {
+            break;
+        }
+        let pass = core.execute_pass(&mut collector, now_ms);
+        now_ms = pass.end_ms.max(now_ms + 1.0);
+        completed += pass
+            .output_signals
+            .iter()
+            .filter(|signal| signal.completed)
+            .count();
+    }
+    completed
+}
+
+fn capacity_args() -> MockEngineArgs {
+    // 4 GPU blocks * block_size 4 = 16-token per-request capacity.
+    MockEngineArgs::builder()
+        .engine_type(EngineType::Trtllm)
+        .block_size(4)
+        .num_gpu_blocks(4)
+        .max_num_batched_tokens(Some(64))
+        .max_num_seqs(Some(4))
+        .enable_chunked_prefill(true)
+        .enable_prefix_caching(false)
+        .speedup_ratio(0.0)
+        .build()
+        .unwrap()
+}
+
+/// Enqueue normalization rejects a prompt that leaves no decode room (prompt
+/// alone exceeds the KV pool): it never enters the scheduler, so a following
+/// valid request still runs and the queue drains (no FIFO-head stall).
+#[test]
+fn enqueue_rejects_prompt_with_no_decode_room() {
+    let mut core = VllmCore::new(capacity_args());
+    let r1 = Uuid::from_u128(1);
+    let r2 = Uuid::from_u128(2);
+    receive(&mut core, r1, 0..20, 4); // 20-token prompt > 16-token pool -> rejected
+    receive(&mut core, r2, 100..104, 4); // fits
+
+    assert!(
+        !core.state().requests.contains_key(&r1),
+        "no-decode-room r1 must be rejected at enqueue, never entering the scheduler"
+    );
+    let completed = drain(&mut core);
+    assert_eq!(completed, 1, "valid r2 still completes");
+    assert!(core.state().requests.is_empty(), "queue fully drains");
+}
+
+/// Enqueue normalization clamps an over-long output to the room left in the KV
+/// pool, so a request asking for more than fits still runs to the clamped
+/// length instead of being dropped. (Without clamping, r1's 4+40=44 tokens =
+/// 11 blocks exceed the 4-block pool and it could never run.)
+#[test]
+fn enqueue_clamps_excess_output_to_capacity() {
+    let mut core = VllmCore::new(capacity_args());
+    let r1 = Uuid::from_u128(1);
+    receive(&mut core, r1, 0..4, 40); // clamped to 4 + (16-4)=12 = 16 tokens (4 blocks)
+
+    assert!(
+        core.state().requests.contains_key(&r1),
+        "r1 fits after clamping and is admitted, not rejected"
+    );
+    let completed = drain(&mut core);
+    assert_eq!(completed, 1, "clamped r1 runs to completion");
+    assert!(core.state().requests.is_empty(), "queue fully drains");
+}

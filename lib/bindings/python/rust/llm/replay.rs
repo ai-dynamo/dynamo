@@ -1271,6 +1271,7 @@ fn materialize_replay_mocker_args(
                     .unwrap_or(DEFAULT_GPU_MEMORY_UTILIZATION),
                 args.mem_fraction_static
                     .or(Some(DEFAULT_MEM_FRACTION_STATIC)),
+                args.free_gpu_memory_fraction,
                 backend_version.as_deref(),
                 moe_tp_size,
                 moe_ep_size,

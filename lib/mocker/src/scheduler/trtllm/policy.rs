@@ -15,13 +15,13 @@ use crate::kv_manager::KvManager;
 /// ```text
 /// needed = ceil((prompt_len + max_output_tokens) / block_size)
 ///          - blocks_already_held
-///          - reusable_cached_prefix_blocks   (waiting candidates only)
+///          - active_cached_prefix_blocks   (waiting candidates only)
 /// ```
 ///
 /// For a running request, the blocks it already holds are physical (counted in
 /// the KV manager's active blocks), so only the remaining footprint is reserved.
-/// For a waiting candidate (nothing allocated yet) the prefix it can reuse from
-/// the cache is discounted instead.
+/// For a waiting candidate, only the active cached prefix is discounted
+/// (`active_cached_tokens`).
 pub(crate) fn blocks_needed_to_finish(
     sequence: &ActiveSequence,
     block_size: usize,
@@ -30,7 +30,8 @@ pub(crate) fn blocks_needed_to_finish(
     let full_blocks =
         (sequence.num_input_tokens() + sequence.max_output_tokens()).div_ceil(block_size);
     if sequence.num_allocated_tokens() == 0 {
-        let reusable_blocks = kv_manager.get_prefill_cost(sequence).cached_tokens / block_size;
+        let reusable_blocks =
+            kv_manager.get_prefill_cost(sequence).active_cached_tokens / block_size;
         full_blocks.saturating_sub(reusable_blocks)
     } else {
         let allocated_blocks = sequence.num_allocated_tokens().div_ceil(block_size);
@@ -62,6 +63,23 @@ pub(crate) fn available_blocks<'a>(
 /// reservation-gates admission and forbids preemption.
 pub(crate) fn is_no_evict(policy: SchedulingPolicy) -> bool {
     policy == SchedulingPolicy::TrtllmGuaranteedNoEvict
+}
+
+/// TRT-LLM enqueue normalization: a no-evict request's `prompt + output` can
+/// reserve at most the whole KV pool. Returns `max_output_tokens` clamped to the
+/// room left after the prompt, or `None` if the prompt alone leaves no decode
+/// room (the request can never run and should be rejected).
+pub(crate) fn normalize_max_output_tokens(
+    prompt_len: usize,
+    max_output_tokens: usize,
+    num_gpu_blocks: usize,
+    block_size: usize,
+) -> Option<usize> {
+    let capacity_tokens = num_gpu_blocks.saturating_mul(block_size);
+    if prompt_len >= capacity_tokens {
+        return None;
+    }
+    Some(max_output_tokens.min(capacity_tokens - prompt_len))
 }
 
 /// Fail loudly when the no-evict invariant is violated.

@@ -474,6 +474,7 @@ def test_aic_capacity_estimation_preserves_explicit_zero_inputs(monkeypatch):
     assert calls[0]["max_num_batched_tokens"] == 0
     assert calls[0]["gpu_memory_utilization"] == 0.0
     assert calls[0]["mem_fraction_static"] == 0.0
+    assert calls[0]["free_gpu_memory_fraction"] == 0.0
 
 
 def test_build_mocker_engine_args_estimates_sglang_blocks_with_static_fraction(

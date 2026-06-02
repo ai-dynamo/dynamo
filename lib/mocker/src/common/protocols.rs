@@ -223,6 +223,9 @@ pub struct PrefillCost {
     /// Number of tokens already cached (prefix hit).
     /// isl = cached_tokens + new_tokens
     pub cached_tokens: usize,
+    /// Subset of `cached_tokens` backed by active blocks; TRT-LLM no-evict
+    /// capacity reservation discounts only these (inactive reuse is re-consumed).
+    pub active_cached_tokens: usize,
 }
 
 impl PrefillCost {
@@ -512,7 +515,7 @@ fn load_perf_model(path: &Path) -> Arc<PerfModel> {
 #[validate(schema(function = "validate_mock_engine_args"))]
 #[builder(pattern = "owned", build_fn(public))]
 pub struct MockEngineArgs {
-    /// Engine type: vLLM or SGLang simulation
+    /// Engine type: vLLM, SGLang, or TensorRT-LLM simulation
     #[builder(default = "EngineType::Vllm")]
     pub engine_type: EngineType,
 

@@ -18,7 +18,8 @@
 mod policy;
 
 pub(crate) use policy::{
-    available_blocks, blocks_needed_to_finish, is_no_evict, report_no_evict_violation,
+    available_blocks, blocks_needed_to_finish, is_no_evict, normalize_max_output_tokens,
+    report_no_evict_violation,
 };
 
 #[cfg(test)]

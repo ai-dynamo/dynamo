@@ -329,9 +329,35 @@ impl VllmCore {
 
     pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
+        let mut max_output_tokens = request.max_output_tokens;
+        if trtllm::is_no_evict(self.args.scheduling_policy()) {
+            // TRT-LLM enqueue normalization: clamp output to KV-pool capacity, or
+            // reject a prompt with no decode room (never enqueue). The admission
+            // gate keeps a defensive terminal-drop for any oversized leftover.
+            match trtllm::normalize_max_output_tokens(
+                request.tokens.len(),
+                max_output_tokens,
+                self.args.num_gpu_blocks,
+                self.args.block_size,
+            ) {
+                Some(clamped) => {
+                    if clamped != max_output_tokens {
+                        tracing::warn!(%uuid, requested = max_output_tokens, clamped,
+                            "clamped TRT-LLM max_output_tokens to KV-pool capacity");
+                        max_output_tokens = clamped;
+                    }
+                }
+                None => {
+                    tracing::warn!(%uuid, prompt_len = request.tokens.len(),
+                        capacity_blocks = self.args.num_gpu_blocks,
+                        "rejecting TRT-LLM request: prompt leaves no room for decode");
+                    return uuid;
+                }
+            }
+        }
         let sequence = ActiveSequence::new(
             request.tokens,
-            request.max_output_tokens,
+            max_output_tokens,
             Some(self.args.block_size),
             self.args.enable_prefix_caching,
             self.args.zmq_kv_events_port.is_some(),
@@ -706,6 +732,19 @@ impl VllmCore {
                         &self.kv_manager,
                     )
                 {
+                    // Normal TRT-LLM receive() normalizes requests before enqueue, so this should
+                    // only catch bypassed/malformed scheduler state. Keep it as a terminal fallback
+                    // so an impossible FIFO head cannot stall replay.
+                    if needed > self.args.num_gpu_blocks {
+                        tracing::warn!(
+                            %uuid,
+                            needed_blocks = needed,
+                            capacity_blocks = self.args.num_gpu_blocks,
+                            "rejecting TRT-LLM request: prompt + max_output exceeds the entire KV pool"
+                        );
+                        self.drop_request(uuid);
+                        continue;
+                    }
                     break;
                 }
             }

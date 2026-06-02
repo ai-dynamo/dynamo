@@ -14,6 +14,7 @@ _NEXTN_ACCEPT_RATES_LEN = 5
 # AIC CLI default when accept-rates are omitted (``cli/main.py:795``).
 _DEFAULT_NEXTN_ACCEPT_RATES = [0.85, 0.3, 0.0, 0.0, 0.0]
 
+# Default backend versions match the AIC v0.9.0 perf DB.
 DEFAULT_BACKEND_VERSIONS = {
     "vllm": "0.19.0",
     "sglang": "0.5.10",
