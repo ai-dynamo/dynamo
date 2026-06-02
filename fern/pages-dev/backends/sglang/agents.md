@@ -17,7 +17,7 @@ Agentic workloads (tool-calling loops, multi-turn reasoning, code generation pip
 - **Priority-sensitive**: Some requests (user-facing agent turns) matter more than background tasks.
 - **Long-lived**: Conversations span minutes to hours. Cache eviction under memory pressure can destroy accumulated KV state.
 
-Dynamo's agent hints give the router per-request metadata. SGLang's engine flags control how that metadata affects scheduling and eviction on the worker.
+Dynamo's agent hints give the router per-request metadata. SGLang's engine flags control how that metadata affects scheduling and eviction on the worker. For the cross-layer Dynamo priority semantics, see [Priority Scheduling](../../agents/priority-scheduling.md).
 
 ## SGLang Engine Flags
 
@@ -37,6 +37,10 @@ python -m dynamo.sglang \
 | `--enable-priority-scheduling` | Enables priority-based request scheduling instead of FCFS. |
 
 When priority scheduling is enabled, the engine uses the `priority` field from `nvext.agent_hints` to order requests in its internal queue. Requests with higher effective priority are scheduled before lower-priority ones. Ties are broken by arrival time.
+
+Router queue priority is configured separately on the frontend with
+`--router-queue-threshold`; see
+[Router Configuration and Tuning](../../components/router/router-configuration.md#routing-behavior).
 
 ### Priority-Based KV Cache Eviction
 
