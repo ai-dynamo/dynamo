@@ -27,7 +27,7 @@ use std::{
     hash::BuildHasherDefault,
     mem::size_of_val,
     sync::{
-        Arc, OnceLock,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -92,9 +92,9 @@ pub type CacheEventFn = Arc<dyn Fn() + Send + Sync>;
 pub struct L1Cache {
     /// Prefix entries keyed by the blake3 digest of `input[0..boundary]`.
     cache: PrefixCache,
-    /// Aho-Corasick automaton over the special tokens, built once on first use (the set is
-    /// fixed for the cache's lifetime). Lets boundary detection be a single pass.
-    matcher: OnceLock<AhoCorasick>,
+    /// Aho-Corasick automaton over the special tokens, built once at construction (`None`
+    /// when there are no special tokens). Lets boundary detection be a single pass.
+    matcher: Option<AhoCorasick>,
     hits: AtomicU64,
     misses: AtomicU64,
     on_hit: Option<CacheEventFn>,
@@ -102,7 +102,9 @@ pub struct L1Cache {
 }
 
 impl L1Cache {
-    pub fn new(max_memory: usize) -> Self {
+    /// `special_tokens` is the atomic special-token set whose boundaries the cache splits
+    /// at; an empty set leaves L1 inert (no boundaries, no entries).
+    pub fn new(max_memory: usize, special_tokens: Vec<String>) -> Self {
         // Capacity is the byte budget; each entry weighs its resident token-vector bytes
         // (the prefix text is hashed and discarded, never stored). moka's W-TinyLFU policy
         // admits/evicts to keep the weighted size within budget.
@@ -113,9 +115,15 @@ impl L1Cache {
             })
             .build_with_hasher(PrefixHasher::default());
 
+        // Build the boundary automaton once; `None` when there are no special tokens.
+        let matcher = (!special_tokens.is_empty()).then(|| {
+            AhoCorasick::new(&special_tokens)
+                .expect("special tokens form a valid Aho-Corasick automaton")
+        });
+
         Self {
             cache,
-            matcher: OnceLock::new(),
+            matcher,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             on_hit: None,
@@ -129,20 +137,14 @@ impl L1Cache {
         self.on_miss = Some(on_miss);
     }
 
-    /// Special-token boundaries in `text` via a process-once Aho-Corasick automaton — a
-    /// single pass over the input instead of one `str::find` sweep per token. The automaton
-    /// is built from `special_tokens` on first use and reused; the set is fixed for the
-    /// cache's lifetime (it's the owning tokenizer's special tokens), so every later call
-    /// passes the same `special_tokens` the automaton was built from.
-    fn boundaries(&self, text: &str, special_tokens: &[&str]) -> Vec<usize> {
-        if special_tokens.is_empty() {
-            return Vec::new();
+    /// Special-token boundaries in `text` via the process-once Aho-Corasick automaton built
+    /// at construction — a single pass over the input rather than one `str::find` sweep per
+    /// token. Empty when the cache has no special tokens.
+    fn boundaries(&self, text: &str) -> Vec<usize> {
+        match &self.matcher {
+            Some(matcher) => boundaries_with(text, matcher),
+            None => Vec::new(),
         }
-        let matcher = self.matcher.get_or_init(|| {
-            AhoCorasick::new(special_tokens)
-                .expect("special tokens form a valid Aho-Corasick automaton")
-        });
-        boundaries_with(text, matcher)
     }
 
     /// Try to find the longest prefix match at a special-token boundary.
@@ -151,12 +153,8 @@ impl L1Cache {
     /// extends the cached tokens with a fresh encode of `input[byte_offset..]`;
     /// `deepest_boundary` is the deepest special-token boundary in `input` (end-exclusive),
     /// handed back so [`extend_after_match`] need not rescan the input for it.
-    pub fn longest_prefix_match(
-        &self,
-        input: &str,
-        special_tokens: &[&str],
-    ) -> Option<(Vec<TokenIdType>, usize, usize)> {
-        let boundaries = self.boundaries(input, special_tokens);
+    pub fn longest_prefix_match(&self, input: &str) -> Option<(Vec<TokenIdType>, usize, usize)> {
+        let boundaries = self.boundaries(input);
 
         if boundaries.is_empty() {
             self.misses.fetch_add(1, Ordering::Relaxed);
@@ -212,9 +210,8 @@ impl L1Cache {
         &self,
         input: &str,
         tokenizer: &E,
-        special_tokens: &[&str],
     ) -> anyhow::Result<()> {
-        let boundaries = self.boundaries(input, special_tokens);
+        let boundaries = self.boundaries(input);
         if boundaries.is_empty() {
             return Ok(());
         }
@@ -234,9 +231,8 @@ impl L1Cache {
         &self,
         input: &str,
         tokenizer: &E,
-        special_tokens: &[&str],
     ) -> anyhow::Result<Vec<TokenIdType>> {
-        let boundaries = self.boundaries(input, special_tokens);
+        let boundaries = self.boundaries(input);
         if boundaries.is_empty() {
             // No special tokens present — nothing cacheable; a single plain encode.
             return Ok(tokenizer.encode(input)?.token_ids().to_vec());
@@ -421,6 +417,14 @@ mod tests {
         Arc::new(HuggingFaceTokenizer::from_file(TINYLLAMA_PATH).expect("load TinyLlama"))
     }
 
+    /// An `L1Cache` over the TinyLlama [`SPECIALS`] with the given byte budget.
+    fn test_cache(max_memory: usize) -> L1Cache {
+        L1Cache::new(
+            max_memory,
+            SPECIALS.iter().map(|s| (*s).to_string()).collect(),
+        )
+    }
+
     #[test]
     fn boundaries_are_after_each_special_token_occurrence() {
         let input = "<s>system\nHi</s><s>user\nHello</s>";
@@ -440,18 +444,18 @@ mod tests {
 
     #[test]
     fn insert_then_lookup_finds_shared_prefix() {
-        let cache = L1Cache::new(1024 * 1024);
+        let cache = test_cache(1024 * 1024);
         let tokenizer = load_tokenizer();
 
         let warm = "<s>system\nYou are helpful.</s><s>user\nHi</s>";
         cache
-            .insert_at_boundaries(warm, tokenizer.as_ref(), SPECIALS)
+            .insert_at_boundaries(warm, tokenizer.as_ref())
             .unwrap();
         assert!(!cache.is_empty());
 
         let target = "<s>system\nYou are helpful.</s><s>user\nDifferent question</s>";
         let (tokens, offset, _deepest) = cache
-            .longest_prefix_match(target, SPECIALS)
+            .longest_prefix_match(target)
             .expect("shared prefix should match");
         assert!(offset > 0);
         assert!(!tokens.is_empty());
@@ -459,10 +463,10 @@ mod tests {
 
     #[test]
     fn miss_increments_misses_counter() {
-        let cache = L1Cache::new(1024 * 1024);
+        let cache = test_cache(1024 * 1024);
         assert!(
             cache
-                .longest_prefix_match("plain text no specials", SPECIALS)
+                .longest_prefix_match("plain text no specials")
                 .is_none()
         );
         assert_eq!(cache.stats().misses, 1);
@@ -470,13 +474,13 @@ mod tests {
 
     #[test]
     fn hit_increments_hits_counter() {
-        let cache = L1Cache::new(1024 * 1024);
+        let cache = test_cache(1024 * 1024);
         let tokenizer = load_tokenizer();
         let warm = "<s>system\nA.</s><s>user\nB</s>";
         cache
-            .insert_at_boundaries(warm, tokenizer.as_ref(), SPECIALS)
+            .insert_at_boundaries(warm, tokenizer.as_ref())
             .unwrap();
-        let _ = cache.longest_prefix_match(warm, SPECIALS);
+        let _ = cache.longest_prefix_match(warm);
         assert!(cache.stats().hits >= 1);
     }
 
@@ -485,18 +489,18 @@ mod tests {
         // Load-bearing correctness check: cached prefix + fresh suffix encode must
         // equal plain encode of the full input. Relies on `<s>`/`</s>` being atomic
         // in TinyLlama's BPE (they are).
-        let cache = L1Cache::new(1024 * 1024);
+        let cache = test_cache(1024 * 1024);
         let tokenizer = load_tokenizer();
 
         let template = "<s>system\nYou are helpful.</s><s>user\n";
         let warm = format!("{template}First.</s>");
         cache
-            .insert_at_boundaries(&warm, tokenizer.as_ref(), SPECIALS)
+            .insert_at_boundaries(&warm, tokenizer.as_ref())
             .unwrap();
 
         let target = format!("{template}A completely different second question.</s>");
         let (prefix_tokens, prefix_len, _deepest) = cache
-            .longest_prefix_match(&target, SPECIALS)
+            .longest_prefix_match(&target)
             .expect("should find prefix");
 
         let suffix = &target[prefix_len..];
@@ -515,13 +519,13 @@ mod tests {
     #[test]
     fn eviction_respects_memory_budget() {
         // 4 KB budget — tight enough to force eviction after a few inserts.
-        let cache = L1Cache::new(4 * 1024);
+        let cache = test_cache(4 * 1024);
         let tokenizer = load_tokenizer();
         for i in 0..50 {
             let input =
                 format!("<s>system\nPersona {i} chatty.</s><s>user\nTurn {i} content here.</s>");
             cache
-                .insert_at_boundaries(&input, tokenizer.as_ref(), SPECIALS)
+                .insert_at_boundaries(&input, tokenizer.as_ref())
                 .unwrap();
         }
         let stats = cache.stats();
@@ -536,7 +540,7 @@ mod tests {
     fn concurrent_inserts_and_lookups_do_not_corrupt() {
         use std::thread;
 
-        let cache = Arc::new(L1Cache::new(1024 * 1024));
+        let cache = Arc::new(test_cache(1024 * 1024));
         let tokenizer = load_tokenizer();
 
         let mut handles = vec![];
@@ -545,10 +549,8 @@ mod tests {
             let tok = tokenizer.clone();
             handles.push(thread::spawn(move || {
                 let input = format!("<s>system\nThread {i}.</s><s>user\nThread {i} body.</s>");
-                cache_c
-                    .insert_at_boundaries(&input, tok.as_ref(), SPECIALS)
-                    .unwrap();
-                let r = cache_c.longest_prefix_match(&input, SPECIALS);
+                cache_c.insert_at_boundaries(&input, tok.as_ref()).unwrap();
+                let r = cache_c.longest_prefix_match(&input);
                 assert!(r.is_some(), "thread {i} expected match after insert");
             }));
         }
@@ -585,15 +587,11 @@ mod tests {
         let turns = growing_chat_turns(5);
 
         // EXTEND OFF: seed turn 0 via the miss path, then only look up (never insert).
-        let off = L1Cache::new(8 * 1024 * 1024);
-        off.insert_at_boundaries(&turns[0], tok.as_ref(), SPECIALS)
-            .unwrap();
-        let pinned = off
-            .longest_prefix_match(&turns[1], SPECIALS)
-            .expect("hit")
-            .1;
+        let off = test_cache(8 * 1024 * 1024);
+        off.insert_at_boundaries(&turns[0], tok.as_ref()).unwrap();
+        let pinned = off.longest_prefix_match(&turns[1]).expect("hit").1;
         for t in &turns[1..] {
-            let (_toks, offset, _deepest) = off.longest_prefix_match(t, SPECIALS).expect("hit");
+            let (_toks, offset, _deepest) = off.longest_prefix_match(t).expect("hit");
             assert_eq!(
                 offset, pinned,
                 "extend-off offset must stay pinned at turn-1 depth"
@@ -601,13 +599,11 @@ mod tests {
         }
 
         // EXTEND ON: each hit caches the deepest boundary, so the next turn hits deeper.
-        let on = L1Cache::new(8 * 1024 * 1024);
-        on.insert_at_boundaries(&turns[0], tok.as_ref(), SPECIALS)
-            .unwrap();
+        let on = test_cache(8 * 1024 * 1024);
+        on.insert_at_boundaries(&turns[0], tok.as_ref()).unwrap();
         let mut prev = 0usize;
         for (i, t) in turns.iter().enumerate().skip(1) {
-            let (prefix_tokens, offset, deepest) =
-                on.longest_prefix_match(t, SPECIALS).expect("hit");
+            let (prefix_tokens, offset, deepest) = on.longest_prefix_match(t).expect("hit");
             assert!(
                 offset > prev,
                 "turn {i}: extend-on offset {offset} must exceed previous {prev}"
@@ -637,23 +633,19 @@ mod tests {
         // Tiny budget forces eviction (and over-budget skips) while extending; every
         // turn's encode must stay correct and memory must stay within budget.
         let tok = load_tokenizer();
-        let cache = L1Cache::new(4 * 1024);
+        let cache = test_cache(4 * 1024);
         let turns = growing_chat_turns(20);
-        cache
-            .insert_at_boundaries(&turns[0], tok.as_ref(), SPECIALS)
-            .unwrap();
+        cache.insert_at_boundaries(&turns[0], tok.as_ref()).unwrap();
 
         for t in &turns[1..] {
-            let merged = match cache.longest_prefix_match(t, SPECIALS) {
+            let merged = match cache.longest_prefix_match(t) {
                 Some((prefix_tokens, offset, deepest)) => cache
                     .extend_after_match(t, prefix_tokens, offset, deepest, tok.as_ref())
                     .unwrap(),
                 None => {
                     // Full miss under eviction pressure — mirror the miss path.
                     let enc = tok.encode(t).unwrap();
-                    cache
-                        .insert_at_boundaries(t, tok.as_ref(), SPECIALS)
-                        .unwrap();
+                    cache.insert_at_boundaries(t, tok.as_ref()).unwrap();
                     enc.token_ids().to_vec()
                 }
             };
@@ -676,12 +668,10 @@ mod tests {
         use std::thread;
 
         let tok = load_tokenizer();
-        let cache = Arc::new(L1Cache::new(8 * 1024 * 1024));
+        let cache = Arc::new(test_cache(8 * 1024 * 1024));
         let turns = growing_chat_turns(8);
         // Seed turn 0 so every thread gets at least a partial hit.
-        cache
-            .insert_at_boundaries(&turns[0], tok.as_ref(), SPECIALS)
-            .unwrap();
+        cache.insert_at_boundaries(&turns[0], tok.as_ref()).unwrap();
 
         let mut handles = vec![];
         for _ in 0..8 {
@@ -690,8 +680,7 @@ mod tests {
             let turns_c = turns.clone();
             handles.push(thread::spawn(move || {
                 for t in &turns_c[1..] {
-                    if let Some((prefix_tokens, offset, deepest)) =
-                        cache_c.longest_prefix_match(t, SPECIALS)
+                    if let Some((prefix_tokens, offset, deepest)) = cache_c.longest_prefix_match(t)
                     {
                         let merged = cache_c
                             .extend_after_match(t, prefix_tokens, offset, deepest, tok_c.as_ref())
@@ -722,13 +711,11 @@ mod tests {
         let tok = load_tokenizer();
         let turns = growing_chat_turns(3);
 
-        let cache = L1Cache::new(8 * 1024 * 1024);
-        cache
-            .insert_at_boundaries(&turns[0], tok.as_ref(), SPECIALS)
-            .unwrap();
+        let cache = test_cache(8 * 1024 * 1024);
+        cache.insert_at_boundaries(&turns[0], tok.as_ref()).unwrap();
 
         let (prefix_tokens, prefix_len, deepest_boundary) = cache
-            .longest_prefix_match(&turns[1], SPECIALS)
+            .longest_prefix_match(&turns[1])
             .expect("partial hit on turns[1]");
         let entries_before = cache.stats().entries;
 
@@ -763,7 +750,7 @@ mod tests {
         // A fresh lookup must now hit AT that deepest boundary, and the stored tokens must
         // equal the uncached encode of exactly that prefix.
         let (saved_tokens, saved_offset, _deepest) = cache
-            .longest_prefix_match(&turns[1], SPECIALS)
+            .longest_prefix_match(&turns[1])
             .expect("hit after extend");
         assert_eq!(
             saved_offset, deepest,
@@ -804,12 +791,10 @@ mod tests {
         // The fused miss path must (a) return ids byte-exact to an uncached encode and
         // (b) leave the cache populated at the boundaries, so a follow-up lookup hits.
         let tok = load_tokenizer();
-        let cache = L1Cache::new(8 * 1024 * 1024);
+        let cache = test_cache(8 * 1024 * 1024);
         let input = "<s>system\nYou are helpful.</s><s>user\nHello there, friend.</s>";
 
-        let got = cache
-            .populate_and_encode(input, tok.as_ref(), SPECIALS)
-            .unwrap();
+        let got = cache.populate_and_encode(input, tok.as_ref()).unwrap();
         let plain = tok.encode(input).unwrap();
         assert_eq!(
             got,
@@ -823,7 +808,7 @@ mod tests {
             "miss path must populate boundary entries"
         );
         let (_t, offset, _d) = cache
-            .longest_prefix_match(input, SPECIALS)
+            .longest_prefix_match(input)
             .expect("hit after populate");
         assert!(offset > 0, "follow-up lookup should hit a cached boundary");
     }
@@ -833,12 +818,10 @@ mod tests {
         // No registered special appears in the input → no boundaries → one plain encode,
         // nothing cached, still byte-exact.
         let tok = load_tokenizer();
-        let cache = L1Cache::new(8 * 1024 * 1024);
+        let cache = test_cache(8 * 1024 * 1024);
         let input = "plain text with no special tokens at all";
 
-        let got = cache
-            .populate_and_encode(input, tok.as_ref(), SPECIALS)
-            .unwrap();
+        let got = cache.populate_and_encode(input, tok.as_ref()).unwrap();
         let plain = tok.encode(input).unwrap();
         assert_eq!(got, plain.token_ids());
         assert!(cache.is_empty(), "nothing cacheable without boundaries");
@@ -850,12 +833,10 @@ mod tests {
         // so the trailing `</s>` lands in the tail segment. The assembled ids must still
         // equal an uncached encode.
         let tok = load_tokenizer();
-        let cache = L1Cache::new(8 * 1024 * 1024);
+        let cache = test_cache(8 * 1024 * 1024);
         let input = "<s>system\nDone.</s>";
 
-        let got = cache
-            .populate_and_encode(input, tok.as_ref(), SPECIALS)
-            .unwrap();
+        let got = cache.populate_and_encode(input, tok.as_ref()).unwrap();
         let plain = tok.encode(input).unwrap();
         assert_eq!(
             got,

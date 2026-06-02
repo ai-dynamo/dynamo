@@ -68,7 +68,10 @@ use crate::{
 pub struct CachedTokenizer {
     inner: Arc<dyn Tokenizer>,
     l1: L1Cache,
-    special_tokens: Vec<String>,
+    /// Whether L1 is active. False when the special-token set is empty (e.g. the tiktoken
+    /// wrapping path): `encode`/`encode_batch` then bypass the cache entirely. The special
+    /// tokens themselves live in the `L1Cache` (its boundary automaton).
+    l1_enabled: bool,
     /// When true, cache the newly-tokenized suffix on a partial hit so the next turn
     /// of a growing conversation hits deeper (see [`L1Cache::extend_after_match`]).
     extend_on_hit: bool,
@@ -89,10 +92,11 @@ impl CachedTokenizer {
         special_tokens: Vec<String>,
         max_memory_bytes: usize,
     ) -> Self {
+        let l1_enabled = !special_tokens.is_empty();
         Self {
             inner,
-            l1: L1Cache::new(max_memory_bytes),
-            special_tokens,
+            l1: L1Cache::new(max_memory_bytes, special_tokens),
+            l1_enabled,
             extend_on_hit: false,
         }
     }
@@ -130,24 +134,18 @@ impl CachedTokenizer {
     }
 }
 
-fn special_token_refs(specials: &[String]) -> Vec<&str> {
-    specials.iter().map(String::as_str).collect()
-}
-
 impl Encoder for CachedTokenizer {
     fn encode(&self, input: &str) -> Result<Encoding> {
-        // Empty specials => no boundaries are ever produced. Skip the lookup,
-        // miss-counter bump, and insert attempt entirely — otherwise the
-        // tiktoken wrapping path (which deliberately passes an empty list)
-        // pays the scan cost on every call with zero chance of a hit.
-        if self.special_tokens.is_empty() {
+        // No specials => no boundaries are ever produced. Skip the lookup, miss-counter
+        // bump, and insert attempt entirely — otherwise the tiktoken wrapping path (which
+        // deliberately passes an empty list) pays the cost on every call with no chance
+        // of a hit.
+        if !self.l1_enabled {
             return self.inner.encode(input);
         }
 
-        let specials = special_token_refs(&self.special_tokens);
-
         if let Some((prefix_tokens, prefix_len, deepest_boundary)) =
-            self.l1.longest_prefix_match(input, &specials)
+            self.l1.longest_prefix_match(input)
         {
             let suffix = &input[prefix_len..];
             if suffix.is_empty() {
@@ -176,18 +174,16 @@ impl Encoder for CachedTokenizer {
         // avoid the redundant second tokenization a separate full-encode + insert would
         // cost. Returns Encoding::Sp — consistent with the hit path (see the storage-
         // normalization note in the module docs).
-        Ok(Encoding::Sp(self.l1.populate_and_encode(
-            input,
-            self.inner.as_ref(),
-            &specials,
-        )?))
+        Ok(Encoding::Sp(
+            self.l1.populate_and_encode(input, self.inner.as_ref())?,
+        ))
     }
 
     fn encode_batch(&self, inputs: &[&str]) -> Result<Vec<Encoding>> {
         // True passthrough when L1 is disabled — delegate to the inner's native
         // batch path (which may be rayon-parallel for HF) instead of falling
         // through per-item.
-        if self.special_tokens.is_empty() {
+        if !self.l1_enabled {
             return self.inner.encode_batch(inputs);
         }
 
