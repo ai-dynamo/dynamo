@@ -170,9 +170,12 @@ impl AicPerfConfig {
                 return Err(PyValueError::new_err(format!("{name} must be >= 1")));
             }
         }
-        if matches!(aic_nextn, Some(0)) {
+        // AIC caps MTP draft tokens at 5; >5 would IndexError in calc_expectation.
+        if let Some(nextn) = aic_nextn
+            && !(1..=5).contains(&nextn)
+        {
             return Err(PyValueError::new_err(
-                "aic_nextn must be >= 1 when set (omit to disable spec dec)",
+                "aic_nextn must be 1..=5 when set (omit to disable spec dec)",
             ));
         }
 

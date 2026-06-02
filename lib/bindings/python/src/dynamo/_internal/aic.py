@@ -11,6 +11,8 @@ import math
 logger = logging.getLogger(__name__)
 
 _NEXTN_ACCEPT_RATES_LEN = 5
+# AIC CLI default when accept-rates are omitted (``cli/main.py:795``).
+_DEFAULT_NEXTN_ACCEPT_RATES = [0.85, 0.3, 0.0, 0.0, 0.0]
 
 DEFAULT_BACKEND_VERSIONS = {
     "vllm": "0.14.0",
@@ -47,16 +49,23 @@ def _pad_nextn_accept_rates(
 
     AIC caps MTP draft tokens at 5 (``ModelConfig.nextn`` "at most mtp5",
     ``sdk/config.py:28``) and ``calc_expectation`` indexes into the list up
-    to ``nextn``. AIC's own CLI normalizes to length 5 with trailing zeros
-    (``cli/main.py:795``); we mirror that so callers can pass a shorter list
-    or a comma-separated string without tripping over IndexError or
-    schema-mismatch downstream.
+    to ``nextn``. When rates are omitted entirely we fall back to AIC's CLI
+    default (``cli/main.py:795``); an explicit shorter list is zero-padded and
+    a longer one is truncated, so callers never trip over IndexError downstream.
     """
     if isinstance(nextn_accept_rates, str):
-        nextn_accept_rates = [
-            float(x) for x in nextn_accept_rates.split(",") if x.strip()
-        ]
-    rates = list(nextn_accept_rates) if nextn_accept_rates else []
+        try:
+            nextn_accept_rates = [
+                float(x) for x in nextn_accept_rates.split(",") if x.strip()
+            ]
+        except ValueError as exc:
+            raise ValueError(
+                "aic_nextn_accept_rates must be comma-separated floats, got "
+                f"{nextn_accept_rates!r}"
+            ) from exc
+    if not nextn_accept_rates:
+        return list(_DEFAULT_NEXTN_ACCEPT_RATES)
+    rates = list(nextn_accept_rates)
     if len(rates) < _NEXTN_ACCEPT_RATES_LEN:
         rates = rates + [0.0] * (_NEXTN_ACCEPT_RATES_LEN - len(rates))
     elif len(rates) > _NEXTN_ACCEPT_RATES_LEN:
@@ -131,6 +140,11 @@ class AicSession:
             attention_dp_size=attention_dp_size or 1,
         )
         if nextn:
+            if nextn > _NEXTN_ACCEPT_RATES_LEN:
+                # AIC indexes accept_rates up to nextn; >5 would IndexError.
+                raise ValueError(
+                    f"nextn must be <= {_NEXTN_ACCEPT_RATES_LEN} when set, got {nextn}"
+                )
             model_config_kwargs["nextn"] = nextn
             model_config_kwargs["nextn_accept_rates"] = _pad_nextn_accept_rates(
                 nextn_accept_rates
