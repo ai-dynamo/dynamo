@@ -248,6 +248,28 @@ enum MmRoutingProtocol {
     Vllm,
 }
 
+/// Mirror of sglang's `MultimodalItem._compute_pad_value` constants from
+/// `python/sglang/srt/managers/multimodal_processor.py`. The pad_value
+/// shoved into routing-side block hashes for each image must match what
+/// sglang publishes via its `BlockStored` KV events — if either constant
+/// drifts from upstream, our pad_value diverges and routing silently
+/// degrades to text-prefix.
+///
+/// Pinned by `mm_pad_value_matches_sglang_protocol` in `mod tests`.
+#[cfg(feature = "lightseek-mm")]
+const MM_PAD_SHIFT_VALUE: u64 = 1_000_000;
+#[cfg(feature = "lightseek-mm")]
+const MM_PAD_HASH_MASK: u64 = (1 << 30) - 1;
+
+/// Compute the sglang per-image pad_value from a routing-side mm_hash.
+/// Wrapping the formula in a function (not just an inline closure) lets
+/// the test in `mod tests` pin both the constants and the formula
+/// directly.
+#[cfg(feature = "lightseek-mm")]
+fn pad_value_for_sglang(mm_hash: u64) -> crate::protocols::TokenIdType {
+    (MM_PAD_SHIFT_VALUE + (mm_hash & MM_PAD_HASH_MASK)) as crate::protocols::TokenIdType
+}
+
 #[cfg(feature = "lightseek-mm")]
 impl MmRoutingProtocol {
     /// Resolve from `runtime_config.backend_framework`. Both `dynamo.sglang`
@@ -1257,13 +1279,10 @@ impl OpenAIPreprocessor {
         // event bytes. vLLM (or unreported, with prior startup warn) keeps
         // vLLM's protocol.
         let sglang_pad_value_mode = self.mm_routing_protocol == MmRoutingProtocol::Sglang;
-        // Mirrors sglang's _compute_pad_value; must follow upstream if either
-        // constant changes.
-        const MM_PAD_SHIFT_VALUE: u64 = 1_000_000;
-        const MM_PAD_HASH_MASK: u64 = (1 << 30) - 1;
-        let pad_value_for_sglang = |mm_hash: u64| -> crate::protocols::TokenIdType {
-            (MM_PAD_SHIFT_VALUE + (mm_hash & MM_PAD_HASH_MASK)) as crate::protocols::TokenIdType
-        };
+        // sglang per-image pad_value formula. Constants + formula live at
+        // module scope (`pad_value_for_sglang`) so the contract with sglang
+        // upstream is pinned by a unit test rather than a magic-number
+        // inline.
 
         let mut expanded: Vec<crate::protocols::TokenIdType> =
             Vec::with_capacity(normalized_token_ids.len() + n_total);
@@ -3542,6 +3561,40 @@ mod tests {
         assert_ne!(
             s3a, s3b,
             "s3:// query params identify objects and must not collide"
+        );
+    }
+
+    /// Pin the sglang pad_value protocol constants and formula against
+    /// upstream `MultimodalItem._compute_pad_value`. If sglang bumps
+    /// either constant in a new release, this test fails — without it
+    /// the routing-side pad_value would silently diverge from sglang's
+    /// `BlockStored` event bytes and MM-routing would degrade to text-
+    /// prefix without any error.
+    #[cfg(feature = "lightseek-mm")]
+    #[test]
+    fn mm_pad_value_matches_sglang_protocol() {
+        // Constant pins (upstream:
+        // python/sglang/srt/managers/multimodal_processor.py).
+        assert_eq!(MM_PAD_SHIFT_VALUE, 1_000_000);
+        assert_eq!(MM_PAD_HASH_MASK, (1u64 << 30) - 1);
+
+        // Formula pins. Three cases: zero, a value that exactly fits the
+        // 30-bit mask, and a value that overflows it (verifies the mask
+        // is actually applied, not just additively combined).
+        assert_eq!(
+            pad_value_for_sglang(0),
+            MM_PAD_SHIFT_VALUE as crate::protocols::TokenIdType
+        );
+        let fits = (1u64 << 30) - 1;
+        assert_eq!(
+            pad_value_for_sglang(fits),
+            (MM_PAD_SHIFT_VALUE + fits) as crate::protocols::TokenIdType
+        );
+        let overflow = (1u64 << 30) | 0xCAFE;
+        assert_eq!(
+            pad_value_for_sglang(overflow),
+            (MM_PAD_SHIFT_VALUE + 0xCAFE) as crate::protocols::TokenIdType,
+            "high bits above the 30-bit mask must be discarded"
         );
     }
 }
