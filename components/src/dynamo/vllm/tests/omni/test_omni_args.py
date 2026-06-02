@@ -76,6 +76,7 @@ def _make_omni_config(**overrides) -> OmniConfig:
         "tts_ref_audio_max_bytes": 50 * 1024 * 1024,
         "stage_id": None,
         "omni_router": False,
+        "cosmos3_guardrails": True,
     }
     flat_defaults.update(flat_overrides)
 
@@ -192,3 +193,16 @@ def test_omni_config_imports_cleanly():
 
     assert OmniConfig is not None
     assert callable(parse_omni_args)
+
+
+# --- Cosmos3 guardrails ---
+
+
+def test_omni_config_cosmos3_guardrails_default_enabled():
+    assert OmniConfig.cosmos3_guardrails is True
+
+
+def test_omni_config_cosmos3_guardrails_overridable():
+    config = _make_omni_config(cosmos3_guardrails=False)
+    assert config.cosmos3_guardrails is False
+    config.validate()  # disabling guardrails must not fail validation

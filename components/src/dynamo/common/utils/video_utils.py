@@ -82,6 +82,34 @@ def normalize_video_frames(images: list) -> list:
     return list(frames)
 
 
+def normalize_image_frames(images: list) -> list:
+    """Normalize stage_output.images into a flat list of PIL Images.
+
+    Image diffusion pipelines usually return PIL Images, but some (e.g. the
+    Cosmos3 native pipeline) return numpy arrays shaped ``[batch, frames, H, W,
+    C]`` even for single images. Collapse leading batch/frame dims and convert
+    each frame to a PIL Image; PIL inputs pass through unchanged.
+    """
+    from PIL import Image
+
+    out: list = []
+    for item in images:
+        if isinstance(item, Image.Image):
+            out.append(item)
+            continue
+        arr = np.asarray(item)
+        while arr.ndim > 4:  # [batch, frames, H, W, C] -> [frames, H, W, C]
+            arr = arr[0]
+        if arr.dtype != np.uint8:  # frames share a dtype/range; convert once
+            arr = ((arr.clip(0, 1) * 255).round() if arr.max() <= 1.0 else arr).astype(
+                np.uint8
+            )
+        frames = arr if arr.ndim == 4 else arr[None]  # -> [N, H, W, C]
+        for frame in frames:
+            out.append(Image.fromarray(frame))
+    return out
+
+
 def frames_to_numpy(images: list) -> np.ndarray:
     """Convert a list of PIL Images to a numpy array suitable for video encoding.
 

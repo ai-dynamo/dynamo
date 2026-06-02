@@ -77,6 +77,12 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         if config.stage_configs_path:
             omni_kwargs["stage_configs_path"] = config.stage_configs_path
 
+        # Cosmos3 guardrails toggle -> od_config.model_config["guardrails"].
+        # Mirrors vllm-omni serve's --cosmos3-no-guardrails; when disabled the
+        # diffusion engine skips loading the guardrail models entirely.
+        if not config.cosmos3_guardrails:
+            omni_kwargs["model_config"] = {"guardrails": False}
+
         for field, value in dataclasses.asdict(config.diffusion).items():
             if value is not None:
                 omni_kwargs[field] = value

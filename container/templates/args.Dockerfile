@@ -102,6 +102,7 @@ ARG MAX_JOBS={{ context.vllm.max_jobs }}
 ARG FLASHINF_REF={{ context.vllm.flashinf_ref }}
 {% endif %}
 ARG VLLM_OMNI_REF={{ context.vllm.vllm_omni_ref }}
+ARG VLLM_OMNI_GIT_URL={{ context.vllm.vllm_omni_git_url }}
 
 {% if device == "cuda" -%}
 # If left blank, then we will fallback to vLLM defaults

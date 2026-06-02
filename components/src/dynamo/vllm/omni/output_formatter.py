@@ -28,7 +28,10 @@ from dynamo.common.protocols.video_protocol import NvVideosResponse, VideoData
 from dynamo.common.storage import upload_to_fs
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.output_modalities import RequestType
-from dynamo.common.utils.video_utils import normalize_video_frames
+from dynamo.common.utils.video_utils import (
+    normalize_image_frames,
+    normalize_video_frames,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -241,7 +244,7 @@ class DiffusionFormatter:
         self, images: list, request_id: str, response_format: Optional[str] = None
     ) -> list:
         outlist = []
-        for img in images:
+        for img in normalize_image_frames(images):
             buf = BytesIO()
             img.save(buf, format="PNG")
             image_bytes = buf.getvalue()

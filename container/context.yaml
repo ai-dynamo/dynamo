@@ -67,7 +67,15 @@ vllm:
     base_image_tag: 22.04
     runtime_image_tag: v0.22.0
   flashinf_ref: v0.6.8.post1
-  vllm_omni_ref: "v0.21.0rc1"
+  # Cosmos3 support is not yet in a released vllm-omni; install from the
+  # canonical repo pinned to the PR head commit (vllm-project/vllm-omni#3454,
+  # == refs/pull/3454/head). When vllm_omni_git_url is set, install_vllm_omni.sh
+  # installs from git@ref; otherwise it falls back to "vllm-omni==<ref>".
+  vllm_omni_ref: "65b83d87ad786aa786b248f0242e2ed1b4a8161f"
+  # If vllm_omni_git_url is defined, vllm-omni is NOT installed from PyPI; it is
+  # installed from the git commit SHA (or ref) defined in vllm_omni_ref above.
+  # Leave it unset/empty to install the released "vllm-omni==<vllm_omni_ref>" wheel.
+  vllm_omni_git_url: "https://github.com/vllm-project/vllm-omni.git"
   nixl_ref: v1.1.0
   max_jobs: "10"
   enable_media_ffmpeg: "false"

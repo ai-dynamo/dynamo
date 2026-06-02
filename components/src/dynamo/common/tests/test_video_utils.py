@@ -154,3 +154,67 @@ class TestEncodeToVideoBytes:
 
             assert writer.append_data.call_count == 4
             writer.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# normalize_image_frames
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeImageFrames:
+    """Tests for normalize_image_frames() — flattens DiffusionFormatter image
+    inputs to PIL. Image pipelines usually emit PIL Images; the Cosmos3 native
+    pipeline emits 5D numpy ``[B, F, H, W, C]``."""
+
+    def test_pil_inputs_returned_by_identity(self):
+        """PIL inputs must pass through without conversion or copy."""
+        from PIL import Image
+
+        from dynamo.common.utils.video_utils import normalize_image_frames
+
+        a = Image.new("RGB", (4, 4), (255, 0, 0))
+        b = Image.new("RGB", (4, 4), (0, 255, 0))
+        out = normalize_image_frames([a, b])
+
+        assert len(out) == 2
+        assert out[0] is a and out[1] is b
+
+    def test_uint8_hwc_numpy_preserves_pixels(self):
+        from PIL import Image
+
+        from dynamo.common.utils.video_utils import normalize_image_frames
+
+        arr = np.full((4, 4, 3), 7, dtype=np.uint8)
+        out = normalize_image_frames([arr])
+
+        assert len(out) == 1
+        assert isinstance(out[0], Image.Image)
+        assert out[0].size == (4, 4)  # PIL is (W, H)
+        assert np.asarray(out[0])[0, 0].tolist() == [7, 7, 7]
+
+    def test_cosmos3_5d_strips_batch_and_preserves_frame_order(self):
+        """[B, F, H, W, C] collapses to F PIL frames in order. Distinct
+        per-frame content guards against wrong-axis indexing regressions."""
+        from dynamo.common.utils.video_utils import normalize_image_frames
+
+        arr = np.zeros((1, 3, 4, 4, 3), dtype=np.uint8)
+        arr[0, 0] = 10  # frame 0 fill
+        arr[0, 1] = 20  # frame 1 fill
+        arr[0, 2] = 30  # frame 2 fill
+
+        out = normalize_image_frames([arr])
+
+        assert len(out) == 3
+        assert np.asarray(out[0])[0, 0, 0] == 10
+        assert np.asarray(out[1])[0, 0, 0] == 20
+        assert np.asarray(out[2])[0, 0, 0] == 30
+
+    def test_float_zero_to_one_scaled_to_uint8(self):
+        """float32 [0, 1] inputs must be rescaled to uint8 [0, 255]."""
+        from dynamo.common.utils.video_utils import normalize_image_frames
+
+        arr = np.full((4, 4, 3), 0.5, dtype=np.float32)
+        out = normalize_image_frames([arr])
+
+        # 0.5 * 255 = 127.5; numpy's banker's rounding yields exactly 128.
+        assert np.asarray(out[0])[0, 0, 0] == 128

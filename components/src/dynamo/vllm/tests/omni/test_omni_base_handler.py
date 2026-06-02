@@ -101,3 +101,25 @@ class TestDiffusionParallelConfigCoverage:
         kwargs = _build_kwargs(config)
 
         assert kwargs["output_modalities"] == ["image"]
+
+
+class TestCosmos3Guardrails:
+    """`cosmos3_guardrails=False` should route into omni_kwargs as
+    ``model_config={"guardrails": False}``; the default (True) leaves
+    model_config untouched so vllm-omni applies its own default."""
+
+    def test_disabled_routes_into_model_config(self):
+        config = _make_config()
+        config.cosmos3_guardrails = False
+
+        kwargs = _build_kwargs(config)
+
+        assert kwargs.get("model_config") == {"guardrails": False}
+
+    def test_enabled_does_not_set_model_config(self):
+        config = _make_config()
+        config.cosmos3_guardrails = True
+
+        kwargs = _build_kwargs(config)
+
+        assert "model_config" not in kwargs

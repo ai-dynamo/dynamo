@@ -187,6 +187,16 @@ class OmniArgGroup(ArgGroup):
             default=False,
             help="Disable torch.compile and force eager execution for diffusion models.",
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--cosmos3-guardrails",
+            env_var="DYN_OMNI_COSMOS3_GUARDRAILS",
+            default=True,
+            help=(
+                "Enable Cosmos3 text/video safety guardrails (loads guardrail models "
+                "at startup). Use --no-cosmos3-guardrails to disable."
+            ),
+        )
 
         # TTS parameters
         tts_g = parser.add_argument_group(
@@ -332,6 +342,11 @@ class OmniConfig(DynamoRuntimeConfig):
 
     stage_configs_path: Optional[str] = None
     default_video_fps: int = 16
+
+    # Cosmos3 safety guardrails. When False, routed into
+    # od_config.model_config["guardrails"]=False so the diffusion engine skips
+    # loading the guardrail models (see base_handler._build_omni_kwargs).
+    cosmos3_guardrails: bool = True
 
     # Nested structs — each group of fields has a clear destination
     diffusion: OmniDiffusionKwargs = dataclasses.field(
