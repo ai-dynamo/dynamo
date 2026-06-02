@@ -91,6 +91,59 @@ runs:
           fi
           sleep 1
         done
+    - name: Verify runtime services
+      shell: python
+      run: |
+        import os
+        import socket
+        import time
+        import urllib.parse
+        import urllib.request
+
+        def wait_tcp(name: str, endpoint: str, default_port: int, timeout: int = 60) -> None:
+            parsed = urllib.parse.urlparse(endpoint)
+            host = parsed.hostname or "localhost"
+            port = parsed.port or default_port
+            deadline = time.monotonic() + timeout
+            last_error = None
+            while time.monotonic() < deadline:
+                try:
+                    with socket.create_connection((host, port), timeout=2):
+                        print(f"{name} is ready at {host}:{port}")
+                        return
+                except OSError as exc:
+                    last_error = exc
+                    time.sleep(1)
+            raise SystemExit(f"{name} was not reachable at {host}:{port}: {last_error}")
+
+        def wait_http_health(name: str, endpoint: str, timeout: int = 60) -> None:
+            first_endpoint = endpoint.split(",", 1)[0].rstrip("/")
+            health_url = f"{first_endpoint}/health"
+            deadline = time.monotonic() + timeout
+            last_error = None
+            while time.monotonic() < deadline:
+                try:
+                    with urllib.request.urlopen(health_url, timeout=2) as response:
+                        if response.status < 500:
+                            print(f"{name} is ready at {first_endpoint}")
+                            return
+                except Exception as exc:
+                    last_error = exc
+                    time.sleep(1)
+            raise SystemExit(f"{name} was not healthy at {health_url}: {last_error}")
+
+        nats_server = os.environ.get("NATS_SERVER")
+        etcd_endpoints = os.environ.get("ETCD_ENDPOINTS")
+
+        if nats_server:
+            wait_tcp("NATS", nats_server, 4222)
+        else:
+            print("NATS_SERVER is unset; pytest fixtures may start local NATS if needed")
+
+        if etcd_endpoints:
+            wait_http_health("etcd", etcd_endpoints)
+        else:
+            print("ETCD_ENDPOINTS is unset; pytest fixtures may start local etcd if needed")
     - name: Verify GPU visibility
       if: inputs.gpu_tests == 'true'
       shell: python

@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from contextlib import contextmanager
 from typing import List, Optional
 
 import pytest
@@ -19,9 +20,24 @@ from tests.utils.managed_process import (
     DynamoFrontendProcess as BaseDynamoFrontendProcess,
 )
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.port_utils import allocate_ports, deallocate_ports
 from tests.utils.test_output import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def nats_server_env(nats):
+    """Point child Dynamo processes at the NATS server started by the test."""
+    orig_nats = os.environ.get("NATS_SERVER")
+    os.environ["NATS_SERVER"] = f"nats://localhost:{nats.port}"
+    try:
+        yield
+    finally:
+        if orig_nats is not None:
+            os.environ["NATS_SERVER"] = orig_nats
+        else:
+            os.environ.pop("NATS_SERVER", None)
 
 
 class DynamoFrontendProcess(BaseDynamoFrontendProcess):
@@ -137,11 +153,21 @@ class EtcdCluster:
         self,
         request,
         num_replicas: int = 3,
-        base_port: int = 2379,
+        base_port: Optional[int] = None,
     ):
         self.request = request
         self.num_replicas = num_replicas
         self.base_port = base_port
+        self._allocated_ports: list[int] = (
+            allocate_ports(num_replicas * 2, 2379)
+            if base_port is None or base_port == 0
+            else []
+        )
+        self._ports = (
+            self._allocated_ports
+            if self._allocated_ports
+            else [base_port + idx for idx in range(num_replicas * 2)]
+        )
         self.replicas: List[Optional[EtcdReplicaServer]] = []
         self.data_dirs: List[str] = []
         self.log_base_dir = resolve_test_output_path(
@@ -157,22 +183,26 @@ class EtcdCluster:
 
         os.makedirs(self.log_base_dir, exist_ok=True)
 
+    def _client_port(self, idx: int) -> int:
+        return self._ports[2 * idx]
+
+    def _peer_port(self, idx: int) -> int:
+        return self._ports[(2 * idx) + 1]
+
     def _get_initial_cluster(self) -> str:
         """Build the initial cluster configuration string"""
         initial_cluster_parts = []
         for i in range(self.num_replicas):
             name = f"etcd-{i}"
-            peer_port = self.base_port + (2 * i) + 1
+            peer_port = self._peer_port(i)
             initial_cluster_parts.append(f"{name}=http://127.0.0.1:{peer_port}")
         return ",".join(initial_cluster_parts)
 
     def _start_replica(self, idx: int, cluster_state: str = "new") -> EtcdReplicaServer:
         """Start a single ETCD replica"""
         name = f"etcd-{idx}"
-        # e.g. base_port = 2379 -> client_port = 2379, 2381, 2383
-        # e.g. base_port = 2379 -> peer_port = 2380, 2382, 2384
-        client_port = self.base_port + (2 * idx)
-        peer_port = self.base_port + (2 * idx) + 1
+        client_port = self._client_port(idx)
+        peer_port = self._peer_port(idx)
 
         # Create data dir for the node
         data_dir = tempfile.mkdtemp(prefix=f"etcd_{idx}_")
@@ -245,7 +275,7 @@ class EtcdCluster:
             raise RuntimeError("No healthy replica found to perform member operations")
 
         name = f"etcd-{idx}"
-        peer_port = self.base_port + (2 * idx) + 1
+        peer_port = self._peer_port(idx)
         peer_url = f"http://127.0.0.1:{peer_port}"
 
         # Set ETCDCTL_ENDPOINTS for etcdctl commands
@@ -339,8 +369,7 @@ class EtcdCluster:
         endpoints = []
         for i, replica in enumerate(self.replicas):
             if replica:  # Only include active replicas
-                client_port = self.base_port + (2 * i)
-                endpoints.append(f"http://127.0.0.1:{client_port}")
+                endpoints.append(f"http://127.0.0.1:{replica.client_port}")
         return endpoints
 
     def terminate_replica(self, idx: int):
@@ -398,6 +427,14 @@ class EtcdCluster:
             except Exception as e:
                 logger.warning(f"Error removing data directory {data_dir}: {e}")
         self.data_dirs = []
+
+        if self._allocated_ports:
+            try:
+                deallocate_ports(self._allocated_ports)
+            except Exception as e:
+                logger.warning(f"Error releasing ETCD cluster ports: {e}")
+            finally:
+                self._allocated_ports = []
 
     def __enter__(self):
         self.start()

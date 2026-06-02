@@ -1,0 +1,146 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# TEMPORARY workflow to validate the etcd/nats sidecar (GitHub Actions service
+# containers) detachment introduced on this branch. Fires on push to the
+# detach-etcd-nats-startup-from-test branch and on manual dispatch. Pins the
+# AMD test runs to stg-tester-amd-gpu-4-v2-temp per the migration plan.
+#
+# Delete this file once the sidecar change lands on main.
+
+name: Test Sidecar Services (temp)
+
+on:
+  push:
+    branches:
+      - pvijayakrish/detach-etcd-nats-startup-from-test
+  workflow_dispatch:
+
+concurrency:
+  group: test-sidecar-services-${{ github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Build the dynamo runtime image and the vllm runtime image. The shared-test
+  # jobs below pull these by SHA-keyed tag.
+  # --------------------------------------------------------------------------
+  dynamo-build:
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: dynamo
+      target: runtime
+      cuda_version: '["12.9"]'
+      platform: 'linux/amd64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 45
+    secrets: inherit
+
+  vllm-build:
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: vllm
+      target: runtime
+      cuda_version: '["12.9"]'
+      platform: 'linux/amd64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 60
+    secrets: inherit
+
+  # --------------------------------------------------------------------------
+  # CPU smoke: the parallel + sequential pre_merge CPU markers exercise the
+  # function-scoped runtime_services fixture and session-scoped
+  # runtime_services_session fixture against the ambient NATS/etcd sidecars.
+  # --------------------------------------------------------------------------
+  dynamo-cpu-parallel:
+    needs: dynamo-build
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: dynamo
+      test_type: parallel
+      amd_runner: stg-tester-amd-gpu-4-v2-temp
+      target_tag_plain: ${{ needs.dynamo-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      run_cpu_only_tests: true
+      cpu_only_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      cpu_only_test_timeout_minutes: 30
+      cpu_parallel_mode: 'none'
+      run_gpu_tests: false
+    secrets: inherit
+
+  dynamo-cpu-sequential:
+    needs: dynamo-build
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: dynamo
+      test_type: sequential
+      amd_runner: stg-tester-amd-gpu-4-v2-temp
+      target_tag_plain: ${{ needs.dynamo-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      run_cpu_only_tests: true
+      cpu_only_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      cpu_only_test_timeout_minutes: 30
+      cpu_parallel_mode: 'none'
+      run_gpu_tests: false
+    secrets: inherit
+
+  # --------------------------------------------------------------------------
+  # vLLM single-GPU stage on the 4-GPU temp runner.
+  #
+  # The GPU-parallel orchestrator (tests/utils/pytest_parallel_gpu.py) pins
+  # CUDA_VISIBLE_DEVICES to one GPU per slot, so each test gets a dedicated
+  # GPU. On a 4-GPU node, auto_worker_count = num_gpus * (gpu_vram /
+  # max_vram_gib), so bumping the per-test cap below admits larger profiled
+  # tests while still letting the scheduler fan out across the 4 GPUs.
+  # 48 GiB matches the H100 80GB / H200 footprint we expect on this runner.
+  # --------------------------------------------------------------------------
+  vllm-test:
+    needs: vllm-build
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      test_type: Test
+      amd_runner: stg-tester-amd-gpu-4-v2-temp
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9"]'
+      platform: '["amd64"]'
+      run_cpu_only_tests: true
+      cpu_only_test_markers: pre_merge and vllm and gpu_0
+      gpu_test_markers: pre_merge and vllm and gpu_1
+      gpu_test_timeout_minutes: 45
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '48'
+    secrets: inherit
+
+  # --------------------------------------------------------------------------
+  # vLLM multi-GPU stage on the same 4-GPU temp runner.
+  #
+  # Covers tests marked gpu_2 / gpu_4 (e.g. disaggregated, etcd_ha pieces).
+  # These run sequentially today because the orchestrator only supports
+  # single-GPU slots. The point of running them here is to validate that the
+  # NATS/etcd sidecars and the new dynamic-port runtime_services fixture
+  # behave correctly under multi-GPU tests too — same job, same pod, same
+  # ambient NATS_SERVER / ETCD_ENDPOINTS.
+  # --------------------------------------------------------------------------
+  vllm-multi-gpu-test:
+    needs: vllm-build
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      test_type: Multi-GPU Test
+      amd_runner: stg-tester-amd-gpu-4-v2-temp
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      run_cpu_only_tests: false
+      gpu_test_markers: pre_merge and vllm and (gpu_2 or gpu_4)
+      gpu_test_timeout_minutes: 60
+    secrets: inherit
