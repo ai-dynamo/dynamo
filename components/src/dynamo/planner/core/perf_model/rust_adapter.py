@@ -243,10 +243,6 @@ class PlannerEnginePerfModel:
     # Observation and bootstrap
     # ------------------------------------------------------------------
 
-    def add_observation(self, fpm: ForwardPassMetrics) -> None:
-        """Compatibility hook used by older state-machine tests."""
-        self.add_observations({(fpm.worker_id, fpm.dp_rank): fpm})
-
     def add_observations(
         self, fpm_stats: dict[tuple[str, int], ForwardPassMetrics]
     ) -> None:
@@ -538,7 +534,10 @@ class PlannerEnginePerfModel:
         )
 
     # ------------------------------------------------------------------
-    # Compatibility methods for existing tests and fallback call sites
+    # Readiness and moving-average accessors used by load scaling and query
+    # synthesis. Direct legacy prediction/capacity calls should not go through
+    # this adapter; use the engine-query helpers above or the regression
+    # classes directly in regression-specific tests.
     # ------------------------------------------------------------------
 
     def has_sufficient_data(self) -> bool:
@@ -571,21 +570,6 @@ class PlannerEnginePerfModel:
         ):
             return self._legacy_model.avg_decode_length
         return 0.0
-
-    def estimate_next_ttft(self, *args: Any, **kwargs: Any) -> Optional[float]:
-        return self._legacy_model.estimate_next_ttft(*args, **kwargs)
-
-    def estimate_next_itl(self, *args: Any, **kwargs: Any) -> Optional[float]:
-        return self._legacy_model.estimate_next_itl(*args, **kwargs)
-
-    def find_best_engine_prefill_rps(self, *args: Any, **kwargs: Any) -> Any:
-        return self._legacy_model.find_best_engine_prefill_rps(*args, **kwargs)
-
-    def find_best_engine_decode_rps(self, *args: Any, **kwargs: Any) -> Any:
-        return self._legacy_model.find_best_engine_decode_rps(*args, **kwargs)
-
-    def find_best_engine_agg_rps(self, *args: Any, **kwargs: Any) -> Any:
-        return self._legacy_model.find_best_engine_agg_rps(*args, **kwargs)
 
     # ------------------------------------------------------------------
     # Synthetic FPM builders

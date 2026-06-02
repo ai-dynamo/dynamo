@@ -204,3 +204,15 @@ def test_flat_bootstrap_fpms_skip_rust_tuning_for_attention_dp(monkeypatch):
 
     assert fake.tuned_iterations == []
     assert model.num_observations == 1
+
+
+def test_adapter_does_not_expose_legacy_prediction_passthroughs():
+    for name in (
+        "add_observation",
+        "estimate_next_ttft",
+        "estimate_next_itl",
+        "find_best_engine_prefill_rps",
+        "find_best_engine_decode_rps",
+        "find_best_engine_agg_rps",
+    ):
+        assert not hasattr(PlannerEnginePerfModel, name)

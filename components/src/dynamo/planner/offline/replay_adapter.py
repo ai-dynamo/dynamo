@@ -334,7 +334,9 @@ class ReplayPlannerAdapter:
                     continue
                 fpm = _build_fpm_from_dict(snap)
                 if fpm.wall_time > 0.0:
-                    self._sm._agg_regression.add_observation(fpm)
+                    self._sm._agg_regression.add_observations(
+                        {(fpm.worker_id, fpm.dp_rank): fpm}
+                    )
         else:
             if self._sm._has_prefill:
                 last_idx: dict[int, int] = {}
@@ -346,7 +348,9 @@ class ReplayPlannerAdapter:
                         continue
                     fpm = _build_fpm_from_dict(snap)
                     if fpm.wall_time > 0.0:
-                        self._sm._prefill_regression.add_observation(fpm)
+                        self._sm._prefill_regression.add_observations(
+                            {(fpm.worker_id, fpm.dp_rank): fpm}
+                        )
             if self._sm._has_decode:
                 last_idx = {}
                 for i, snap in enumerate(decode_snaps):
@@ -357,7 +361,9 @@ class ReplayPlannerAdapter:
                         continue
                     fpm = _build_fpm_from_dict(snap)
                     if fpm.wall_time > 0.0:
-                        self._sm._decode_regression.add_observation(fpm)
+                        self._sm._decode_regression.add_observations(
+                            {(fpm.worker_id, fpm.dp_rank): fpm}
+                        )
 
     def _build_tick_input(
         self, tick: ScheduledTick, result: dict[str, Any]
