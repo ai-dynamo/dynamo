@@ -117,9 +117,18 @@ impl LoraStateTracker {
             .or_default()
             .insert(lora_name);
 
-        let capacity = lora
-            .max_gpu_lora_count
-            .unwrap_or(DEFAULT_MAX_GPU_LORA_COUNT);
+        let capacity = lora.max_gpu_lora_count.unwrap_or_else(|| {
+            tracing::warn!(
+                worker_id = worker.worker_id,
+                dp_rank = worker.dp_rank,
+                lora_name = lora.name,
+                default = DEFAULT_MAX_GPU_LORA_COUNT,
+                "LoRA MDC carries no max_gpu_lora_count; using default for placement capacity. \
+                 The worker backend should publish its configured per-worker LoRA slot count \
+                 (e.g. vLLM --max-loras) so allocation reflects real capacity."
+            );
+            DEFAULT_MAX_GPU_LORA_COUNT
+        });
         if let Some(prev) = self.worker_capacity.get(&worker)
             && *prev != capacity
         {
