@@ -256,6 +256,7 @@ The planner inside each pool must be configured for `global-planner` mode so it 
   "global_planner_namespace": "${K8S_NAMESPACE}-gp-ctrl",
   "backend": "vllm",
   "mode": "prefill",
+  "optimization_target": "sla",
   "enable_load_scaling": false,
   "enable_throughput_scaling": true,
   "throughput_metrics_source": "router",
