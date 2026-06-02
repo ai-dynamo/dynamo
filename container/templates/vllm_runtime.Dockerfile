@@ -178,6 +178,23 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
     bash /tmp/install_vllm_omni.sh
 
+{% if device == "cuda" %}
+# Backport vLLM PR #40984 ("feat(kv-events): emit KV cache metadata") onto the
+# installed vLLM so the Dynamo KV-aware router can index per-prefix worker
+# affinity on hybrid Mamba/Attention models (e.g. NVIDIA-Nemotron-3-Super).
+# Not present in the pinned vLLM v0.21.0 runtime base; drop once it lands
+# upstream in the runtime image. Patch lives under the per-ref convention in
+# container/deps/vllm/patches/.
+RUN --mount=type=bind,source=./container/deps/vllm/patches/v0.21.0/0001-pr40984-emit-kv-cache-metadata.patch,target=/tmp/0001-pr40984-emit-kv-cache-metadata.patch \
+    set -eux; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends patch; \
+    rm -rf /var/lib/apt/lists/*; \
+    VLLM_PARENT="$(cd / && python3 -c 'import vllm, os; print(os.path.dirname(os.path.dirname(vllm.__file__)))')"; \
+    patch -p1 --forward -d "${VLLM_PARENT}" < /tmp/0001-pr40984-emit-kv-cache-metadata.patch; \
+    cd / && python3 -c 'import vllm.v1.engine.core as c; assert hasattr(c.EngineCoreProc, "get_kv_cache_group_metadata"), "vLLM PR #40984 backport did not land"'
+{% endif %}
+
 {% if device == "xpu" %}
 # Remove conflicting standard triton package for XPU and reinstall triton-xpu
 # This must be done after vLLM-Omni installation to ensure no dependencies re-install triton

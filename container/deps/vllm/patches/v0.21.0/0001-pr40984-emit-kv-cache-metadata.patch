@@ -1,0 +1,253 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-License-Identifier: Apache-2.0
+
+From bcb9c133bafed161b3f4d0ea391c985465429680 Mon Sep 17 00:00:00 2001
+From: Yan Ru Pei <yanrpei@gmail.com>
+Date: Tue, 12 May 2026 08:58:48 -0700
+Subject: [PATCH] feat(kv-events): emit KV cache metadata (#40984)
+
+Signed-off-by: PeaBrane <yanrpei@gmail.com>
+---
+ vllm/distributed/kv_events.py        |  6 +++
+ vllm/v1/core/kv_cache_coordinator.py | 10 ++---
+ vllm/v1/core/kv_cache_manager.py     | 35 +++++++++++++++--
+ vllm/v1/engine/core.py               | 21 +++++++++-
+ vllm/v1/kv_cache_interface.py        | 59 +++++++++++++++++++++++++++-
+ 5 files changed, 121 insertions(+), 10 deletions(-)
+
+diff --git a/vllm/distributed/kv_events.py b/vllm/distributed/kv_events.py
+index d3e304f8b..ee2118596 100644
+--- a/vllm/distributed/kv_events.py
++++ b/vllm/distributed/kv_events.py
+@@ -68,6 +68,10 @@ class BlockStored(KVCacheEvent):
+     """
+ 
+     group_idx: int | None = None
++    # Store events carry cache-spec metadata so consumers can classify and
++    # filter groups as they are learned. Remove events only need group_idx+hash.
++    kv_cache_spec_kind: str | None = None
++    kv_cache_spec_sliding_window: int | None = None
+ 
+     def __hash__(self) -> int:
+         return hash(
+@@ -80,6 +84,8 @@ class BlockStored(KVCacheEvent):
+                 self.medium,
+                 tuple(self.extra_keys) if self.extra_keys else None,
+                 self.group_idx,
++                self.kv_cache_spec_kind,
++                self.kv_cache_spec_sliding_window,
+             )
+         )
+ 
+diff --git a/vllm/v1/core/kv_cache_coordinator.py b/vllm/v1/core/kv_cache_coordinator.py
+index 65993e804..b5332ea0f 100644
+--- a/vllm/v1/core/kv_cache_coordinator.py
++++ b/vllm/v1/core/kv_cache_coordinator.py
+@@ -48,11 +48,11 @@ class KVCacheCoordinator(ABC):
+         self.enable_caching = enable_caching
+ 
+         self.block_pool = BlockPool(
+-            kv_cache_config.num_blocks,
+-            enable_caching,
+-            hash_block_size,
+-            enable_kv_cache_events,
+-            metrics_collector,
++            num_gpu_blocks=kv_cache_config.num_blocks,
++            enable_caching=enable_caching,
++            hash_block_size=hash_block_size,
++            enable_kv_cache_events=enable_kv_cache_events,
++            metrics_collector=metrics_collector,
+         )
+ 
+         # KV cache group indices that get the EAGLE last-block drop.
+diff --git a/vllm/v1/core/kv_cache_manager.py b/vllm/v1/core/kv_cache_manager.py
+index 431776870..9359d8843 100644
+--- a/vllm/v1/core/kv_cache_manager.py
++++ b/vllm/v1/core/kv_cache_manager.py
+@@ -6,12 +6,16 @@ from collections.abc import Sequence
+ from dataclasses import dataclass
+ from typing import Literal, overload
+ 
+-from vllm.distributed.kv_events import KVCacheEvent
++from vllm.distributed.kv_events import BlockStored, KVCacheEvent
+ from vllm.logger import init_logger
+ from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
+ from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
+ from vllm.v1.core.kv_cache_utils import KVCacheBlock
+-from vllm.v1.kv_cache_interface import KVCacheConfig
++from vllm.v1.kv_cache_interface import (
++    KVCacheConfig,
++    get_kv_cache_spec_kind,
++    get_kv_cache_spec_sliding_window,
++)
+ from vllm.v1.metrics.stats import PrefixCacheStats
+ from vllm.v1.request import Request
+ 
+@@ -149,6 +153,13 @@ class KVCacheManager:
+         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
+         self.block_pool = self.coordinator.block_pool
+         self.kv_cache_config = kv_cache_config
++        self.kv_cache_event_metadata = tuple(
++            (
++                get_kv_cache_spec_kind(group.kv_cache_spec).value,
++                get_kv_cache_spec_sliding_window(group.kv_cache_spec),
++            )
++            for group in kv_cache_config.kv_cache_groups
++        )
+ 
+         # Pre-constructed KVCacheBlocks with no blocks, callers should use this
+         # via create_kv_cache_blocks instead of creating new ones to avoid GC
+@@ -502,7 +513,25 @@ class KVCacheManager:
+         Returns:
+             A list of KV cache events.
+         """
+-        return self.block_pool.take_events()
++        events = self.block_pool.take_events()
++        for event in events:
++            if not isinstance(event, BlockStored):
++                continue
++            if event.group_idx is None:
++                continue
++            if event.group_idx < 0 or event.group_idx >= len(
++                self.kv_cache_event_metadata
++            ):
++                logger.warning(
++                    "Group index `%s` not in KV cache metadata", event.group_idx
++                )
++                continue
++            # Annotate here so BlockPool can keep emitting structural cache
++            # events without owning semantic KV cache spec metadata.
++            kind, sliding_window = self.kv_cache_event_metadata[event.group_idx]
++            event.kv_cache_spec_kind = kind
++            event.kv_cache_spec_sliding_window = sliding_window
++        return events
+ 
+     def get_blocks(self, request_id: str) -> KVCacheBlocks:
+         """Get the blocks of a request."""
+diff --git a/vllm/v1/engine/core.py b/vllm/v1/engine/core.py
+index 07d3cca05..d19d928c7 100644
+--- a/vllm/v1/engine/core.py
++++ b/vllm/v1/engine/core.py
+@@ -72,7 +72,7 @@ from vllm.v1.engine.utils import (
+     get_device_indices,
+ )
+ from vllm.v1.executor import Executor
+-from vllm.v1.kv_cache_interface import KVCacheConfig
++from vllm.v1.kv_cache_interface import KVCacheConfig, get_kv_cache_spec_kind
+ from vllm.v1.metrics.stats import SchedulerStats
+ from vllm.v1.outputs import ModelRunnerOutput
+ from vllm.v1.request import Request, RequestStatus
+@@ -312,6 +312,25 @@ class EngineCore:
+     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+         return self.model_executor.supported_tasks
+ 
++    def get_kv_cache_group_metadata(self) -> list[dict[str, int | str | None]]:
++        """Return msgspec-serializable metadata for scheduler KV cache groups."""
++        kv_cache_config = getattr(self.scheduler, "kv_cache_config", None)
++        if kv_cache_config is None:
++            return []
++
++        metadata: list[dict[str, int | str | None]] = []
++        for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
++            spec = group.kv_cache_spec
++            metadata.append(
++                {
++                    "group_idx": group_idx,
++                    "kind": get_kv_cache_spec_kind(spec).value,
++                    "block_size": spec.block_size,
++                    "sliding_window": getattr(spec, "sliding_window", None),
++                }
++            )
++        return metadata
++
+     def add_request(self, request: Request, request_wave: int = 0):
+         """Add request to the scheduler.
+ 
+diff --git a/vllm/v1/kv_cache_interface.py b/vllm/v1/kv_cache_interface.py
+index cf50dbff1..fa58297c4 100644
+--- a/vllm/v1/kv_cache_interface.py
++++ b/vllm/v1/kv_cache_interface.py
+@@ -6,7 +6,7 @@ from __future__ import annotations
+ import copy
+ from collections import Counter
+ from dataclasses import dataclass, fields, replace
+-from enum import IntEnum
++from enum import Enum, IntEnum
+ from math import prod
+ from typing import TYPE_CHECKING
+ 
+@@ -78,6 +78,19 @@ def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
+     return get_kv_quant_mode(kv_cache_dtype).is_per_token_head
+ 
+ 
++class KVCacheSpecKind(str, Enum):
++    FULL_ATTENTION = "full_attention"
++    MLA_ATTENTION = "mla_attention"
++    SLIDING_WINDOW = "sliding_window"
++    SLIDING_WINDOW_MLA = "sliding_window_mla"
++    MAMBA = "mamba"
++    CHUNKED_LOCAL_ATTENTION = "chunked_local_attention"
++    SINK_FULL_ATTENTION = "sink_full_attention"
++    ENCODER_ONLY_ATTENTION = "encoder_only_attention"
++    CROSS_ATTENTION = "cross_attention"
++    UNKNOWN = "unknown"
++
++
+ @dataclass(frozen=True)
+ class KVCacheSpec:
+     """
+@@ -732,6 +745,50 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
+         )
+ 
+ 
++def get_kv_cache_spec_kind(kv_cache_spec: KVCacheSpec) -> KVCacheSpecKind:
++    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
++        inner_kinds = {
++            get_kv_cache_spec_kind(spec)
++            for spec in kv_cache_spec.kv_cache_specs.values()
++        }
++        if len(inner_kinds) == 1:
++            return next(iter(inner_kinds))
++        return KVCacheSpecKind.UNKNOWN
++    # Keep subclass checks before base classes so specialized specs keep their
++    # more precise kind.
++    if isinstance(kv_cache_spec, SlidingWindowMLASpec):
++        return KVCacheSpecKind.SLIDING_WINDOW_MLA
++    if isinstance(kv_cache_spec, MLAAttentionSpec):
++        return KVCacheSpecKind.MLA_ATTENTION
++    if isinstance(kv_cache_spec, SinkFullAttentionSpec):
++        return KVCacheSpecKind.SINK_FULL_ATTENTION
++    if isinstance(kv_cache_spec, FullAttentionSpec):
++        return KVCacheSpecKind.FULL_ATTENTION
++    if isinstance(kv_cache_spec, ChunkedLocalAttentionSpec):
++        return KVCacheSpecKind.CHUNKED_LOCAL_ATTENTION
++    if isinstance(kv_cache_spec, SlidingWindowSpec):
++        return KVCacheSpecKind.SLIDING_WINDOW
++    if isinstance(kv_cache_spec, MambaSpec):
++        return KVCacheSpecKind.MAMBA
++    if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
++        return KVCacheSpecKind.ENCODER_ONLY_ATTENTION
++    if isinstance(kv_cache_spec, CrossAttentionSpec):
++        return KVCacheSpecKind.CROSS_ATTENTION
++    return KVCacheSpecKind.UNKNOWN
++
++
++def get_kv_cache_spec_sliding_window(kv_cache_spec: KVCacheSpec) -> int | None:
++    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
++        inner_windows = {
++            get_kv_cache_spec_sliding_window(spec)
++            for spec in kv_cache_spec.kv_cache_specs.values()
++        }
++        return next(iter(inner_windows)) if len(inner_windows) == 1 else None
++    if isinstance(kv_cache_spec, SlidingWindowSpec):
++        return kv_cache_spec.sliding_window
++    return None
++
++
+ @dataclass
+ class KVCacheTensor:
+     """
+-- 
+2.43.0
+
