@@ -12,8 +12,10 @@ from types import SimpleNamespace
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
+from _routed_engine_fakes import FakeRoutedItem
 from transformers import AutoTokenizer
 from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
+from vllm.v1.engine import FinishReason
 
 from dynamo.frontend.prepost import _prepare_request
 
@@ -126,7 +128,7 @@ class TestPrepareRequestToolStripping:  # FRONTEND.1 + FRONTEND.3 — tool strip
         ), "No tools in request should produce None tools in template"
 
 
-class TestReasoningParserMetadata:
+class TestReasoningParserMetadata:  # FRONTEND.2 + FRONTEND.9 — reasoning parser dispatch + reasoning/tool orchestration metadata
     def test_no_reasoning_parser_returns_none(self):
         from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
 
@@ -292,7 +294,7 @@ async def _run_generate(processor, preproc, *, mm_routing_info=None, context=Non
     ]
 
 
-class TestRoutedEnginePath:
+class TestRoutedEnginePath:  # FRONTEND.4 — routed-engine output assembly into OpenAI chunks
     @pytest.mark.asyncio
     async def test_routed_engine_gets_extra_args_metadata(self, vllm_processor_module):
         routed_engine = _FakeRoutedEngine()
@@ -375,7 +377,7 @@ OBJECT_TYPED_TOOL_REQUEST = {
 # ---------------------------------------------------------------------------
 
 
-class TestSchemaAwareToolParser:
+class TestSchemaAwareToolParser:  # FRONTEND.1 + FRONTEND.3 — schema-aware parser construction + request shaping
     """Schema-aware parsers (e.g. qwen3_coder) need ``tools`` at construction
     to coerce object/array-typed parameter values from raw text into JSON;
     without them, the value comes through as a string-in-a-string inside the
@@ -419,7 +421,7 @@ class TestSchemaAwareToolParser:
 
 
 @pytest.mark.core
-class TestChatTemplateKwargsForwarding:
+class TestChatTemplateKwargsForwarding:  # FRONTEND.1 + FRONTEND.2 — chat-template input preprocessing + parser-affecting template kwargs
     """chat_template_kwargs from the request are forwarded to ChatParams.
 
     Uses Qwen3 which supports enable_thinking: False to suppress <think> blocks.
@@ -489,3 +491,123 @@ class TestChatTemplateKwargsForwarding:
             tokenizer,
         )
         assert chat_params.chat_template_kwargs.get("reasoning_effort") == "low"
+
+
+# ---------------------------------------------------------------------------
+# vllm_processor.map_finish_reason: router finish_reason string -> FinishReason
+# ---------------------------------------------------------------------------
+
+
+class TestVllmMapFinishReason:  # FRONTEND.5 — finish-reason mapping (vllm frontend layer)
+    """vllm twin of sglang's TestMapFinishReason.
+
+    Note: the OpenAI ``tool_calls`` finish_reason is NOT produced here. That
+    remap lives in ``StreamingPostProcessor._remap_finish_reason`` (text
+    ``stop`` -> ``tool_calls`` once a tool delta is emitted); ``map_finish_reason``
+    only knows the router's raw strings and returns ``None`` for ``tool_calls``.
+    """
+
+    # map_finish_reason is imported lazily per-test: it pulls vllm_processor ->
+    # vllm.tasks, which the marker-collection pre-commit hook cannot import.
+    # FinishReason stays module-level (used in the parametrize ids below).
+    def test_none_passthrough(self):
+        from dynamo.frontend.vllm_processor import map_finish_reason
+
+        assert map_finish_reason(None) is None
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("stop", FinishReason.STOP),
+            ("eos", FinishReason.STOP),
+            ("length", FinishReason.LENGTH),
+            ("cancelled", FinishReason.ABORT),
+            ("content_filter", FinishReason.STOP),
+        ],
+    )
+    def test_known_reasons_map(self, raw, expected):
+        from dynamo.frontend.vllm_processor import map_finish_reason
+
+        assert map_finish_reason(raw) == expected
+
+    @pytest.mark.parametrize("raw", ["error", "error: cuda oom", "errors-later"])
+    def test_error_prefix_maps_to_error(self, raw):
+        from dynamo.frontend.vllm_processor import map_finish_reason
+
+        assert map_finish_reason(raw) == FinishReason.ERROR
+
+    @pytest.mark.parametrize("raw", ["abort", "aborted", "abort: client gone"])
+    def test_abort_prefix_maps_to_abort(self, raw):
+        from dynamo.frontend.vllm_processor import map_finish_reason
+
+        assert map_finish_reason(raw) == FinishReason.ABORT
+
+    @pytest.mark.parametrize("raw", ["content_filter", "content_filter:hate"])
+    def test_content_filter_prefix_maps_to_stop(self, raw):
+        from dynamo.frontend.vllm_processor import map_finish_reason
+
+        assert map_finish_reason(raw) == FinishReason.STOP
+
+    @pytest.mark.parametrize("raw", ["tool_calls", "gibberish", ""])
+    def test_unknown_returns_none(self, raw):
+        from dynamo.frontend.vllm_processor import map_finish_reason
+
+        assert map_finish_reason(raw) is None
+
+
+class TestVllmErrorSurface:  # FRONTEND.8 — vllm processor error wiring (engine error -> OpenAI error shape)
+    """Exercises the error branches of vllm_processor._generate_and_stream that
+    the shared utils.py tests do not: a routed-engine error, a backend-error
+    response, a malformed (no token_ids) response, and an exception mid-stream.
+    """
+
+    @pytest.mark.asyncio
+    async def test_routed_error_yields_internal_error(self, vllm_processor_module):
+        routed = _FakeRoutedEngine(
+            [FakeRoutedItem(None, is_error=True, comments=["boom: 403"])]
+        )
+        processor = _make_processor(vllm_processor_module, routed)
+        chunks = await _run_generate(processor, _base_preproc())
+        assert chunks == [{"error": {"message": "boom: 403", "type": "internal_error"}}]
+
+    @pytest.mark.asyncio
+    async def test_backend_error_response_maps_to_backend_error(
+        self, vllm_processor_module
+    ):
+        routed = _FakeRoutedEngine(
+            [FakeRoutedItem({"status": "error", "message": "503 unavailable"})]
+        )
+        processor = _make_processor(vllm_processor_module, routed)
+        chunks = await _run_generate(processor, _base_preproc())
+        assert chunks == [
+            {"error": {"message": "503 unavailable", "type": "backend_error"}}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_missing_token_ids_maps_to_internal_error(
+        self, vllm_processor_module
+    ):
+        routed = _FakeRoutedEngine(
+            [FakeRoutedItem({"index": 0, "finish_reason": None})]
+        )
+        processor = _make_processor(vllm_processor_module, routed)
+        chunks = await _run_generate(processor, _base_preproc())
+        assert chunks == [
+            {
+                "error": {
+                    "message": "Invalid engine response for request request-id",
+                    "type": "internal_error",
+                }
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_stream_exception_yields_internal_error(self, vllm_processor_module):
+        class _RaisingItem(FakeRoutedItem):
+            def data(self):
+                raise RuntimeError("kaboom")
+
+        routed = _FakeRoutedEngine([_RaisingItem({"x": 1})])
+        processor = _make_processor(vllm_processor_module, routed)
+        chunks = await _run_generate(processor, _base_preproc())
+        assert chunks == [{"error": {"message": "kaboom", "type": "internal_error"}}]

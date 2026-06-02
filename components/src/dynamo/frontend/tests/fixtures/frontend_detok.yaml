@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# FRONTEND.6 — incremental detokenization, fast plain-text path (backend-agnostic).
+#
+# Shared subset of FRONTEND.6: when NEITHER a tool nor a reasoning parser is
+# configured, process_output takes the fast plain-text path and must stream the
+# model text straight through as `content` -- no tool_calls, no
+# reasoning_content -- across chunk granularities, emitting finish_reason on the
+# final chunk. Replayed on both backends by test_{vllm,sglang}_frontend_detok.py
+# with a parser-less StreamingPostProcessor.
+#
+# Backend-specific detok internals (SGLang prompt-token-id normalization and
+# JSON-array buffering; vLLM uses pre-detok output.text and does not re-detok)
+# are NOT shared and stay as each backend's own annotated tests.
+
+cases:
+  plain_text_single_chunk:
+    description: short plain answer, whole thing in one chunk
+    model_text: It is sunny in NYC today.
+    single_chunk: true
+    expected:
+      tool_calls: []
+      content_contains: It is sunny in NYC today.
+      finish_reason: stop
+
+  plain_text_streamed:
+    description: plain answer streamed in small chunks -> content reassembled intact
+    model_text: The quick brown fox jumps over the lazy dog.
+    batch_sizes: [20, 5, 2]
+    expected:
+      tool_calls: []
+      content_contains: The quick brown fox jumps over the lazy dog.
+      finish_reason: stop
+
+  plain_text_with_markup_like_chars:
+    description: JSON/bracket chars without tool markup stay as content (no spurious parse)
+    model_text: 'Use the format {"city": "NYC"} or a list like [1, 2, 3].'
+    batch_sizes: [20, 4]
+    expected:
+      tool_calls: []
+      content_contains: '{"city": "NYC"}'
+      finish_reason: stop
