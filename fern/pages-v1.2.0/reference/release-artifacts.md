@@ -71,6 +71,7 @@ The `dynamo-crds` Helm chart is deprecated as of v1.0.0; CRDs are now managed by
 | `dynamo-tokenizers@1.2.0` | Tokenizer library for LLM inference | `v1.82` | [crates.io: dynamo-tokenizers 1.2.0](https://crates.io/crates/dynamo-tokenizers/1.2.0) |
 | `dynamo-mocker@1.2.0` | Inference engine simulator for benchmarking | `v1.82` | [crates.io: dynamo-mocker 1.2.0](https://crates.io/crates/dynamo-mocker/1.2.0) |
 | `dynamo-kv-router@1.2.0` | KV-aware request routing library | `v1.82` | [crates.io: dynamo-kv-router 1.2.0](https://crates.io/crates/dynamo-kv-router/1.2.0) |
+| `kvbm-logical@1.2.0` | Logical layer for the KV Block Manager | `v1.82` | [crates.io: kvbm-logical 1.2.0](https://crates.io/crates/kvbm-logical/1.2.0) |
 
 ## Quick Install Commands
 
@@ -151,6 +152,7 @@ cargo add dynamo-tokens@1.2.0
 cargo add dynamo-tokenizers@1.2.0
 cargo add dynamo-mocker@1.2.0
 cargo add dynamo-kv-router@1.2.0
+cargo add kvbm-logical@1.2.0
 ```
 
 **CUDA and Driver Requirements:** For detailed CUDA toolkit versions and minimum driver requirements for each container image, see the [Support Matrix](support-matrix.md#cuda-and-driver-requirements).
@@ -558,7 +560,7 @@ The `dynamo-crds` Helm chart is deprecated as of v1.0.0. CRDs are now managed by
 
 ### Rust Crates
 
-> **crates.io:** [dynamo-runtime](https://crates.io/crates/dynamo-runtime) | [dynamo-llm](https://crates.io/crates/dynamo-llm) | [dynamo-protocols](https://crates.io/crates/dynamo-protocols) | [dynamo-async-openai](https://crates.io/crates/dynamo-async-openai) *(deprecated)* | [dynamo-parsers](https://crates.io/crates/dynamo-parsers) | [dynamo-memory](https://crates.io/crates/dynamo-memory) | [dynamo-config](https://crates.io/crates/dynamo-config) | [dynamo-tokens](https://crates.io/crates/dynamo-tokens) | [dynamo-tokenizers](https://crates.io/crates/dynamo-tokenizers)
+> **crates.io:** [dynamo-runtime](https://crates.io/crates/dynamo-runtime) | [dynamo-llm](https://crates.io/crates/dynamo-llm) | [dynamo-protocols](https://crates.io/crates/dynamo-protocols) | [dynamo-async-openai](https://crates.io/crates/dynamo-async-openai) *(deprecated)* | [dynamo-parsers](https://crates.io/crates/dynamo-parsers) | [dynamo-memory](https://crates.io/crates/dynamo-memory) | [dynamo-config](https://crates.io/crates/dynamo-config) | [dynamo-tokens](https://crates.io/crates/dynamo-tokens) | [dynamo-tokenizers](https://crates.io/crates/dynamo-tokenizers) | [kvbm-logical](https://crates.io/crates/kvbm-logical)
 >
 > To access a specific version: `https://crates.io/crates/{crate}/{version}`
 
@@ -721,6 +723,12 @@ On crates.io, **`dynamo-protocols`** lists **`1.1.0`** as its first installable 
 | `dynamo-kv-router@1.0.2` | `v1.82` | |
 | `dynamo-kv-router@1.0.1` | `v1.82` | |
 | `dynamo-kv-router@1.0.0` | `v1.82` | Initial |
+
+#### kvbm-logical (crate)
+
+| Crate | MSRV (Rust) | Notes |
+|-------|-------------|-------|
+| `kvbm-logical@1.2.0` | `v1.82` | Initial |
 
 ---
 
