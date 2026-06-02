@@ -128,8 +128,8 @@ jobs:
             --driver-opt=requests.cpu=16 \
             --driver-opt=requests.memory=64Gi \
             --driver-opt=limits.memory=80Gi \
-            --driver-opt="nodeselector=kubernetes.io/arch=amd64,role=dynamo-builder-fallback" \
-            --driver-opt="tolerations=key=buildkit-fallback-worker,value=true,operator=Equal,effect=NoSchedule"
+            '--driver-opt=nodeselector=kubernetes.io/arch=amd64,role=dynamo-builder-fallback' \
+            '--driver-opt=tolerations=key=buildkit-fallback-worker,value=true,operator=Equal,effect=NoSchedule'
           for i in 1 2 3 4; do
             if docker buildx inspect "${BUILDER_NAME}" --bootstrap; then
               echo "Bootstrap succeeded on attempt ${i}"
