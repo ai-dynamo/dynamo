@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Shared model cache for nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4.
+# Weights live at the PVC root (not in HF cache layout) so the worker can
+# point --model directly at the mount path.
+#
+# Edit storageClassName to match your cluster:
+#   kubectl get storageclass
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 200Gi
+  storageClassName: "vast"
