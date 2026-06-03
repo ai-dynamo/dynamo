@@ -28,7 +28,12 @@ import dataclasses
 
 import pytest
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.sglang,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+]
 
 
 def test_sglang_pad_value_formula_unchanged() -> None:
