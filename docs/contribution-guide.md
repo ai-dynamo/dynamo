@@ -22,7 +22,7 @@ Join the community:
 - [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
 - [Design Proposals](https://github.com/ai-dynamo/enhancements) -- RFCs for major features
 - [Office Hours](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X) -- biweekly calls
-- [Community Meetings](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view) -- weekly (Wed 10:30 AM PT) development community meetings
+- [Community Meetings](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view) [YouTube](https://www.youtube.com/@ai-dynamo-community) -- Weekly (Wed 10:30 AM PT) development community meetings
 - [Dynamo Day Recordings](https://nvevents.nvidia.com/dynamoday) -- deep dives from production users
 
 ## TL;DR
@@ -432,7 +432,7 @@ If you discover a security vulnerability, please follow the instructions in our 
 - **Discussions**: [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
 - **Design Proposals**: [RFCs for major features](https://github.com/ai-dynamo/enhancements)
 - **Office Hours**: [Biweekly calls](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)
-- **Community Meetings**: [Weekly (Wed 10:30 AM PT) development community meetings](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view)
+- **Community Meetings**: [Weekly (Wed 10:30 AM PT) development community meetings](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view) ([YouTube recordings](https://www.youtube.com/@ai-dynamo-community))
 - **Dynamo Day Recordings**: [Deep dives from production users](https://nvevents.nvidia.com/dynamoday)
 - **Documentation**: [docs.nvidia.com/dynamo](https://docs.nvidia.com/dynamo/)
 
