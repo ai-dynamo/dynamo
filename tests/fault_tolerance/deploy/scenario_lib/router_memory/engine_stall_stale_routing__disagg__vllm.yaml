@@ -121,7 +121,7 @@ events:
   # ── Phase 1: single DECODE stall → reconvergence (isolated stale-routing) ──
   # 1 decode stays healthy → any 500 here is the router holding the dead id,
   # NOT loss of capacity. Watch the ramp + how long reconvergence takes.
-  - { kind: StallProcess, services: [VllmDecodeWorker], process_name: dynamo.vllm, pod_indices: [0], rank_index: 1, duration: 75 }
+  - { kind: StallProcess, services: [VllmDecodeWorker], process_name: "VLLM::EngineCore", pod_indices: [0], rank_index: 1, duration: 75 }
   - { kind: Wait, duration: 450 }                 # 7.5 min — observe decode ramp + decay
   - { kind: CaptureMetrics, suffix: ".after-decode-stall" }
 
@@ -129,7 +129,7 @@ events:
   # 1 prefill stays healthy. Proves the stale-routing 500s also come from a
   # churned PREFILL instance_id, not only decode. Carved from Phase 1's old
   # 15-min window (now 7.5 + 7.5) → no added wall time.
-  - { kind: StallProcess, services: [VllmPrefillWorker], process_name: dynamo.vllm, pod_indices: [0], rank_index: 1, duration: 75 }
+  - { kind: StallProcess, services: [VllmPrefillWorker], process_name: "VLLM::EngineCore", pod_indices: [0], rank_index: 1, duration: 75 }
   - { kind: Wait, duration: 450 }                 # 7.5 min — observe prefill ramp + decay
   - { kind: CaptureMetrics, suffix: ".after-prefill-stall" }
 
@@ -137,11 +137,11 @@ events:
   # Rolling churn (each restarts in ~60-90 s) so 1 decode + 1 prefill id churn
   # at once → overlapping stale-routing windows build the peak. One pod per role
   # at a time → never zeroes a pool → still capacity-bounded.
-  - { kind: StallProcess, services: [VllmDecodeWorker], process_name: dynamo.vllm, pod_indices: [1], rank_index: 1, duration: 75 }
+  - { kind: StallProcess, services: [VllmDecodeWorker], process_name: "VLLM::EngineCore", pod_indices: [1], rank_index: 1, duration: 75 }
   - { kind: Wait, duration: 120 }
-  - { kind: StallProcess, services: [VllmPrefillWorker], process_name: dynamo.vllm, pod_indices: [1], rank_index: 1, duration: 75 }
+  - { kind: StallProcess, services: [VllmPrefillWorker], process_name: "VLLM::EngineCore", pod_indices: [1], rank_index: 1, duration: 75 }
   - { kind: Wait, duration: 120 }
-  - { kind: StallProcess, services: [VllmDecodeWorker], process_name: dynamo.vllm, pod_indices: [0], rank_index: 1, duration: 75 }
+  - { kind: StallProcess, services: [VllmDecodeWorker], process_name: "VLLM::EngineCore", pod_indices: [0], rank_index: 1, duration: 75 }
 
   # ── Phase 4: FE rollout-restart MID-STORM (the "does bouncing the FE help?"
   # probe). Same image → rolling restart of the 3 FEs while errors are elevated.
