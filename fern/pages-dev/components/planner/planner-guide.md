@@ -8,7 +8,7 @@ title: Planner Guide
   <a href="./planner-guide.zh-CN.md" hreflang="zh-CN"><img src="../../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
 </p>
 
-The Dynamo Planner is an autoscaling controller that adjusts prefill and decode engine replica counts at runtime to meet latency SLAs. It reads traffic signals (Prometheus metrics or load predictor output) and engine performance profiles to decide when to scale up or down.
+The Dynamo Planner is an autoscaling controller that adjusts prefill and decode engine replica counts at runtime to meet latency SLAs. It reads traffic signals (Prometheus metrics or load predictor output) and engine performance models to decide when to scale up or down.
 
 For a quick overview, see the [Planner overview](README.md). For architecture internals, see [Planner Design](../../design-docs/planner-design.md).
 
@@ -19,14 +19,14 @@ The planner supports four optimization targets that determine how scaling decisi
 - **`throughput`** (default): Uses static thresholds on queue depth and KV cache utilization. No SLA targets or profiling needed. Works out of the box.
 - **`latency`**: Same approach as `throughput` but with more aggressive thresholds — scales up earlier and tolerates less queuing. Ideal for latency-sensitive workloads.
 - **`load`**: Uses user-defined prefill queue token thresholds and decode KV utilization thresholds for reactive load-based scaling.
-- **`sla`**: Uses regression-based performance models with specific TTFT/ITL targets. Supports both throughput-based (predictive) and load-based (reactive) scaling modes. For advanced users who need precise SLA control.
+- **`sla`**: Uses the Rust engine performance shim with native AIC estimates when available, plus online FPM tuning or FPM regression fallback, to target specific TTFT/ITL values. Supports both throughput-based (predictive) and load-based (reactive) scaling modes. For advanced users who need precise SLA control.
 
 **When to use which:**
 
 - Start with **`throughput`** (the default) — it works immediately with no configuration.
 - Switch to **`latency`** if your workload has strict latency requirements and you prefer to over-provision rather than queue.
 - Use **`load`** when you want direct control through prefill queue and decode KV utilization thresholds.
-- Use **`sla`** when you have pre-deployment profiling data and want to target specific TTFT/ITL values.
+- Use **`sla`** when you want to target specific TTFT/ITL values with native AIC estimates, optional bootstrap profiling data, or live FPM warmup.
 
 ## PlannerConfig Reference
 
@@ -67,7 +67,7 @@ Advisory mode is suggestion-only. The Planner computes recommended replica count
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `optimization_target` | string | `throughput` | `throughput`: scale based on queue/utilization thresholds. `latency`: aggressive low-latency thresholds. `load`: user-defined prefill queue and decode KV utilization thresholds. `sla`: regression-based scaling with ttft_ms/itl_ms targets. |
+| `optimization_target` | string | `throughput` | `throughput`: scale based on queue/utilization thresholds. `latency`: aggressive low-latency thresholds. `load`: user-defined prefill queue and decode KV utilization thresholds. `sla`: Rust engine perf model scaling with ttft_ms/itl_ms targets. |
 
 When `optimization_target` is `throughput`, `latency`, or `load`, load-based scaling is automatically enabled and throughput-based scaling is disabled. The `ttft_ms`/`itl_ms` fields are ignored.
 
@@ -75,7 +75,7 @@ When `optimization_target` is `throughput`, `latency`, or `load`, load-based sca
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enable_throughput_scaling` | bool | `true` | Enable throughput-based scaling (requires pre-deployment performance data). Only used when `optimization_target: sla`. |
+| `enable_throughput_scaling` | bool | `true` | Enable throughput-based scaling. Only used when `optimization_target: sla`. |
 | `enable_load_scaling` | bool | `false` | Enable load-based scaling. Only used when `optimization_target: sla`. |
 
 At least one scaling mode must be enabled when using `optimization_target: sla`.
@@ -84,9 +84,25 @@ At least one scaling mode must be enabled when using `optimization_target: sla`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `pre_deployment_sweeping_mode` | string | `rapid` | How to generate engine performance data: `rapid` (AIC simulation, ~30s), `thorough` (real GPUs, 2-4h), or `none` (skip). |
+| `pre_deployment_sweeping_mode` | string | `rapid` | How to generate optional bootstrap performance data: `rapid` (AIC simulation, ~30s), `thorough` (real GPUs, 2-4h), or `none` (skip). |
 
-When throughput-based scaling is enabled, the planner needs engine performance data. At startup, it first tries to fetch self-benchmark results from the `get_perf_metrics` Dynamo endpoint (see PR #7779). If unavailable, it falls back to profiler-generated data (npz or JSON) at `profile_results_dir`. Both sources are converted to ForwardPassMetrics and fed into the FPM regression model.
+SLA mode uses the Rust engine performance shim. If `aic_perf_model` is present, the planner initializes the shim with native AIC model identity and engine limits. Unsupported native AIC configs automatically fall back to observed-FPM regression in the shim. If `aic_perf_model` is absent, the shim starts as an FPM regression model and becomes ready after enough self-benchmark or live FPM observations.
+
+At startup, the planner always tries to fetch self-benchmark results from the `get_perf_metrics` Dynamo endpoint. If unavailable, it falls back to rapid-mode AIC interpolation data or profiler-generated data (npz or JSON) at `profile_results_dir` when configured. These sources are converted to ForwardPassMetrics and used to tune or bootstrap the perf model. With `pre_deployment_sweeping_mode: none`, the planner can still start; throughput decisions report `model_not_ready` until native AIC is available or enough live FPMs have warmed the regression fallback.
+
+Manual native AIC perf-model config:
+
+```yaml
+features:
+  planner:
+    optimization_target: sla
+    aic_perf_model:
+      hf_id: nvidia/Llama-3.1-8B-Instruct-FP8
+      system: h200_sxm
+      backend: vllm
+      prefill_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
+      decode_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
+```
 
 ### Throughput-Based Scaling Settings
 
@@ -103,8 +119,8 @@ When throughput-based scaling is enabled, the planner needs engine performance d
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `load_adjustment_interval_seconds` | int | `5` | Seconds between FPM regression updates and load-based scaling decisions. Even when only throughput scaling is enabled, live FPM observations are fed into the regression at this interval. Must be shorter than `throughput_adjustment_interval_seconds`. |
-| `max_num_fpm_samples` | int | `64` | Maximum retained FPM observations for regression. |
+| `load_adjustment_interval_seconds` | int | `5` | Seconds between FPM tuning updates and load-based scaling decisions. Even when only throughput scaling is enabled, live FPM observations are fed into the perf model at this interval. Must be shorter than `throughput_adjustment_interval_seconds`. |
+| `max_num_fpm_samples` | int | `64` | Maximum retained FPM observations for online tuning or regression. |
 | `fpm_sample_bucket_size` | int | `16` | Number of buckets for observation retirement (must be a perfect square). |
 | `load_scaling_down_sensitivity` | int | `80` | Scale-down sensitivity 0–100 (0=never, 100=aggressive). |
 | `load_metric_samples` | int | `10` | Number of metric samples to collect per decision. |
@@ -159,7 +175,7 @@ When the profiler runs with planner enabled, it:
 3. Saves the `PlannerConfig` and performance data into separate Kubernetes ConfigMaps
 4. Adds the planner service to the generated DGD, configured to read from those ConfigMaps
 
-The planner receives its config via `--config /path/to/planner_config.json` which is mounted from the `planner-config-XXXX` ConfigMap. Profiling data is mounted from the `planner-profile-data-XXXX` ConfigMap.
+The planner receives its config via `--config /path/to/planner_config.json` which is mounted from the `planner-config-XXXX` ConfigMap. When thorough bootstrap data is generated, profiling data is mounted from the `planner-profile-data-XXXX` ConfigMap.
 
 See the [Profiler Guide](../profiler/profiler-guide.md) for the full profiling workflow and how to configure pre-deployment sweeping.
 
