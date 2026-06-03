@@ -488,9 +488,9 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
     if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-        maturin build --release --features "media-ffmpeg,kv-indexer,lightseek-mm" --out /opt/dynamo/dist; \
+        maturin build --release --features "media-ffmpeg,kv-indexer,lightseek-mm,aic-forward-pass" --out /opt/dynamo/dist; \
     else \
-        maturin build --release --features "kv-indexer,lightseek-mm" --out /opt/dynamo/dist; \
+        maturin build --release --features "kv-indexer,lightseek-mm,aic-forward-pass" --out /opt/dynamo/dist; \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
