@@ -124,7 +124,7 @@ kubectl delete pod power-agent-dev -n $NAMESPACE
 
 | Key | Meaning | Default |
 |-----|---------|---------|
-| `image.repository` | Power Agent image registry path | `nvcr.io/nvidia/dynamo/power-agent` |
+| `image.repository` | Power Agent image registry path | `nvcr.io/nvidia/ai-dynamo/power-agent` |
 | `image.tag` | **Required** — pin to a release tag or `sha256:digest` (no default) | `""` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `imagePullSecrets` | Image pull secrets list | `[]` |

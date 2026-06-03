@@ -6,7 +6,7 @@
 # docs/design-docs/power-agent-helm-chart-plan.md for the design rationale.
 
 image:
-  repository: nvcr.io/nvidia/dynamo/power-agent
+  repository: nvcr.io/nvidia/ai-dynamo/power-agent
   # REQUIRED. Pin to a release tag or sha256 digest. No default to avoid the
   # `:latest` reproducibility footgun CodeRabbit flagged on PR #9682.
   # `helm install` will fail fast at template time if this is empty.

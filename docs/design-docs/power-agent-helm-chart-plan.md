@@ -391,7 +391,7 @@ config ConfigMap in the v1 chart — see §4.2).
 # See deploy/helm/charts/power-agent/README.md for usage.
 
 image:
-  repository: nvcr.io/nvidia/dynamo/power-agent
+  repository: nvcr.io/nvidia/ai-dynamo/power-agent
   # REQUIRED. Pin to a release tag or sha256 digest. No default to avoid the
   # `:latest` reproducibility footgun CodeRabbit flagged on PR #9682.
   tag: ""
