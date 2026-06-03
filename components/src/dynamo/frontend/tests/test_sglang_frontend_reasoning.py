@@ -1,11 +1,11 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
-"""FE.process_output.6 detok (fast plain-text path) — SGLang, over the shared YAML fixture.
+"""FE.process_output.9 reasoning<->tool orchestration — SGLang, over the shared YAML fixture.
 
-Runs the SAME cases as test_vllm_frontend_detok.py
-(``fixtures/frontend_detok.yaml``) through a parser-less
-``SglangStreamingPostProcessor`` (``_fast_plain_text`` path)."""
+Runs the SAME cases as test_vllm_frontend_reasoning.py
+(``fixtures/frontend_reasoning.yaml``) through a SglangStreamingPostProcessor
+built with both a qwen3 reasoning parser and a hermes function-call parser."""
 
 import _sglang_frontend_adapter as adapter
 import pytest
@@ -22,7 +22,7 @@ pytestmark = [
 ]
 
 MODEL = "Qwen/Qwen3-0.6B"
-CASES = load_cases("frontend_detok")
+CASES = load_cases("frontend_reasoning")
 
 
 @pytest.fixture(scope="module")
@@ -30,11 +30,11 @@ def tokenizer():
     return get_tokenizer(MODEL)
 
 
-class TestSglangFrontendDetok:  # FE.process_output.6 — incremental detok / fast plain-text path (shared YAML fixture)
+class TestSglangFrontendReasoning:  # FE.process_output.9 — reasoning <-> tool-call orchestration (shared YAML fixture)
     @pytest.mark.parametrize("case,batch_size", params(CASES))
-    def test_detok(self, tokenizer, case, batch_size):
+    def test_reasoning(self, tokenizer, case, batch_size):
         choices = adapter.replay(
-            tokenizer, case.model_text, batch_size, with_tools=False
+            tokenizer, case.model_text, batch_size, with_tools=True, with_reasoning=True
         )
         assert_case(
             normalize(choices),

@@ -1,7 +1,7 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
-"""FRONTEND.4 tool-call assembly — SGLang, over the shared YAML fixture.
+"""FE.process_output.4 tool-call assembly — SGLang, over the shared YAML fixture.
 
 Runs the SAME cases as test_vllm_frontend_assembly.py
 (``fixtures/frontend_assembly.yaml``) through
@@ -32,7 +32,7 @@ _KNOWN_GAPS = {
     (
         "multiple_tool_calls",
         20,
-    ): "SGLang drops the 2nd of two parallel tool calls at stream_interval=20 (coarse chunk boundary); both are recovered at smaller chunk sizes. vLLM recovers both at the same granularity.",
+    ): "SGLang drops the 2nd of two parallel tool calls at stream_interval=20 (coarse chunk boundary); both are recovered at smaller chunk sizes. vLLM recovers both at the same granularity.||tool_calls: [get_weather(London)] only — search_books silently dropped",
 }
 
 
@@ -41,7 +41,7 @@ def tokenizer():
     return get_tokenizer(MODEL)
 
 
-class TestSglangFrontendAssembly:  # FRONTEND.4 — tool-call output assembly (shared YAML fixture)
+class TestSglangFrontendAssembly:  # FE.process_output.4 — tool-call output assembly (shared YAML fixture)
     @pytest.mark.parametrize("case,batch_size", params(CASES, known_gaps=_KNOWN_GAPS))
     def test_assembly(self, tokenizer, case, batch_size):
         choices = adapter.replay(

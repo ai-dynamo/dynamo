@@ -61,7 +61,7 @@ def tokenizer():
 # ---------------------------------------------------------------------------
 
 
-class TestPrepareRequestToolStripping:  # FRONTEND.1 + FRONTEND.3 — tool stripping when tool_choice=none on chat-template input
+class TestPrepareRequestToolStripping:  # FE.preprocess.1 + FE.preprocess.3 — tool stripping when tool_choice=none on chat-template input
     """Test that _prepare_request strips/keeps tools based on the flag."""
 
     def test_tool_choice_none_strips_tools_from_template(self, tokenizer):
@@ -128,7 +128,7 @@ class TestPrepareRequestToolStripping:  # FRONTEND.1 + FRONTEND.3 — tool strip
         ), "No tools in request should produce None tools in template"
 
 
-class TestReasoningParserMetadata:  # FRONTEND.2 + FRONTEND.9 — reasoning parser dispatch + reasoning/tool orchestration metadata
+class TestReasoningParserMetadata:  # FE.preprocess.2 + FE.process_output.9 — reasoning parser dispatch + reasoning/tool orchestration metadata
     def test_no_reasoning_parser_returns_none(self):
         from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
 
@@ -294,7 +294,7 @@ async def _run_generate(processor, preproc, *, mm_routing_info=None, context=Non
     ]
 
 
-class TestRoutedEnginePath:  # FRONTEND.4 — routed-engine output assembly into OpenAI chunks
+class TestRoutedEnginePath:  # FE.process_output.4 — routed-engine output assembly into OpenAI chunks
     @pytest.mark.asyncio
     async def test_routed_engine_gets_extra_args_metadata(self, vllm_processor_module):
         routed_engine = _FakeRoutedEngine()
@@ -377,7 +377,7 @@ OBJECT_TYPED_TOOL_REQUEST = {
 # ---------------------------------------------------------------------------
 
 
-class TestSchemaAwareToolParser:  # FRONTEND.1 + FRONTEND.3 — schema-aware parser construction + request shaping
+class TestSchemaAwareToolParser:  # FE.preprocess.1 + FE.preprocess.3 — schema-aware parser construction + request shaping
     """Schema-aware parsers (e.g. qwen3_coder) need ``tools`` at construction
     to coerce object/array-typed parameter values from raw text into JSON;
     without them, the value comes through as a string-in-a-string inside the
@@ -421,7 +421,7 @@ class TestSchemaAwareToolParser:  # FRONTEND.1 + FRONTEND.3 — schema-aware par
 
 
 @pytest.mark.core
-class TestChatTemplateKwargsForwarding:  # FRONTEND.1 + FRONTEND.2 — chat-template input preprocessing + parser-affecting template kwargs
+class TestChatTemplateKwargsForwarding:  # FE.preprocess.1 + FE.preprocess.2 — chat-template input preprocessing + parser-affecting template kwargs
     """chat_template_kwargs from the request are forwarded to ChatParams.
 
     Uses Qwen3 which supports enable_thinking: False to suppress <think> blocks.
@@ -498,7 +498,7 @@ class TestChatTemplateKwargsForwarding:  # FRONTEND.1 + FRONTEND.2 — chat-temp
 # ---------------------------------------------------------------------------
 
 
-class TestVllmMapFinishReason:  # FRONTEND.5 — finish-reason mapping (vllm frontend layer)
+class TestVllmMapFinishReason:  # FE.response_misc.5 — finish-reason mapping (vllm frontend layer)
     """vllm twin of sglang's TestMapFinishReason.
 
     Note: the OpenAI ``tool_calls`` finish_reason is NOT produced here. That
@@ -555,7 +555,7 @@ class TestVllmMapFinishReason:  # FRONTEND.5 — finish-reason mapping (vllm fro
         assert map_finish_reason(raw) is None
 
 
-class TestVllmErrorSurface:  # FRONTEND.8 — vllm processor error wiring (engine error -> OpenAI error shape)
+class TestVllmErrorSurface:  # FE.response_misc.8 — vllm processor error wiring (engine error -> OpenAI error shape)
     """Exercises the error branches of vllm_processor._generate_and_stream that
     the shared utils.py tests do not: a routed-engine error, a backend-error
     response, a malformed (no token_ids) response, and an exception mid-stream.

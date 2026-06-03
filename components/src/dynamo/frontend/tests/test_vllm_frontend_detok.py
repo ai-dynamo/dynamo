@@ -1,7 +1,7 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
-"""FRONTEND.6 detok (fast plain-text path) — vLLM, over the shared YAML fixture.
+"""FE.process_output.6 detok (fast plain-text path) — vLLM, over the shared YAML fixture.
 
 When no parser is configured, ``process_output`` takes the ``_fast_plain_text``
 path and must stream model text through as ``content`` across chunk
@@ -32,7 +32,7 @@ def tokenizer():
     return AutoTokenizer.from_pretrained(MODEL)
 
 
-class TestVllmFrontendDetok:  # FRONTEND.6 — incremental detok / fast plain-text path (shared YAML fixture)
+class TestVllmFrontendDetok:  # FE.process_output.6 — incremental detok / fast plain-text path (shared YAML fixture)
     @pytest.mark.parametrize("case,batch_size", params(CASES))
     def test_detok(self, tokenizer, case, batch_size):
         choices = adapter.replay(
