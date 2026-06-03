@@ -32,7 +32,7 @@ _KNOWN_GAPS = {
     (
         "multiple_tool_calls",
         20,
-    ): "SGLang drops the 2nd of two parallel tool calls at stream_interval=20 (coarse chunk boundary); both are recovered at smaller chunk sizes. vLLM recovers both at the same granularity.||tool_calls: [get_weather(London)] only — search_books silently dropped",
+    ): """SGLang drops the 2nd of two parallel tool calls at stream_interval=20 (coarse chunk boundary); both are recovered at smaller chunk sizes. vLLM recovers both at the same granularity.||calls=[get_weather({"city": "London"})]\nfinish_reason=tool_calls""",
 }
 
 

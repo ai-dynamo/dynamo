@@ -27,13 +27,33 @@ from __future__ import annotations
 import argparse
 import datetime
 import html
+import importlib.util
 import json
 import re
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from frontend_fixture_cases import load_cases
+
+
+def _load_parity_module(name: str):
+    """Load a tests/parity/*.py helper by path. Those modules live in a different
+    source tree (a plain import won't resolve) but are dependency-free, so the FE
+    dashboard reuses the SAME tooltip builder + marker colorizer the TOOLCALLING /
+    REASONING dashboards use, rather than reimplementing them."""
+    path = Path(__file__).resolve().parents[5] / "tests" / "parity" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"parity_{name}", path)
+    module = importlib.util.module_from_spec(spec)
+    # Register before exec so @dataclass type-introspection can resolve the module.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+colorize_markup = _load_parity_module("markup").colorize_markup
+build_parity_tooltip_html = _load_parity_module("common").build_parity_tooltip_html
 
 BACKENDS = ["vllm", "sglang"]
 
@@ -140,6 +160,17 @@ td.cell:hover .ttip { visibility: visible; opacity: 1; }
 .ttip-head { font-weight: bold; margin-bottom: 4px; color: #fbbf24; }
 .ttip-section { font-weight: bold; margin-top: 6px; color: #93c5fd; }
 .ttip-pre { margin: 2px 0 0 0; white-space: pre-wrap; word-break: break-word; color: #e5e7eb; }
+/* Marker palette — shared with the TOOLCALLING / REASONING tooltips (tests/parity/markup.py).
+   Each matched <tool_call>/<think> pair gets a fresh color; orphans go red. */
+.tt-c0 { color: #34d399; }
+.tt-c1 { color: #60a5fa; }
+.tt-c2 { color: #fbbf24; }
+.tt-c3 { color: #f472b6; }
+.tt-c4 { color: #a78bfa; }
+.tt-c5 { color: #fb923c; }
+.tt-c6 { color: #22d3ee; }
+.tt-c7 { color: #f87171; }
+.tt-orphan { background: #7f1d1d; color: #fecaca; padding: 0 2px; border-radius: 2px; }
 """
 
 _VIEW_JS = """
@@ -162,14 +193,11 @@ def _esc(s) -> str:
     return html.escape(str(s))
 
 
-def _cell(text: str, color: str, head: str, lines: list[tuple[str, str]]) -> str:
-    tip = '<span class="ttip"><span class="ttip-head">' + _esc(head) + "</span>"
-    for section, body in lines:
-        if section:
-            tip += '<div class="ttip-section">' + _esc(section) + "</div>"
-        tip += '<div class="ttip-pre">' + _esc(body) + "</div>"
-    tip += "</span>"
-    return f'<td class="cell" style="background:{color}"><span class="cell-label">{_esc(text)}</span>{tip}</td>'
+def _cell(text: str, color: str, ttip_html: str) -> str:
+    return (
+        f'<td class="cell" style="background:{color}">'
+        f'<span class="cell-label">{_esc(text)}</span>{ttip_html}</td>'
+    )
 
 
 def _legend(items: list[tuple[str, str]], tail: str) -> str:
@@ -196,31 +224,37 @@ def _load_fixture_cases() -> dict[str, dict]:
     return out
 
 
-def _format_expected(expected: dict) -> str:
-    """Render a fixture `expected` block as the contract both backends must meet."""
+def _format_contract(expected: dict) -> str:
+    """Render a fixture `expected` block in the TOOLCALLING tooltip convention:
+    ``calls=[name({json}), ...]`` / ``normal_text='...'`` / ``reasoning_text='...'`` /
+    ``finish_reason=...``. Returns safe HTML (markup-bearing values colorized).
+    FE asserts substrings for some fields, so those read ``... contains '...'``."""
     if not expected:
-        return "(see fixture)"
+        return _esc("(see frontend_fixture_cases.py)")
     parts: list[str] = []
     calls = expected.get("tool_calls")
     if calls is not None:
-        if calls:
-            parts.append(
-                "tool_calls: "
-                + "; ".join(
-                    f"{c.get('name')}({json.dumps(c.get('arguments', {}), ensure_ascii=False)})"
-                    for c in calls
-                )
-            )
-        else:
-            parts.append("tool_calls: []")
-    if "reasoning_contains" in expected:
-        parts.append(f"reasoning contains: {expected['reasoning_contains']!r}")
+        rendered = ", ".join(
+            f"{c.get('name')}({json.dumps(c.get('arguments', {}), ensure_ascii=False)})"
+            for c in calls
+        )
+        parts.append(_esc(f"calls=[{rendered}]"))
     if "content" in expected:
-        parts.append(f"content: {expected['content']!r}")
-    if "content_contains" in expected:
-        parts.append(f"content contains: {expected['content_contains']!r}")
+        parts.append("normal_text='" + colorize_markup(expected["content"]) + "'")
+    elif "content_contains" in expected:
+        parts.append(
+            "normal_text contains '"
+            + colorize_markup(expected["content_contains"])
+            + "'"
+        )
+    if "reasoning_contains" in expected:
+        parts.append(
+            "reasoning_text contains '"
+            + colorize_markup(expected["reasoning_contains"])
+            + "'"
+        )
     if "finish_reason" in expected:
-        parts.append(f"finish_reason: {expected['finish_reason']}")
+        parts.append(_esc(f"finish_reason={expected['finish_reason']}"))
     return "\n".join(parts)
 
 
@@ -251,7 +285,12 @@ def _matrix(junits: dict[str, Path]) -> str:
         info = cases.get(case_base, {})
         label = f"{info.get('stage', 'FE.?')}.{case_base}"
         model_text = info.get("model_text", "")
-        expected = _format_expected(info.get("expected", {}))
+        contract = _format_contract(info.get("expected", {}))
+        # Colorize <tool_call>/<think> markers inside the input the same way the
+        # TOOLCALLING tooltips colorize theirs.
+        input_html = (
+            "input_text='" + colorize_markup(model_text) + "'" if model_text else None
+        )
         cells = ""
         for b in backends:
             per_chunk = [
@@ -263,27 +302,28 @@ def _matrix(junits: dict[str, Path]) -> str:
             agg = "n/a" if not present else max(present, key=lambda s: rank.get(s, 0))
             breakdown = " · ".join(f"chunk={c}: {s}" for c, s, _ in per_chunk)
             worst_msg = next((m for _, s, m in per_chunk if s == agg and m), "")
-            lines = []
-            if info.get("description"):
-                lines.append(("", info["description"]))
-            if model_text:
-                lines.append(("input (model_text)", model_text))
-            lines.append(("expected output (contract)", expected))
-            lines.append(("chunk sizes", breakdown))
+
+            output_sections = [("Expected", contract)]
+            divergent = None
             if worst_msg:
                 # xfail/FAIL reasons carry the observed output after a "||" marker.
-                why, sep, actual = worst_msg.partition("||")
-                if sep:
-                    lines.append(("ACTUAL output (this backend)", actual.strip()))
-                    lines.append(("why", why.strip()))
-                else:
-                    lines.append(("status reason", why.strip()))
-            cells += _cell(
-                agg,
-                _CASE_COLOR.get(agg, "#e4e8ec"),
-                f"{label} · {b} · {agg}",
-                lines,
+                why, _, actual = worst_msg.partition("||")
+                if actual.strip():
+                    output_sections.append(
+                        (f"Actual ({b})", colorize_markup(actual.strip()))
+                    )
+                divergent = why.strip() or None
+
+            ttip = build_parity_tooltip_html(
+                head=f"{label} — {b}",
+                description=info.get("description") or None,
+                input_label="Input" if input_html else None,
+                input_html=input_html,
+                output_sections=output_sections,
+                divergent_reasons=divergent,
+                extra_sections=[("Chunk sizes", _esc(breakdown))],
             )
+            cells += _cell(agg, _CASE_COLOR.get(agg, "#e4e8ec"), ttip)
         rows += f'<tr><th class="rowhdr">{_esc(label)}</th>{cells}</tr>'
 
     legend = _legend(

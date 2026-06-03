@@ -32,7 +32,7 @@ _KNOWN_GAPS = {
     (
         "reasoning_then_multiple_tool_calls",
         10,
-    ): "vLLM leaks the first of multiple post-reasoning tool calls into content (recovers only the last) -- the reasoning-end + multi-tool buffered path in StreamingPostProcessor. sglang recovers both.||tool_calls: [search_books(Joyce)] only; get_weather's <tool_call> markup leaked into content (reasoning_content was correct)",
+    ): """vLLM leaks the first of multiple post-reasoning tool calls into content (recovers only the last) -- the reasoning-end + multi-tool buffered path in StreamingPostProcessor. sglang recovers both.||calls=[search_books({"q": "Joyce"})]\nnormal_text='<tool_call>{"name": "get_weather", "arguments": {"city": "London"}}</tool_call>'\nreasoning_text contains 'check weather'\nfinish_reason=tool_calls""",
 }
 
 
