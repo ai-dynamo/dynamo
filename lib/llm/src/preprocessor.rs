@@ -216,14 +216,13 @@ struct PreprocessRequestOptions {
     preserve_omitted_max_tokens: bool,
 }
 
-/// Backend-specific MM-routing wire shape. Each variant corresponds to a
-/// distinct on-the-wire format for image-position fill tokens + KV-event
-/// hash forwarding; see the call sites in `gather_mm_exact_routing_info`
-/// for the per-protocol behavior.
+/// Backend-specific MM-routing wire shape. Resolved once from
+/// `runtime_config.backend_framework`; unknown values disable MM
+/// routing (text-prefix fallback).
 ///
-/// Resolved once at `OpenAIPreprocessor` construction from
-/// `runtime_config.backend_framework`. Unknown / missing values warn and
-/// disable MM-aware routing (text-prefix fallback).
+/// TODO(mm-routing): collapse the 16-vs-64-char split. Blocked on
+/// kv-router's `parse_mm_hash_from_extra_key` using 64-char length as
+/// the MM-hash type tag in vLLM `BlockStored` extra_keys.
 #[cfg(feature = "lightseek-mm")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MmRoutingProtocol {
@@ -279,17 +278,9 @@ impl MmRoutingProtocol {
         }
     }
 
-    /// Hex-encode a per-image `mm_hash` for the backend's `mm_hashes`
-    /// wire field. Length is protocol-load-bearing:
-    /// - sglang: 16 chars. Sglang derives per-block pad_value from
-    ///   `int(hex, 16)`; trailing zeros would collapse pad_value to
-    ///   `MM_PAD_SHIFT_VALUE` for every image.
-    /// - vLLM: 64 chars (16 hex + 48 trailing zeros). Required by
-    ///   `parse_mm_hash_from_extra_key` in
-    ///   `lib/kv-router/src/zmq_wire/extra_keys.rs`, which uses the
-    ///   64-char length to discriminate MM hashes from other
-    ///   `extra_keys` (LoRA salts, cache salts, prompt-embed metadata)
-    ///   in vLLM `BlockStored` events.
+    /// Hex-encode `mm_hash` for `extra_args["mm_hashes"]`. Length is
+    /// load-bearing: sglang reads `int(hex, 16)` for pad_value, vLLM's
+    /// `BlockStored` parser uses 64-char as the MM-hash type tag.
     fn format_mm_hash_hex(&self, mm_hash: u64) -> String {
         const HEX_PAD: &str = "000000000000000000000000000000000000000000000000";
         match self {
@@ -298,12 +289,9 @@ impl MmRoutingProtocol {
         }
     }
 
-    /// Token id to write at an image-placeholder position in the
-    /// routing-side `token_ids`. SGLang substitutes
-    /// `pad_value(mm_hash)` so its RadixAttention prefix-cache key
-    /// matches the worker; vLLM leaves the family's `find_token_id`
-    /// in place (the backend's HF processor emits that id in the
-    /// expanded sequence, so block hashes align).
+    /// Fill token at image positions in the routing-side `token_ids`.
+    /// sglang: `pad_value(mm_hash)` to match RadixAttention cache key.
+    /// vLLM: `find_token_id` (what the HF processor emits).
     fn image_fill_token(
         &self,
         mm_hash: u64,
@@ -315,11 +303,8 @@ impl MmRoutingProtocol {
         }
     }
 
-    /// Whether the routing layer should emit per-block MM-info
-    /// alongside the request. vLLM consumes these to align its
-    /// `BlockStored` events; sglang's pad_value already encodes the
-    /// `mm_hash` in the bytes the router hashes, so block-level info
-    /// is redundant there.
+    /// Emit per-block MM-info? vLLM consumes it; sglang's pad_value
+    /// already encodes `mm_hash` in the bytes the router hashes.
     fn emits_block_mm_infos(&self) -> bool {
         matches!(self, Self::Vllm)
     }
