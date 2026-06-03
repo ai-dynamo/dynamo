@@ -830,8 +830,8 @@ func (r *DynamoGraphDeploymentReconciler) getDesiredWorkerReplicas(
 type oldWorkerReplicaPlan struct {
 	name      string
 	createdAt metav1.Time
-	spec      int32
-	target    int32
+	spec      int32 // declared intent for this DCD
+	target    int32 // desired replica count for this DCD
 }
 
 func allocateOldWorkerDCDReplicas(
@@ -839,10 +839,15 @@ func allocateOldWorkerDCDReplicas(
 	oldTarget int32,
 ) map[string]int32 {
 	plans := buildOldWorkerReplicaPlans(dcds)
-	servingTarget := sumTargetReplicas(plans)
+	var servingTarget int32
+	for i := range plans {
+		servingTarget += plans[i].target
+	}
 
+	// if we have more available replicas currently than total desired replicas, remove the oldest DCD replicas first
 	if servingTarget > oldTarget {
-		removeServingReplicasOldestFirst(plans, servingTarget-oldTarget)
+		removeAvailableReplicasOldestFirst(plans, servingTarget-oldTarget)
+		// if we have less available replicas currently than total desired replicas, add the newest DCD replicas first
 	} else if servingTarget < oldTarget {
 		addUnavailableReplicasNewestFirst(plans, oldTarget-servingTarget)
 	}
@@ -850,6 +855,7 @@ func allocateOldWorkerDCDReplicas(
 	return replicaTargetsByDCDName(plans)
 }
 
+// initializes DCD replicas to available replicas
 func buildOldWorkerReplicaPlans(
 	dcds []*nvidiacomv1beta1.DynamoComponentDeployment,
 ) []oldWorkerReplicaPlan {
@@ -857,7 +863,6 @@ func buildOldWorkerReplicaPlans(
 
 	for _, dcd := range dcds {
 		state := dcdComponentStateFromDCD(dcd)
-		// Start by preserving replicas that are currently serving traffic.
 		target := min(state.Spec, state.Available)
 		plans = append(plans, oldWorkerReplicaPlan{
 			name:      dcd.Name,
@@ -870,17 +875,12 @@ func buildOldWorkerReplicaPlans(
 	return plans
 }
 
-func sumTargetReplicas(plans []oldWorkerReplicaPlan) int32 {
-	var total int32
-	for i := range plans {
-		total += plans[i].target
-	}
-	return total
-}
-
-func removeServingReplicasOldestFirst(plans []oldWorkerReplicaPlan, replicasToRemove int32) {
+func removeAvailableReplicasOldestFirst(plans []oldWorkerReplicaPlan, replicasToRemove int32) {
 	sort.Slice(plans, func(i, j int) bool {
-		return olderOldWorkerReplicaPlanFirst(plans[i], plans[j])
+		if plans[i].createdAt.Time.Equal(plans[j].createdAt.Time) {
+			return plans[i].name < plans[j].name
+		}
+		return plans[i].createdAt.Time.Before(plans[j].createdAt.Time)
 	})
 
 	for i := range plans {
@@ -895,7 +895,10 @@ func removeServingReplicasOldestFirst(plans []oldWorkerReplicaPlan, replicasToRe
 
 func addUnavailableReplicasNewestFirst(plans []oldWorkerReplicaPlan, replicasToAdd int32) {
 	sort.Slice(plans, func(i, j int) bool {
-		return newerOldWorkerReplicaPlanFirst(plans[i], plans[j])
+		if plans[i].createdAt.Time.Equal(plans[j].createdAt.Time) {
+			return plans[i].name < plans[j].name
+		}
+		return plans[i].createdAt.Time.After(plans[j].createdAt.Time)
 	})
 
 	for i := range plans {
@@ -907,20 +910,6 @@ func addUnavailableReplicasNewestFirst(plans []oldWorkerReplicaPlan, replicasToA
 		plans[i].target += added
 		replicasToAdd -= added
 	}
-}
-
-func olderOldWorkerReplicaPlanFirst(a, b oldWorkerReplicaPlan) bool {
-	if a.createdAt.Time.Equal(b.createdAt.Time) {
-		return a.name < b.name
-	}
-	return a.createdAt.Time.Before(b.createdAt.Time)
-}
-
-func newerOldWorkerReplicaPlanFirst(a, b oldWorkerReplicaPlan) bool {
-	if a.createdAt.Time.Equal(b.createdAt.Time) {
-		return a.name < b.name
-	}
-	return a.createdAt.Time.After(b.createdAt.Time)
 }
 
 func replicaTargetsByDCDName(plans []oldWorkerReplicaPlan) map[string]int32 {
