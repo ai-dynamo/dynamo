@@ -623,6 +623,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 # Pass through disjoint token segments directly
                 out["token_ids"] = output_ids
+                out["text"] = res.get("text", "")
 
                 # Extract logprobs for new tokens if available
                 (
