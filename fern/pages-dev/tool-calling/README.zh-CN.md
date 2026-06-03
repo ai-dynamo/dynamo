@@ -20,7 +20,7 @@ completions API 上的 `tool_choice` 和 `tools` 请求参数控制。
 | 路径 | 何时使用 | 页面 |
 |------|----------|------|
 | **Dynamo** | Dynamo 为该模型的 tool-call 格式提供了 Rust 解析器。延迟最低，也是默认路径。 | [工具调用解析（Dynamo）](dynamo.md) |
-| **Engine Fallback** | 使用框架（vLLM 或 SGLang）的实现进行预处理/后处理，包括工具调用和推理解析，以确保与框架行为保持一致。 | [工具调用解析（Engine Fallback）](engine-fallback.md) |
+| **Engine Fallback** | 使用框架（vLLM 或 SGLang）的实现进行预处理/后处理，包括工具调用和推理解析，以确保与框架行为保持一致。 | [工具调用解析（Engine Fallback）](../engine-fallback.md) |
 
 请从 Dynamo 路径开始。只有当 Dynamo 的注册表没有列出适用于你的模型的解析器时，才回退到引擎路径。
 
