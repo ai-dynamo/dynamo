@@ -1,0 +1,148 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""TensorRT-LLM executor health monitor."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import signal
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from dynamo.trtllm.engine import TensorRTLLMEngine
+
+logger = logging.getLogger(__name__)
+
+HEALTH_CHECK_INTERVAL = 2.0
+HEALTH_SHUTDOWN_TIMEOUT = 90.0
+HEALTH_CHECK_INTERVAL_ENV = "DYN_TRTLLM_HEALTH_CHECK_INTERVAL"
+HEALTH_SHUTDOWN_TIMEOUT_ENV = "DYN_TRTLLM_HEALTH_SHUTDOWN_TIMEOUT"
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %.1f", name, value, default)
+        return default
+    if parsed < 0:
+        logger.warning("Negative %s=%r; using 0", name, value)
+        return 0.0
+    return parsed
+
+
+class TrtllmEngineMonitor:
+    """Poll TRT-LLM's internal health API and stop the worker on fatal state."""
+
+    def __init__(
+        self,
+        engine: "TensorRTLLMEngine",
+        shutdown_event: Optional[asyncio.Event] = None,
+        *,
+        interval: Optional[float] = None,
+        shutdown_timeout: Optional[float] = None,
+        kill_fn: Callable[[int, int], None] = os.kill,
+        exit_fn: Callable[[int], None] = os._exit,
+        pid_fn: Callable[[], int] = os.getpid,
+    ) -> None:
+        self.engine = engine
+        self.shutdown_event = shutdown_event
+        self.interval = (
+            _env_float(HEALTH_CHECK_INTERVAL_ENV, HEALTH_CHECK_INTERVAL)
+            if interval is None
+            else interval
+        )
+        self.shutdown_timeout = (
+            _env_float(HEALTH_SHUTDOWN_TIMEOUT_ENV, HEALTH_SHUTDOWN_TIMEOUT)
+            if shutdown_timeout is None
+            else shutdown_timeout
+        )
+        self._kill_fn = kill_fn
+        self._exit_fn = exit_fn
+        self._pid_fn = pid_fn
+        self._monitor_task: Optional[asyncio.Task[None]] = None
+
+        if not engine.supports_health_check():
+            logger.info(
+                "TRT-LLM health monitor disabled; installed TRT-LLM does not "
+                "expose _check_health() or executor.check_health()."
+            )
+            return
+
+        self._monitor_task = asyncio.create_task(self._check_engine_health())
+        logger.info("TRT-LLM engine health monitor started.")
+
+    async def stop(self) -> None:
+        if self._monitor_task is None:
+            return
+        if self._monitor_task is asyncio.current_task():
+            return
+        self._monitor_task.cancel()
+        try:
+            await self._monitor_task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._monitor_task = None
+
+    async def _check_engine_health(self) -> None:
+        while True:
+            try:
+                if self.shutdown_event is not None and self.shutdown_event.is_set():
+                    logger.info(
+                        "TRT-LLM health monitor stopping because shutdown_event is set."
+                    )
+                    break
+
+                try:
+                    healthy = await asyncio.to_thread(self.engine.check_health)
+                except Exception as exc:
+                    logger.error("TRT-LLM health check raised: %r", exc, exc_info=True)
+                    await self._shutdown_worker(f"health check raised {exc!r}")
+                    break
+
+                if not healthy:
+                    fatal_error = self.engine.get_health_check_fatal_error()
+                    if fatal_error is not None:
+                        logger.error("TRT-LLM engine is unhealthy: %r", fatal_error)
+                    else:
+                        logger.error("TRT-LLM engine is unhealthy.")
+                    await self._shutdown_worker("TRT-LLM health check failed")
+                    break
+
+                if self.shutdown_event is not None:
+                    try:
+                        await asyncio.wait_for(
+                            self.shutdown_event.wait(), timeout=self.interval
+                        )
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(self.interval)
+            except asyncio.CancelledError:
+                logger.debug("TRT-LLM health monitor cancelled.")
+                break
+
+    async def _shutdown_worker(self, reason: str) -> None:
+        logger.warning(
+            "Initiating worker shutdown after TRT-LLM fatal health state: %s", reason
+        )
+        self._kill_fn(self._pid_fn(), signal.SIGINT)
+        try:
+            await asyncio.sleep(self.shutdown_timeout)
+        except asyncio.CancelledError:
+            logger.debug("TRT-LLM health monitor shutdown wait cancelled.")
+            raise
+        logger.critical(
+            "TRT-LLM health-triggered shutdown did not complete within %.1fs; "
+            "forcing process exit.",
+            self.shutdown_timeout,
+        )
+        self._exit_fn(1)

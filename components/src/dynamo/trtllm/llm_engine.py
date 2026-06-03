@@ -292,6 +292,7 @@ class TrtllmLLMEngine(LLMEngine):
 
         self._engine = TensorRTLLMEngine(self.engine_args, self.disaggregation_mode)
         await self._engine.initialize()
+        self._engine.start_health_monitor()
 
         from tensorrt_llm.metrics import MetricsCollector
 
