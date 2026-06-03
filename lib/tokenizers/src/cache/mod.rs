@@ -26,11 +26,13 @@
 //!
 //! # Storage normalization
 //!
-//! Cache hits return [`Encoding::Sp`] (token-ids only), even when the inner
-//! tokenizer would have produced [`Encoding::Hf`] (rich offsets/attention/etc).
-//! All current downstream consumers in Dynamo only call [`Encoding::token_ids`],
-//! so this lossy normalization is safe; revisit if a caller starts reading
-//! offsets or attention masks from cached encodings.
+//! When L1 is enabled, **every** `encode` returns [`Encoding::Sp`] (token-ids only) —
+//! hits merge cached prefix ids with a fresh suffix encode, and misses assemble the ids
+//! from the per-boundary segment encodes (see [`L1Cache::populate_and_encode`]) — even
+//! when the inner tokenizer would have produced [`Encoding::Hf`] (rich offsets/attention/
+//! etc). All current downstream consumers in Dynamo only call [`Encoding::token_ids`], so
+//! this lossy normalization is safe; revisit if a caller starts reading offsets or
+//! attention masks from encodings produced through the cache.
 //!
 //! # Configuration
 //!
@@ -66,7 +68,13 @@ use crate::{
 pub struct CachedTokenizer {
     inner: Arc<dyn Tokenizer>,
     l1: L1Cache,
-    special_tokens: Vec<String>,
+    /// Whether L1 is active. False when the special-token set is empty (e.g. the tiktoken
+    /// wrapping path): `encode`/`encode_batch` then bypass the cache entirely. The special
+    /// tokens themselves live in the `L1Cache` (its boundary automaton).
+    l1_enabled: bool,
+    /// When true, cache the newly-tokenized suffix on a partial hit so the next turn
+    /// of a growing conversation hits deeper (see [`L1Cache::extend_after_match`]).
+    extend_on_hit: bool,
 }
 
 impl CachedTokenizer {
@@ -84,11 +92,22 @@ impl CachedTokenizer {
         special_tokens: Vec<String>,
         max_memory_bytes: usize,
     ) -> Self {
+        let l1_enabled = !special_tokens.is_empty();
         Self {
             inner,
-            l1: L1Cache::new(max_memory_bytes),
-            special_tokens,
+            l1: L1Cache::new(max_memory_bytes, special_tokens),
+            l1_enabled,
+            extend_on_hit: false,
         }
+    }
+
+    /// Enable partial-hit extension. When on, a partial cache hit also caches the
+    /// freshly-tokenized suffix at its deepest special-token boundary, so each turn of
+    /// a growing multi-turn conversation hits deeper than the last and per-turn
+    /// tokenization cost stops growing with conversation length. Default off.
+    pub fn with_extend(mut self, enabled: bool) -> Self {
+        self.extend_on_hit = enabled;
+        self
     }
 
     /// Install hit/miss callbacks so each L1 lookup pushes an event into the
@@ -115,26 +134,34 @@ impl CachedTokenizer {
     }
 }
 
-fn special_token_refs(specials: &[String]) -> Vec<&str> {
-    specials.iter().map(String::as_str).collect()
-}
-
 impl Encoder for CachedTokenizer {
     fn encode(&self, input: &str) -> Result<Encoding> {
-        // Empty specials => no boundaries are ever produced. Skip the lookup,
-        // miss-counter bump, and insert attempt entirely — otherwise the
-        // tiktoken wrapping path (which deliberately passes an empty list)
-        // pays the scan cost on every call with zero chance of a hit.
-        if self.special_tokens.is_empty() {
+        // No specials => no boundaries are ever produced. Skip the lookup, miss-counter
+        // bump, and insert attempt entirely — otherwise the tiktoken wrapping path (which
+        // deliberately passes an empty list) pays the cost on every call with no chance
+        // of a hit.
+        if !self.l1_enabled {
             return self.inner.encode(input);
         }
 
-        let specials = special_token_refs(&self.special_tokens);
-
-        if let Some((prefix_tokens, prefix_len)) = self.l1.longest_prefix_match(input, &specials) {
+        if let Some((prefix_tokens, prefix_len, deepest_boundary)) =
+            self.l1.longest_prefix_match(input)
+        {
             let suffix = &input[prefix_len..];
             if suffix.is_empty() {
                 return Ok(Encoding::Sp(prefix_tokens));
+            }
+            if self.extend_on_hit {
+                // Cache the new suffix at its deepest boundary so the next turn hits
+                // deeper, then return the full merged tokens. The deepest boundary was
+                // already found by `longest_prefix_match`, so no rescan is needed here.
+                return Ok(Encoding::Sp(self.l1.extend_after_match(
+                    input,
+                    prefix_tokens,
+                    prefix_len,
+                    deepest_boundary,
+                    self.inner.as_ref(),
+                )?));
             }
             let suffix_enc = self.inner.encode(suffix)?;
             let mut merged: Vec<TokenIdType> = prefix_tokens;
@@ -142,19 +169,21 @@ impl Encoder for CachedTokenizer {
             return Ok(Encoding::Sp(merged));
         }
 
-        // Miss path: full encode, then populate L1 at every boundary.
-        let encoding = self.inner.encode(input)?;
-        let _ = self
-            .l1
-            .insert_at_boundaries(input, self.inner.as_ref(), &specials);
-        Ok(encoding)
+        // Miss path: tokenize once, caching the cumulative prefix at every boundary as we
+        // go. The returned ids equal an uncached encode (special tokens are atomic), so we
+        // avoid the redundant second tokenization a separate full-encode + insert would
+        // cost. Returns Encoding::Sp — consistent with the hit path (see the storage-
+        // normalization note in the module docs).
+        Ok(Encoding::Sp(
+            self.l1.populate_and_encode(input, self.inner.as_ref())?,
+        ))
     }
 
     fn encode_batch(&self, inputs: &[&str]) -> Result<Vec<Encoding>> {
         // True passthrough when L1 is disabled — delegate to the inner's native
         // batch path (which may be rayon-parallel for HF) instead of falling
         // through per-item.
-        if self.special_tokens.is_empty() {
+        if !self.l1_enabled {
             return self.inner.encode_batch(inputs);
         }
 

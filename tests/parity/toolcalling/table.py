@@ -82,6 +82,20 @@ TEMPLATE_DIR = REPO_ROOT / "tests/parity"
 
 RUST_TOOL_CALLING_DIR = REPO_ROOT / "lib/parsers/src/tool_calling"
 
+# Row-label / visibility overrides keyed by tool calling family; ‡ is explained
+# by the legend note in parity_table.html.j2.
+_TOOL_CALLING_LABEL_OVERRIDES = {
+    "qwen3_coder": "Qwen 3 Coder / Nemotron V3‡",
+}
+# nemotron_nano: an alias for qwen3_coder, hide to avoid duplicate row
+# nemotron_deci: for older v2 nemotron models, hide to avoid confusion with nemotron v3 models
+_HIDDEN_TOOL_CALLING_FAMILIES = {"nemotron_deci", "nemotron_nano"}
+
+
+def _model_label_html(model: str) -> str:
+    """Escape a model label, styling any ‡ marker like the †/§ suffixes."""
+    return html_lib.escape(model).replace("‡", '<span class="parser-suffix">‡</span>')
+
 
 def _make_jinja_env() -> Environment:
     return Environment(
@@ -548,10 +562,12 @@ def _build_display_groups(
     Others: every YAML-discovered family not in TOP_N, sorted by label.
     Missing labels fall back to the family ID.
     """
-    families = {fam for fam, _ in cases.keys()}
+    families = {
+        fam for fam, _ in cases.keys() if fam not in _HIDDEN_TOOL_CALLING_FAMILIES
+    }
 
     def label_of(fam: str) -> str:
-        return labels.get(fam, fam)
+        return _TOOL_CALLING_LABEL_OVERRIDES.get(fam, labels.get(fam, fam))
 
     top_n = [(label_of(f), f) for f in TOP_N_FAMILIES if f in families]
     other_fams = sorted(
@@ -788,6 +804,10 @@ _LEGEND_MD = (
     "`—` missing fixture coverage · "
     "`†` (tool calling parser column) = no vLLM peer parser for this family · "
     "`§` (tool calling parser column) = no SGLang peer parser for this family."
+    "\n\n"
+    "`‡` Nemotron V3 (Ultra) reuses the qwen3_coder tool calling parser; "
+    "Nemotron V1 / V2 (DeciLM) is removed from the chart for being an older "
+    "generation, but the nemotron_deci parser is still supported."
 )
 
 
@@ -1242,7 +1262,7 @@ def render_row_html(
     inheritance: dict[str, dict],
 ) -> str:
     cells = [
-        f'<tr><td class="model" data-col-hide-group="model">{html_lib.escape(model)}</td>',
+        f'<tr><td class="model" data-col-hide-group="model">{_model_label_html(model)}</td>',
         _column_placeholder_html("model"),
         _parser_cell_html(family, refs, no_vllm, no_sglang, inheritance),
         _column_placeholder_html("parser"),

@@ -348,6 +348,28 @@ def test_load_aware_preserves_prefill_load_scale() -> None:
     assert kwargs["prefill_load_scale"] == 2.5
 
 
+def test_load_aware_preserves_cache_hit_weights() -> None:
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(
+        [
+            "--load-aware",
+            "--router-host-cache-hit-weight",
+            "0.9",
+            "--router-disk-cache-hit-weight",
+            "0.1",
+        ]
+    )
+
+    config = KvRouterConfigBase.from_cli_args(args)
+    kwargs = config.kv_router_kwargs()
+
+    assert kwargs["overlap_score_credit"] == 0.0
+    assert kwargs["host_cache_hit_weight"] == 0.9
+    assert kwargs["disk_cache_hit_weight"] == 0.1
+
+
 def test_kv_router_kwargs_preserves_explicit_queue_tiers() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
