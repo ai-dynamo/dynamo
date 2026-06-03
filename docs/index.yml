@@ -325,15 +325,8 @@ navigation:
         contents:
           - page: Custom Backend Overview
             path: development/custom-backend.md
-          - section: Writing Unified Backends
+          - page: Writing Unified Backends
             path: development/unified-backends.md
-            contents:
-              - page: Python Implementation
-                slug: python
-                path: development/python-backend-guide.md
-              - page: Rust Implementation
-                slug: rust
-                path: development/rust-backend-guide.md
           - page: Python Workers (lower-level)
             path: development/backend-guide.md
           - page: Runtime Containers

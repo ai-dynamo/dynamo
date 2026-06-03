@@ -42,6 +42,14 @@ redirects:
     destination: "/dynamo/dev/"
   - source: "/dynamo/latest/index.html"
     destination: "/dynamo/"
+  - source: "/dynamo/dev/backends/custom-backend/writing-unified-backends/python"
+    destination: "/dynamo/dev/backends/custom-backend/writing-unified-backends"
+  - source: "/dynamo/dev/backends/custom-backend/writing-unified-backends/rust"
+    destination: "/dynamo/dev/backends/custom-backend/writing-unified-backends"
+  - source: "/dynamo/latest/backends/custom-backend/writing-unified-backends/python"
+    destination: "/dynamo/latest/backends/custom-backend/writing-unified-backends"
+  - source: "/dynamo/latest/backends/custom-backend/writing-unified-backends/rust"
+    destination: "/dynamo/latest/backends/custom-backend/writing-unified-backends"
   # Unversioned root redirects → dev (fixes broken links from docs.nvidia.com/dynamo)
   # See: https://github.com/ai-dynamo/dynamo/issues/7297
   - source: "/dynamo/resources/support-matrix"
