@@ -234,6 +234,13 @@ struct PendingTierPromotion {
 struct CdRequestState {
     reserved_tokens: usize,
 
+    /// GNMT-time `inputs.num_computed_tokens` (the vLLM-computed prefix length).
+    /// Authoritative `num_computed` for the USAA-1 split: a vLLM prefix-cache hit
+    /// with zero G2 match leaves the slot's onboarding state `None`, so the
+    /// onboarding-derived num_computed would be 0 and the split would under-count
+    /// `computed_blocks` (over-counting `remote_blocks()` → USAA-1 mismatch crash).
+    base_offset: usize,
+
     /// Pinned local-match G2 (Arc clones).  Held until the local
     /// G2→G1 kick resolves so the G2 entries stay live for the
     /// duration of the copy. `session.make_available` holds its
@@ -987,6 +994,7 @@ impl DecodeDisaggLeader {
 
         let new_state = Arc::new(CdRequestState {
             reserved_tokens: full_block_external_tokens,
+            base_offset,
             local_match_g2_pins: Mutex::new(Some(local_g2)),
             local_match_g2_block_ids,
             local_match_g1_block_ids: Vec::new(),
@@ -1236,7 +1244,67 @@ impl DecodeDisaggLeader {
             );
         }
 
-        let split = self.inner.slot_match_split(request_id)?;
+        // Resolve the wrapper's gnmt-time state up front — BEFORE the split (we
+        // need its authoritative base_offset) and BEFORE any state mutation. The
+        // soft-skip covers the CD USAA-1 cleanup race: under
+        // `kv_load_failure_policy=recompute`, a sibling `cleanup_failed_request`
+        // on a previous run of this request id can call `coordinator.release`
+        // (coordinator.rs:1045) between the `is_active` check at the top of
+        // `decode_usaa` and the lookup here, dropping the wrapper-side state. The
+        // cleanup chain has already run — bailing would propagate worker-fatal to
+        // vLLM's EngineCore for a race vLLM already owns recovery for. Mirrors the
+        // soft-skip at coordinator.rs:1045 and coordinator.rs:309-313 (see
+        // `feedback-bail-vs-softskip-callbacks`, Tier-2 under Graham King's review skill).
+        let existing = match self
+            .cd_request_state
+            .get(request_id)
+            .map(|e| Arc::clone(e.value()))
+        {
+            Some(s) => s,
+            None => {
+                crate::audit!(
+                    "commit_usaa1_state_gone",
+                    role = "decode",
+                    request_id,
+                    reason = "cd_state_removed_between_is_active_and_commit_usaa1"
+                );
+                return Ok(());
+            }
+        };
+
+        // Observability only (NOT a bail): GNMT's sizing (reserved_tokens) is
+        // EXPECTED to equal vLLM's external allocation (num_external_tokens), but
+        // chunked-prefill can split the prefill across scheduler steps, so this may
+        // legitimately differ — bailing would trade the USAA-1 crash for a NEW
+        // crash on a previously-working path. The corrected block-count check below
+        // is the real guard (it cross-checks the split's computed/total against
+        // vLLM independently). Promote to a hard check once a clean run proves
+        // equality holds across chunked-prefill.
+        if existing.reserved_tokens != num_external_tokens {
+            crate::audit!(
+                "usaa1_reserved_external_desync",
+                role = "decode",
+                request_id,
+                reserved_tokens = existing.reserved_tokens,
+                num_external_tokens
+            );
+            tracing::warn!(
+                request_id,
+                reserved_tokens = existing.reserved_tokens,
+                num_external_tokens,
+                "CD USAA-1: GNMT reserved_tokens != vLLM num_external_tokens \
+                 (chunked-prefill?) — not fatal; block-count check is the guard"
+            );
+        }
+
+        // Authoritative num_computed = the GNMT base_offset. A vLLM prefix-cache
+        // hit with zero G2 match leaves onboarding=None, so the slot's
+        // onboarding-derived num_computed would be 0 and computed_blocks would
+        // under-count the prefix (over-counting remote_blocks() → the mismatch
+        // below). See slot_match_split_with_num_computed.
+        let split = self
+            .inner
+            .slot_match_split_with_num_computed(request_id, existing.base_offset)?;
 
         let actual_external_blocks = num_external_tokens / block_size;
         let expected_external_blocks = split.local_match_blocks + split.remote_blocks();
@@ -1269,43 +1337,6 @@ impl DecodeDisaggLeader {
         let prefix_g1_block_ids: Vec<BlockId> = block_ids[..split.computed_blocks].to_vec();
         let expected_remote_hashes = split.expected_remote_hashes();
         let remote_range = split.remote_range();
-
-        // Resolve the wrapper's gnmt-time state BEFORE any state
-        // mutation (block assignments, pin drain, remote_slots
-        // rebuild). The pending_failure re-check below short-circuits
-        // out without mutating anything if a concurrent cleanup
-        // stashed a failure between decode_usaa's check and ours.
-        //
-        // CD USAA-1 race (read side): under
-        // `kv_load_failure_policy=recompute`, a sibling
-        // `cleanup_failed_request` on a previous run of this same
-        // request id can call `coordinator.release` (Bug B's atomic-
-        // remove site, coordinator.rs:1045) between the `is_active`
-        // check at the top of `decode_usaa` and the lookup here,
-        // dropping the wrapper-side state. The cleanup chain has
-        // already run — there's nothing for us to do, and bailing
-        // would propagate worker-fatal up to vLLM's EngineCore for
-        // a race vLLM already owns recovery for.
-        //
-        // Mirrors the soft-skip pattern at coordinator.rs:1045 and
-        // coordinator.rs:309-313. See `feedback-bail-vs-softskip-callbacks`
-        // for the Tier-2 ranking under Graham King's review skill.
-        let existing = match self
-            .cd_request_state
-            .get(request_id)
-            .map(|e| Arc::clone(e.value()))
-        {
-            Some(s) => s,
-            None => {
-                crate::audit!(
-                    "commit_usaa1_state_gone",
-                    role = "decode",
-                    request_id,
-                    reason = "cd_state_removed_between_is_active_and_commit_usaa1"
-                );
-                return Ok(());
-            }
-        };
 
         // Race re-check: `decode_usaa`'s pending_failure check happens
         // BEFORE entering `commit_usaa1`. A concurrent
@@ -1410,6 +1441,7 @@ impl DecodeDisaggLeader {
 
         let updated = Arc::new(CdRequestState {
             reserved_tokens: existing.reserved_tokens,
+            base_offset: existing.base_offset,
             local_match_g2_pins: Mutex::new(None),
             local_match_g2_block_ids: existing.local_match_g2_block_ids.clone(),
             local_match_g1_block_ids: local_match_g1.clone(),

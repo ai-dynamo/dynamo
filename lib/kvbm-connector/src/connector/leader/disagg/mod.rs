@@ -237,6 +237,30 @@ impl ConditionalDisaggPolicy for AlwaysRemote {
     }
 }
 
+/// Threshold policy: disaggregate (`Remote`) only when the *uncached* prefill
+/// work meets `min_remote_prefill_tokens`, otherwise prefill locally on the
+/// decode worker. The comparison is against
+/// [`PolicyInputs::num_prefill_tokens`] (`total − num_computed − local
+/// connector match`) — i.e. the tokens that still need a prefill forward pass
+/// after local cache — not the raw prompt length.
+///
+/// A threshold of `0` makes every request `Remote` (equivalent to
+/// [`AlwaysRemote`]); larger values keep short prompts local.
+#[derive(Debug, Clone, Copy)]
+pub struct ThresholdRemote {
+    pub min_remote_prefill_tokens: usize,
+}
+
+impl ConditionalDisaggPolicy for ThresholdRemote {
+    fn evaluate(&self, inputs: &PolicyInputs) -> PrefillSelection {
+        if inputs.num_prefill_tokens() >= self.min_remote_prefill_tokens {
+            PrefillSelection::Remote
+        } else {
+            PrefillSelection::Local
+        }
+    }
+}
+
 /// Helper for policy call sites that have raw request metadata.
 pub fn parse_transfer_params(metadata: Option<&RequestMetadata>) -> Result<Option<TransferParams>> {
     metadata
@@ -268,5 +292,39 @@ mod tests {
 
         assert_eq!(NeverRemote.evaluate(&inputs), PrefillSelection::Local);
         assert_eq!(inputs.num_prefill_tokens(), 80);
+    }
+
+    #[test]
+    fn threshold_remote_gates_on_uncached_prefill_tokens() {
+        let policy = ThresholdRemote {
+            min_remote_prefill_tokens: 256,
+        };
+        let cold = |total: usize| PolicyInputs {
+            total_tokens: total,
+            num_computed_tokens: 0,
+            num_connector_tokens: 0,
+            transfer_params: None,
+        };
+        // Cold prompt of 300 uncached tokens >= 256 -> disaggregate.
+        assert_eq!(policy.evaluate(&cold(300)), PrefillSelection::Remote);
+        // Cold prompt of 200 uncached tokens < 256 -> local prefill.
+        assert_eq!(policy.evaluate(&cold(200)), PrefillSelection::Local);
+        // Boundary: exactly 256 uncached -> Remote (>=).
+        assert_eq!(policy.evaluate(&cold(256)), PrefillSelection::Remote);
+        // 300 total but mostly cached (100 computed + 60 matched) => 140
+        // uncached < 256 -> local prefill, even though the prompt is long.
+        let mostly_cached = PolicyInputs {
+            total_tokens: 300,
+            num_computed_tokens: 100,
+            num_connector_tokens: 60,
+            transfer_params: None,
+        };
+        assert_eq!(mostly_cached.num_prefill_tokens(), 140);
+        assert_eq!(policy.evaluate(&mostly_cached), PrefillSelection::Local);
+        // Threshold 0 is equivalent to AlwaysRemote.
+        let always = ThresholdRemote {
+            min_remote_prefill_tokens: 0,
+        };
+        assert_eq!(always.evaluate(&cold(1)), PrefillSelection::Remote);
     }
 }

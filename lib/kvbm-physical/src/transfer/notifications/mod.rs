@@ -34,11 +34,69 @@ pub trait CompletionChecker: Send {
     fn is_complete(&self) -> Result<bool>;
 }
 
+/// Per-worker telemetry for a single NIXL transfer, threaded from the
+/// planner's post site ([`execute_planner_nixl_transfer`]) through
+/// [`RegisterPollingNotification`] to the completion poller so the
+/// `worker_xfer_complete` audit event is emitted in ONE place with the full
+/// control / post / completion picture. Each TP rank is its own process with
+/// its own poller, so one event is emitted per rank per transfer.
+///
+/// [`execute_planner_nixl_transfer`]: crate::transfer::executor
+pub struct XferTelemetry {
+    /// Velo messenger per-process id (== `ctx.worker_id()`). Opaque, but
+    /// distinct per TP rank — group the bench's events by this.
+    pub worker_id: u64,
+    /// "Read" (pull) or "Write" (push).
+    pub op: &'static str,
+    /// Local CUDA device ordinal of the destination (for a Read/pull this is
+    /// the rank's own GPU) — maps rank → GPU → GPU-local NIC in the report.
+    pub device_id: u64,
+    /// Logical KV blocks in this transfer (`dst_block_ids.len()`).
+    pub num_blocks: usize,
+    /// Coalesced NIXL descriptor count (`ops.len()`) — may be < num_blocks.
+    pub num_descs: usize,
+    /// Bytes actually moved by THIS rank — the per-rank shard (sum of op sizes).
+    pub bytes: usize,
+    /// Control/setup time: descriptor build + `create_xfer_req` (µs).
+    pub ctrl_us: u64,
+    /// `post_xfer_req` submit cost (µs).
+    pub post_us: u64,
+    /// Captured just after the post returns; `completion_us = .elapsed()` is
+    /// measured by the poller when the transfer is observed complete.
+    pub submitted_at: Instant,
+}
+
+impl XferTelemetry {
+    /// Emit the per-worker `worker_xfer_complete` kvbm_audit event. Called from
+    /// the polling handler on async completion, or inline for a synchronous
+    /// completion. `completion_us` is the post→complete wall time.
+    pub fn emit_complete(&self, success: bool) {
+        let completion_us = self.submitted_at.elapsed().as_micros() as u64;
+        tracing::info!(
+            target: "kvbm_audit",
+            event = "worker_xfer_complete",
+            worker_id = self.worker_id,
+            op = self.op,
+            device_id = self.device_id,
+            num_blocks = self.num_blocks,
+            num_descs = self.num_descs,
+            bytes = self.bytes,
+            ctrl_us = self.ctrl_us,
+            post_us = self.post_us,
+            completion_us = completion_us,
+            success = success,
+        );
+    }
+}
+
 /// Registration message for polling-based transfer completion.
 pub struct RegisterPollingNotification<C: CompletionChecker> {
     pub uuid: Uuid,
     pub checker: C,
     pub event_handle: EventHandle,
+    /// Worker-side timing for the `worker_xfer_complete` event, or `None` for
+    /// transfers we don't instrument (CUDA events, staged legs).
+    pub telemetry: Option<XferTelemetry>,
 }
 
 /// Tracking struct for outstanding polling-based transfers.
@@ -47,6 +105,7 @@ struct OutstandingPollingTransfer<C: CompletionChecker> {
     event_handle: EventHandle,
     arrived_at: Instant,
     last_warned_at: Option<Instant>,
+    telemetry: Option<XferTelemetry>,
 }
 
 /// Helper function to check if a transfer should be warned about and log the warning.
@@ -94,6 +153,7 @@ pub async fn process_polling_notifications<C: CompletionChecker>(
                             event_handle: notif.event_handle,
                             arrived_at: Instant::now(),
                             last_warned_at: None,
+                            telemetry: notif.telemetry,
                         });
                     }
                     None => {
@@ -136,6 +196,11 @@ pub async fn process_polling_notifications<C: CompletionChecker>(
                 // Remove completed transfers and signal completion
                 for (uuid, result) in completed {
                     if let Some(transfer) = outstanding.remove(&uuid) {
+                        // Per-worker RDMA telemetry: emit on the transition to
+                        // complete (this site fires exactly once per transfer).
+                        if let Some(tel) = &transfer.telemetry {
+                            tel.emit_complete(result.is_ok());
+                        }
                         // Signal completion via Velo event system
                         match result {
                             Ok(()) => {
@@ -179,6 +244,10 @@ pub async fn process_polling_notifications<C: CompletionChecker>(
 
         for (uuid, result) in completed {
             if let Some(transfer) = outstanding.remove(&uuid) {
+                // Per-worker RDMA telemetry (post-channel-close drain path).
+                if let Some(tel) = &transfer.telemetry {
+                    tel.emit_complete(result.is_ok());
+                }
                 match result {
                     Ok(()) => {
                         let _ = system.trigger(transfer.event_handle);

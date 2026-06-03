@@ -646,6 +646,24 @@ impl InnerLeaderShim for MockInnerLeaderShim {
         })
     }
 
+    fn slot_match_split_with_num_computed(
+        &self,
+        request_id: &str,
+        num_computed_tokens: usize,
+    ) -> Result<SlotMatchSplit> {
+        // Mirror the production override: computed_blocks derives from the
+        // caller-supplied num_computed (the GNMT base_offset), independent of the
+        // slot's onboarding-derived local match.
+        let slot = self.require_slot(request_id)?;
+        Ok(SlotMatchSplit {
+            block_size: slot.block_size,
+            computed_blocks: num_computed_tokens / slot.block_size,
+            local_match_blocks: slot.local_match_blocks,
+            total_blocks: slot.total_blocks,
+            all_sequence_hashes: slot.all_hashes.clone(),
+        })
+    }
+
     fn slot_token_ids(&self, request_id: &str) -> Result<Vec<u32>> {
         let slot = self.require_slot(request_id)?;
         let mut out = Vec::with_capacity(slot.total_blocks * slot.block_size);

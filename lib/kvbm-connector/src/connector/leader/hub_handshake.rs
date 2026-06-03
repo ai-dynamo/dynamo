@@ -529,6 +529,7 @@ mod tests {
         DisaggConfig {
             role: DisaggregationRole::Decode,
             max_inflight_remote_prefill_tokens: usize::MAX,
+            min_remote_prefill_tokens: 0,
         }
     }
 
@@ -536,6 +537,7 @@ mod tests {
         DisaggConfig {
             role: DisaggregationRole::Prefill,
             max_inflight_remote_prefill_tokens: usize::MAX,
+            min_remote_prefill_tokens: 0,
         }
     }
 

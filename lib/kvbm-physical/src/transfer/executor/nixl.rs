@@ -368,11 +368,14 @@ impl<'a> NixlTransferBuilder<'a, Set, Set, Set, Set, Set> {
 
         // Post transfer request
         // Note: Notification handling via OptArgs can be added later if needed
+        // NOTE: this legacy NixlTransferBuilder path is NOT the live remote-search
+        // pull route (the connector always uses the planner's direct path via
+        // execute_planner_nixl_transfer). Per-worker RDMA telemetry lives there.
         let still_pending = nixl_agent.post_xfer_req(&xfer_req, None)?;
 
         if still_pending {
             // Register for async completion via status polling
-            Ok(ctx.register_nixl_status(xfer_req))
+            Ok(ctx.register_nixl_status(xfer_req, None))
         } else {
             // Transfer completed synchronously
             Ok(TransferCompleteNotification::completed())

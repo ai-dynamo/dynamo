@@ -48,6 +48,16 @@ pub struct DisaggConfig {
     /// unless operators opt in to admission throttling.
     #[serde(default = "default_max_inflight_remote_prefill_tokens")]
     pub max_inflight_remote_prefill_tokens: usize,
+
+    /// Decode-side conditional-disagg threshold: the minimum number of
+    /// *uncached* prefill tokens (`total − num_computed − local connector
+    /// match`) at or above which a decode leader disaggregates prefill to a
+    /// remote prefill worker. Requests below this prefill locally on the
+    /// decode instance. `0` (default) ⇒ AlwaysRemote — every CD-eligible
+    /// request disaggregates (subject to the downstream 1-full-block floor),
+    /// preserving prior behavior. Only consulted for the decode role.
+    #[serde(default)]
+    pub min_remote_prefill_tokens: usize,
 }
 
 fn default_max_inflight_remote_prefill_tokens() -> usize {
@@ -78,6 +88,7 @@ mod tests {
         let cfg = DisaggConfig {
             role: DisaggregationRole::Decode,
             max_inflight_remote_prefill_tokens: 4096,
+            min_remote_prefill_tokens: 0,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(json.contains(r#""role":"decode""#));
@@ -96,8 +107,21 @@ mod tests {
         let cfg = DisaggConfig {
             role: DisaggregationRole::Prefill,
             max_inflight_remote_prefill_tokens: default_max_inflight_remote_prefill_tokens(),
+            min_remote_prefill_tokens: 0,
         };
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_min_remote_prefill_tokens_defaults_and_parses() {
+        // Absent ⇒ defaults to 0 (AlwaysRemote-equivalent).
+        let cfg: DisaggConfig = serde_json::from_str(r#"{"role": "decode"}"#).unwrap();
+        assert_eq!(cfg.min_remote_prefill_tokens, 0);
+
+        // Present ⇒ parsed (conditional-disagg threshold).
+        let cfg: DisaggConfig =
+            serde_json::from_str(r#"{"role": "decode", "min_remote_prefill_tokens": 256}"#).unwrap();
+        assert_eq!(cfg.min_remote_prefill_tokens, 256);
     }
 
     #[test]

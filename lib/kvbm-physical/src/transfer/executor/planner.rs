@@ -412,6 +412,11 @@ pub(crate) fn execute_planner_nixl_transfer(
         ),
     };
 
+    // Worker-side RDMA telemetry: CONTROL clock starts once ops are lowered —
+    // it covers metadata + descriptor build + create_xfer_req, i.e. everything
+    // up to the NIXL post. (See XferTelemetry / worker_xfer_complete.)
+    let t_ctrl0 = std::time::Instant::now();
+
     let nixl_agent = ctx.nixl_agent();
     let src_metadata = src.nixl_metadata();
     let dst_metadata = dst.nixl_metadata();
@@ -482,15 +487,21 @@ pub(crate) fn execute_planner_nixl_transfer(
         XferOp::Read => src_metadata.agent_name(),
     };
     // PR-7.6: telemetry for the NIXL direct (non-staged) path.
-    // Descriptor count = ops.len() (coalesced); bytes = sum of sizes.
+    // Descriptor count = ops.len() (coalesced); bytes = sum of sizes (the
+    // per-rank shard at TP>1, since the local layout is head-sharded).
     let tel_descriptors = ops.len();
     let tel_bytes: usize = ops.iter().map(|o| o.size).sum();
-    let tel_t0 = std::time::Instant::now();
 
+    // CONTROL = create_xfer_req (and the build above, since t_ctrl0); POST =
+    // post_xfer_req; COMPLETION is measured from `tel_submitted_at` by the
+    // status poller. For an async RDMA read the post returns still_pending=true
+    // and completion is polled; a synchronous completion emits inline below.
     let xfer_req = nixl_agent.create_xfer_req(xfer_op, &src_dl, &dst_dl, remote_agent, None)?;
+    let tel_ctrl_us = t_ctrl0.elapsed().as_micros() as u64;
+    let t_post0 = std::time::Instant::now();
     let still_pending = nixl_agent.post_xfer_req(&xfer_req, None)?;
-
-    let tel_latency_us = tel_t0.elapsed().as_micros() as u64;
+    let tel_post_us = t_post0.elapsed().as_micros() as u64;
+    let tel_submitted_at = std::time::Instant::now();
 
     if tracing::enabled!(target: "kvbm_physical::planner", tracing::Level::DEBUG) {
         let src_sig = physical_to_layout_view(src)
@@ -509,15 +520,35 @@ pub(crate) fn execute_planner_nixl_transfer(
             coalesced_bytes = tel_bytes,
             route = "nixl",
             strategy = ?strategy,
-            submit_latency_us = tel_latency_us,
+            submit_latency_us = tel_ctrl_us + tel_post_us,
             candidate_class = "DirectDma",
             "planner dispatch"
         );
     }
 
+    // Per-worker RDMA audit telemetry (emitted once on completion). worker_id
+    // is the per-process velo id (distinct per TP rank); device_id is the local
+    // dst GPU ordinal (rank → GPU → GPU-local NIC for the report).
+    let telemetry = crate::transfer::notifications::XferTelemetry {
+        worker_id: ctx.worker_id(),
+        op: match xfer_op {
+            XferOp::Read => "Read",
+            XferOp::Write => "Write",
+        },
+        device_id: dst_device_id,
+        num_blocks: dst_block_ids.len(),
+        num_descs: tel_descriptors,
+        bytes: tel_bytes,
+        ctrl_us: tel_ctrl_us,
+        post_us: tel_post_us,
+        submitted_at: tel_submitted_at,
+    };
+
     if still_pending {
-        Ok(ctx.register_nixl_status(xfer_req))
+        Ok(ctx.register_nixl_status(xfer_req, Some(telemetry)))
     } else {
+        // Synchronous completion never enters the poller — emit inline.
+        telemetry.emit_complete(true);
         Ok(TransferCompleteNotification::completed())
     }
 }
@@ -1503,6 +1534,7 @@ impl OwnedStagedContext {
             uuid: uuid::Uuid::new_v4(),
             checker: crate::transfer::notifications::CudaEventChecker::new(cuda_event),
             event_handle: handle,
+            telemetry: None,
         };
         self.tx_cuda_event
             .try_send(notification)
@@ -1525,6 +1557,9 @@ impl OwnedStagedContext {
                 xfer_req,
             ),
             event_handle: handle,
+            // Staged NIXL legs (operational↔universal transform) are not part of
+            // the uniform remote-search pull path we instrument.
+            telemetry: None,
         };
         self.tx_nixl_status
             .try_send(notification)

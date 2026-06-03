@@ -991,7 +991,7 @@ impl ConnectorLeader {
                 ConditionalDisaggPolicy, ConnectorLeaderApi, ConnectorLeaderShim, CoordinatorParts,
                 DecodeDisaggLeader, EngineP2pBlockTransport, HubRemotePrefillQueue, HubWiring,
                 InnerLeaderShim, InnerLeaderWorkerHook, P2pBlockTransport, P2pWorkerHook,
-                PeerResolver, PrefillDisaggLeader, RemotePrefillQueue,
+                PeerResolver, PrefillDisaggLeader, RemotePrefillQueue, ThresholdRemote,
             };
             use kvbm_config::DisaggregationRole;
 
@@ -1103,12 +1103,28 @@ impl ConnectorLeader {
 
             let role_specific: RoleSpecific = match disagg_cfg.role {
                 DisaggregationRole::Decode => {
-                    // Production policy: AlwaysRemote (every CD-eligible
-                    // request goes remote). Threshold-based policies are
-                    // a Phase B.4 follow-up; the local-only path is
-                    // exercised by running with `disagg = None`, which
-                    // bypasses this whole block.
-                    let policy: Arc<dyn ConditionalDisaggPolicy> = Arc::new(AlwaysRemote);
+                    // Decode policy. `min_remote_prefill_tokens > 0` selects
+                    // the threshold policy: prompts whose *uncached* prefill
+                    // work (total − computed − local match) is below the
+                    // threshold prefill locally on the decode worker; at or
+                    // above it they disaggregate to a remote prefill worker.
+                    // `0` (default) ⇒ AlwaysRemote (every CD-eligible request
+                    // goes remote). The fully-local path is reached by running
+                    // with `disagg = None`, which bypasses this whole block.
+                    let policy: Arc<dyn ConditionalDisaggPolicy> =
+                        if disagg_cfg.min_remote_prefill_tokens > 0 {
+                            tracing::info!(
+                                min_remote_prefill_tokens =
+                                    disagg_cfg.min_remote_prefill_tokens,
+                                "decode CD policy: ThresholdRemote"
+                            );
+                            Arc::new(ThresholdRemote {
+                                min_remote_prefill_tokens: disagg_cfg.min_remote_prefill_tokens,
+                            })
+                        } else {
+                            tracing::info!("decode CD policy: AlwaysRemote (no threshold)");
+                            Arc::new(AlwaysRemote)
+                        };
                     let queue: Arc<dyn RemotePrefillQueue> =
                         HubRemotePrefillQueue::new(Arc::clone(&client));
                     let coord = ConditionalDisaggCoordinator::new_with_decode(

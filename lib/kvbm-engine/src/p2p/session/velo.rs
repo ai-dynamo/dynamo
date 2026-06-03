@@ -1139,16 +1139,27 @@ impl Session for VeloSession {
                 pull_id,
                 num_blocks = dst_block_ids.len()
             );
+            // Time exactly the awaited RDMA pull (and nothing else) so a
+            // bandwidth harness can divide bytes-pulled by a clean kernel-clock
+            // duration instead of differencing log-line timestamps. `num_blocks`
+            // is re-emitted here so the done event is self-contained (× the
+            // layout's bytes_per_block = bytes moved). Added fields only — the
+            // (event, role, request_id) signature is unchanged, so the disagg
+            // audit-equiv diff (bin/audit_diff.rs) is unaffected.
+            let rdma_t0 = std::time::Instant::now();
             session
                 .inner
                 .leader
                 .rdma_pull_with_opts(peer_instance_id, refs, WirePullOptions::default())
                 .await
                 .context("rdma_pull_with_opts")?;
+            let rdma_elapsed_us = rdma_t0.elapsed().as_micros() as u64;
             crate::engine_audit!(
                 "session_pull_rdma_done",
                 session_id = %session.inner.session_id,
-                pull_id
+                pull_id,
+                num_blocks = dst_block_ids.len(),
+                elapsed_us = rdma_elapsed_us
             );
 
             // Enqueue PullAck — sender task forwards in order

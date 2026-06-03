@@ -160,6 +160,16 @@ pub trait InnerLeaderShim: Send + Sync {
     fn block_size(&self) -> usize;
     fn get_slot_total_tokens(&self, request_id: &str) -> Result<usize>;
     fn slot_match_split(&self, request_id: &str) -> Result<SlotMatchSplit>;
+    /// Like [`Self::slot_match_split`] but with the caller supplying the
+    /// authoritative `num_computed_tokens` (the GNMT `base_offset`). The CD
+    /// wrapper uses this at USAA-1: a vLLM prefix-cache hit with zero G2 match
+    /// leaves the slot's onboarding state `None`, so the onboarding-derived
+    /// num_computed would be 0 and `computed_blocks` would under-count the prefix.
+    fn slot_match_split_with_num_computed(
+        &self,
+        request_id: &str,
+        num_computed_tokens: usize,
+    ) -> Result<SlotMatchSplit>;
     fn slot_token_ids(&self, request_id: &str) -> Result<Vec<u32>>;
     /// Borrow the slot's LoRA adapter name for CD wire propagation.
     fn slot_lora_name(&self, request_id: &str) -> Result<Option<String>>;
@@ -405,6 +415,15 @@ impl InnerLeaderShim for ConnectorLeaderShim {
 
     fn slot_match_split(&self, request_id: &str) -> Result<SlotMatchSplit> {
         self.inner.slot_match_split(request_id)
+    }
+
+    fn slot_match_split_with_num_computed(
+        &self,
+        request_id: &str,
+        num_computed_tokens: usize,
+    ) -> Result<SlotMatchSplit> {
+        self.inner
+            .slot_match_split_with_num_computed(request_id, num_computed_tokens)
     }
 
     fn slot_token_ids(&self, request_id: &str) -> Result<Vec<u32>> {
