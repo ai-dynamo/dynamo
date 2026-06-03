@@ -20,7 +20,7 @@ This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo)
 - **Concurrency:** One request at a time per worker (VideoGenerator is not re-entrant). Scale throughput by running multiple workers.
 
 > [!IMPORTANT]
-> `worker.py` defaults to `--attention-backend VIDEO_SPARSE_ATTN` and routes `VSA_sparsity=0.8` through FastVideo's typed `PipelineSelection.experimental` config. Use `--attention-backend TORCH_SDPA` if your GPU/software stack does not support video sparse attention.
+> `worker.py` defaults to `--attention-backend VIDEO_SPARSE_ATTN` and routes `VSA_sparsity=0.8` through FastVideo's typed `PipelineSelection.experimental` config. Keep this backend for FastWan 2.1 models; forcing `TORCH_SDPA` can instantiate a non-VSA Wan block and fail checkpoint loading. Use `--attention-backend TORCH_SDPA` for LTX2 if you want the compatibility path validated by the B300 smoke test.
 
 ## Docker Image Build
 
@@ -105,7 +105,7 @@ Environment variables:
 | `MODEL` | `FastVideo/FastWan2.1-T2V-1.3B-Diffusers` | HuggingFace model path |
 | `NUM_GPUS` | `1` | Number of GPUs |
 | `DYN_HTTP_PORT` | `8000` | Frontend HTTP port |
-| `WORKER_EXTRA_ARGS` | — | Extra flags for `worker.py` (for example, `--torch-compile --fp4-quantization`) |
+| `WORKER_EXTRA_ARGS` | — | Extra flags for `worker.py` (for example, `--attention-backend VIDEO_SPARSE_ATTN --vsa-sparsity 0.8`) |
 | `FRONTEND_EXTRA_ARGS` | — | Extra flags for `dynamo.frontend` |
 
 Example:
@@ -114,12 +114,22 @@ Example:
 MODEL=FastVideo/FastWan2.1-T2V-1.3B-Diffusers \
 NUM_GPUS=1 \
 DYN_HTTP_PORT=8000 \
-WORKER_EXTRA_ARGS="--torch-compile --fp4-quantization" \
+WORKER_EXTRA_ARGS="--attention-backend VIDEO_SPARSE_ATTN --vsa-sparsity 0.8" \
 ./run_local.sh
 ```
 
 > [!NOTE]
 > FastVideo worker flags are not `dynamo.frontend` flags, so pass non-default worker configuration through `WORKER_EXTRA_ARGS`.
+
+Validated B300 smoke-test worker configurations:
+
+| Model | Base worker flags | FP4 worker flags |
+|---|---|---|
+| `FastVideo/FastWan2.1-T2V-1.3B-Diffusers` | `--attention-backend VIDEO_SPARSE_ATTN --vsa-sparsity 0.8` | `--attention-backend VIDEO_SPARSE_ATTN --vsa-sparsity 0.8 --fp4-quantization` |
+| `FastVideo/LTX2-Distilled-Diffusers` | `--attention-backend TORCH_SDPA` | `--attention-backend TORCH_SDPA --fp4-quantization` |
+
+> [!NOTE]
+> The FastWan FP4 configuration completed the smoke request, but the worker log did not show the NVFP4 weight-conversion marker. Treat `--fp4-quantization` as requested, not independently confirmed, for FastWan until the FastVideo logs expose that confirmation.
 
 The script writes logs to:
 
@@ -239,7 +249,7 @@ Start the local example with an LTX-2 model:
 cd <dynamo-root>/examples/diffusers/local
 
 MODEL=FastVideo/LTX2-Distilled-Diffusers \
-WORKER_EXTRA_ARGS="--torch-compile --fp4-quantization --attention-backend FLASH_ATTN" \
+WORKER_EXTRA_ARGS="--attention-backend TORCH_SDPA --fp4-quantization" \
 ./run_local.sh
 ```
 
@@ -279,7 +289,7 @@ FastVideo exposes generated audio and `audio_sample_rate` on its Python result o
 | `--attention-backend` | `VIDEO_SPARSE_ATTN` | Sets `FASTVIDEO_ATTENTION_BACKEND`; choices: `FLASH_ATTN`, `TORCH_SDPA`, `SAGE_ATTN`, `SAGE_ATTN_THREE`, `VIDEO_SPARSE_ATTN`, `VMOBA_ATTN`, `SLA_ATTN`, `SAGE_SLA_ATTN` |
 | `--vsa-sparsity` | `0.8` | Sets `PipelineSelection.experimental["VSA_sparsity"]` |
 | `--torch-compile` | off | Enables FastVideo `CompileConfig` |
-| `--fp4-quantization` | off | Requests FastVideo NVFP4 transformer quantization through `QuantizationConfig(transformer_quant="NVFP4")` |
+| `--fp4-quantization` | off | Requests FastVideo NVFP4 transformer quantization through `QuantizationConfig(transformer_quant="NVFP4")`; confirm actual activation in worker logs before reporting FP4 results |
 | `--enable-optimizations` | off | Backward-compatible shortcut for `--torch-compile --fp4-quantization` |
 | `--dit-cpu-offload`, `--vae-cpu-offload`, `--text-encoder-cpu-offload`, `--image-encoder-cpu-offload`, `--pin-cpu-memory` | on | CPU offload controls; each has a `--no-*` variant |
 | `--max-video-width`, `--max-video-height` | `4096`, `4096` | Reject request dimensions above these caps before calling FastVideo |
@@ -314,8 +324,9 @@ FastVideo exposes generated audio and `audio_sample_rate` on its Python result o
 | `no kernel image available for this GPU` or CUDA arch error at runtime | Image was built for a different GPU architecture | Rebuild with the correct `TORCH_CUDA_ARCH_LIST` (e.g. `9.0 9.0a` for Hopper or `12.0` for RTX 50-series) |
 | 10–20 min wait on first start with `--torch-compile` enabled | Model download + `torch.compile` warmup | Expected behavior; subsequent starts are faster if weights are cached |
 | ~35 s second request | Runtime caches still warming | Steady-state performance from third request onward |
-| Lower throughput than expected on Blackwell GPUs | NVFP4/compile are opt-in | Pass `--torch-compile --fp4-quantization` |
-| Startup or import failure after enabling FP4/compile or changing the attention backend | NVFP4 and some attention backends depend on specific hardware/software support | Re-run `worker.py` without `--torch-compile --fp4-quantization`, or use `--attention-backend TORCH_SDPA` |
+| Lower throughput than expected on Blackwell GPUs | NVFP4/compile are opt-in | Pass `--fp4-quantization` and, if desired, `--torch-compile`; confirm NVFP4 activation in worker logs |
+| FastWan startup fails with a missing `to_gate_compress` checkpoint parameter | FastWan 2.1 checkpoints expect the VSA Wan block | Use `--attention-backend VIDEO_SPARSE_ATTN --vsa-sparsity 0.8`; do not force `TORCH_SDPA` for FastWan 2.1 |
+| Startup or import failure after enabling FP4/compile or changing the attention backend | NVFP4 and some attention backends depend on specific hardware/software support | Re-run `worker.py` without `--torch-compile --fp4-quantization`; for LTX2, use `--attention-backend TORCH_SDPA` for the validated compatibility path |
 
 ## Source Code
 
