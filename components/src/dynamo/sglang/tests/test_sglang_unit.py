@@ -17,6 +17,7 @@ from dynamo.sglang._compat import (
     ensure_sglang_top_level_exports,
     filter_supported_async_generate_kwargs,
 )
+from dynamo.sglang.args import _derive_shared_hicache_bootstrap_port
 from dynamo.sglang.args import parse_args
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
@@ -116,6 +117,14 @@ def test_shared_hicache_plan_adapter_uses_string_worker_ids():
     assert plan["source_bootstrap_port"] == 41000
     assert plan["source_medium"] == "CPU_PINNED"
     assert "source_endpoint" not in plan
+
+
+def test_shared_hicache_auto_bootstrap_derives_from_dynamo_system_port(monkeypatch):
+    monkeypatch.setenv("DYN_SYSTEM_PORT", "9102")
+
+    base_port = _derive_shared_hicache_bootstrap_port(tp_size=4)
+
+    assert base_port == 20000 + (9102 % 3192) * 4
 
 
 def test_compat_keeps_async_generate_kwargs_for_newer_engines():

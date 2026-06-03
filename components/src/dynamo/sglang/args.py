@@ -248,7 +248,8 @@ async def parse_args(args: list[str]) -> Config:
     ):
         args_dict = vars(parsed_args)
         args_dict["shared_hicache_bootstrap_port"] = (
-            _reserve_disaggregation_bootstrap_port()
+            _derive_shared_hicache_bootstrap_port(getattr(parsed_args, "tp_size", 1))
+            or _reserve_disaggregation_bootstrap_port()
         )
         parsed_args = Namespace(**args_dict)
 
@@ -479,3 +480,21 @@ def _reserve_disaggregation_bootstrap_port() -> int:
     """
     with reserve_free_port() as port:
         return port
+
+
+def _derive_shared_hicache_bootstrap_port(tp_size: int) -> Optional[int]:
+    raw_system_port = os.getenv("DYN_SYSTEM_PORT")
+    if raw_system_port is None:
+        return None
+    try:
+        system_port = int(raw_system_port)
+    except ValueError:
+        return None
+    if system_port <= 0:
+        return None
+
+    width = max(1, int(tp_size))
+    first_port = 20000
+    last_port = 32767
+    slot_count = max(1, (last_port - first_port + 1) // width)
+    return first_port + (system_port % slot_count) * width
