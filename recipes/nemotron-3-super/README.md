@@ -3,9 +3,9 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Nemotron-3-Super Turbo Recipes
+# Nemotron-3-Super Recipes
 
-NIM Turbo deployment recipes for **nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4** (B200) and **nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8** (H200) — a ~120B hybrid Mamba/Attention/MoE model (~12B active).
+Recipes for **nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4** (B200) and **nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8** (H200) — a ~120B hybrid Mamba/Attention/MoE model (~12B active).
 
 We ship Dynamo + vLLM deployment profiles across two GPU SKUs and two serving modes.
 
