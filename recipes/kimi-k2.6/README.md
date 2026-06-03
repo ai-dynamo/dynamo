@@ -43,7 +43,14 @@ Dynamo + vLLM deployment profiles across two GPU SKUs and two target workloads:
 
 ## Quick Start
 
-### 1. Create Storage
+### 1. Create namespace
+
+```
+export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
+```
+
+### 2. Create Storage
 
 > **Note:** Edit `model-cache/model-cache.yaml` first and update `storageClassName` to match your cluster (`kubectl get storageclass`).
 
@@ -51,17 +58,16 @@ Dynamo + vLLM deployment profiles across two GPU SKUs and two target workloads:
 kubectl apply -f model-cache/model-cache.yaml -n ${NAMESPACE}
 ```
 
-### 2. Download model + EAGLE3 head
+### 3. Download model + EAGLE3 head
 
-> **Note:** Edit `model-cache/model-download.yaml` first and remove the `hf download` lines that do not apply to your deployment.
+> **Note:** Edit `model-cache/model-download.yaml` first and remove the `hf download` lines that do not apply to your deployment (For H200, remove the NVFP4 download, for B200, remove the native INT4 download).
 
 ```bash
 kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
 ```
 
-
-### 3. Deploy the DGD
+### 4. Deploy the DGD
 
 Deploy the target DGD:
 
@@ -73,7 +79,7 @@ kubectl apply -f vllm/turbo_kimi_k26_agg_${SKU}_${USECASE}.yaml -n ${NAMESPACE}
 ```
 
 
-### 4. Benchmark
+### 5. Benchmark
 
 See [`perf/README.md`](perf/README.md) for the full benchmark workflow — trace staging on the PVC, running the AIPerf trace-replay Job ([`perf/perf.yaml`](perf/perf.yaml)), running a concurrency sweep, and fetching artifacts.
 
