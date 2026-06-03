@@ -482,7 +482,10 @@ impl LoraController {
                 continue;
             }
             let pinned_worker = pin.first().map(|w| w.worker_id);
-            if self.update_routing_entry(lora_name, 1, pin, false) {
+            // Store the effective set size (not a literal 1): the per-LoRA allocators return one
+            // worker for HRW/MCF cold-start, but the test-only Random allocator returns every
+            // worker regardless of the requested count, so replica_factor must track the set.
+            if self.update_routing_entry(lora_name, pin.len(), pin, false) {
                 tracing::info!(
                     lora = lora_name,
                     pinned_worker_id = ?pinned_worker,
