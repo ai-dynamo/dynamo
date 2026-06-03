@@ -819,6 +819,17 @@ fn inject_worker_id_from_tracker(
     }
 }
 
+/// Attach the request's timing to `routing_data` so it survives the
+/// Rust->Python->Rust router path to the frontend (data survives, annotations don't).
+fn inject_timing_from_tracker(
+    data: &mut llm_rs::protocols::common::llm_backend::LLMEngineOutput,
+    tracker: &RequestTracker,
+) {
+    data.routing_data
+        .get_or_insert_with(Default::default)
+        .timing = Some(tracker.get_timing_info());
+}
+
 // TODO: can this reuse the stream conversion method in Client bindings?
 impl KvRouter {
     /// Helper method to process a request and create a Python async generator
@@ -858,6 +869,14 @@ impl KvRouter {
                             }
                             first_token_gauges_observed = true;
                         }
+                    }
+
+                    // On the terminal chunk, finalize timing and attach it for the frontend.
+                    if let (Some(tracker), Some(data)) = (&tracker, &mut response.data)
+                        && data.finish_reason.is_some()
+                    {
+                        tracker.record_finish();
+                        inject_timing_from_tracker(data, tracker);
                     }
 
                     let py_response = Python::with_gil(|py| {

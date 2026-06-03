@@ -10,7 +10,7 @@ SPDX-License-Identifier: Apache-2.0
 > bridging, KV event publishing, KV-aware (DP-rank) routing,
 > health-check canaries, OpenTelemetry tracing, and request-side
 > guided decoding. Logprob response wire, multimodal, diffusion
-> (image/video/DLLM), LoRA, engine routes (sleep/wake, profiling,
+> (image/video/DLLM), LoRA, engine routes (pause/resume, profiling,
 > weight updates), text-in-text-out, and snapshot/CRIU are still on
 > the non-unified path. See the
 > [Python package README](../../components/src/dynamo/common/backend/README.md#feature-gaps)
