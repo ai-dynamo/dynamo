@@ -218,6 +218,11 @@ pub struct PreprocessedRequest {
     #[serde(default)]
     pub annotations: Vec<String>,
 
+    /// Whether to require reasoning for the request
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_reasoning: Option<bool>,
+
     /// Routing hints for worker targeting (backend_instance_id, prefill/decode worker IDs, dp_rank)
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
