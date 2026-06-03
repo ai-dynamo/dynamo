@@ -1452,7 +1452,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 	if rollingUpdateCtx.InProgress() {
 		logger.Info("Rolling update in progress",
 			"newWorkerHash", rollingUpdateCtx.NewWorkerHash,
-			"oldWorkerComponentReplicas", rollingUpdateCtx.OldWorkerComponentReplicas)
+			"oldWorkerComponentReplicas", rollingUpdateCtx.OldWorkerReplicaTargetsByComponent)
 	}
 
 	// Generate all DCDs (handles both normal and rolling update cases)

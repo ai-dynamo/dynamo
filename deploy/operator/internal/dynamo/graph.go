@@ -262,7 +262,7 @@ func ParseDynDeploymentConfig(jsonContent []byte) (DynDeploymentConfig, error) {
 }
 
 func (r RollingUpdateContext) InProgress() bool {
-	return len(r.OldWorkerComponentReplicas) > 0
+	return len(r.OldWorkerReplicaTargetsByComponent) > 0
 }
 
 // RollingUpdateContext provides information about an in-progress rolling update.
@@ -272,14 +272,14 @@ type RollingUpdateContext struct {
 
 	// Aggregate desired replica targets for old worker generations, keyed by logical component name.
 	// Example: worker -> 3 means all old DCDs for component "worker" should sum to 3 replicas.
-	OldWorkerComponentReplicas map[string]int32
+	OldWorkerReplicaTargetsByComponent map[string]int32
 
 	// Concrete desired replica targets for each old worker DCD, keyed by DCD object name.
 	// Example: dgd-worker-a -> 3, dgd-worker-b -> 0.
-	OldWorkerDCDReplicas map[string]int32
+	OldWorkerReplicaTargetsByDCD map[string]int32
 
 	// Desired replica targets for the new worker generation, keyed by logical component name.
-	NewWorkerReplicas map[string]int32
+	NewWorkerReplicaTargetsByComponent map[string]int32
 }
 
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig.
@@ -433,7 +433,7 @@ func generateSingleDCD(
 	}
 
 	// during a rolling update, the replica count is determined by the rollingUpdateCtx instead of the component spec
-	if newReplicas, ok := rollingUpdateCtx.NewWorkerReplicas[componentName]; rollingUpdateCtx.InProgress() && IsWorkerComponent(string(component.ComponentType)) && ok {
+	if newReplicas, ok := rollingUpdateCtx.NewWorkerReplicaTargetsByComponent[componentName]; rollingUpdateCtx.InProgress() && IsWorkerComponent(string(component.ComponentType)) && ok {
 		deployment.Spec.Replicas = ptr.To(newReplicas)
 	} else if component.Replicas != nil {
 		deployment.Spec.Replicas = component.Replicas

@@ -942,11 +942,11 @@ func (r *DynamoGraphDeploymentReconciler) scaleOldWorkerDCDs(
 	for i := range oldDCDs {
 		dcd := &oldDCDs[i]
 		componentName := dynamo.GetDCDComponentName(dcd)
-		if _, ok := rollingUpdateCtx.OldWorkerComponentReplicas[componentName]; !ok {
+		if _, ok := rollingUpdateCtx.OldWorkerReplicaTargetsByComponent[componentName]; !ok {
 			continue
 		}
 
-		desiredReplicas, ok := rollingUpdateCtx.OldWorkerDCDReplicas[dcd.Name]
+		desiredReplicas, ok := rollingUpdateCtx.OldWorkerReplicaTargetsByDCD[dcd.Name]
 		if !ok {
 			return fmt.Errorf("missing old worker DCD replica target for %s", dcd.Name)
 		}
@@ -1066,7 +1066,7 @@ func (r *DynamoGraphDeploymentReconciler) aggregateOldWorkerComponentStatuses(
 
 	for _, dcd := range oldDCDs {
 		componentName := dynamo.GetDCDComponentName(&dcd)
-		if _, inRollout := rollingUpdateCtx.OldWorkerComponentReplicas[componentName]; !inRollout {
+		if _, inRollout := rollingUpdateCtx.OldWorkerReplicaTargetsByComponent[componentName]; !inRollout {
 			continue
 		}
 		if dcd.Status.Component == nil {
@@ -1135,10 +1135,10 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 
 	if currentHashes.contains(newWorkerHash) {
 		return dynamo.RollingUpdateContext{
-			NewWorkerHash:              newWorkerHash,
-			OldWorkerComponentReplicas: make(map[string]int32),
-			OldWorkerDCDReplicas:       make(map[string]int32),
-			NewWorkerReplicas:          make(map[string]int32),
+			NewWorkerHash:                      newWorkerHash,
+			OldWorkerReplicaTargetsByComponent: make(map[string]int32),
+			OldWorkerReplicaTargetsByDCD:       make(map[string]int32),
+			NewWorkerReplicaTargetsByComponent: make(map[string]int32),
 		}, nil
 	}
 
@@ -1209,10 +1209,10 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 	}
 
 	return dynamo.RollingUpdateContext{
-		NewWorkerHash:              newWorkerHash,
-		OldWorkerComponentReplicas: oldWorkerComponentReplicas,
-		OldWorkerDCDReplicas:       oldWorkerDCDReplicas,
-		NewWorkerReplicas:          newWorkerReplicas,
+		NewWorkerHash:                      newWorkerHash,
+		OldWorkerReplicaTargetsByComponent: oldWorkerComponentReplicas,
+		OldWorkerReplicaTargetsByDCD:       oldWorkerDCDReplicas,
+		NewWorkerReplicaTargetsByComponent: newWorkerReplicas,
 	}, nil
 }
 

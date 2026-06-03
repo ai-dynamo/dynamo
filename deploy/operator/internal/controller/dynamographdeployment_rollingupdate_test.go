@@ -1452,9 +1452,9 @@ func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 		ctx := context.Background()
 
 		rollingUpdateCtx := dynamo.RollingUpdateContext{
-			NewWorkerHash:              testNewWorkerHash,
-			OldWorkerComponentReplicas: map[string]int32{"prefill": 1},
-			NewWorkerReplicas:          map[string]int32{"prefill": 2},
+			NewWorkerHash:                      testNewWorkerHash,
+			OldWorkerReplicaTargetsByComponent: map[string]int32{"prefill": 1},
+			NewWorkerReplicaTargetsByComponent: map[string]int32{"prefill": 2},
 		}
 
 		statuses, err := r.aggregateOldWorkerComponentStatuses(ctx, dgd, rollingUpdateCtx)
@@ -1478,9 +1478,9 @@ func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 		ctx := context.Background()
 
 		rollingUpdateCtx := dynamo.RollingUpdateContext{
-			NewWorkerHash:              testNewWorkerHash,
-			OldWorkerComponentReplicas: map[string]int32{"prefill": 1},
-			NewWorkerReplicas:          map[string]int32{"prefill": 2},
+			NewWorkerHash:                      testNewWorkerHash,
+			OldWorkerReplicaTargetsByComponent: map[string]int32{"prefill": 1},
+			NewWorkerReplicaTargetsByComponent: map[string]int32{"prefill": 2},
 		}
 
 		statuses, err := r.aggregateOldWorkerComponentStatuses(ctx, dgd, rollingUpdateCtx)
@@ -2202,10 +2202,10 @@ func TestScaleOldWorkerDCDs_LegacyDCDs(t *testing.T) {
 		ctx := context.Background()
 
 		rollingUpdateCtx := dynamo.RollingUpdateContext{
-			NewWorkerHash:              "newhash1",
-			OldWorkerComponentReplicas: map[string]int32{"worker": 1},
-			OldWorkerDCDReplicas:       map[string]int32{"test-dgd-worker": 1},
-			NewWorkerReplicas:          map[string]int32{"worker": 3},
+			NewWorkerHash:                      "newhash1",
+			OldWorkerReplicaTargetsByComponent: map[string]int32{"worker": 1},
+			OldWorkerReplicaTargetsByDCD:       map[string]int32{"test-dgd-worker": 1},
+			NewWorkerReplicaTargetsByComponent: map[string]int32{"worker": 3},
 		}
 
 		err := r.scaleOldWorkerDCDs(ctx, dgd, rollingUpdateCtx)
@@ -2228,10 +2228,10 @@ func TestScaleOldWorkerDCDs_LegacyDCDs(t *testing.T) {
 
 		// Empty OldWorkerComponentReplicas = not in progress
 		rollingUpdateCtx := dynamo.RollingUpdateContext{
-			NewWorkerHash:              "samehash",
-			OldWorkerComponentReplicas: map[string]int32{},
-			OldWorkerDCDReplicas:       map[string]int32{},
-			NewWorkerReplicas:          map[string]int32{},
+			NewWorkerHash:                      "samehash",
+			OldWorkerReplicaTargetsByComponent: map[string]int32{},
+			OldWorkerReplicaTargetsByDCD:       map[string]int32{},
+			NewWorkerReplicaTargetsByComponent: map[string]int32{},
 		}
 
 		err := r.scaleOldWorkerDCDs(ctx, dgd, rollingUpdateCtx)
@@ -2268,10 +2268,10 @@ func TestScaleOldWorkerDCDs_LegacyDCDs(t *testing.T) {
 		ctx := context.Background()
 
 		rollingUpdateCtx := dynamo.RollingUpdateContext{
-			NewWorkerHash:              "newhash1",
-			OldWorkerComponentReplicas: map[string]int32{"worker": 1},
-			OldWorkerDCDReplicas:       map[string]int32{"test-dgd-worker": 1},
-			NewWorkerReplicas:          map[string]int32{"worker": 3},
+			NewWorkerHash:                      "newhash1",
+			OldWorkerReplicaTargetsByComponent: map[string]int32{"worker": 1},
+			OldWorkerReplicaTargetsByDCD:       map[string]int32{"test-dgd-worker": 1},
+			NewWorkerReplicaTargetsByComponent: map[string]int32{"worker": 3},
 		}
 
 		err := r.scaleOldWorkerDCDs(ctx, dgd, rollingUpdateCtx)
@@ -2325,9 +2325,9 @@ func TestAggregateOldWorkerServiceStatuses_LegacyDCDs(t *testing.T) {
 		ctx := context.Background()
 
 		rollingUpdateCtx := dynamo.RollingUpdateContext{
-			NewWorkerHash:              "newhash1",
-			OldWorkerComponentReplicas: map[string]int32{"worker": 2},
-			NewWorkerReplicas:          map[string]int32{"worker": 3},
+			NewWorkerHash:                      "newhash1",
+			OldWorkerReplicaTargetsByComponent: map[string]int32{"worker": 2},
+			NewWorkerReplicaTargetsByComponent: map[string]int32{"worker": 3},
 		}
 
 		statuses, err := r.aggregateOldWorkerComponentStatuses(ctx, dgd, rollingUpdateCtx)
@@ -2350,9 +2350,9 @@ func TestAggregateOldWorkerServiceStatuses_LegacyDCDs(t *testing.T) {
 		ctx := context.Background()
 
 		rollingUpdateCtx := dynamo.RollingUpdateContext{
-			NewWorkerHash:              "newhash1",
-			OldWorkerComponentReplicas: map[string]int32{"worker": 1},
-			NewWorkerReplicas:          map[string]int32{"worker": 1},
+			NewWorkerHash:                      "newhash1",
+			OldWorkerReplicaTargetsByComponent: map[string]int32{"worker": 1},
+			NewWorkerReplicaTargetsByComponent: map[string]int32{"worker": 1},
 		}
 
 		statuses, err := r.aggregateOldWorkerComponentStatuses(ctx, dgd, rollingUpdateCtx)
@@ -2613,13 +2613,13 @@ func TestScaleOldWorkerDCDs_MultipleOldGenerations(t *testing.T) {
 
 	// oldNeeded = 2: newest old (B) should get 2, oldest (A) should get 0
 	rollingUpdateCtx := dynamo.RollingUpdateContext{
-		NewWorkerHash:              "hashcccc",
-		OldWorkerComponentReplicas: map[string]int32{"worker": 2},
-		OldWorkerDCDReplicas: map[string]int32{
+		NewWorkerHash:                      "hashcccc",
+		OldWorkerReplicaTargetsByComponent: map[string]int32{"worker": 2},
+		OldWorkerReplicaTargetsByDCD: map[string]int32{
 			"test-dgd-worker-hashaaaa": 0,
 			"test-dgd-worker-hashbbbb": 2,
 		},
-		NewWorkerReplicas: map[string]int32{"worker": 4},
+		NewWorkerReplicaTargetsByComponent: map[string]int32{"worker": 4},
 	}
 
 	err := r.scaleOldWorkerDCDs(ctx, dgd, rollingUpdateCtx)
@@ -2786,10 +2786,10 @@ func TestScaleOldWorkerDCDs_MultipleOldGenerationsPreservesAvailableReplicas(t *
 
 	rollingUpdateCtx, err := r.buildRollingUpdateContext(ctx, dgd)
 	require.NoError(t, err)
-	assert.Equal(t, int32(15), rollingUpdateCtx.OldWorkerComponentReplicas["worker"])
-	assert.Equal(t, int32(15), rollingUpdateCtx.OldWorkerDCDReplicas["test-dgd-worker-hashaaaa"])
-	assert.Equal(t, int32(0), rollingUpdateCtx.OldWorkerDCDReplicas["test-dgd-worker-hashbbbb"])
-	assert.Equal(t, int32(0), rollingUpdateCtx.NewWorkerReplicas["worker"])
+	assert.Equal(t, int32(15), rollingUpdateCtx.OldWorkerReplicaTargetsByComponent["worker"])
+	assert.Equal(t, int32(15), rollingUpdateCtx.OldWorkerReplicaTargetsByDCD["test-dgd-worker-hashaaaa"])
+	assert.Equal(t, int32(0), rollingUpdateCtx.OldWorkerReplicaTargetsByDCD["test-dgd-worker-hashbbbb"])
+	assert.Equal(t, int32(0), rollingUpdateCtx.NewWorkerReplicaTargetsByComponent["worker"])
 
 	err = r.scaleOldWorkerDCDs(ctx, dgd, rollingUpdateCtx)
 	require.NoError(t, err)
@@ -2871,9 +2871,9 @@ func TestAggregateOldWorkerServiceStatuses_MultipleOldGenerations(t *testing.T) 
 	ctx := context.Background()
 
 	rollingUpdateCtx := dynamo.RollingUpdateContext{
-		NewWorkerHash:              "hashcccc",
-		OldWorkerComponentReplicas: map[string]int32{"worker": 3},
-		NewWorkerReplicas:          map[string]int32{"worker": 4},
+		NewWorkerHash:                      "hashcccc",
+		OldWorkerReplicaTargetsByComponent: map[string]int32{"worker": 3},
+		NewWorkerReplicaTargetsByComponent: map[string]int32{"worker": 4},
 	}
 
 	statuses, err := r.aggregateOldWorkerComponentStatuses(ctx, dgd, rollingUpdateCtx)
@@ -3673,11 +3673,11 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 
 			assert.Equal(t, newHash, result.NewWorkerHash)
 			for svc, expectedOld := range tt.expectedOld {
-				assert.Equal(t, expectedOld, result.OldWorkerComponentReplicas[svc],
+				assert.Equal(t, expectedOld, result.OldWorkerReplicaTargetsByComponent[svc],
 					"old replicas for service %s", svc)
 			}
 			for svc, expectedNew := range tt.expectedNew {
-				assert.Equal(t, expectedNew, result.NewWorkerReplicas[svc],
+				assert.Equal(t, expectedNew, result.NewWorkerReplicaTargetsByComponent[svc],
 					"new replicas for service %s", svc)
 			}
 		})
@@ -3730,8 +3730,8 @@ func TestBuildRollingUpdateContext_NoNewDCDExists(t *testing.T) {
 	assert.NoError(t, err, "IsNotFound on the new-hash DCD must not produce an error")
 	assert.Equal(t, newHash, result.NewWorkerHash)
 	// Math runs with newState={0,0,0}: drain old to minAvailable, surge new from zero.
-	assert.Equal(t, int32(8), result.OldWorkerComponentReplicas["worker"])
-	assert.Equal(t, int32(3), result.NewWorkerReplicas["worker"])
+	assert.Equal(t, int32(8), result.OldWorkerReplicaTargetsByComponent["worker"])
+	assert.Equal(t, int32(3), result.NewWorkerReplicaTargetsByComponent["worker"])
 }
 
 func TestBuildRollingUpdateContext_ListOldDCDsError(t *testing.T) {
