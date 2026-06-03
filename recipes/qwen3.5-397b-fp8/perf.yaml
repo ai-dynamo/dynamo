@@ -12,12 +12,13 @@
 # server/worker pods, which is what guarantees same-node placement.
 # No podAffinity — the hostname pin makes it redundant.
 #
-# Installs aiperf from source pinned at AIPERF_GIT_REF — must include
-# https://github.com/ai-dynamo/aiperf/pull/824 ("add session_id to
-# single-turn for causal ordering"). Our sliding-window jsonl writes
-# session_id=user_<N> per row; PR 824 makes single_turn mode honor
-# that ordering so the 8 turns of any one user are issued in causal
-# order and prefix-cache hits across turns actually land.
+# Installs aiperf from PyPI pinned at AIPERF_VERSION. Both required
+# PRs — 824 ("add session_id to single-turn for causal ordering") and
+# 903 ("HF Image(decode=False) byte dicts") — landed in the 0.8.0
+# release (2026-05-16), so any 0.8.0+ wheel works. Our sliding-window
+# jsonl writes session_id=user_<N> per row; PR 824 makes single_turn
+# mode honor that ordering so the 8 turns of any one user are issued
+# in causal order and prefix-cache hits across turns actually land.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -47,11 +48,11 @@ spec:
 
           apt update && apt install -y --no-install-recommends curl jq git
 
-          # Pin to a recent aiperf main SHA that includes PR 824
-          # (session_id for single-turn) + PR 903 (HF image-byte-dict fix).
-          # Bump AIPERF_GIT_REF to roll forward.
-          pip install --no-cache-dir "aiperf @ git+https://github.com/ai-dynamo/aiperf.git@${AIPERF_GIT_REF}"
-          python -c "import aiperf, sys; print('aiperf', aiperf.__version__ if hasattr(aiperf,'__version__') else 'sha-pinned', 'OK')"
+          # Pin to a released aiperf wheel — 0.8.0+ includes PR 824
+          # (session_id for single-turn) + PR 903 (HF image-byte-dict
+          # fix). Bump AIPERF_VERSION to roll forward.
+          pip install --no-cache-dir "aiperf==${AIPERF_VERSION}"
+          python -c "import aiperf; print('aiperf', getattr(aiperf, '__version__', '?'), 'OK')"
 
           echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000/v1/models ..."
           until curl -s "http://${FRONTEND}:8000/v1/models" \
@@ -124,8 +125,8 @@ spec:
         # retrieve() can scoop only this config's run.
         - name: RUN_LABEL
           value: ${BENCH_RUN_LABEL}
-        - name: AIPERF_GIT_REF
-          value: "79de74ece808"
+        - name: AIPERF_VERSION
+          value: "0.9.0"
         - name: MAX_TOKENS
           value: "1024"
         - name: REQUEST_COUNT
