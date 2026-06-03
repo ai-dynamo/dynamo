@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Dict, Final, Generic, Optional, TypeVar
 
 import torch
+from vllm import PoolingParams
 from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
@@ -2950,10 +2951,6 @@ class EmbeddingWorkerHandler:
         ``dimensions`` truncation so the byte count matches the requested
         dimensionality.
         """
-        # Lazy import to avoid pulling PoolingParams into handlers.py at module
-        # load time for non-embedding workers.
-        from vllm import PoolingParams
-
         model_name = request.get("model") or self.config.served_model_name or ""
         input_field = request.get("input")
         if input_field is None:
@@ -2985,13 +2982,15 @@ class EmbeddingWorkerHandler:
                 "expected 'float' or 'base64'"
             )
 
-        # Request the pooled, normalized sentence embedding. With no task,
-        # vLLM 0.21's encode() resolves to per-token output (the full
-        # ``n_tokens x hidden`` hidden-state matrix, un-normalized), so the
-        # OpenAI ``/v1/embeddings`` response ends up with the wrong shape
-        # (dim scales with input length) instead of one vector per input.
-        # ``task="embed"`` selects the pooled+normalized embedding, matching
-        # vLLM's own embedding server.
+        # Request the pooled sentence embedding. With no task, vLLM's
+        # encode() resolves to per-token output (the full ``n_tokens x
+        # hidden`` hidden-state matrix), so the OpenAI ``/v1/embeddings``
+        # response ends up with the wrong shape (dim scales with input
+        # length) instead of one vector per input. ``task="embed"`` selects
+        # the pooled embedding and runs the model's configured pooler
+        # (normalization included for models like Qwen3-Embedding), matching
+        # vLLM's own embedding server. ``use_activation`` is intentionally
+        # left at the pooler default so per-model behaviour isn't overridden.
         pooling_params = PoolingParams(task="embed")
         # Use the per-request context id (same as the chat/completion paths
         # in this file) so concurrent embeddings never collide inside
