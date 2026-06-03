@@ -197,6 +197,17 @@ bench() {
   # which run-benchmark.sh's case statement exports.
   APPLY_TPL "$HERE/perf.yaml"
   $K wait --for=condition=Ready "pod/$BENCH_POD" --timeout=300s
+  # Clear any stale .aiperf-done sentinel from a prior run BEFORE we
+  # start polling. The sentinel lives on the FSx-shared
+  # /perf-cache/artifacts/qwen35_fp8/<run-label>/ subpath, which any
+  # namespace on this cluster sharing the same FSx mount can have
+  # written to in the past (also affects re-runs in the same namespace
+  # if a prior retrieve failed and clean was skipped). Without this rm,
+  # the poll below sees the old sentinel on its very first tick and
+  # exits "done" before the fresh aiperf has even finished its pip
+  # install — giving you May-12 artifacts instead of today's.
+  local sentinel="/perf-cache/artifacts/qwen35_fp8/${BENCH_RUN_LABEL}/.aiperf-done"
+  $K exec "$BENCH_POD" -- rm -f "$sentinel" 2>/dev/null || true
   echo "[bench] pod Ready; polling for .aiperf-done sentinel (max ~50 min)"
   # Don't trust `kubectl logs -f` as a synchronization primitive — under
   # transient teleport / network hiccups it exits early and we'd race
@@ -204,7 +215,6 @@ bench() {
   # run that way once). The bench Pod writes a /perf-cache/artifacts/.../
   # .aiperf-done sentinel after aiperf finishes and the inputs.json
   # cleanup runs (see perf.yaml). Poll for it via `kubectl exec ls`.
-  local sentinel="/perf-cache/artifacts/qwen35_fp8/${BENCH_RUN_LABEL}/.aiperf-done"
   local deadline=$((SECONDS + 3000))   # 50 min
   while (( SECONDS < deadline )); do
     if $K exec "$BENCH_POD" -- test -f "$sentinel" 2>/dev/null; then
