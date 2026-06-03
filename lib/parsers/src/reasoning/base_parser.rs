@@ -196,15 +196,35 @@ impl ReasoningParser for BasicReasoningParser {
                     }
                 }
             } else {
-                // We're in normal text — look for start token
-                if let Some(start_offset) = text[cursor..].find(&self.think_start_token) {
-                    normal_parts.push(&text[cursor..cursor + start_offset]);
-                    cursor += start_offset + self.think_start_token.len();
-                    currently_reasoning = true;
-                } else {
-                    // No more think blocks — rest is normal text
-                    normal_parts.push(&text[cursor..]);
-                    cursor = text.len();
+                // We're in normal text. Look for the next reasoning open marker,
+                // but also detect any stray close marker (unmatched </think>) and
+                // strip it: parser-owned syntax must never reach normal_text per the
+                // lossless-split contract.
+                let start_offset = text[cursor..].find(&self.think_start_token);
+                let end_offset = text[cursor..].find(&self.think_end_token);
+                match (start_offset, end_offset) {
+                    (Some(s), Some(e)) if s <= e => {
+                        // <think> appears first → enter reasoning normally.
+                        normal_parts.push(&text[cursor..cursor + s]);
+                        cursor += s + self.think_start_token.len();
+                        currently_reasoning = true;
+                    }
+                    (Some(s), None) => {
+                        normal_parts.push(&text[cursor..cursor + s]);
+                        cursor += s + self.think_start_token.len();
+                        currently_reasoning = true;
+                    }
+                    (_, Some(e)) => {
+                        // Stray </think> before the next <think> (or no <think> at all).
+                        // Drop the marker, keep the text on both sides, stay in normal mode.
+                        normal_parts.push(&text[cursor..cursor + e]);
+                        cursor += e + self.think_end_token.len();
+                    }
+                    (None, None) => {
+                        // No more markers — rest is normal text.
+                        normal_parts.push(&text[cursor..]);
+                        cursor = text.len();
+                    }
                 }
             }
         }
@@ -328,31 +348,57 @@ impl ReasoningParser for BasicReasoningParser {
                     break;
                 }
             } else {
-                // Not in reasoning — look for the next <think> block.
-                if let Some(think_pos) = current_text.find(self.think_start_token.as_str()) {
-                    accumulated_normal.push_str(&current_text[..think_pos]);
-                    let after_start = think_pos + self.think_start_token.len();
-                    self._buffer = current_text[after_start..].to_string();
-                    self._in_reasoning = true;
-                    self.stripped_think_start = true;
-                    continue; // Process reasoning content
-                } else {
-                    // No complete start token — check for partial at end of buffer
-                    // (e.g., "Hello world <th" where "<th" is a prefix of "<think>").
-                    // Require overlap >= 2 so a lone `<` passes through for tool call
-                    // XML tags like `<invoke>` or `<minimax:tool_call>`.
-                    let ol = overlap(&current_text, &self.think_start_token);
-                    if ol >= 2 {
-                        let safe_end = current_text.len() - ol;
-                        if safe_end > 0 {
-                            accumulated_normal.push_str(&current_text[..safe_end]);
-                        }
-                        self._buffer = current_text[safe_end..].to_string();
-                    } else {
-                        accumulated_normal.push_str(&current_text);
-                        self._buffer.clear();
+                // Not in reasoning. Look for the next <think> block, but also detect
+                // a stray </think> (unmatched close marker) and drop it: parser-owned
+                // syntax must never reach normal_text per the lossless-split contract.
+                let think_pos = current_text.find(self.think_start_token.as_str());
+                let stray_close_pos = current_text.find(self.think_end_token.as_str());
+                match (think_pos, stray_close_pos) {
+                    (Some(s), Some(e)) if s <= e => {
+                        // <think> arrives first → enter reasoning.
+                        accumulated_normal.push_str(&current_text[..s]);
+                        let after_start = s + self.think_start_token.len();
+                        self._buffer = current_text[after_start..].to_string();
+                        self._in_reasoning = true;
+                        self.stripped_think_start = true;
+                        continue;
                     }
-                    break;
+                    (Some(s), _) => {
+                        accumulated_normal.push_str(&current_text[..s]);
+                        let after_start = s + self.think_start_token.len();
+                        self._buffer = current_text[after_start..].to_string();
+                        self._in_reasoning = true;
+                        self.stripped_think_start = true;
+                        continue;
+                    }
+                    (None, Some(e)) => {
+                        // Stray </think> with no opening tag — drop the marker, stay in normal.
+                        accumulated_normal.push_str(&current_text[..e]);
+                        let after_end = e + self.think_end_token.len();
+                        self._buffer = current_text[after_end..].to_string();
+                        continue;
+                    }
+                    (None, None) => {
+                        // No complete marker — check for partial at end of buffer.
+                        // The partial could be a prefix of either <think> or </think>
+                        // (both start with `<`), so check both and use the wider overlap.
+                        // Require overlap >= 2 so a lone `<` passes through for tool call
+                        // XML tags like `<invoke>` or `<minimax:tool_call>`.
+                        let ol_start = overlap(&current_text, &self.think_start_token);
+                        let ol_end = overlap(&current_text, &self.think_end_token);
+                        let ol = ol_start.max(ol_end);
+                        if ol >= 2 {
+                            let safe_end = current_text.len() - ol;
+                            if safe_end > 0 {
+                                accumulated_normal.push_str(&current_text[..safe_end]);
+                            }
+                            self._buffer = current_text[safe_end..].to_string();
+                        } else {
+                            accumulated_normal.push_str(&current_text);
+                            self._buffer.clear();
+                        }
+                        break;
+                    }
                 }
             }
         }
@@ -555,7 +601,7 @@ mod tests {
         assert_eq!(result3.reasoning_text, "more");
     }
 
-    #[test] // REASONING.batch.2.f — nested marker-looking content
+    #[test] // REASONING.batch.6.b — stray close marker after a complete reasoning span
     fn test_nested_reasoning_blocks() {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
@@ -565,9 +611,11 @@ mod tests {
         );
         // Cursor-based parsing: first <think> starts reasoning, first </think> ends it.
         // "outer <think>inner" is reasoning (inner <think> is just text within reasoning).
-        // " reasoning</think> normal" is normal text (stray </think> passes through).
+        // After exiting reasoning, the cursor encounters another stray </think> in
+        // " reasoning</think> normal"; per the lossless-split contract it is stripped,
+        // leaving "reasoning normal" in normal_text after trim.
         assert_eq!(result.reasoning_text, "outer <think>inner");
-        assert_eq!(result.normal_text, "reasoning</think> normal");
+        assert_eq!(result.normal_text, "reasoning normal");
     }
 
     #[test] // REASONING.batch.5

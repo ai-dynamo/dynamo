@@ -145,12 +145,11 @@ cases:
     - "<|channel>thought\npreamble<channel|>"
     - 'body<channel|>'
     - 'answer'
-    dynamo_leak: true
     expected:
       dynamo:
         reasoning_text: preamble
-        normal_text: 'body<channel|>answer'
-        reason: 'Same first-close-wins defect as batch mode: chunks after the first close are forwarded as normal_text with the stray second close marker intact. Repro: F6 case#2.'
+        normal_text: 'bodyanswer'
+        reason: 'Lossless split: stray <channel|> close marker after a complete reasoning span is stripped (parser-owned syntax must not appear in normal_text).'
       vllm:
         reasoning_text: 'preamble'
         normal_text: 'body<channel|>answer'

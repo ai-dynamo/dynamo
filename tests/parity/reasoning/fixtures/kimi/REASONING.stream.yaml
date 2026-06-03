@@ -109,12 +109,11 @@ cases:
     - '◁think▷preamble◁/think▷'
     - 'body◁/think▷'
     - 'answer'
-    dynamo_leak: true
     expected:
       dynamo:
         reasoning_text: preamble
-        normal_text: 'body◁/think▷answer'
-        reason: 'Same first-close-wins defect as batch mode: chunks after the first close are forwarded as normal_text with the stray second close marker intact. Repro: F6 case#2.'
+        normal_text: 'bodyanswer'
+        reason: 'Lossless split: when a stray close marker appears outside any reasoning block, it is stripped (parser-owned syntax must not appear in normal_text). Reasoning is captured from the first <open>...<close> pair only; subsequent stray closes are discarded.'
       vllm:
         unavailable: "UNAVAILABLE: vLLM has no reasoning parser for family='kimi'"
       sglang:

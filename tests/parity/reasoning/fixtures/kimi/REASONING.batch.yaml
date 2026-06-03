@@ -146,12 +146,11 @@ cases:
     ref: dynamo
     spec_ref: tests/parity/README.md
     model_text: '◁think▷preamble◁/think▷body◁/think▷answer'
-    dynamo_leak: true
     expected:
       dynamo:
         reasoning_text: preamble
-        normal_text: 'body◁/think▷answer'
-        reason: "Dynamo's BasicReasoningParser splits at the first close marker and leaves the stray second close marker as a literal in normal_text (see lib/parsers/src/reasoning/base_parser.rs first-close-wins logic). Repro: F6 case#2 on Nemotron-3-Ultra."
+        normal_text: 'bodyanswer'
+        reason: 'Lossless split: when a stray close marker appears outside any reasoning block, it is stripped (parser-owned syntax must not appear in normal_text). Reasoning is captured from the first <open>...<close> pair only; subsequent stray closes are discarded.'
       vllm:
         unavailable: "UNAVAILABLE: vLLM has no reasoning parser for family='kimi'"
       sglang:

@@ -181,12 +181,11 @@ cases:
     model_text: |-
       <|channel>thought
       preamble<channel|>body<channel|>answer
-    dynamo_leak: true
     expected:
       dynamo:
         reasoning_text: preamble
-        normal_text: 'body<channel|>answer'
-        reason: "Dynamo's BasicReasoningParser splits at the first close marker and leaves the stray second close marker as a literal in normal_text (see lib/parsers/src/reasoning/base_parser.rs first-close-wins logic). Repro: F6 case#2 on Nemotron-3-Ultra."
+        normal_text: 'bodyanswer'
+        reason: 'Lossless split: stray <channel|> close marker after a complete reasoning span is stripped (parser-owned syntax must not appear in normal_text).'
       vllm:
         reasoning_text: 'preamble'
         normal_text: 'body<channel|>answer'
