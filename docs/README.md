@@ -391,6 +391,16 @@ fern docs dev
 The local server lets you see exactly how pages will look on the live site,
 including navigation, version dropdowns, and custom styling.
 
+If you cannot access the private NVIDIA global theme, use the fallback helper:
+
+```bash
+python fern/local_docs.py
+```
+
+It generates `.fern-local/` without `global-theme`. Pass Fern CLI arguments
+after `--`. The fallback preview does not include NVIDIA global-theme styling or
+any issues caused only by that theme.
+
 ---
 
 ## Version Management
