@@ -654,8 +654,8 @@ async fn tcp_listener(
             connection,
         } = request_stream;
 
-        // Buffer size matches `process_response_stream`. See the corresponding
-        // TODO there — both should be driven by `StreamOptions::send_buffer_count`.
+        // Buffer size matches `process_response_stream`; both should be driven
+        // by the registration options rather than hard-coded. See #10293.
         let (request_tx, request_rx) = mpsc::channel(64);
 
         if connection
@@ -807,7 +807,8 @@ async fn tcp_listener(
             return Err(error!("Received error prologue: {}", error));
         }
 
-        // we need to know the buffer size from the registration options; add this to the RequestRecvConnection object
+        // Buffer size should be driven by the registration options rather than
+        // hard-coded; the same applies to `process_request_stream`. See #10293.
         let (response_tx, response_rx) = mpsc::channel(64);
 
         if connection

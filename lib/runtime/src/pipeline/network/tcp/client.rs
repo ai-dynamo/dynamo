@@ -178,7 +178,10 @@ impl TcpClient {
     /// never writes anything back (no `Sentinel` ack). The spawned reader task
     /// forwards `TwoPartMessage::DataOnly` payloads into the channel and
     /// translates `ControlMessage::Stop` / `Kill` into context cancellation;
-    /// `ControlMessage::Sentinel` (or TCP close) terminates the task cleanly.
+    /// `ControlMessage::Sentinel` terminates the task cleanly. A TCP close
+    /// before any `Sentinel` is treated as a truncated input (cancellation +
+    /// `context.kill()`), and dropping the returned `StreamReceiver` also stops
+    /// the task.
     pub async fn create_request_stream(
         context: Arc<dyn AsyncEngineContext>,
         info: ConnectionInfo,
@@ -262,6 +265,15 @@ async fn handle_request_reader(
                 break;
             }
 
+            // Downstream consumer dropped the StreamReceiver. Exit promptly
+            // instead of staying parked on `framed_reader.next()` until the
+            // socket closes — the data has nowhere to go. This is the consumer's
+            // own choice, so it is not a cancellation (no kill, no count).
+            _ = bytes_tx.closed() => {
+                tracing::debug!("downstream consumer dropped; exiting request-stream reader");
+                break;
+            }
+
             msg = framed_reader.next() => {
                 match msg {
                     Some(Ok(two_part_msg)) => match two_part_msg.into_message_type() {
@@ -315,7 +327,13 @@ async fn handle_request_reader(
                         break;
                     }
                     None => {
-                        tracing::debug!("request stream closed by upstream");
+                        // Socket closed before a Sentinel/Stop/Kill: the request
+                        // input is truncated. Kill the context so the consumer
+                        // sees an aborted stream rather than a clean end, and
+                        // count it as a cancellation.
+                        tracing::warn!("request stream closed by upstream before sentinel; treating as truncated");
+                        cancellation_seen = true;
+                        context.kill();
                         break;
                     }
                 }
@@ -1696,6 +1714,9 @@ mod tests {
     }
 
     /// Socket EOF exits the reader and drops bytes_tx.
+    /// EOF before a closing Sentinel is a truncated request input: the handler
+    /// kills the context and counts a cancellation so the consumer sees an
+    /// aborted stream rather than a clean end.
     #[tokio::test]
     async fn test_handle_request_reader_exits_on_stream_closed() {
         let RequestReaderHarness {
@@ -1706,9 +1727,19 @@ mod tests {
             controller,
         } = request_reader_harness().await;
 
+        let counter =
+            IntCounter::new("tcp_request_reader_eof_truncation_test", "test counter").unwrap();
+
+        let counter_clone = counter.clone();
         let controller_clone = controller.clone();
         let handle = tokio::spawn(async move {
-            handle_request_reader(framed_reader, bytes_tx, controller_clone, None).await
+            handle_request_reader(
+                framed_reader,
+                bytes_tx,
+                controller_clone,
+                Some(counter_clone),
+            )
+            .await
         });
 
         framed_server.close().await.unwrap();
@@ -1716,8 +1747,68 @@ mod tests {
         let result = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
         assert!(result.is_ok(), "handler should exit on EOF");
         assert!(
+            controller.is_killed(),
+            "EOF before sentinel should kill the context (truncated input)"
+        );
+        assert_eq!(
+            counter.get(),
+            1,
+            "EOF before sentinel should count as a cancellation"
+        );
+        assert!(
             bytes_rx.recv().await.is_none(),
             "bytes_tx should be dropped"
+        );
+    }
+
+    /// Dropping the returned StreamReceiver makes the reader exit promptly via
+    /// the `bytes_tx.closed()` arm, even while parked on the socket with no
+    /// incoming frame. This is the consumer's own choice, so it is not counted
+    /// as a cancellation and the context is left untouched.
+    #[tokio::test]
+    async fn test_handle_request_reader_exits_when_receiver_dropped() {
+        let RequestReaderHarness {
+            framed_server,
+            framed_reader,
+            bytes_tx,
+            bytes_rx,
+            controller,
+        } = request_reader_harness().await;
+
+        // Keep the socket open so the only exit path is the receiver drop.
+        let _framed_server = framed_server;
+
+        let counter =
+            IntCounter::new("tcp_request_reader_receiver_drop_test", "test counter").unwrap();
+
+        let counter_clone = counter.clone();
+        let controller_clone = controller.clone();
+        let handle = tokio::spawn(async move {
+            handle_request_reader(
+                framed_reader,
+                bytes_tx,
+                controller_clone,
+                Some(counter_clone),
+            )
+            .await
+        });
+
+        // Drop the consumer; the reader is parked on `framed_reader.next()`.
+        drop(bytes_rx);
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
+        assert!(
+            result.is_ok(),
+            "handler should exit promptly when the receiver is dropped"
+        );
+        assert!(
+            !controller.is_killed() && !controller.is_stopped(),
+            "consumer drop is not a cancellation"
+        );
+        assert_eq!(
+            counter.get(),
+            0,
+            "consumer drop must not count as cancellation"
         );
     }
 }
