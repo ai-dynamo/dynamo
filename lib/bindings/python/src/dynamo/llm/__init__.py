@@ -36,6 +36,7 @@ from dynamo._core import RouterConfig as RouterConfig
 from dynamo._core import RouterMode as RouterMode
 from dynamo._core import RoutingConstraints as RoutingConstraints
 from dynamo._core import SglangArgs as SglangArgs
+from dynamo._core import TrtllmArgs as TrtllmArgs
 from dynamo._core import WorkerMetricsPublisher as WorkerMetricsPublisher
 from dynamo._core import WorkerType as WorkerType
 from dynamo._core import compute_block_hash_for_seq as compute_block_hash_for_seq

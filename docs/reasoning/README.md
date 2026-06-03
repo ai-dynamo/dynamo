@@ -18,7 +18,7 @@ parser lives in Dynamo's own registry or in an upstream engine frontend
 | Path | When to use | Page |
 |------|-------------|------|
 | **Dynamo** | Dynamo ships a framework-agnostic Rust parser for the model's reasoning format. Default path. | [Reasoning Parsing (Dynamo)](dynamo.md) |
-| **Engine Fallback** | Use the framework's parser implementation (vLLM or SGLang today; TRTLLM in progress) for pre/post processing, including tool call and reasoning parsing - ensure consistency with framework behavior. | [Reasoning Parsing (Engine Fallback)](engine-fallback.md) |
+| **Engine Fallback** | Use the framework's parser implementation (vLLM or SGLang today; TRTLLM in progress) for pre/post processing, including tool call and reasoning parsing - ensure consistency with framework behavior. | [Parser Engine Fallback](../engine-fallback.md) |
 
 Start with the Dynamo path. Fall back to the engine path only when Dynamo's
 registry does not list a parser for your model.
@@ -39,6 +39,9 @@ Python GIL bottlenecks.
 
 ## See Also
 
+- [Parser Configuration](../parser-configuration.md) -- how `--dyn-chat-processor`,
+  `--dyn-reasoning-parser`, and `--dyn-tool-call-parser` combine, and which
+  combinations are invalid.
 - [Tool Calling](../tool-calling/README.md) -- parse tool calls out of model
   output. Several models need both a reasoning parser and a tool-call parser
   configured together.

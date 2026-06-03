@@ -6,7 +6,7 @@ KV-aware (DP-rank) routing, health-check canaries, OpenTelemetry
 tracing, and request-side guided decoding / structural tag.
 
 > **Work in progress.** Logprob response wire, multimodal, diffusion
-> (image/video/DLLM), LoRA, engine routes (sleep/wake, profiling,
+> (image/video/DLLM), LoRA, engine routes (pause/resume, profiling,
 > weight updates), text-in-text-out, and snapshot/CRIU are still on
 > the non-unified path. See [Feature Gaps](#feature-gaps) for the
 > per-engine matrix.
@@ -437,7 +437,7 @@ Lifecycle and runtime:
 - `drain()` hook for pre-cleanup work
 - `DynamoException` error chain wrapping
 - Finish reason normalization handled by the Rust layer
-- Engine control plumbing, with per-backend profiling, quiesce/resume, and supported weight-update controls
+- Engine control plumbing, with per-backend profiling, pause/resume, and supported weight-update controls
 - **Disaggregated serving** (`agg`/`prefill`/`decode`) — KV transfer
   uses NIXL across all three engines; SGLang exchanges a Dynamo-level
   bootstrap address, vLLM and TRT-LLM use an engine-internal handshake.
@@ -498,7 +498,7 @@ Request handling:
 
 | Feature | Description |
 |---------|-------------|
-| Sleep/wake/quiesce | 3-level engine lifecycle control (`VllmEngineQuiesceController`) with shutdown-delay tags |
+| Sleep/wake | 3-level vLLM engine lifecycle control (`VllmEnginePauseController`) with shutdown-delay tags |
 | Elastic EP scaling | `scale_elastic_ep` endpoint with Ray node management |
 | GMS shadow mode | GPU Memory Service integration with failover lock (`--gms-shadow-mode`, `configure_gms_lock_mode`) |
 | ModelExpress P2P | Distributed model loading via P2P (`--model-express-url`, `register_modelexpress_loaders`, `mx-source` / `mx-target` load formats) |
@@ -523,7 +523,7 @@ Request handling:
 | Multimodal encode worker | Front-facing `MMEncoder`, embedding LRU cache, NIXL transfer (`MultimodalEncodeWorkerHandler`) |
 | Multimodal worker | Aggregated and disaggregated-prefill multimodal inference with `EmbeddingsProcessor` |
 | Deferred signal handling | `install_graceful_shutdown` captures SGLang's internal `loop.add_signal_handler` registrations for coordinated teardown |
-| Snapshot quiesce | Legacy `prepare_snapshot_engine` wires `SGLangEngineQuiesceController` to the shared `EngineSnapshotController` (CRIU + identity reload); unified path doesn't invoke it |
+| Snapshot pause | Legacy `prepare_snapshot_engine` wires `SGLangEnginePauseController` to the shared `EngineSnapshotController` (CRIU + identity reload); unified path doesn't invoke it |
 | Image/video health-check payloads | `ImageDiffusionHealthCheckPayload`, `VideoGenerationHealthCheckPayload` |
 | `register_model_with_readiness_gate` + image/video fast paths | `register.py` skips HF `config.json` download for `ModelType.Images` / `ModelType.Videos` |
 | Output modalities override | Required for diffusion workers (default `["text"]` -> `["image"]` / `["video"]`) |

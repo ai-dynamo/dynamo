@@ -144,14 +144,14 @@ navbar-links:
     links:
       - text: All Posts
         href: /dynamo/dev/digest
+      - text: "NVIDIA Dynamo Snapshot: Fast Startup for Inference Workloads on Kubernetes"
+        href: /dynamo/dev/digest/dynamo-snapshot-fast-startup
       - text: "DynoSim: Simulating the Pareto Frontier"
         href: /dynamo/dev/digest/dynosim-pareto-frontier
       - text: "Dynamo Day 0 support for TokenSpeed"
         href: /dynamo/dev/digest/tokenspeed-day-0
       - text: "Multi-Turn Agentic Harnesses"
         href: /dynamo/dev/digest/agentic-harnesses
-      - text: "Full-Stack Optimizations for Agentic Inference"
-        href: /dynamo/dev/digest/agentic-inference
   - type: github
     value: https://github.com/ai-dynamo/dynamo
 
