@@ -331,9 +331,6 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
         depth: usize,
     ) {
         let score = depth as u32;
-        scores
-            .scores
-            .reserve(active.len().saturating_sub(scores.scores.len()));
         for &worker in active {
             let entry = scores.scores.entry(worker).or_insert(0);
             *entry = (*entry).max(score);
@@ -341,10 +338,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
     }
 
     fn collect_live_workers(node: &RoutingNode) -> FxHashSet<WorkerWithDpRank> {
-        let mut workers =
-            FxHashSet::with_capacity_and_hasher(node.live_workers.len(), FxBuildHasher);
-        workers.extend(node.live_workers.iter().map(|worker| *worker));
-        workers
+        node.live_workers.iter().map(|worker| *worker).collect()
     }
 
     fn reconcile_active_workers(
@@ -360,9 +354,6 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
             return;
         }
         let score = drop_depth as u32;
-        scores
-            .scores
-            .reserve(active.len().saturating_sub(scores.scores.len()));
         active.retain(|worker| {
             if node.live_workers.contains(worker) {
                 true
