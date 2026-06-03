@@ -325,7 +325,7 @@ async def _get_runtime_config(
         try:
             runtime_config.set_engine_specific(
                 SGLANG_SHARED_HICACHE_RUNTIME_KEY,
-                shared_hicache_runtime_data,
+                json.dumps(shared_hicache_runtime_data),
             )
             logging.info(
                 "Published Shared HiCache runtime metadata for router use: %s",
