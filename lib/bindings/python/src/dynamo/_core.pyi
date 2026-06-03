@@ -674,6 +674,7 @@ class ModelRuntimeConfig:
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
     reasoning_parser: str | None
+    backend_framework: str | None
     exclude_tools_when_tool_choice_none: bool
     data_parallel_start_rank: int
     data_parallel_size: int
@@ -1481,6 +1482,8 @@ class AicPerfConfig:
         aic_moe_tp_size: Optional[int] = None,
         aic_moe_ep_size: Optional[int] = None,
         aic_attention_dp_size: Optional[int] = None,
+        aic_nextn: Optional[int] = None,
+        aic_nextn_accept_rates: Optional[str] = None,
     ) -> None:
         ...
 
@@ -1551,6 +1554,7 @@ class EngineCapacityRequest:
         ttft_sla_ms: Optional[float] = None,
         itl_sla_ms: Optional[float] = None,
         e2e_latency_sla_ms: Optional[float] = None,
+        kv_hit_rate: Optional[float] = None,
         optimization_target: OptimizationTarget = OptimizationTarget.Throughput,
     ) -> None:
         ...
@@ -1788,6 +1792,13 @@ class SglangArgs:
     ) -> None:
         ...
 
+class TrtllmArgs:
+    def __init__(
+        self,
+        capacity_scheduler_policy: Optional[str] = None,
+    ) -> None:
+        ...
+
 class MockEngineArgs:
     def __init__(
         self,
@@ -1812,8 +1823,11 @@ class MockEngineArgs:
         aic_moe_tp_size: Optional[int] = None,
         aic_moe_ep_size: Optional[int] = None,
         aic_attention_dp_size: Optional[int] = None,
+        aic_nextn: Optional[int] = None,
+        aic_nextn_accept_rates: Optional[str] = None,
         gpu_memory_utilization: Optional[float] = None,
         mem_fraction_static: Optional[float] = None,
+        free_gpu_memory_fraction: Optional[float] = None,
         enable_local_indexer: bool = False,
         bootstrap_port: Optional[int] = None,
         kv_bytes_per_token: Optional[int] = None,
@@ -1824,6 +1838,7 @@ class MockEngineArgs:
         preemption_mode: str = "lifo",
         router_queue_policy: Optional[str] = None,
         sglang: Optional[SglangArgs] = None,
+        trtllm: Optional[TrtllmArgs] = None,
         num_g2_blocks: Optional[int] = None,
         num_g3_blocks: Optional[int] = None,
         offload_batch_size: Optional[int] = None,
@@ -1952,6 +1967,18 @@ class MockEngineArgs:
     def aic_attention_dp_size(self, value: Optional[int]) -> None: ...
 
     @property
+    def aic_nextn(self) -> Optional[int]: ...
+
+    @aic_nextn.setter
+    def aic_nextn(self, value: Optional[int]) -> None: ...
+
+    @property
+    def aic_nextn_accept_rates(self) -> Optional[str]: ...
+
+    @aic_nextn_accept_rates.setter
+    def aic_nextn_accept_rates(self, value: Optional[str]) -> None: ...
+
+    @property
     def gpu_memory_utilization(self) -> Optional[float]: ...
 
     @gpu_memory_utilization.setter
@@ -1962,6 +1989,12 @@ class MockEngineArgs:
 
     @mem_fraction_static.setter
     def mem_fraction_static(self, value: Optional[float]) -> None: ...
+
+    @property
+    def free_gpu_memory_fraction(self) -> Optional[float]: ...
+
+    @free_gpu_memory_fraction.setter
+    def free_gpu_memory_fraction(self, value: Optional[float]) -> None: ...
 
     @property
     def worker_type(self) -> str: ...
@@ -1988,8 +2021,11 @@ class MockEngineArgs:
         aic_moe_tp_size: Optional[int] = None,
         aic_moe_ep_size: Optional[int] = None,
         aic_attention_dp_size: Optional[int] = None,
+        aic_nextn: Optional[int] = None,
+        aic_nextn_accept_rates: Optional[str] = None,
         gpu_memory_utilization: Optional[float] = None,
         mem_fraction_static: Optional[float] = None,
+        free_gpu_memory_fraction: Optional[float] = None,
         enable_prefix_caching: Optional[bool] = None,
         worker_type: Optional[str] = None,
     ) -> "MockEngineArgs": ...

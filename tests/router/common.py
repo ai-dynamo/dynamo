@@ -2411,6 +2411,46 @@ def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
                 prefill_endpoint, decode_workers.num_workers
             )
 
+            async def post_expect_status(
+                session: aiohttp.ClientSession,
+                payload: dict,
+                expected_status: int,
+                message: str,
+                retry_statuses: set[int] | None = None,
+                timeout_s: float = 30.0,
+            ) -> str:
+                retry_statuses = retry_statuses or set()
+                deadline = asyncio.get_running_loop().time() + timeout_s
+                attempt = 0
+                last_status = None
+                last_body = ""
+
+                while True:
+                    attempt += 1
+                    async with session.post(chat_url, json=payload) as response:
+                        response_body = await response.text()
+                        if response.status == expected_status:
+                            return response_body
+
+                        last_status = response.status
+                        last_body = response_body
+
+                    if (
+                        last_status not in retry_statuses
+                        or asyncio.get_running_loop().time() >= deadline
+                    ):
+                        raise AssertionError(
+                            f"{message}, got status={last_status} body={last_body}"
+                        )
+
+                    logger.info(
+                        "%s not ready yet: status=%s attempt=%s; retrying...",
+                        message,
+                        last_status,
+                        attempt,
+                    )
+                    await asyncio.sleep(1.0)
+
             zone_a_payload = {
                 **test_payload,
                 "nvext": {
@@ -2432,12 +2472,13 @@ def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
             )
 
             async with aiohttp.ClientSession() as session:
-                async with session.post(chat_url, json=zone_a_payload) as response:
-                    response_body = await response.text()
-                    assert response.status == 200, (
-                        "Expected required KV-transfer topology match to succeed, "
-                        f"got status={response.status} body={response_body}"
-                    )
+                await post_expect_status(
+                    session,
+                    zone_a_payload,
+                    200,
+                    "Expected required KV-transfer topology match to succeed",
+                    retry_statuses={404},
+                )
 
             zone_b_payload = {
                 **test_payload,
@@ -2446,12 +2487,12 @@ def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
                 },
             }
             async with aiohttp.ClientSession() as session:
-                async with session.post(chat_url, json=zone_b_payload) as response:
-                    response_body = await response.text()
-                    assert response.status == 500, (
-                        "Expected required KV-transfer topology mismatch to fail, "
-                        f"got status={response.status} body={response_body}"
-                    )
+                await post_expect_status(
+                    session,
+                    zone_b_payload,
+                    500,
+                    "Expected required KV-transfer topology mismatch to fail",
+                )
 
         asyncio.run(run_requests())
 

@@ -53,11 +53,11 @@ class CheckpointConfig:
 
     async def run_lifecycle(
         self,
-        quiesce_controller: Any,
-        *quiesce_args: object,
+        pause_controller: Any,
+        *pause_args: object,
     ) -> bool:
-        logger.info("Quiescing model")
-        await quiesce_controller.quiesce(*quiesce_args)
+        logger.info("Pausing model")
+        await pause_controller.pause(*pause_args)
 
         try:
             with open(self.ready_file, "w", encoding="utf-8") as ready_file:
@@ -76,8 +76,8 @@ class CheckpointConfig:
         if event == "restore":
             logger.info("Restore sentinel detected")
             logger.info("Resuming model after restore")
-            await quiesce_controller.resume()
-            quiesce_controller.mark_resumed()
+            await pause_controller.resume()
+            pause_controller.mark_resumed()
             return True
 
         logger.info("Snapshot completion sentinel detected")
@@ -186,14 +186,14 @@ def configure_checkpoint_transport_env() -> None:
 @dataclass
 class EngineSnapshotController(Generic[EngineT]):
     engine: EngineT
-    quiesce_controller: Any
+    pause_controller: Any
     checkpoint_config: CheckpointConfig
-    quiesce_args: tuple[object, ...] = ()
+    pause_args: tuple[object, ...] = ()
 
     async def wait_for_restore(self) -> bool:
         return await self.checkpoint_config.run_lifecycle(
-            self.quiesce_controller,
-            *self.quiesce_args,
+            self.pause_controller,
+            *self.pause_args,
         )
 
     def reload_restore_identity(

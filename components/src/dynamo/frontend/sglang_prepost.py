@@ -356,6 +356,29 @@ def _flatten_message_content(content: Any) -> Any:
     return " ".join(text_parts)
 
 
+def _normalize_openai_thinking_template_kwargs(
+    request: dict[str, Any],
+) -> dict[str, Any]:
+    request = copy.copy(request)
+    chat_template_kwargs = dict(
+        request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
+    )
+    thinking = request.get("thinking")
+    if "thinking" not in chat_template_kwargs:
+        if isinstance(thinking, bool):
+            chat_template_kwargs["thinking"] = thinking
+        elif isinstance(thinking, dict):
+            thinking_type = thinking.get("type")
+            if thinking_type == "enabled":
+                chat_template_kwargs["thinking"] = True
+            elif thinking_type == "disabled":
+                chat_template_kwargs["thinking"] = False
+
+    if chat_template_kwargs:
+        request["chat_template_kwargs"] = chat_template_kwargs
+    return request
+
+
 def _render_deepseek_v4_prompt_token_ids(
     request: dict[str, Any],
     *,
@@ -385,7 +408,7 @@ def _render_deepseek_v4_prompt_token_ids(
             encoding_messages.insert(0, {"role": "system", "content": ""})
         encoding_messages[0]["tools"] = template_tools
 
-    chat_template_kwargs = (
+    chat_template_kwargs = dict(
         request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
     )
     thinking_mode = "thinking" if chat_template_kwargs.get("thinking") else "chat"
@@ -530,6 +553,7 @@ def preprocess_chat_request(
 
     Synchronous -- suitable for both main-process and worker-process execution.
     """
+    request = _normalize_openai_thinking_template_kwargs(request)
     messages = _materialize_messages(request.get("messages", []))
 
     # Per-request client escape hatch: skip reasoning parsing entirely when

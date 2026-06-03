@@ -15,13 +15,14 @@ keywords.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 blake3 = { workspace = true }
-dashmap = { workspace = true }
 fastokens = { workspace = true }
+moka = { workspace = true, features = ["sync"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 strum = { workspace = true }
 tracing = { workspace = true }
 
+aho-corasick = "1"
 base64 = { version = "0.22" }
 rayon = "1"
 rustc-hash = "1.1"

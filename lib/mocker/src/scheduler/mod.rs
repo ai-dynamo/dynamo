@@ -6,6 +6,7 @@
 mod kv_event_sink;
 #[path = "sglang/mod.rs"]
 pub mod sglang;
+mod trtllm;
 pub mod vllm;
 
 pub use crate::common::protocols::ForwardPassSnapshot;
@@ -224,7 +225,10 @@ impl EngineScheduler {
         fpm_publisher: FpmPublisher,
     ) -> Self {
         match args.engine_type {
-            crate::common::protocols::EngineType::Vllm => {
+            // TRT-LLM reuses the vLLM scheduler; the GUARANTEED_NO_EVICT
+            // policy is carried in `args` and read by `VllmCore` per pass.
+            crate::common::protocols::EngineType::Vllm
+            | crate::common::protocols::EngineType::Trtllm => {
                 Self::Vllm(Scheduler::new_with_admission(
                     args,
                     dp_rank,
