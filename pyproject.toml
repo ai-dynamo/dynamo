@@ -464,6 +464,15 @@ follow_imports = "skip"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+# grpc / google.protobuf ship without type stubs in the dynamo-runtime image
+# (grpc-stubs / types-protobuf are not pulled in by requirements.common.txt).
+# The planner plugin transport imports grpc.aio + google.protobuf.message at
+# module top — silence import-untyped errors there.
+module = ["grpc", "grpc.*", "google.protobuf", "google.protobuf.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 # Profiler module was never previously type-checked and has many
 # union-attr / attr-defined issues. Skip errors for now.
 module = ["dynamo.profiler.*"]

@@ -394,7 +394,7 @@ def _run_planner_replay(
     # planner's linear regression. The default polynomial model cannot
     # feed the throughput regression (its decode formula is quadratic in
     # utilization ratio, causing negative regression coefficients).
-    if not adapter._sm._is_easy:
+    if adapter._sm is not None and not adapter._sm._is_easy:
         ref_args = extra_engine_args or prefill_engine_args or MockEngineArgs()
         aic_backend = ref_args.aic_backend
         if (

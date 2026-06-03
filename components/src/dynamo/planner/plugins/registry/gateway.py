@@ -136,7 +136,7 @@ class PluginRegistryGatewayServicer(pbg.PluginRegistryServicer):
             )
         return pydantic_to_proto(UnregisterResponse(ok=ok))
 
-    async def ListPlugins(
+    async def ListPlugins(  # type: ignore[return]
         self,
         request: pb.ListPluginsRequest,
         context: grpc.aio.ServicerContext,

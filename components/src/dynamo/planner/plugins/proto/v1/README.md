@@ -7,9 +7,9 @@ This directory contains:
 | File | Purpose | Status |
 |---|---|---|
 | `plugin.proto` | Single-source-of-truth proto3 schema | tracked |
-| `plugin_pb2.py` | Generated protobuf Python stubs | gitignored (regen at install + dev time — see "Generation" below) |
-| `plugin_pb2_grpc.py` | Generated gRPC client/server stubs | gitignored (same as `plugin_pb2.py`) |
-| `plugin_pb2.pyi` | Generated type stubs for IDE / mypy | gitignored |
+| `plugin_pb2.py` | Generated protobuf Python stubs | tracked (regenerate locally when editing `plugin.proto` — see "Generation" below) |
+| `plugin_pb2_grpc.py` | Generated gRPC client/server stubs | tracked (same as `plugin_pb2.py`) |
+| `plugin_pb2.pyi` | Generated type stubs for IDE / mypy | tracked |
 | `__init__.py` | Module marker | tracked |
 
 ## Schema overview
@@ -45,9 +45,12 @@ Total: **6 services / 33 messages / 3 enums**
 ## Generation
 
 Generated stubs (`plugin_pb2.py`, `plugin_pb2_grpc.py`, `plugin_pb2.pyi`)
-are NOT checked into git — `.gitignore` excludes `*_pb2.py` / `*_pb2.pyi`.
-They are produced at install time by the container build and on demand by
-developers:
+are **checked into git** so that test/build environments don't need
+`grpcio-tools` installed just to import the module. The repo-wide
+`.gitignore` excludes `*_pb2.py` / `*_pb2.pyi` for other consumers; the
+planner stubs are explicitly negated with `!components/src/dynamo/planner/plugins/proto/v1/*`.
+
+Regenerate locally when you edit `plugin.proto`:
 
 ```bash
 # Regenerate all three stubs (run from components/src/)
@@ -55,21 +58,27 @@ cd components/src
 python -m grpc_tools.protoc \
     --python_out=. --grpc_python_out=. --pyi_out=. --proto_path=. \
     dynamo/planner/plugins/proto/v1/plugin.proto
+
+# protoc strips the SPDX header — re-prepend on the two .py files so
+# copyright-checks pass. (.pyi is exempt by file-type already.)
+SPDX=$'# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n# SPDX-License-Identifier: Apache-2.0\n'
+for f in dynamo/planner/plugins/proto/v1/plugin_pb2.py \
+         dynamo/planner/plugins/proto/v1/plugin_pb2_grpc.py; do
+  printf '%s%s' "$SPDX" "$(cat "$f")" > "$f"
+done
 ```
 
 **Workflow status**: PR #1 does NOT ship a wrapper script or CI
 drift-catching step. The proposed `tools/build/gen_planner_proto.sh`
 (and a `planner-build --check` job that diffs regenerated stubs against
-committed ones) is deferred to a follow-up build infra PR — that PR
-will also decide whether to lift `.gitignore` on the generated files
-so `git diff --exit-code` can be used as the drift signal.
+committed ones) is deferred to a follow-up build infra PR.
 
 Until then, developers who edit `plugin.proto` are responsible for
-running the protoc command above and (separately) updating the Pydantic
-mirror in `plugins/types.py`. The two `test_class_coverage_*` round-trip
-tests catch missing Pydantic mirrors at CI time; they do NOT catch a
-stale `plugin_pb2.py` against an updated `plugin.proto` (since the
-generated stub is rebuilt on every install).
+running the protoc command above, committing the regenerated stubs,
+and (separately) updating the Pydantic mirror in `plugins/types.py`.
+The two `test_class_coverage_*` round-trip tests catch missing Pydantic
+mirrors at CI time; they do NOT catch a stale `plugin_pb2.py` against
+an updated `plugin.proto` (the drift-catching CI step is deferred).
 
 ## Schema evolution policy (proto3, must-follow)
 

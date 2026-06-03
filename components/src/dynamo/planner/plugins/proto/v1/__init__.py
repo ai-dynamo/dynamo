@@ -65,12 +65,19 @@ for _stub_name in ("plugin_pb2", "plugin_pb2_grpc"):
         continue
     try:
         importlib.import_module(_fq)
-    except ImportError:
-        # Generated stub not on disk yet (pre-protoc env) — install a
-        # placeholder so ``from <pkg> import plugin_pb2`` succeeds at
-        # collection time AND the ``_proto_bridge`` module-top lookup
-        # table can resolve attributes like ``plugin_pb2.RegisterRequest``
-        # (synthesised on demand by ``_PlaceholderModule.__getattr__``).
+    except (ImportError, AttributeError):
+        # Two failure modes both land us here:
+        #   - ImportError: generated stub not on disk yet (pre-protoc env)
+        #   - AttributeError: stub IS on disk but its module-top code
+        #     (e.g. ``GRPC_VERSION = grpc.__version__`` in plugin_pb2_grpc.py)
+        #     crashes because grpc/protobuf are themselves stubbed by
+        #     pytest-marker-report's ``--collect-only`` runner, which
+        #     strips dunder attributes from stubbed modules.
+        # In either case install a placeholder so ``from <pkg> import
+        # plugin_pb2`` succeeds at collection time AND the
+        # ``_proto_bridge`` module-top lookup table can resolve attributes
+        # like ``plugin_pb2.RegisterRequest`` (synthesised on demand by
+        # ``_PlaceholderModule.__getattr__``).
         _placeholder = _PlaceholderModule(_fq)
         _placeholder.__doc__ = (
             f"Pre-generation placeholder for {_fq}. Run protoc per "
