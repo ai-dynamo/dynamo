@@ -64,6 +64,10 @@ type DynamoGraphDeploymentSpec struct {
 	// Service-level labels take precedence over these values.
 	// +optional
 	Labels map[string]string `json:"labels,omitempty"`
+	// PriorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.
+	// Requires the Grove pathway.
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
 	// PVCs defines a list of persistent volume claims that can be referenced by components.
 	// Each PVC must have a unique name that can be referenced in component specifications.
 	// +kubebuilder:validation:Optional
@@ -91,6 +95,21 @@ type DynamoGraphDeploymentSpec struct {
 	// Services without their own topologyConstraint inherit from this value.
 	// +optional
 	TopologyConstraint *SpecTopologyConstraint `json:"topologyConstraint,omitempty"`
+
+	// Experimental groups graph-level preview features whose API shape and
+	// behavior may change in breaking ways between releases.
+	// +optional
+	Experimental *DynamoGraphDeploymentExperimentalSpec `json:"experimental,omitempty"`
+}
+
+// DynamoGraphDeploymentExperimentalSpec groups graph-level opt-in preview
+// features. Component-level experimental features are represented separately
+// on component specs.
+type DynamoGraphDeploymentExperimentalSpec struct {
+	// KvTransferPolicy configures topology-aware routing for KV-cache
+	// transfers between prefill and decode workers.
+	// +optional
+	KvTransferPolicy *KvTransferPolicy `json:"kvTransferPolicy,omitempty"`
 }
 
 type Restart struct {

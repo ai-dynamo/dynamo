@@ -25,6 +25,7 @@ import (
 	"maps"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -261,18 +262,24 @@ func ParseDynDeploymentConfig(jsonContent []byte) (DynDeploymentConfig, error) {
 }
 
 func (r RollingUpdateContext) InProgress() bool {
-	return len(r.OldWorkerReplicas) > 0
+	return len(r.OldWorkerReplicaTargetsByComponent) > 0
 }
 
 // RollingUpdateContext provides information about an in-progress rolling update.
 type RollingUpdateContext struct {
 	// NewWorkerHash is the short hash (8 chars) for the new worker spec, used for DCD naming
 	NewWorkerHash string
-	// OldWorkerReplicas maps service name to the desired replica count for old workers.
-	// Used by the controller to patch old worker DCDs directly.
-	OldWorkerReplicas map[string]int32
-	// NewWorkerReplicas maps service name to the desired replica count for new workers.
-	NewWorkerReplicas map[string]int32
+
+	// Aggregate desired replica targets for old worker generations, keyed by logical component name.
+	// Example: worker -> 3 means all old DCDs for component "worker" should sum to 3 replicas.
+	OldWorkerReplicaTargetsByComponent map[string]int32
+
+	// Concrete desired replica targets for each old worker DCD, keyed by DCD object name.
+	// Example: dgd-worker-a -> 3, dgd-worker-b -> 0.
+	OldWorkerReplicaTargetsByDCD map[string]int32
+
+	// Desired replica targets for the new worker generation, keyed by logical component name.
+	NewWorkerReplicaTargetsByComponent map[string]int32
 }
 
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig.
@@ -357,6 +364,7 @@ func generateSingleDCD(
 	if err := applyDGDComponentAlphaCompatibilityToDCD(parentDGD, componentName, deployment); err != nil {
 		return nil, err
 	}
+	delete(deployment.Annotations, commonconsts.KubeAnnotationTopologyLabelKey)
 
 	labels := make(map[string]string)
 	maps.Copy(labels, GetPodTemplateLabels(component))
@@ -376,7 +384,34 @@ func generateSingleDCD(
 		}
 	}
 
+	// Stamp sidecar.istio.io/inject: "false" on EPP pod templates before
+	// DGD-level annotations are merged in. EPP serves its own TLS on port 9002
+	// (--secure-serving true); an Istio sidecar intercepting that port causes a
+	// double-TLS handshake failure when the namespace has STRICT mTLS, which
+	// surfaces as cx_connect_fail / HTTP 500 on the gateway.
+	//
+	// Placement before applyDGDTemplateDefaults is intentional: the merge
+	// function (mergeLowPriorityMetadata) does not overwrite keys already
+	// present in the destination map, so a graph-wide DGD Spec.Annotations
+	// entry of sidecar.istio.io/inject: "true" cannot silently bypass the
+	// EPP opt-out. An explicit per-EPP podTemplate annotation set by the user
+	// is preserved by the !exists guard.
+	if component.ComponentType == commonconsts.ComponentTypeEPP {
+		podTemplate := ensurePodTemplate(&deployment.Spec.DynamoComponentDeploymentSharedSpec)
+		if _, exists := podTemplate.Annotations[commonconsts.KubeAnnotationIstioSidecarInject]; !exists {
+			podTemplate.Annotations[commonconsts.KubeAnnotationIstioSidecarInject] = "false"
+		}
+	}
+
 	applyDGDTemplateDefaults(&deployment.Spec.DynamoComponentDeploymentSharedSpec, parentDGD)
+
+	// Topology label controller marker: set on the DCD so it propagates to pods.
+	if shouldApplyKvTransferPolicyToWorkerComponent(component, parentDGD) {
+		if deployment.Annotations == nil {
+			deployment.Annotations = make(map[string]string)
+		}
+		deployment.Annotations[commonconsts.KubeAnnotationTopologyLabelKey] = parentDGD.Spec.Experimental.KvTransferPolicy.LabelKey
+	}
 
 	// Apply restart annotation if this component should be restarted.
 	if restartState.ShouldAnnotateComponent(componentName) {
@@ -398,7 +433,7 @@ func generateSingleDCD(
 	}
 
 	// during a rolling update, the replica count is determined by the rollingUpdateCtx instead of the component spec
-	if newReplicas, ok := rollingUpdateCtx.NewWorkerReplicas[componentName]; rollingUpdateCtx.InProgress() && IsWorkerComponent(string(component.ComponentType)) && ok {
+	if newReplicas, ok := rollingUpdateCtx.NewWorkerReplicaTargetsByComponent[componentName]; rollingUpdateCtx.InProgress() && IsWorkerComponent(string(component.ComponentType)) && ok {
 		deployment.Spec.Replicas = ptr.To(newReplicas)
 	} else if component.Replicas != nil {
 		deployment.Spec.Replicas = component.Replicas
@@ -975,13 +1010,24 @@ func GenerateEPPDestinationRule(serviceName, namespace string, meshConfig config
 		skipVerify = *meshConfig.Istio.InsecureSkipVerify
 	}
 
+	tls := &istioNetworking.ClientTLSSettings{
+		Mode:               tlsMode,
+		InsecureSkipVerify: wrapperspb.Bool(skipVerify),
+	}
+	// Istio's validation webhook requires ClientCertificate and PrivateKey for
+	// MUTUAL mode (CaCertificates is optional). Plumb through the operator
+	// config values so the DR is accepted; for other modes these fields must
+	// remain empty per the Istio proto spec.
+	if tlsMode == istioNetworking.ClientTLSSettings_MUTUAL {
+		tls.ClientCertificate = meshConfig.Istio.ClientCertificate
+		tls.PrivateKey = meshConfig.Istio.PrivateKey
+		tls.CaCertificates = meshConfig.Istio.CaCertificates
+	}
+
 	dr.Spec = istioNetworking.DestinationRule{
 		Host: fmt.Sprintf("%s.%s.svc.cluster.local", normalizedName, namespace),
 		TrafficPolicy: &istioNetworking.TrafficPolicy{
-			Tls: &istioNetworking.ClientTLSSettings{
-				Mode:               tlsMode,
-				InsecureSkipVerify: wrapperspb.Bool(skipVerify),
-			},
+			Tls: tls,
 		},
 	}
 	return dr
@@ -1508,6 +1554,19 @@ func GenerateBasePodSpec(
 			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
 		}
 		gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0])
+		for _, name := range GetGPUMemoryService(component).ExtraClientContainers {
+			var container *corev1.Container
+			for i := range podSpec.Containers {
+				if podSpec.Containers[i].Name == name {
+					container = &podSpec.Containers[i]
+					break
+				}
+			}
+			if container == nil {
+				continue
+			}
+			gms.EnsureClient(&podSpec, container)
+		}
 	}
 
 	// Clone main container into two engine containers (active + standby) for failover.
@@ -1754,8 +1813,111 @@ func applyDGDTemplateDefaults(
 		main.Env = MergeEnvs(dynamoDeployment.Spec.Env, main.Env)
 	}
 
+	// Bake KV transfer policy env vars and topology projection into worker pod
+	// templates so they survive DGD -> DCD materialization (the DCD controller
+	// lacks the parent DGD). Workers publish these in their MDC so the router
+	// reads policy per-worker.
+	if shouldApplyKvTransferPolicyToWorkerComponent(component, dynamoDeployment) {
+		applyKvTransferPolicyToWorkerComponent(component, dynamoDeployment.Spec.Experimental.KvTransferPolicy)
+	}
+
 	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
 	propagateDGDSpecMetadata(dynamoDeployment.Spec.Annotations, dynamoDeployment.Spec.Labels, component)
+}
+
+func shouldApplyKvTransferPolicyToWorkerComponent(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	dynamoDeployment *v1beta1.DynamoGraphDeployment,
+) bool {
+	return component != nil &&
+		dynamoDeployment != nil &&
+		dynamoDeployment.Spec.Experimental != nil &&
+		dynamoDeployment.Spec.Experimental.KvTransferPolicy != nil &&
+		dynamoDeployment.Spec.Experimental.KvTransferPolicy.LabelKey != "" &&
+		IsWorkerComponent(string(component.ComponentType))
+}
+
+func applyKvTransferPolicyToWorkerComponent(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	kvt *v1beta1.KvTransferPolicy,
+) {
+	if component == nil || kvt == nil {
+		return
+	}
+	podTemplate := ensurePodTemplate(component)
+	main := ensureMainContainer(podTemplate)
+	main.Env = MergeEnvs(removeWorkerKvTransferPolicyEnvVars(main.Env), workerKvTransferPolicyEnvVars(kvt))
+	main.VolumeMounts = appendTopologyLabelVolumeMount(main.VolumeMounts, TopologyLabelVolumeMount())
+	podTemplate.Spec.Volumes = appendTopologyLabelVolume(podTemplate.Spec.Volumes, TopologyLabelVolume(kvt))
+}
+
+func workerKvTransferPolicyEnvVars(kvt *v1beta1.KvTransferPolicy) []corev1.EnvVar {
+	enforcement := string(kvt.Enforcement)
+	if enforcement == "" {
+		enforcement = string(v1beta1.KvTransferEnforcementRequired)
+	}
+	policyEnvs := []corev1.EnvVar{
+		{Name: commonconsts.EnvKvTransferDomain, Value: string(kvt.Domain)},
+		{Name: commonconsts.EnvKvTransferEnforcement, Value: enforcement},
+		{Name: commonconsts.EnvTopologyEnabled, Value: "true"},
+		{Name: commonconsts.EnvTopologyMountPath, Value: topologyMountPath},
+	}
+	if kvt.PreferredWeight != nil {
+		policyEnvs = append(policyEnvs, corev1.EnvVar{
+			Name:  commonconsts.EnvKvTransferPreferredWeight,
+			Value: strconv.FormatFloat(float64(*kvt.PreferredWeight), 'f', -1, 32),
+		})
+	}
+	return policyEnvs
+}
+
+func removeWorkerKvTransferPolicyEnvVars(envs []corev1.EnvVar) []corev1.EnvVar {
+	if len(envs) == 0 {
+		return envs
+	}
+	filtered := make([]corev1.EnvVar, 0, len(envs))
+	for _, env := range envs {
+		if isWorkerKvTransferPolicyEnvVar(env.Name) {
+			continue
+		}
+		filtered = append(filtered, env)
+	}
+	return filtered
+}
+
+func isWorkerKvTransferPolicyEnvVar(name string) bool {
+	switch name {
+	case commonconsts.EnvKvTransferDomain,
+		commonconsts.EnvKvTransferEnforcement,
+		commonconsts.EnvKvTransferPreferredWeight,
+		commonconsts.EnvTopologyEnabled,
+		commonconsts.EnvTopologyMountPath:
+		return true
+	default:
+		return false
+	}
+}
+
+func appendTopologyLabelVolumeMount(mounts []corev1.VolumeMount, mount corev1.VolumeMount) []corev1.VolumeMount {
+	filtered := make([]corev1.VolumeMount, 0, len(mounts)+1)
+	for _, existing := range mounts {
+		if existing.Name == mount.Name || existing.MountPath == mount.MountPath {
+			continue
+		}
+		filtered = append(filtered, existing)
+	}
+	return append(filtered, mount)
+}
+
+func appendTopologyLabelVolume(volumes []corev1.Volume, vol corev1.Volume) []corev1.Volume {
+	filtered := make([]corev1.Volume, 0, len(volumes)+1)
+	for _, v := range volumes {
+		if v.Name == vol.Name {
+			continue
+		}
+		filtered = append(filtered, v)
+	}
+	return append(filtered, vol)
 }
 
 // dgdPropagatedAnnotationKeys lists DGD metadata annotations that are propagated
@@ -1912,6 +2074,10 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate annotations: %w", err)
 	}
+	delete(annotations, commonconsts.KubeAnnotationTopologyLabelKey)
+	if p.r.Role != RoleGMS && shouldApplyKvTransferPolicyToWorkerComponent(p.component, p.dynamoDeployment) {
+		annotations[commonconsts.KubeAnnotationTopologyLabelKey] = p.dynamoDeployment.Spec.Experimental.KvTransferPolicy.LabelKey
+	}
 	if p.r.Role != RoleGMS {
 		if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(labels, annotations, p.checkpointInfo, p.operatorConfig.Checkpoint.Storage); err != nil {
 			return nil, fmt.Errorf("failed to apply checkpoint metadata for role %s: %w", p.r.Name, err)
@@ -1968,6 +2134,7 @@ func GenerateGrovePodCliqueSet(
 		PublishNotReadyAddresses: true,
 	}
 	gangSet.Spec.Template.StartupType = ptr.To(grovev1alpha1.CliqueStartupTypeAnyOrder)
+	gangSet.Spec.Template.PriorityClassName = dynamoDeployment.Spec.PriorityClassName
 	if operatorConfig.Orchestrators.Grove.TerminationDelay.Duration > 0 {
 		gangSet.Spec.Template.TerminationDelay = &operatorConfig.Orchestrators.Grove.TerminationDelay
 	}

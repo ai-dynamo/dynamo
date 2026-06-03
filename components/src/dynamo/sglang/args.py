@@ -269,7 +269,7 @@ async def parse_args(args: list[str]) -> Config:
         ):
             endpoint = f"dyn://{namespace}.prefill.generate"
         elif dynamo_config.multimodal_encode_worker:
-            endpoint = f"dyn://{namespace}.encoder.generate"
+            endpoint = f"dyn://{namespace}.encode.generate"
         elif (
             dynamo_config.multimodal_worker
             and parsed_args.disaggregation_mode == "prefill"

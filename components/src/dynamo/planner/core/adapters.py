@@ -13,9 +13,21 @@ import logging
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.core.base import NativePlannerBase
 from dynamo.planner.core.types import PlannerEffects
-from dynamo.planner.monitoring.perf_metrics import fetch_pre_deployment_metrics
+from dynamo.planner.monitoring.perf_metrics import (
+    PreDeploymentMetricsUnavailableError,
+    fetch_pre_deployment_metrics,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _log_missing_pre_deployment_data(component: str, error: Exception) -> None:
+    logger.warning(
+        "No pre-deployment data for %s; perf model will rely on native AIC "
+        "or live FPM tuning when available: %s",
+        component,
+        error,
+    )
 
 
 class PrefillPlanner(NativePlannerBase):
@@ -28,17 +40,15 @@ class PrefillPlanner(NativePlannerBase):
         try:
             fpms = await fetch_pre_deployment_metrics(
                 runtime=self.runtime,
-                namespace=self.namespace,
+                namespace=self.runtime_namespace,
                 worker_info=self.prefill_worker_info,
                 profile_results_dir=self.config.profile_results_dir,
                 component_type=SubComponentType.PREFILL,
                 aic_spec=self.config.aic_interpolation,
             )
             self.state_machine.load_benchmark_fpms(prefill_fpms=fpms)
-        except Exception as e:
-            if self.config.enable_throughput_scaling:
-                raise
-            logger.warning(f"No pre-deployment data for prefill: {e}")
+        except PreDeploymentMetricsUnavailableError as e:
+            _log_missing_pre_deployment_data("prefill", e)
 
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         if effects.scale_to is None or effects.scale_to.num_prefill is None:
@@ -67,17 +77,15 @@ class DecodePlanner(NativePlannerBase):
         try:
             fpms = await fetch_pre_deployment_metrics(
                 runtime=self.runtime,
-                namespace=self.namespace,
+                namespace=self.runtime_namespace,
                 worker_info=self.decode_worker_info,
                 profile_results_dir=self.config.profile_results_dir,
                 component_type=SubComponentType.DECODE,
                 aic_spec=self.config.aic_interpolation,
             )
             self.state_machine.load_benchmark_fpms(decode_fpms=fpms)
-        except Exception as e:
-            if self.config.enable_throughput_scaling:
-                raise
-            logger.warning(f"No pre-deployment data for decode: {e}")
+        except PreDeploymentMetricsUnavailableError as e:
+            _log_missing_pre_deployment_data("decode", e)
 
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         if effects.scale_to is None or effects.scale_to.num_decode is None:
@@ -106,17 +114,15 @@ class AggPlanner(NativePlannerBase):
         try:
             fpms = await fetch_pre_deployment_metrics(
                 runtime=self.runtime,
-                namespace=self.namespace,
+                namespace=self.runtime_namespace,
                 worker_info=self.decode_worker_info,
                 profile_results_dir=self.config.profile_results_dir,
                 component_type=SubComponentType.DECODE,
                 aic_spec=self.config.aic_interpolation,
             )
             self.state_machine.load_benchmark_fpms(agg_fpms=fpms)
-        except Exception as e:
-            if self.config.enable_throughput_scaling:
-                raise
-            logger.warning(f"No pre-deployment data for agg: {e}")
+        except PreDeploymentMetricsUnavailableError as e:
+            _log_missing_pre_deployment_data("agg", e)
 
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         if effects.scale_to is None or effects.scale_to.num_decode is None:
@@ -154,17 +160,15 @@ class DisaggPlanner(NativePlannerBase):
             try:
                 fpms = await fetch_pre_deployment_metrics(
                     runtime=self.runtime,
-                    namespace=self.namespace,
+                    namespace=self.runtime_namespace,
                     worker_info=worker_info,
                     profile_results_dir=self.config.profile_results_dir,
                     component_type=component,
                     aic_spec=self.config.aic_interpolation,
                 )
                 self.state_machine.load_benchmark_fpms(**{kwarg: fpms})
-            except Exception as e:
-                if self.config.enable_throughput_scaling:
-                    raise
-                logger.warning(f"No pre-deployment data for {component.value}: {e}")
+            except PreDeploymentMetricsUnavailableError as e:
+                _log_missing_pre_deployment_data(component.value, e)
 
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         if effects.scale_to is None:

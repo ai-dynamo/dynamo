@@ -26,22 +26,60 @@ pub type Token = u32;
 /// This might encode model architecture, weights, PEFT info, etc.
 pub type Salt = Vec<u8>;
 
-/// A 64-bit hash of the salt, computed using [`compute_hash_v2`] with a seed of 0.
-/// Used as the initial seed for subsequent block hashes.
+/// A 64-bit hash of the salt. Computed once per request and used as the seed for
+/// every block-hash computation in that request.
+///
+/// The canonical construction path is [`compute_salt_hash_from_bytes`] (or
+/// `dynamo_kv_hashing::Request::salt_hash` at the application layer).
 pub type SaltHash = u64;
 
-/// A 64-bit hash computed only from the tokens within a single block.
-/// It uses [`compute_hash_v2`] with the [`SaltHash`] as the seed.
+/// A 64-bit hash computed from the tokens within a single block (with optional MM
+/// frames), seeded by the request's [`SaltHash`].
+///
+/// The canonical construction path is [`compute_block_hash`].
 pub type BlockHash = u64;
 
-/// A 64-bit sequence-aware hash.
-/// It combines the previous block's [`SequenceHash`] (or the [`SaltHash`] for the first block)
-/// with the current block's [`BlockHash`] using [`compute_hash_v2`] and the [`SaltHash`] as the seed.
+/// A 64-bit sequence-aware hash. Equals the [`BlockHash`] at position 0 and
+/// [`compute_next_sequence_hash(prev_seq, block_hash)`](compute_next_sequence_hash)
+/// at every subsequent position. Salt propagates through `seq_hash[0]` since
+/// `block_hash[0]` already encodes it.
 pub type SequenceHash = u64;
 
-/// Computes a hash of the data using the given seed.
+/// Computes a hash of the data using the given seed (raw u64).
+///
+/// Prefer [`compute_block_hash`] / [`compute_salt_hash_from_bytes`] for typed
+/// construction; this raw-u64 form is kept for low-level callers.
 pub fn compute_hash_v2(data: &[u8], seed: u64) -> u64 {
     xxhash_rust::xxh3::xxh3_64_with_seed(data, seed)
+}
+
+/// Canonical XXH3 seed used by every chain-step `(parent_seq, child_block_hash) → next_seq`
+/// in this codebase. Must match `dynamo_kv_router::protocols::XXH3_SEED` — the router's
+/// `compute_seq_hash_for_block` and the `PositionalIndexer`'s chain re-computation both
+/// route through [`compute_next_sequence_hash`] (or equivalently seeded helpers in
+/// `kv-router`), so changing this constant requires all of them to flip in lockstep.
+pub const CHAIN_XXH3_SEED: u64 = 1337;
+
+/// Chain-step for sequence hashing: returns the [`SequenceHash`] at `position + 1`
+/// given the parent's `SequenceHash` and the child block's [`BlockHash`].
+///
+/// This is the single source of truth for the chain recurrence used by:
+/// - [`PositionalLineageHash::extend`]
+/// - [`TokenBlock::from_chunk`]
+/// - `dynamo_kv_router::protocols::compute_next_seq_hash` (request side)
+/// - `dynamo_kv_router::indexer::PositionalIndexer` (chain re-validation)
+///
+/// Salt is already mixed into `block_hash[0]` and propagates through every parent, so
+/// the per-step seed is a constant: re-feeding salt at each step would be redundant.
+/// Any constant seed preserves PLH composability — the value is set to
+/// [`CHAIN_XXH3_SEED`] to match the router's existing wire format.
+#[inline]
+pub fn compute_next_sequence_hash(
+    parent_sequence_hash: SequenceHash,
+    child_block_hash: BlockHash,
+) -> SequenceHash {
+    let combined = [parent_sequence_hash, child_block_hash];
+    compute_hash_v2(cast_slice(&combined), CHAIN_XXH3_SEED)
 }
 
 /// Custom serde codec that encodes a `u128` as a 16-byte big-endian byte sequence.
@@ -101,6 +139,241 @@ mod serde_bytes_u128 {
         let arr = deserializer.deserialize_bytes(V)?;
         Ok(u128::from_be_bytes(arr))
     }
+}
+
+/// Canonical [`BlockHash`] construction: XXH3 over the per-block byte buffer
+/// (already encoded by [`compute_block_bytes_with_mm`] or `cast_slice` for the
+/// no-MM path), seeded by [`SaltHash`].
+#[inline]
+pub fn compute_block_hash(block_bytes: &[u8], salt: SaltHash) -> BlockHash {
+    compute_hash_v2(block_bytes, salt)
+}
+
+/// Canonical [`SaltHash`] construction from a pre-canonicalized salt-payload byte
+/// buffer. Application-layer callers should use `dynamo_kv_hashing::Request::salt_hash`
+/// which canonicalizes `(salt, lora_name)` first; this function is the low-level path.
+#[inline]
+pub fn compute_salt_hash_from_bytes(payload: &[u8]) -> SaltHash {
+    compute_hash_v2(payload, 0)
+}
+
+/// Metadata describing a single multimodal placeholder run within a token sequence.
+///
+/// A run occupies `length` consecutive slots starting at `offset`. The token IDs at
+/// those slot positions are opaque for hashing — the `(mm_hash, run_offset)` pair drives
+/// the per-slot bytes during block formation.
+///
+/// See [`compute_block_bytes_with_mm`] for the byte-encoding rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct TokenBlockMmInfo {
+    /// Hash identifying the multimodal object (image / audio / etc.).
+    pub mm_hash: u64,
+    /// Start position of the placeholder run in the full token sequence (zero-based).
+    pub offset: usize,
+    /// Number of placeholder slots in the run.
+    pub length: usize,
+}
+
+/// Slot-tag byte distinguishing real-token slots from multimodal placeholder slots in
+/// the per-block byte buffer. See [`compute_block_bytes_with_mm`].
+pub const MM_SLOT_TAG_TOKEN: u8 = 0x00;
+/// Slot-tag byte for multimodal placeholder slots. See [`compute_block_bytes_with_mm`].
+pub const MM_SLOT_TAG_PLACEHOLDER: u8 = 0x01;
+
+impl TokenBlockMmInfo {
+    /// Returns the exclusive end position of this run, or `None` on `usize` overflow.
+    #[inline]
+    pub fn checked_end(&self) -> Option<usize> {
+        self.offset.checked_add(self.length)
+    }
+
+    /// Returns the exclusive end position of this run.
+    ///
+    /// # Panics
+    /// Panics if `offset + length` overflows `usize`. Prefer [`Self::checked_end`] in
+    /// validation paths; this helper is for already-validated runs.
+    #[inline]
+    pub fn end(&self) -> usize {
+        self.checked_end()
+            .expect("TokenBlockMmInfo::end overflowed usize; run was not validated")
+    }
+
+    /// Returns `true` if the given absolute position falls inside this run.
+    /// Returns `false` if the run's end overflows `usize` (such a run is invalid; use
+    /// [`validate_and_sort_mm_info`] before relying on this method).
+    #[inline]
+    pub fn covers(&self, position: usize) -> bool {
+        match self.checked_end() {
+            Some(end) => position >= self.offset && position < end,
+            None => false,
+        }
+    }
+}
+
+/// Errors raised while validating [`TokenBlockMmInfo`] inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum MmInfoError {
+    /// The run extends past the end of the token sequence.
+    #[error(
+        "mm_info range starting at {offset} (length {length}) exceeds tokens length {tokens_len}"
+    )]
+    OutOfBounds {
+        /// Run start.
+        offset: usize,
+        /// Run length.
+        length: usize,
+        /// Length of the token sequence the run was validated against.
+        tokens_len: usize,
+    },
+    /// `offset + length` overflows `usize`.
+    #[error("mm_info range starting at {offset} (length {length}) overflows usize")]
+    OffsetOverflow {
+        /// Run start.
+        offset: usize,
+        /// Run length.
+        length: usize,
+    },
+    /// Two runs overlap.
+    #[error("mm_info ranges overlap at position {position}")]
+    Overlapping {
+        /// Position where the overlap begins.
+        position: usize,
+    },
+    /// A run has zero length.
+    #[error("mm_info length must be greater than zero")]
+    EmptyRun,
+}
+
+/// Validates `mm_info` against `tokens_len` and returns a copy sorted by `offset`.
+///
+/// Validation rules:
+/// - Every run must have `length > 0`.
+/// - `offset + length` must not overflow `usize`.
+/// - Every run's end (`offset + length`) must be `<= tokens_len`.
+/// - No two runs may overlap.
+pub fn validate_and_sort_mm_info(
+    mm_info: &[TokenBlockMmInfo],
+    tokens_len: usize,
+) -> Result<Vec<TokenBlockMmInfo>, MmInfoError> {
+    let mut sorted: Vec<TokenBlockMmInfo> = mm_info.to_vec();
+    sorted.sort_by_key(|m| m.offset);
+    let mut prev_end = 0usize;
+    for m in &sorted {
+        if m.length == 0 {
+            return Err(MmInfoError::EmptyRun);
+        }
+        let end = m
+            .offset
+            .checked_add(m.length)
+            .ok_or(MmInfoError::OffsetOverflow {
+                offset: m.offset,
+                length: m.length,
+            })?;
+        if end > tokens_len {
+            return Err(MmInfoError::OutOfBounds {
+                offset: m.offset,
+                length: m.length,
+                tokens_len,
+            });
+        }
+        if m.offset < prev_end {
+            return Err(MmInfoError::Overlapping { position: m.offset });
+        }
+        prev_end = end;
+    }
+    Ok(sorted)
+}
+
+/// Returns `true` if any run in `mm_runs` overlaps the block `[block_offset, block_offset + len)`.
+/// `mm_runs` must be validated and sorted.
+fn block_has_mm(block_offset: usize, len: usize, mm_runs: &[TokenBlockMmInfo]) -> bool {
+    let block_end = block_offset.saturating_add(len);
+    mm_runs
+        .iter()
+        .any(|m| m.offset < block_end && m.end() > block_offset)
+}
+
+/// Builds the byte buffer used to compute a block's [`BlockHash`].
+///
+/// **Two encodings, picked per-block:**
+///
+/// 1. **Legacy / zero-MM** — when no run in `mm_runs` overlaps this block, the buffer is
+///    `bytemuck::cast_slice(tokens)` (4 bytes per slot, LE u32). This matches the existing
+///    `compute_hash_v2(cast_slice(&tokens), salt_hash)` path used by every existing
+///    [`TokenBlock`] in `dynamo_tokens` and kvbm — preserving cache identity for any block
+///    that is not itself MM-affected.
+///
+/// 2. **Tagged / MM-affected** — when at least one run overlaps this block, every slot
+///    emits a fixed 13-byte frame:
+///    - Real-token slot: `[MM_SLOT_TAG_TOKEN | token_id u32 LE | 0u64 LE]`
+///      The trailing `0u64` is **frame padding only** — it has no semantic meaning,
+///      it is there so the real-token frame matches the placeholder frame's width.
+///      Token IDs at placeholder positions are *ignored* by this encoder; whether
+///      a slot is a placeholder is determined solely by `mm_runs[run_idx].covers(g)`.
+///    - Placeholder slot: `[MM_SLOT_TAG_PLACEHOLDER | run_offset u32 LE | mm_hash u64 LE]`,
+///      where `run_offset = (block_offset + s) - run.offset`.
+///
+///    The 1-byte tag plus the fixed-width frame make the encoding self-delimiting and
+///    slot-position-preserving: two MM-affected byte buffers compare equal iff they describe
+///    the same `(slot_kind, slot_payload)` sequence at the same slot positions.
+///
+/// The two encodings have different per-slot widths (4 vs 13), so an all-tokens block can
+/// never produce the same byte buffer as an MM-affected block — eliminating cross-encoding
+/// collisions.
+///
+/// `mm_runs` must be validated and sorted (typically the output of
+/// [`validate_and_sort_mm_info`]).
+pub fn compute_block_bytes_with_mm(
+    tokens: &[Token],
+    block_offset: usize,
+    mm_runs: &[TokenBlockMmInfo],
+) -> Vec<u8> {
+    // Defense-in-depth: routing of each slot to the placeholder vs real-token branch
+    // depends on `mm_runs` being sorted by offset and non-overlapping. The public
+    // entry points (`Request::new`, `TokenBlockSequence::new_with_mm`,
+    // `split_tokens_with_mm`) enforce this via `validate_and_sort_mm_info`, but this
+    // function is also pub so we re-check in debug to catch direct misuse.
+    debug_assert!(
+        mm_runs.windows(2).all(|w| w[0].end() <= w[1].offset),
+        "compute_block_bytes_with_mm: mm_runs must be sorted by offset and non-overlapping (use validate_and_sort_mm_info)",
+    );
+    debug_assert!(
+        mm_runs.iter().all(|r| r.length > 0),
+        "compute_block_bytes_with_mm: mm_runs must have non-zero length",
+    );
+
+    if !block_has_mm(block_offset, tokens.len(), mm_runs) {
+        // Zero-MM-affecting-this-block: use the legacy encoding so the resulting block_hash
+        // matches what TokenBlockSequence::new would produce.
+        return cast_slice::<Token, u8>(tokens).to_vec();
+    }
+
+    const FRAME: usize = 13;
+    let mut out: Vec<u8> = Vec::with_capacity(tokens.len() * FRAME);
+    let mut run_idx = 0usize;
+    // Skip runs that ended at or before this block starts.
+    while run_idx < mm_runs.len() && mm_runs[run_idx].end() <= block_offset {
+        run_idx += 1;
+    }
+    for (s, &tok) in tokens.iter().enumerate() {
+        let g = block_offset + s;
+        // Advance past runs that end at or before g (validated non-overlapping => monotonic).
+        while run_idx < mm_runs.len() && mm_runs[run_idx].end() <= g {
+            run_idx += 1;
+        }
+        if run_idx < mm_runs.len() && mm_runs[run_idx].covers(g) {
+            let run = &mm_runs[run_idx];
+            let run_offset = (g - run.offset) as u32;
+            out.push(MM_SLOT_TAG_PLACEHOLDER);
+            out.extend_from_slice(&run_offset.to_le_bytes());
+            out.extend_from_slice(&run.mm_hash.to_le_bytes());
+        } else {
+            out.push(MM_SLOT_TAG_TOKEN);
+            out.extend_from_slice(&tok.to_le_bytes());
+            out.extend_from_slice(&0u64.to_le_bytes());
+        }
+    }
+    out
 }
 
 /// A 128-bit positional sequence hash combining traditional sequence hash with positional information.
@@ -247,16 +520,20 @@ impl std::fmt::Debug for PositionalSequenceHash {
 /// Layout (using full 128 bits):
 /// - Mode (2 bits): Determines position field size
 /// - Position (8/16/24 bits): Block position in sequence
-/// - Parent Fragment (variable bits): Fragment of parent's sequence hash
-/// - Current Fragment (variable bits): Fragment of current sequence hash
+/// - Current Sequence Hash (64 bits): Full u64 sequence hash for this block
+/// - Parent Fragment (variable bits): Truncated lower bits of the parent's sequence hash
 ///
 /// Modes (automatically selected based on position):
-/// - Mode 00: 8-bit position (max 255) + 59-bit parent + 59-bit current
-/// - Mode 01: 16-bit position (max 65,535) + 55-bit parent + 55-bit current
-/// - Mode 10: 24-bit position (max 16,777,215) + 51-bit parent + 51-bit current
+/// - Mode 00: 8-bit position (max 255) + 64-bit current + 54-bit parent fragment
+/// - Mode 01: 16-bit position (max 65,535) + 64-bit current + 46-bit parent fragment
+/// - Mode 10: 24-bit position (max 16,777,215) + 64-bit current + 38-bit parent fragment
 ///
-/// This encoding enables backward traversal through the radix tree by matching
-/// parent fragments at position-1.
+/// Carrying the full 64-bit current sequence hash inline makes PLH self-contained for
+/// chain extension: a child PLH can be derived from a parent PLH plus the child's
+/// `BlockHash` alone, with no out-of-band state. The parent fragment shrinks as
+/// position grows, but radix backward-traversal always matches on
+/// `(position, parent_fragment)`, and the probability of a shared parent at high
+/// positions decreases faster than the fragment-collision bound rises.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct PositionalLineageHash(#[serde(with = "serde_bytes_u128")] u128);
@@ -269,8 +546,9 @@ impl PositionalLineageHash {
     ///
     /// # Arguments
     ///
-    /// * `current_seq_hash` - The sequence hash of the current block
-    /// * `parent_seq_hash` - The sequence hash of the parent block (None for root)
+    /// * `current_seq_hash` - The full u64 sequence hash of the current block
+    /// * `parent_seq_hash` - The full u64 sequence hash of the parent block (None for root).
+    ///   Will be truncated to this position's parent-fragment width.
     /// * `position` - The block position in the sequence
     ///
     /// # Panics
@@ -289,59 +567,87 @@ impl PositionalLineageHash {
         }
 
         let mode = Self::select_mode(position);
-        let (position_bits, parent_bits, current_bits) = Self::bit_layout(mode);
+        let (position_bits, parent_bits) = Self::bit_layout(mode);
 
-        // CRITICAL: For cross-mode boundary matching, we need to align the current hash
-        // to the bits available at the next position. This ensures that when position+1
-        // stores our current hash as its parent, the fragments will match.
-        let next_mode = Self::select_mode(position + 1);
-        let (_, next_parent_bits, _) = Self::bit_layout(next_mode);
-
-        // Use the minimum of current_bits and next_parent_bits to ensure alignment
-        let aligned_current_bits = current_bits.min(next_parent_bits);
-
-        // Create masks
         let position_mask = (1u128 << position_bits) - 1;
         let parent_mask = (1u128 << parent_bits) - 1;
-        let current_mask = (1u128 << aligned_current_bits) - 1;
 
-        // Extract fragments (LSB-aligned for subset compatibility across modes)
         let position_part = (position as u128) & position_mask;
+        let current_part = current_seq_hash as u128;
         let parent_part = (parent_seq_hash.unwrap_or(0) as u128) & parent_mask;
-        let current_part = (current_seq_hash as u128) & current_mask;
 
-        // Pack: [mode (2)][position (P)][parent (M)][current (N)]
-        // Note: We still allocate current_bits in the layout, but only use aligned_current_bits
+        // Pack: [mode (2)][position (P)][current_u64 (64)][parent_fragment (R)]
         let value = ((mode as u128) << 126)
-            | (position_part << (parent_bits + current_bits))
-            | (parent_part << current_bits)
-            | current_part;
+            | (position_part << (64 + parent_bits))
+            | (current_part << parent_bits)
+            | parent_part;
 
         PositionalLineageHash(value)
+    }
+
+    /// Creates a root [`PositionalLineageHash`] (position 0).
+    ///
+    /// At the root, the sequence hash equals the block hash and there is no parent.
+    pub fn root(block_hash: BlockHash) -> Self {
+        Self::new(block_hash, None, 0)
+    }
+
+    /// Extends this lineage by one block, producing the child PLH.
+    ///
+    /// The chain recurrence is [`compute_next_sequence_hash`]. Salt does not seed the
+    /// per-step xxh3: `BlockHash` is already `xxh3(tokens, salt_hash)`, so salt is mixed
+    /// into `seq_hash[0]` and propagates through every parent. Re-feeding it at each step
+    /// would be redundant.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self.position() + 1 >= 2^24`.
+    pub fn extend(&self, child_block_hash: BlockHash) -> Self {
+        let parent_seq = self.current_sequence_hash();
+        let child_seq = compute_next_sequence_hash(parent_seq, child_block_hash);
+        Self::new(child_seq, Some(parent_seq), self.position() + 1)
     }
 
     /// Returns the block position.
     pub fn position(&self) -> u64 {
         let mode = self.mode();
-        let (position_bits, parent_bits, current_bits) = Self::bit_layout(mode);
+        let (position_bits, parent_bits) = Self::bit_layout(mode);
         let position_mask = (1u128 << position_bits) - 1;
-        ((self.0 >> (parent_bits + current_bits)) & position_mask) as u64
+        ((self.0 >> (64 + parent_bits)) & position_mask) as u64
     }
 
-    /// Returns the current sequence hash fragment.
-    pub fn current_hash_fragment(&self) -> u64 {
+    /// Returns the full 64-bit sequence hash of the current block.
+    ///
+    /// Unlike the legacy `current_hash_fragment` (now removed), this is the complete
+    /// `SequenceHash` and is what [`extend`](Self::extend) feeds into the chain.
+    pub fn current_sequence_hash(&self) -> SequenceHash {
         let mode = self.mode();
-        let (_, _, current_bits) = Self::bit_layout(mode);
-        let current_mask = (1u128 << current_bits) - 1;
-        (self.0 & current_mask) as u64
+        let (_, parent_bits) = Self::bit_layout(mode);
+        ((self.0 >> parent_bits) & 0xFFFF_FFFF_FFFF_FFFFu128) as u64
     }
 
-    /// Returns the parent sequence hash fragment.
+    /// Returns the parent sequence hash fragment as stored in this PLH.
+    ///
+    /// Width depends on this PLH's mode (54/46/38 bits). Backward radix lookup must
+    /// always combine `(position, parent_fragment)` — the fragment alone is not unique.
     pub fn parent_hash_fragment(&self) -> u64 {
         let mode = self.mode();
-        let (_, parent_bits, current_bits) = Self::bit_layout(mode);
+        let (_, parent_bits) = Self::bit_layout(mode);
         let parent_mask = (1u128 << parent_bits) - 1;
-        ((self.0 >> current_bits) & parent_mask) as u64
+        (self.0 & parent_mask) as u64
+    }
+
+    /// Truncates this PLH's `current_sequence_hash` to the parent-fragment width that
+    /// a child at `child_position` would store.
+    ///
+    /// Useful when an external builder wants to construct a child PLH or verify a
+    /// parent/child edge: `child.parent_hash_fragment() ==
+    /// parent.parent_fragment_for_child_position(child.position())`.
+    pub fn parent_fragment_for_child_position(&self, child_position: u64) -> u64 {
+        let child_mode = Self::select_mode(child_position);
+        let (_, child_parent_bits) = Self::bit_layout(child_mode);
+        let mask = (1u64 << child_parent_bits).wrapping_sub(1);
+        self.current_sequence_hash() & mask
     }
 
     /// Returns the mode used for encoding (0, 1, or 2).
@@ -366,12 +672,13 @@ impl PositionalLineageHash {
         }
     }
 
-    /// Returns the bit layout for a given mode: (position_bits, parent_bits, current_bits).
-    fn bit_layout(mode: u8) -> (u32, u32, u32) {
+    /// Returns the bit layout for a given mode: (position_bits, parent_fragment_bits).
+    /// Current is always 64 bits.
+    fn bit_layout(mode: u8) -> (u32, u32) {
         match mode {
-            0 => (8, 59, 59),  // 2 + 8 + 59 + 59 = 128
-            1 => (16, 55, 55), // 2 + 16 + 55 + 55 = 128
-            2 => (24, 51, 51), // 2 + 24 + 51 + 51 = 128
+            0 => (8, 54),  // 2 + 8 + 64 + 54 = 128
+            1 => (16, 46), // 2 + 16 + 64 + 46 = 128
+            2 => (24, 38), // 2 + 24 + 64 + 38 = 128
             _ => unreachable!(
                 "Invalid mode {} in PositionalLineageHash; mode must be 0, 1, or 2",
                 mode
@@ -383,7 +690,7 @@ impl PositionalLineageHash {
 impl PositionalLineageHash {
     fn format_impl(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let position = self.position();
-        let current_hash = self.current_hash_fragment();
+        let current_hash = self.current_sequence_hash();
         let current_hash_b58 = bs58::encode(current_hash.to_be_bytes()).into_string();
 
         if position == 0 {
@@ -415,14 +722,14 @@ impl std::cmp::PartialOrd for PositionalLineageHash {
 }
 
 impl std::cmp::Ord for PositionalLineageHash {
-    /// Lexicographic order: [`Self::position`], then [`Self::current_hash_fragment`],
+    /// Lexicographic order: [`Self::position`], then [`Self::current_sequence_hash`],
     /// then the full packed [`Self::as_u128`] so the order is total and consistent with [`Eq`].
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.position()
             .cmp(&other.position())
             .then_with(|| {
-                self.current_hash_fragment()
-                    .cmp(&other.current_hash_fragment())
+                self.current_sequence_hash()
+                    .cmp(&other.current_sequence_hash())
             })
             .then_with(|| self.0.cmp(&other.0))
     }
@@ -574,6 +881,14 @@ pub enum TokenBlockError {
     /// The operation requires more tokens than are currently in the block.
     #[error("TokenBlock has insufficient tokens")]
     InsufficientTokens,
+
+    /// Multimodal info validation failed.
+    #[error(transparent)]
+    MmInfo(#[from] MmInfoError),
+
+    /// A mutating operation is not supported on a sequence with multimodal runs.
+    #[error("operation is not supported on a TokenBlockSequence with multimodal runs")]
+    MmRunsPresent,
 }
 
 /// Represents a partially filled block of tokens within a sequence.
@@ -643,6 +958,7 @@ impl PartialTokenBlock {
     ///
     /// * `Ok(())` - If the token was successfully added.
     /// * `Err(TokenBlockError::Full)` - If the block already contains `block_size` tokens.
+    #[cfg(test)]
     pub(crate) fn push_token(&mut self, token: Token) -> Result<(), TokenBlockError> {
         if self.tokens.0.len() >= self.block_size as usize {
             return Err(TokenBlockError::Full);
@@ -748,7 +1064,7 @@ struct TokenBlockChunk {
 impl TokenBlockChunk {
     /// Creates a new chunk from [`Tokens`], calculating the [`BlockHash`].
     fn new(tokens: Tokens, salt_hash: SaltHash) -> Self {
-        let block_hash = compute_hash_v2(cast_slice(&tokens), salt_hash);
+        let block_hash = compute_block_hash(cast_slice(&tokens), salt_hash);
         Self {
             tokens,
             salt_hash,
@@ -758,7 +1074,7 @@ impl TokenBlockChunk {
 
     /// Creates a new chunk from a slice of `&[Token]`, calculating the [`BlockHash`].
     fn from_tokens(tokens: &[Token], salt_hash: SaltHash) -> Self {
-        let block_hash = compute_hash_v2(cast_slice(tokens), salt_hash);
+        let block_hash = compute_block_hash(cast_slice(tokens), salt_hash);
         Self {
             tokens: tokens.into(), // Converts slice to owned Tokens
             salt_hash,
@@ -805,10 +1121,7 @@ impl TokenBlock {
         position: usize,
     ) -> Self {
         let sequence_hash = match parent_sequence_hash {
-            Some(parent) => {
-                // Combine parent sequence hash and current block hash
-                compute_hash_v2(cast_slice(&[parent, chunk.block_hash]), chunk.salt_hash)
-            }
+            Some(parent) => compute_next_sequence_hash(parent, chunk.block_hash),
             None => {
                 // First block: sequence hash is just the block hash
                 chunk.block_hash
@@ -913,6 +1226,10 @@ pub struct TokenBlockSequence {
     current_block: PartialTokenBlock,
     salt_hash: SaltHash,
     block_size: usize,
+    /// Validated, sorted multimodal runs covering committed and partial slots.
+    /// Empty for sequences built via the zero-MM constructors; populated by
+    /// [`TokenBlockSequence::new_with_mm`] and the streaming MM helpers.
+    mm_runs: Vec<TokenBlockMmInfo>,
 }
 
 impl TokenBlockSequence {
@@ -932,7 +1249,7 @@ impl TokenBlockSequence {
     /// Panics if `block_size` is 0.
     pub fn new(tokens: Tokens, block_size: u32, salt_hash: Option<SaltHash>) -> Self {
         assert!(block_size > 0, "block_size must be greater than 0");
-        let salt_hash = salt_hash.unwrap_or(0);
+        let salt_hash = salt_hash.unwrap_or_default();
         let (blocks, current_block) = Self::split_tokens(&tokens, block_size, salt_hash);
 
         Self {
@@ -940,6 +1257,7 @@ impl TokenBlockSequence {
             current_block,
             salt_hash,
             block_size: block_size as usize,
+            mm_runs: Vec::new(),
         }
     }
 
@@ -967,31 +1285,62 @@ impl TokenBlockSequence {
             let remaining_in_current = self.current_block.remaining();
 
             if remaining_in_current == 0 {
-                // Current block is full, commit it first
-                let new_block = self.current_block.commit()?;
+                // Current block is full, commit it first.
+                let new_block = self.commit_current()?;
                 self.blocks.push(new_block);
-                // Continue loop to add tokens to the *new* current_block
+                // Continue loop to add tokens to the *new* current_block.
             }
 
-            // Push as many tokens as possible into the current (potentially new) block
+            // Push as many tokens as possible into the current (potentially new) block.
             let available_tokens = tokens_to_append;
             tokens_to_append = self.current_block.push_tokens(available_tokens);
 
-            // Check if the current block *became* full after pushing tokens
+            // Check if the current block *became* full after pushing tokens.
             if self.current_block.remaining() == 0 {
                 // If it became full AND there are still more tokens to append,
                 // commit it now so the next loop iteration starts with a fresh block.
-                let new_block = self.current_block.commit()?;
+                let new_block = self.commit_current()?;
                 self.blocks.push(new_block);
             }
         }
 
         let end_block_index = self.blocks.len();
         if start_block_index == end_block_index {
-            Ok(None) // No blocks were completed
+            Ok(None) // No blocks were completed.
         } else {
             Ok(Some(start_block_index..end_block_index))
         }
+    }
+
+    /// Commits the current partial block.
+    ///
+    /// Routes through the MM-aware byte encoding when [`Self::mm_runs`] is non-empty;
+    /// otherwise behaves identically to [`PartialTokenBlock::commit`].
+    fn commit_current(&mut self) -> Result<TokenBlock, TokenBlockError> {
+        if self.mm_runs.is_empty() {
+            return self.current_block.commit();
+        }
+        // MM-aware path: compute block_hash from the substituted byte buffer.
+        if self.current_block.tokens.0.len() != self.current_block.block_size as usize {
+            return Err(TokenBlockError::Incomplete);
+        }
+        let block_offset = self.blocks.len() * (self.current_block.block_size as usize);
+        let tokens = std::mem::take(&mut self.current_block.tokens);
+        let block_bytes = compute_block_bytes_with_mm(&tokens, block_offset, &self.mm_runs);
+        let block_hash = compute_block_hash(&block_bytes, self.current_block.salt_hash);
+        let chunk = TokenBlockChunk {
+            tokens,
+            salt_hash: self.current_block.salt_hash,
+            block_hash,
+        };
+        let block = TokenBlock::from_chunk(
+            chunk,
+            self.current_block.parent_sequence_hash,
+            self.current_block.position,
+        );
+        self.current_block.parent_sequence_hash = Some(block.sequence_hash());
+        self.current_block.position += 1;
+        Ok(block)
     }
 
     /// Appends a single token to the sequence.
@@ -1011,20 +1360,13 @@ impl TokenBlockSequence {
     /// * `Ok(None)` - No block was completed by adding this token.
     /// * `Err(TokenBlockError)` - If an internal error occurs during processing.
     pub fn append(&mut self, token: Token) -> Result<Option<usize>, TokenBlockError> {
-        if self.current_block.remaining() == 0 {
-            let new_block = self.current_block.commit()?;
-            self.blocks.push(new_block);
-        }
-
-        self.current_block.push_token(token)?;
-        if self.current_block.remaining() != 0 {
-            return Ok(None);
-        }
-
-        let completed_idx = self.blocks.len();
-        let new_block = self.current_block.commit()?;
-        self.blocks.push(new_block);
-        Ok(Some(completed_idx))
+        let before = self.blocks.len();
+        self.extend(Tokens::from(vec![token]))?;
+        Ok(if self.blocks.len() > before {
+            Some(before)
+        } else {
+            None
+        })
     }
 
     /// Shortens the sequence, keeping the first `len` tokens and removing the rest.
@@ -1046,6 +1388,9 @@ impl TokenBlockSequence {
     /// * `Err(TokenBlockError::InsufficientTokens)` - This error should ideally not occur if `len`
     ///   is correctly checked against `total_tokens`, but the underlying `pop_tokens` might return it.
     pub fn truncate(&mut self, len: usize) -> Result<(), TokenBlockError> {
+        if !self.mm_runs.is_empty() {
+            return Err(TokenBlockError::MmRunsPresent);
+        }
         let current_total_len = self.total_tokens();
         if len >= current_total_len {
             return Ok(()); // Nothing to truncate
@@ -1140,10 +1485,15 @@ impl TokenBlockSequence {
     }
 
     /// Resets the sequence to the initial state.
+    ///
+    /// Clears any accumulated multimodal runs; after `reset` the sequence behaves
+    /// identically to a freshly-constructed zero-MM sequence with the same `salt_hash`
+    /// and `block_size`.
     pub fn reset(&mut self) {
         self.blocks.clear();
         self.current_block =
             PartialTokenBlock::create_sequence_root(self.block_size as u32, self.salt_hash);
+        self.mm_runs.clear();
     }
 
     /// Removes the last token from the sequence and returns it, or [`None`] if it is empty.
@@ -1154,7 +1504,20 @@ impl TokenBlockSequence {
     ///
     /// * `Some(Token)` - The last token, if the sequence was not empty.
     /// * `None` - If the sequence was empty.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the sequence has accumulated multimodal runs (see [`Self::try_pop`] for a
+    /// non-panicking variant). `pop` returns `Option<Token>` and cannot signal
+    /// "operation unsupported on MM sequence" through its return type without breaking the
+    /// `Vec::pop` analogy and silently lying to callers.
     pub fn pop(&mut self) -> Option<Token> {
+        if !self.mm_runs.is_empty() {
+            panic!(
+                "TokenBlockSequence::pop is not supported on a sequence with multimodal runs; \
+                 use try_pop or reset before pop"
+            );
+        }
         let current_total_len = self.total_tokens();
         if current_total_len == 0 {
             return None;
@@ -1195,6 +1558,19 @@ impl TokenBlockSequence {
                 None
             }
         }
+    }
+
+    /// Non-panicking variant of [`Self::pop`].
+    ///
+    /// Returns:
+    /// - `Ok(Some(token))` when the sequence had at least one token and pop succeeded.
+    /// - `Ok(None)` when the sequence was empty.
+    /// - `Err(TokenBlockError::MmRunsPresent)` when the sequence has multimodal runs.
+    pub fn try_pop(&mut self) -> Result<Option<Token>, TokenBlockError> {
+        if !self.mm_runs.is_empty() {
+            return Err(TokenBlockError::MmRunsPresent);
+        }
+        Ok(self.pop())
     }
 
     /// Returns a slice containing all the completed [`TokenBlock`]s in the sequence.
@@ -1286,7 +1662,7 @@ impl TokenBlockSequence {
     pub fn split_tokens(
         tokens: &[Token],
         block_size: u32,
-        salt_hash: u64,
+        salt_hash: SaltHash,
     ) -> (Vec<TokenBlock>, PartialTokenBlock) {
         assert!(block_size > 0, "block_size must be greater than 0");
         let chunks: Vec<TokenBlockChunk> = tokens
@@ -1340,7 +1716,7 @@ impl TokenBlockSequence {
     /// * `salt_hash` - The [`SaltHash`] to use for hashing.
     pub fn from_slice(tokens: &[Token], block_size: u32, salt_hash: Option<SaltHash>) -> Self {
         assert!(block_size > 0, "block_size must be greater than 0");
-        let salt_hash = salt_hash.unwrap_or(0);
+        let salt_hash = salt_hash.unwrap_or_default();
         let (blocks, current_block) = Self::split_tokens(tokens, block_size, salt_hash);
 
         Self {
@@ -1348,6 +1724,157 @@ impl TokenBlockSequence {
             current_block,
             salt_hash,
             block_size: block_size as usize,
+            mm_runs: Vec::new(),
+        }
+    }
+
+    /// Creates a [`TokenBlockSequence`] with multimodal placeholder runs.
+    ///
+    /// `mm_info` is validated and sorted via [`validate_and_sort_mm_info`]. Each block's
+    /// [`BlockHash`] is computed using the per-block byte encoding documented on
+    /// [`compute_block_bytes_with_mm`], which selects one of two encodings:
+    ///
+    /// - **MM-affected block** (at least one run overlaps the block): every slot emits
+    ///   13 bytes — a 1-byte tag ([`MM_SLOT_TAG_TOKEN`] or [`MM_SLOT_TAG_PLACEHOLDER`])
+    ///   followed by a 12-byte payload. Real-token slots carry `token_id u32 LE` plus
+    ///   8 bytes of padding; placeholder slots carry `run_offset u32 LE | mm_hash u64 LE`.
+    /// - **Non-MM block** (no run overlaps): the legacy `bytemuck::cast_slice(tokens)`
+    ///   form is used (4 bytes per slot, LE u32), preserving cache identity with blocks
+    ///   produced by [`Self::from_slice`].
+    ///
+    /// Returns an error if `mm_info` is invalid (overlap, out of bounds, zero-length run).
+    pub fn new_with_mm(
+        tokens: Tokens,
+        mm_info: &[TokenBlockMmInfo],
+        block_size: u32,
+        salt_hash: Option<SaltHash>,
+    ) -> Result<Self, TokenBlockError> {
+        assert!(block_size > 0, "block_size must be greater than 0");
+        let salt_hash = salt_hash.unwrap_or_default();
+        let validated =
+            validate_and_sort_mm_info(mm_info, tokens.len()).map_err(TokenBlockError::MmInfo)?;
+        let (blocks, current_block) =
+            Self::split_tokens_with_mm(&tokens, &validated, block_size, salt_hash);
+        Ok(Self {
+            blocks,
+            current_block,
+            salt_hash,
+            block_size: block_size as usize,
+            mm_runs: validated,
+        })
+    }
+
+    /// MM-aware variant of [`Self::split_tokens`].
+    ///
+    /// `mm_runs` must be pre-validated and sorted (e.g., via [`validate_and_sort_mm_info`]).
+    pub fn split_tokens_with_mm(
+        tokens: &[Token],
+        mm_runs: &[TokenBlockMmInfo],
+        block_size: u32,
+        salt_hash: SaltHash,
+    ) -> (Vec<TokenBlock>, PartialTokenBlock) {
+        assert!(block_size > 0, "block_size must be greater than 0");
+        let bs = block_size as usize;
+        let n_complete = tokens.len() / bs;
+        let mut result_blocks = Vec::with_capacity(n_complete);
+        let mut last_seq_hash: Option<SequenceHash> = None;
+        for i in 0..n_complete {
+            let block_offset = i * bs;
+            let block_tokens = &tokens[block_offset..block_offset + bs];
+            let block_bytes = compute_block_bytes_with_mm(block_tokens, block_offset, mm_runs);
+            let block_hash = compute_block_hash(&block_bytes, salt_hash);
+            let chunk = TokenBlockChunk {
+                tokens: block_tokens.into(),
+                salt_hash,
+                block_hash,
+            };
+            let new_block = TokenBlock::from_chunk(chunk, last_seq_hash, i);
+            last_seq_hash = Some(new_block.sequence_hash());
+            result_blocks.push(new_block);
+        }
+        let remainder = &tokens[n_complete * bs..];
+        let current_block = PartialTokenBlock {
+            tokens: remainder.into(),
+            block_size,
+            salt_hash,
+            parent_sequence_hash: last_seq_hash,
+            position: n_complete,
+        };
+        (result_blocks, current_block)
+    }
+
+    /// Returns the validated, sorted multimodal runs accumulated by this sequence.
+    pub fn mm_runs(&self) -> &[TokenBlockMmInfo] {
+        &self.mm_runs
+    }
+
+    /// Appends a single real token to the sequence.
+    ///
+    /// Equivalent to [`Self::append`] but named for symmetry with [`Self::push_mm_run`].
+    pub fn push_token(&mut self, token: Token) -> Result<Option<usize>, TokenBlockError> {
+        self.append(token)
+    }
+
+    /// Appends a multimodal placeholder run of `length` slots all tagged with `mm_hash`.
+    ///
+    /// The placeholder run starts at the current end of the sequence (`total_tokens()` before
+    /// the call). The token IDs at placeholder slot positions are filled with zero sentinels;
+    /// hashing uses the `(mm_hash, run_offset)` pair instead of those token bytes.
+    ///
+    /// Returns the range of fully-committed block indices completed during the call (if any).
+    pub fn push_mm_run(
+        &mut self,
+        mm_hash: u64,
+        length: usize,
+    ) -> Result<Option<Range<usize>>, TokenBlockError> {
+        if length == 0 {
+            return Err(TokenBlockError::MmInfo(MmInfoError::EmptyRun));
+        }
+        let offset = self.total_tokens();
+        self.mm_runs.push(TokenBlockMmInfo {
+            mm_hash,
+            offset,
+            length,
+        });
+        // The token values at placeholder slots are opaque for hashing; use 0 sentinels.
+        let placeholders = Tokens::from(vec![0u32; length]);
+        self.extend(placeholders)
+    }
+
+    /// Batch-validated extension: appends `tokens` (with embedded multimodal runs in `mm_info`)
+    /// to the sequence in a single validated step.
+    ///
+    /// `mm_info` offsets are **relative to the start of `tokens`** (not the existing sequence).
+    /// The function validates the chunk, then translates to absolute offsets and applies the
+    /// updates atomically: it errors before mutating any state if `mm_info` is invalid.
+    ///
+    /// Real-token regions and placeholder runs are interleaved per the chunk's layout.
+    pub fn extend_with_mm(
+        &mut self,
+        tokens: &[Token],
+        mm_info: &[TokenBlockMmInfo],
+    ) -> Result<Option<Range<usize>>, TokenBlockError> {
+        let validated =
+            validate_and_sort_mm_info(mm_info, tokens.len()).map_err(TokenBlockError::MmInfo)?;
+        let start_block = self.blocks.len();
+        let mut cursor = 0usize;
+        for run in &validated {
+            if run.offset > cursor {
+                let real = Tokens::from(tokens[cursor..run.offset].to_vec());
+                self.extend(real)?;
+            }
+            self.push_mm_run(run.mm_hash, run.length)?;
+            cursor = run.offset + run.length;
+        }
+        if cursor < tokens.len() {
+            let real = Tokens::from(tokens[cursor..].to_vec());
+            self.extend(real)?;
+        }
+        let end_block = self.blocks.len();
+        if start_block == end_block {
+            Ok(None)
+        } else {
+            Ok(Some(start_block..end_block))
         }
     }
 }
@@ -1371,9 +1898,9 @@ mod tests {
     const HASH_1_4: BlockHash = 14643705804678351452; // hash([1,2,3,4], 1337)
     const SEQ_HASH_1_4: SequenceHash = HASH_1_4;
     const HASH_5_8: BlockHash = 16777012769546811212; // hash([5,6,7,8], 1337)
-    const SEQ_HASH_5_8: SequenceHash = 4945711292740353085; // hash([SEQ_HASH_1_4, HASH_5_8], 1337)
+    const SEQ_HASH_5_8: SequenceHash = 4945711292740353085; // hash([SEQ_HASH_1_4, HASH_5_8], CHAIN_XXH3_SEED)
     const HASH_9_12: BlockHash = 483935686894639516; // hash([9,10,11,12], 1337)
-    const SEQ_HASH_9_12: SequenceHash = 12583592247330656132; // hash([SEQ_HASH_5_8, HASH_9_12], 1337)
+    const SEQ_HASH_9_12: SequenceHash = 12583592247330656132; // hash([SEQ_HASH_5_8, HASH_9_12], CHAIN_XXH3_SEED)
 
     impl PartialTokenBlock {
         /// Attempts to remove the last token from the block.
@@ -1397,16 +1924,17 @@ mod tests {
 
         // Block 1: [1, 2, 3, 4]
         let tokens_1_4 = &[1u32, 2, 3, 4];
-        let computed_hash_1_4 = compute_hash_v2(cast_slice(tokens_1_4), salt);
+        let computed_hash_1_4 = compute_block_hash(cast_slice(tokens_1_4), salt);
         assert_eq!(computed_hash_1_4, HASH_1_4, "Mismatch for HASH_1_4");
         // First block's sequence hash is its block hash
         assert_eq!(computed_hash_1_4, SEQ_HASH_1_4, "Mismatch for SEQ_HASH_1_4");
 
         // Block 2: [5, 6, 7, 8]
         let tokens_5_8 = &[5u32, 6, 7, 8];
-        let computed_hash_5_8 = compute_hash_v2(cast_slice(tokens_5_8), salt);
+        let computed_hash_5_8 = compute_block_hash(cast_slice(tokens_5_8), salt);
         assert_eq!(computed_hash_5_8, HASH_5_8, "Mismatch for HASH_5_8");
-        let computed_seq_hash_5_8 = compute_hash_v2(cast_slice(&[SEQ_HASH_1_4, HASH_5_8]), salt);
+        // Chain step uses the shared CHAIN_XXH3_SEED; salt is already mixed into block_hash.
+        let computed_seq_hash_5_8 = compute_next_sequence_hash(SEQ_HASH_1_4, HASH_5_8);
         assert_eq!(
             computed_seq_hash_5_8, SEQ_HASH_5_8,
             "Mismatch for SEQ_HASH_5_8"
@@ -1414,9 +1942,9 @@ mod tests {
 
         // Block 3: [9, 10, 11, 12]
         let tokens_9_12 = &[9u32, 10, 11, 12];
-        let computed_hash_9_12 = compute_hash_v2(cast_slice(tokens_9_12), salt);
+        let computed_hash_9_12 = compute_block_hash(cast_slice(tokens_9_12), salt);
         assert_eq!(computed_hash_9_12, HASH_9_12, "Mismatch for HASH_9_12");
-        let computed_seq_hash_9_12 = compute_hash_v2(cast_slice(&[SEQ_HASH_5_8, HASH_9_12]), salt);
+        let computed_seq_hash_9_12 = compute_next_sequence_hash(SEQ_HASH_5_8, HASH_9_12);
         assert_eq!(
             computed_seq_hash_9_12, SEQ_HASH_9_12,
             "Mismatch for SEQ_HASH_9_12"
@@ -1505,16 +2033,16 @@ mod tests {
 
         assert_eq!(plh_0.mode(), 0, "Position 100 should use mode 0");
         assert_eq!(plh_0.position(), position_0);
-        // Current and parent are truncated to 59 bits in mode 0
+        // Current carries the full u64; parent fragment is 54 bits in mode 0
         assert_eq!(
-            plh_0.current_hash_fragment(),
-            current_hash_0 & ((1u64 << 59) - 1),
-            "Current hash should be truncated to 59 bits"
+            plh_0.current_sequence_hash(),
+            current_hash_0,
+            "Current sequence hash should be stored in full"
         );
         assert_eq!(
             plh_0.parent_hash_fragment(),
-            parent_hash_0 & ((1u64 << 59) - 1),
-            "Parent hash should be truncated to 59 bits"
+            parent_hash_0 & ((1u64 << 54) - 1),
+            "Parent fragment should be truncated to 54 bits in mode 0"
         );
 
         // Test Mode 1: position fits in 16 bits (256 <= pos < 65536)
@@ -1523,16 +2051,11 @@ mod tests {
 
         assert_eq!(plh_1.mode(), 1, "Position 1000 should use mode 1");
         assert_eq!(plh_1.position(), position_1);
-        // Current and parent are truncated to 55 bits in mode 1
-        assert_eq!(
-            plh_1.current_hash_fragment(),
-            current_hash_0 & ((1u64 << 55) - 1),
-            "Current hash should be truncated to 55 bits"
-        );
+        assert_eq!(plh_1.current_sequence_hash(), current_hash_0);
         assert_eq!(
             plh_1.parent_hash_fragment(),
-            parent_hash_0 & ((1u64 << 55) - 1),
-            "Parent hash should be truncated to 55 bits"
+            parent_hash_0 & ((1u64 << 46) - 1),
+            "Parent fragment should be truncated to 46 bits in mode 1"
         );
 
         // Test Mode 2: position fits in 24 bits (65536 <= pos < 16777216)
@@ -1541,16 +2064,11 @@ mod tests {
 
         assert_eq!(plh_2.mode(), 2, "Position 100,000 should use mode 2");
         assert_eq!(plh_2.position(), position_2);
-        // Current and parent are truncated to 51 bits in mode 2
-        assert_eq!(
-            plh_2.current_hash_fragment(),
-            current_hash_0 & ((1u64 << 51) - 1),
-            "Current hash should be truncated to 51 bits"
-        );
+        assert_eq!(plh_2.current_sequence_hash(), current_hash_0);
         assert_eq!(
             plh_2.parent_hash_fragment(),
-            parent_hash_0 & ((1u64 << 51) - 1),
-            "Parent hash should be truncated to 51 bits"
+            parent_hash_0 & ((1u64 << 38) - 1),
+            "Parent fragment should be truncated to 38 bits in mode 2"
         );
 
         // Test edge cases: position at boundaries
@@ -1583,28 +2101,9 @@ mod tests {
         assert_eq!(
             plh_root.parent_hash_fragment(),
             0,
-            "Root should have zero parent hash"
+            "Root should have zero parent fragment"
         );
-        assert_eq!(
-            plh_root.current_hash_fragment(),
-            current_hash_0 & ((1u64 << 59) - 1)
-        );
-
-        // Test LSB alignment: verify that smaller mode fragments are subsets of larger mode fragments
-        let position_small = 100; // Mode 0: 59 bits
-        let position_large = 1000; // Mode 1: 55 bits
-        let plh_small =
-            PositionalLineageHash::new(current_hash_0, Some(parent_hash_0), position_small);
-        let plh_large =
-            PositionalLineageHash::new(current_hash_0, Some(parent_hash_0), position_large);
-
-        // The 55-bit fragment from mode 1 should match the lower 55 bits of the 59-bit fragment from mode 0
-        let mask_55 = (1u64 << 55) - 1;
-        assert_eq!(
-            plh_large.current_hash_fragment(),
-            plh_small.current_hash_fragment() & mask_55,
-            "LSB alignment: mode 1 fragment should be subset of mode 0 fragment"
-        );
+        assert_eq!(plh_root.current_sequence_hash(), current_hash_0);
     }
 
     #[test]
@@ -1618,8 +2117,10 @@ mod tests {
 
     #[test]
     fn test_positional_lineage_hash_mode_boundary_alignment() {
-        // Test that hash fragments align correctly across mode boundaries
-        // This is critical for backward traversal in the radix tree
+        // Test that backward radix traversal still works across mode boundaries.
+        // Under the asymmetric layout, the parent fragment is sized to the *child's*
+        // mode and pulled from the parent's full u64 via
+        // `parent_fragment_for_child_position`.
 
         let parent_hash = 0xFEDCBA9876543210;
         let current_hash_255 = 0x1234567890ABCDEF;
@@ -1628,28 +2129,24 @@ mod tests {
         // Position 255: Mode 0 (last position before boundary)
         let plh_255 = PositionalLineageHash::new(current_hash_255, Some(parent_hash), 255);
         assert_eq!(plh_255.mode(), 0);
+        assert_eq!(plh_255.current_sequence_hash(), current_hash_255);
 
         // Position 256: Mode 1 (first position after boundary)
-        // This should store position 255's current_hash as its parent
         let plh_256 = PositionalLineageHash::new(current_hash_256, Some(current_hash_255), 256);
         assert_eq!(plh_256.mode(), 1);
 
-        // CRITICAL TEST: The parent fragment at position 256 should match
-        // the current fragment at position 255, allowing backward traversal
-        // Both should be truncated to 55 bits (the minimum available at the boundary)
-        let mask_55 = (1u64 << 55) - 1;
+        // CRITICAL: child's parent_fragment must equal parent's current truncated to
+        // the child's mode width (46 bits at mode 1).
+        let mask_46 = (1u64 << 46) - 1;
         assert_eq!(
             plh_256.parent_hash_fragment(),
-            plh_255.current_hash_fragment() & mask_55,
-            "Mode boundary: position 256's parent fragment should match position 255's current fragment (55 bits)"
+            current_hash_255 & mask_46,
+            "Mode boundary: position 256's parent fragment matches position 255's current truncated to 46 bits"
         );
-
-        // Verify that position 255's current fragment is already truncated to 55 bits
-        // (not the full 59 bits that Mode 0 could theoretically support)
         assert_eq!(
-            plh_255.current_hash_fragment(),
-            current_hash_255 & mask_55,
-            "Position 255 should pre-truncate current hash to 55 bits for next mode compatibility"
+            plh_256.parent_hash_fragment(),
+            plh_255.parent_fragment_for_child_position(256),
+            "parent_fragment_for_child_position helper should match"
         );
 
         // Test the other boundary: 65535 -> 65536 (Mode 1 -> Mode 2)
@@ -1663,19 +2160,68 @@ mod tests {
             PositionalLineageHash::new(current_hash_65536, Some(current_hash_65535), 65536);
         assert_eq!(plh_65536.mode(), 2);
 
-        // Both should align to 51 bits (Mode 2's capacity)
-        let mask_51 = (1u64 << 51) - 1;
+        // Mode 2 parent fragment is 38 bits.
+        let mask_38 = (1u64 << 38) - 1;
         assert_eq!(
             plh_65536.parent_hash_fragment(),
-            plh_65535.current_hash_fragment() & mask_51,
-            "Mode boundary: position 65536's parent fragment should match position 65535's current fragment (51 bits)"
+            current_hash_65535 & mask_38,
+            "Mode boundary: position 65536's parent fragment matches position 65535's current truncated to 38 bits"
+        );
+        assert_eq!(
+            plh_65536.parent_hash_fragment(),
+            plh_65535.parent_fragment_for_child_position(65536),
+        );
+    }
+
+    #[test]
+    fn test_positional_lineage_hash_extend() {
+        // PLH must be self-extending: a chain built from PLH::root + extend should be
+        // bitwise identical to the chain produced by full TokenBlock construction.
+        let salt: SaltHash = 1337;
+        let bh: [BlockHash; 3] = [
+            compute_block_hash(cast_slice(&[1u32, 2, 3, 4]), salt),
+            compute_block_hash(cast_slice(&[5u32, 6, 7, 8]), salt),
+            compute_block_hash(cast_slice(&[9u32, 10, 11, 12]), salt),
+        ];
+
+        // Direct construction via TokenBlock
+        let blk0 =
+            TokenBlock::from_chunk(TokenBlockChunk::from_tokens(&[1, 2, 3, 4], salt), None, 0);
+        let blk1 = TokenBlock::from_chunk(
+            TokenBlockChunk::from_tokens(&[5, 6, 7, 8], salt),
+            Some(blk0.sequence_hash()),
+            1,
+        );
+        let blk2 = TokenBlock::from_chunk(
+            TokenBlockChunk::from_tokens(&[9, 10, 11, 12], salt),
+            Some(blk1.sequence_hash()),
+            2,
         );
 
+        // Self-extending construction via PLH::root + extend
+        let plh0 = PositionalLineageHash::root(bh[0]);
+        let plh1 = plh0.extend(bh[1]);
+        let plh2 = plh1.extend(bh[2]);
+
+        assert_eq!(plh0.as_u128(), blk0.positional_lineage_hash().as_u128());
+        assert_eq!(plh1.as_u128(), blk1.positional_lineage_hash().as_u128());
+        assert_eq!(plh2.as_u128(), blk2.positional_lineage_hash().as_u128());
+
+        // Chain definition: extended.current_sequence_hash == compute_next_sequence_hash(parent, child)
         assert_eq!(
-            plh_65535.current_hash_fragment(),
-            current_hash_65535 & mask_51,
-            "Position 65535 should pre-truncate current hash to 51 bits for next mode compatibility"
+            plh1.current_sequence_hash(),
+            compute_next_sequence_hash(plh0.current_sequence_hash(), bh[1]),
         );
+
+        // Salt propagation: changing salt changes block_hash[0] and therefore every
+        // subsequent PLH, even though salt no longer seeds the per-step chain.
+        let alt_salt: SaltHash = 4242;
+        let alt_bh0 = compute_block_hash(cast_slice(&[1u32, 2, 3, 4]), alt_salt);
+        assert_ne!(alt_bh0, bh[0]);
+        let alt_plh0 = PositionalLineageHash::root(alt_bh0);
+        let alt_plh1 = alt_plh0.extend(compute_block_hash(cast_slice(&[5u32, 6, 7, 8]), alt_salt));
+        assert_ne!(alt_plh0.as_u128(), plh0.as_u128());
+        assert_ne!(alt_plh1.as_u128(), plh1.as_u128());
     }
 
     #[test]
@@ -1816,10 +2362,7 @@ mod tests {
         let plh1 = block1.positional_lineage_hash();
         assert_eq!(plh1.position(), 0);
         assert_eq!(plh1.parent_hash_fragment(), 0); // Root has no parent
-        assert_eq!(
-            plh1.current_hash_fragment(),
-            SEQ_HASH_1_4 & ((1u64 << 59) - 1)
-        ); // Mode 0: 59 bits
+        assert_eq!(plh1.current_sequence_hash(), SEQ_HASH_1_4);
 
         let tokens2 = Tokens::from(vec![5, 6, 7, 8]);
         let chunk2 = TokenBlockChunk::new(tokens2.clone(), salt);
@@ -1846,12 +2389,9 @@ mod tests {
         assert_eq!(plh2.position(), 1);
         assert_eq!(
             plh2.parent_hash_fragment(),
-            SEQ_HASH_1_4 & ((1u64 << 59) - 1)
-        ); // Parent fragment matches block1's sequence hash
-        assert_eq!(
-            plh2.current_hash_fragment(),
-            SEQ_HASH_5_8 & ((1u64 << 59) - 1)
-        ); // Mode 0: 59 bits
+            SEQ_HASH_1_4 & ((1u64 << 54) - 1)
+        ); // Parent fragment is the parent's u64 truncated to 54 bits in mode 0
+        assert_eq!(plh2.current_sequence_hash(), SEQ_HASH_5_8);
     }
 
     #[test]
@@ -2512,8 +3052,8 @@ mod tests {
         let at_5_low = PositionalLineageHash::new(0x10, Some(0x1111), 5);
         let at_5_high = PositionalLineageHash::new(0x20, Some(0x1111), 5);
         assert!(
-            at_5_low.current_hash_fragment() < at_5_high.current_hash_fragment(),
-            "test assumes distinct current fragments at the same position"
+            at_5_low.current_sequence_hash() < at_5_high.current_sequence_hash(),
+            "test assumes distinct current sequence hashes at the same position"
         );
         assert!(at_5_low < at_5_high);
         assert!(at_5_high > at_5_low);
@@ -2534,8 +3074,8 @@ mod tests {
             same_pos_same_current_other_parent.position()
         );
         assert_eq!(
-            same_pos_same_current.current_hash_fragment(),
-            same_pos_same_current_other_parent.current_hash_fragment()
+            same_pos_same_current.current_sequence_hash(),
+            same_pos_same_current_other_parent.current_sequence_hash()
         );
         assert_ne!(same_pos_same_current, same_pos_same_current_other_parent);
         assert_ne!(
@@ -2759,5 +3299,334 @@ mod tests {
         let decoded: PositionalLineageHash =
             serde_json::from_str(&json).expect("plh json deserialize");
         assert_eq!(plh, decoded);
+    }
+
+    // ----------------------------------------------------------------------------------------
+    // Multimodal block-formation tests (#10–14 in the kv-hashing plan).
+    // ----------------------------------------------------------------------------------------
+
+    /// #10: a sequence built via `new_with_mm` with empty mm_info must equal one built via `new`.
+    #[test]
+    fn tokens_mm_zero_mm_equivalence() {
+        let tokens = Tokens::from(vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let baseline = TokenBlockSequence::new(tokens.clone(), 4, Some(TEST_SALT_HASH));
+        let mm = TokenBlockSequence::new_with_mm(tokens, &[], 4, Some(TEST_SALT_HASH))
+            .expect("validation should pass for empty mm_info");
+
+        assert_eq!(mm.blocks().len(), baseline.blocks().len());
+        for (a, b) in mm.blocks().iter().zip(baseline.blocks().iter()) {
+            assert_eq!(a.salt_hash(), b.salt_hash());
+            assert_eq!(a.block_hash(), b.block_hash());
+            assert_eq!(a.sequence_hash(), b.sequence_hash());
+            assert_eq!(a.parent_sequence_hash(), b.parent_sequence_hash());
+            assert_eq!(a.positional_lineage_hash(), b.positional_lineage_hash());
+        }
+        assert!(mm.mm_runs().is_empty());
+    }
+
+    /// #11: byte layout — verify the MM-aware buffer matches the documented
+    /// 13-bytes-per-slot tagged framing, and that block_hash is XXH3 over that exact buffer.
+    #[test]
+    fn tokens_mm_byte_layout() {
+        // Block 0: tokens [t0..t3], placeholder run [4..6) with mm_hash=0xAA, then t6, t7.
+        // block_size = 8 ⇒ block_offset = 0, run covers slots 4..6. The block is MM-affected
+        // ⇒ tagged 13-byte frames apply to *every* slot.
+        let tokens = Tokens::from(vec![100u32, 101, 102, 103, 0, 0, 106, 107]);
+        let mm = vec![TokenBlockMmInfo {
+            mm_hash: 0xAAu64,
+            offset: 4,
+            length: 2,
+        }];
+        let salt = TEST_SALT_HASH;
+
+        // Build expected bytes manually: each slot is 13 bytes.
+        let mut expected = Vec::new();
+        for &t in &[100u32, 101, 102, 103] {
+            expected.push(MM_SLOT_TAG_TOKEN);
+            expected.extend_from_slice(&t.to_le_bytes());
+            expected.extend_from_slice(&0u64.to_le_bytes());
+        }
+        for run_off in 0u32..2 {
+            expected.push(MM_SLOT_TAG_PLACEHOLDER);
+            expected.extend_from_slice(&run_off.to_le_bytes());
+            expected.extend_from_slice(&0xAAu64.to_le_bytes());
+        }
+        for &t in &[106u32, 107] {
+            expected.push(MM_SLOT_TAG_TOKEN);
+            expected.extend_from_slice(&t.to_le_bytes());
+            expected.extend_from_slice(&0u64.to_le_bytes());
+        }
+        assert_eq!(expected.len(), 8 * 13);
+
+        // Validate helper output matches.
+        let helper_bytes = compute_block_bytes_with_mm(&tokens, 0, &mm);
+        assert_eq!(helper_bytes, expected, "MM-aware byte buffer mismatch");
+
+        // Validate block_hash equals XXH3 over the expected buffer.
+        let expected_block_hash = compute_block_hash(&expected, salt);
+        let seq = TokenBlockSequence::new_with_mm(tokens, &mm, 8, Some(salt)).unwrap();
+        assert_eq!(seq.blocks().len(), 1);
+        assert_eq!(seq.blocks()[0].block_hash(), expected_block_hash);
+    }
+
+    /// #11b — collision regression. Reviewer P1: with the original 4/12 mixed encoding,
+    /// `block_size=2` blocks `[MM(slot 0), token]` and `[token, MM(slot 1)]` could produce
+    /// identical byte streams under chosen `mm_hash`/token values. With tagged 13-byte
+    /// framing they MUST differ.
+    #[test]
+    fn tokens_mm_no_position_collision() {
+        let salt = TEST_SALT_HASH;
+        // Layout A: block_size=2, MM at slot 0, token at slot 1.
+        let tokens_a = Tokens::from(vec![0u32, 0xAB]);
+        let mm_a = vec![TokenBlockMmInfo {
+            mm_hash: 0x1122_3344_5566_7788,
+            offset: 0,
+            length: 1,
+        }];
+        // Layout B: block_size=2, token at slot 0, MM at slot 1.
+        let tokens_b = Tokens::from(vec![0xAB, 0u32]);
+        let mm_b = vec![TokenBlockMmInfo {
+            mm_hash: 0x1122_3344_5566_7788,
+            offset: 1,
+            length: 1,
+        }];
+
+        let bytes_a = compute_block_bytes_with_mm(&tokens_a, 0, &mm_a);
+        let bytes_b = compute_block_bytes_with_mm(&tokens_b, 0, &mm_b);
+        assert_ne!(
+            bytes_a, bytes_b,
+            "tagged framing must distinguish slot kinds at different positions"
+        );
+
+        let seq_a = TokenBlockSequence::new_with_mm(tokens_a, &mm_a, 2, Some(salt)).unwrap();
+        let seq_b = TokenBlockSequence::new_with_mm(tokens_b, &mm_b, 2, Some(salt)).unwrap();
+        assert_ne!(
+            seq_a.blocks()[0].block_hash(),
+            seq_b.blocks()[0].block_hash()
+        );
+    }
+
+    /// #11c — per-block legacy fallback. A block with no overlapping MM run uses the legacy
+    /// 4-byte-per-slot encoding so its `block_hash` matches the existing zero-MM path. Block 0
+    /// of an MM-bearing sequence (run starts in block 1) must equal block 0 of a no-MM sequence.
+    #[test]
+    fn tokens_mm_legacy_fallback_per_block() {
+        let block_size: u32 = 4;
+        let salt = Some(TEST_SALT_HASH);
+        let raw = vec![1u32, 2, 3, 4, 5, 6, 7, 8];
+        // MM run covers only block 1 (positions [4..7)).
+        let mm = vec![TokenBlockMmInfo {
+            mm_hash: 0xAB,
+            offset: 4,
+            length: 3,
+        }];
+        let seq_mm =
+            TokenBlockSequence::new_with_mm(Tokens::from(raw.clone()), &mm, block_size, salt)
+                .unwrap();
+        let seq_plain = TokenBlockSequence::new(Tokens::from(raw), block_size, salt);
+
+        // Block 0 untouched by MM ⇒ identical hashes.
+        assert_eq!(
+            seq_mm.blocks()[0].block_hash(),
+            seq_plain.blocks()[0].block_hash()
+        );
+        assert_eq!(
+            seq_mm.blocks()[0].sequence_hash(),
+            seq_plain.blocks()[0].sequence_hash()
+        );
+        // Block 1 IS MM-affected ⇒ hashes diverge.
+        assert_ne!(
+            seq_mm.blocks()[1].block_hash(),
+            seq_plain.blocks()[1].block_hash()
+        );
+    }
+
+    /// #11d — `offset + length` overflow is rejected as a dedicated error variant rather
+    /// than panicking or silently wrapping.
+    #[test]
+    fn tokens_mm_validation_overflow() {
+        let bad = vec![TokenBlockMmInfo {
+            mm_hash: 1,
+            offset: usize::MAX - 2,
+            length: 10,
+        }];
+        let err = validate_and_sort_mm_info(&bad, usize::MAX).expect_err("must reject overflow");
+        assert!(matches!(err, MmInfoError::OffsetOverflow { .. }));
+    }
+
+    /// #12: building incrementally via push_token / push_mm_run yields the same sequence
+    /// as the batch `new_with_mm` constructor.
+    #[test]
+    fn tokens_mm_streaming_equals_batch() {
+        // Layout: [t,t,t,(MM=0xAA len=4),t,t] over block_size=4 ⇒ 2 blocks + partial.
+        let tokens = Tokens::from(vec![1u32, 2, 3, 0, 0, 0, 0, 6, 7]);
+        let mm = vec![TokenBlockMmInfo {
+            mm_hash: 0xAAu64,
+            offset: 3,
+            length: 4,
+        }];
+        let salt = Some(TEST_SALT_HASH);
+        let batch = TokenBlockSequence::new_with_mm(tokens, &mm, 4, salt).unwrap();
+
+        let mut streamed = TokenBlockSequence::new(Tokens::default(), 4, salt);
+        streamed.push_token(1).unwrap();
+        streamed.push_token(2).unwrap();
+        streamed.push_token(3).unwrap();
+        streamed.push_mm_run(0xAAu64, 4).unwrap();
+        streamed.push_token(6).unwrap();
+        streamed.push_token(7).unwrap();
+
+        assert_eq!(streamed.blocks().len(), batch.blocks().len());
+        for (a, b) in streamed.blocks().iter().zip(batch.blocks().iter()) {
+            assert_eq!(a.block_hash(), b.block_hash(), "block_hash mismatch");
+            assert_eq!(a.sequence_hash(), b.sequence_hash(), "seq_hash mismatch");
+            assert_eq!(
+                a.positional_lineage_hash(),
+                b.positional_lineage_hash(),
+                "PLH mismatch"
+            );
+        }
+        assert_eq!(streamed.mm_runs(), batch.mm_runs());
+    }
+
+    /// #13: a multi-block MM run produces distinct block_hashes for blocks fully covered by
+    /// the run (run_offset increases monotonically), and shares prefix hashes with another
+    /// request whose run starts at the same global offset.
+    #[test]
+    fn tokens_mm_multi_block_run() {
+        let block_size: u32 = 8;
+        let bs = block_size as usize;
+        // Run of length 2*bs + k = 20 starting at the boundary of block 0 ⇒ spans blocks 0,1,2.
+        // Blocks 0 and 1 are fully placeholders; block 2 starts as 4 placeholders + 4 reals.
+        let mut tokens_a: Vec<Token> = vec![0u32; 2 * bs]; // blocks 0, 1 (placeholders)
+        tokens_a.extend_from_slice(&[0u32, 0, 0, 0, 100, 101, 102, 103]); // block 2
+        let tokens_a = Tokens::from(tokens_a);
+        let mm = vec![TokenBlockMmInfo {
+            mm_hash: 0xCAFEBABEu64,
+            offset: 0,
+            length: 20,
+        }];
+        let seq_a = TokenBlockSequence::new_with_mm(
+            tokens_a.clone(),
+            &mm,
+            block_size,
+            Some(TEST_SALT_HASH),
+        )
+        .unwrap();
+        assert_eq!(seq_a.blocks().len(), 3);
+
+        // Block 0 and block 1 are *both* fully placeholder, but with different run_offsets
+        // (0..7 vs 8..15) → block_hashes must differ.
+        let bh0 = seq_a.blocks()[0].block_hash();
+        let bh1 = seq_a.blocks()[1].block_hash();
+        assert_ne!(
+            bh0, bh1,
+            "fully-placeholder blocks at different run_offsets must hash differently"
+        );
+
+        // Same image at the same global starting position in another request must share blocks.
+        let seq_b =
+            TokenBlockSequence::new_with_mm(tokens_a, &mm, block_size, Some(TEST_SALT_HASH))
+                .unwrap();
+        assert_eq!(
+            seq_a.blocks()[0].block_hash(),
+            seq_b.blocks()[0].block_hash()
+        );
+        assert_eq!(
+            seq_a.blocks()[1].block_hash(),
+            seq_b.blocks()[1].block_hash()
+        );
+        assert_eq!(
+            seq_a.blocks()[2].block_hash(),
+            seq_b.blocks()[2].block_hash()
+        );
+
+        // A different mm_hash at the same position must diverge starting at block 0.
+        let mm_diff = vec![TokenBlockMmInfo {
+            mm_hash: 0xDEADBEEFu64,
+            offset: 0,
+            length: 20,
+        }];
+        let mut tokens_c: Vec<Token> = vec![0u32; 2 * bs];
+        tokens_c.extend_from_slice(&[0u32, 0, 0, 0, 100, 101, 102, 103]);
+        let seq_c = TokenBlockSequence::new_with_mm(
+            Tokens::from(tokens_c),
+            &mm_diff,
+            block_size,
+            Some(TEST_SALT_HASH),
+        )
+        .unwrap();
+        assert_ne!(
+            seq_a.blocks()[0].block_hash(),
+            seq_c.blocks()[0].block_hash()
+        );
+    }
+
+    /// #14: mm_info validation rejects overlap, out-of-bounds, and zero-length runs.
+    #[test]
+    fn tokens_mm_validation() {
+        let tokens = Tokens::from(vec![0u32; 32]);
+        // Overlap.
+        let overlap = vec![
+            TokenBlockMmInfo {
+                mm_hash: 1,
+                offset: 0,
+                length: 5,
+            },
+            TokenBlockMmInfo {
+                mm_hash: 2,
+                offset: 4,
+                length: 5,
+            },
+        ];
+        let err = TokenBlockSequence::new_with_mm(tokens.clone(), &overlap, 4, None).unwrap_err();
+        assert!(matches!(
+            err,
+            TokenBlockError::MmInfo(MmInfoError::Overlapping { .. })
+        ));
+
+        // Out-of-bounds.
+        let oob = vec![TokenBlockMmInfo {
+            mm_hash: 1,
+            offset: 30,
+            length: 10,
+        }];
+        let err = TokenBlockSequence::new_with_mm(tokens.clone(), &oob, 4, None).unwrap_err();
+        assert!(matches!(
+            err,
+            TokenBlockError::MmInfo(MmInfoError::OutOfBounds { .. })
+        ));
+
+        // Zero-length run.
+        let empty = vec![TokenBlockMmInfo {
+            mm_hash: 1,
+            offset: 0,
+            length: 0,
+        }];
+        let err = TokenBlockSequence::new_with_mm(tokens, &empty, 4, None).unwrap_err();
+        assert!(matches!(
+            err,
+            TokenBlockError::MmInfo(MmInfoError::EmptyRun)
+        ));
+
+        // push_mm_run with length 0.
+        let mut seq = TokenBlockSequence::new(Tokens::default(), 4, None);
+        let err = seq.push_mm_run(0xAB, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            TokenBlockError::MmInfo(MmInfoError::EmptyRun)
+        ));
+
+        // truncate / pop / unwind blocked once mm_runs is non-empty.
+        let mut seq = TokenBlockSequence::new(Tokens::from(vec![1u32, 2, 3]), 4, None);
+        seq.push_mm_run(0xAB, 2).unwrap();
+        assert!(matches!(
+            seq.truncate(0).unwrap_err(),
+            TokenBlockError::MmRunsPresent
+        ));
+        assert!(matches!(
+            seq.unwind(1).unwrap_err(),
+            TokenBlockError::MmRunsPresent
+        ));
     }
 }

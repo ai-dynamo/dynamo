@@ -34,6 +34,7 @@ AUDIO_TEST_URL = (
 _MULTIMODAL_COLOR_PROMPT = (
     "What colors are in the following image? Respond only with the colors."
 )
+IMAGE_COLOR_PROMPT = _MULTIMODAL_COLOR_PROMPT
 
 
 def make_image_payload(
@@ -65,21 +66,18 @@ def make_image_payload(
 def make_image_payload_cached_tokens(
     expected_response: list[str],
     *,
-    repeat_count: int = 2,
+    repeat_count: int = 3,
     min_cached_tokens: int = 1,
+    require_rust_processor_init: bool = False,
+    require_vllm_mm_processor_init: bool = False,
+    min_avg_kv_hit_rate: float = 0.0,
 ) -> CachedTokensChatPayload:
-    """Image payload that also asserts MM-aware KV cache reuse on repeats.
+    """Image payload that asserts MM-aware KV cache reuse on repeats.
 
-    Same body shape as :func:`make_image_payload`, but wrapped in a
-    :class:`CachedTokensChatPayload` so the 2nd+ request validates that
-    ``usage.prompt_tokens_details.cached_tokens >= min_cached_tokens``.
-    Two identical MM requests through an MM-routing-aware frontend must
-    land on the same warm worker and reuse the prefix cache; if routing
-    silently regresses to text-only the second request will report 0
-    cached tokens and this payload fails.
-
-    Used to harden the ``agg_router`` pre_merge smoke against silent
-    regressions in the Rust+lightseek routing path.
+    ``require_rust_processor_init`` / ``require_vllm_mm_processor_init`` assert
+    the MM-routing init log fired. ``min_avg_kv_hit_rate`` asserts the
+    post-R1 mean of router_kv_hit_rate >= threshold (fails closed when
+    router-side hashes diverge from the worker).
     """
     return CachedTokensChatPayload(
         body={
@@ -95,13 +93,16 @@ def make_image_payload_cached_tokens(
                     ],
                 }
             ],
-            "max_tokens": 100,
+            "max_tokens": 50,
             "temperature": 0.0,
             "stream": False,
         },
         repeat_count=repeat_count,
         expected_response=expected_response,
         min_cached_tokens=min_cached_tokens,
+        require_rust_processor_init=require_rust_processor_init,
+        require_vllm_mm_processor_init=require_vllm_mm_processor_init,
+        min_avg_kv_hit_rate=min_avg_kv_hit_rate,
     )
 
 
@@ -345,6 +346,7 @@ def make_multimodal_configs(
             marks: list[Any] = [
                 getattr(pytest.mark, gpu),
                 pytest.mark.timeout(timeout),
+                pytest.mark.multimodal,
             ]
             marks.extend(case.marks if case.marks else topo_cfg.marks)
             if topo_cfg.profiled_vram_gib is not None:

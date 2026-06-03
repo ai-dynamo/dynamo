@@ -11,7 +11,7 @@ Method names follow Python / Pydantic convention (snake_case), matching how
 
 DGDR shapes we clone / extend:
 - `EngineSpec`    — local extension (DGDR has `model`/`backend` flat on the
-                    outer; we need engine-args carriers)
+                    outer; we need engine-arg input dictionaries)
 - `HardwareSpec`  — subset clone of DGDR.HardwareSpec (gpuSku + totalGpus only)
 - `WorkloadSpec`  — DGDR.WorkloadSpec + replay extensions, unified synthetic/
                     trace with a `traceFile` discriminator
@@ -35,7 +35,6 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from dynamo.llm import KvRouterConfig, MockEngineArgs
 from dynamo.profiler.utils.dgdr_v1beta1_types import BackendType, GPUSKUType
 
 from .constants import (
@@ -84,13 +83,17 @@ class ReplayObjective(str, Enum):
         return -float(report["mean_e2e_latency_ms"])
 
 
+EngineArgsInput = dict[str, Any]
+RouterConfigInput = dict[str, Any]
+
+
 class EngineSpec(BaseModel):
-    """Model + backend + engine-arg carriers.
+    """Model + backend + engine-arg input dictionaries.
 
     DGDR has `model: str` and `backend: BackendType` flat on the outer spec and
     no engine-args equivalent, so this spec is a replay-local extension.
 
-    Carries engine args for both agg and disagg paths; the relevant
+    Carries engine-arg inputs for both agg and disagg paths; the relevant
     `optimize_dense_*` entry asserts the right fields are populated
     (guardrail #8).
 
@@ -99,13 +102,13 @@ class EngineSpec(BaseModel):
     instead of silently falling through to a vLLM run.
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+    model_config = ConfigDict(extra="forbid")
 
     model: str
     backend: BackendType
-    baseEngineArgs: MockEngineArgs | None = None
-    basePrefillEngineArgs: MockEngineArgs | None = None
-    baseDecodeEngineArgs: MockEngineArgs | None = None
+    baseEngineArgs: EngineArgsInput | None = None
+    basePrefillEngineArgs: EngineArgsInput | None = None
+    baseDecodeEngineArgs: EngineArgsInput | None = None
 
     @field_validator("backend", mode="after")
     @classmethod
@@ -331,7 +334,7 @@ class RouterSpec(BaseModel):
     score credits plus a mode selector.
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+    model_config = ConfigDict(extra="forbid")
 
     mode: RouterMode = RouterMode.KV_ROUTER
     # None → fallback to DEFAULT_* sweep values (guardrail #3). Empty
@@ -339,7 +342,7 @@ class RouterSpec(BaseModel):
     # Round-robin auto-collapse happens in `effectiveOverlapCredits` (guardrail #5).
     overlapCredits: list[float] | None = None
     prefillLoadScales: list[float] | None = None
-    baseRouterConfig: KvRouterConfig | None = None
+    baseRouterConfig: RouterConfigInput | None = None
 
     @field_validator("overlapCredits", mode="after")
     @classmethod

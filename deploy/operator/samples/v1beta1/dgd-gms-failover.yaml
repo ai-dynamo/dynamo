@@ -1,0 +1,122 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Example: DynamoGraphDeployment with inter-pod GMS (GPU Memory Service)
+# failover on vLLM.
+#
+# Inter-pod GMS failover splits the traditional single-engine pod into:
+#   * a dedicated GMS weight-server pod (per rank) that owns the model weights
+#     and exposes them over a shared-GPU UDS, and
+#   * N engine pods (per rank) that attach to the same GPUs via DRA and race
+#     for a flock; the winner becomes primary, the others are hot shadows.
+#
+# This file contains variants you can use under .spec.components:
+#
+# Single-node GMS:
+#   Creates per PCSG replica:
+#     - 1 GMS weight-server pod     (<component>-gms-0)
+#     - numShadows + 1 engine pods (<component>, replicas = numShadows + 1)
+#   All engine pods + the GMS pod share the same GPUs via DRA ResourceClaims.
+#   component.replicas controls how many PCSG replicas are created
+#   (horizontal scale).
+#
+# Multinode GMS (N nodes):
+#   Creates per PCSG replica:
+#     - 1 GMS weight-server pod per rank   (<component>-gms-<rank>)
+#     - numShadows + 1 engine pods per rank
+#         rank 0: <component>-ldr   (leader,   replicas = numShadows + 1)
+#         rank R: <component>-wkr-R (worker R, replicas = numShadows + 1)
+#   Each rank's GMS + engine pods share GPUs via DRA within that node.
+#   component.replicas controls horizontal PCSG replicas.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: llm-serving-mn
+spec:
+  backendFramework: vllm
+  components:
+  # --- Single-node GMS failover ---
+  # - experimental:
+  #     failover:
+  #       mode: InterPod
+  #       numShadows: 1 # 1 primary + 1 shadow = 2 engine pods per PCSG replica
+  #     gpuMemoryService:
+  #       mode: InterPod
+  #   name: agg
+  #   podTemplate:
+  #     spec:
+  #       # To target H100 nodes, add nodeSelector or affinity for your cluster's GPU labels.
+  #       containers:
+  #       - args:
+  #         - --model
+  #         - Qwen/Qwen3-0.6B
+  #         - --tensor-parallel-size
+  #         - "1"
+  #         - --enforce-eager
+  #         - --gpu-memory-utilization
+  #         - "0.85"
+  #         command:
+  #         - python3
+  #         - -m
+  #         - dynamo.vllm
+  #         image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
+  #         name: main
+  #         resources:
+  #           limits:
+  #             nvidia.com/gpu: "1"
+  #   replicas: 1
+  #   sharedMemorySize: 16Gi
+  #   type: worker
+
+  # --- Multinode GMS failover (2 nodes) ---
+  - experimental:
+      failover:
+        mode: InterPod
+        numShadows: 1 # 1 primary + 1 shadow = 2 engine pods per rank
+      gpuMemoryService:
+        mode: InterPod
+    multinode:
+      nodeCount: 2
+    name: agg
+    podTemplate:
+      spec:
+        # To target H100 nodes, add nodeSelector or affinity for your cluster's GPU labels.
+        containers:
+        - args:
+          # args: ["--model", "Qwen/Qwen3-235B-A22B", "--tensor-parallel-size", "8", "--enforce-eager", "--gpu-memory-utilization", "0.85"]
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --tensor-parallel-size
+          - "2"
+          - --enforce-eager
+          - --gpu-memory-utilization
+          - "0.85"
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+    replicas: 1
+    # sharedMemorySize: 16Gi
+    type: worker
+
+  # --- Regular frontend (no failover) ---
+  - name: frontend
+    podTemplate:
+      spec:
+        containers:
+        - envFrom:
+          - secretRef:
+              name: hf-token-secret
+          # command: ["python3", "-m", "dynamo.frontend"]
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
+          name: main
+    replicas: 1
+    type: frontend

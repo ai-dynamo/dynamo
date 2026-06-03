@@ -159,7 +159,8 @@ type GPUMemoryServiceMode string
 const (
 	// GMSModeIntraPod runs GMS as a sidecar within the same pod.
 	GMSModeIntraPod GPUMemoryServiceMode = "IntraPod"
-	// GMSModeInterPod runs GMS as a separate pod (not yet supported).
+	// GMSModeInterPod runs GMS as rank-local pods that share GPUs through DRA.
+	// Extra client pod rendering is reserved for a follow-up change.
 	GMSModeInterPod GPUMemoryServiceMode = "InterPod"
 )
 
@@ -171,8 +172,8 @@ const (
 // graduate out of this block (and become first-class fields on the shared
 // spec) once their API is considered stable.
 type ExperimentalSpec struct {
-	// gpuMemoryService configures the GPU Memory Service (GMS) sidecar.
-	// When set, a GMS sidecar is injected and GPU access is managed via DRA.
+	// gpuMemoryService configures the GPU Memory Service (GMS). When set, GPU
+	// access for GMS clients is managed via DRA.
 	// +optional
 	GPUMemoryService *GPUMemoryServiceSpec `json:"gpuMemoryService,omitempty"`
 
@@ -194,10 +195,14 @@ type ExperimentalSpec struct {
 	Checkpoint *ComponentCheckpointConfig `json:"checkpoint,omitempty"`
 }
 
-// GPUMemoryServiceSpec configures the GPU Memory Service (GMS) sidecar for a
-// worker component. The operator injects a GMS sidecar and replaces the main
+// GPUMemoryServiceSpec configures the GPU Memory Service (GMS) for a
+// worker component. The operator injects GMS wiring and replaces the main
 // container's GPU resources with a DRA `ResourceClaim` for shared GPU access.
 // See ExperimentalSpec for the stability caveat.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.extraClientContainers) || size(self.extraClientContainers) == 0 || self.mode == 'IntraPod'",message="extraClientContainers is only supported with mode=IntraPod"
+// +kubebuilder:validation:XValidation:rule="!has(self.extraClientPods) || size(self.extraClientPods) == 0 || self.mode == 'InterPod'",message="extraClientPods is only supported with mode=InterPod"
+// +kubebuilder:validation:XValidation:rule="!has(self.extraClientPods) || size(self.extraClientPods) == 0",message="extraClientPods is reserved for inter-pod GMS and is not implemented yet"
 type GPUMemoryServiceSpec struct {
 	// mode selects the GMS deployment topology.
 	// +optional
@@ -208,6 +213,39 @@ type GPUMemoryServiceSpec struct {
 	// +optional
 	// +kubebuilder:default="gpu.nvidia.com"
 	DeviceClassName string `json:"deviceClassName,omitempty"`
+
+	// extraClientContainers lists additional user-declared containers that should
+	// be wired as GMS clients in service pods. Checkpoint Job clients are declared
+	// under checkpoint.job.gmsClientContainers. In each rendered pod, only
+	// matching container names are wired; absent names are ignored.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	ExtraClientContainers []string `json:"extraClientContainers,omitempty"`
+
+	// extraClientPods declares additional GMS client pods for inter-pod GMS. This field is
+	// reserved for future use and is rejected until inter-pod client orchestration is wired.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	ExtraClientPods []GMSClientPodSpec `json:"extraClientPods,omitempty"`
+}
+
+// GMSClientPodSpec declares an additional GMS client pod for inter-pod GMS.
+type GMSClientPodSpec struct {
+	// name identifies this client pod.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+
+	// podTemplate configures the pod to run as a GMS client.
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:validation:Type=object
+	// +kubebuilder:pruning:PreserveUnknownFields
+	PodTemplate corev1.PodTemplateSpec `json:"podTemplate"`
 }
 
 // FailoverSpec configures active-passive failover for a worker component.
@@ -249,6 +287,8 @@ const (
 
 // ComponentCheckpointConfig configures checkpointing for a DGD component.
 // +kubebuilder:validation:XValidation:rule="(has(self.checkpointRef) && size(self.checkpointRef) > 0) || has(self.identity)",message="When checkpoint is configured, either checkpointRef or identity must be specified"
+// +kubebuilder:validation:XValidation:rule="!has(self.job) || !has(self.checkpointRef) || size(self.checkpointRef) == 0",message="checkpoint.job cannot be set when checkpointRef is specified"
+// +kubebuilder:validation:XValidation:rule="!has(self.job) || !has(self.mode) || self.mode == 'Auto'",message="checkpoint.job can only be set in Auto mode"
 type ComponentCheckpointConfig struct {
 	// mode defines how checkpoint creation is handled.
 	// `Auto`: DGD controller creates the DynamoCheckpoint CR automatically.
@@ -268,6 +308,39 @@ type ComponentCheckpointConfig struct {
 	// Required when `checkpointRef` is not specified.
 	// +optional
 	Identity *DynamoCheckpointIdentity `json:"identity,omitempty"`
+
+	// targetContainerName is the workload container to snapshot and restore.
+	// +optional
+	// +kubebuilder:default=main
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	TargetContainerName string `json:"targetContainerName,omitempty"`
+
+	// job customizes the checkpoint Job that is created in Auto mode.
+	// +optional
+	Job *ComponentCheckpointJobConfig `json:"job,omitempty"`
+}
+
+// ComponentCheckpointJobConfig customizes the checkpoint Job created for a DGD component.
+type ComponentCheckpointJobConfig struct {
+	// gmsClientContainers lists checkpoint Job containers that should receive
+	// GMS client wiring. Requires gpuMemoryService on the component.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	GMSClientContainers []string `json:"gmsClientContainers,omitempty"`
+
+	// podTemplate customizes the checkpoint Job pod. The operator starts from the
+	// selected workload container and merges this template so users can add helper
+	// containers such as gms-saver.
+	// +optional
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:validation:Type=object
+	// +kubebuilder:pruning:PreserveUnknownFields
+	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }
 
 // DynamoCheckpointIdentity defines the inputs that determine checkpoint equivalence.
@@ -341,10 +414,71 @@ type TopologyConstraint struct {
 }
 
 // TopologyDomain is a free-form topology level identifier.
-// Domain names are defined by the cluster admin in the ClusterTopology CR.
 // Common examples: "region", "zone", "datacenter", "block", "rack", "host", "numa".
+// When used with a ClusterTopology CR, domain names are defined in the CR's
+// hierarchy; when used with `spec.experimental.kvTransferPolicy.labelKey`
+// alone, the value is a user-chosen logical name for the topology level.
 // +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
 type TopologyDomain string
+
+// KvTransferEnforcement controls how the selected prefill worker's topology is
+// applied to decode routing.
+// +kubebuilder:validation:Enum=required;preferred
+type KvTransferEnforcement string
+
+const (
+	// KvTransferEnforcementRequired enforces same-domain decode worker
+	// selection.
+	KvTransferEnforcementRequired KvTransferEnforcement = "required"
+	// KvTransferEnforcementPreferred biases decode worker selection toward the
+	// same domain.
+	KvTransferEnforcementPreferred KvTransferEnforcement = "preferred"
+)
+
+// KvTransferPolicy configures topology-aware routing for KV-cache transfers
+// between prefill and decode workers. This is a graph-wide concern placed
+// under `spec.experimental` while the API is incubating.
+// +kubebuilder:validation:XValidation:rule="has(self.labelKey)",message="labelKey is required until alternate topology sources are supported"
+// +kubebuilder:validation:XValidation:rule="!has(self.enforcement) || self.enforcement != 'preferred' || has(self.preferredWeight)",message="preferredWeight is required when enforcement is preferred"
+// +kubebuilder:validation:XValidation:rule="!has(self.preferredWeight) || (has(self.enforcement) && self.enforcement == 'preferred')",message="preferredWeight may only be set when enforcement is preferred"
+type KvTransferPolicy struct {
+	// labelKey is a Kubernetes node label key (e.g.
+	// "topology.kubernetes.io/zone") whose value identifies the topology
+	// domain for each worker. The operator copies the node label onto worker
+	// pods so the runtime can publish it as worker metadata. The label
+	// should correspond to the topology level named in `domain`.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=317
+	// +kubebuilder:validation:Pattern=`^(([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*/)?([A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)$`
+	// +kubebuilder:validation:XValidation:rule="!self.contains('/') || self.split('/')[0].size() <= 253",message="labelKey prefix must be 253 characters or less"
+	LabelKey string `json:"labelKey,omitempty"`
+
+	// domain is the logical name for the topology level to enforce
+	// (e.g. "zone", "rack"). The router uses this to match workers that
+	// share the same value for the label identified by `labelKey`.
+	Domain TopologyDomain `json:"domain"`
+
+	// enforcement controls how the selected prefill worker's topology is
+	// applied to decode routing. "required" only allows decode workers in the
+	// same topology domain as the selected prefill worker. "preferred" keeps
+	// all decode workers eligible, but biases selection toward workers in the
+	// same topology domain. Defaults to "required".
+	// +optional
+	// +kubebuilder:default=required
+	Enforcement KvTransferEnforcement `json:"enforcement,omitempty"`
+
+	// preferredWeight is required and used only when enforcement is
+	// "preferred". Higher values create a stronger same-domain routing
+	// preference, but do not guarantee same-domain selection. The value is not
+	// a probability; worker selection still depends on load and other routing
+	// inputs. A value of 0 disables the topology preference; 1 is the strongest
+	// supported preference.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1
+	PreferredWeight *float32 `json:"preferredWeight,omitempty"`
+}
 
 // ComponentKind represents the type of underlying Kubernetes resource backing a DGD component.
 // +kubebuilder:validation:Enum=PodClique;PodCliqueScalingGroup;Deployment;LeaderWorkerSet

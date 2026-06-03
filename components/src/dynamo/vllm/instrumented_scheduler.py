@@ -120,6 +120,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_FPM_PORT = 20380
 ENV_FPM_PORT = "DYN_FORWARDPASS_METRIC_PORT"
+ENV_FPM_WORKER_ID = "DYN_FPM_WORKER_ID"
+ENV_FPM_BENCHMARK_OUTPUT_PATH = "DYN_FPM_BENCHMARK_OUTPUT_PATH"
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +273,7 @@ class InstrumentedScheduler(AsyncScheduler):
         )
 
         dp_rank = self._resolve_dp_rank(vllm_config.parallel_config)
-        self._fpm_worker_id = vllm_config.additional_config.get("fpm_worker_id", "")
+        self._fpm_worker_id = os.environ.get(ENV_FPM_WORKER_ID, "")
         self._fpm_dp_rank = dp_rank
 
         self._schedule_times: deque[float] = deque()
@@ -456,6 +458,9 @@ class InstrumentedScheduler(AsyncScheduler):
         decode_kv = WelfordAccumulator()
 
         for req in new_reqs:
+            if self._bench_new_request_counts_as_decode(req.req_id):
+                decode_kv.add(req.num_computed_tokens)
+                continue
             num_prefill += 1
             sum_prefill_tokens += num_scheduled.get(req.req_id, 0)
             prompt_len = len(req.prompt_token_ids) if req.prompt_token_ids else 0
@@ -480,6 +485,15 @@ class InstrumentedScheduler(AsyncScheduler):
             num_decode_requests=decode_kv.n,
             sum_decode_kv_tokens=decode_kv.s,
             var_decode_kv_tokens=decode_kv.variance(),
+        )
+
+    def _bench_new_request_counts_as_decode(self, req_id: str) -> bool:
+        """Synthetic decode benchmark requests register as new requests."""
+        return (
+            getattr(self, "_bench_active", False)
+            and getattr(self, "_bench_phase", _BenchPhase.IDLE)
+            == _BenchPhase.DECODE_SWEEP
+            and req_id in getattr(self, "_bench_active_req_ids", set())
         )
 
     def _compute_queued(self) -> QueuedRequestMetrics:
@@ -579,6 +593,10 @@ class InstrumentedScheduler(AsyncScheduler):
         known = {f.name for f in BenchmarkConfig.__dataclass_fields__.values()}
         self._bench_config = BenchmarkConfig(
             **{k: v for k, v in cfg.items() if k in known}
+        )
+        self._bench_config.output_path = os.environ.get(
+            ENV_FPM_BENCHMARK_OUTPUT_PATH,
+            self._bench_config.output_path,
         )
 
         dp_rank = self._fpm_dp_rank
@@ -765,6 +783,12 @@ class InstrumentedScheduler(AsyncScheduler):
                     block_ids=block_ids,
                     num_computed_tokens=ctx_len,
                     lora_request=None,
+                    # vLLM >=0.22's v2 GPU model runner requires `prefill_token_ids`
+                    # (asserted non-None in gpu/model_runner.add_requests, used as the
+                    # request's `all_token_ids`). vLLM's own scheduler passes
+                    # `req._all_token_ids` for new requests; mirror that here for the
+                    # synthetic decode requests we build directly. Older runners ignore it.
+                    prefill_token_ids=req._all_token_ids,
                 )
             )
             num_scheduled_tokens[req_id] = 1

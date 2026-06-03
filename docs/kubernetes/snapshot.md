@@ -538,9 +538,8 @@ If the manifest already carries snapshot target metadata, it must agree with the
 
 ## Planned Features
 
-- Stabilize multi-GPU support
-- Additional backend support
-- Alternative storage backends
+- Stable multi-GPU and multinode support
+- TensorRT-LLM support
 
 ## Related Documentation
 

@@ -253,8 +253,11 @@ func init() {
 	SchemeBuilder.Register(&DynamoComponentDeployment{}, &DynamoComponentDeploymentList{})
 }
 
-// IsReady returns true if the component is `Available`.
+// IsReady returns true if the component has processed its latest spec and is `Available`.
 func (s *DynamoComponentDeployment) IsReady() (bool, string) {
+	if s.Status.ObservedGeneration < s.Generation {
+		return false, fmt.Sprintf("spec not yet processed: generation=%d, observedGeneration=%d", s.Generation, s.Status.ObservedGeneration)
+	}
 	return s.Status.IsReady()
 }
 

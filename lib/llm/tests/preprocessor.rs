@@ -4,10 +4,12 @@
 use anyhow::{Ok, Result};
 use dynamo_runtime::config::environment_names::model::huggingface as env_hf;
 
-use dynamo_llm::model_card::{ModelDeploymentCard, PromptContextMixin};
+use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_llm::preprocessor::prompt::PromptFormatter;
+use dynamo_llm::preprocessor::prompt::prompt_formatter_from_mdc;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynamo_renderer::PromptContextMixin;
+use dynamo_renderer::PromptFormatter;
 use serde::{Deserialize, Serialize};
 
 use hf_hub::{Cache, Repo, RepoType, api::tokio::ApiBuilder};
@@ -259,6 +261,7 @@ impl Request {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -276,7 +279,7 @@ async fn test_single_turn() {
     let mdcs = make_mdcs().await;
 
     for mdc in mdcs.iter() {
-        let formatter = PromptFormatter::from_mdc(mdc).unwrap();
+        let formatter = prompt_formatter_from_mdc(mdc).unwrap();
 
         // assert its an OAI formatter
         let formatter = match formatter {
@@ -308,7 +311,7 @@ async fn test_single_turn_with_tools() {
     let mdcs = make_mdcs().await;
 
     for mdc in mdcs.iter() {
-        let formatter = PromptFormatter::from_mdc(mdc).unwrap();
+        let formatter = prompt_formatter_from_mdc(mdc).unwrap();
 
         // assert its an OAI formatter
         let formatter = match formatter {
@@ -345,7 +348,7 @@ async fn test_mulit_turn_without_system() {
     let mdcs = make_mdcs().await;
 
     for mdc in mdcs.iter() {
-        let formatter = PromptFormatter::from_mdc(mdc).unwrap();
+        let formatter = prompt_formatter_from_mdc(mdc).unwrap();
 
         // assert its an OAI formatter
         let formatter = match formatter {
@@ -377,7 +380,7 @@ async fn test_mulit_turn_with_system() {
     let mdcs = make_mdcs().await;
 
     for mdc in mdcs.iter() {
-        let formatter = PromptFormatter::from_mdc(mdc).unwrap();
+        let formatter = prompt_formatter_from_mdc(mdc).unwrap();
 
         // assert its an OAI formatter
         let formatter = match formatter {
@@ -415,7 +418,7 @@ async fn test_multi_turn_with_system_with_tools() {
     let mdcs = make_mdcs().await;
 
     for mdc in mdcs.iter() {
-        let formatter = PromptFormatter::from_mdc(mdc).unwrap();
+        let formatter = prompt_formatter_from_mdc(mdc).unwrap();
 
         // assert its an OAI formatter
         let formatter = match formatter {
@@ -458,7 +461,7 @@ async fn test_multi_turn_with_continuation() {
     )
     .await;
 
-    let formatter = PromptFormatter::from_mdc(&mdc).unwrap();
+    let formatter = prompt_formatter_from_mdc(&mdc).unwrap();
 
     // assert its an OAI formatter
     let formatter = match formatter {
@@ -701,6 +704,7 @@ mod context_length_validation {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),

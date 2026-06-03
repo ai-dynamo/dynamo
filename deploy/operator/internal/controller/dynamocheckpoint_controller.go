@@ -25,8 +25,6 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
-	resourcev1 "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -41,10 +39,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
@@ -65,8 +60,6 @@ func (r *CheckpointReconciler) GetRecorder() record.EventRecorder {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=resource.k8s.io,resources=resourceclaimtemplates,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=resource.k8s.io,resources=deviceclasses,verbs=get
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch
 
 func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -183,27 +176,10 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 	logger := log.FromContext(ctx)
 
 	if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, ckpt.Spec.GPUMemoryService); err != nil {
-		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
-		ckpt.Status.JobName = ""
-		ckpt.Status.CreatedAt = nil
-		ckpt.Status.Message = err.Error()
-		meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
-			Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated),
-			Status:             metav1.ConditionFalse,
-			Reason:             "GMSSnapshotDisabled",
-			Message:            err.Error(),
-			LastTransitionTime: metav1.Now(),
-		})
-		if updateErr := r.Status().Update(ctx, ckpt); updateErr != nil {
-			logger.Error(updateErr, "Failed to mark DynamoCheckpoint as failed")
-			return ctrl.Result{}, updateErr
-		}
-		return ctrl.Result{}, nil
+		return r.failPendingCheckpoint(ctx, ckpt, "GMSSnapshotDisabled", err)
 	}
-
-	if err := r.reconcileK8sDiscoveryResources(ctx, ckpt); err != nil {
-		logger.Error(err, "Failed to reconcile K8s discovery resources for checkpoint")
-		return ctrl.Result{}, fmt.Errorf("failed to reconcile K8s discovery resources for checkpoint: %w", err)
+	if err := checkpoint.ValidatePreparedGPUMemoryServicePodTemplate(ckpt); err != nil {
+		return r.failPendingCheckpoint(ctx, ckpt, "GMSPodTemplateNotPrepared", err)
 	}
 
 	hash := ckpt.Status.IdentityHash
@@ -212,31 +188,6 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 		hash, err = checkpoint.ComputeIdentityHash(ckpt.Spec.Identity)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to compute checkpoint identity hash: %w", err)
-		}
-	}
-
-	// Sync DRA ResourceClaimTemplate for GMS-enabled checkpoints.
-	if ckpt.Spec.GPUMemoryService != nil && ckpt.Spec.GPUMemoryService.Enabled {
-		if !r.RuntimeConfig.DRAEnabled {
-			return ctrl.Result{}, fmt.Errorf(
-				"GMS requires DRA (Dynamic Resource Allocation), but the resource.k8s.io API group is not available")
-		}
-		if len(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers) == 0 {
-			return ctrl.Result{}, fmt.Errorf("checkpoint job requires at least one container for GMS")
-		}
-		gpuQty := ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Resources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)]
-		gpuCount := int(gpuQty.Value())
-		deviceClassName := ""
-		if ckpt.Spec.GPUMemoryService != nil {
-			deviceClassName = ckpt.Spec.GPUMemoryService.DeviceClassName
-		}
-		claimTemplateName := dra.ResourceClaimTemplateName("checkpoint-"+hash, "worker")
-		_, _, err := commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
-			return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, ckpt.Namespace, gpuCount, deviceClassName)
-		})
-		if err != nil {
-			logger.Error(err, "Failed to sync GMS ResourceClaimTemplate for checkpoint")
-			return ctrl.Result{}, fmt.Errorf("failed to sync GMS ResourceClaimTemplate for checkpoint: %w", err)
 		}
 	}
 
@@ -265,11 +216,10 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 	ckpt.Status.CreatedAt = nil
 	ckpt.Status.Message = ""
 	meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
-		Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated),
-		Status:             metav1.ConditionTrue,
-		Reason:             "JobCreated",
-		Message:            fmt.Sprintf("Checkpoint job %s created", jobName),
-		LastTransitionTime: metav1.Now(),
+		Type:    string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated),
+		Status:  metav1.ConditionTrue,
+		Reason:  "JobCreated",
+		Message: fmt.Sprintf("Checkpoint job %s created", jobName),
 	})
 
 	if err := r.Status().Update(ctx, ckpt); err != nil {
@@ -280,45 +230,29 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 	return ctrl.Result{}, nil
 }
 
-func (r *CheckpointReconciler) reconcileK8sDiscoveryResources(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (err error) {
+func (r *CheckpointReconciler) failPendingCheckpoint(
+	ctx context.Context,
+	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
+	reason string,
+	err error,
+) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	resourceName := ""
-	defer func() {
-		if err == nil {
-			return
-		}
-		logger.Error(err, "failed to sync checkpoint k8s discovery resource", "resource", resourceName)
-		err = fmt.Errorf("failed to sync checkpoint k8s discovery %s: %w", resourceName, err)
-	}()
-
-	resourceName = "service account"
-	serviceAccount := discovery.GetK8sDiscoveryServiceAccount(ckpt.Name, ckpt.Namespace)
-	_, _, err = commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*corev1.ServiceAccount, bool, error) {
-		return serviceAccount, false, nil
+	ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
+	ckpt.Status.JobName = ""
+	ckpt.Status.CreatedAt = nil
+	ckpt.Status.Message = err.Error()
+	meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
+		Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated),
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            err.Error(),
+		LastTransitionTime: metav1.Now(),
 	})
-	if err != nil {
-		return err
+	if updateErr := r.Status().Update(ctx, ckpt); updateErr != nil {
+		logger.Error(updateErr, "Failed to mark DynamoCheckpoint as failed")
+		return ctrl.Result{}, updateErr
 	}
-
-	resourceName = "role"
-	role := discovery.GetK8sDiscoveryRole(ckpt.Name, ckpt.Namespace)
-	_, _, err = commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*rbacv1.Role, bool, error) {
-		return role, false, nil
-	})
-	if err != nil {
-		return err
-	}
-
-	resourceName = "role binding"
-	roleBinding := discovery.GetK8sDiscoveryRoleBinding(ckpt.Name, ckpt.Namespace)
-	_, _, err = commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*rbacv1.RoleBinding, bool, error) {
-		return roleBinding, false, nil
-	})
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return ctrl.Result{}, nil
 }
 
 func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (ctrl.Result, error) {
@@ -340,11 +274,10 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 			ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
 			ckpt.Status.Message = "checkpoint job was deleted"
 			meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
-				Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated),
-				Status:             metav1.ConditionFalse,
-				Reason:             "JobDeleted",
-				Message:            "Checkpoint job was deleted",
-				LastTransitionTime: metav1.Now(),
+				Type:    string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated),
+				Status:  metav1.ConditionFalse,
+				Reason:  "JobDeleted",
+				Message: "Checkpoint job was deleted",
 			})
 			if err := r.Status().Update(ctx, ckpt); err != nil {
 				return ctrl.Result{}, err
@@ -393,11 +326,10 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		ckpt.Status.CreatedAt = &now
 		ckpt.Status.Message = ""
 		meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
-			Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCompleted),
-			Status:             metav1.ConditionTrue,
-			Reason:             observation.Reason,
-			Message:            observation.Message,
-			LastTransitionTime: metav1.Now(),
+			Type:    string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCompleted),
+			Status:  metav1.ConditionTrue,
+			Reason:  observation.Reason,
+			Message: observation.Message,
 		})
 		if err := r.Status().Update(ctx, ckpt); err != nil {
 			return ctrl.Result{}, err
@@ -410,11 +342,10 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
 		ckpt.Status.Message = observation.Message
 		meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
-			Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCompleted),
-			Status:             metav1.ConditionFalse,
-			Reason:             observation.Reason,
-			Message:            observation.Message,
-			LastTransitionTime: metav1.Now(),
+			Type:    string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCompleted),
+			Status:  metav1.ConditionFalse,
+			Reason:  observation.Reason,
+			Message: observation.Message,
 		})
 		if err := r.Status().Update(ctx, ckpt); err != nil {
 			return ctrl.Result{}, err

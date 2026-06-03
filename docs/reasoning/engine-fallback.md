@@ -15,9 +15,9 @@ the equivalent tool-call fallback, see
 
 > [!WARNING]
 > **Known Issue:** Engine-fallback reasoning parsing does not currently work
-> with [disaggregated serving](../features/disaggregated-serving/README.md).
-> Use the [Dynamo-native reasoning parser](dynamo.md) for disaggregated
-> deployments.
+> with [disaggregated serving](../features/disaggregated-serving/README.md)
+> (support coming soon). Use the [Dynamo-native reasoning parser](dynamo.md)
+> for disaggregated deployments today.
 
 ## Configurations
 
@@ -25,6 +25,7 @@ the equivalent tool-call fallback, see
 |---|---|---|---|---|
 | **vLLM chat processor** | `--dyn-chat-processor vllm --reasoning-parser <name>` | *(none)* | Yes | Parsing runs in vLLM's Python preprocessor. See [vLLM Chat Processor](../backends/vllm/vllm-chat-processor.md). |
 | **SGLang chat processor** | `--dyn-chat-processor sglang --reasoning-parser <name>` | *(none)* | Yes | Parsing runs in SGLang's Python preprocessor. See [SGLang Chat Processor](../backends/sglang/sglang-chat-processor.md). |
+| **TRTLLM chat processor** | *(work in progress)* | *(work in progress)* | -- | Engine-fallback support for TRTLLM is in progress. Use the [Dynamo-native reasoning parser](dynamo.md) for TRTLLM today. |
 
 > [!NOTE]
 > `--dyn-reasoning-parser` selects the **Dynamo-native** parser path, while

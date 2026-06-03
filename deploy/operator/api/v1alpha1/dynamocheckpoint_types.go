@@ -92,8 +92,19 @@ type DynamoCheckpointIdentity struct {
 type DynamoCheckpointJobConfig struct {
 	// PodTemplateSpec allows customizing the checkpoint Job pod
 	// This should include the container that runs the workload to be checkpointed
+	// and any workload/runtime env, service account, GMS, or DRA wiring needed
+	// by that container. Auto-created checkpoints from DynamoGraphDeployment
+	// render Dynamo defaults before creating the DynamoCheckpoint.
 	// +kubebuilder:validation:Required
 	PodTemplateSpec corev1.PodTemplateSpec `json:"podTemplateSpec"`
+
+	// TargetContainerName is the container in PodTemplateSpec to snapshot.
+	// +optional
+	// +kubebuilder:default=main
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	TargetContainerName string `json:"targetContainerName,omitempty"`
 
 	// SharedMemory controls the tmpfs mounted at /dev/shm for the checkpoint Job pod.
 	// When omitted, checkpoint Jobs use the same default 8Gi tmpfs as Dynamo components.
@@ -124,9 +135,14 @@ type DynamoCheckpointSpec struct {
 	// +kubebuilder:validation:Required
 	Identity DynamoCheckpointIdentity `json:"identity"`
 
-	// GPUMemoryService enables checkpoint-time GPU Memory Service wiring.
-	// It is intentionally outside spec.identity, so it does not affect the
-	// checkpoint identity hash or deduplication.
+	// GPUMemoryService records checkpoint-time GPU Memory Service metadata for
+	// a prepared checkpoint Job pod. The DynamoCheckpoint controller does not
+	// inject GMS/DRA resources; auto-created checkpoints from
+	// DynamoGraphDeployment prepare the pod template before creating this object.
+	// Manual GMS-enabled checkpoints must provide the prepared pod template; the
+	// controller fails the checkpoint if the required GMS/DRA wiring is missing.
+	// This field is intentionally outside spec.identity, so it does not affect
+	// the checkpoint identity hash or deduplication.
 	// +optional
 	GPUMemoryService *GPUMemoryServiceSpec `json:"gpuMemoryService,omitempty"`
 

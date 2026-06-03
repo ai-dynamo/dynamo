@@ -604,3 +604,11 @@ To force read-only mode (import only, never load from disk), pass `gms_read_only
 ```
 
 This forces `RO` lock mode instead of the default `RW_OR_RO` auto-detection. The engine will only import existing committed weights and fail if none are available.
+
+To bound how long a restored engine waits for the published weights layout before remapping, pass `gms_ro_connect_timeout_ms`:
+
+```bash
+--model-loader-extra-config '{"gms_ro_connect_timeout_ms": 300000}'
+```
+
+The default is `null`, which waits indefinitely. Set an integer value to fail after that many milliseconds.

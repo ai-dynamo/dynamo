@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.10.0-labs
 # SPDX-FileCopyrightText:  Copyright The Kubernetes Authors.
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
@@ -31,7 +32,7 @@
 #     -t dynamo/dynamo-epp:dev .
 
 ARG RUST_IMAGE=rust:1.93.1
-ARG BUILDER_IMAGE=golang:1.25
+ARG BUILDER_IMAGE=golang:1.26.3
 ARG BASE_IMAGE=ubuntu:24.04
 
 # =============================================================================

@@ -6,6 +6,9 @@ title: Quickstart
 
 Get a model running on Kubernetes in minutes.
 
+> [!NOTE]
+> **Deployment modes.** Dynamo supports two deployment modes on Kubernetes. This quickstart uses **standalone mode**, where the Dynamo Frontend serves requests and the integrated Dynamo Router does KV-aware routing. Dynamo can also run in **gateway mode** behind a [Gateway API Inference Extension](https://gateway-api-inference-extension.sigs.k8s.io/) gateway, where KV-aware routing happens in the Dynamo Endpoint Picker Plugin (EPP) at the gateway layer and the Frontend runs as a sidecar in `--router-mode direct`. See the [Inference Gateway (GAIE) guide](inference-gateway.md) to set up gateway mode.
+
 ## Prerequisites
 
 - Kubernetes cluster (v1.24+) with GPU nodes
@@ -91,7 +94,7 @@ metadata:
 spec:
   model: Qwen/Qwen3-0.6B
   backend: auto
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.0.2"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 ```bash
@@ -105,7 +108,7 @@ kubectl get dgdr qwen3-quickstart -n $NAMESPACE -w
 ```
 
 > [!NOTE]
-> Dynamo supports vLLM, TensorRT-LLM, and SGLang backends. Setting `backend: auto` lets the profiler choose the best one for your model and hardware. See the [backends guide](../backends/) for details.
+> Dynamo supports vLLM, TensorRT-LLM, and SGLang backends. Setting `backend: auto` lets the profiler choose the best one for your model and hardware. See the [vLLM backend guide](../backends/vllm/README.md) for a backend guide example.
 
 
 ## Send a Request
