@@ -362,7 +362,8 @@ where
                 .downcast::<PyDict>()
                 .ok()
                 .and_then(|d| d.get_item("_dynamo_annotated").ok().flatten())
-                .is_some();
+                .and_then(|v| v.is_truthy().ok())
+                .unwrap_or(false);
             if is_envelope {
                 depythonize::<Annotated<Resp>>(&bound)
             } else {
