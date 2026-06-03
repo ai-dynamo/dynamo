@@ -21,7 +21,6 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 use futures::stream::{self, StreamExt};
-use serde_json::json;
 use tracing::Instrument;
 
 use crate::{
@@ -39,7 +38,7 @@ use crate::{
         common::{
             llm_backend::LLMEngineOutput,
             preprocessor::RoutingHints,
-            timing::{RequestPhase, RequestTracker},
+            timing::{RequestPhase, RequestTracker, RoutingData},
         },
     },
 };
@@ -746,11 +745,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 "Returning worker selection (query-only mode)"
             );
 
+            // Return worker attribution + the tokenized prompt on `routing_data`, the same
+            // typed channel as router timing; the frontend drains it onto the request tracker.
             let output = LLMEngineOutput {
-                disaggregated_params: Some(json!({
-                    "worker_id": worker_id_info,
-                    "token_ids": request.token_ids
-                })),
+                routing_data: Some(RoutingData {
+                    worker_id: worker_id_info,
+                    token_ids: Some(request.token_ids.clone()),
+                    ..Default::default()
+                }),
                 ..Default::default()
             };
             let response = Annotated::from_data(output);

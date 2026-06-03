@@ -159,12 +159,26 @@ impl LLMMetricAnnotation {
     }
 }
 
-/// Take a standalone router's timing out of `routing_data` (see
-/// `inject_timing_from_tracker`). Removing it keeps the field off the client wire.
-fn take_router_timing(
+/// Drain a standalone router's forwarded `routing_data` onto this request's tracker so the
+/// frontend's timing/token surfaces populate, then drop the field to keep it off the client
+/// wire. `worker_id` is intentionally not drained here: the prefill router reads it from the
+/// raw output instead.
+fn drain_router_routing_data(
     data: &mut Option<BackendOutput>,
-) -> Option<crate::protocols::common::timing::TimingInfo> {
-    data.as_mut()?.routing_data.take()?.timing
+    tracker: Option<&std::sync::Arc<crate::protocols::common::timing::RequestTracker>>,
+) {
+    let Some(routing_data) = data.as_mut().and_then(|d| d.routing_data.take()) else {
+        return;
+    };
+    let Some(tracker) = tracker else {
+        return;
+    };
+    if let Some(timing) = routing_data.timing {
+        tracker.set_external_timing(timing);
+    }
+    if let Some(token_ids) = routing_data.token_ids {
+        tracker.set_external_query_token_ids(token_ids);
+    }
 }
 
 // Reasoning State for reasoning parsing transformation step
@@ -2017,13 +2031,13 @@ impl OpenAIPreprocessor {
                 }
 
                 if let Some(mut response) = inner.response_stream.next().await {
-                    // Split topology: overlay a standalone router's forwarded timing onto
-                    // this request's tracker so the frontend's timing surfaces populate.
-                    if let Some(timing) = take_router_timing(&mut response.data)
-                        && let Some(tracker) = inner.response_generator.tracker()
-                    {
-                        tracker.set_external_timing(timing);
-                    }
+                    // Split topology: overlay a standalone router's forwarded routing_data
+                    // (timing, query-only token_ids) onto this request's tracker so the
+                    // frontend's nvext/timing surfaces populate.
+                    drain_router_routing_data(
+                        &mut response.data,
+                        inner.response_generator.tracker().as_ref(),
+                    );
 
                     if inner.cancelled {
                         tracing::debug!(
