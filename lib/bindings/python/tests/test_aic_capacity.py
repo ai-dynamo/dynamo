@@ -3,7 +3,13 @@
 
 import pytest
 
-from dynamo._internal.aic import AicSession, resolve_backend_version
+from dynamo._internal.aic import (
+    _DEFAULT_NEXTN_ACCEPT_RATES,
+    _NEXTN_ACCEPT_RATES_LEN,
+    AicSession,
+    _pad_nextn_accept_rates,
+    resolve_backend_version,
+)
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -108,3 +114,25 @@ def test_trtllm_version_resolution_still_supports_latency_configs():
             max_num_batched_tokens=128,
             gpu_memory_utilization=0.8,
         )
+
+
+def test_pad_nextn_accept_rates_defaults_when_omitted():
+    # Omitted/empty input falls back to AIC's CLI default, not all zeros.
+    assert _pad_nextn_accept_rates(None) == _DEFAULT_NEXTN_ACCEPT_RATES
+    assert _pad_nextn_accept_rates("") == _DEFAULT_NEXTN_ACCEPT_RATES
+    assert _pad_nextn_accept_rates([]) == _DEFAULT_NEXTN_ACCEPT_RATES
+
+
+def test_pad_nextn_accept_rates_pads_and_truncates():
+    assert _pad_nextn_accept_rates([0.9, 0.4]) == [0.9, 0.4, 0.0, 0.0, 0.0]
+    assert _pad_nextn_accept_rates("0.9,0.4") == [0.9, 0.4, 0.0, 0.0, 0.0]
+    assert _pad_nextn_accept_rates([0.1] * 7) == [0.1] * _NEXTN_ACCEPT_RATES_LEN
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["0.85,abc,0", [1.5, 0.0], [-0.1, 0.0], [float("nan")], [float("inf")]],
+)
+def test_pad_nextn_accept_rates_rejects_invalid(bad):
+    with pytest.raises(ValueError):
+        _pad_nextn_accept_rates(bad)
