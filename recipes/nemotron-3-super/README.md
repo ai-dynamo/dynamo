@@ -30,8 +30,6 @@ We ship Dynamo + vLLM deployment profiles across two GPU SKUs and two serving mo
 | **KV cache offloading**      | none | none | none | none |
 | **Max model length**         | 131072 (128k) | 131072 (128k) | 131072 (128k) | 131072 (128k) |
 | **Max batched tokens**       | 65536 (MTP-ON default; bump to 131072 with MTP off) | 65536 (MTP-ON default; bump to 131072 with MTP off) | 16384 | 16384 |
-| **Tool / reasoning parser**  | `nemotron_nano` | `nemotron_nano` | `nemotron_nano` | `nemotron_nano` |
-| **Workload**                 | General chat / reasoning (throughput) | Agentic coding (latency) | General chat / reasoning + MTP | Agentic coding + MTP (DeepEP high-throughput all-to-all vs chat's FlashInfer NVLink one-sided) |
 
 ## Supported features
 
@@ -128,8 +126,6 @@ curl http://localhost:8000/v1/chat/completions \
 
 See [`perf/README.md`](perf/README.md) for the full benchmark workflow — staging Mooncake-format traces on the PVC, running the AIPerf trace-replay Job ([`perf/perf.yaml`](perf/perf.yaml)), running a concurrency sweep, and fetching artifacts.
 
-For H200 MTP benchmarking with a fixed acceptance length, switch the worker's `SPECULATIVE_CONFIG` env to point at the `speculative-config-synthetic` key in the H200 ConfigMap (already provided alongside the default `speculative-config`).
-
 ## Performance results
 
 | Recipe               | SKU  | # of worker replicas | Concurrency | User output tok/s | System output tok/s/gpu |
@@ -143,15 +139,7 @@ For H200 MTP benchmarking with a fixed acceptance length, switch the worker's `S
 
 B200 chat and agentic ship with **MTP spec-dec ON by default** — DL=3, `moe_backend=triton`, stripped `compilation-config`, and `MAX_NUM_BATCHED_TOKENS=65536`.
 
-To turn MTP off, flip three knobs in the worker pod spec:
-
-1. Remove the `- --speculative-config=$(SPECULATIVE_CONFIG)` line from worker args.
-2. Switch the `COMPILATION_CONFIG` env's `configMapKeyRef.key` from `compilation-config` → `compilation-config-fused` (turns on `use_inductor_graph_partition` + `fuse_allreduce_rms` + `fuse_attn_quant`).
-3. Bump the `MAX_NUM_BATCHED_TOKENS` env value from `"65536"` → `"131072"` (no draft model means there's headroom for a larger chunked-prefill chunk).
-
-Both ConfigMap keys (`compilation-config` and `compilation-config-fused`) ship in the same DGD; flipping is a YAML edit, no re-render.
-
-> Fusions and MTP can't be on at the same time on B200: Inductor's first-time Triton autotune calls `torch.cuda.synchronize()` inside the active cudagraph capture, which aborts with `cudaErrorStreamCaptureUnsupported` / `cudaErrorStreamCaptureInvalidated` (vLLM #40742). That's why fusions are only enabled in the MTP-OFF path.
+To turn MTP off, remove the `- --speculative-config=$(SPECULATIVE_CONFIG)` line from worker args. With the extra memory headroom freed up, you can optionally bump `MAX_NUM_BATCHED_TOKENS` to `"131072"` and switch the `COMPILATION_CONFIG` env to the `compilation-config-fused` ConfigMap key (which enables `use_inductor_graph_partition` + `fuse_allreduce_rms` + `fuse_attn_quant`) for better throughput.
 
 ## Known issues
 
