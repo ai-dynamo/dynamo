@@ -51,6 +51,7 @@ def make_args(**overrides):
         "sglang_chunked_prefill_size": None,
         "sglang_clip_max_new_tokens": None,
         "sglang_schedule_conservativeness": None,
+        "trtllm_capacity_scheduler_policy": None,
         "aic_perf_model": False,
         "aic_system": None,
         "aic_backend": None,
@@ -61,6 +62,7 @@ def make_args(**overrides):
         "aic_attention_dp_size": None,
         "gpu_memory_utilization": None,
         "mem_fraction_static": None,
+        "free_gpu_memory_fraction": None,
         "model_path": None,
         "is_prefill_worker": False,
         "is_decode_worker": False,
@@ -101,6 +103,53 @@ def test_load_mocker_engine_args_from_json_file_normalizes_page_size(tmp_path):
 
     assert engine_args.block_size == 32
     assert engine_args.num_gpu_blocks == 1024
+
+
+def test_build_mocker_engine_args_trtllm_defaults_block_size():
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(engine_type="trtllm", block_size=None)
+    )
+
+    # TRT-LLM PyTorch backend default tokens_per_block.
+    assert engine_args.block_size == 32
+
+
+def test_build_mocker_engine_args_trtllm_accepts_guaranteed_no_evict():
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(
+            engine_type="trtllm",
+            trtllm_capacity_scheduler_policy="guaranteed_no_evict",
+        )
+    )
+
+    assert engine_args.block_size == 32
+
+
+def test_build_mocker_engine_args_trtllm_rejects_unsupported_policy():
+    with pytest.raises(Exception, match="guaranteed_no_evict"):
+        CONFIG.build_mocker_engine_args(
+            make_args(
+                engine_type="trtllm",
+                trtllm_capacity_scheduler_policy="max_utilization",
+            )
+        )
+
+
+def test_load_mocker_engine_args_from_json_file_accepts_trtllm(tmp_path):
+    config_path = tmp_path / "engine_args.json"
+    config_path.write_text(
+        '{"engine_type":"trtllm",'
+        '"trtllm":{"capacity_scheduler_policy":"guaranteed_no_evict"},'
+        '"num_gpu_blocks":1024}'
+    )
+
+    engine_args = CONFIG.load_mocker_engine_args(
+        make_args(extra_engine_args=config_path)
+    )
+
+    assert engine_args.num_gpu_blocks == 1024
+    # block_size omitted from JSON -> normalized to the TRT-LLM default.
+    assert engine_args.block_size == 32
 
 
 def test_worker_overrides_drive_runtime_config_for_prefill_worker():
@@ -383,6 +432,7 @@ def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
             "max_num_batched_tokens": 4096,
             "gpu_memory_utilization": 0.8,
             "mem_fraction_static": 0.7,
+            "free_gpu_memory_fraction": None,
             "backend_version": None,
             "moe_tp_size": None,
             "moe_ep_size": None,
@@ -414,6 +464,7 @@ def test_aic_capacity_estimation_preserves_explicit_zero_inputs(monkeypatch):
         aic_attention_dp_size=None,
         gpu_memory_utilization=0.0,
         mem_fraction_static=0.0,
+        free_gpu_memory_fraction=0.0,
         sglang_page_size=0,
     )
 
@@ -423,6 +474,7 @@ def test_aic_capacity_estimation_preserves_explicit_zero_inputs(monkeypatch):
     assert calls[0]["max_num_batched_tokens"] == 0
     assert calls[0]["gpu_memory_utilization"] == 0.0
     assert calls[0]["mem_fraction_static"] == 0.0
+    assert calls[0]["free_gpu_memory_fraction"] == 0.0
 
 
 def test_build_mocker_engine_args_estimates_sglang_blocks_with_static_fraction(

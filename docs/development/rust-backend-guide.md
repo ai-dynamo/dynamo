@@ -85,7 +85,7 @@ Lifecycle and runtime:
 - Graceful shutdown with signal handling and 3-phase
   distributed-runtime teardown
 - Debug-build stream validator and the `testing::run_conformance` kit
-- Engine control plumbing, with per-backend profiling, quiesce/resume, and supported weight-update controls
+- Engine control plumbing, with per-backend profiling, pause/resume, and supported weight-update controls
 
 Observability:
 - Health-check canary via `LLMEngine::health_check_payload()` plus

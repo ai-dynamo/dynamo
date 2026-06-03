@@ -16,7 +16,7 @@ from tests.gpu_memory_service.flow_assertions import (
     assert_completion_ok,
     assert_kv_history,
     assert_weights_published_once,
-    quiesce_engine,
+    pause_engine,
     wait_for_resumed_layout,
     wait_for_weights_state,
 )
@@ -27,12 +27,12 @@ pytestmark = [pytest.mark.nightly, pytest.mark.fault_tolerance]
 # Event flow under test:
 # 1. Weights are published once as a committed layout.
 # 2. KV cache starts as a live RW layout build.
-# 3. Quiesce keeps weights committed but aborts and clears the KV layout.
+# 3. Pause keeps weights committed but aborts and clears the KV layout.
 # 4. Resume reconnects weights as RO to the same committed layout.
 # 5. Resume recreates KV cache in a fresh RW layout after the old one was cleared.
 
 
-def _run_quiesce_resume_test(
+def _run_pause_resume_test(
     request,
     engine_cls,
 ) -> None:
@@ -48,21 +48,21 @@ def _run_quiesce_resume_test(
             success_message="Initial inference result",
         )
 
-        # Before quiesce, weights must already be published and visible to RO
+        # Before pause, weights must already be published and visible to RO
         # readers while KV cache remains a live RW layout owned by the engine.
-        weights_before_quiesce = quiesce_engine(
+        weights_before_pause = pause_engine(
             weights_gms,
             kv_cache_gms,
             engine,
-            quiesce_label="Engine quiesce",
+            pause_label="Engine pause",
         )
 
-        # Weights are immutable across quiesce/resume, so their event history should
+        # Weights are immutable across pause/resume, so their event history should
         # still be the original publish: connect once, commit once.
         weights_events = weights_gms.get_event_history().events
         assert_weights_published_once(weights_events)
 
-        # KV cache is different: quiesce must abort the old RW layout and clear
+        # KV cache is different: pause must abort the old RW layout and clear
         # its server-owned allocations before resume can start a new RW layout.
         kv_events = kv_cache_gms.get_event_history().events
         assert_kv_history(kv_events, cleared_layouts=1)
@@ -76,7 +76,7 @@ def _run_quiesce_resume_test(
         wait_for_resumed_layout(
             weights_gms,
             kv_cache_gms,
-            weights_before_quiesce,
+            weights_before_pause,
         )
 
         weights_events_after_resume = weights_gms.get_event_history().events
@@ -105,12 +105,12 @@ def _run_quiesce_resume_test(
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.timeout(300)
 @pytest.mark.vllm
-def test_gms_basic_quiesce_resume_vllm(
+def test_gms_basic_pause_resume_vllm(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
 ):
-    _run_quiesce_resume_test(request, VLLMWithGMSProcess)
+    _run_pause_resume_test(request, VLLMWithGMSProcess)
 
 
 @pytest.mark.e2e
@@ -118,12 +118,12 @@ def test_gms_basic_quiesce_resume_vllm(
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.timeout(300)
 @pytest.mark.sglang
-def test_gms_basic_quiesce_resume_sglang(
+def test_gms_basic_pause_resume_sglang(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
 ):
-    _run_quiesce_resume_test(request, SGLangWithGMSProcess)
+    _run_pause_resume_test(request, SGLangWithGMSProcess)
 
 
 # ---------------------------------------------------------------------------
@@ -137,12 +137,12 @@ def test_gms_basic_quiesce_resume_sglang(
 @pytest.mark.gpu_1
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.timeout(600)
-def test_gms_basic_quiesce_resume_trtllm(
+def test_gms_basic_pause_resume_trtllm(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
 ):
-    """Weights-only quiesce/resume for TRT-LLM (no KV cache GMS)."""
+    """Weights-only pause/resume for TRT-LLM (no KV cache GMS)."""
     with GMSProcessManager(request, TRTLLMWithGMSProcess, tags=("weights",)) as manager:
         frontend_port = manager.frontend_port
         weights_gms = manager.weights_gms
@@ -158,7 +158,7 @@ def test_gms_basic_quiesce_resume_trtllm(
         ws = wait_for_weights_state(weights_gms, ServerState.RO, timeout=60.0)
         weights_hash = ws.memory_layout_hash
 
-        assert engine.quiesce()["status"] == "ok"
+        assert engine.pause()["status"] == "ok"
 
         wait_for_weights_state(
             weights_gms, ServerState.COMMITTED, expected_hash=weights_hash

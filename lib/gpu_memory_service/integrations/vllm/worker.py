@@ -61,7 +61,7 @@ apply_scratch_kv_patches()
 logger.info("[GMS] Worker module loaded - model loader registered, all patches applied")
 
 # MX imports — only when MX_ENABLED=1 (modelexpress is an optional dependency).
-# Sleep/wake serving lifecycle is implemented in modelexpress.lifecycle, which
+# Pause/resume serving lifecycle is implemented in modelexpress.lifecycle, which
 # composes publish/unpublish_metadata + register_tensors + MxClient/NIXL
 # teardown into a single pause/resume pair.
 if os.environ.get("MX_ENABLED", "0") == "1":

@@ -63,27 +63,27 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
-class TRTLLMEngineQuiesceController:
-    """Adapts TRT-LLM sleep/wake to the standard quiesce controller interface.
+class TRTLLMEnginePauseController:
+    """Adapts TRT-LLM sleep/wake to the standard pause controller interface.
 
     Two memory domains: KV cache via TRT-LLM collective_rpc, weights via GMS.
     """
 
     def __init__(self, engine: TensorRTLLMEngine):
         self._engine = engine
-        self._is_quiesced = False
+        self._is_paused = False
         self._pending_resume_tags: set[str] = set()
 
     @property
-    def is_quiesced(self) -> bool:
-        return self._is_quiesced
+    def is_paused(self) -> bool:
+        return self._is_paused
 
     @property
     def needs_resume_recovery(self) -> bool:
         return bool(self._pending_resume_tags)
 
-    async def quiesce(self, tags: list[str] | None = None) -> bool:
-        if self._is_quiesced or self._pending_resume_tags:
+    async def pause(self, tags: list[str] | None = None) -> bool:
+        if self._is_paused or self._pending_resume_tags:
             return False
         tags = tags or ["kv_cache", "weights"]
         if "kv_cache" in tags:
@@ -92,11 +92,11 @@ class TRTLLMEngineQuiesceController:
         if "weights" in tags:
             self._pending_resume_tags.add("weights")
             self._release_gms_weights()
-        self._is_quiesced = True
+        self._is_paused = True
         return True
 
     async def resume(self, tags: list[str] | None = None) -> bool:
-        if not self._is_quiesced and not self._pending_resume_tags:
+        if not self._is_paused and not self._pending_resume_tags:
             return False
         requested_tags = set(tags or ["kv_cache", "weights"])
         # During recovery, restore the domains that may actually be asleep
@@ -111,7 +111,7 @@ class TRTLLMEngineQuiesceController:
         return True
 
     def mark_resumed(self) -> None:
-        self._is_quiesced = False
+        self._is_paused = False
         self._pending_resume_tags.clear()
 
     def _collective_rpc(self, method: str, rpc_tags: list[str]) -> None:
@@ -267,12 +267,12 @@ class HandlerBase(BaseGenerativeHandler):
         self.max_seq_len = config.max_seq_len
         self.disagg_machine_id = config.disagg_machine_id
         # Sleep/wake state
-        self._quiesce_lock = asyncio.Lock()
+        self._pause_lock = asyncio.Lock()
         self._inflight_lock = asyncio.Lock()
         self._inflight_requests = 0
         self._no_inflight_requests = asyncio.Event()
         self._no_inflight_requests.set()
-        self._quiesce_controller = TRTLLMEngineQuiesceController(config.engine)
+        self._pause_controller = TRTLLMEnginePauseController(config.engine)
         self._reject_new_requests = False
 
     def check_error(self, result: dict) -> bool:
@@ -322,25 +322,25 @@ class HandlerBase(BaseGenerativeHandler):
 
     @staticmethod
     def _controller_needs_resume_recovery(
-        controller: TRTLLMEngineQuiesceController,
+        controller: TRTLLMEnginePauseController,
     ) -> bool:
         needs_recovery = getattr(controller, "needs_resume_recovery", False)
         return needs_recovery if isinstance(needs_recovery, bool) else False
 
     # ------------------------------------------------------------------
-    # Sleep / wake public API (delegates to TRTLLMEngineQuiesceController)
+    # Sleep / wake public API (delegates to TRTLLMEnginePauseController)
     # ------------------------------------------------------------------
 
     async def release_memory_occupation(self, body: dict) -> dict:
-        """Release GPU memory: unregister endpoint, drain requests, quiesce engine."""
+        """Release GPU memory: unregister endpoint, drain requests, pause engine."""
         body = body or {}
         tags = body.get("tags")
 
-        async with self._quiesce_lock:
-            if self._quiesce_controller.is_quiesced:
+        async with self._pause_lock:
+            if self._pause_controller.is_paused:
                 return {"status": "ok", "message": "Memory already released"}
-            if self._controller_needs_resume_recovery(self._quiesce_controller):
-                # A prior release rolled back into a half-quiesced state; quiesce()
+            if self._controller_needs_resume_recovery(self._pause_controller):
+                # A prior release rolled back into a half-paused state; pause()
                 # would no-op and falsely report success. Force a resume first.
                 return {
                     "status": "error",
@@ -355,19 +355,19 @@ class HandlerBase(BaseGenerativeHandler):
 
                 timeout_s = float(body.get("timeout_s", 30.0))
                 await self._wait_for_inflight_requests(timeout_s)
-                await self._quiesce_controller.quiesce(tags)
+                await self._pause_controller.pause(tags)
 
                 return {"status": "ok", "message": "Memory released"}
             except Exception as exc:
                 logger.error("release_memory_occupation failed: %s", exc)
                 # Rollback: TRT-LLM has no pause_generation(), so we
                 # manually unregistered the endpoint and set reject flag
-                # above. Restore both on failure. If quiesce partially
+                # above. Restore both on failure. If pause partially
                 # succeeded, resume the completed domains first.
-                if self._controller_needs_resume_recovery(self._quiesce_controller):
+                if self._controller_needs_resume_recovery(self._pause_controller):
                     try:
-                        await self._quiesce_controller.resume(tags)
-                        self._quiesce_controller.mark_resumed()
+                        await self._pause_controller.resume(tags)
+                        self._pause_controller.mark_resumed()
                     except Exception as resume_exc:
                         logger.error(
                             "release_memory_occupation rollback resume failed: %s",
@@ -387,21 +387,21 @@ class HandlerBase(BaseGenerativeHandler):
         body = body or {}
         tags = body.get("tags")
 
-        async with self._quiesce_lock:
+        async with self._pause_lock:
             needs_recovery = self._controller_needs_resume_recovery(
-                self._quiesce_controller
+                self._pause_controller
             )
-            if not self._quiesce_controller.is_quiesced and not needs_recovery:
+            if not self._pause_controller.is_paused and not needs_recovery:
                 return {"status": "ok", "message": "Memory already resumed"}
 
             try:
-                await self._quiesce_controller.resume(tags)
+                await self._pause_controller.resume(tags)
 
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.register_endpoint_instance()
 
                 await self._set_reject_new_requests(False)
-                self._quiesce_controller.mark_resumed()
+                self._pause_controller.mark_resumed()
                 return {"status": "ok", "message": "Memory resumed"}
             except Exception as exc:
                 logger.error("resume_memory_occupation failed: %s", exc)

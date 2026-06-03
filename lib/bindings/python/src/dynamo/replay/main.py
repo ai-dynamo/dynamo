@@ -38,6 +38,7 @@ _DEFAULT_AIC_SYSTEM = "h200_sxm"
 _DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
 _DEFAULT_VLLM_BLOCK_SIZE = 64
 _DEFAULT_SGLANG_BLOCK_SIZE = 1
+_DEFAULT_TRTLLM_BLOCK_SIZE = 32
 
 
 def resolve_planner_profile_data(
@@ -67,6 +68,8 @@ def _resolve_block_size_for_capacity(raw: dict) -> int:
         if isinstance(sglang, dict) and sglang.get("page_size") is not None:
             return cast(int, sglang["page_size"])
         return _DEFAULT_SGLANG_BLOCK_SIZE
+    if raw.get("engine_type") == "trtllm":
+        return _DEFAULT_TRTLLM_BLOCK_SIZE
     return _DEFAULT_VLLM_BLOCK_SIZE
 
 
@@ -88,6 +91,7 @@ def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
     max_num_batched_tokens = raw.get("max_num_batched_tokens")
     gpu_memory_utilization = raw.get("gpu_memory_utilization")
     mem_fraction_static = raw.get("mem_fraction_static")
+    free_gpu_memory_fraction = raw.get("free_gpu_memory_fraction")
 
     raw["num_gpu_blocks"] = estimate_num_gpu_blocks(
         backend_name=aic_backend,
@@ -113,6 +117,8 @@ def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
             if mem_fraction_static is not None
             else DEFAULT_MEM_FRACTION_STATIC,
         ),
+        # None -> aic.py applies the TRT-LLM default (0.9).
+        free_gpu_memory_fraction=free_gpu_memory_fraction,
         backend_version=raw.get("aic_backend_version"),
         moe_tp_size=raw.get("aic_moe_tp_size"),
         moe_ep_size=raw.get("aic_moe_ep_size"),
