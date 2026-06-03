@@ -293,6 +293,11 @@ The `VllmDecodeWorker` pod should restore from the ready checkpoint instead of c
 existing `DynamoCheckpoint` and does not create a new automatic checkpoint for
 the component. This is the escape hatch for users who intentionally want to
 reuse a retained or pre-warmed checkpoint and accept the compatibility risk.
+Treat the pod template as a compatibility template for the same workload: once
+the checkpoint is ready, restore admission replaces the target container's
+command and args with the restore placeholder, and the restored process resumes
+from the checkpointed state rather than from newly supplied command-line or
+environment settings.
 
 Without `checkpointRef`, `mode: Auto` is the DGD-managed path: for each
 checkpoint-enabled worker generation, the DGD controller creates a DGD-owned
@@ -506,6 +511,7 @@ status:
 - **Multi-GPU remains preview**: vLLM tensor-parallel configurations have limited validation and are not yet a broadly supported path across clusters.
 - **GMS restore remains experimental**: GMS + Snapshot is currently disabled.
 - **Admission is create-only**: with DGD `startupPolicy: Immediate`, only Pods created after a checkpoint is `Ready` are restore-shaped. Existing Pods cold-started before checkpoint readiness keep running as-is.
+- **Restore admission must be installed**: DGD restores rely on the snapshot Pod mutating webhook, so upgrade the snapshot chart/webhook configuration along with the operator and CRDs when enabling these features.
 - **Network state is sensitive**: restore is sensitive to live TCP socket state. Loopback bootstrap/control sockets are the most reliable path today.
 - **Privileged DaemonSet required**: `snapshot-agent` must run privileged to execute CRIU and `cuda-checkpoint`. Workload pods do not need to be privileged.
 
