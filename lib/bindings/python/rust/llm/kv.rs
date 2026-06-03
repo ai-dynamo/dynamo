@@ -921,6 +921,8 @@ impl KvRouter {
                         config.moe_tp_size(),
                         config.moe_ep_size(),
                         config.attention_dp_size(),
+                        config.nextn(),
+                        config.nextn_accept_rates(),
                     )
                 })
             })

@@ -27,6 +27,7 @@ from pydantic import AliasChoices, BaseModel, Field, field_validator, model_vali
 
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
 from dynamo.planner.config.defaults import SLAPlannerDefaults
+from dynamo.planner.config.parallelization import PickedParallelConfig
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,30 @@ class PlannerPreDeploymentSweepMode(str, Enum):
     Thorough = "thorough"
 
 
+class AICPerfModelSpec(BaseModel):
+    """Native AIC model identity used by the Rust engine perf shim.
+
+    Unlike ``AICInterpolationSpec``, this does not describe an AIC sweep.
+    It is the forward-pass model/backend/parallelism identity used for
+    real-time shim queries. Unsupported native AIC configs are allowed: the
+    shim falls back to FPM regression and can still tune from observations.
+    """
+
+    hf_id: str = Field(description="HuggingFace model id, e.g. Qwen/Qwen3-32B")
+    system: str = Field(description="AIC system identifier, e.g. h200_sxm")
+    backend: Literal["trtllm", "vllm", "sglang"]
+    backend_version: Optional[str] = None
+
+    prefill_pick: Optional[PickedParallelConfig] = None
+    decode_pick: Optional[PickedParallelConfig] = None
+
+    model_arch: Optional[str] = None
+    weight_dtype: Optional[str] = None
+    moe_dtype: Optional[str] = None
+    activation_dtype: Optional[str] = None
+    kv_cache_dtype: Optional[str] = None
+
+
 class PlannerConfig(BaseModel):
     """Pydantic configuration for the Dynamo Planner.
 
@@ -54,7 +79,12 @@ class PlannerConfig(BaseModel):
 
     pre_deployment_sweeping_mode: Optional[PlannerPreDeploymentSweepMode] = Field(
         default=PlannerPreDeploymentSweepMode.Rapid,
-        description='Controls pre-deployment sweeping mode for planner in-depth profiling. "none" means no pre-deployment sweep (only load-based scaling). "rapid" uses AI Configurator to simulate engine performance. "thorough" uses real GPUs to measure engine performance (takes several hours).',
+        description=(
+            "Controls optional pre-deployment perf-model bootstrap data. "
+            '"none" skips bootstrap data, "rapid" uses AI Configurator to '
+            'simulate engine performance, and "thorough" uses real GPUs to '
+            "measure engine performance (takes several hours)."
+        ),
     )
 
     environment: Literal[
@@ -74,7 +104,8 @@ class PlannerConfig(BaseModel):
             "depth and KV cache utilization — no SLA targets or profiling needed. "
             "'load' uses user-defined prefill queue token and decode KV "
             "utilization thresholds. "
-            "'sla' uses regression-based scaling that targets specific ttft_ms/itl_ms values."
+            "'sla' uses the Rust engine perf model to target specific "
+            "ttft_ms/itl_ms values."
         ),
     )
 
@@ -117,6 +148,16 @@ class PlannerConfig(BaseModel):
             "at bootstrap and uses the resulting FPMs to seed the regression "
             "models (priority 2 between the get_perf_metrics endpoint and "
             "the legacy profile_results_dir file loader)."
+        ),
+    )
+    aic_perf_model: Optional[AICPerfModelSpec] = Field(
+        default=None,
+        description=(
+            "Native AIC forward-pass perf model identity for the Rust engine "
+            "perf shim. This enables real-time AIC estimates plus online "
+            "correction; unsupported native configs automatically fall back to "
+            "FPM regression in the shim. This field does not trigger AIC "
+            "interpolation sweeps."
         ),
     )
 
@@ -239,9 +280,9 @@ class PlannerConfig(BaseModel):
             "load_adjustment_interval_seconds", "load_adjustment_interval"
         ),
         description=(
-            "Interval for FPM regression model updates AND load-based "
+            "Interval for perf-model tuning AND load-based "
             "scaling decisions. Even when only throughput-based scaling is enabled, "
-            "live FPM observations are fed into the regression at this interval to "
+            "live FPM observations are fed into the perf model at this interval to "
             "keep the performance model accurate. Must be shorter than "
             "throughput_adjustment_interval_seconds."
         ),
@@ -424,10 +465,11 @@ class PlannerConfig(BaseModel):
                 or self.pre_deployment_sweeping_mode
                 == PlannerPreDeploymentSweepMode.None_
             ):
-                raise ValueError(
-                    "pre_deployment_sweeping_mode cannot be 'none' when "
-                    "enable_throughput_scaling is True. Throughput-based scaling "
-                    "requires pre-deployment sweeping to profile engine performance."
+                logger.warning(
+                    "pre_deployment_sweeping_mode is 'none' or unset while "
+                    "throughput scaling is enabled; the Rust engine perf model "
+                    "will start from native AIC estimates when available or "
+                    "from live FPM regression after enough observations."
                 )
             if (
                 self.pre_deployment_sweeping_mode == PlannerPreDeploymentSweepMode.Rapid
@@ -435,8 +477,27 @@ class PlannerConfig(BaseModel):
             ):
                 logger.warning(
                     "pre_deployment_sweeping_mode='rapid' but aic_interpolation "
-                    "is not set; planner will fall back to profile_results_dir "
-                    "files if the get_perf_metrics endpoint is unavailable."
+                    "is not set; planner will use aic_perf_model, live FPM "
+                    "tuning, or profile_results_dir files if the "
+                    "get_perf_metrics endpoint is unavailable."
+                )
+
+        if self.aic_perf_model is not None:
+            if (
+                self.mode in ("disagg", "prefill")
+                and self.aic_perf_model.prefill_pick is None
+            ):
+                raise ValueError(
+                    "aic_perf_model.prefill_pick is required for prefill "
+                    f"perf queries in mode={self.mode!r}"
+                )
+            if (
+                self.mode in ("disagg", "decode", "agg")
+                and self.aic_perf_model.decode_pick is None
+            ):
+                raise ValueError(
+                    "aic_perf_model.decode_pick is required for decode/agg "
+                    f"perf queries in mode={self.mode!r}"
                 )
 
         if self.enable_load_scaling:

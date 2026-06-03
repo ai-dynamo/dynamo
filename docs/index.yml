@@ -153,6 +153,8 @@ navigation:
             contents:
               - page: GKE Setup
                 path: kubernetes/cloud-providers/gke/gke.md
+      - page: API Reference
+        path: kubernetes/api-reference.md
 
   # ==================== User Guides ====================
   - section: User Guides
@@ -189,6 +191,8 @@ navigation:
             path: agents/agent-tracing.md
           - page: Agent Hints
             path: agents/agent-hints.md
+          - page: Priority Scheduling
+            path: agents/priority-scheduling.md
           - page: Use Pi-Mono with Dynamo
             path: agents/pi-mono.md
       - section: Multimodal
@@ -460,8 +464,6 @@ navigation:
           - page: RDMA Metadata
             path: api/nixl-connect/rdma-metadata.md
       # -- Kubernetes (hidden sub-pages) --
-      - page: API Reference (K8s)
-        path: kubernetes/api-reference.md
       - page: Creating Deployments
         path: kubernetes/deployment/create-deployment.md
       - page: FluxCD
