@@ -190,6 +190,8 @@ def _load_aic_perf_config(args: argparse.Namespace):
         "aic_moe_tp_size": args.aic_moe_tp_size,
         "aic_moe_ep_size": args.aic_moe_ep_size,
         "aic_attention_dp_size": args.aic_attention_dp_size,
+        "aic_nextn": args.aic_nextn,
+        "aic_nextn_accept_rates": args.aic_nextn_accept_rates,
     }
     if not any(value is not None for value in values.values()):
         return None
@@ -212,6 +214,8 @@ def _load_aic_perf_config(args: argparse.Namespace):
         aic_moe_tp_size=values["aic_moe_tp_size"],
         aic_moe_ep_size=values["aic_moe_ep_size"],
         aic_attention_dp_size=values["aic_attention_dp_size"],
+        aic_nextn=values["aic_nextn"],
+        aic_nextn_accept_rates=values["aic_nextn_accept_rates"],
     )
 
 
@@ -499,6 +503,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--aic-moe-tp-size", type=int)
     parser.add_argument("--aic-moe-ep-size", type=int)
     parser.add_argument("--aic-attention-dp-size", type=int)
+    parser.add_argument("--aic-nextn", type=int)
+    parser.add_argument("--aic-nextn-accept-rates")
     parser.add_argument("--input-tokens", type=int)
     parser.add_argument("--output-tokens", type=int)
     parser.add_argument(

@@ -233,3 +233,37 @@ cases:
           </function>
           </tool_call>
         reason: SGLang preserves the bare Qwen function before the first <tool_call> as content, including the trailing newline; Dynamo recovers it as the first structured call before parsing the wrapped call.
+  TOOLCALLING.batch.5.g:
+    description: Closing </tool_call> without matching <tool_call> open after prefix prose
+    ref: dynamo
+    model_text: |-
+      I will check that. <function=get_weather>
+      <parameter=location>
+      NYC
+      </parameter>
+      </function>
+      </tool_call>
+    tools:
+    - *id002
+    expected:
+      dynamo: &id006
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: 'I will check that. '
+      vllm: *id006
+      sglang:
+        calls: []
+        normal_text: |-
+          I will check that. <function=get_weather>
+          <parameter=location>
+          NYC
+          </parameter>
+          </function>
+          </tool_call>
+        reason: |-
+          SGLang's qwen3_coder detector gates parsing on the opening <tool_call>
+          sentinel; a bare </tool_call> close after prefix prose short-circuits to
+          zero calls and the full text as normal_text. Dynamo preserves the prose,
+          recovers the <function> body, and strips the orphan close marker.

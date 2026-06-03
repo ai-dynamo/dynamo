@@ -85,6 +85,7 @@ Lifecycle and runtime:
 - Graceful shutdown with signal handling and 3-phase
   distributed-runtime teardown
 - Debug-build stream validator and the `testing::run_conformance` kit
+- Engine control plumbing, with per-backend profiling, quiesce/resume, and supported weight-update controls
 
 Observability:
 - Health-check canary via `LLMEngine::health_check_payload()` plus
@@ -139,7 +140,6 @@ Request handling:
 | Multimodal | Images / video / embeddings, NIXL embedding transfer, separate encode workers; `ENCODE` disaggregation role |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path |
 | LoRA adapters | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization |
-| Engine routes | Profile start/stop, sleep / wake / quiesce, weight updates (disk / tensor / distributed / IPC), KV block clearing, prefix cache reset |
 | Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload |
 
 If you need one of these features today, keep that workload on the
