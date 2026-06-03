@@ -4,6 +4,7 @@
 #   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm)
 #   operator -> operator build and test
 #   snapshot -> snapshot-agent build and test
+#   power_agent -> power-agent image build
 #   deploy   -> deploy tests
 #   planner  -> dynamo build-test
 #   vllm     -> vllm build and test
@@ -131,6 +132,13 @@ snapshot:
   - *ci
   - 'deploy/snapshot/**'
   - 'deploy/snapshot/.*'
+
+power_agent:
+  - *ci
+  - 'components/power_agent/**'
+  - 'deploy/helm/charts/power-agent/**'
+  - '!**/*.md'
+  - '!**/*.rst'
 
 deploy:
   - *ci
