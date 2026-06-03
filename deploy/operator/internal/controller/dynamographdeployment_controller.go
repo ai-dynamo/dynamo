@@ -1805,6 +1805,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 }
 
 // createCheckpointCR creates a DynamoCheckpoint CR for a component in Auto mode.
+//
+//nolint:gocyclo
 func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 	ctx context.Context,
 	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
