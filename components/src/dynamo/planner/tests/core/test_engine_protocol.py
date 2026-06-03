@@ -93,7 +93,10 @@ def test_initial_tick_forwards_to_psm():
 @pytest.mark.asyncio
 async def test_tick_async_wraps_psm_on_tick_identically():
     psm = PlannerStateMachine(_easy_agg_config(), _simple_caps())
-    adapter = _PSMEngineAdapter(psm)
+    # ``adapter`` not used directly here — we construct it to assert the
+    # constructor accepts a PSM without raising. The second-half of the
+    # test below builds ``adapter2`` for the actual tick comparison.
+    _PSMEngineAdapter(psm)
 
     # Baseline: call PSM directly.
     tick_input_a = TickInput(

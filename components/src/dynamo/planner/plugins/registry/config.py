@@ -29,24 +29,27 @@ from __future__ import annotations
 
 import functools
 import logging
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from dynamo.planner.plugins.clock import Clock
-from dynamo.planner.plugins.registry.auth import (
-    AllowUnauthenticatedAuth,
-    AuthValidator,
-    MultiSourceAuth,
-    StaticSecretAuth,
-)
-from dynamo.planner.plugins.registry.circuit_breaker import CircuitBreaker
-from dynamo.planner.plugins.registry.server import PluginRegistryServer
-from dynamo.planner.plugins.transport.base import PluginTransport
-from dynamo.planner.plugins.transport.config import (
-    TransportConfig,
-    make_transport_for_endpoint,
-)
+from dynamo.planner.plugins.transport.config import TransportConfig
+
+# ``PluginRegistryServer`` (and through it ``plugin_pb2`` / ``plugin_pb2_grpc``)
+# is only needed at *runtime* by the build helpers below — not by the
+# Pydantic config schema this module exposes for import-time deserialisation.
+# Keeping the heavy import out of the module top-level lets
+# ``PlannerConfig.scheduling.plugin_registration`` resolve to its schema in
+# a default ``use_orchestrator=False`` deployment without requiring the
+# generated proto stubs to be present on disk (the stubs are generated at
+# install / dev-time only; PSM-only deployments must still parse the
+# config tree).
+if TYPE_CHECKING:
+    from dynamo.planner.plugins.clock import Clock
+    from dynamo.planner.plugins.registry.auth.base import AuthValidator
+    from dynamo.planner.plugins.registry.circuit_breaker import CircuitBreaker
+    from dynamo.planner.plugins.registry.server import PluginRegistryServer
+    from dynamo.planner.plugins.transport.base import PluginTransport
 
 log = logging.getLogger(__name__)
 
@@ -146,7 +149,16 @@ class PluginRegistrationConfig(BaseModel):
 # ----------------------------------------------------------------------------
 
 
-def build_auth_validator(config: AuthConfig) -> AuthValidator:
+def build_auth_validator(config: AuthConfig) -> "AuthValidator":
+    # Heavy auth/registry imports deferred to call time so this module
+    # stays importable in PSM-only deployments without the generated
+    # plugin_pb2 stubs (see TYPE_CHECKING block at module top).
+    from dynamo.planner.plugins.registry.auth import (
+        AllowUnauthenticatedAuth,
+        MultiSourceAuth,
+        StaticSecretAuth,
+    )
+
     """Construct the composed auth validator from ``AuthConfig``.
 
     Raises ``ValueError`` on empty ``trusted_sources`` (fail-closed) —
@@ -177,13 +189,19 @@ def build_auth_validator(config: AuthConfig) -> AuthValidator:
 
 def build_registry_from_config(
     config: PluginRegistrationConfig,
-    clock: Clock,
-) -> tuple[PluginRegistryServer, CircuitBreaker]:
+    clock: "Clock",
+) -> tuple["PluginRegistryServer", "CircuitBreaker"]:
     """Construct and wire the registry + circuit breaker.
 
     Returns the pair so the caller (orchestrator) can hand the circuit
     breaker to other subsystems (scheduler, heartbeat monitor).
     """
+    # Heavy registry imports deferred to call time so this module stays
+    # importable in PSM-only deployments without the generated
+    # plugin_pb2 stubs (see TYPE_CHECKING block at module top).
+    from dynamo.planner.plugins.registry.circuit_breaker import CircuitBreaker
+    from dynamo.planner.plugins.registry.server import PluginRegistryServer
+
     auth = build_auth_validator(config.auth)
     cb = CircuitBreaker(clock)
 
@@ -207,10 +225,13 @@ def _transport_factory_shim(
     *,
     in_process_instance: Any = None,
     transport_config: TransportConfig,
-) -> PluginTransport:
+) -> "PluginTransport":
     """Adapter: ``make_transport_for_endpoint`` takes ``config`` as the
     third positional argument; the registry's factory protocol is
     ``(plugin_id, endpoint, *, in_process_instance=None)``."""
+    # Heavy transport import deferred (see TYPE_CHECKING block above).
+    from dynamo.planner.plugins.transport.config import make_transport_for_endpoint
+
     return make_transport_for_endpoint(
         plugin_id,
         endpoint,

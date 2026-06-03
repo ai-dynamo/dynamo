@@ -32,8 +32,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
+from dynamo.planner.core.types import TrafficObservation, WorkerCapabilities
+from dynamo.planner.monitoring.planner_metrics import PluginFrameworkMetrics
 from dynamo.planner.plugins.clock import Clock
 from dynamo.planner.plugins.merge.types import ComponentKey
 from dynamo.planner.plugins.orchestrator.pipeline import PipelineOutcome, run_pipeline
@@ -51,10 +53,6 @@ from dynamo.planner.plugins.types import (
     RegisterRequest,
 )
 
-if TYPE_CHECKING:
-    from dynamo.planner.core.types import TrafficObservation, WorkerCapabilities
-    from dynamo.planner.monitoring.planner_metrics import PluginFrameworkMetrics
-
 log = logging.getLogger(__name__)
 
 
@@ -70,8 +68,8 @@ class LocalPlannerOrchestrator:
         circuit_breaker: CircuitBreaker,
         clock: Clock,
         tick_max_duration_seconds: float = 30.0,
-        capabilities: Optional["WorkerCapabilities"] = None,
-        metrics: Optional["PluginFrameworkMetrics"] = None,
+        capabilities: Optional[WorkerCapabilities] = None,
+        metrics: Optional[PluginFrameworkMetrics] = None,
     ) -> None:
         if tick_max_duration_seconds <= 0:
             raise ValueError("tick_max_duration_seconds must be > 0")
@@ -128,7 +126,7 @@ class LocalPlannerOrchestrator:
         return self._registry
 
     @property
-    def capabilities(self) -> Optional["WorkerCapabilities"]:
+    def capabilities(self) -> Optional[WorkerCapabilities]:
         """Static per-engine capabilities. Builtins that need
         ``max_num_batched_tokens`` / ``max_kv_tokens`` etc. read this;
         ``None`` when the orchestrator was constructed without
@@ -328,7 +326,7 @@ class LocalPlannerOrchestrator:
     async def bootstrap_plugins(
         self,
         *,
-        historical_traffic: Optional[Sequence["TrafficObservation"]] = None,
+        historical_traffic: Optional[Sequence[TrafficObservation]] = None,
     ) -> None:
         """Fan out plugin Bootstrap lifecycle hooks.
 

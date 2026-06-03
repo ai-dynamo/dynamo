@@ -100,9 +100,7 @@ async def test_virtual_clock_sleeper_resumes_on_advance():
     for _ in range(3):
         await asyncio.sleep(0)
     assert ("b", 12.0) in woke
-    await task1
-    await task2
-    await task3
+    await asyncio.gather(task1, task2, task3)
 
 
 @pytest.mark.asyncio
@@ -145,7 +143,11 @@ async def test_virtual_clock_cancellation_does_not_leak_heap():
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await task
+        # Awaiting a cancelled task re-raises ``CancelledError`` — the
+        # whole point of this block. Assign the await expression so
+        # CodeQL doesn't read it as "statement has no effect".
+        _result = await task
+        del _result  # silence "unused local" warnings symmetrically
 
     # After advance past deadline, the cancelled future is dropped from heap
     assert len(c._sleepers) == 1  # before advance, still in heap

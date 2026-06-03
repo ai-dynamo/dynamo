@@ -75,8 +75,11 @@ def stub_transport(monkeypatch):
     def _factory(plugin_id, endpoint, config, *, in_process_instance=None):
         return _Stub(plugin_id, endpoint)
 
+    # ``registry.config`` defers its ``make_transport_for_endpoint`` import
+    # to call time (so PSM-only deployments don't need the generated proto
+    # stubs at module load), so we monkeypatch at the *source* module.
     monkeypatch.setattr(
-        "dynamo.planner.plugins.registry.config.make_transport_for_endpoint",
+        "dynamo.planner.plugins.transport.config.make_transport_for_endpoint",
         _factory,
     )
 

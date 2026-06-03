@@ -174,14 +174,14 @@ class PredictPluginCallable(Protocol):
 
     @property
     def plugin_id(self) -> str:
-        ...
+        """Stable plugin identifier as registered with the registry."""
 
     @property
     def priority(self) -> int:
-        ...
+        """Chain-augment ordering: lower priority runs first."""
 
     async def call(self, method: str, context: PipelineContext) -> PredictStageResponse:
-        ...
+        """Dispatch a PREDICT call; transport layer handles serialisation."""
 
 
 __all__ = [

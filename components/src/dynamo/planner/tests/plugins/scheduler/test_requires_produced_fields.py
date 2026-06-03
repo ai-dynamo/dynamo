@@ -259,28 +259,28 @@ def _stub_metrics():
     """Minimal stand-in for PluginFrameworkMetrics — just records the
     counter inc calls."""
 
+    class _BoundCounter:
+        def __init__(self, parent, labels_kw):
+            self._parent = parent
+            self._labels_kw = labels_kw
+
+        def inc(self):
+            self._parent.calls.append(self._labels_kw)
+
     class _Counter:
         def __init__(self):
             self.calls = []
 
         def labels(self, **kw):
-            class _C:
-                def __init__(_self, outer, kw):
-                    _self._outer = outer
-                    _self._kw = kw
+            return _BoundCounter(self, kw)
 
-                def inc(_self):
-                    _self._outer.calls.append(_self._kw)
-
-            return _C(self, kw)
+    class _BoundGauge:
+        def set(self, _v):
+            pass
 
     class _Gauge:
         def labels(self, **kw):
-            class _G:
-                def set(_self, _v):
-                    pass
-
-            return _G()
+            return _BoundGauge()
 
     class M:
         tick_skipped_total = _Counter()

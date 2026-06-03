@@ -14,6 +14,8 @@ mTLS support lands in a follow-up PR; PR #1 ships plaintext gRPC only,
 gated behind ``allow_insecure_grpc=true`` (DEV ONLY).
 """
 
+from typing import TYPE_CHECKING, Any
+
 from dynamo.planner.plugins.transport.base import PluginTransport
 from dynamo.planner.plugins.transport.errors import (
     PluginCallError,
@@ -22,8 +24,17 @@ from dynamo.planner.plugins.transport.errors import (
     PluginTimeoutError,
     PluginUnknownMethodError,
 )
-from dynamo.planner.plugins.transport.grpc_remote import GrpcTransport
 from dynamo.planner.plugins.transport.in_process import InProcessTransport
+
+# ``GrpcTransport`` is eagerly *re-exported* via PEP 562 lazy
+# ``__getattr__`` so ``from ... transport import GrpcTransport`` still
+# works for consumers that want it.  Eager import would pull in
+# ``_grpc_base`` → ``_proto_bridge`` → ``plugin_pb2``, which is generated
+# at install time and not on disk in PSM-only source-tree deployments
+# (``scheduling.use_orchestrator=False``).  See ``planner_config.py``
+# lazy-import refactor for the matching change at the registry layer.
+if TYPE_CHECKING:
+    from dynamo.planner.plugins.transport.grpc_remote import GrpcTransport
 
 __all__ = [
     "PluginTransport",
@@ -35,3 +46,11 @@ __all__ = [
     "PluginTimeoutError",
     "PluginUnknownMethodError",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name == "GrpcTransport":
+        from dynamo.planner.plugins.transport.grpc_remote import GrpcTransport
+
+        return GrpcTransport
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

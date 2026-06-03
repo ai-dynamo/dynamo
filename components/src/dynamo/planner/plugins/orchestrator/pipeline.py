@@ -129,6 +129,7 @@ class _PredictAdapter:
         clock: Optional[Clock] = None,
         scheduler: Optional["PluginScheduler"] = None,
         tick_now: float = 0.0,
+        circuit_breaker: Optional[CircuitBreaker] = None,
     ) -> None:
         self._plugin = plugin
         self._metrics = metrics
@@ -140,6 +141,15 @@ class _PredictAdapter:
         # ``last_call_at`` bumped → throttle no-op for the entire stage.
         self._scheduler = scheduler
         self._tick_now = tick_now
+        # CircuitBreaker is required for failure isolation: PROPOSE /
+        # RECONCILE / CONSTRAIN catch plugin errors inside the fan-out
+        # runner and record_failure to the CB; PREDICT used to re-raise
+        # the exception out of ``chain_augment``, taking down the whole
+        # planner tick.  Now we mirror the fan-out stages' behaviour:
+        # record_failure, log, emit error metric, and return a no-op
+        # ``PredictStageResponse`` so the chain continues with the next
+        # plugin (or terminates cleanly if this was the last).
+        self._circuit_breaker = circuit_breaker
 
     @property
     def plugin_id(self) -> str:
@@ -156,17 +166,39 @@ class _PredictAdapter:
         started = self._clock.now() if (self._metrics and self._clock) else 0.0
         try:
             resp = await self._plugin.transport.call("Predict", req)
-        except Exception:
+        except asyncio.CancelledError:
+            # Task cancellation must propagate — same handling as the
+            # fan-out runner.  CB / metrics emission is for *plugin*
+            # failures, not for outer cancellation of the planner tick.
+            raise
+        except Exception as exc:
+            # Mirror ``_run_fanout_stage`` failure handling so a broken
+            # PREDICT plugin does NOT take down the whole planner tick.
+            log.warning(
+                "pipeline.predict: plugin_id=%s call failed: %r",
+                self._plugin.plugin_id,
+                exc,
+            )
+            if self._circuit_breaker is not None:
+                self._circuit_breaker.record_failure(self._plugin.plugin_id)
             if self._metrics is not None:
                 self._metrics.plugin_evaluations_total.labels(
                     plugin_id=self._plugin.plugin_id,
                     stage="predict",
                     result="error",
                 ).inc()
-            raise
+            # Return a no-op response so ``chain_augment`` continues
+            # with the next plugin in the chain.  ``predictions=None``
+            # plus ``final=False`` is exactly the empty-contribution
+            # shape that ``_partial_merge`` already handles (carries
+            # forward the previous predictions, doesn't break the
+            # chain).
+            return PredictStageResponse(predictions=None, final=False)
 
-        # RPC succeeded — bump scheduler bookkeeping so
-        # ``execution_interval_seconds`` throttling applies to PREDICT.
+        # RPC succeeded — record CB success + bump scheduler bookkeeping
+        # so ``execution_interval_seconds`` throttling applies to PREDICT.
+        if self._circuit_breaker is not None:
+            self._circuit_breaker.record_success(self._plugin.plugin_id)
         if self._scheduler is not None:
             self._scheduler.record_evaluation(self._plugin.plugin_id, self._tick_now)
 
@@ -727,6 +759,7 @@ async def run_pipeline(
                 clock=clock,
                 scheduler=scheduler,
                 tick_now=tick_now,
+                circuit_breaker=circuit_breaker,
             )
             for p in predict_active.triggered
         ]

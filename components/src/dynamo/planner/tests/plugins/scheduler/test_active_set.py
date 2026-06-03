@@ -162,7 +162,6 @@ async def test_zero_interval_triggers_every_tick():
 async def test_not_triggered_inside_interval_window():
     server, scheduler, _, clock = _make_ctx()
     await _register(server, "p1", "propose", 10, execution_interval_seconds=10.0)
-    active = scheduler.compute_active_set(clock.monotonic(), "propose")
     _record_override_tick(scheduler, "p1", "propose", _ovr(5), clock.monotonic())
     clock.advance(5.0)
     active = scheduler.compute_active_set(clock.monotonic(), "propose")
@@ -174,7 +173,6 @@ async def test_not_triggered_inside_interval_window():
 async def test_triggered_again_after_interval_elapses():
     server, scheduler, _, clock = _make_ctx()
     await _register(server, "p1", "propose", 10, execution_interval_seconds=10.0)
-    active = scheduler.compute_active_set(clock.monotonic(), "propose")
     _record_override_tick(scheduler, "p1", "propose", _ovr(5), clock.monotonic())
     clock.advance(10.0)
     active = scheduler.compute_active_set(clock.monotonic(), "propose")

@@ -325,6 +325,9 @@ def test_default_registry_construction_succeeds():
             try:
                 REGISTRY.unregister(metric)
             except KeyError:
+                # Metric wasn't registered yet — fixture is idempotent
+                # so a missing entry just means the previous test didn't
+                # register it; nothing to clean up.
                 pass
 
 

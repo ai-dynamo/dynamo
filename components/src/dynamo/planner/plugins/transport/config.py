@@ -17,7 +17,6 @@ Factory functions:
 
 from __future__ import annotations
 
-import logging
 import os
 from typing import Any, Literal
 
@@ -25,10 +24,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from dynamo.planner.plugins.clock import Clock, VirtualClock, WallClock
 from dynamo.planner.plugins.transport.base import PluginTransport
-from dynamo.planner.plugins.transport.grpc_remote import GrpcTransport
-from dynamo.planner.plugins.transport.in_process import InProcessTransport
 
-log = logging.getLogger(__name__)
+# ``GrpcTransport`` import deferred to ``make_transport_for_endpoint``
+# where it's actually constructed.  Module-top import would pull in
+# ``_grpc_base`` → ``_proto_bridge`` → ``plugin_pb2``, which is generated
+# at install time and absent from the source tree — that would break
+# ``PlannerConfig`` parsing in PSM-only deployments (where
+# ``use_orchestrator=False`` never reaches the gRPC path).
 
 
 # ----------------------------------------------------------------------------
@@ -102,6 +104,10 @@ def make_transport_for_endpoint(
     timeout = config.request_timeout_seconds
 
     if endpoint.startswith("inproc://"):
+        # Local import keeps the module top free of plugin_pb2-dependent
+        # transports — see comment at top of file.
+        from dynamo.planner.plugins.transport.in_process import InProcessTransport
+
         if in_process_instance is None:
             raise ValueError(
                 f"make_transport_for_endpoint(plugin_id={plugin_id!r}, "
@@ -112,6 +118,9 @@ def make_transport_for_endpoint(
         )
 
     if endpoint.startswith("grpc://"):
+        # Same deferred-import pattern as ``InProcessTransport`` above.
+        from dynamo.planner.plugins.transport.grpc_remote import GrpcTransport
+
         if not config.allow_insecure_grpc:
             raise ValueError(
                 f"make_transport_for_endpoint(plugin_id={plugin_id!r}, "

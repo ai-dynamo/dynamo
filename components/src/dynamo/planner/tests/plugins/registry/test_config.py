@@ -11,9 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 from dynamo.planner.plugins.clock import VirtualClock
-from dynamo.planner.plugins.registry.auth import (
-    MultiSourceAuth,
-)
+from dynamo.planner.plugins.registry.auth import MultiSourceAuth
 from dynamo.planner.plugins.registry.config import (
     AuthConfig,
     InProcessPluginSpec,

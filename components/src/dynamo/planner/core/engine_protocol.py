@@ -43,7 +43,6 @@ class EngineProtocol(Protocol):
 
     def initial_tick(self, start_s: float) -> ScheduledTick:
         """Build the first ``ScheduledTick`` for the main loop to wait on."""
-        ...
 
     async def tick(
         self,
@@ -53,11 +52,9 @@ class EngineProtocol(Protocol):
         """Drive one tick; return the decision + next scheduled tick +
         diagnostics. Path implementations absorb the concrete
         sync/async difference of their underlying engine."""
-        ...
 
     async def shutdown(self) -> None:
         """Release any engine-owned resources. Idempotent."""
-        ...
 
 
 class _PSMEngineAdapter:

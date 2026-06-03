@@ -20,8 +20,6 @@ import grpc
 from google.protobuf.message import Message as ProtoMessage
 from pydantic import BaseModel
 
-log = logging.getLogger(__name__)
-
 from dynamo.planner.plugins._proto_bridge import proto_to_pydantic, pydantic_to_proto
 from dynamo.planner.plugins.transport._method_dispatch import StubDispatcher
 from dynamo.planner.plugins.transport.base import PluginTransport
@@ -32,6 +30,8 @@ from dynamo.planner.plugins.transport.errors import (
     PluginTimeoutError,
     PluginUnknownMethodError,
 )
+
+log = logging.getLogger(__name__)
 
 _DEFAULT_KEEPALIVE_TIME_MS = 30_000
 _DEFAULT_MAX_MESSAGE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB

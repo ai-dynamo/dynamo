@@ -139,7 +139,6 @@ async def test_plugin_timeout_records_failure_without_tripping_tick(ctx_factory)
     # slow handler exceeds it, transport raises PluginTimeoutError.
     ctx = ctx_factory(tick_max_duration_seconds=5.0)
     orchestrator = ctx["orchestrator"]
-    cb = ctx["circuit_breaker"]
 
     async def slow_handler(req):
         await asyncio.sleep(2.0)  # > transport timeout 1.0s

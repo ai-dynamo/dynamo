@@ -12,16 +12,8 @@ from __future__ import annotations
 
 import pytest
 
-from dynamo.planner.plugins.merge import (
-    ComponentKey,
-    PluginResult,
-    type_aware_merge,
-)
-from dynamo.planner.plugins.types import (
-    ComponentTarget,
-    OverrideResult,
-    OverrideType,
-)
+from dynamo.planner.plugins.merge import ComponentKey, PluginResult, type_aware_merge
+from dynamo.planner.plugins.types import ComponentTarget, OverrideResult, OverrideType
 
 pytestmark = [
     pytest.mark.gpu_0,

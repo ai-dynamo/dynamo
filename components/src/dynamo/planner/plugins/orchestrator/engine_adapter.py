@@ -85,10 +85,9 @@ from dynamo.planner.plugins.registry.circuit_breaker import CircuitBreaker
 from dynamo.planner.plugins.registry.config import build_auth_validator
 from dynamo.planner.plugins.registry.server import PluginRegistryServer
 from dynamo.planner.plugins.scheduler import PluginScheduler
-from dynamo.planner.plugins.transport.config import (
-    make_transport_for_endpoint,
-)
+from dynamo.planner.plugins.transport.config import make_transport_for_endpoint
 from dynamo.planner.plugins.types import (
+    FpmData,
     ObservationData,
     PipelineContext,
     TrafficMetrics,
@@ -744,10 +743,59 @@ class OrchestratorEngineAdapter:
                 expected_prefill=ti.worker_counts.expected_num_prefill,
                 expected_decode=ti.worker_counts.expected_num_decode,
             )
+        # FPM observations: encode per-engine ``ForwardPassMetrics`` to
+        # msgpack bytes (the wire format the proto README + ``FpmData``
+        # docstring already prescribe), keyed by "<worker_id>/<dp_rank>"
+        # so cross-language plugins can decode without knowing about the
+        # tuple key. Without this, external load-based plugins that
+        # declare ``needs=["observations.fpm"]`` would always see None
+        # and could not implement PSM-equivalent load decisions through
+        # the public PipelineContext API.
+        fpm = self._encode_fpm(ti.fpm_observations)
         return PipelineContext(
             request_id=f"tick-{ti.now_s}",
             decision_id=f"d-{ti.now_s}",
-            observations=ObservationData(traffic=traffic, workers=workers),
+            observations=ObservationData(traffic=traffic, fpm=fpm, workers=workers),
+        )
+
+    @staticmethod
+    def _encode_fpm(obs: Optional[FpmObservations]) -> Optional[FpmData]:
+        """Encode ``FpmObservations`` for transport over the public
+        ``PipelineContext.observations.fpm`` channel.
+
+        Encoding contract (matches the proto README in
+        ``plugins/proto/v1/README.md``):
+        - per-engine map key = ``f"{worker_id}/{dp_rank}"`` (flat str
+          since proto3 ``map<string, bytes>`` can't carry a tuple key)
+        - per-engine map value = msgpack-encoded ``ForwardPassMetrics``
+          via ``msgspec.msgpack.encode`` so cross-language plugins
+          decode with any standard msgpack library
+
+        Returns None when ``obs`` is None (no FPM this tick) or when
+        both prefill+decode submaps are empty.
+        """
+        if obs is None:
+            return None
+        if not obs.prefill and not obs.decode:
+            return None
+        # Local import to keep the module-top import surface minimal —
+        # msgspec is already a planner runtime dep but it's only used
+        # here on the orchestrator hot path so the local import keeps
+        # the dependency explicit at point of use.
+        import msgspec
+
+        encoder = msgspec.msgpack.Encoder()
+        prefill_engines: dict[str, bytes] = {}
+        decode_engines: dict[str, bytes] = {}
+        if obs.prefill:
+            for (worker_id, dp_rank), fpm_obs in obs.prefill.items():
+                prefill_engines[f"{worker_id}/{dp_rank}"] = encoder.encode(fpm_obs)
+        if obs.decode:
+            for (worker_id, dp_rank), fpm_obs in obs.decode.items():
+                decode_engines[f"{worker_id}/{dp_rank}"] = encoder.encode(fpm_obs)
+        return FpmData(
+            prefill_engines=prefill_engines,
+            decode_engines=decode_engines,
         )
 
     @staticmethod

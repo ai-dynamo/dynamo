@@ -178,6 +178,79 @@ async def test_constrain_at_most_clamps_propose_output(ctx_factory):
 
 
 @pytest.mark.asyncio
+async def test_broken_predict_plugin_isolated_does_not_fail_whole_tick(ctx_factory):
+    """A PREDICT plugin whose ``Predict`` call raises must NOT propagate
+    the exception out of the pipeline — that would kill the whole
+    planner tick (regression for tedzhouhk review comment).  Instead
+    ``_PredictAdapter`` records a circuit-breaker failure, emits the
+    error metric, and returns a no-op response so ``chain_augment``
+    moves on to the next plugin in the chain.
+
+    Mirror of the same isolation behaviour
+    ``_run_fanout_stage`` already provides for PROPOSE / RECONCILE /
+    CONSTRAIN.
+    """
+    ctx = ctx_factory()
+
+    def boom(_req):
+        raise RuntimeError("simulated predict failure")
+
+    # Lower priority (numerically smaller) — runs first.
+    ctx["orchestrator"].register_internal(
+        plugin_id="predict_broken",
+        plugin_type="predict",
+        priority=1,
+        instance=StubPlugin(predict=boom),
+    )
+    # Healthy predict plugin runs after the broken one and produces
+    # predictions; if isolation works the chain reaches this plugin.
+    ctx["orchestrator"].register_internal(
+        plugin_id="predict_healthy",
+        plugin_type="predict",
+        priority=2,
+        instance=StubPlugin(predict=_predict_response(num_req=42.0)),
+    )
+
+    def propose_echo(req):
+        # Only fires when predictions made it through the chain.
+        if req.context.predictions is None:
+            return ProposeStageResponse(result_kind="accept", accept=AcceptResult())
+        predicted = req.context.predictions.predicted_num_req
+        return ProposeStageResponse(
+            result_kind="override",
+            override=OverrideResult(
+                targets=[
+                    ComponentTarget(
+                        sub_component_type="prefill",
+                        replicas=int(predicted),
+                        type=OverrideType.SET,
+                    )
+                ]
+            ),
+        )
+
+    ctx["orchestrator"].register_internal(
+        plugin_id="propose_echo",
+        plugin_type="propose",
+        priority=10,
+        instance=StubPlugin(propose=propose_echo),
+    )
+
+    # Tick must complete without raising; healthy plugin produces the
+    # expected prediction; CB recorded a failure for the broken plugin.
+    outcome = await ctx["orchestrator"].tick(PipelineContext(), {PREFILL: 3})
+    assert outcome.execute_action == "apply"
+    assert outcome.final_proposal.targets[0].replicas == 42
+    cb = ctx["circuit_breaker"]
+    # The CB recorded a failure on the broken plugin's per-plugin
+    # entry; healthy plugin's CB entry remains at zero failures.
+    broken_entry = cb._entries.get("predict_broken")
+    healthy_entry = cb._entries.get("predict_healthy")
+    assert broken_entry is not None and broken_entry.consecutive_failures >= 1
+    assert healthy_entry is not None and healthy_entry.consecutive_failures == 0
+
+
+@pytest.mark.asyncio
 async def test_predict_chain_threads_predictions_into_propose_context(ctx_factory):
     # PREDICT plugin sets predictions; a PROPOSE plugin that echoes the
     # running prediction into an OverrideResult demonstrates the thread.
