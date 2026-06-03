@@ -648,8 +648,20 @@ impl OpenAIPreprocessor {
         } else {
             stop_conditions.stop_token_ids_hidden = Some(hidden_eos_token_ids);
         }
+        let mut visible_tool_parser_end_token_ids = Vec::new();
         if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
-            self.remove_tool_parser_end_tokens_from_hidden_stops(request, stop_tokens)?;
+            visible_tool_parser_end_token_ids =
+                self.remove_tool_parser_end_tokens_from_hidden_stops(request, stop_tokens)?;
+        }
+        if !visible_tool_parser_end_token_ids.is_empty() {
+            let visible_stops = stop_conditions
+                .stop_token_ids_visible
+                .get_or_insert_with(Vec::new);
+            for token_id in visible_tool_parser_end_token_ids {
+                if !visible_stops.contains(&token_id) {
+                    visible_stops.push(token_id);
+                }
+            }
         }
 
         // apply ignore eos if not already set
@@ -730,7 +742,7 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
         hidden_stop_token_ids: &mut Vec<TokenIdType>,
-    ) -> Result<()> {
+    ) -> Result<Vec<TokenIdType>> {
         let has_tools = request
             .tools()
             .as_ref()
@@ -743,17 +755,18 @@ impl OpenAIPreprocessor {
             == Some("none");
 
         if !Self::should_keep_tool_parser_end_tokens_visible(has_tools, tool_choice_none) {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         let Some(tool_call_parser) = self.tool_call_parser.as_deref().filter(|p| !p.is_empty())
         else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         let Some(tool_call_config) = get_tool_parser_map().get(tool_call_parser) else {
-            return Ok(());
+            return Ok(Vec::new());
         };
 
+        let mut visible_stop_token_ids = Vec::new();
         for end_token in tool_call_config.parser_config.tool_call_end_tokens() {
             if end_token.is_empty() {
                 continue;
@@ -763,6 +776,11 @@ impl OpenAIPreprocessor {
                     "Failed to encode tool-call end token {end_token:?} for parser {tool_call_parser:?}"
                 )
             })?;
+            if let [token_id] = encoded.token_ids() {
+                if !visible_stop_token_ids.contains(token_id) {
+                    visible_stop_token_ids.push(*token_id);
+                }
+            }
             if !Self::remove_single_token_marker(hidden_stop_token_ids, encoded.token_ids()) {
                 tracing::debug!(
                     token_ids = ?encoded.token_ids(),
@@ -773,7 +791,7 @@ impl OpenAIPreprocessor {
             }
         }
 
-        Ok(())
+        Ok(visible_stop_token_ids)
     }
 
     fn should_keep_tool_parser_end_tokens_visible(has_tools: bool, tool_choice_none: bool) -> bool {
