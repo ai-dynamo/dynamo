@@ -19,7 +19,8 @@ SPDX-License-Identifier: Apache-2.0
 > is a thin shim over this crate.
 
 > **Looking for a walkthrough?** Start with
-> [Writing a Rust Unified Backend](../../docs/development/rust-backend-guide.md).
+> [Writing Unified Backends](../../docs/development/unified-backends.md)
+> and choose the Rust tab.
 > This README is the in-tree reference: trait shape, file layout,
 > disaggregation contract, error taxonomy, and the conformance kit.
 
@@ -93,9 +94,9 @@ lives at
 cargo run --release -- --help
 ```
 
-See the [walkthrough](../../docs/development/rust-backend-guide.md) for
-how to set up the crate (Cargo.toml, `tokio_unstable` cfg flag, toolchain
-pin) and write the engine.
+See the [walkthrough](../../docs/development/unified-backends.md) and choose
+the Rust tab for how to set up the crate (Cargo.toml, `tokio_unstable` cfg
+flag, toolchain pin) and write the engine.
 
 ## Implementing a New Backend
 
@@ -149,8 +150,8 @@ fn main() -> anyhow::Result<()> {
 
 See [`examples/mocker/src/engine.rs`](examples/mocker/src/engine.rs)
 for a complete, runnable reference and the
-[walkthrough](../../docs/development/rust-backend-guide.md) for the
-step-by-step including Cargo.toml, `tokio_unstable` cfg, and the
+[walkthrough](../../docs/development/unified-backends.md) for the
+Rust step-by-step including Cargo.toml, `tokio_unstable` cfg, and the
 conformance kit.
 
 ## Disaggregated Serving
@@ -255,7 +256,7 @@ Mid-stream errors have two equivalent terminal forms:
   pure message-level failures. Loses the typed `BackendError` variant.
 
 A tiny helper per backend keeps call sites clean — see the
-[guide's Step 6](../../docs/development/rust-backend-guide.md) for the
+[guide's Rust Step 6](../../docs/development/unified-backends.md) for the
 `invalid_arg` pattern.
 
 ## Conformance Kit
@@ -403,8 +404,8 @@ entry points lives at
 
 ## See Also
 
-- [Writing a Rust Unified Backend](../../docs/development/rust-backend-guide.md)
-  — step-by-step walkthrough.
+- [Writing Unified Backends](../../docs/development/unified-backends.md)
+  — step-by-step walkthrough; choose the Rust tab.
 - [`CLAUDE.md`](CLAUDE.md) — design notes (rationale, invariants,
   Phase 2 PyO3 plans).
 - [Mocker example](examples/mocker/) — reference engine + compose stack.

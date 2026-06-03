@@ -12,10 +12,10 @@ tracing, and request-side guided decoding / structural tag.
 > per-engine matrix.
 
 > **Looking for a walkthrough?** Start with the
-> [Writing a Python Unified Backend](../../../../../docs/development/python-backend-guide.md)
-> guide. This README is the in-tree reference: file layout, per-engine
-> cancellation cookbook, disaggregation contract, error-handling table,
-> and the feature-gap matrix.
+> [Writing Unified Backends](../../../../../docs/development/unified-backends.md)
+> guide and choose the Python tab. This README is the in-tree reference:
+> file layout, per-engine cancellation cookbook, disaggregation contract,
+> error-handling table, and the feature-gap matrix.
 
 A two-class abstraction that separates **runtime integration** (common across
 all backends) from **engine logic** (vLLM, SGLang, TensorRT-LLM, etc.).
