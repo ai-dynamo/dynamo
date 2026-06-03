@@ -1,10 +1,9 @@
 # Plugin Transport
 
-Plugin RPC transport abstractions for **DEP-XXXX Dynamo Planner Plugin
-Architecture** (v11), implementing PR 2.
+Plugin RPC transport abstractions for the Dynamo Planner plugin framework.
 
-Two transports under one `PluginTransport` ABC; orchestrator pipeline
-driver (PR 5) treats them uniformly via `await plugin.transport.call(method, request)`.
+Two transports under one `PluginTransport` ABC; the orchestrator pipeline
+driver treats them uniformly via `await plugin.transport.call(method, request)`.
 
 A dedicated `UdsTransport` and mTLS for `GrpcTransport` are deferred to a
 follow-up PR — see "Deferred" section below.
@@ -107,9 +106,6 @@ slow sync plugins doing blocking IO will exhaust the pool and stall the
 orchestrator.
 
 If your plugin needs IO, write it as `async def`.
-
-PR 7 production config will additionally cap the executor with
-`executor_max_workers <= 8` to bound damage from misbehaving sync plugins.
 
 ## Wire-message conversion (Pydantic ↔ proto)
 

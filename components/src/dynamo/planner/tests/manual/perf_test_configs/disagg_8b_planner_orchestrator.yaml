@@ -2,15 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Variant of disagg_8b_planner.yaml that opts into the plugin-based
-# orchestrator tick engine (DEP-XXXX PR 7 cutover). The only diff vs
+# orchestrator tick engine (use_orchestrator cutover). The only diff vs
 # the sibling is the planner --config JSON adding
 # "scheduling": {"use_orchestrator": true}.
 #
-# Decision outputs (scale_to / next_tick) are byte-identical to the
-# legacy PSM path — locked by tests/integration/test_dual_path_parity.py
-# across 10 G3 scenarios. The differences operators see are observability:
+# Decision outputs (scale_to / next_tick) track the legacy PSM path at
+# the decision level — cadence + tick-merge parity is locked by
+# tests/plugins/orchestrator/test_engine_adapter.py. The differences
+# operators see are observability:
 #
-# - 19 new dynamo_planner_* Prometheus series (plugin / reconcile / tick)
+# - Extra dynamo_planner_* Prometheus series (plugin / reconcile / tick)
 # - Structured AUDIT log events on the dynamo.planner.audit logger
 # - load_decision_reason emitted into TickDiagnostics from the orchestrator path
 

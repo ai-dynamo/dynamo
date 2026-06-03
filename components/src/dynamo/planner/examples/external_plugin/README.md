@@ -38,11 +38,13 @@ planner to dial it. SIGTERM and SIGINT shut down cleanly.
 
 ## Run in K8s
 
-`tests/manual/ext-4stage.yaml` (see "K8s smoke fixtures" in
-`tests/manual/README.md`) spins up one Pod per stage; each Pod runs
-this binary with the appropriate `--stage`. The planner registers
-them via static `external_plugins:` config and exercises the full
-pipeline over real cross-pod gRPC.
+The intended K8s deployment shape is one Pod per stage, each running
+this binary with the appropriate `--stage`, and the planner registering
+all four via the static `external_plugins:` config block — exercising
+the full PREDICT / PROPOSE / RECONCILE / CONSTRAIN pipeline over real
+cross-pod gRPC. The ready-to-`kubectl apply` fixture is deferred to a
+follow-up PR; the four `--stage` invocations above are the building
+blocks.
 
 ## Forking to a real plugin
 

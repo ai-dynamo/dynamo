@@ -528,8 +528,8 @@ class OrchestratorEngineAdapter:
         Symmetric with ``_project_load_diagnostics``: PSM path populates
         these fields from ``_diag_throughput_reason*``; this helper
         keeps the orchestrator path's surface byte-equivalent at the
-        observability layer (decision outputs are already
-        byte-identical, locked by ``test_dual_path_parity.py``).
+        observability layer (decision outputs track PSM at the
+        decision level, locked by ``test_engine_adapter.py``).
 
         Mode mapping:
         - mode=agg → aggregate ``throughput_decision_reason``

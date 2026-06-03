@@ -25,10 +25,12 @@ etc.); the protocol contract and lifecycle stay identical. See
 
 Two callers in PR #1:
 
-1. K8s smoke (``tests/manual/ext-4stage.yaml`` / ``ext-4stage.yaml``
-   in deploy fixtures): each external plugin Pod runs one stage of
-   this binary; planner registers them via static config and
-   exercises the full pipeline over real cross-pod gRPC.
+1. Integration test (``tests/integration/test_external_plugin_e2e.py``):
+   spawns this binary as a subprocess (one per stage) and exercises
+   the full PREDICT/PROPOSE/RECONCILE/CONSTRAIN pipeline over real
+   localhost gRPC. The K8s ``kubectl apply``-able fixture (one Pod
+   per stage with the same ``--stage`` invocations) is deferred to
+   a follow-up PR.
 2. User code: ``cp reference_runner.py my_plugin.py`` and replace
    the fixed responses inside the ``_Deterministic*Plugin`` classes
    for the stage(s) you want to serve.

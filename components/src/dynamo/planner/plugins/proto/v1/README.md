@@ -1,6 +1,6 @@
 # Plugin Proto v1
 
-Plugin contract for **DEP-XXXX Dynamo Planner Plugin Architecture** (v11).
+Plugin RPC contract for the Dynamo Planner plugin framework.
 
 This directory contains:
 
@@ -209,14 +209,14 @@ is higher priority than authority override.
    `plugins/_proto_bridge.py`
 4. Add a round-trip test case in `tests/plugins/proto/test_round_trip.py`
 5. Regenerate stubs locally with the protoc command in "Generation"
-   above — the generated `*.py` / `*.pyi` are gitignored, so this step
-   keeps your working copy aligned for local test runs
+   above (don't forget the SPDX re-prepend step) — the generated
+   `plugin_pb2.py` / `plugin_pb2_grpc.py` / `plugin_pb2.pyi` are
+   **checked into git**, so this also produces the diff you need to commit
 6. Run `pytest dynamo/planner/tests/plugins/proto/` — both
    `test_class_coverage_*` tests catch missing mirror / converter; all
    round-trip cases must still pass
-7. Commit `plugin.proto` + Pydantic mirror + test case in the same PR
-   (the generated stubs are gitignored; the container build regenerates
-   them at install time)
+7. Commit `plugin.proto` + regenerated stubs + Pydantic mirror + test
+   case in the same PR
 
 ## FPM `bytes` field encoding
 
