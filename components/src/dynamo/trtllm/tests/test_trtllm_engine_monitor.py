@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import signal
+import os
 
 import pytest
 
@@ -30,6 +30,7 @@ class _FakeEngine:
         self._fatal_error = fatal_error
         self._health_exception = health_exception
         self.check_count = 0
+        self.shutdown_count = 0
 
     def supports_health_check(self):
         return self._supports_health_check
@@ -45,51 +46,57 @@ class _FakeEngine:
     def get_health_check_fatal_error(self):
         return self._fatal_error
 
+    def shutdown(self):
+        self.shutdown_count += 1
 
-def _recorder():
-    calls = []
 
-    def kill_fn(pid, sig):
-        calls.append(("kill", pid, sig))
+class _FakeRuntime:
+    def __init__(self):
+        self.shutdown_count = 0
+
+    def shutdown(self):
+        self.shutdown_count += 1
+
+
+def _record_exit(monkeypatch):
+    exit_calls = []
 
     def exit_fn(code):
-        calls.append(("exit", code))
+        exit_calls.append(code)
 
-    return calls, kill_fn, exit_fn
+    monkeypatch.setattr(os, "_exit", exit_fn)
+    return exit_calls
 
 
 @pytest.mark.asyncio
 async def test_monitor_disables_without_health_api():
-    calls, kill_fn, exit_fn = _recorder()
     engine = _FakeEngine(supports_health_check=False)
+    runtime = _FakeRuntime()
 
     monitor = TrtllmEngineMonitor(
         engine,
+        runtime=runtime,
         interval=0.01,
         shutdown_timeout=0.01,
-        kill_fn=kill_fn,
-        exit_fn=exit_fn,
-        pid_fn=lambda: 123,
     )
 
     assert monitor._monitor_task is None
-    assert calls == []
+    assert engine.shutdown_count == 0
+    assert runtime.shutdown_count == 0
     await monitor.stop()
 
 
 @pytest.mark.asyncio
 async def test_monitor_stops_cleanly_on_shutdown_event():
-    calls, kill_fn, exit_fn = _recorder()
     shutdown_event = asyncio.Event()
     engine = _FakeEngine([True])
+    runtime = _FakeRuntime()
     monitor = TrtllmEngineMonitor(
         engine,
+        runtime=runtime,
         shutdown_event=shutdown_event,
         interval=0.01,
         shutdown_timeout=0.01,
-        kill_fn=kill_fn,
-        exit_fn=exit_fn,
-        pid_fn=lambda: 123,
     )
 
     await asyncio.sleep(0.02)
@@ -98,70 +105,87 @@ async def test_monitor_stops_cleanly_on_shutdown_event():
     await asyncio.wait_for(monitor._monitor_task, timeout=1.0)
 
     assert engine.check_count >= 1
-    assert calls == []
+    assert engine.shutdown_count == 0
+    assert runtime.shutdown_count == 0
 
 
 @pytest.mark.asyncio
-async def test_monitor_signals_and_exits_when_unhealthy():
-    calls, kill_fn, exit_fn = _recorder()
+async def test_monitor_shuts_down_engine_runtime_and_exits_when_unhealthy(monkeypatch):
+    exit_calls = _record_exit(monkeypatch)
+    shutdown_event = asyncio.Event()
     engine = _FakeEngine([False], fatal_error=RuntimeError("fatal"))
+    runtime = _FakeRuntime()
 
     monitor = TrtllmEngineMonitor(
         engine,
+        runtime=runtime,
+        shutdown_event=shutdown_event,
         interval=0.01,
         shutdown_timeout=0.01,
-        kill_fn=kill_fn,
-        exit_fn=exit_fn,
-        pid_fn=lambda: 123,
     )
 
     assert monitor._monitor_task is not None
     await asyncio.wait_for(monitor._monitor_task, timeout=1.0)
 
-    assert calls == [
-        ("kill", 123, signal.SIGINT),
-        ("exit", 1),
-    ]
+    assert engine.shutdown_count == 1
+    assert runtime.shutdown_count == 1
+    assert shutdown_event.is_set()
+    assert exit_calls == [1]
 
 
 @pytest.mark.asyncio
-async def test_monitor_treats_health_exception_as_fatal():
-    calls, kill_fn, exit_fn = _recorder()
+async def test_monitor_treats_health_exception_as_fatal(monkeypatch):
+    exit_calls = _record_exit(monkeypatch)
     engine = _FakeEngine(health_exception=RuntimeError("health failed"))
+    runtime = _FakeRuntime()
 
     monitor = TrtllmEngineMonitor(
         engine,
+        runtime=runtime,
         interval=0.01,
         shutdown_timeout=0.01,
-        kill_fn=kill_fn,
-        exit_fn=exit_fn,
-        pid_fn=lambda: 456,
     )
 
     assert monitor._monitor_task is not None
     await asyncio.wait_for(monitor._monitor_task, timeout=1.0)
 
-    assert calls == [
-        ("kill", 456, signal.SIGINT),
-        ("exit", 1),
-    ]
+    assert engine.shutdown_count == 1
+    assert runtime.shutdown_count == 1
+    assert exit_calls == [1]
+
+
+@pytest.mark.asyncio
+async def test_monitor_shutdown_works_without_runtime(monkeypatch):
+    exit_calls = _record_exit(monkeypatch)
+    engine = _FakeEngine([False])
+
+    monitor = TrtllmEngineMonitor(
+        engine,
+        interval=0.01,
+        shutdown_timeout=0.01,
+    )
+
+    assert monitor._monitor_task is not None
+    await asyncio.wait_for(monitor._monitor_task, timeout=1.0)
+
+    assert engine.shutdown_count == 1
+    assert exit_calls == [1]
 
 
 @pytest.mark.asyncio
 async def test_monitor_stop_cancels_poll_task():
-    calls, kill_fn, exit_fn = _recorder()
     engine = _FakeEngine([True])
+    runtime = _FakeRuntime()
     monitor = TrtllmEngineMonitor(
         engine,
+        runtime=runtime,
         interval=10.0,
         shutdown_timeout=0.01,
-        kill_fn=kill_fn,
-        exit_fn=exit_fn,
-        pid_fn=lambda: 123,
     )
 
     await asyncio.sleep(0.02)
     await monitor.stop()
 
     assert monitor._monitor_task is None
-    assert calls == []
+    assert engine.shutdown_count == 0
+    assert runtime.shutdown_count == 0

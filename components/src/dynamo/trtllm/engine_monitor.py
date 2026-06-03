@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import signal
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from dynamo.trtllm.engine import TensorRTLLMEngine
@@ -44,15 +44,14 @@ class TrtllmEngineMonitor:
     def __init__(
         self,
         engine: "TensorRTLLMEngine",
+        runtime: Optional[Any] = None,
         shutdown_event: Optional[asyncio.Event] = None,
         *,
         interval: Optional[float] = None,
         shutdown_timeout: Optional[float] = None,
-        kill_fn: Callable[[int, int], None] = os.kill,
-        exit_fn: Callable[[int], None] = os._exit,
-        pid_fn: Callable[[], int] = os.getpid,
     ) -> None:
         self.engine = engine
+        self.runtime = runtime
         self.shutdown_event = shutdown_event
         self.interval = (
             _env_float(HEALTH_CHECK_INTERVAL_ENV, HEALTH_CHECK_INTERVAL)
@@ -64,9 +63,6 @@ class TrtllmEngineMonitor:
             if shutdown_timeout is None
             else shutdown_timeout
         )
-        self._kill_fn = kill_fn
-        self._exit_fn = exit_fn
-        self._pid_fn = pid_fn
         self._monitor_task: Optional[asyncio.Task[None]] = None
 
         if not engine.supports_health_check():
@@ -130,19 +126,31 @@ class TrtllmEngineMonitor:
                 logger.debug("TRT-LLM health monitor cancelled.")
                 break
 
+    def _shutdown_engine(self) -> None:
+        """Shutdown the TRT-LLM engine on crash scenarios to free resources."""
+
+        def timeout_handler(signum, frame):
+            raise TimeoutError("TRT-LLM engine shutdown timed out")
+
+        if self.shutdown_timeout > 0:
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(math.ceil(self.shutdown_timeout))
+
+        try:
+            self.engine.shutdown()
+        except Exception as exc:
+            logger.warning("TRT-LLM engine shutdown failed: %r", exc, exc_info=True)
+        finally:
+            signal.alarm(0)
+
     async def _shutdown_worker(self, reason: str) -> None:
         logger.warning(
             "Initiating worker shutdown after TRT-LLM fatal health state: %s", reason
         )
-        self._kill_fn(self._pid_fn(), signal.SIGINT)
-        try:
-            await asyncio.sleep(self.shutdown_timeout)
-        except asyncio.CancelledError:
-            logger.debug("TRT-LLM health monitor shutdown wait cancelled.")
-            raise
-        logger.critical(
-            "TRT-LLM health-triggered shutdown did not complete within %.1fs; "
-            "forcing process exit.",
-            self.shutdown_timeout,
-        )
-        self._exit_fn(1)
+        self._shutdown_engine()
+        if self.shutdown_event is not None:
+            self.shutdown_event.set()
+        if self.runtime is not None:
+            logger.warning("Initiating Dynamo Runtime shutdown.")
+            self.runtime.shutdown()
+        os._exit(1)

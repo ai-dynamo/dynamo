@@ -98,11 +98,14 @@ class TensorRTLLMEngine:
 
     async def cleanup(self) -> None:
         await self.stop_health_monitor()
+        self.shutdown()
+
+    def shutdown(self) -> None:
         if self._llm:
             try:
                 self._llm.shutdown()
             except Exception as e:
-                logging.error(f"Error during cleanup: {e}")
+                logging.error(f"Error during shutdown: {e}")
             finally:
                 self._llm = None
 
@@ -130,11 +133,11 @@ class TensorRTLLMEngine:
         return getattr(executor, "_fatal_error", None)
 
     def start_health_monitor(
-        self, shutdown_event: Optional[Any] = None
+        self, runtime: Optional[Any] = None, shutdown_event: Optional[Any] = None
     ) -> Optional[TrtllmEngineMonitor]:
         if self._health_monitor is None:
             self._health_monitor = TrtllmEngineMonitor(
-                self, shutdown_event=shutdown_event
+                self, runtime=runtime, shutdown_event=shutdown_event
             )
         return self._health_monitor
 
