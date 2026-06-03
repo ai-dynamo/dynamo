@@ -140,6 +140,15 @@ class ImageLoader:
         except HttpError as e:
             logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")
             raise
+        except Image.UnidentifiedImageError as e:
+            logger.error(f"Unsupported image format loading: '{image_url}'")
+            raise HttpStatusError(415, "Unsupported Media Type", image_url) from e
+        except ValueError as e:
+            if "Unsupported image format" in str(e):
+                logger.error(f"Unsupported image format loading: '{image_url}'")
+                raise HttpStatusError(415, "Unsupported Media Type", image_url) from e
+            logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")
+            raise ValueError(f"Failed to load image: '{image_url}': {e}") from e
         except Exception as e:
             logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")
             raise ValueError(f"Failed to load image: '{image_url}': {e}") from e
@@ -208,7 +217,13 @@ class ImageLoader:
                         raise ValueError(f"Invalid base64 encoding: {e}") from e
                     image_data = BytesIO(image_bytes)
                 return await self._open_image(image_data)
+            except Image.UnidentifiedImageError as e:
+                logger.error(f"Unsupported image format decoding: '{image_url}'")
+                raise HttpStatusError(415, "Unsupported Media Type", image_url) from e
             except Exception as e:
+                if "Unsupported image format" in str(e):
+                    logger.error(f"Unsupported image format decoding: '{image_url}'")
+                    raise HttpStatusError(415, "Unsupported Media Type", image_url) from e
                 logger.error(f"{type(e).__name__} decoding image: '{image_url}': {e}")
                 raise ValueError(f"Failed to decoding image: '{image_url}': {e}") from e
 

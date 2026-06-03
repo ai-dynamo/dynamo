@@ -224,6 +224,30 @@ async def test_cache_hit_skips_fetch(loader: ImageLoader) -> None:
     assert result is img
 
 
+def _make_svg_bytes() -> bytes:
+    return b"<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'/>"
+
+
+async def test_unsupported_format_url_raises_415(loader: ImageLoader) -> None:
+    """Fetching a URL that returns an unsupported image format (e.g. SVG) should raise
+    HttpStatusError with status 415, not 500."""
+    mock_fetch = _mock_fetch_bytes(content=_make_svg_bytes())
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        with pytest.raises(HttpStatusError) as exc_info:
+            await loader.load_image("https://example.com/image.svg")
+        assert exc_info.value.status == 415
+
+
+async def test_unsupported_format_data_url_raises_415(loader: ImageLoader) -> None:
+    """A data: URL carrying an SVG payload should raise HttpStatusError 415."""
+    import base64
+
+    svg_b64 = base64.b64encode(_make_svg_bytes()).decode()
+    with pytest.raises(HttpStatusError) as exc_info:
+        await loader.load_image(f"data:image/svg+xml;base64,{svg_b64}")
+    assert exc_info.value.status == 415
+
+
 async def test_cache_is_lru_not_fifo(loader: ImageLoader) -> None:
     """Accessing a cached entry should protect it from eviction (LRU, not FIFO)."""
     loader._cache_size = 3
