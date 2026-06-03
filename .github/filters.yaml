@@ -137,6 +137,7 @@ nvsnapshot:
   - *ci
   - 'deploy/nvsnapshot/**'
   - 'deploy/nvsnapshot/.*'
+  - 'deploy/nvsnapshot/**/.*'
 
 deploy:
   - *ci
