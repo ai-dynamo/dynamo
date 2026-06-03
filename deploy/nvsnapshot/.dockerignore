@@ -18,4 +18,5 @@ cover.out
 # Repo content not needed in the build context
 docs/
 hack/
+operator/
 **/.gitkeep
