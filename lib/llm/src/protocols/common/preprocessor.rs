@@ -367,6 +367,8 @@ mod tests {
             target_dp_rank: 2,
             source_worker_id: 7,
             source_dp_rank: 0,
+            source_host: "10.0.0.7".to_string(),
+            source_bootstrap_port: 41000,
             source_tier: StorageTier::HostPinned,
             block_hashes: vec![LocalBlockHash(11), LocalBlockHash(22)],
             start_block_index: 0,
@@ -375,6 +377,7 @@ mod tests {
             created_at_ms: 1000,
             expires_at_ms: 2000,
             plan_version: REMOTE_KV_REUSE_PLAN_VERSION,
+            kv_block_hashes: vec![],
         }
     }
 
@@ -388,6 +391,14 @@ mod tests {
         assert_eq!(
             extra_args[REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY]["source_tier"],
             "host_pinned"
+        );
+        assert_eq!(
+            extra_args[REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY]["source_host"],
+            "10.0.0.7"
+        );
+        assert_eq!(
+            extra_args[REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY]["source_bootstrap_port"],
+            41000
         );
     }
 

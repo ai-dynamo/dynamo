@@ -19,6 +19,7 @@ from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang.args import DynamoConfig
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
+SGLANG_SHARED_HICACHE_RUNTIME_KEY = "sglang_shared_hicache"
 
 
 async def _register_model_with_runtime_config(
@@ -156,6 +157,34 @@ def _parse_hicache_storage_extra_config(
     return {}
 
 
+def _get_shared_hicache_runtime_data(
+    engine: sgl.Engine,
+) -> Optional[dict[str, Any]]:
+    try:
+        inner_tm = engine.tokenizer_manager
+        server_args = inner_tm.server_args
+        if not getattr(server_args, "enable_shared_hicache", False):
+            return None
+
+        bootstrap_port = getattr(server_args, "shared_hicache_bootstrap_port", None)
+        if bootstrap_port is None:
+            return None
+
+        bootstrap_host, _ = _get_bootstrap_info_for_config(engine)
+        if not bootstrap_host:
+            bootstrap_host = getattr(server_args, "host", None)
+        if not bootstrap_host:
+            return None
+
+        return {
+            "source_host": bootstrap_host,
+            "source_bootstrap_port": int(bootstrap_port),
+        }
+    except Exception as e:
+        logging.warning(f"Failed to get Shared HiCache runtime metadata: {e}")
+        return None
+
+
 def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, Any]]:
     if getattr(server_args, "hicache_storage_backend", None) != "mooncake":
         return None
@@ -290,6 +319,23 @@ async def _get_runtime_config(
             f"Publishing disaggregated endpoint to discovery: "
             f"{bootstrap_host}:{bootstrap_port}"
         )
+
+    shared_hicache_runtime_data = _get_shared_hicache_runtime_data(engine)
+    if shared_hicache_runtime_data is not None:
+        try:
+            runtime_config.set_engine_specific(
+                SGLANG_SHARED_HICACHE_RUNTIME_KEY,
+                shared_hicache_runtime_data,
+            )
+            logging.info(
+                "Published Shared HiCache runtime metadata for router use: %s",
+                shared_hicache_runtime_data,
+            )
+        except Exception as e:
+            logging.warning(
+                f"Failed to attach Shared HiCache runtime metadata to registration: {e}"
+            )
+
     # In SGLang, these are server_args, not scheduler_info (unlike vLLM)
     # Note: If --max-running-requests is not specified, SGLang uses an internal default
     # undocumented value. The value here will be None if not explicitly set by user.

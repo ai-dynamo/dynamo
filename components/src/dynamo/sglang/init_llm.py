@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import fcntl
-import json
 import logging
 import os
 import time
@@ -25,82 +23,16 @@ from dynamo.sglang.publisher import handle_non_leader_node, setup_sgl_metrics
 from dynamo.sglang.register import register_model_with_readiness_gate
 from dynamo.sglang.request_handlers import DecodeWorkerHandler, PrefillWorkerHandler
 
-_SHARED_HICACHE_SOURCE_ENDPOINTS_FILE_ENV = "DYN_SHARED_HICACHE_SOURCE_ENDPOINTS_FILE"
-
-
-def _shared_hicache_control_endpoint(server_args) -> Optional[str]:
-    config = getattr(server_args, "shared_hicache_config", None)
-    if isinstance(config, dict):
-        endpoint = config.get("control_endpoint")
-        if isinstance(endpoint, str) and endpoint:
-            return endpoint
-        control = config.get("control")
-        if isinstance(control, dict):
-            endpoint = control.get("endpoint")
-            if isinstance(endpoint, str) and endpoint:
-                return endpoint
-
-    endpoint = getattr(config, "control_endpoint", None)
-    if isinstance(endpoint, str) and endpoint:
-        return endpoint
-    return None
-
-
-def _write_shared_hicache_source_endpoint(worker_id: int, endpoint: str) -> None:
-    file_path = os.environ.get(_SHARED_HICACHE_SOURCE_ENDPOINTS_FILE_ENV)
-    if not file_path:
-        return
-
-    directory = os.path.dirname(file_path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    lock_path = f"{file_path}.lock"
-    with open(lock_path, "w") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
-        try:
-            try:
-                with open(file_path) as existing_file:
-                    data = json.load(existing_file)
-            except FileNotFoundError:
-                data = {}
-            except json.JSONDecodeError:
-                logging.warning(
-                    "Replacing invalid Shared HiCache source endpoint map: %s",
-                    file_path,
-                )
-                data = {}
-
-            if not isinstance(data, dict):
-                data = {}
-            data[str(worker_id)] = endpoint
-
-            tmp_path = f"{file_path}.{os.getpid()}.tmp"
-            with open(tmp_path, "w") as tmp_file:
-                json.dump(data, tmp_file, sort_keys=True)
-            os.replace(tmp_path, file_path)
-        finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
-
 
 def _configure_shared_hicache_worker_identity(server_args, generate_endpoint) -> None:
     if not getattr(server_args, "enable_shared_hicache", False):
         return
 
-    worker_id = int(generate_endpoint.connection_id())
+    worker_id = str(generate_endpoint.connection_id())
     server_args.shared_hicache_worker_id = worker_id
-    config = getattr(server_args, "shared_hicache_config", None)
-    if isinstance(config, dict):
-        config["worker_id"] = worker_id
-
-    control_endpoint = _shared_hicache_control_endpoint(server_args)
-    if control_endpoint:
-        _write_shared_hicache_source_endpoint(worker_id, control_endpoint)
-        logging.info(
-            "Shared HiCache worker identity set from Dynamo endpoint: "
-            "worker_id=%s control_endpoint=%s",
-            worker_id,
-            control_endpoint,
-        )
+    logging.info(
+        "Shared HiCache worker identity set from Dynamo endpoint: %s", worker_id
+    )
 
 
 async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:

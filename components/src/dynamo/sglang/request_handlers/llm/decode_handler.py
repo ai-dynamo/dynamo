@@ -2,11 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import json
 import logging
 import os
 import time
-from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, Optional
 
 import pybase64
@@ -38,8 +36,6 @@ _TOP_LOGPROBS_UNSUPPORTED_MSG = (
 
 _REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY = "remote_kv_reuse_plan"
 _REMOTE_KV_REUSE_NO_PLAN_REASON_EXTRA_ARGS_KEY = "remote_kv_reuse_no_plan_reason"
-_SHARED_HICACHE_SOURCE_ENDPOINTS_ENV = "DYN_SHARED_HICACHE_SOURCE_ENDPOINTS"
-_SHARED_HICACHE_SOURCE_ENDPOINTS_FILE_ENV = "DYN_SHARED_HICACHE_SOURCE_ENDPOINTS_FILE"
 _SHARED_HICACHE_TP_SIZE_ENV = "DYN_SHARED_HICACHE_TP_SIZE"
 _SHARED_HICACHE_SOURCE_MEDIUM = "CPU_PINNED"
 
@@ -115,70 +111,15 @@ def _extract_remote_kv_reuse_plan(
     return None
 
 
-def _shared_hicache_source_endpoints() -> dict[str, str]:
-    endpoints: dict[str, str] = {}
-    raw = os.environ.get(_SHARED_HICACHE_SOURCE_ENDPOINTS_ENV)
-    if raw:
-        try:
-            value = json.loads(raw)
-        except json.JSONDecodeError:
-            logging.warning("Invalid %s=%r", _SHARED_HICACHE_SOURCE_ENDPOINTS_ENV, raw)
-        else:
-            if isinstance(value, dict):
-                endpoints.update(
-                    {str(k): str(v) for k, v in value.items() if v is not None}
-                )
-            else:
-                logging.warning(
-                    "%s must be a JSON object", _SHARED_HICACHE_SOURCE_ENDPOINTS_ENV
-                )
-
-    file_path = os.environ.get(_SHARED_HICACHE_SOURCE_ENDPOINTS_FILE_ENV)
-    if file_path:
-        try:
-            value = json.loads(Path(file_path).read_text())
-        except FileNotFoundError:
-            pass
-        except json.JSONDecodeError:
-            logging.warning(
-                "Invalid JSON in %s=%s",
-                _SHARED_HICACHE_SOURCE_ENDPOINTS_FILE_ENV,
-                file_path,
-            )
-        except OSError as exc:
-            logging.warning(
-                "Could not read %s=%s: %s",
-                _SHARED_HICACHE_SOURCE_ENDPOINTS_FILE_ENV,
-                file_path,
-                exc,
-            )
-        else:
-            if isinstance(value, dict):
-                endpoints.update(
-                    {str(k): str(v) for k, v in value.items() if v is not None}
-                )
-            else:
-                logging.warning(
-                    "%s file must contain a JSON object",
-                    _SHARED_HICACHE_SOURCE_ENDPOINTS_FILE_ENV,
-                )
-
-    return endpoints
-
-
 def _to_shared_hicache_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     shared_plan = dict(plan)
     shared_plan["source_medium"] = _SHARED_HICACHE_SOURCE_MEDIUM
     shared_plan.pop("source_tier", None)
+    shared_plan["target_worker_id"] = str(shared_plan["target_worker_id"])
+    shared_plan["source_worker_id"] = str(shared_plan["source_worker_id"])
     tp_size = int(os.environ.get(_SHARED_HICACHE_TP_SIZE_ENV, "1"))
     shared_plan.setdefault("source_tp_size", tp_size)
     shared_plan.setdefault("target_tp_size", tp_size)
-
-    if not shared_plan.get("source_endpoint"):
-        source_worker_id = shared_plan.get("source_worker_id")
-        endpoint = _shared_hicache_source_endpoints().get(str(source_worker_id))
-        if endpoint:
-            shared_plan["source_endpoint"] = endpoint
 
     return shared_plan
 
@@ -267,9 +208,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Engine.async_generate does not declare it (notably the deepseek_v4
         # branch). Doing this at init keeps the per-request hot path free of
         # signature inspection.
-        self._routed_experts_kwargs: Dict[
-            str, Any
-        ] = self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
+        self._routed_experts_kwargs: Dict[str, Any] = (
+            self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
+        )
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
                 "Decode worker handler initialized (disaggregated decode mode)"
@@ -522,10 +463,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         if remote_kv_reuse_plan is not None:
             logging.debug(
                 "Forwarding router remote_kv_reuse_plan as SGLang cache_hints.shared_hicache: "
-                "plan_id=%s source_worker_id=%s source_endpoint=%s extra_arg_keys=%s",
+                "plan_id=%s source_worker_id=%s source_host=%s source_bootstrap_port=%s extra_arg_keys=%s",
                 remote_kv_reuse_plan.get("plan_id"),
                 remote_kv_reuse_plan.get("source_worker_id"),
-                remote_kv_reuse_plan.get("source_endpoint"),
+                remote_kv_reuse_plan.get("source_host"),
+                remote_kv_reuse_plan.get("source_bootstrap_port"),
                 sorted(extra_args.keys()) if isinstance(extra_args, dict) else None,
             )
         elif isinstance(extra_args, dict) and (

@@ -22,7 +22,10 @@ from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
-from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
+from dynamo.sglang.request_handlers.llm.decode_handler import (
+    DecodeWorkerHandler,
+    _to_shared_hicache_plan,
+)
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
 
 # Get path relative to this test file
@@ -92,6 +95,27 @@ def test_compat_filters_async_generate_kwargs_for_older_engines():
     assert filter_supported_async_generate_kwargs(OldEngine(), kwargs) == {
         "input_ids": [1, 2, 3]
     }
+
+
+def test_shared_hicache_plan_adapter_uses_string_worker_ids():
+    plan = _to_shared_hicache_plan(
+        {
+            "plan_id": "plan-1",
+            "request_id": "request-1",
+            "target_worker_id": 42,
+            "source_worker_id": 7,
+            "source_host": "10.0.0.7",
+            "source_bootstrap_port": 41000,
+            "source_tier": "host_pinned",
+        }
+    )
+
+    assert plan["target_worker_id"] == "42"
+    assert plan["source_worker_id"] == "7"
+    assert plan["source_host"] == "10.0.0.7"
+    assert plan["source_bootstrap_port"] == 41000
+    assert plan["source_medium"] == "CPU_PINNED"
+    assert "source_endpoint" not in plan
 
 
 def test_compat_keeps_async_generate_kwargs_for_newer_engines():

@@ -18,6 +18,8 @@ pub struct RemoteKvReusePlan {
     pub target_dp_rank: DpRank,
     pub source_worker_id: WorkerId,
     pub source_dp_rank: DpRank,
+    pub source_host: String,
+    pub source_bootstrap_port: u16,
     pub source_tier: StorageTier,
     pub block_hashes: Vec<LocalBlockHash>,
     /// Position in the request's prefix where `block_hashes[0]` lives.
@@ -52,6 +54,7 @@ pub enum RemoteKvReuseNoPlanReason {
     SourceIsTarget,
     IncompatibleBlockSize,
     PlanExpired,
+    NoSourceBootstrapEndpoint,
     SerializationFailed,
 }
 
@@ -64,6 +67,7 @@ impl RemoteKvReuseNoPlanReason {
             Self::SourceIsTarget => "source_is_target",
             Self::IncompatibleBlockSize => "incompatible_block_size",
             Self::PlanExpired => "plan_expired",
+            Self::NoSourceBootstrapEndpoint => "no_source_bootstrap_endpoint",
             Self::SerializationFailed => "serialization_failed",
         }
     }
@@ -220,6 +224,8 @@ pub fn select_remote_g2_reuse_plan(
             target_dp_rank: input.target.dp_rank,
             source_worker_id: source.worker_id,
             source_dp_rank: source.dp_rank,
+            source_host: String::new(),
+            source_bootstrap_port: 0,
             source_tier: StorageTier::HostPinned,
             block_hashes: input.block_hashes[start..end].to_vec(),
             start_block_index: start as u32,
@@ -254,6 +260,8 @@ mod tests {
             target_dp_rank: 0,
             source_worker_id: 7,
             source_dp_rank: 1,
+            source_host: "10.0.0.7".to_string(),
+            source_bootstrap_port: 41000,
             source_tier: StorageTier::HostPinned,
             block_hashes: vec![LocalBlockHash(11), LocalBlockHash(22)],
             start_block_index: 0,

@@ -241,6 +241,17 @@ async def parse_args(args: list[str]) -> Config:
         args_dict["disaggregation_bootstrap_port"] = bootstrap_port
         parsed_args = Namespace(**args_dict)
 
+    if (
+        getattr(parsed_args, "enable_shared_hicache", False)
+        and hasattr(parsed_args, "shared_hicache_bootstrap_port")
+        and not _has_cli_flag(unknown, "--shared-hicache-bootstrap-port")
+    ):
+        args_dict = vars(parsed_args)
+        args_dict["shared_hicache_bootstrap_port"] = (
+            _reserve_disaggregation_bootstrap_port()
+        )
+        parsed_args = Namespace(**args_dict)
+
     # Dynamo argument processing
     # If an endpoint is provided, validate and use it
     # otherwise fall back to default endpoints

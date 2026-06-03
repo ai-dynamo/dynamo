@@ -37,6 +37,7 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 use futures::stream;
+use serde::Deserialize;
 use tracing::Instrument;
 use validator::Validate;
 
@@ -114,6 +115,36 @@ struct CacheHitEstimates {
 const REMOTE_KV_REUSE_PLAN_TTL_MS: u64 = 30_000;
 const REMOTE_G2_REUSE_ENABLED_ENV: &str = "DYN_REMOTE_G2_REUSE_ENABLED";
 const REMOTE_G2_TRACE_ENV: &str = "DYN_REMOTE_G2_TRACE";
+const SGLANG_SHARED_HICACHE_RUNTIME_KEY: &str = "sglang_shared_hicache";
+
+#[derive(Debug, Clone, Deserialize)]
+struct SglangSharedHiCacheRuntimeData {
+    source_host: String,
+    source_bootstrap_port: u16,
+}
+
+fn shared_hicache_source_route_from_config(
+    config: &ModelRuntimeConfig,
+) -> Option<SglangSharedHiCacheRuntimeData> {
+    let route = match config
+        .get_engine_specific::<SglangSharedHiCacheRuntimeData>(SGLANG_SHARED_HICACHE_RUNTIME_KEY)
+    {
+        Ok(Some(route)) => route,
+        Ok(None) => return None,
+        Err(error) => {
+            tracing::debug!(
+                runtime_key = SGLANG_SHARED_HICACHE_RUNTIME_KEY,
+                %error,
+                "failed to read Shared HiCache runtime metadata"
+            );
+            return None;
+        }
+    };
+    if route.source_host.trim().is_empty() || route.source_bootstrap_port == 0 {
+        return None;
+    }
+    Some(route)
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct BestMatchDetails {
@@ -470,6 +501,18 @@ where
         self.is_eagle
     }
 
+    fn shared_hicache_source_route(
+        &self,
+        worker_id: WorkerId,
+    ) -> Option<SglangSharedHiCacheRuntimeData> {
+        let workers = self.workers_with_configs.borrow();
+        let config = workers.get(&worker_id)?;
+        shared_hicache_source_route_from_config(config).or_else(|| {
+            tracing::debug!(worker_id, "missing Shared HiCache runtime metadata");
+            None
+        })
+    }
+
     fn cache_hit_estimates_from_tiered_matches(
         &self,
         tiered_matches: &indexer::TieredMatchDetails,
@@ -659,52 +702,51 @@ where
                 plan.source_worker_id,
                 plan.source_dp_rank,
             );
-            let start = plan.start_block_index as usize;
-            let end = start + plan.planned_prefix_blocks as usize;
-            // Starting parent_hash for the host-pinned chain: None when the
-            // source had no device-tier matches (start == 0), otherwise the
-            // device tier's last matched block_hash for this source.
-            let parent_hash = if start == 0 {
-                None
+            if let Some(route) = self.shared_hicache_source_route(plan.source_worker_id) {
+                plan.source_host = route.source_host;
+                plan.source_bootstrap_port = route.source_bootstrap_port;
+
+                let start = plan.start_block_index as usize;
+                let end = start + plan.planned_prefix_blocks as usize;
+                // Starting parent_hash for the host-pinned chain: None when the
+                // source had no device-tier matches (start == 0), otherwise the
+                // device tier's last matched block_hash for this source.
+                let parent_hash = if start == 0 {
+                    None
+                } else {
+                    tiered_matches
+                        .device
+                        .last_matched_hashes
+                        .get(&source)
+                        .copied()
+                };
+
+                let chain = self.indexer.chain_block_hashes_for_host_pinned(
+                    source,
+                    parent_hash,
+                    &block_hashes[start..end],
+                );
+
+                if chain.is_empty() {
+                    let stats_copy = *plan_stats;
+                    remote_kv_reuse = RemoteKvReuseDecision::NoPlan {
+                        reason: RemoteKvReuseNoPlanReason::NoContiguousPrefix,
+                        stats: stats_copy,
+                    };
+                } else {
+                    if chain.len() < end - start {
+                        let new_len = chain.len();
+                        plan.planned_prefix_blocks = new_len as u32;
+                        plan.block_hashes.truncate(new_len);
+                    }
+                    plan.kv_block_hashes = chain.into_iter().map(|h| h.0).collect();
+                }
             } else {
-                tiered_matches
-                    .device
-                    .last_matched_hashes
-                    .get(&source)
-                    .copied()
-            };
-
-            let chain = self.indexer.chain_block_hashes_for_host_pinned(
-                source,
-                parent_hash,
-                &block_hashes[start..end],
-            );
-
-            // PROBE: emit at WARN so worker-side block_hash logs can be
-            // cross-referenced against planner output. Investigation-only
-            // until the hash plumbing is validated end-to-end.
-            tracing::warn!(
-                plan_id = %plan.plan_id,
-                source_worker_id = source.worker_id,
-                source_dp_rank = source.dp_rank,
-                requested_block_hashes = ?plan.block_hashes,
-                chain_kv_block_hashes = ?chain,
-                "PROBE remote_g2_plan kv_block_hash chain"
-            );
-
-            if chain.is_empty() {
                 let stats_copy = *plan_stats;
                 remote_kv_reuse = RemoteKvReuseDecision::NoPlan {
-                    reason: RemoteKvReuseNoPlanReason::NoContiguousPrefix,
+                    reason: RemoteKvReuseNoPlanReason::NoSourceBootstrapEndpoint,
                     stats: stats_copy,
                 };
-            } else {
-                if chain.len() < end - start {
-                    let new_len = chain.len();
-                    plan.planned_prefix_blocks = new_len as u32;
-                    plan.block_hashes.truncate(new_len);
-                }
-                plan.kv_block_hashes = chain.into_iter().map(|h| h.0).collect();
             }
         }
         let total_elapsed = start.elapsed();
@@ -1122,6 +1164,24 @@ mod tests {
     use crate::local_model::runtime_config::ModelRuntimeConfig;
 
     #[test]
+    fn shared_hicache_source_route_uses_runtime_config() {
+        let mut config = ModelRuntimeConfig::new();
+        config
+            .set_engine_specific(
+                SGLANG_SHARED_HICACHE_RUNTIME_KEY,
+                serde_json::json!({
+                    "source_host": "10.0.0.7",
+                    "source_bootstrap_port": 41000,
+                }),
+            )
+            .unwrap();
+
+        let route = shared_hicache_source_route_from_config(&config).unwrap();
+        assert_eq!(route.source_host, "10.0.0.7");
+        assert_eq!(route.source_bootstrap_port, 41000);
+    }
+
+    #[test]
     fn weighted_cache_hit_estimates_include_lower_tiers() {
         let worker_1 = WorkerWithDpRank::new(1, 0);
         let worker_2 = WorkerWithDpRank::new(2, 0);
@@ -1353,6 +1413,8 @@ mod tests {
             target_dp_rank: 2,
             source_worker_id: 7,
             source_dp_rank: 0,
+            source_host: "10.0.0.7".to_string(),
+            source_bootstrap_port: 41000,
             source_tier: StorageTier::HostPinned,
             block_hashes: vec![LocalBlockHash(11), LocalBlockHash(22)],
             start_block_index: 0,
@@ -1361,6 +1423,7 @@ mod tests {
             created_at_ms: 1000,
             expires_at_ms: 2000,
             plan_version: REMOTE_KV_REUSE_PLAN_VERSION,
+            kv_block_hashes: vec![],
         }
     }
 
@@ -1382,6 +1445,8 @@ mod tests {
         assert_eq!(plan["target_dp_rank"], 2);
         assert_eq!(plan["source_worker_id"], 7);
         assert_eq!(plan["source_dp_rank"], 0);
+        assert_eq!(plan["source_host"], "10.0.0.7");
+        assert_eq!(plan["source_bootstrap_port"], 41000);
         assert_eq!(plan["source_tier"], "host_pinned");
     }
 
