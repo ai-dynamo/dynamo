@@ -159,6 +159,14 @@ impl LLMMetricAnnotation {
     }
 }
 
+/// Take a standalone router's timing out of `routing_data` (see
+/// `inject_timing_from_tracker`). Removing it keeps the field off the client wire.
+fn take_router_timing(
+    data: &mut Option<BackendOutput>,
+) -> Option<crate::protocols::common::timing::TimingInfo> {
+    data.as_mut()?.routing_data.take()?.timing
+}
+
 // Reasoning State for reasoning parsing transformation step
 struct ReasoningState {
     stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
@@ -762,6 +770,25 @@ impl OpenAIPreprocessor {
             )
         {
             output_options.skip_special_tokens = Some(false);
+        } else if Self::special_tokens_will_be_stripped(
+            output_options.skip_special_tokens,
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        ) {
+            // Caller forced `skip_special_tokens=true` while a special-token-
+            // dependent parser is active. The engine's markers (e.g. harmony
+            // `<|channel|>` / `<|message|>`) get stripped before the parser
+            // runs, so tool_calls / reasoning_content come back empty and the
+            // markup leaks into `content`. Warn once: this is a silent,
+            // deterministic correctness loss that no parser fixture can catch.
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    tool_call_parser = ?self.tool_call_parser,
+                    reasoning_parser = ?self.runtime_config.reasoning_parser,
+                    "skip_special_tokens=true requested while a special-token-dependent parser is active; the engine's special tokens will be stripped before parsing, so tool_calls/reasoning_content will be empty and the markup will leak into content. Unset skip_special_tokens (Dynamo defaults it to false for these parsers) or set it to false."
+                );
+            });
         }
         builder.output_options(output_options);
         builder.annotations(request.annotations().unwrap_or_default());
@@ -1989,7 +2016,15 @@ impl OpenAIPreprocessor {
                     return None;
                 }
 
-                if let Some(response) = inner.response_stream.next().await {
+                if let Some(mut response) = inner.response_stream.next().await {
+                    // Split topology: overlay a standalone router's forwarded timing onto
+                    // this request's tracker so the frontend's timing surfaces populate.
+                    if let Some(timing) = take_router_timing(&mut response.data)
+                        && let Some(tracker) = inner.response_generator.tracker()
+                    {
+                        tracker.set_external_timing(timing);
+                    }
+
                     if inner.cancelled {
                         tracing::debug!(
                             request_id = inner.context.id(),
@@ -2405,6 +2440,21 @@ impl OpenAIPreprocessor {
             reasoning_parser,
             Some("gemma4") | Some("gemma-4") | Some("gpt_oss") | Some("kimi_k25")
         )
+    }
+
+    /// Whether the resolved `skip_special_tokens` will strip the special-token
+    /// markers an active parser depends on — guaranteeing the parser silently
+    /// emits empty tool_calls / reasoning_content and the markup leaks into
+    /// `content`. Only true when the caller explicitly forced
+    /// `skip_special_tokens=true` while a special-token-dependent parser is
+    /// active; otherwise the default is flipped to false before this check.
+    fn special_tokens_will_be_stripped(
+        skip_special_tokens: Option<bool>,
+        tool_call_parser: Option<&str>,
+        reasoning_parser: Option<&str>,
+    ) -> bool {
+        skip_special_tokens == Some(true)
+            && Self::parser_requires_special_tokens(tool_call_parser, reasoning_parser)
     }
 
     fn is_nemotron_force_reasoning(reasoning_parser: Option<&str>) -> bool {
@@ -3198,6 +3248,26 @@ mod tests {
                 "FAILED: {desc}",
             );
         }
+    }
+
+    /// Guard: a caller forcing `skip_special_tokens=true` while a
+    /// special-token-dependent parser is active strips the markers before
+    /// parsing → silent empty tool_calls / leaked markup. Only that exact
+    /// combination should trip the warning condition.
+    #[test]
+    fn test_special_tokens_will_be_stripped() {
+        let f = OpenAIPreprocessor::special_tokens_will_be_stripped;
+        // forced-true + marker-dependent parser → will be stripped (warn)
+        assert!(f(Some(true), Some("harmony"), Some("gpt_oss")));
+        assert!(f(Some(true), Some("harmony"), None));
+        assert!(f(Some(true), None, Some("gpt_oss")));
+        assert!(f(Some(true), Some("kimi_k2"), None));
+        // false / unset → never (default path keeps the markers)
+        assert!(!f(Some(false), Some("harmony"), None));
+        assert!(!f(None, Some("harmony"), None));
+        // forced-true but parser doesn't need special tokens → fine
+        assert!(!f(Some(true), Some("hermes"), None));
+        assert!(!f(Some(true), None, None));
     }
 
     #[test]

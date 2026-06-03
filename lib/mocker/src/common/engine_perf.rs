@@ -24,6 +24,7 @@ use crate::common::protocols::{ForwardPassSnapshot, MockEngineArgs, WorkerType};
 
 const DEFAULT_AIC_SYSTEM: &str = "h200_sxm";
 const MAX_CAPACITY_SEARCH_CANDIDATES: u32 = 128;
+const MAX_KV_HIT_RATE_DISCOUNT: f64 = 0.95;
 
 /// Engine limits needed by planner/router-level queries.
 ///
@@ -147,6 +148,12 @@ pub struct EngineCapacityRequest {
     pub ttft_sla: Option<Duration>,
     pub itl_sla: Option<Duration>,
     pub e2e_latency_sla: Option<Duration>,
+    /// Prefix-cache hit rate used to discount prefill compute only.
+    ///
+    /// Decode context/KV residency still uses the raw `isl`, because prefix
+    /// reuse reduces prefill work but does not shrink the KV footprint for
+    /// generated-token decode.
+    pub kv_hit_rate: Option<f64>,
     pub optimization_target: OptimizationTarget,
 }
 
@@ -625,14 +632,15 @@ impl EnginePerfModel {
         &self,
         request: &EngineCapacityRequest,
     ) -> Result<Option<EngineCapacity>> {
-        let max_batch = self.prefill_max_batch(request.isl);
+        let prefill_isl = effective_prefill_isl(request)?;
+        let max_batch = self.prefill_max_batch(prefill_isl);
         if max_batch == 0 {
             return Ok(None);
         }
 
         let mut best = None;
         for batch_size in capacity_batch_sizes(max_batch) {
-            let tokens = request.isl.saturating_mul(batch_size);
+            let tokens = prefill_isl.saturating_mul(batch_size);
             let Some(ttft) = self.prefill_time_for_tokens(tokens)? else {
                 return Ok(None);
             };
@@ -694,6 +702,7 @@ impl EnginePerfModel {
             return Ok(None);
         }
 
+        let prefill_isl = effective_prefill_isl(request)?;
         let context_length = decode_context_length(request);
         let kv_cap = self.decode_max_batch(context_length);
         let hard_cap = cmp::min(
@@ -707,7 +716,7 @@ impl EnginePerfModel {
         let mut best = None;
         for batch_size in capacity_batch_sizes(hard_cap) {
             if !prefill_decode_balanced(
-                request.isl,
+                prefill_isl,
                 request.osl,
                 batch_size,
                 self.limits.max_num_batched_tokens,
@@ -718,7 +727,7 @@ impl EnginePerfModel {
             let decode_kv = batch_size.saturating_mul(context_length);
             let prefill_per_iter = cmp::min(
                 self.limits.max_num_batched_tokens,
-                ceil_div_u32(batch_size.saturating_mul(request.isl), request.osl.max(1)),
+                ceil_div_u32(batch_size.saturating_mul(prefill_isl), request.osl.max(1)),
             );
             let Some(itl) = self.mixed_time(prefill_per_iter, batch_size, decode_kv)? else {
                 return Ok(None);
@@ -727,7 +736,7 @@ impl EnginePerfModel {
                 continue;
             }
 
-            let ttft_prefill_tokens = prefill_per_iter.saturating_add(request.isl);
+            let ttft_prefill_tokens = prefill_per_iter.saturating_add(prefill_isl);
             let Some(ttft) = self.agg_ttft(ttft_prefill_tokens, batch_size, decode_kv)? else {
                 return Ok(None);
             };
@@ -1158,6 +1167,25 @@ fn split_total(total: u32, ranks: usize, rank: usize) -> u32 {
 
 fn decode_context_length(request: &EngineCapacityRequest) -> u32 {
     request.isl.saturating_add(request.osl / 2).max(1)
+}
+
+fn effective_prefill_isl(request: &EngineCapacityRequest) -> Result<u32> {
+    let scale = 1.0 - clamp_kv_hit_rate(request.kv_hit_rate);
+    let tokens = ceil_positive_f64_to_u32(
+        f64::from(request.isl) * scale,
+        "effective prefill ISL after kv_hit_rate discount",
+    )?;
+    Ok(tokens.max(1))
+}
+
+fn clamp_kv_hit_rate(kv_hit_rate: Option<f64>) -> f64 {
+    let Some(value) = kv_hit_rate else {
+        return 0.0;
+    };
+    if !value.is_finite() {
+        return 0.0;
+    }
+    value.clamp(0.0, MAX_KV_HIT_RATE_DISCOUNT)
 }
 
 fn prefill_decode_balanced(
@@ -1792,6 +1820,7 @@ mod tests {
                 ttft_sla: None,
                 itl_sla: None,
                 e2e_latency_sla: None,
+                kv_hit_rate: None,
                 optimization_target: OptimizationTarget::Latency,
             })
             .unwrap()
@@ -1826,6 +1855,7 @@ mod tests {
                 ttft_sla: None,
                 itl_sla: None,
                 e2e_latency_sla: None,
+                kv_hit_rate: None,
                 optimization_target: OptimizationTarget::Throughput,
             })
             .unwrap_err();
@@ -1860,6 +1890,7 @@ mod tests {
                 ttft_sla: None,
                 itl_sla: None,
                 e2e_latency_sla: None,
+                kv_hit_rate: None,
                 optimization_target: OptimizationTarget::Throughput,
             })
             .unwrap()
@@ -1869,6 +1900,105 @@ mod tests {
         assert!(capacity.ttft.is_some());
         assert_eq!(capacity.e2e_latency, capacity.ttft);
         assert!(capacity.itl.is_none());
+    }
+
+    #[test]
+    fn prefill_capacity_kv_hit_rate_discounts_prefill_compute() {
+        let single_seq_limits = EnginePerfLimits {
+            max_num_batched_tokens: 8192,
+            max_num_seqs: 1,
+            max_kv_tokens: 1_000_000,
+        };
+        let mut model = EnginePerfModel::from_regression(
+            WorkerType::Prefill,
+            single_seq_limits,
+            Some(fast_options()),
+        )
+        .unwrap();
+        model
+            .tune_with_fpms(&vec![
+                vec![prefill_observation(100, 0.020)],
+                vec![prefill_observation(400, 0.080)],
+            ])
+            .unwrap();
+
+        let base = model
+            .find_engine_capacity_rps(EngineCapacityRequest {
+                isl: 400,
+                osl: 10,
+                ttft_sla: None,
+                itl_sla: None,
+                e2e_latency_sla: None,
+                kv_hit_rate: Some(0.0),
+                optimization_target: OptimizationTarget::Throughput,
+            })
+            .unwrap()
+            .unwrap();
+        let hit = model
+            .find_engine_capacity_rps(EngineCapacityRequest {
+                isl: 400,
+                osl: 10,
+                ttft_sla: None,
+                itl_sla: None,
+                e2e_latency_sla: None,
+                kv_hit_rate: Some(0.5),
+                optimization_target: OptimizationTarget::Throughput,
+            })
+            .unwrap()
+            .unwrap();
+
+        assert!(hit.rps > base.rps);
+        assert!(hit.ttft.unwrap() < base.ttft.unwrap());
+    }
+
+    #[test]
+    fn aggregated_capacity_kv_hit_rate_keeps_raw_context_for_kv_cap() {
+        let raw_context_limited = EnginePerfLimits {
+            max_num_batched_tokens: 8192,
+            max_num_seqs: 1,
+            max_kv_tokens: 1_100,
+        };
+        let many_seq_same_kv = EnginePerfLimits {
+            max_num_batched_tokens: 8192,
+            max_num_seqs: 100,
+            max_kv_tokens: 1_100,
+        };
+        let mut one_seq = EnginePerfModel::from_regression(
+            WorkerType::Aggregated,
+            raw_context_limited,
+            Some(fast_options()),
+        )
+        .unwrap();
+        let mut many_seq = EnginePerfModel::from_regression(
+            WorkerType::Aggregated,
+            many_seq_same_kv,
+            Some(fast_options()),
+        )
+        .unwrap();
+        let training = vec![
+            vec![mixed_observation(10, 1, 1_050, 0.011)],
+            vec![mixed_observation(20, 1, 1_050, 0.021)],
+            vec![mixed_observation(40, 1, 1_050, 0.041)],
+        ];
+        one_seq.tune_with_fpms(&training).unwrap();
+        many_seq.tune_with_fpms(&training).unwrap();
+
+        let request = EngineCapacityRequest {
+            isl: 1_000,
+            osl: 100,
+            ttft_sla: None,
+            itl_sla: None,
+            e2e_latency_sla: None,
+            kv_hit_rate: Some(0.9),
+            optimization_target: OptimizationTarget::Throughput,
+        };
+        let one_seq_capacity = one_seq
+            .find_engine_capacity_rps(request.clone())
+            .unwrap()
+            .unwrap();
+        let many_seq_capacity = many_seq.find_engine_capacity_rps(request).unwrap().unwrap();
+
+        assert!((one_seq_capacity.rps - many_seq_capacity.rps).abs() < 1e-9);
     }
 
     #[test]
@@ -1898,6 +2028,7 @@ mod tests {
                 ttft_sla: None,
                 itl_sla: None,
                 e2e_latency_sla: None,
+                kv_hit_rate: None,
                 optimization_target: OptimizationTarget::Throughput,
             })
             .unwrap();
@@ -1923,6 +2054,7 @@ mod tests {
                 ttft_sla: None,
                 itl_sla: Some(Duration::from_secs(1)),
                 e2e_latency_sla: None,
+                kv_hit_rate: None,
                 optimization_target: OptimizationTarget::Throughput,
             })
             .unwrap()
@@ -1945,6 +2077,7 @@ mod tests {
                 ttft_sla: Some(Duration::from_secs(1)),
                 itl_sla: None,
                 e2e_latency_sla: None,
+                kv_hit_rate: None,
                 optimization_target: OptimizationTarget::Throughput,
             })
             .unwrap()
@@ -1970,6 +2103,7 @@ mod tests {
                 ttft_sla: None,
                 itl_sla: Some(Duration::from_secs_f64(1.0)),
                 e2e_latency_sla: None,
+                kv_hit_rate: None,
                 optimization_target: OptimizationTarget::Throughput,
             })
             .unwrap()

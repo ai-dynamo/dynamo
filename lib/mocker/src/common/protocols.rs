@@ -223,6 +223,9 @@ pub struct PrefillCost {
     /// Number of tokens already cached (prefix hit).
     /// isl = cached_tokens + new_tokens
     pub cached_tokens: usize,
+    /// Subset of `cached_tokens` backed by active blocks; TRT-LLM no-evict
+    /// capacity reservation discounts only these (inactive reuse is re-consumed).
+    pub active_cached_tokens: usize,
 }
 
 impl PrefillCost {
@@ -264,6 +267,23 @@ pub enum EngineType {
     Vllm,
     /// SGLang-style scheduling with radix-tree KV cache
     Sglang,
+    /// TensorRT-LLM-style scheduling. Reuses the vLLM scheduler
+    /// core with a TensorRT-LLM-style admission policy.
+    Trtllm,
+}
+
+/// Scheduling policy applied by the shared vLLM scheduler core.
+///
+/// Derived from [`EngineType`] (+ engine-specific args) so the core reads a
+/// single discriminant instead of re-deriving engine behavior per pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SchedulingPolicy {
+    /// vLLM semantics: optimistic admission, preempt under KV pressure.
+    #[default]
+    Vllm,
+    /// TRT-LLM `GUARANTEED_NO_EVICT`: reserve `prompt + max_output` per
+    /// admitted request up front; never preempt.
+    TrtllmGuaranteedNoEvict,
 }
 
 /// Worker type for disaggregated serving configurations
@@ -335,6 +355,17 @@ pub struct SglangArgs {
     pub schedule_conservativeness: Option<f64>,
 }
 
+/// TensorRT-LLM-specific configuration parameters.
+///
+/// Grouped into a nested struct to keep the `MockEngineArgs` namespace clean,
+/// following the same pattern as [`SglangArgs`].
+#[derive(Debug, Clone, Serialize, Deserialize, Validate, Default)]
+pub struct TrtllmArgs {
+    /// Capacity scheduler policy, supported only `"guaranteed_no_evict"`
+    /// (TensorRT-LLM's default). Default: `"guaranteed_no_evict"`.
+    pub capacity_scheduler_policy: Option<String>,
+}
+
 /// Keeps omitted JSON fields distinct from explicit `null` so serde can replace
 /// the old hand-written parser without losing input-config semantics.
 #[derive(Debug, Clone, Default)]
@@ -403,6 +434,7 @@ struct MockEngineArgsSerde {
     aic_nextn_accept_rates: OptionalConfigValue<String>,
     gpu_memory_utilization: OptionalConfigValue<f64>,
     mem_fraction_static: OptionalConfigValue<f64>,
+    free_gpu_memory_fraction: OptionalConfigValue<f64>,
     enable_local_indexer: OptionalConfigValue<bool>,
     bootstrap_port: OptionalConfigValue<u16>,
     kv_bytes_per_token: OptionalConfigValue<usize>,
@@ -423,6 +455,7 @@ struct MockEngineArgsSerde {
     preemption_mode: OptionalConfigValue<String>,
     router_queue_policy: OptionalConfigValue<String>,
     sglang: OptionalConfigValue<SglangArgs>,
+    trtllm: OptionalConfigValue<TrtllmArgs>,
     #[serde(rename = "has_perf_model")]
     _has_perf_model: OptionalConfigValue<serde_json::Value>,
 }
@@ -431,8 +464,9 @@ fn parse_engine_type(value: &str) -> Result<EngineType, String> {
     match value {
         "vllm" => Ok(EngineType::Vllm),
         "sglang" => Ok(EngineType::Sglang),
+        "trtllm" => Ok(EngineType::Trtllm),
         other => Err(format!(
-            "Invalid engine_type '{other}'. Must be 'vllm' or 'sglang'."
+            "Invalid engine_type '{other}'. Must be 'vllm', 'sglang', or 'trtllm'."
         )),
     }
 }
@@ -481,7 +515,7 @@ fn load_perf_model(path: &Path) -> Arc<PerfModel> {
 #[validate(schema(function = "validate_mock_engine_args"))]
 #[builder(pattern = "owned", build_fn(public))]
 pub struct MockEngineArgs {
-    /// Engine type: vLLM or SGLang simulation
+    /// Engine type: vLLM, SGLang, or TensorRT-LLM simulation
     #[builder(default = "EngineType::Vllm")]
     pub engine_type: EngineType,
 
@@ -615,6 +649,15 @@ pub struct MockEngineArgs {
     #[validate(range(min = 0.0, max = 1.0))]
     pub mem_fraction_static: Option<f64>,
 
+    /// Fraction of *free* GPU memory (after weights/buffers) allocated to the KV
+    /// cache, for AIC KV capacity estimation with TRT-LLM. Mirrors TRT-LLM's
+    /// `KvCacheConfig.free_gpu_memory_fraction`. Unlike vLLM's
+    /// `gpu_memory_utilization` (a fraction of *total* memory), this is a
+    /// fraction of what remains after the model is loaded.
+    #[builder(default = "None")]
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub free_gpu_memory_fraction: Option<f64>,
+
     /// Enable worker-local KV indexer for tracking this worker's own KV cache state
     #[builder(default = "false")]
     pub enable_local_indexer: bool,
@@ -729,6 +772,10 @@ pub struct MockEngineArgs {
     /// SGLang-specific configuration. Only used when `engine_type == Sglang`.
     #[builder(default = "None")]
     pub sglang: Option<SglangArgs>,
+
+    /// TensorRT-LLM-specific configuration. Only used when `engine_type == Trtllm`.
+    #[builder(default = "None")]
+    pub trtllm: Option<TrtllmArgs>,
 }
 
 fn mock_engine_args_validation_error(code: &'static str, message: String) -> ValidationError {
@@ -756,6 +803,20 @@ fn validate_mock_engine_args(args: &MockEngineArgs) -> Result<(), ValidationErro
             "g4_requires_g2",
             "enable_g4_storage requires num_g2_blocks because mocker stages G4 through G2"
                 .to_string(),
+        ));
+    }
+
+    if let Some(policy) = args
+        .trtllm
+        .as_ref()
+        .and_then(|trtllm| trtllm.capacity_scheduler_policy.as_deref())
+        && policy != "guaranteed_no_evict"
+    {
+        return Err(mock_engine_args_validation_error(
+            "trtllm_unsupported_capacity_scheduler_policy",
+            format!(
+                "engine_type=trtllm v1 supports only capacity_scheduler_policy='guaranteed_no_evict', got '{policy}'",
+            ),
         ));
     }
 
@@ -913,6 +974,9 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         if let Some(mem_fraction_static) = compat.mem_fraction_static.into_nullable() {
             builder = builder.mem_fraction_static(mem_fraction_static);
         }
+        if let Some(free_gpu_memory_fraction) = compat.free_gpu_memory_fraction.into_nullable() {
+            builder = builder.free_gpu_memory_fraction(free_gpu_memory_fraction);
+        }
         if let Some(enable_local_indexer) = compat
             .enable_local_indexer
             .into_non_null("enable_local_indexer")?
@@ -982,6 +1046,9 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         if let Some(sglang) = compat.sglang.into_nullable() {
             builder = builder.sglang(sglang);
         }
+        if let Some(trtllm) = compat.trtllm.into_nullable() {
+            builder = builder.trtllm(trtllm);
+        }
 
         builder
             .build()
@@ -1004,6 +1071,7 @@ impl Default for MockEngineArgs {
 impl MockEngineArgs {
     const DEFAULT_VLLM_BLOCK_SIZE: usize = 64;
     const DEFAULT_SGLANG_BLOCK_SIZE: usize = 1;
+    const DEFAULT_TRTLLM_BLOCK_SIZE: usize = 32;
 
     pub fn builder() -> MockEngineArgsBuilder {
         MockEngineArgsBuilder::default()
@@ -1035,6 +1103,11 @@ impl MockEngineArgs {
                     (_, None) => {}
                 }
             }
+            EngineType::Trtllm => {
+                if self.block_size == 0 {
+                    self.block_size = Self::DEFAULT_TRTLLM_BLOCK_SIZE;
+                }
+            }
         }
 
         if self.num_g2_blocks == Some(0) {
@@ -1052,6 +1125,15 @@ impl MockEngineArgs {
         self.validate()
             .map_err(|error| anyhow::anyhow!("Failed to validate MockEngineArgs: {error}"))?;
         Ok(())
+    }
+
+    /// Scheduling policy applied by the shared vLLM scheduler core, derived
+    /// from the engine type. TRT-LLM uses `GUARANTEED_NO_EVICT`.
+    pub fn scheduling_policy(&self) -> SchedulingPolicy {
+        match self.engine_type {
+            EngineType::Trtllm => SchedulingPolicy::TrtllmGuaranteedNoEvict,
+            EngineType::Vllm | EngineType::Sglang => SchedulingPolicy::Vllm,
+        }
     }
 
     pub fn is_prefill(&self) -> bool {

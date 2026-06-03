@@ -2776,11 +2776,12 @@ dependencies = [
 name = "dynamo-tokenizers"
 version = "1.3.0"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "base64 0.22.1",
  "blake3",
- "dashmap",
  "fastokens",
+ "moka",
  "rayon",
  "rustc-hash 1.1.0",
  "serde",

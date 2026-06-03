@@ -1237,14 +1237,18 @@ impl KvManager {
         // randomised hash that can't possibly be in the cache across requests
         // — skip the PLH lookup (PLH is deterministic from tokens) to stay
         // consistent with that no-reuse contract.
-        let overlap_blocks = if sequence.enable_prefix_caching() {
+        // overlap = all reusable prefix blocks (compute); active_overlap = only
+        // those backed by an active block (capacity — inactive reuse is re-consumed).
+        let (overlap_blocks, active_overlap_blocks) = if sequence.enable_prefix_caching() {
             let plhs = sequence.positional_lineage_hashes();
             let mut overlap = 0;
+            let mut active_overlap = 0;
             for (i, block) in seq_blocks.iter().enumerate() {
                 match block {
                     UniqueBlock::FullBlock(seq_hash) => {
                         if self.active_full.contains_key(seq_hash) {
                             overlap += 1;
+                            active_overlap += 1;
                             continue;
                         }
                         let Some(plh) = plhs.get(i) else {
@@ -1259,19 +1263,22 @@ impl KvManager {
                     UniqueBlock::PartialBlock(_) => break,
                 }
             }
-            overlap
+            (overlap, active_overlap)
         } else {
-            0
+            (0, 0)
         };
 
         let new_blocks = seq_blocks.len() - overlap_blocks;
         let cached_tokens = (overlap_blocks * self.block_size).min(sequence.num_input_tokens());
+        let active_cached_tokens =
+            (active_overlap_blocks * self.block_size).min(sequence.num_input_tokens());
         let new_tokens = sequence.num_input_tokens() - cached_tokens;
 
         PrefillCost {
             new_blocks,
             new_tokens,
             cached_tokens,
+            active_cached_tokens,
         }
     }
 }
@@ -1378,6 +1385,36 @@ mod tests {
         let mut mgr = make_mgr(10, 16);
         assert_eq!(use_full(&mut mgr, 1, plh(100)), 1);
         assert_eq!(mgr.num_active_blocks(), 1);
+    }
+
+    /// `get_prefill_cost` must report an inactive cached prefix as reusable for
+    /// compute (`cached_tokens`) but NOT for no-evict capacity reservation
+    /// (`active_cached_tokens`), since reactivation re-consumes the block.
+    #[test]
+    fn prefill_cost_splits_active_and_inactive_cached_reuse() {
+        let mut mgr = make_mgr(10, 4);
+        // 2 full blocks (8 tokens, block_size 4), prefix caching on.
+        let seq = ActiveSequence::new((0u32..8).collect(), 4, Some(4), true, false);
+        let blocks = seq.unique_blocks();
+        let plhs = seq.positional_lineage_hashes();
+        let h0 = match &blocks[0] {
+            UniqueBlock::FullBlock(h) => *h,
+            other => panic!("expected a full block, got {other:?}"),
+        };
+        // Register block 0, then deref so it falls inactive (still registered;
+        // only eviction prunes registered_blocks).
+        use_full(&mut mgr, h0, plhs[0]);
+        deref_full(&mut mgr, h0);
+
+        let cost = mgr.get_prefill_cost(&seq);
+        assert!(
+            cost.cached_tokens >= 4,
+            "inactive prefix should count for compute reuse: {cost:?}"
+        );
+        assert_eq!(
+            cost.active_cached_tokens, 0,
+            "inactive reuse must not be discounted for capacity: {cost:?}"
+        );
     }
 
     #[test]
