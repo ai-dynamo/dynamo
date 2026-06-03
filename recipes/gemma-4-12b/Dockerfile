@@ -20,14 +20,15 @@
 #      (Same approach as recipes/nemotron-3-nano-omni/Dockerfile.)
 #
 # Build (from the repo root):
-#   docker build -t <registry>/gemma4-12b-vllm:latest \
+#   docker build --platform=linux/arm64 \
+#                -t <registry>/gemma4-12b-vllm:latest \
 #                -f recipes/gemma-4-12b/Dockerfile \
-#                --build-arg VLLM_PR_REF=<PR#44429 head SHA from Phase 1> \
-#                recipes/gemma-4-12b
+#                .
 #
 # Override defaults with --build-arg, e.g.:
 #   --build-arg BASE_IMAGE=vllm/vllm-openai:v0.22.0
-#   --build-arg DYNAMO_VERSION=1.2.0.dev20260427
+#   --build-arg DYNAMO_VERSION=1.2.0.post1
+#   --build-arg VLLM_PR_SHA=25f921b008768712e99611cc5d942178637359c3
 #   --build-arg TRANSFORMERS_REF=d3f05911abb216047a00aba79c8543c73633db05
 #
 # ALTERNATIVE (offline / reproducible): instead of cloning the PR here, build a
@@ -108,10 +109,16 @@ RUN pip install --no-cache-dir \
       msgpack msgspec prometheus-client pyzmq
 
 # 3c. Multimodal runtime extras (image today; librosa/soundfile/av cover the
-#     audio/video paths for the deferred follow-up).
+#     audio/video paths for the deferred follow-up). numpy/pillow are also used
+#     by the bundled JSONL benchmark generator.
 RUN pip install --no-cache-dir \
       blake3 librosa soundfile uvloop \
-      av ftfy nvtx sentencepiece
+      av ftfy nvtx sentencepiece \
+      "numpy<3" pillow
+
+# Benchmark dataset generator used by data-gen/generate-datasets-job.yaml.
+# Keep the build context at the repo root and copy only this small directory.
+COPY benchmarks/multimodal/jsonl /workspace/benchmarks/multimodal/jsonl
 
 # Sanity-check at build time that the architecture and processor resolve.
 RUN python3 -c "import transformers.models.gemma4_unified; \

@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Gemma 4 12B (text + image)
+# Gemma 4 12B (text + image + audio)
 
 Serves [google/gemma-4-12B-it](https://huggingface.co/google/gemma-4-12B-it) using
 vLLM with an aggregated Dynamo deployment.
@@ -21,10 +21,8 @@ container that layers that PR's vLLM, a `transformers` build carrying
 (from <https://pypi.nvidia.com/ai-dynamo/>) onto an upstream vLLM image — no Rust
 toolchain.
 
-> **Scope:** text + image is verified here. **Audio input is deferred** — native
-> audio rides the normal token path in vLLM, but accepting `audio_url` parts
-> through Dynamo's frontend/preprocessor needs additional work (tracked as a
-> follow-up). See [Notes](#notes).
+> **Scope:** text, image, and audio chat inputs are verified locally. The
+> benchmark below is image-only.
 
 ## Results
 
@@ -55,7 +53,7 @@ requests succeeded.
 | Role | Replicas | GPUs/replica | Notes |
 |------|----------|--------------|-------|
 | Frontend | 1 | 0 | Dynamo frontend with prefix-hash KV routing |
-| vLLM worker | 1 | 1 | Text + image inputs (encoder-free) |
+| vLLM worker | 1 | 1 | Text, image, and audio inputs (encoder-free) |
 
 ## Prerequisites
 
@@ -71,7 +69,7 @@ docker build \
   --platform=linux/arm64 \
   -t <your-registry>/gemma4-12b-vllm:latest \
   -f recipes/gemma-4-12b/Dockerfile \
-  recipes/gemma-4-12b
+  .
 docker push <your-registry>/gemma4-12b-vllm:latest
 ```
 
@@ -85,7 +83,8 @@ docker push <your-registry>/gemma4-12b-vllm:latest
 
 Useful build args:
 
-- `VLLM_PR_REF=<sha>` — pin PR #44429 to a commit (default: live `refs/pull/44429/head`).
+- `VLLM_PR_REF=<ref>` — PR #44429 ref to fetch (default: `refs/pull/44429/head`).
+- `VLLM_PR_SHA=<sha>` — exact PR commit to check out after fetching.
 - `TRANSFORMERS_REF=<sha>` — pin the `transformers` `main` commit that ships `models/gemma4_unified`.
 - `BASE_IMAGE=<image>` — upstream vLLM base (default `vllm/vllm-openai:v0.22.0`); align its vLLM minor with PR #44429's base.
 - `DYNAMO_VERSION=<version>` — pin an `ai-dynamo` release/nightly from <https://pypi.nvidia.com/ai-dynamo/>.
@@ -157,17 +156,54 @@ curl http://localhost:8000/v1/chat/completions \
   }'
 ```
 
+Audio:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "google/gemma-4-12B-it",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "What is in this audio?"},
+        {"type": "audio_url", "audio_url": {"url": "<HTTPS-or-data-URI WAV/MP3>"}}
+      ]
+    }],
+    "max_tokens": 128
+  }'
+```
+
 ## Local (no Kubernetes) bring-up
 
 The same image runs directly under Docker — useful on a single GPU box:
 
 ```bash
 IMG=<your-registry>/gemma4-12b-vllm:latest
-docker run --gpus all --rm -it -p 8000:8000 -e HF_TOKEN=$HF_TOKEN "$IMG" bash -lc '
-  python3 -m dynamo.frontend --http-port 8000 &
-  exec python3 -m dynamo.vllm \
-    --model google/gemma-4-12B-it --enable-multimodal --tensor-parallel-size 1 \
-    --dyn-tool-call-parser gemma4 --dyn-reasoning-parser gemma4'
+docker run --gpus all --rm -it -p 8000:8000 \
+  --entrypoint /bin/bash \
+  -e HF_TOKEN="${HF_TOKEN}" \
+  -e DYN_DISCOVERY_BACKEND=file \
+  -e DYN_FILE_KV=/tmp/dynamo-gemma4-kv \
+  -e DYN_REQUEST_PLANE=tcp \
+  -e DYN_EVENT_PLANE=zmq \
+  "$IMG" -lc '
+    set -euo pipefail
+    rm -rf "${DYN_FILE_KV}"
+    python3 -m dynamo.frontend --router-mode kv --no-kv-events --http-port 8000 &
+    frontend_pid=$!
+    trap "kill ${frontend_pid} 2>/dev/null || true" EXIT
+    python3 -m dynamo.vllm \
+      --model google/gemma-4-12B-it \
+      --served-model-name google/gemma-4-12B-it \
+      --enable-multimodal \
+      --tensor-parallel-size 1 \
+      --gpu-memory-utilization 0.85 \
+      --max-model-len 32768 \
+      --enable-prefix-caching \
+      --no-enable-log-requests \
+      --dyn-tool-call-parser gemma4 \
+      --dyn-reasoning-parser gemma4'
 ```
 
 Then use the same `curl` calls against `http://localhost:8000`.
@@ -177,6 +213,8 @@ Then use the same `curl` calls against `http://localhost:8000`.
 ```bash
 # 1. Generate the text+image dataset (writes to the perf-cache PVC).
 kubectl apply -f recipes/gemma-4-12b/data-gen/generate-datasets-job.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=complete job/gemma4-12b-generate-datasets -n ${NAMESPACE} --timeout=3600s
+kubectl logs job/gemma4-12b-generate-datasets -n ${NAMESPACE}
 
 # 2. Deploy + run the benchmark.
 NAMESPACE=${NAMESPACE} recipes/gemma-4-12b/vllm/agg/run-benchmark.sh
@@ -190,7 +228,7 @@ exact flags).
 
 ## Key Configuration Notes
 
-- `--enable-multimodal` enables image input.
+- `--enable-multimodal` enables multimodal input.
 - `--dyn-tool-call-parser gemma4` / `--dyn-reasoning-parser gemma4` enable Gemma 4
   tool-call and reasoning parsing (already shipped in Dynamo, architecture-agnostic).
   For tool-calling prompts, also pass `--custom-jinja-template
@@ -213,9 +251,10 @@ exact flags).
   embeddings internally (`handlers.py`: *"Without encode worker, the embedding
   will be generated internally by vLLM."*). Prefill/decode (KV-transfer) disagg
   would still be valid, but is out of scope for this recipe.
-- **Audio is deferred.** Gemma 4 accepts audio natively, but Dynamo's
-  frontend/preprocessor does not yet accept `audio_url` request parts. The image
-  installs `librosa`/`soundfile`/`av` so the runtime is ready once that lands.
+- **MM-aware KV routing:** Gemma 4 Unified generation works without a separate
+  encode worker. Dynamo needs Gemma 4-specific routing-side image-token counting
+  to make the Rust/lightseek MM-aware KV router distinguish image content; with
+  older images it falls back to normal text-prefix KV routing.
 - **Upstream tracking.** vLLM PR #44429 is unmerged. Once it merges and a
   `transformers` release ships `models/gemma4_unified`, repin the Dockerfile to a
   released vLLM/transformers and drop the from-source install.

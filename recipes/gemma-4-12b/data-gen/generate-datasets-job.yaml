@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # Generates a single-turn text+image JSONL dataset for the Gemma 4 12B benchmark.
-# Replace the image reference with your built recipe image (it ships the
-# benchmarks/multimodal/jsonl generator) or any image that contains it.
+# Replace the image reference with your built recipe image. The Dockerfile copies
+# the benchmarks/multimodal/jsonl generator into /workspace.
 apiVersion: batch/v1
 kind: Job
 metadata:

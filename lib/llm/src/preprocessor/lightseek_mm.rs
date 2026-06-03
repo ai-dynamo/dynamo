@@ -72,19 +72,29 @@ static REGISTRY: LazyLock<ImageProcessorRegistry> =
     LazyLock::new(ImageProcessorRegistry::with_defaults);
 static MODEL_REGISTRY: LazyLock<ModelRegistry> = LazyLock::new(ModelRegistry::new);
 
-/// Maps `(width, height) → num_image_tokens` for a single model using the
-/// model's HF `preprocessor_config.json`.
+enum CounterKind {
+    Lightseek {
+        processor: &'static dyn ImagePreProcessor,
+        config: PreProcessorConfig,
+    },
+    Gemma4 {
+        patch_size: u32,
+        pooling_kernel_size: u32,
+        max_soft_tokens: usize,
+    },
+}
+
+/// Maps `(width, height) → num_image_tokens` for a single model.
 pub struct LightseekMmCounter {
-    processor: &'static dyn ImagePreProcessor,
-    config: PreProcessorConfig,
+    kind: CounterKind,
     model_id: String,
 }
 
 impl LightseekMmCounter {
-    /// Returns `Err` when `preprocessor_config.json` is missing or unparseable
-    /// or no registered processor matches `model_id` / `model_type`. Callers
-    /// should treat the error as "MM-aware routing disabled for this model"
-    /// rather than failing the request.
+    /// Returns `Err` when the model cannot be mapped to a supported
+    /// routing-side image-token counter. Callers should treat the error as
+    /// "MM-aware routing disabled for this model" rather than failing the
+    /// request.
     ///
     /// Uses sync filesystem I/O. This is intentional: `try_new` is called
     /// once per model during preprocessor construction (a startup-time path
@@ -93,6 +103,25 @@ impl LightseekMmCounter {
     /// Switching to async would cascade through `OpenAIPreprocessor::new`
     /// and every caller of it.
     pub fn try_new(model_id: &str, model_type: Option<&str>, model_dir: &Path) -> Result<Self> {
+        match Self::try_new_lightseek(model_id, model_type, model_dir) {
+            Ok(counter) => Ok(counter),
+            Err(lightseek_err) => {
+                Self::try_new_gemma4(model_id, model_type, model_dir).map_err(|gemma4_err| {
+                    anyhow!(
+                        "{}; Gemma4 fallback unavailable ({})",
+                        lightseek_err,
+                        gemma4_err
+                    )
+                })
+            }
+        }
+    }
+
+    fn try_new_lightseek(
+        model_id: &str,
+        model_type: Option<&str>,
+        model_dir: &Path,
+    ) -> Result<Self> {
         let cfg_path = model_dir.join("preprocessor_config.json");
         let json = std::fs::read_to_string(&cfg_path).with_context(|| {
             format!(
@@ -116,20 +145,148 @@ impl LightseekMmCounter {
         })?;
 
         Ok(Self {
-            processor,
-            config,
+            kind: CounterKind::Lightseek { processor, config },
+            model_id: model_id.to_string(),
+        })
+    }
+
+    fn try_new_gemma4(model_id: &str, model_type: Option<&str>, model_dir: &Path) -> Result<Self> {
+        let config = read_json(model_dir, "config.json")
+            .ok_or_else(|| anyhow!("Gemma4 fallback failed to read config.json"))?;
+        if !is_gemma4_config(model_type, &config) {
+            return Err(anyhow!(
+                "model_id={:?} model_type={:?} is not Gemma4",
+                model_id,
+                model_type
+            ));
+        }
+
+        let vision_config = config
+            .get("vision_config")
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| anyhow!("Gemma4 config has no vision_config object"))?;
+        let patch_size = vision_config
+            .get("patch_size")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or_else(|| anyhow!("Gemma4 vision_config.patch_size missing"))?;
+        let pooling_kernel_size = vision_config
+            .get("pooling_kernel_size")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or_else(|| anyhow!("Gemma4 vision_config.pooling_kernel_size missing"))?;
+        let max_soft_tokens = vision_config
+            .get("num_soft_tokens")
+            .or_else(|| vision_config.get("default_output_length"))
+            .and_then(|v| v.as_u64())
+            .and_then(|v| usize::try_from(v).ok())
+            .ok_or_else(|| {
+                anyhow!("Gemma4 vision_config.num_soft_tokens/default_output_length missing")
+            })?;
+
+        if patch_size == 0 || pooling_kernel_size == 0 || max_soft_tokens == 0 {
+            return Err(anyhow!(
+                "Gemma4 token-count parameters must be non-zero: \
+                 patch_size={patch_size}, pooling_kernel_size={pooling_kernel_size}, \
+                 max_soft_tokens={max_soft_tokens}"
+            ));
+        }
+
+        Ok(Self {
+            kind: CounterKind::Gemma4 {
+                patch_size,
+                pooling_kernel_size,
+                max_soft_tokens,
+            },
             model_id: model_id.to_string(),
         })
     }
 
     pub fn count_tokens(&self, width: u32, height: u32) -> usize {
-        self.processor
-            .calculate_num_tokens(width, height, &self.config)
+        match &self.kind {
+            CounterKind::Lightseek { processor, config } => {
+                processor.calculate_num_tokens(width, height, config)
+            }
+            CounterKind::Gemma4 {
+                patch_size,
+                pooling_kernel_size,
+                max_soft_tokens,
+            } => gemma4_image_token_count(
+                width,
+                height,
+                *patch_size,
+                *pooling_kernel_size,
+                *max_soft_tokens,
+            ),
+        }
     }
 
     pub fn model_id(&self) -> &str {
         &self.model_id
     }
+}
+
+fn is_gemma4_config(model_type_hint: Option<&str>, config: &serde_json::Value) -> bool {
+    let hint_matches = model_type_hint
+        .map(|t| t.starts_with("gemma4"))
+        .unwrap_or(false);
+    let model_type_matches = config
+        .get("model_type")
+        .and_then(|v| v.as_str())
+        .map(|t| t.starts_with("gemma4"))
+        .unwrap_or(false);
+    let architecture_matches = config
+        .get("architectures")
+        .and_then(|v| v.as_array())
+        .map(|arches| {
+            arches.iter().any(|a| {
+                a.as_str()
+                    .map(|s| s.contains("Gemma4") || s.contains("Gemma4Unified"))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+
+    hint_matches || model_type_matches || architecture_matches
+}
+
+fn gemma4_image_token_count(
+    width: u32,
+    height: u32,
+    patch_size: u32,
+    pooling_kernel_size: u32,
+    max_soft_tokens: usize,
+) -> usize {
+    if width == 0
+        || height == 0
+        || patch_size == 0
+        || pooling_kernel_size == 0
+        || max_soft_tokens == 0
+    {
+        return 0;
+    }
+
+    let patch_size_f = f64::from(patch_size);
+    let pooling = u64::from(pooling_kernel_size);
+    let unit = u64::from(patch_size) * pooling;
+    let max_patches = max_soft_tokens as f64 * (pooling * pooling) as f64;
+    let num_patches_orig = (f64::from(height) / patch_size_f) * (f64::from(width) / patch_size_f);
+    if num_patches_orig <= 0.0 {
+        return 0;
+    }
+
+    let scale = (max_patches / num_patches_orig).sqrt();
+    let target_h = std::cmp::max(
+        unit,
+        ((f64::from(height) * scale / unit as f64).floor() as u64) * unit,
+    );
+    let target_w = std::cmp::max(
+        unit,
+        ((f64::from(width) * scale / unit as f64).floor() as u64) * unit,
+    );
+    let num_patches = (target_h / u64::from(patch_size)) * (target_w / u64::from(patch_size));
+    let num_soft = num_patches / (pooling * pooling);
+    std::cmp::min(num_soft as usize, max_soft_tokens)
 }
 
 /// Resolve the image-placeholder token id by delegating to lightseek's
@@ -339,6 +496,62 @@ mod tests {
     //! smg matcher change shows up here instead of as a silent runtime
     //! fallback to text-prefix-only routing.
     use super::*;
+
+    fn gemma4_config(max_soft_tokens: usize) -> String {
+        serde_json::json!({
+            "architectures": ["Gemma4UnifiedForConditionalGeneration"],
+            "model_type": "gemma4_unified",
+            "image_token_id": 258880,
+            "vision_config": {
+                "patch_size": 16,
+                "pooling_kernel_size": 3,
+                "num_soft_tokens": max_soft_tokens
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn gemma4_fallback_counter_uses_unified_config() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.json"), gemma4_config(280)).unwrap();
+
+        let counter = LightseekMmCounter::try_new(
+            "google/gemma-4-12B-it",
+            Some("gemma4_unified"),
+            dir.path(),
+        )
+        .unwrap();
+
+        assert_eq!(counter.count_tokens(64, 64), 256);
+        assert_eq!(counter.count_tokens(1000, 1000), 256);
+    }
+
+    #[test]
+    fn gemma4_fallback_counter_respects_max_soft_tokens_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.json"), gemma4_config(70)).unwrap();
+
+        let counter = LightseekMmCounter::try_new(
+            "google/gemma-4-12B-it",
+            Some("gemma4_unified"),
+            dir.path(),
+        )
+        .unwrap();
+
+        assert_eq!(counter.count_tokens(900, 3), 70);
+        assert_eq!(counter.count_tokens(4000, 2), 70);
+    }
+
+    #[test]
+    fn gemma4_routing_tokens_read_config_image_token_id() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.json"), gemma4_config(280)).unwrap();
+
+        let tokens = resolve_routing_tokens("google/gemma-4-12B-it", dir.path());
+
+        assert_eq!(tokens.chat_placeholder_token_id, Some(258880));
+    }
 
     #[test]
     fn image_processor_registry_resolves_qwen3vl_via_path_substring() {

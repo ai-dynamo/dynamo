@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+
 import pytest
 
 from tests.utils.multimodal import (
@@ -363,15 +365,17 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         topologies={
             "agg": TopologyConfig(
                 marks=[
-                    pytest.mark.skip(
+                    pytest.mark.skipif(
+                        not os.environ.get("DYN_GEMMA4_12B_MANUAL_ENABLED"),
                         reason="Requires vLLM PR #44429 "
                         "(Gemma4UnifiedForConditionalGeneration) image and a "
-                        "≥40 GiB GPU; see recipes/gemma-4-12b."
+                        ">=40 GiB GPU; set DYN_GEMMA4_12B_MANUAL_ENABLED=1 "
+                        "and see recipes/gemma-4-12b."
                     ),
                     pytest.mark.post_merge,
                 ],
                 timeout_s=900,
-                profiled_vram_gib=28.0,
+                profiled_vram_gib=40.0,
                 tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
         },

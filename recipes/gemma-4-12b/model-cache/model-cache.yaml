@@ -11,3 +11,15 @@ spec:
     requests:
       storage: 100Gi
   storageClassName: "your-storage-class-name"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: perf-cache
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: "your-storage-class-name"
