@@ -193,6 +193,21 @@ def apply_deployment(spec, deployment) -> None:
         for name in all_names:
             spec[name].image = deployment.image
 
+    if deployment.memory_request:
+        for name in all_names:
+            spec[name].set_memory_request(deployment.memory_request)
+
+    if deployment.cpu_request:
+        for name in all_names:
+            spec[name].set_cpu_request(deployment.cpu_request)
+
+    if deployment.model:
+        # Worker services only — the Frontend has no ``--model`` arg (the
+        # setter is a no-op there). ``served_model`` is read from the worker
+        # spec right after this, so the load + router pick up the override.
+        for name in spec.worker_services():
+            spec[name].model = deployment.model
+
     if deployment.model_cache_pvc:
         spec.enable_model_cache(deployment.model_cache_pvc)
 
@@ -327,6 +342,10 @@ def build_load_config(
         "connection_reuse_strategy": common.connection_reuse_strategy,
         "warmup_requests": common.warmup_requests,
     }
+    # Open-loop: fixed arrival rate (aiperf --request-rate); concurrency stays
+    # as a max-in-flight cap. ManagedLoad already emits --request-rate.
+    if rung.request_rate is not None:
+        kwargs["request_rate"] = rung.request_rate
     if common.goodput is not None:
         kwargs["goodput"] = list(common.goodput)
     if common.request_cancellation_rate is not None:

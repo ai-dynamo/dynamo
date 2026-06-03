@@ -192,6 +192,32 @@ class ServiceSpec:
     def replicas(self, value: int):
         self._spec["replicas"] = value
 
+    # ----- Memory request -----
+    def set_memory_request(self, value: str) -> None:
+        """Override the container memory *request* (e.g. '5Gi').
+
+        Controls scheduler packing density: a larger request caps how many
+        replicas a (bin-packing) scheduler can stack on one node, forcing it
+        to spread pods instead of cramming a node to OOM. Leaves limits and
+        cpu untouched. No-op on a falsy value.
+        """
+        if not value:
+            return
+        mc = self._spec.setdefault("extraPodSpec", {}).setdefault("mainContainer", {})
+        mc.setdefault("resources", {}).setdefault("requests", {})["memory"] = str(value)
+
+    def set_cpu_request(self, value: str) -> None:
+        """Override the container cpu *request* (e.g. '500m').
+
+        Same rationale as ``set_memory_request`` but for CPU: lowers the gang's
+        CPU pressure so a large mocker gang fits a shared CPU pool. The cpu
+        *limit* is unchanged, so busy pods still burst. No-op on a falsy value.
+        """
+        if not value:
+            return
+        mc = self._spec.setdefault("extraPodSpec", {}).setdefault("mainContainer", {})
+        mc.setdefault("resources", {}).setdefault("requests", {})["cpu"] = str(value)
+
     @property
     def model(self) -> Optional[str]:
         """Model being served by this service (checks both --model and --model-path)"""
@@ -1719,10 +1745,15 @@ class ManagedDeployment:
             return
 
         try:
-            # Render each event as its raw API object (a dict). Sorted by
-            # lastTimestamp so the file reads chronologically.
+            # Render each event as its raw API object. kr8s returns each as a
+            # box.Box (a dict subclass) which yaml.safe_dump has no representer
+            # for -> RepresenterError, leaving a 0-byte file. Convert to a plain
+            # dict first. Sorted by lastTimestamp so the file reads chronologically.
             payload = sorted(
-                (ev.raw for ev in events),
+                (
+                    ev.raw.to_dict() if hasattr(ev.raw, "to_dict") else ev.raw
+                    for ev in events
+                ),
                 key=lambda e: (
                     e.get("lastTimestamp")
                     or e.get("eventTime")
@@ -1777,6 +1808,15 @@ class ManagedDeployment:
             content = response.text
         except Exception as e:
             self._logger.error(str(e))
+        finally:
+            # Stop the forward as soon as this pod's scrape is done. Each
+            # forward holds a background thread + local port + an aiohttp
+            # session; leaking one per scrape (5 captures x N pods) exhausts
+            # local connections at scale and stalls *all* k8s ops — including
+            # the load-completion-marker read that force-stopped the N=15
+            # arm-C run at burst-3 (241 leaked forwards). Closing here keeps
+            # active forwards O(1).
+            self._close_port_forward(pf)
 
         if content:
             with open(
@@ -2114,6 +2154,25 @@ class ManagedDeployment:
                 f"Failed to create port forward for pod {pod.name}: {e}"
             )
             return None
+
+    def _close_port_forward(self, pf) -> None:
+        """Stop one port-forward and drop it from the active list.
+
+        Forwards are tracked in ``_active_port_forwards`` for teardown, but
+        one-shot consumers (metric scrapes) must close their forward right
+        after use so they don't accumulate over a long run — each holds a
+        thread + local port + an aiohttp session, and leaking hundreds
+        exhausts local connections (the N=15 arm-C burst-3 force-stop). The
+        teardown loop remains as a backstop for anything not closed here.
+        """
+        try:
+            pf.stop()
+        except Exception as e:
+            self._logger.debug(f"Error stopping port forward: {e}")
+        try:
+            self._active_port_forwards.remove(pf)
+        except ValueError:
+            pass
 
     async def _cleanup(self):
         try:

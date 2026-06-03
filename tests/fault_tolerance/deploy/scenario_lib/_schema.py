@@ -32,6 +32,24 @@ class Deployment:
     # PVC reuse knobs — None = framework default, "" = disable
     model_cache_pvc: Optional[str] = None
     log_pvc: Optional[str] = None
+    # Per-pod container memory *request* override (e.g. "5Gi"), applied to
+    # every service. None → use the template's request. Raising it caps how
+    # many replicas a (bin-packing) scheduler can stack on one node, forcing
+    # spread instead of cramming a node to OOM — needed for large mocker
+    # gangs on memory-tight CPU pools.
+    memory_request: Optional[str] = None
+    # Per-pod container cpu *request* override (e.g. "500m"), applied to every
+    # service. Lowers scheduler CPU pressure so large gangs fit a shared CPU
+    # pool (mockers burst to the cpu *limit* regardless of request). None →
+    # use the template's request.
+    cpu_request: Optional[str] = None
+    # Served model override (e.g. "deepseek-ai/DeepSeek-V2-Lite"). Rewrites the
+    # ``--model`` arg on every worker service so the same shape template can
+    # serve different models without a new template. ``served_model`` (the name
+    # the load + router use) is read from the worker spec after this is applied,
+    # so the aiperf load tracks it automatically. None → use the template's
+    # ``--model``.
+    model: Optional[str] = None
 
 
 @dataclass
@@ -106,6 +124,11 @@ class Rung:
     name: str
     concurrency: int
     duration_minutes: float
+    # Open-loop arrival rate (requests/sec) → aiperf --request-rate. When set,
+    # clients arrive at this fixed rate regardless of pool health (the faithful
+    # production-traffic model for error-rate-shape repros); concurrency then
+    # acts as a max-in-flight cap. None = closed-loop (drive by concurrency).
+    request_rate: Optional[float] = None
     # Optional per-rung shape override. If None, the scenario's
     # top-level shape applies.
     shape: Optional[Shape] = None

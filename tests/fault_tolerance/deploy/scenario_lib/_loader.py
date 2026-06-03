@@ -146,10 +146,12 @@ def _rung(d: dict, path: Path, idx: int) -> Rung:
         if f not in d:
             raise ValueError(f"{path}: {where}.{f} is required")
     shape = _shape(d["shape"], path, f"{where}.shape") if "shape" in d else None
+    rr = d.get("request_rate")
     return Rung(
         name=d["name"],
         concurrency=int(d["concurrency"]),
         duration_minutes=float(d["duration_minutes"]),
+        request_rate=float(rr) if rr is not None else None,
         shape=shape,
     )
 
