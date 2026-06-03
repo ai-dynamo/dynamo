@@ -55,7 +55,10 @@ func ConfigureLogger(output string) logr.Logger {
 	zapCfg.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
 	zapLog, err := zapCfg.Build()
 	if err != nil {
-		zapLog, _ = zap.NewDevelopment()
+		zapLog, err = zap.NewDevelopment()
+		if err != nil {
+			zapLog = zap.NewNop()
+		}
 	}
 
 	log := zapr.NewLogger(zapLog)
