@@ -2278,7 +2278,7 @@ mod tests {
         assert!(!dest.exists(), "dest must not exist after cancel");
     }
 
-    /// Brings in the sibling that `lightseek-mm` needs.
+    /// Brings in the sibling that `mm-routing` needs.
     #[test]
     fn harvest_brings_in_non_weight_siblings() -> anyhow::Result<()> {
         let snap = tempfile::tempdir()?;

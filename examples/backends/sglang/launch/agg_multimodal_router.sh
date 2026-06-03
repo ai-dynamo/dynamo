@@ -4,7 +4,7 @@
 #
 # MM-aware KV routing for SGLang.
 #
-# Requires dynamo built with `--features lightseek-mm` (default in the
+# Requires dynamo built with `--features mm-routing` (default in the
 # dynamo sglang container image) and sglang carrying the
 # sgl-project/sglang#25300 mm_hashes patch. Without the mm_hashes kwarg
 # the dynamo glue silently falls back to text-prefix routing.
