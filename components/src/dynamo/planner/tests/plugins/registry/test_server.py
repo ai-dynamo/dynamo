@@ -187,12 +187,31 @@ async def test_authenticated_heartbeat_subject_mismatch_returns_permission_denie
 
 
 @pytest.mark.asyncio
-async def test_authenticated_heartbeat_unknown_plugin_returns_false_no_reject():
+async def test_authenticated_heartbeat_unknown_plugin_returns_permission_denied():
+    """Unknown plugin_id collapses to ``permission_denied`` — same response
+    as a wrong-subject probe — so a token-holder cannot enumerate registered
+    plugin_ids by observing distinct return codes."""
     server, _, _, _ = _make_server(auth=_PerTokenAuth())
     ok, reject = await server.authenticated_heartbeat("ghost", "A")
-    # Auth passed, no plugin exists — same shape as in-process heartbeat
-    # for unknown plugin_id (don't leak existence to authenticated callers).
-    assert (ok, reject) == (False, None)
+    assert (ok, reject) == (False, "permission_denied")
+
+
+@pytest.mark.asyncio
+async def test_authenticated_heartbeat_in_process_plugin_returns_permission_denied():
+    """``register_internal`` plugins have ``auth_subject == ""`` by design —
+    they are not reachable via the gateway.  Heartbeat against one must
+    collapse to ``permission_denied`` (NOT silently succeed because
+    ``"" == ""`` if some buggy auth backend ever returned an empty subject)."""
+    server, _, _, _ = _make_server(auth=_PerTokenAuth())
+    server.register_internal(
+        plugin_id="builtin",
+        plugin_type="propose",
+        priority=10,
+        instance=object(),
+    )
+    assert server.get_plugin("builtin").auth_subject == ""
+    ok, reject = await server.authenticated_heartbeat("builtin", "A")
+    assert (ok, reject) == (False, "permission_denied")
 
 
 @pytest.mark.asyncio
@@ -228,10 +247,29 @@ async def test_authenticated_unregister_subject_mismatch_does_not_evict():
 
 
 @pytest.mark.asyncio
-async def test_authenticated_unregister_unknown_plugin_returns_false_no_reject():
+async def test_authenticated_unregister_unknown_plugin_returns_permission_denied():
+    """Same existence-oracle hardening as the heartbeat case — unknown
+    plugin and wrong subject return the same code."""
     server, _, _, _ = _make_server(auth=_PerTokenAuth())
     ok, reject = await server.authenticated_unregister("ghost", "A")
-    assert (ok, reject) == (False, None)
+    assert (ok, reject) == (False, "permission_denied")
+
+
+@pytest.mark.asyncio
+async def test_authenticated_unregister_in_process_plugin_not_reachable_via_gateway():
+    """``register_internal`` plugins are not removable via the gateway —
+    in-process invariant enforced explicitly so the data shape isn't the
+    only line of defense."""
+    server, _, _, _ = _make_server(auth=_PerTokenAuth())
+    server.register_internal(
+        plugin_id="builtin",
+        plugin_type="propose",
+        priority=10,
+        instance=object(),
+    )
+    ok, reject = await server.authenticated_unregister("builtin", "A")
+    assert (ok, reject) == (False, "permission_denied")
+    assert server.get_plugin("builtin") is not None  # NOT evicted
 
 
 @pytest.mark.asyncio

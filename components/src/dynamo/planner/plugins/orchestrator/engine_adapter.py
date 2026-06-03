@@ -144,7 +144,21 @@ class OrchestratorEngineAdapter:
         # observable scaling decisions while collapsing the legacy
         # dual-cadence book-keeping into one base interval.
         self._scale_interval: float = float(config.scheduling.scale_interval_seconds)
+        # ``_last_tick_s`` is wall-epoch (matches ``tick_input.now_s`` /
+        # PSM ``ScheduledTick.at_s``).  ``_last_tick_monotonic`` is the
+        # clock-domain twin used by the lazy-traffic-pull due-check
+        # against ``RegisteredPlugin.last_call_at`` — which the
+        # ``PluginScheduler.record_evaluation`` path stores in
+        # ``self._clock.monotonic()`` domain.  Without the parallel
+        # field, ``_is_due(p, _last_tick_s + scale_interval)`` would
+        # compare wall-epoch against monotonic; in production
+        # ``WallClock`` deployments that's ~1.7e9 vs ~1e3 — every
+        # plugin reads as "due" and lazy-pull silently degenerates to
+        # always-pull.  Replay path is unaffected because
+        # ``VirtualClock.monotonic()`` is synchronised to
+        # ``tick_input.now_s`` at the top of ``tick()``.
         self._last_tick_s: float = 0.0
+        self._last_tick_monotonic: float = 0.0
 
         # Legacy cadence fields preserved as a compatibility shim for
         # any existing test that still reads them.  Not consulted by the
@@ -377,6 +391,7 @@ class OrchestratorEngineAdapter:
         scheduled for removal once decision-level parity is in place).
         """
         self._last_tick_s = start_s
+        self._last_tick_monotonic = self._clock.monotonic()
         self._next_load_s = start_s + self._config.load_adjustment_interval_seconds
         if self._config.enable_throughput_scaling:
             self._next_throughput_s = (
@@ -431,6 +446,12 @@ class OrchestratorEngineAdapter:
         #    only for shim compatibility — they no longer drive next-
         #    tick selection.
         self._last_tick_s = tick_input.now_s
+        # Monotonic twin — see ``__init__`` for why we keep both.  Read
+        # *after* the optional VirtualClock sync above so replay sees
+        # ``last_tick_monotonic == tick_input.now_s`` (parity with PSM
+        # cadence math) and production wall-clock deployments see the
+        # boot-relative value that plugin ``last_call_at`` is recorded in.
+        self._last_tick_monotonic = self._clock.monotonic()
         self._next_load_s = (
             tick_input.now_s + self._config.load_adjustment_interval_seconds
         )
@@ -656,6 +677,10 @@ class OrchestratorEngineAdapter:
         themselves declared via ``observation_window_seconds``.
         """
         at_s = self._last_tick_s + self._scale_interval
+        # Due-check operates in the monotonic domain that
+        # ``RegisteredPlugin.last_call_at`` lives in — NOT wall-epoch.
+        # ``at_s`` (wall-epoch) is for ``ScheduledTick.at_s`` only.
+        at_monotonic = self._last_tick_monotonic + self._scale_interval
 
         # Lazy traffic pull: only when some currently-registered,
         # currently-due plugin actually consumes
@@ -667,7 +692,7 @@ class OrchestratorEngineAdapter:
             p
             for p in self._orchestrator._registry.all_plugins()
             if "observations.traffic" in p.needs
-            and self._orchestrator._scheduler._is_due(p, at_s)
+            and self._orchestrator._scheduler._is_due(p, at_monotonic)
         ]
         if traffic_consumers_due:
             need_traffic = True

@@ -221,3 +221,86 @@ def test_default_clock_is_wallclock():
 
     adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps())
     assert isinstance(adapter._clock, WallClock)
+
+
+def test_lazy_traffic_due_check_uses_monotonic_not_wall_epoch():
+    """Regression: ``_compute_next_scheduled_tick`` must call
+    ``PluginScheduler._is_due`` with the **monotonic-domain** projection
+    of the next tick, not the wall-epoch projection.
+
+    In production ``WallClock`` deployments, ``tick_input.now_s`` is
+    wall-epoch (~1.7e9) while ``RegisteredPlugin.last_call_at`` is set
+    by the pipeline via ``self._clock.monotonic()`` (boot-relative,
+    ~1e3). A naive ``_is_due(plugin, _last_tick_s + scale_interval)``
+    therefore compares ~1.7e9 against ~1e3 — every plugin reads as due
+    forever, and the lazy traffic pull degenerates to "always pull".
+
+    This test wires a custom ``Clock`` that fixes monotonic() at 100s
+    while ``_last_tick_s`` is set to a wall-epoch-like 1.7e9, then
+    pins ``plugin.last_call_at`` such that the plugin is **not yet due**
+    in the monotonic domain.  With the bug, the plugin would be in
+    ``traffic_consumers_due`` and ``need_traffic_metrics`` would be
+    ``True``.  Fixed: monotonic projection correctly skips the plugin.
+    """
+    from dynamo.planner.plugins.clock import Clock
+    from dynamo.planner.plugins.registry.types import RegisteredPlugin
+    from dynamo.planner.plugins.types import HoldPolicy
+
+    class _FixedMonoClock(Clock):
+        """Wall-vs-monotonic drift simulator — not a VirtualClock so the
+        ``tick()`` sync path stays out of the picture."""
+
+        def __init__(self, mono: float) -> None:
+            self._mono = mono
+
+        def now(self) -> float:
+            return 1.7e9  # arbitrary wall epoch
+
+        def monotonic(self) -> float:
+            return self._mono
+
+        async def sleep(self, seconds: float) -> None:  # pragma: no cover
+            return None
+
+    clock = _FixedMonoClock(mono=100.0)
+    adapter = OrchestratorEngineAdapter(
+        _agg_config_throughput_on(), _caps(), clock=clock
+    )
+    # adapter._scale_interval defaults to 5.0s — the monotonic projection
+    # below uses it implicitly inside ``_compute_next_scheduled_tick``.
+
+    # Simulate "one tick has just been recorded" — _last_tick_s is wall epoch,
+    # _last_tick_monotonic is the matching monotonic snapshot.
+    adapter._last_tick_s = 1.7e9
+    adapter._last_tick_monotonic = 100.0
+
+    # Inject a registered traffic-consuming plugin whose last_call_at is in
+    # monotonic domain and whose execution_interval keeps it NOT due at the
+    # next tick.
+    registry = adapter._orchestrator._registry
+    plugin = RegisteredPlugin(
+        plugin_id="traffic_consumer",
+        plugin_type="propose",
+        priority=10,
+        endpoint="inproc://traffic_consumer",
+        version="test",
+        protocol_version="1.0",
+        execution_interval_seconds=60.0,
+        hold_policy=HoldPolicy.ACCEPT_WHEN_IDLE,
+        needs=["observations.traffic"],
+        is_builtin=False,
+        transport=None,  # type: ignore[arg-type]
+        transport_type="grpc",
+        registered_at=95.0,  # monotonic — 5s ago, well before tick
+    )
+    plugin.last_call_at = 95.0  # plugin called 5s ago in monotonic time
+    registry._plugins[plugin.plugin_id] = plugin
+
+    # Next tick monotonic projection = 100 + 5 = 105; plugin last_call_at = 95,
+    # execution_interval = 60 → next-due monotonic = 95 + 60 = 155.  Not due.
+    # If the buggy code path were active, at_s = 1.7e9 + 5 ≫ 155 → due.
+    sched = adapter._compute_next_scheduled_tick()
+    assert sched.need_traffic_metrics is False, (
+        "lazy traffic pull broke: plugin with last_call_at in monotonic domain "
+        "was read as due against a wall-epoch projection of the next tick"
+    )

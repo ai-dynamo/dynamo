@@ -238,23 +238,29 @@ class PluginRegistryServer:
         """Heartbeat for gateway-facing callers.
 
         Returns ``(ok, reject)`` where ``reject`` is one of:
-          * ``None`` — auth succeeded; ``ok`` is the underlying heartbeat result
-            (``True`` if plugin exists, ``False`` if it does not — same as the
-            in-process ``heartbeat`` API).
+          * ``None`` — auth succeeded AND plugin exists AND caller is its owner.
+            ``ok`` is the underlying heartbeat result.
           * ``"auth_failed"`` — token did not validate.
-          * ``"permission_denied"`` — token validated but its subject does not
-            match the subject the plugin registered with.
+          * ``"permission_denied"`` — caller does not own this plugin OR the
+            plugin does not exist OR the plugin is in-process-only (registered
+            via ``register_internal``, ``auth_subject == ""``).  The three
+            cases collapse to a single gRPC status to avoid an existence-/
+            transport-leak oracle: a token-holder could otherwise enumerate
+            registered ``plugin_id``s by probing for differing status codes
+            (``OK ok=false`` vs ``PERMISSION_DENIED``).
         """
         try:
             identity = await self._auth.validate(auth_token)
         except AuthError:
             return False, "auth_failed"
         plugin = self._plugins.get(plugin_id)
-        if plugin is None:
-            # Don't leak existence; behave like the in-process heartbeat for
-            # unknown plugin_id (caller already authenticated, just no plugin).
-            return False, None
-        if plugin.auth_subject != identity.subject:
+        # Collapse "unknown plugin" / "wrong subject" / "in-process plugin"
+        # into a single response.  See docstring for the rationale.
+        if (
+            plugin is None
+            or not plugin.auth_subject
+            or plugin.auth_subject != identity.subject
+        ):
             return False, "permission_denied"
         plugin.last_heartbeat_at = self._clock.monotonic()
         return True, None
@@ -263,17 +269,22 @@ class PluginRegistryServer:
         self, plugin_id: str, auth_token: str, reason: str = ""
     ) -> tuple[bool, Optional[str]]:
         """Unregister for gateway-facing callers; same return contract as
-        ``authenticated_heartbeat``. Subject mismatch is rejected BEFORE the
+        ``authenticated_heartbeat``.  Subject mismatch is rejected BEFORE the
         plugin is removed from the dict, so a forged Unregister cannot evict
-        another caller's plugin even by accident."""
+        another caller's plugin even by accident.  Unknown plugin and
+        in-process-only plugin (``auth_subject == ""``) also collapse to
+        ``"permission_denied"`` to avoid an existence oracle — see
+        ``authenticated_heartbeat`` docstring."""
         try:
             identity = await self._auth.validate(auth_token)
         except AuthError:
             return False, "auth_failed"
         plugin = self._plugins.get(plugin_id)
-        if plugin is None:
-            return False, None  # idempotent for unknown plugin (matches in-proc)
-        if plugin.auth_subject != identity.subject:
+        if (
+            plugin is None
+            or not plugin.auth_subject
+            or plugin.auth_subject != identity.subject
+        ):
             return False, "permission_denied"
         ok = await self.unregister(plugin_id, reason=reason)
         return ok, None
