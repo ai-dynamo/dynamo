@@ -258,10 +258,7 @@ def create_parsers(
             )
 
     reasoning_parser = None
-    guided_decoding_active = tool_choice == "required" or _is_named_tool_choice(
-        tool_choice
-    )
-    if reasoning_parser_name and not guided_decoding_active:
+    if reasoning_parser_name:
         reasoning_parser = ReasoningParser(
             model_type=reasoning_parser_name,
             stream_reasoning=True,
