@@ -377,3 +377,13 @@ def test_python_processor_spec_is_carried_through():
         spec, disaggregation_mode=DisaggregationMode.DECODE
     )
     assert activation == [desc]
+
+
+async def test_default_engine_controls_are_empty():
+    """Engines opt into management controls explicitly."""
+    engine = _Complete()
+    assert engine.supported_controls() == set()
+    assert await engine.engine_control("sleep", {}) == {
+        "status": "error",
+        "message": "unsupported engine control: sleep",
+    }

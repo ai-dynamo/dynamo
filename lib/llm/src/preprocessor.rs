@@ -185,19 +185,6 @@ fn mdc_model_dir(mdc: &ModelDeploymentCard) -> Option<std::path::PathBuf> {
     cf.path()?.parent().map(std::path::PathBuf::from)
 }
 
-/// Find the first occurrence of `needle` in `haystack`. Linear scan; the
-/// needles here are tokenized chat-template placeholders (≤ 10 tokens for
-/// Phi-3-style `<|image_N|>`), so the naive O(n·m) cost is fine.
-#[cfg(feature = "lightseek-mm")]
-fn find_subseq<T: PartialEq>(haystack: &[T], needle: &[T]) -> Option<usize> {
-    if needle.is_empty() || needle.len() > haystack.len() {
-        return None;
-    }
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}
-
 /// Shared SSRF-aware `MediaFetcher` + `reqwest::Client` for the dim-fetch
 /// path used by MM-aware routing. Inherits the same policy contract as the
 /// frontend-decode path (`MediaLoader`): blocklist DNS resolver, redirect
@@ -248,11 +235,17 @@ pub struct OpenAIPreprocessor {
     /// unreadable.
     #[cfg(feature = "lightseek-mm")]
     image_token_counter: Option<lightseek_mm::LightseekMmCounter>,
-    /// Image-placeholder token id resolved from the model's HF JSON configs.
+    /// Image-placeholder token id the routing-side sequence fills per image.
+    /// Resolved from `config.json`'s `image_token_id` field when present,
+    /// otherwise falls back to lightseek's `ModelProcessorSpec` value. This
+    /// is the id the backend's HF processor emits in the expanded sequence
+    /// (per-patch token for Qwen-VL families, the single placeholder for
+    /// LLaVA/Phi-3), so block hashes align bit-for-bit with the worker.
+    ///
     /// `None` disables MM-aware routing for this model and the router falls
     /// back to text-prefix routing.
     #[cfg(feature = "lightseek-mm")]
-    image_token_id: Option<crate::protocols::TokenIdType>,
+    routing_image_token_id: Option<crate::protocols::TokenIdType>,
     /// Per-family flatten-time image placeholder template (e.g.
     /// `"<|image_{n}|>"` for Phi-3, `"<image>"` for LLaVA-1.5). Threaded
     /// through from the formatter so the routing path can reverse the
@@ -260,6 +253,13 @@ pub struct OpenAIPreprocessor {
     /// tokens when the chat template uses numbered markers.
     #[cfg(feature = "lightseek-mm")]
     image_placeholder_template: Option<&'static str>,
+    /// BOS token id to prepend to the routing-side sequence so per-block
+    /// hashes match the backend's HF processor output on models with
+    /// `add_bos_token: true` (Phi-3-vision and other `LlamaTokenizer`
+    /// families). `None` when the model doesn't need it or `bos_token`
+    /// doesn't round-trip to a single id.
+    #[cfg(feature = "lightseek-mm")]
+    routing_prepend_bos: Option<crate::protocols::TokenIdType>,
 }
 
 impl OpenAIPreprocessor {
@@ -388,8 +388,31 @@ impl OpenAIPreprocessor {
         // lightseek registry resolve fine-tunes loaded from custom-named
         // directories where the family substring isn't in the path.
         #[cfg(feature = "lightseek-mm")]
-        let image_token_inputs: Option<(String, String, std::path::PathBuf)> = mdc_model_dir(&mdc)
-            .map(|p| (mdc.source_path().to_string(), model_info.model_type(), p));
+        let model_dir_for_routing: Option<std::path::PathBuf> = mdc_model_dir(&mdc);
+        // TODO(mm-routing): fastokens lacks a special-token mutator, so it
+        // can't merge tokenizer_config.json specials and would BPE-shatter
+        // placeholders (e.g. Qwen2-VL `<|image_pad|>`). Disable MM-routing
+        // here; remove once fastokens upstream exposes the mutator.
+        #[cfg(feature = "lightseek-mm")]
+        let image_token_inputs: Option<(String, String, std::path::PathBuf)> = {
+            let fastokens_active = std::env::var("DYN_TOKENIZER").as_deref() == Ok("fastokens");
+            if fastokens_active && model_dir_for_routing.is_some() {
+                tracing::warn!(
+                    target: "mm_routing",
+                    "DYN_TOKENIZER=fastokens is set; MM-aware KV routing disabled. \
+                     Unset DYN_TOKENIZER (or set it to 'default') to re-enable."
+                );
+                None
+            } else {
+                model_dir_for_routing.as_ref().map(|p| {
+                    (
+                        mdc.source_path().to_string(),
+                        model_info.model_type(),
+                        p.clone(),
+                    )
+                })
+            }
+        };
 
         let media_loader = match mdc.media_decoder {
             Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
@@ -399,73 +422,80 @@ impl OpenAIPreprocessor {
         let context_length = mdc.context_length;
 
         #[cfg(feature = "lightseek-mm")]
-        let (image_token_counter, image_token_id) = match image_token_inputs {
-            Some((model_id, model_type, model_dir)) => {
-                // Try counter init and image-token resolution independently.
-                // Each carries its own reason for failure; the summary log
-                // below names whichever pieces are missing so operators can
-                // tell at a glance whether the model needs a lightseek
-                // upstream PR (registry miss) or a non-standard placeholder
-                // location (resolver miss).
-                let (counter, counter_err): (
-                    Option<lightseek_mm::LightseekMmCounter>,
-                    Option<String>,
-                ) = match lightseek_mm::LightseekMmCounter::try_new(
-                    &model_id,
-                    Some(&model_type),
-                    &model_dir,
-                ) {
-                    Ok(c) => (Some(c), None),
-                    Err(e) => (None, Some(e.to_string())),
-                };
-                let img_tok = lightseek_mm::resolve_image_token_id(&model_id, &model_dir);
+        let (image_token_counter, routing_image_token_id, bos_token_string) =
+            match image_token_inputs {
+                Some((model_id, model_type, model_dir)) => {
+                    // Resolve counter + image-token id independently so the
+                    // summary log can name which piece is missing.
+                    let (counter, counter_err): (
+                        Option<lightseek_mm::LightseekMmCounter>,
+                        Option<String>,
+                    ) = match lightseek_mm::LightseekMmCounter::try_new(
+                        &model_id,
+                        Some(&model_type),
+                        &model_dir,
+                    ) {
+                        Ok(c) => (Some(c), None),
+                        Err(e) => (None, Some(e.to_string())),
+                    };
+                    // One-shot config/tokenizer_config read for all
+                    // routing-side token info. Parsing lives in
+                    // `lightseek_mm`, next to the spec resolution.
+                    let routing_tokens =
+                        lightseek_mm::resolve_routing_tokens(&model_id, &model_dir);
+                    // `chat_placeholder_token_id` already prefers config.json's
+                    // explicit field and falls back to the spec value, so it's
+                    // the single id used both for the engagement gate and the
+                    // routing-fill below.
+                    let img_tok = routing_tokens.chat_placeholder_token_id;
+                    let bos_tok_string = routing_tokens.bos_token_string;
 
-                match (counter.is_some(), img_tok.is_some()) {
-                    (true, true) => tracing::info!(
-                        target: "mm_routing",
-                        model = %model_id,
-                        model_dir = %model_dir.display(),
-                        "MM-aware KV routing enabled (lightseek)"
-                    ),
-                    (counter_ok, img_ok) => {
-                        let mut reasons: Vec<String> = Vec::new();
-                        if !counter_ok {
-                            reasons.push(format!(
-                                "model not supported by the lightseek registry ({})",
-                                counter_err.as_deref().unwrap_or("unknown error")
-                            ));
-                        }
-                        if !img_ok {
-                            reasons.push(
-                                "image-placeholder token unresolvable from \
-                                 config.json / processor_config.json / \
-                                 tokenizer_config.json / vocab probe"
-                                    .to_string(),
-                            );
-                        }
-                        tracing::warn!(
+                    match (counter.is_some(), img_tok.is_some()) {
+                        (true, true) => tracing::info!(
                             target: "mm_routing",
                             model = %model_id,
-                            reasons = %reasons.join("; "),
-                            "{} is not supported for MM-aware KV routing ({}). \
-                             Falling back to KV routing without MM awareness — \
-                             text-prefix overlap still works but the router \
-                             cannot distinguish requests by image content.",
-                            model_id,
-                            reasons.join("; ")
-                        );
+                            model_dir = %model_dir.display(),
+                            "MM-aware KV routing enabled"
+                        ),
+                        (counter_ok, img_ok) => {
+                            let mut reasons: Vec<String> = Vec::new();
+                            if !counter_ok {
+                                reasons.push(format!(
+                                    "model not supported by the MM-routing registry ({})",
+                                    counter_err.as_deref().unwrap_or("unknown error")
+                                ));
+                            }
+                            if !img_ok {
+                                reasons.push(
+                                    "image-placeholder token unresolvable from \
+                                 config.json / processor_config.json / \
+                                 tokenizer_config.json / vocab probe"
+                                        .to_string(),
+                                );
+                            }
+                            tracing::warn!(
+                                target: "mm_routing",
+                                model = %model_id,
+                                reasons = %reasons.join("; "),
+                                "{} is not supported for MM-aware KV routing ({}). \
+                                 Falling back to KV routing without MM awareness — \
+                                 text-prefix overlap still works but the router \
+                                 cannot distinguish requests by image content.",
+                                model_id,
+                                reasons.join("; ")
+                            );
+                        }
                     }
+                    (counter, img_tok, bos_tok_string)
                 }
-                (counter, img_tok)
-            }
-            None => {
-                tracing::debug!(
-                    target: "mm_routing",
-                    "model directory not derivable from MDC; MM-aware routing disabled"
-                );
-                (None, None)
-            }
-        };
+                None => {
+                    tracing::debug!(
+                        target: "mm_routing",
+                        "model directory not derivable from MDC; MM-aware routing disabled"
+                    );
+                    (None, None, None)
+                }
+            };
 
         #[cfg(feature = "lightseek-mm")]
         let image_placeholder_template = formatter.image_placeholder_template();
@@ -477,10 +507,50 @@ impl OpenAIPreprocessor {
         // force (both lightseek hooks resolved to `None`) — no point
         // building a client they'll never use.
         #[cfg(feature = "lightseek-mm")]
-        if image_token_counter.is_some() || image_token_id.is_some() {
+        if image_token_counter.is_some() || routing_image_token_id.is_some() {
             std::sync::LazyLock::force(&DIM_FETCH_MEDIA_FETCHER);
             std::sync::LazyLock::force(&DIM_FETCH_HTTP_CLIENT);
         }
+
+        // Resolve the routing-side BOS prepend for models with
+        // `add_bos_token: true` (see `routing_prepend_bos` doc). Only kept
+        // when the configured `bos_token` round-trips to a single id. The
+        // BOS string was harvested above by `resolve_routing_tokens` from
+        // the same `tokenizer_config.json` pass.
+        #[cfg(feature = "lightseek-mm")]
+        let routing_prepend_bos = match bos_token_string {
+            Some(bos_text) => match tokenizer.encode(&bos_text) {
+                Ok(enc) if enc.token_ids().len() == 1 => {
+                    let id = enc.token_ids()[0];
+                    tracing::debug!(
+                        target: "mm_routing",
+                        bos_token = %bos_text,
+                        bos_token_id = id,
+                        "routing-side BOS prepend enabled (tokenizer_config.json add_bos_token=true)"
+                    );
+                    Some(id)
+                }
+                Ok(enc) => {
+                    tracing::debug!(
+                        target: "mm_routing",
+                        bos_token = %bos_text,
+                        round_trip_ids = ?enc.token_ids(),
+                        "BOS token does not round-trip to a single id; routing-side prepend disabled"
+                    );
+                    None
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        target: "mm_routing",
+                        bos_token = %bos_text,
+                        error = %e,
+                        "BOS token failed to re-encode; routing-side prepend disabled"
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
 
         Ok(Arc::new(Self {
             formatter,
@@ -496,9 +566,11 @@ impl OpenAIPreprocessor {
             #[cfg(feature = "lightseek-mm")]
             image_token_counter,
             #[cfg(feature = "lightseek-mm")]
-            image_token_id,
+            routing_image_token_id,
             #[cfg(feature = "lightseek-mm")]
             image_placeholder_template,
+            #[cfg(feature = "lightseek-mm")]
+            routing_prepend_bos,
         }))
     }
 
@@ -569,13 +641,13 @@ impl OpenAIPreprocessor {
         let tokenize_start = Instant::now();
         let (token_ids, annotations) = {
             let _nvtx = dynamo_nvtx_range!("preprocess.tokenize");
-            self.gather_tokens(request, formatted_prompt.clone(), tracker)
+            self.gather_tokens(request, formatted_prompt.as_deref(), tracker)
                 .with_context(|| "Failed to gather tokens")?
         };
         TOKENIZE_SECONDS.observe(tokenize_start.elapsed().as_secs_f64());
 
         let _mm_image_entries = self
-            .gather_multi_modal_data(request, &mut builder, formatted_prompt)
+            .gather_multi_modal_data(request, &mut builder, formatted_prompt.as_deref())
             .await
             .with_context(|| "Failed to gather multimodal data")?;
 
@@ -583,8 +655,13 @@ impl OpenAIPreprocessor {
         // mm_hashes) for the KV router. No-op when no images are present or
         // the model has no resolved image-placeholder.
         #[cfg(feature = "lightseek-mm")]
-        self.gather_mm_exact_routing_info(&mut builder, &_mm_image_entries, &token_ids)
-            .with_context(|| "Failed to build MM routing info")?;
+        self.gather_mm_exact_routing_info(
+            &mut builder,
+            &_mm_image_entries,
+            &token_ids,
+            formatted_prompt.as_deref(),
+        )
+        .with_context(|| "Failed to build MM routing info")?;
 
         // Install tokens on the builder. Done after MM routing built its
         // view so the routing-side borrow stays cheap and builder ownership
@@ -634,14 +711,31 @@ impl OpenAIPreprocessor {
         builder.model(request.model());
 
         let mut stop_conditions = request.extract_stop_conditions()?;
+        // Harmony's `<|call|>` is BOTH the tool-call terminator the parser needs in the
+        // decoded text AND a gpt-oss EOS token. Hiding it like other EOS tokens strips the
+        // terminator before the harmony parser sees it, so tool calls are silently dropped
+        // (vLLM >=0.22 correctly stops on `<|call|>`, which is when this surfaces). Keep it
+        // visible — out of the hidden stop set — when the harmony tool-call parser is active.
+        // Generation still stops on it via the worker's own EOS; we only avoid *hiding* it.
+        let visible_eos: Vec<u32> = if matches!(self.tool_call_parser.as_deref(), Some("harmony")) {
+            dynamo_parsers::harmony_terminator_token_ids()
+        } else {
+            Vec::new()
+        };
         if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
             for eos_token in self.model_info.eos_token_ids() {
-                if !stop_tokens.contains(&eos_token) {
+                if !visible_eos.contains(&eos_token) && !stop_tokens.contains(&eos_token) {
                     stop_tokens.push(eos_token);
                 }
             }
         } else {
-            stop_conditions.stop_token_ids_hidden = Some(self.model_info.eos_token_ids());
+            stop_conditions.stop_token_ids_hidden = Some(
+                self.model_info
+                    .eos_token_ids()
+                    .into_iter()
+                    .filter(|t| !visible_eos.contains(t))
+                    .collect(),
+            );
         }
 
         // apply ignore eos if not already set
@@ -668,6 +762,25 @@ impl OpenAIPreprocessor {
             )
         {
             output_options.skip_special_tokens = Some(false);
+        } else if Self::special_tokens_will_be_stripped(
+            output_options.skip_special_tokens,
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        ) {
+            // Caller forced `skip_special_tokens=true` while a special-token-
+            // dependent parser is active. The engine's markers (e.g. harmony
+            // `<|channel|>` / `<|message|>`) get stripped before the parser
+            // runs, so tool_calls / reasoning_content come back empty and the
+            // markup leaks into `content`. Warn once: this is a silent,
+            // deterministic correctness loss that no parser fixture can catch.
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    tool_call_parser = ?self.tool_call_parser,
+                    reasoning_parser = ?self.runtime_config.reasoning_parser,
+                    "skip_special_tokens=true requested while a special-token-dependent parser is active; the engine's special tokens will be stripped before parsing, so tool_calls/reasoning_content will be empty and the markup will leak into content. Unset skip_special_tokens (Dynamo defaults it to false for these parsers) or set it to false."
+                );
+            });
         }
         builder.output_options(output_options);
         builder.annotations(request.annotations().unwrap_or_default());
@@ -785,7 +898,7 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
-        formatted_prompt: Option<String>,
+        formatted_prompt: Option<&str>,
     ) -> Result<Vec<MmImageEntry>> {
         let mut media_map: MultimodalDataMap = HashMap::new();
         let mut fetch_tasks: Vec<(String, &ChatCompletionRequestUserMessageContentPart)> =
@@ -940,8 +1053,8 @@ impl OpenAIPreprocessor {
 
         // URL-passthrough path (media_loader is None): fetch image headers in
         // parallel to get (W, H) per image without downloading the full bytes.
-        // This is what enables MM-aware routing for vLLM-backed VLMs that
-        // register `media_decoder: null` and let the worker do its own decode.
+        // Enables MM-aware routing for backends that register
+        // `media_decoder: null` and decode images on the worker.
         #[cfg(feature = "lightseek-mm")]
         if !url_passthrough_images.is_empty() {
             let dim_results = futures::future::join_all(
@@ -1013,8 +1126,12 @@ impl OpenAIPreprocessor {
                 Self::strip_inline_data_urls(&mut extra_args["messages"]);
             }
 
-            if let Some(ref prompt) = formatted_prompt {
-                extra_args["formatted_prompt"] = serde_json::Value::String(prompt.clone());
+            if let Some(prompt) = formatted_prompt {
+                // Clone here is the single owned allocation we actually need:
+                // the prompt is inserted into the request's `extra_args` JSON.
+                // The caller still holds the original `String`; passing
+                // `Option<&str>` keeps text-only requests (no MM) clone-free.
+                extra_args["formatted_prompt"] = serde_json::Value::String(prompt.to_string());
             }
 
             if let Some(serde_json::Value::Object(backend_extra_args)) =
@@ -1067,32 +1184,19 @@ impl OpenAIPreprocessor {
         Ok(Vec::new())
     }
 
-    /// Build `MmRoutingInfo` for exact MM-aware KV routing.
-    ///
-    /// Computes per-image token counts via lightseek, expands the placeholder
-    /// tokens, builds per-block `BlockMmObjectInfo`, and writes the result to
-    /// `builder.mm_routing_info`. The worker-bound `token_ids` are left
-    /// unchanged — only the routing-side view is expanded.
-    ///
-    /// `token_ids` is the tokenized formatted prompt (one entry per
-    /// placeholder per image, before expansion); the caller threads it in
-    /// from `gather_tokens` to avoid a second tokenizer pass.
-    ///
-    /// Returns `Ok(())` with no work performed when:
-    /// - no images in the request,
-    /// - `image_token_id` was not resolved at startup,
-    /// - `image_token_counter` is unavailable,
-    /// - `kv_cache_block_size` is 0 (worker didn't advertise one), or
-    /// - the count of placeholder tokens in `token_ids` doesn't match
-    ///   `mm_image_entries.len()` (mismatched expansion would misalign
-    ///   offsets; falling back to text-prefix routing is safer than
-    ///   producing incorrect block hashes).
+    /// Build `MmRoutingInfo` for exact MM-aware KV routing. The worker-bound
+    /// `token_ids` are unchanged — only the routing-side view is expanded.
+    /// `formatted_prompt` is only consumed for Phi-3-style numbered placeholder
+    /// templates; single-special-token families (Qwen-VL, LLaVA) ignore it.
+    /// Returns `Ok(())` with no work performed on any precondition miss
+    /// (caller falls back to text-prefix routing).
     #[cfg(feature = "lightseek-mm")]
     pub fn gather_mm_exact_routing_info(
         &self,
         builder: &mut PreprocessedRequestBuilder,
         mm_image_entries: &[MmImageEntry],
         token_ids: &[crate::protocols::TokenIdType],
+        formatted_prompt: Option<&str>,
     ) -> Result<()> {
         use crate::protocols::common::preprocessor::MmRoutingInfo;
         use dynamo_kv_router::protocols::{RequestExtraInfo, RequestMmObjectInfo};
@@ -1100,10 +1204,10 @@ impl OpenAIPreprocessor {
         if mm_image_entries.is_empty() {
             return Ok(());
         }
-        let Some(image_token_id) = self.image_token_id else {
+        let Some(find_token_id) = self.routing_image_token_id else {
             tracing::debug!(
                 target: "mm_routing",
-                "image_token_id unresolved; skipping MM routing info"
+                "routing_image_token_id unresolved; skipping MM routing info"
             );
             return Ok(());
         };
@@ -1123,40 +1227,34 @@ impl OpenAIPreprocessor {
             return Ok(());
         }
 
-        // Sanity: number of placeholder tokens in the tokenized prompt must
-        // match the number of images in the request. If they disagree, the
-        // expansion would misplace ranges; better to skip MM routing entirely
-        // and fall back to text-prefix routing for this request.
-        //
-        // Families like Phi-3-vision use numbered placeholder text
-        // (`<|image_1|>`) that BPE-decomposes into multiple sub-tokens —
-        // `image_token_id` (the single `<|image|>` special token) never
-        // appears post-tokenization. For those we run a substring-match
-        // pass first that rewrites each numbered placeholder's BPE
-        // sub-sequence back to a single `image_token_id`, then proceed
-        // with the standard expansion below.
-        let placeholder_count = token_ids.iter().filter(|&&t| t == image_token_id).count();
+        // Single-special-token placeholders (Qwen-VL `<|image_pad|>`, LLaVA
+        // `<image>`) emit one `find_token_id` per image in the tokenized
+        // prompt and hit the fast path below. Numbered-text placeholders
+        // (Phi-3 `<|image_N|>`) BPE-shatter and need the splice helper to
+        // mirror what the worker hashes on.
+        let placeholder_count = token_ids.iter().filter(|&&t| t == find_token_id).count();
         let normalized_token_ids: std::borrow::Cow<'_, [crate::protocols::TokenIdType]> =
             if placeholder_count == mm_image_entries.len() {
                 std::borrow::Cow::Borrowed(token_ids)
             } else if let Some(tpl) = self.image_placeholder_template
                 && tpl.contains("{n}")
+                && let Some(prompt) = formatted_prompt
             {
-                match self.normalize_numbered_placeholders(
-                    token_ids,
-                    image_token_id,
+                match self.splice_phi3_numbered_placeholders_at_token_level(
+                    prompt,
                     tpl,
+                    find_token_id,
                     mm_image_entries.len(),
                 ) {
-                    Some(v) => std::borrow::Cow::Owned(v),
+                    Some(spliced) => std::borrow::Cow::Owned(spliced),
                     None => {
                         tracing::warn!(
                             target: "mm_routing",
                             placeholder_count,
                             image_count = mm_image_entries.len(),
-                            image_token_id = image_token_id,
+                            routing_image_token_id = find_token_id,
                             placeholder_template = tpl,
-                            "numbered placeholder BPE rewrite failed; \
+                            "splice failed for numbered placeholder; \
                              skipping MM routing info (text-prefix routing only)"
                         );
                         return Ok(());
@@ -1167,7 +1265,7 @@ impl OpenAIPreprocessor {
                     target: "mm_routing",
                     placeholder_count,
                     image_count = mm_image_entries.len(),
-                    image_token_id = image_token_id,
+                    routing_image_token_id = find_token_id,
                     "placeholder token count in tokenized prompt does not match image count; \
                      skipping MM routing info (text-prefix routing only)"
                 );
@@ -1181,14 +1279,32 @@ impl OpenAIPreprocessor {
             .collect();
         let n_total: usize = n_tokens.iter().sum();
 
+        // Replace each placeholder occurrence with N copies of the same
+        // `find_token_id` (config.json's `image_token_id` when present).
+        // That id is what the backend's HF processor emits in the expanded
+        // sequence for every supported family; filling with lightseek-mm's
+        // per-spec value previously left Qwen2-VL / Qwen2.5-VL stuck at
+        // `effective_cached_blocks=1` because their per-patch id never
+        // appears in stored block hashes.
+        // BOS ownership: when the Phi-3 splice helper produced
+        // `normalized_token_ids` (Cow::Owned), it has already emitted the
+        // leading BOS as part of its complete sequence. Only the non-splice
+        // path (Cow::Borrowed = raw tokenized prompt) needs the caller to
+        // prepend BOS here. Avoids the prior split-brain where the leading
+        // push was here and the mid-segment pushes lived inside the helper.
+        let splice_owns_bos = matches!(normalized_token_ids, std::borrow::Cow::Owned(_));
+        let bos_extra = (!splice_owns_bos && self.routing_prepend_bos.is_some()) as usize;
         let mut expanded: Vec<crate::protocols::TokenIdType> =
-            Vec::with_capacity(normalized_token_ids.len() + n_total);
+            Vec::with_capacity(normalized_token_ids.len() + n_total + bos_extra);
+        if !splice_owns_bos && let Some(bos) = self.routing_prepend_bos {
+            expanded.push(bos);
+        }
         let mut img_ranges: Vec<(usize, usize)> = Vec::with_capacity(mm_image_entries.len());
         let mut i = 0usize;
         for &t in normalized_token_ids.iter() {
-            if t == image_token_id && i < mm_image_entries.len() {
+            if t == find_token_id && i < mm_image_entries.len() {
                 let start = expanded.len();
-                expanded.extend(std::iter::repeat_n(image_token_id, n_tokens[i]));
+                expanded.extend(std::iter::repeat_n(find_token_id, n_tokens[i]));
                 img_ranges.push((start, start + n_tokens[i]));
                 i += 1;
             } else {
@@ -1235,48 +1351,89 @@ impl OpenAIPreprocessor {
         Ok(())
     }
 
-    /// Rewrites BPE-decomposed numbered image placeholders back into single
-    /// `image_token_id` tokens so the standard expansion can proceed.
+    /// Build routing-side tokens for Phi-3-vision's `<|image_N|>` numbered
+    /// placeholder template so the router's per-block hashes match the
+    /// worker's BlockStored events byte-for-byte.
     ///
-    /// Used for Phi-3-vision-style templates whose flatten-time placeholder
-    /// is `<|image_{n}|>` (not a tokenizer special token, BPE-encodes into
-    /// ~7 sub-tokens) while the model's actual image token is `<|image|>`
-    /// (single special token = `image_token_id`). The backend's HF
-    /// processor recognises `<|image_{n}|>` in the prompt and replaces
-    /// each with N copies of `image_token_id` post-tokenization — we
-    /// replicate the routing-side equivalent here.
+    /// **Family contract — Phi-3-only.** The encode-decode roundtrip +
+    /// per-segment BOS pattern here is specific to Phi-3's HF processor
+    /// (and any future `LlamaTokenizer`-family with `<|image_{n}|>`
+    /// placeholders): the processor splits the prompt at `<|image_N|>` and
+    /// tokenizes each segment with `add_special_tokens=true`, prefixing
+    /// every segment (including the first) with a fresh BOS, and decodes-
+    /// then-re-encodes across special-token boundaries, which inserts
+    /// whitespace after each special token and bumps the SentencePiece
+    /// prefix token (e.g. 29871 `▁` -> 259 `▁▁` for `<|user|>\n`). Both
+    /// effects are reproduced here.
     ///
-    /// For each image index `i` in `1..=expected_count`, encodes the
-    /// substituted placeholder string and scans `token_ids` for the
-    /// resulting BPE sub-sequence. Each match collapses to a single
-    /// `image_token_id` in the returned vector, preserving every
-    /// surrounding token. Returns `None` if any expected placeholder is
-    /// missing or if scans go out of order — the caller falls back to
-    /// text-prefix routing in that case.
+    /// Caller is `gather_mm_exact_routing_info`, which gates on
+    /// `placeholder_tpl.contains("{n}")`. The `routing_prepend_bos`
+    /// requirement below acts as the family guard: a future model with a
+    /// `{n}`-style placeholder but no BOS prepend (i.e. not a
+    /// LlamaTokenizer-family) would not benefit from this roundtrip and
+    /// could silently produce wrong block hashes, so we bail and let the
+    /// caller fall back to text-prefix routing.
+    ///
+    /// Returns one `find_token_id` per image; the caller's expansion loop
+    /// multiplies them to the per-image patch count. Leading BOS is
+    /// emitted here as the first element of the returned vector — the
+    /// caller does NOT prepend its own BOS when this helper succeeds.
+    /// Returns `None` (caller falls back to text-prefix routing) when the
+    /// family guard trips or on any tokenize/decode failure.
     #[cfg(feature = "lightseek-mm")]
-    fn normalize_numbered_placeholders(
+    fn splice_phi3_numbered_placeholders_at_token_level(
         &self,
-        token_ids: &[crate::protocols::TokenIdType],
-        image_token_id: crate::protocols::TokenIdType,
+        prompt: &str,
         placeholder_tpl: &str,
+        find_token_id: crate::protocols::TokenIdType,
         expected_count: usize,
     ) -> Option<Vec<crate::protocols::TokenIdType>> {
-        let mut out: Vec<crate::protocols::TokenIdType> = Vec::with_capacity(token_ids.len());
-        let mut cursor = 0usize;
+        // Family guard: the encode-decode roundtrip + per-segment BOS
+        // semantics are LlamaTokenizer-family-specific. `routing_prepend_bos`
+        // is set iff the model declares `add_bos_token: true` in
+        // tokenizer_config.json, which is the marker for that family.
+        let bos = self.routing_prepend_bos?;
+
+        // Encode-decode roundtrip mirrors vLLM's text-substitute fallback,
+        // which is what the Phi-3 worker actually hashes on.
+        let prompt_owned: String = self
+            .tokenizer
+            .encode(prompt)
+            .ok()
+            .and_then(|enc| self.tokenizer.decode(enc.token_ids(), false).ok())
+            .map(Into::into)?;
+        let prompt: &str = &prompt_owned;
+
+        let mut byte_ranges: Vec<(usize, usize)> = Vec::with_capacity(expected_count);
+        let mut search_from = 0usize;
         for idx in 1..=expected_count {
-            let placeholder_text = placeholder_tpl.replace("{n}", &idx.to_string());
-            let encoding = self.tokenizer.encode(&placeholder_text).ok()?;
-            let sub_ids = encoding.token_ids();
-            if sub_ids.is_empty() {
-                return None;
-            }
-            let pos = find_subseq(&token_ids[cursor..], sub_ids)? + cursor;
-            out.extend_from_slice(&token_ids[cursor..pos]);
-            out.push(image_token_id);
-            cursor = pos + sub_ids.len();
+            let pattern = placeholder_tpl.replace("{n}", &idx.to_string());
+            let rel = prompt[search_from..].find(&pattern)?;
+            let start = search_from + rel;
+            let end = start + pattern.len();
+            byte_ranges.push((start, end));
+            search_from = end;
         }
-        out.extend_from_slice(&token_ids[cursor..]);
-        Some(out)
+
+        // Leading BOS is emitted here so the caller's general-purpose
+        // BOS-prepend path can skip when this helper produced the
+        // normalized tokens (avoids the prior split-brain where leading
+        // BOS was pushed by the caller and mid/suffix BOS pushed here).
+        let mut result: Vec<crate::protocols::TokenIdType> = vec![bos];
+        let mut prev_end = 0usize;
+        for &(ph_start, ph_end) in byte_ranges.iter() {
+            let seg = &prompt[prev_end..ph_start];
+            let seg_enc = self.tokenizer.encode(seg).ok()?;
+            result.extend_from_slice(seg_enc.token_ids());
+            result.push(find_token_id);
+            // Mid-prompt segments get a fresh BOS — Phi-3's HF processor
+            // tokenizes each segment with add_special_tokens=true.
+            result.push(bos);
+            prev_end = ph_end;
+        }
+        let suffix_enc = self.tokenizer.encode(&prompt[prev_end..]).ok()?;
+        result.extend_from_slice(suffix_enc.token_ids());
+        Some(result)
     }
 
     /// xxh3-64 of the raw URL bytes. Used as the routing `mm_hash` in the
@@ -1455,7 +1612,7 @@ impl OpenAIPreprocessor {
     >(
         &self,
         request: &R,
-        formatted_prompt: Option<String>,
+        formatted_prompt: Option<&str>,
         tracker: Option<&RequestTracker>,
     ) -> Result<(Vec<crate::protocols::TokenIdType>, HashMap<String, String>)> {
         let mut annotations = HashMap::new();
@@ -1488,15 +1645,17 @@ impl OpenAIPreprocessor {
                 if let Some(text_input) = request.extract_text() {
                     match text_input {
                         TextInput::Single(raw_prompt) => {
-                            if let Some(f) = formatted_prompt.as_ref()
+                            if let Some(f) = formatted_prompt
                                 && request.has_annotation(ANNOTATION_FORMATTED_PROMPT)
                             {
                                 annotations
                                     .insert(ANNOTATION_FORMATTED_PROMPT.to_string(), f.to_string());
                             }
 
-                            // Completions will use raw_prompt, no template
-                            let prompt = formatted_prompt.unwrap_or(raw_prompt);
+                            // Completions will use raw_prompt, no template.
+                            // Borrow either input — no allocation needed; the
+                            // tokenizer accepts `&str`.
+                            let prompt: &str = formatted_prompt.unwrap_or(raw_prompt.as_str());
 
                             // If nvext.token_data is present, use the pre-computed tokens
                             // directly and skip tokenization.  This avoids redundant
@@ -1526,10 +1685,10 @@ impl OpenAIPreprocessor {
                                 tracing::warn!(
                                     "backend_instance_id provided but no token_data; tokenizing prompt"
                                 );
-                                let encoding = self.encode_with_timing(&prompt, tracker)?;
+                                let encoding = self.encode_with_timing(prompt, tracker)?;
                                 (encoding.token_ids().to_vec(), false)
                             } else {
-                                let encoding = self.encode_with_timing(&prompt, tracker)?;
+                                let encoding = self.encode_with_timing(prompt, tracker)?;
                                 (encoding.token_ids().to_vec(), false)
                             };
 
@@ -2265,6 +2424,21 @@ impl OpenAIPreprocessor {
             reasoning_parser,
             Some("gemma4") | Some("gemma-4") | Some("gpt_oss") | Some("kimi_k25")
         )
+    }
+
+    /// Whether the resolved `skip_special_tokens` will strip the special-token
+    /// markers an active parser depends on — guaranteeing the parser silently
+    /// emits empty tool_calls / reasoning_content and the markup leaks into
+    /// `content`. Only true when the caller explicitly forced
+    /// `skip_special_tokens=true` while a special-token-dependent parser is
+    /// active; otherwise the default is flipped to false before this check.
+    fn special_tokens_will_be_stripped(
+        skip_special_tokens: Option<bool>,
+        tool_call_parser: Option<&str>,
+        reasoning_parser: Option<&str>,
+    ) -> bool {
+        skip_special_tokens == Some(true)
+            && Self::parser_requires_special_tokens(tool_call_parser, reasoning_parser)
     }
 
     fn is_nemotron_force_reasoning(reasoning_parser: Option<&str>) -> bool {
@@ -3058,6 +3232,26 @@ mod tests {
                 "FAILED: {desc}",
             );
         }
+    }
+
+    /// Guard: a caller forcing `skip_special_tokens=true` while a
+    /// special-token-dependent parser is active strips the markers before
+    /// parsing → silent empty tool_calls / leaked markup. Only that exact
+    /// combination should trip the warning condition.
+    #[test]
+    fn test_special_tokens_will_be_stripped() {
+        let f = OpenAIPreprocessor::special_tokens_will_be_stripped;
+        // forced-true + marker-dependent parser → will be stripped (warn)
+        assert!(f(Some(true), Some("harmony"), Some("gpt_oss")));
+        assert!(f(Some(true), Some("harmony"), None));
+        assert!(f(Some(true), None, Some("gpt_oss")));
+        assert!(f(Some(true), Some("kimi_k2"), None));
+        // false / unset → never (default path keeps the markers)
+        assert!(!f(Some(false), Some("harmony"), None));
+        assert!(!f(None, Some("harmony"), None));
+        // forced-true but parser doesn't need special tokens → fine
+        assert!(!f(Some(true), Some("hermes"), None));
+        assert!(!f(Some(true), None, None));
     }
 
     #[test]
