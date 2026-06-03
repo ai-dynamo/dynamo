@@ -484,9 +484,15 @@ func verifyDGDServices(dgdName string, expectations map[string]ServiceExpectatio
 func verifyInference(dgdName, model string) {
 	frontendURL := fmt.Sprintf("http://%s-frontend.%s.svc.cluster.local:8000", dgdName, flagNamespace)
 
+	// Build a short suffix for ephemeral pod names.
+	suffix := dgdName
+	if len(suffix) > 12 {
+		suffix = suffix[:12]
+	}
+
 	// v1/models — verify the model is listed
 	By("Checking v1/models endpoint")
-	modelsOut, modelsErr, err := kubectl("run", "inference-check-models-"+dgdName[:8],
+	modelsOut, modelsErr, err := kubectl("run", "inference-models-"+suffix,
 		"--rm", "-i", "--restart=Never",
 		"-n", flagNamespace,
 		"--image=curlimages/curl:latest",
@@ -501,7 +507,7 @@ func verifyInference(dgdName, model string) {
 	// v1/chat/completions — verify the model can generate a response
 	By("Sending a chat completion request")
 	chatBody := fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"Say hello in one word."}],"max_tokens":16}`, model)
-	chatOut, chatErr, err := kubectl("run", "inference-check-chat-"+dgdName[:8],
+	chatOut, chatErr, err := kubectl("run", "inference-chat-"+suffix,
 		"--rm", "-i", "--restart=Never",
 		"-n", flagNamespace,
 		"--image=curlimages/curl:latest",
