@@ -4,7 +4,6 @@
 #}
 # === BEGIN templates/sglang_framework.Dockerfile ===
 
-{% if device == "xpu" %}
 ##################################
 #### SGLang XPU Framework ########
 ##################################
@@ -113,5 +112,4 @@ RUN echo ". ${CONDA_DIR}/bin/activate sglang" >> /etc/bash.bashrc && \
 
 ENV SGLANG_FORCE_SHUTDOWN=1
 
-{% endif %}
 # === END templates/sglang_framework.Dockerfile ===
