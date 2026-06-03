@@ -771,6 +771,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 NewRequestData(
                     req_id=req_id,
                     prompt_token_ids=prompt,
+                    prefill_token_ids=prompt,
                     mm_features=[],
                     sampling_params=req.sampling_params,
                     pooling_params=None,
