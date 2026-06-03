@@ -298,6 +298,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     // Peer routers still approximate decay anchoring with local receive time.
                     let decay_now = Instant::now();
                     let mut remote_capacity_changed = false;
+                    // TODO: Extract a reusable single-event apply method with structured errors
+                    // and lazy or strict worker admission. Native sync assumes discovery plus lazy
+                    // registration; standalone transports must reject stale adds after removal.
                     match &event.data {
                         ActiveSequenceEventData::AddRequest {
                             token_sequence,
