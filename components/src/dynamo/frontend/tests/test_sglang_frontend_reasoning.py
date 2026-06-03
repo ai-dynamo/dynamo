@@ -1,10 +1,10 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
-"""FE.process_output.9 reasoning<->tool orchestration — SGLang, over the shared YAML fixture.
+"""FE.process_output.9 reasoning<->tool orchestration — SGLang, over the shared case set.
 
 Runs the SAME cases as test_vllm_frontend_reasoning.py
-(``fixtures/frontend_reasoning.yaml``) through a SglangStreamingPostProcessor
+(``frontend_fixture_cases.py``) through a SglangStreamingPostProcessor
 built with both a qwen3 reasoning parser and a hermes function-call parser."""
 
 import _sglang_frontend_adapter as adapter
@@ -30,7 +30,7 @@ def tokenizer():
     return get_tokenizer(MODEL)
 
 
-class TestSglangFrontendReasoning:  # FE.process_output.9 — reasoning <-> tool-call orchestration (shared YAML fixture)
+class TestSglangFrontendReasoning:  # FE.process_output.9 — reasoning <-> tool-call orchestration (shared case set)
     @pytest.mark.parametrize("case,batch_size", params(CASES))
     def test_reasoning(self, tokenizer, case, batch_size):
         choices = adapter.replay(

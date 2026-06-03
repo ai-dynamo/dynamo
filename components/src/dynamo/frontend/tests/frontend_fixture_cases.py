@@ -1,32 +1,35 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
-"""Shared loader + normalize + assert for the FRONTEND.* YAML fixtures.
+"""Shared cases + normalize + assert for the FE.process_output parity tests.
 
-Fixtures (``fixtures/frontend_*.yaml``) are backend-agnostic. The per-backend
-adapters (``_vllm_frontend_adapter.py`` / ``_sglang_frontend_adapter.py``)
-build that backend's StreamingPostProcessor, replay a case's ``model_text`` at
-each chunk granularity, and hand the assembled OpenAI choice dicts here.
-Both backends emit the same choice shape
+The cases are backend-agnostic and defined in code below, composed from shared
+hermes tool-call / qwen3 ``<think>`` snippets so a block is written once and
+reused. (They were YAML fixtures, but unlike the parser parity corpus these are
+homogeneous -- one markup, one tool set, one shared ``expected`` -- so a data
+file only added a parse step, a second reader in the dashboard, and verbatim
+duplication YAML can't factor out.)
+
+The per-backend adapters (``_vllm_frontend_adapter.py`` /
+``_sglang_frontend_adapter.py``) build that backend's StreamingPostProcessor,
+replay a case's ``model_text`` at each chunk granularity, and hand the assembled
+OpenAI choice dicts here. Both backends emit the same choice shape
 (``{delta: {content, reasoning_content, tool_calls}, finish_reason}``), so
 normalize/assert is shared rather than duplicated.
 
-Consumed by FRONTEND.4 (assembly, tool parser configured) and FRONTEND.6
-(detok, fast plain-text path, no parser). This is a *coverage* matrix (write
-once, both engines must pass), NOT a behavioral divergence grid -- vLLM/SGLang
-expose no callable frontend on the same input, so there is no
-expected.{vllm,sglang}.
+Grouped into FE.process_output.4 (assembly, tool parser configured), .6 (detok,
+fast plain-text path, no parser), and .9 (reasoning <-> tool orchestration).
+This is a *coverage* matrix (write once, both engines must pass), NOT a
+behavioral divergence grid -- vLLM/SGLang expose no callable frontend on the
+same input, so there is no expected.{vllm,sglang}; per-engine gaps live in each
+test's ``_KNOWN_GAPS``.
 """
 
 import json
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
-
-_FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
 
 @dataclass
@@ -39,31 +42,210 @@ class FrontendCase:
     description: str = ""
 
 
-def _load(name: str) -> dict[str, Any]:
-    with (_FIXTURE_DIR / f"{name}.yaml").open() as fh:
-        return yaml.safe_load(fh)
+# --------------------------------------------------------------------------- #
+# Shared markup snippets. Hermes tool calls and qwen3 <think> blocks are written
+# once here; cases below compose them, so the same block is never repeated.
+# --------------------------------------------------------------------------- #
+
+_TC_WEATHER_NYC = (
+    "<tool_call>\n"
+    '{"name": "get_weather", "arguments": {"city": "NYC"}}\n'
+    "</tool_call>"
+)
+_TC_WEATHER_LONDON = (
+    "<tool_call>\n"
+    '{"name": "get_weather", "arguments": {"city": "London"}}\n'
+    "</tool_call>"
+)
+_TC_SEARCH_JOYCE = (
+    "<tool_call>\n"
+    '{"name": "search_books", "arguments": {"q": "Joyce"}}\n'
+    "</tool_call>"
+)
+# Two parallel calls, one newline between them, exactly as a model streams them.
+_TC_WEATHER_AND_SEARCH = _TC_WEATHER_LONDON + "\n" + _TC_SEARCH_JOYCE
+
+_THINK_WEATHER = "<think>\nThe user wants the weather, I will call the tool.\n</think>"
+_THINK_ANSWER = "<think>\nLet me think about the answer.\n</think>"
+_THINK_MULTI = "<think>\nI'll check weather and search books.\n</think>"
+
+# Expected parsed tool calls (the assert contract), reused across cases.
+_EXP_WEATHER_NYC = {"name": "get_weather", "arguments": {"city": "NYC"}}
+_EXP_WEATHER_LONDON = {"name": "get_weather", "arguments": {"city": "London"}}
+_EXP_SEARCH_JOYCE = {"name": "search_books", "arguments": {"q": "Joyce"}}
+
+# Canonical tool schemas; each adapter converts to its engine's tool type.
+TOOLS = [
+    {
+        "name": "get_weather",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+    },
+    {
+        "name": "search_books",
+        "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+    },
+]
+
+
+# --------------------------------------------------------------------------- #
+# FE.process_output.4 — tool-call output assembly (hermes markup, reasoning-free)
+# --------------------------------------------------------------------------- #
+ASSEMBLY_CASES = [
+    FrontendCase(
+        "single_tool_call",
+        _TC_WEATHER_NYC,
+        {
+            "tool_calls": [_EXP_WEATHER_NYC],
+            "content": "",
+            "finish_reason": "tool_calls",
+        },
+        batch_sizes=[20, 10, 3],
+        description="one complete tool call, no narration",
+    ),
+    FrontendCase(
+        "multiple_tool_calls",
+        _TC_WEATHER_AND_SEARCH,
+        {
+            "tool_calls": [_EXP_WEATHER_LONDON, _EXP_SEARCH_JOYCE],
+            "finish_reason": "tool_calls",
+        },
+        batch_sizes=[20, 10],
+        description="two parallel tool calls, distinct names",
+    ),
+    FrontendCase(
+        "content_then_tool_call",
+        # Realistic token streaming: narration arrives in chunks BEFORE the
+        # <tool_call> start. Known limitation (not asserted): when narration and
+        # the <tool_call> start land in the SAME delta, the narration is dropped
+        # -- prepost.py buffers post-</think> content but not plain pre-tool
+        # narration.
+        "Let me check that for you.\n" + _TC_WEATHER_NYC,
+        {
+            "tool_calls": [_EXP_WEATHER_NYC],
+            "content_contains": "Let me check that for you.",
+            "finish_reason": "tool_calls",
+        },
+        batch_sizes=[8, 5],
+        description="narration before the tool call is preserved as content",
+    ),
+    FrontendCase(
+        "no_tool_calls",
+        "It is sunny in NYC today.",
+        {
+            "tool_calls": [],
+            "content_contains": "It is sunny in NYC today.",
+            "finish_reason": "stop",
+        },
+        batch_sizes=[20, 5],
+        description="plain text answer, no tool markup -> no tool_calls, content kept",
+    ),
+    FrontendCase(
+        "single_chunk_fallback",
+        _TC_WEATHER_NYC,
+        {"tool_calls": [_EXP_WEATHER_NYC], "finish_reason": "tool_calls"},
+        single_chunk=True,
+        description="whole response plus finish arrive in one chunk (non-streaming fallback)",
+    ),
+]
+
+
+# --------------------------------------------------------------------------- #
+# FE.process_output.6 — incremental detok / fast plain-text path (no parser)
+# --------------------------------------------------------------------------- #
+DETOK_CASES = [
+    FrontendCase(
+        "plain_text_single_chunk",
+        "It is sunny in NYC today.",
+        {
+            "tool_calls": [],
+            "content": "It is sunny in NYC today.",
+            "finish_reason": "stop",
+        },
+        single_chunk=True,
+        description="short plain answer, whole thing in one chunk",
+    ),
+    FrontendCase(
+        "plain_text_streamed",
+        "The quick brown fox jumps over the lazy dog.",
+        {
+            "tool_calls": [],
+            "content": "The quick brown fox jumps over the lazy dog.",
+            "finish_reason": "stop",
+        },
+        batch_sizes=[20, 5, 2],
+        description="plain answer streamed in small chunks -> content reassembled intact",
+    ),
+    FrontendCase(
+        "plain_text_with_markup_like_chars",
+        'Use the format {"city": "NYC"} or a list like [1, 2, 3].',
+        {
+            "tool_calls": [],
+            "content": 'Use the format {"city": "NYC"} or a list like [1, 2, 3].',
+            "finish_reason": "stop",
+        },
+        batch_sizes=[20, 4],
+        description="JSON/bracket chars without tool markup stay as content (no spurious parse)",
+    ),
+]
+
+
+# --------------------------------------------------------------------------- #
+# FE.process_output.9 — reasoning <-> tool-call orchestration
+# --------------------------------------------------------------------------- #
+REASONING_CASES = [
+    FrontendCase(
+        "reasoning_then_tool_call",
+        _THINK_WEATHER + "\n\n" + _TC_WEATHER_NYC,
+        {
+            "reasoning_contains": "call the tool",
+            "tool_calls": [_EXP_WEATHER_NYC],
+            "content": "",
+            "finish_reason": "tool_calls",
+        },
+        batch_sizes=[8, 5],
+        description="reasoning block then a tool call -> reasoning_content + tool_calls, content empty",
+    ),
+    FrontendCase(
+        "reasoning_then_text",
+        _THINK_ANSWER + "\n\nThe answer is 42.",
+        {
+            "reasoning_contains": "think about the answer",
+            "tool_calls": [],
+            "content_contains": "The answer is 42.",
+            "finish_reason": "stop",
+        },
+        batch_sizes=[8, 5],
+        description="reasoning block then a plain answer -> reasoning_content + content, no tool_calls",
+    ),
+    FrontendCase(
+        "reasoning_then_multiple_tool_calls",
+        _THINK_MULTI + "\n\n" + _TC_WEATHER_AND_SEARCH,
+        {
+            "reasoning_contains": "check weather",
+            "tool_calls": [_EXP_WEATHER_LONDON, _EXP_SEARCH_JOYCE],
+            "finish_reason": "tool_calls",
+        },
+        batch_sizes=[10],
+        description="reasoning block then two parallel tool calls",
+    ),
+]
+
+
+_CASE_LISTS: dict[str, list[FrontendCase]] = {
+    "frontend_assembly": ASSEMBLY_CASES,
+    "frontend_detok": DETOK_CASES,
+    "frontend_reasoning": REASONING_CASES,
+}
 
 
 def load_tools(name: str = "frontend_assembly") -> list[dict[str, Any]]:
     """Canonical tool schemas; each adapter converts to its engine's type."""
-    return _load(name).get("tools", [])
+    return TOOLS
 
 
 def load_cases(name: str = "frontend_assembly") -> list[FrontendCase]:
-    data = _load(name)
-    cases = []
-    for case_id, body in data["cases"].items():
-        cases.append(
-            FrontendCase(
-                case_id=case_id,
-                model_text=body["model_text"],
-                expected=body["expected"],
-                batch_sizes=body.get("batch_sizes", [20]),
-                single_chunk=body.get("single_chunk", False),
-                description=body.get("description", ""),
-            )
-        )
-    return cases
+    """Return the shared, backend-agnostic cases for a fixture group."""
+    return _CASE_LISTS[name]
 
 
 def params(cases, known_gaps: dict | None = None):

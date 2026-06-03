@@ -1,10 +1,10 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
-"""FE.process_output.4 tool-call assembly — SGLang, over the shared YAML fixture.
+"""FE.process_output.4 tool-call assembly — SGLang, over the shared case set.
 
 Runs the SAME cases as test_vllm_frontend_assembly.py
-(``fixtures/frontend_assembly.yaml``) through
+(``frontend_fixture_cases.py``) through
 ``sglang_prepost.py::SglangStreamingPostProcessor`` (see
 ``_sglang_frontend_adapter``)."""
 
@@ -25,7 +25,7 @@ pytestmark = [
 MODEL = "Qwen/Qwen3-0.6B"
 CASES = load_cases("frontend_assembly")
 
-# Known SGLang assembly gaps surfaced by the shared fixture. Kept as strict
+# Known SGLang assembly gaps surfaced by the shared cases. Kept as strict
 # xfails so the case still guards the vLLM side and the marker flips (xpass ->
 # failure) the moment SGLang is fixed, forcing its removal.
 _KNOWN_GAPS = {
@@ -41,7 +41,7 @@ def tokenizer():
     return get_tokenizer(MODEL)
 
 
-class TestSglangFrontendAssembly:  # FE.process_output.4 — tool-call output assembly (shared YAML fixture)
+class TestSglangFrontendAssembly:  # FE.process_output.4 — tool-call output assembly (shared case set)
     @pytest.mark.parametrize("case,batch_size", params(CASES, known_gaps=_KNOWN_GAPS))
     def test_assembly(self, tokenizer, case, batch_size):
         choices = adapter.replay(

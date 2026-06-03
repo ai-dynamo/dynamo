@@ -3,9 +3,9 @@
 
 """Generate the FE.process_output behavioral parity matrix.
 
-Merges per-backend pytest JUnit (from the shared YAML fixtures:
-FE.process_output.4 assembly, .6 detok, .9 reasoning) into a fixture-case x
-backend grid: pass / xfail (documented gap) / FAIL / n/a.
+Merges per-backend pytest JUnit (from the shared cases in
+frontend_fixture_cases.py: FE.process_output.4 assembly, .6 detok, .9 reasoning)
+into a case x backend grid: pass / xfail (documented gap) / FAIL / n/a.
 
 This is the behavioral analog of the parser PARITY.html grid -- but NOT a
 Dynamo-vs-reference divergence grid: vLLM/SGLang expose no callable frontend on
@@ -33,7 +33,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import yaml
+from frontend_fixture_cases import load_cases
 
 BACKENDS = ["vllm", "sglang"]
 
@@ -180,19 +180,16 @@ def _legend(items: list[tuple[str, str]], tail: str) -> str:
     return f'<p class="legend">{spans} · {tail}</p>'
 
 
-def _load_fixture_cases(tests_dir: Path) -> dict[str, dict]:
-    """case_id -> {description, model_text, expected, fixture} from the fixture YAMLs."""
+def _load_fixture_cases() -> dict[str, dict]:
+    """case_id -> {description, model_text, expected, fixture, stage} from the
+    in-code FE.process_output cases (frontend_fixture_cases.py)."""
     out: dict[str, dict] = {}
     for name, label, stage in _FIXTURES:
-        path = tests_dir / "fixtures" / f"{name}.yaml"
-        if not path.exists():
-            continue
-        data = yaml.safe_load(path.read_text()) or {}
-        for case_id, body in (data.get("cases") or {}).items():
-            out[case_id] = {
-                "description": body.get("description", ""),
-                "model_text": body.get("model_text", ""),
-                "expected": body.get("expected", {}) or {},
+        for case in load_cases(name):
+            out[case.case_id] = {
+                "description": case.description,
+                "model_text": case.model_text,
+                "expected": case.expected,
                 "fixture": label,
                 "stage": stage,
             }
@@ -227,45 +224,64 @@ def _format_expected(expected: dict) -> str:
     return "\n".join(parts)
 
 
-def _matrix(tests_dir: Path, junits: dict[str, Path]) -> str:
+def _matrix(junits: dict[str, Path]) -> str:
     full = {b: _parse_junit_full(p) for b, p in junits.items()}
     backends = [b for b in BACKENDS if b in full] + [
         b for b in full if b not in BACKENDS
     ]
-    cases = _load_fixture_cases(tests_dir)
+    cases = _load_fixture_cases()
     case_ids = sorted({c for res in full.values() for c in res})
+
+    # Collapse "<case>-<chunk>" param-ids to one row per case. Chunk size is a
+    # streaming-granularity dimension (catches chunk-boundary bugs); it only
+    # carries signal when sizes disagree, so the per-chunk breakdown goes in the
+    # tooltip and the cell shows the worst status across chunks.
+    by_case: dict[str, list[str]] = {}
+    for cid in case_ids:
+        by_case.setdefault(cid.rpartition("-")[0], []).append(cid)
+
+    # Worst-status precedence for the collapsed cell.
+    rank = {"pass": 0, "skip": 1, "xfail": 2, "FAIL": 3}
 
     rows = (
         "<tr><th>Case</th>" + "".join(f"<th>{_esc(b)}</th>" for b in backends) + "</tr>"
     )
-    for cid in case_ids:
-        case_base, _, chunk = cid.rpartition("-")
+    for case_base in sorted(by_case):
+        param_ids = by_case[case_base]
         info = cases.get(case_base, {})
-        stage = info.get("stage", "FRONTEND.?")
-        label = f"{stage}.{case_base} · chunk={chunk}"
+        label = f"{info.get('stage', 'FE.?')}.{case_base}"
         model_text = info.get("model_text", "")
         expected = _format_expected(info.get("expected", {}))
         cells = ""
         for b in backends:
-            status, message = full[b].get(cid, ("n/a", ""))
+            per_chunk = [
+                (cid.rpartition("-")[2], *full[b].get(cid, ("n/a", "")))
+                for cid in param_ids
+            ]
+            per_chunk.sort(key=lambda r: int(r[0]) if r[0].isdigit() else 10**9)
+            present = [s for _, s, _ in per_chunk if s != "n/a"]
+            agg = "n/a" if not present else max(present, key=lambda s: rank.get(s, 0))
+            breakdown = " · ".join(f"chunk={c}: {s}" for c, s, _ in per_chunk)
+            worst_msg = next((m for _, s, m in per_chunk if s == agg and m), "")
             lines = []
             if info.get("description"):
                 lines.append(("", info["description"]))
             if model_text:
                 lines.append(("input (model_text)", model_text))
             lines.append(("expected output (contract)", expected))
-            if message:
+            lines.append(("chunk sizes", breakdown))
+            if worst_msg:
                 # xfail/FAIL reasons carry the observed output after a "||" marker.
-                why, sep, actual = message.partition("||")
+                why, sep, actual = worst_msg.partition("||")
                 if sep:
                     lines.append(("ACTUAL output (this backend)", actual.strip()))
                     lines.append(("why", why.strip()))
                 else:
                     lines.append(("status reason", why.strip()))
             cells += _cell(
-                status,
-                _CASE_COLOR.get(status, "#e4e8ec"),
-                f"{label} · {b} · {status}",
+                agg,
+                _CASE_COLOR.get(agg, "#e4e8ec"),
+                f"{label} · {b} · {agg}",
                 lines,
             )
         rows += f'<tr><th class="rowhdr">{_esc(label)}</th>{cells}</tr>'
@@ -292,7 +308,7 @@ def _matrix(tests_dir: Path, junits: dict[str, Path]) -> str:
         "<section>"
         f"<table>{rows}</table>{legend}"
         f'<h2>Fixture case descriptions</h2><p class="legend">Cases live in '
-        f"<code>fixtures/frontend_*.yaml</code>; taxonomy in "
+        f"<code>frontend_fixture_cases.py</code>; taxonomy in "
         f'<a href="{_CASES_DOC_HREF}">{_CASES_DOC_LABEL}</a>.</p>'
         f'<table class="glossary"><tbody>{glossary}</tbody></table>'
         "</section>"
@@ -304,7 +320,7 @@ def _info_panel() -> str:
         '<div class="info-panel">'
         "<h2>FE.process_output — behavioral parity (chat-processor)</h2>"
         "<p>The frontend turns OpenAI requests into engine input and re-assembles the engine "
-        "stream into OpenAI chunks. This grid replays the shared YAML fixtures through both "
+        "stream into OpenAI chunks. This grid replays the shared cases through both "
         "backends' <code>StreamingPostProcessor.process_output</code> and checks the assembled "
         "deltas: <strong>FE.process_output.4</strong> tool-call assembly, <strong>.6</strong> "
         "incremental detok, <strong>.9</strong> reasoning&harr;tool orchestration. Write a case "
@@ -321,7 +337,7 @@ def _info_panel() -> str:
     )
 
 
-def render_html(tests_dir: Path, junits: dict[str, Path], generated_at: str) -> str:
+def render_html(junits: dict[str, Path], generated_at: str) -> str:
     toolbar = (
         '<div class="table-toolbar"><div class="radio-group" role="radiogroup" aria-label="View">'
         '<span class="radio-group-label">View:</span>'
@@ -338,7 +354,7 @@ def render_html(tests_dir: Path, junits: dict[str, Path], generated_at: str) -> 
         "<code>frontend_matrix.py html</code></p>"
         + _info_panel()
         + toolbar
-        + _matrix(tests_dir, junits)
+        + _matrix(junits)
         + "<script>"
         + _VIEW_JS
         + "</script>"
@@ -356,7 +372,7 @@ def _parse_junit_args(pairs: list[str]) -> dict[str, Path]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Generate the FRONTEND.* behavioral parity matrix."
+        description="Generate the FE.process_output behavioral parity matrix."
     )
     sub = ap.add_subparsers(dest="mode", required=True)
 
@@ -364,7 +380,6 @@ def main() -> None:
     cases.add_argument("--junit", nargs="+", required=True, metavar="backend=path.xml")
 
     htmlp = sub.add_parser("html", help="render PARITY.html")
-    htmlp.add_argument("--tests-dir", type=Path, default=Path(__file__).parent)
     htmlp.add_argument("--junit", nargs="+", required=True, metavar="backend=path.xml")
     htmlp.add_argument("--out", type=Path, required=True)
 
@@ -376,9 +391,7 @@ def main() -> None:
             "%Y-%m-%d %H:%M %Z"
         )
         args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(
-            render_html(args.tests_dir, _parse_junit_args(args.junit), generated_at)
-        )
+        args.out.write_text(render_html(_parse_junit_args(args.junit), generated_at))
         print(f"wrote {args.out}")
 
 

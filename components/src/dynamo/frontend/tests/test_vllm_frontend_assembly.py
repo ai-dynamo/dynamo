@@ -1,9 +1,9 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
-"""FE.process_output.4 tool-call assembly — vLLM, over the shared YAML fixture.
+"""FE.process_output.4 tool-call assembly — vLLM, over the shared case set.
 
-Replays each case in ``fixtures/frontend_assembly.yaml`` through the real
+Replays each case in ``frontend_fixture_cases.py`` through the real
 ``prepost.py::StreamingPostProcessor.process_output`` at several chunk
 granularities (see ``_vllm_frontend_adapter``). The sglang adapter runs the
 SAME cases -- write once, both engines must pass."""
@@ -33,7 +33,7 @@ def tokenizer():
     return AutoTokenizer.from_pretrained(MODEL)
 
 
-class TestVllmFrontendAssembly:  # FE.process_output.4 — tool-call output assembly (shared YAML fixture)
+class TestVllmFrontendAssembly:  # FE.process_output.4 — tool-call output assembly (shared case set)
     @pytest.mark.parametrize("case,batch_size", params(CASES))
     def test_assembly(self, tokenizer, case, batch_size):
         choices = adapter.replay(

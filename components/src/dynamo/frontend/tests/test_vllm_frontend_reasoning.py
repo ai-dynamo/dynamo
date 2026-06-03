@@ -1,7 +1,7 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
-"""FE.process_output.9 reasoning<->tool orchestration — vLLM, over the shared YAML fixture.
+"""FE.process_output.9 reasoning<->tool orchestration — vLLM, over the shared case set.
 
 Both a qwen3 reasoning parser and a hermes tool parser are active; process_output
 must route <think>...</think> to reasoning_content and tool markup to tool_calls
@@ -26,7 +26,7 @@ pytestmark = [
 MODEL = "Qwen/Qwen3-0.6B"
 CASES = load_cases("frontend_reasoning")
 
-# Known vLLM gaps surfaced by the shared fixture (strict xfail -> flips to a
+# Known vLLM gaps surfaced by the shared cases (strict xfail -> flips to a
 # failure the moment vLLM is fixed). sglang handles these cases.
 _KNOWN_GAPS = {
     (
@@ -41,7 +41,7 @@ def tokenizer():
     return AutoTokenizer.from_pretrained(MODEL)
 
 
-class TestVllmFrontendReasoning:  # FE.process_output.9 — reasoning <-> tool-call orchestration (shared YAML fixture)
+class TestVllmFrontendReasoning:  # FE.process_output.9 — reasoning <-> tool-call orchestration (shared case set)
     @pytest.mark.parametrize("case,batch_size", params(CASES, known_gaps=_KNOWN_GAPS))
     def test_reasoning(self, tokenizer, case, batch_size):
         choices = adapter.replay(

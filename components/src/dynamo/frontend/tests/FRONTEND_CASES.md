@@ -127,11 +127,11 @@ Consequence: when a peer fixes a tool/reasoning quirk inside its own `serving_ch
 
 Backends covered by this taxonomy: **vllm** (`prepost.py` + `vllm_processor.py`) and **sglang** (`sglang_prepost.py` + `sglang_processor.py`). trtllm has its own architecture under `components/src/dynamo/trtllm/` and is out of scope here.
 
-## Cases: FE.process_output (fixtures) vs FE.preprocess / FE.response_misc (unit)
+## Cases: FE.process_output (shared cases) vs FE.preprocess / FE.response_misc (unit)
 
 The 9 pipeline stages split into three groups, all prefixed `FE.*`. The number is the pipeline position; the prefix tells you the group and how the stage is tested.
 
-- **`FE.process_output.{4,6,9}`** — stages that are a deterministic input → output transform both backends implement with the *same* `process_output` contract, so the same case replays on vllm **and** sglang from shared YAML fixtures (`fixtures/frontend_*.yaml`) and is rendered in the behavioral parity matrix (`tests/parity/frontend/PARITY.html`): **4** tool-call assembly, **6** incremental detok, **9** reasoning ↔ tool orchestration.
+- **`FE.process_output.{4,6,9}`** — stages that are a deterministic input → output transform both backends implement with the *same* `process_output` contract, so the same case replays on vllm **and** sglang from shared cases defined in code (`frontend_fixture_cases.py`) and is rendered in the behavioral parity matrix (`tests/parity/frontend/PARITY.html`): **4** tool-call assembly, **6** incremental detok, **9** reasoning ↔ tool orchestration.
 - **`FE.preprocess.{1,2,3,7}`** — request-side stages (request → prompt): **1** chat-template, **2** parser dispatch, **3** request shaping, **7** worker subprocess boundary. Per-backend annotated unit tests, not a shared replay.
 - **`FE.response_misc.{5,8}`** — response-side stages *outside* `process_output`'s streaming assembly: **5** finish-reason mapping, **8** error surface. Per-backend annotated unit tests.
 

@@ -1,10 +1,10 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
-"""FE.process_output.6 detok (fast plain-text path) — SGLang, over the shared YAML fixture.
+"""FE.process_output.6 detok (fast plain-text path) — SGLang, over the shared case set.
 
 Runs the SAME cases as test_vllm_frontend_detok.py
-(``fixtures/frontend_detok.yaml``) through a parser-less
+(``frontend_fixture_cases.py``) through a parser-less
 ``SglangStreamingPostProcessor`` (``_fast_plain_text`` path)."""
 
 import _sglang_frontend_adapter as adapter
@@ -30,7 +30,7 @@ def tokenizer():
     return get_tokenizer(MODEL)
 
 
-class TestSglangFrontendDetok:  # FE.process_output.6 — incremental detok / fast plain-text path (shared YAML fixture)
+class TestSglangFrontendDetok:  # FE.process_output.6 — incremental detok / fast plain-text path (shared case set)
     @pytest.mark.parametrize("case,batch_size", params(CASES))
     def test_detok(self, tokenizer, case, batch_size):
         choices = adapter.replay(
