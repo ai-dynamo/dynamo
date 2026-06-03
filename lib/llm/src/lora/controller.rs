@@ -127,13 +127,61 @@ impl LoraController {
 
         let workers = self.state_tracker.list_workers();
         if workers.is_empty() {
-            tracing::debug!("No workers available, skipping recompute");
+            // Cluster drained: every routing entry now points at gone workers. Leaving it would
+            // make the filter fall back to all-available (scatter) and the gauges show phantom
+            // allocations. Clear routing state and reset metrics instead of returning early.
+            tracing::debug!("No workers available; clearing stale LoRA routes and metrics");
+            self.clear_lora_routing_and_metrics();
             return;
         }
 
         let total_slots = self.state_tracker.total_lora_slots() as usize;
         if total_slots == 0 {
-            tracing::debug!("No LoRA slots available, skipping recompute");
+            // Workers exist but report zero LoRA capacity, so there is nothing to (re)allocate.
+            // Don't wipe bounded routes wholesale (they'd drop to the filter's no-table scatter),
+            // but a route whose replica set has lost ALL its live workers (e.g. some workers were
+            // removed) WOULD scatter — the filter finds no live replica intersection and falls back
+            // to all available workers. Prune every entry against the live worker set: narrow to
+            // the live intersection, or rebind to a single deterministic live pin when none of its
+            // workers are live, so every LoRA keeps a bounded, live route. Then skip recompute.
+            let live: std::collections::HashSet<WorkerWithDpRank> =
+                workers.iter().copied().collect();
+            for (name, cfg) in self.routing_table.snapshot_configs() {
+                let live_set: Vec<WorkerWithDpRank> = cfg
+                    .replica_set
+                    .iter()
+                    .copied()
+                    .filter(|w| live.contains(w))
+                    .collect();
+                if live_set.is_empty() {
+                    // Deterministic HRW top-1, NOT self.allocator: the Random allocator returns
+                    // all workers regardless of replica_factor, which would re-scatter the dead
+                    // route instead of binding it to a single worker.
+                    let pin = crate::lora::routing::RendezvousHasher
+                        .compute_replica_set(&name, &workers, 1);
+                    if pin.is_empty() {
+                        self.routing_table.remove_lora(&name);
+                        self.hysteresis.remove(&name);
+                    } else if pin != cfg.replica_set {
+                        self.update_routing_entry(&name, pin.len(), pin, cfg.is_active);
+                    }
+                } else if live_set.len() != cfg.replica_set.len() {
+                    self.update_routing_entry(&name, live_set.len(), live_set, cfg.is_active);
+                }
+            }
+            // Refresh gauges from the pruned table so a narrowed/rebound route's replica_factor
+            // (and the other LoRA gauges) don't stay stale while capacity remains zero. No
+            // allocation ran this tick, so churn/overflow are zero.
+            let table_snapshot = self.routing_table.snapshot_configs();
+            let loads = self.load_estimator.get_current_load();
+            let raw_arrival_counts = self.load_estimator.get_raw_arrival_counts();
+            self.update_prometheus_metrics(&table_snapshot, &loads, &raw_arrival_counts);
+            crate::http::service::metrics::LORA_CHURN_LOADS_GAUGE.set(0);
+            crate::http::service::metrics::LORA_CHURN_UNLOADS_GAUGE.set(0);
+            crate::http::service::metrics::LORA_OVERFLOW_COUNT_GAUGE.set(0);
+            tracing::debug!(
+                "No LoRA slots available; pruned routes to live workers, skipping recompute"
+            );
             return;
         }
 
@@ -410,10 +458,17 @@ impl LoraController {
                 }
             }
 
-            if self.update_routing_entry(lora_name, final_replicas, replica_set.clone(), true) {
+            // Store the EFFECTIVE replica count (the set the allocator actually returned), not the
+            // desired `final_replicas`. Under partial-capacity pressure the slot-aware allocator
+            // returns a smaller-than-requested set, so using `final_replicas` would make
+            // LoraReplicaConfig::replica_factor overstate replica_set.len() — wrong for the
+            // replica-factor gauge and any consumer of that field. The router already narrows by
+            // the set itself.
+            if self.update_routing_entry(lora_name, replica_set.len(), replica_set.clone(), true) {
                 tracing::info!(
                     lora = lora_name,
-                    replicas = final_replicas,
+                    desired = final_replicas,
+                    replicas = replica_set.len(),
                     workers = ?replica_set.iter().map(|w| w.worker_id).collect::<Vec<_>>(),
                     "Updated active LoRA allocation"
                 );
@@ -781,6 +836,50 @@ impl LoraController {
 
         let inflight = self.load_estimator.get_inflight_counts();
         for (lora_name, count) in &inflight {
+            LORA_ACTIVE_REQUESTS_GAUGE
+                .with_label_values(&[lora_name.as_str()])
+                .set(*count as i64);
+        }
+    }
+
+    /// Clear all LoRA routing state and reset every LoRA gauge.
+    ///
+    /// Called when the cluster has no live workers (a full drain). Every routing entry is then
+    /// stale — its replica set points at gone workers — and such an entry makes `LoraFilter` fall
+    /// back to all available workers (none), so dropping the entries and resetting the gauges
+    /// (which would otherwise show phantom allocations) is correct. The separate zero-capacity
+    /// path (workers live, no slots) instead prunes/rebinds routes against the live worker set,
+    /// since those entries can still name live workers.
+    fn clear_lora_routing_and_metrics(&mut self) {
+        use crate::http::service::metrics::{
+            LORA_ACTIVE_REQUESTS_GAUGE, LORA_CHURN_LOADS_GAUGE, LORA_CHURN_UNLOADS_GAUGE,
+            LORA_ESTIMATED_LOAD_GAUGE, LORA_IS_ACTIVE_GAUGE, LORA_OVERFLOW_COUNT_GAUGE,
+            LORA_RAW_ARRIVAL_COUNT_GAUGE, LORA_REPLICA_FACTOR_GAUGE,
+        };
+
+        for (name, _) in self.routing_table.snapshot_configs() {
+            self.routing_table.remove_lora(&name);
+        }
+        self.hysteresis.clear();
+        // Drop MCF delta state so a later recovery re-solves from scratch rather than against a
+        // phantom prior assignment referencing gone workers.
+        self.prev_assignment.clear();
+        self.prev_workers.clear();
+        self.prev_replica_counts.clear();
+
+        LORA_REPLICA_FACTOR_GAUGE.reset();
+        LORA_IS_ACTIVE_GAUGE.reset();
+        LORA_RAW_ARRIVAL_COUNT_GAUGE.reset();
+        LORA_ESTIMATED_LOAD_GAUGE.reset();
+        LORA_CHURN_LOADS_GAUGE.set(0);
+        LORA_CHURN_UNLOADS_GAUGE.set(0);
+        LORA_OVERFLOW_COUNT_GAUGE.set(0);
+
+        // In-flight requests can still be draining even with no workers; keep reporting them
+        // (reset then repopulate from the estimator, matching the normal metrics path) rather than
+        // forcing the gauge to zero.
+        LORA_ACTIVE_REQUESTS_GAUGE.reset();
+        for (lora_name, count) in &self.load_estimator.get_inflight_counts() {
             LORA_ACTIVE_REQUESTS_GAUGE
                 .with_label_values(&[lora_name.as_str()])
                 .set(*count as i64);
@@ -1161,5 +1260,91 @@ mod tests {
             "must be pinned to a single worker, not scattered across all"
         );
         assert!(cfg_b.is_active);
+    }
+
+    #[test]
+    fn test_worker_drain_clears_stale_routes() {
+        // P1: when the cluster loses all workers, the controller must clear the routing table
+        // instead of leaving stale entries that point at gone workers (which would make the
+        // filter scatter LoRA traffic to all available workers).
+        let (mut controller, st, le, rt) = setup_controller();
+        let w1 = make_worker(1);
+        st.handle_mdc_addition(w1, &make_lora_info("lora-a", 4));
+        le.increment_load("lora-a");
+        controller.recompute_now();
+        assert!(
+            rt.get_config("lora-a").is_some(),
+            "LoRA placed while a worker exists"
+        );
+
+        // Drain the cluster.
+        st.handle_worker_removal(w1);
+        controller.recompute_now();
+        assert!(
+            rt.get_config("lora-a").is_none(),
+            "stale routing entry must be cleared after a full worker drain"
+        );
+    }
+
+    #[test]
+    fn test_zero_capacity_rebinds_dead_route_to_live_worker() {
+        // P1 follow-up: with live workers but zero LoRA capacity, a route pointing only at a
+        // now-removed worker must be rebound to a live worker (bounded), not left pointing at the
+        // gone worker (which makes the filter scatter to all available workers).
+        let (mut controller, _st, _le, rt) = setup_controller();
+        let w1 = make_worker(1);
+        let w2 = make_worker(2);
+        // w1 is live with zero capacity; w2 is never registered (gone).
+        _st.set_worker_capacity(w1, 0);
+        rt.update_allocation(
+            "lora-a".to_string(),
+            LoraReplicaConfig {
+                lora_name: "lora-a".to_string(),
+                replica_factor: 1,
+                replica_set: vec![w2],
+                updated_at: Instant::now(),
+                is_active: true,
+            },
+        );
+
+        controller.recompute_now(); // exercises the total_slots == 0 path
+
+        let cfg = rt
+            .get_config("lora-a")
+            .expect("route should be rebound to a live worker, not dropped to scatter");
+        assert_eq!(
+            cfg.replica_set,
+            vec![w1],
+            "dead route must be rebound to the live worker w1, not left at the gone w2"
+        );
+    }
+
+    #[test]
+    fn test_replica_factor_matches_set_under_partial_capacity() {
+        // P1/P2: under partial-capacity pressure the slot-aware allocator returns fewer workers
+        // than desired. The stored replica_factor must equal the actual replica_set length, not
+        // the (larger) desired count.
+        let (mut controller, st, le, rt) = setup_controller();
+        let w1 = make_worker(1);
+        let w2 = make_worker(2);
+        st.set_worker_capacity(w1, 4); // free
+        st.handle_mdc_addition(w2, &make_lora_info("lora-b", 1)); // w2 full (1/1) with lora-b
+        // lora-a is the only active LoRA; its proportional desired is 2, but w2 is full so the
+        // allocator can only place it on w1.
+        le.increment_load("lora-a");
+        le.increment_load("lora-a");
+
+        controller.recompute_now();
+
+        let cfg = rt.get_config("lora-a").unwrap();
+        assert_eq!(
+            cfg.replica_factor,
+            cfg.replica_set.len(),
+            "replica_factor must equal the actual replica_set size"
+        );
+        assert!(
+            !cfg.replica_set.iter().any(|w| w.worker_id == 2),
+            "must not place on the full worker w2"
+        );
     }
 }
