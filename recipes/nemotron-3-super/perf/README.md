@@ -43,7 +43,7 @@ For shorter runs (smoke tests, faster iteration), point `TRACE_FILE` at a smalle
 /model-cache/traces/<flavour>_short_15perc.jsonl    # ~15% subset
 ```
 
-These are workload-shape traces (not model-specific) — the same JSONLs the Kimi-K2.6 recipe uses. Pull them from the k26-recipes branch (`recipes/kimi-k2.6/perf/traces/`) or stage your own.
+These are workload-shape traces (not model-specific). Stage your own Mooncake-format JSONLs at the path you set in `TRACE_FILE`.
 
 ## Workflow
 

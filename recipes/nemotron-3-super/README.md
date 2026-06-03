@@ -130,6 +130,15 @@ See [`perf/README.md`](perf/README.md) for the full benchmark workflow — stagi
 
 For H200 MTP benchmarking with a fixed acceptance length, switch the worker's `SPECULATIVE_CONFIG` env to point at the `speculative-config-synthetic` key in the H200 ConfigMap (already provided alongside the default `speculative-config`).
 
+## Performance results
+
+| Recipe               | SKU  | # of worker replicas | Concurrency | User output tok/s | System output tok/s/gpu |
+|----------------------|------|----------------------|-------------|-------------------|-------------------------|
+| Chat (15% subset)    | B200 | 2                    | 128         | 61.25             | 844.5                   |
+| Agentic (15% subset) | B200 | 2                    | 192         | 63.16             | 1388.4                  |
+| Chat (15% subset)    | H200 | 2                    | 64          | 56.07             | 404.6                   |
+| Agentic (15% subset) | H200 | 2                    | 128         | 62.94             | 851.0                   |
+
 ## Spec-dec toggle (B200)
 
 B200 chat and agentic ship with **MTP spec-dec ON by default** — DL=3, `moe_backend=triton`, stripped `compilation-config`, and `MAX_NUM_BATCHED_TOKENS=65536`.
