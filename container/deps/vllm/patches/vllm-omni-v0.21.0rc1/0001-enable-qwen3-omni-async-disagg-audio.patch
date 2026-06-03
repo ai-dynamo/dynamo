@@ -160,6 +160,23 @@ diff -rN -u vllm_omni/distributed/omni_connectors/transfer_adapter/chunk_transfe
                              merged_sub[sk] = sv
                          info[key] = merged_sub
                          continue
+diff -rN -u vllm_omni/core/sched/omni_ar_scheduler.py vllm_omni/core/sched/omni_ar_scheduler.py
+--- vllm_omni/core/sched/omni_ar_scheduler.py	2026-06-03 13:30:00.000000000 +0200
++++ vllm_omni/core/sched/omni_ar_scheduler.py	2026-06-03 13:30:00.000000000 +0200
+@@ -431,8 +431,8 @@
+             if stopped:
+-                if (
+-                    model_runner_output.routed_experts_dict is not None
+-                    and req_id in model_runner_output.routed_experts_dict
+-                ):
+-                    routed_experts = model_runner_output.routed_experts_dict[req_id]
++                routed_experts_by_req = getattr(
++                    model_runner_output, "routed_experts_dict", None
++                ) or getattr(model_runner_output, "routed_experts", None)
++                if routed_experts_by_req is not None and req_id in routed_experts_by_req:
++                    routed_experts = routed_experts_by_req[req_id]
+                 # Capture finish_reason BEFORE _handle_stopped_request, which may
+                 # reset the status to WAITING for streaming requests that continue.
 diff -rN -u vllm_omni/worker/gpu_ar_model_runner.py vllm_omni/worker/gpu_ar_model_runner.py
 --- vllm_omni/worker/gpu_ar_model_runner.py	2026-06-02 17:05:00.000000000 +0200
 +++ vllm_omni/worker/gpu_ar_model_runner.py	2026-06-02 17:05:00.000000000 +0200
@@ -295,6 +312,25 @@ diff -rN -u vllm_omni/engine/output_processor.py vllm_omni/engine/output_process
 +
  class OmniRequestState(RequestState):
      """Request state for omni models, tracking multimodal outputs.
+
+@@ -256,6 +281,5 @@
+             outputs,
+             finished,
+             kv_transfer_params,
+-            prompt_routed_experts,
+         )
+     def _new_completion_output(
+@@ -268,5 +293,9 @@
+     ) -> Any:
+         # Reuse base text/logprobs logic, then annotate with pooling_result.
+-        base_output = super()._new_completion_output(token_ids, finish_reason, stop_reason, routed_experts)
++        base_output = super()._new_completion_output(
++            token_ids,
++            finish_reason,
++            stop_reason,
++        )
+         # Inter-stage processors need the full cumulative token sequence.
+         # In DELTA mode, base_output.token_ids only has the latest step's
 
 diff -rN -u vllm_omni/engine/stage_pool.py vllm_omni/engine/stage_pool.py
 --- vllm_omni/engine/stage_pool.py	2026-06-01 18:32:53.480503115 +0200
