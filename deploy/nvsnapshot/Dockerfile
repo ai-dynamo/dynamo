@@ -21,7 +21,7 @@
 # Build arguments
 # =============================================================================
 ARG DOCKER_PROXY
-ARG GO_VERSION=1.25
+ARG GO_VERSION=1.26.3
 ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
 ARG CRIU_REF=criu-dev
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04
