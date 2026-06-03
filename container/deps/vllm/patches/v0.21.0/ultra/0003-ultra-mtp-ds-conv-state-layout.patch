@@ -1,0 +1,146 @@
+diff --git a/vllm/model_executor/layers/mamba/mamba_utils.py b/vllm/model_executor/layers/mamba/mamba_utils.py
+index c1fd81e..df3883d 100644
+--- a/vllm/model_executor/layers/mamba/mamba_utils.py
++++ b/vllm/model_executor/layers/mamba/mamba_utils.py
+@@ -270,16 +270,19 @@ class MambaStateShapeCalculator:
+ @dataclass
+ class MambaCopySpec:
+     """
+-    Data class specifying the memory-copy parameters for Mamba states used for
+-    prefix caching in align mode.
++    Data class specifying memory-copy parameters for Mamba state copies.
+ 
+-    Attributes:
+-        start_addr (int): Starting address for the memory copy operation.
+-        num_elements (int): Number of elements to copy from the starting address.
++    HELIX_ULTRA_MTP_DS_COPY_DIAG: DS-layout conv-state speculative copies with offset > 0
++    cannot be represented as one contiguous span. For that diagnostic case,
++    ``ds_conv_tail`` carries the source block and accepted-token offset; the
++    worker-side copy path launches a strided copy kernel.
+     """
+ 
+     start_addr: int
+     num_elements: int
++    ds_conv_tail: bool = False
++    src_block_id: int = -1
++    offset: int = 0
+ 
+ 
+ MambaStateCopyFunc: TypeAlias = Callable[
+@@ -312,12 +315,15 @@ def get_conv_copy_spec(
+     if is_conv_state_dim_first():
+         # DS layout: (num_blocks, dim, state_len) — state_len is last.
+         if offset > 0:
+-            # Slicing along the last dim yields a non-contiguous view
+-            # because features (dim) are strided by state_len.
+-            raise NotImplementedError(
+-                "DS conv state layout does not yet support speculative "
+-                "decoding with mamba_cache_mode='align' "
+-                "(num_accepted_tokens > 1)."
++            # HELIX_ULTRA_MTP_DS_COPY_DIAG: DS layout stores rows as (dim, state_len), so
++            # the accepted-token tail is strided across rows. Return a marker
++            # spec and let the worker-side copy path use a strided kernel.
++            return MambaCopySpec(
++                start_addr=0,
++                num_elements=0,
++                ds_conv_tail=True,
++                src_block_id=src_block_id,
++                offset=offset,
+             )
+         src_state = state[src_block_id]
+     else:
+diff --git a/vllm/v1/worker/mamba_utils.py b/vllm/v1/worker/mamba_utils.py
+index 485b274..62ef975 100644
+--- a/vllm/v1/worker/mamba_utils.py
++++ b/vllm/v1/worker/mamba_utils.py
+@@ -202,6 +202,72 @@ def batch_memcpy(src_ptrs, dst_ptrs, sizes):
+     batch_memcpy_kernel[grid](src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=BLOCK_SIZE)
+ 
+ 
++# HELIX_ULTRA_MTP_DS_COPY_DIAG: diagnostic DS-layout conv-state tail copy for MTP align mode.
++@triton.jit
++def ds_conv_tail_copy_kernel(
++    state,
++    src_block_id,
++    dst_block_id,
++    dim: tl.constexpr,
++    state_len: tl.constexpr,
++    offset,
++    stride_block: tl.constexpr,
++    stride_dim: tl.constexpr,
++    stride_state: tl.constexpr,
++    BLOCK_D: tl.constexpr,
++    BLOCK_T: tl.constexpr,
++):
++    pid_d = tl.program_id(0)
++    pid_t = tl.program_id(1)
++    rows = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
++    cols = pid_t * BLOCK_T + tl.arange(0, BLOCK_T)
++    tail_len = state_len - offset
++    mask = (rows[:, None] < dim) & (cols[None, :] < tail_len)
++    src = (
++        state
++        + src_block_id * stride_block
++        + rows[:, None] * stride_dim
++        + (cols[None, :] + offset) * stride_state
++    )
++    dst = (
++        state
++        + dst_block_id * stride_block
++        + rows[:, None] * stride_dim
++        + cols[None, :] * stride_state
++    )
++    values = tl.load(src, mask=mask, other=0)
++    tl.store(dst, values, mask=mask)
++
++
++def ds_conv_tail_copy(state: torch.Tensor, src_block_id: int, dst_block_id: int,
++                      offset: int) -> None:
++    """Copy DS-layout conv tail from source block into destination prefix."""
++    if offset <= 0:
++        raise ValueError("ds_conv_tail_copy expects offset > 0")
++    if state.dim() != 3:
++        raise ValueError(f"expected 3D Mamba conv state, got {tuple(state.shape)}")
++    _, dim, state_len = state.shape
++    if offset >= state_len:
++        return
++    stride_block, stride_dim, stride_state = state.stride()
++    block_d = 16
++    block_t = 8
++    grid = (triton.cdiv(dim, block_d), triton.cdiv(state_len - offset, block_t))
++    ds_conv_tail_copy_kernel[grid](
++        state,
++        int(src_block_id),
++        int(dst_block_id),
++        int(dim),
++        int(state_len),
++        int(offset),
++        int(stride_block),
++        int(stride_dim),
++        int(stride_state),
++        BLOCK_D=block_d,
++        BLOCK_T=block_t,
++    )
++
++
+ def get_mamba_groups(kv_cache_config: KVCacheConfig) -> tuple[list[int], MambaSpec]:
+     mamba_group_ids: list[int] = []
+     mamba_specs: list[MambaSpec] = []
+@@ -600,6 +666,17 @@ def collect_mamba_copy_meta(
+                     state, block_ids, src_block_idx, accept_token_bias + 1
+                 )
+ 
++                if getattr(copy_spec, "ds_conv_tail", False):
++                    # HELIX_ULTRA_MTP_DS_COPY_DIAG: DS conv tail is not one contiguous
++                    # memcpy span. Launch a diagnostic strided copy kernel.
++                    ds_conv_tail_copy(
++                        state,
++                        copy_spec.src_block_id,
++                        dest_block_id,
++                        copy_spec.offset,
++                    )
++                    continue
++
+                 src_ptrs_np[offset] = copy_spec.start_addr
+                 dst_ptrs_np[offset] = state[dest_block_id].data_ptr()
+                 sizes_np[offset] = copy_spec.num_elements * state.element_size()

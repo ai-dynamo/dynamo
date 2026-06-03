@@ -87,6 +87,48 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     export UV_CACHE_DIR=/root/.cache/uv; \
     bash /tmp/install_vllm_omni.sh
 
+{% if cuda_version == "13.0" %}
+# Apply the Nemotron Ultra v0.21 fallback overlay for CUDA13 vLLM runtime.
+RUN --mount=type=bind,source=./container/deps/vllm/patches/v0.21.0/ultra,target=/tmp/ultra-vllm-patches,readonly \
+    set -eux; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends patch; \
+    rm -rf /var/lib/apt/lists/*; \
+    site_parent="$(python3 -c 'import pathlib, vllm; print(pathlib.Path(vllm.__file__).resolve().parent.parent)')"; \
+    for patch_file in \
+        /tmp/ultra-vllm-patches/0001-pr42554-ultra-mamba-spec-runtime.patch \
+        /tmp/ultra-vllm-patches/0002-ultra-hybrid-hash-block-kv-events.patch \
+        /tmp/ultra-vllm-patches/0003-ultra-mtp-ds-conv-state-layout.patch \
+        /tmp/ultra-vllm-patches/0004-ultra-ssm-nixl-tailfix.patch; do \
+        patch --batch --forward -p1 -d "${site_parent}" < "${patch_file}"; \
+    done; \
+    python3 -m pip install --no-cache-dir 'humming-kernels[cu13]==0.1.0'; \
+    python3 - <<'ULTRA_MARKER_PY'
+import importlib.metadata
+from pathlib import Path
+import vllm
+
+root = Path(vllm.__file__).resolve().parent
+markers = {
+    "semantic_kv_events": ["kv_cache_spec_kind", "kv_cache_spec_sliding_window", "get_kv_cache_spec_kind"],
+    "mamba_spec_decode_runtime": ["postprocess_mamba_fused_kernel", "MambaSpecDecodeGPUContext", "MambaBuffers", "postprocess_mamba_align_gpu"],
+    "hybrid_hash_block_events": ["_maybe_emit_sub_block_events", "hash_block_size", "BlockStored"],
+    "mtp_ds_copy": ["HELIX_ULTRA_MTP_DS_COPY_DIAG", "ds_conv_tail_copy"],
+    "ssm_nixl_tailfix": ["NEMOTRON_ULTRA_SSM_NIXL_TAILFIX", "SSM group has no local blocks to receive"],
+}
+files = [p for p in root.rglob("*.py") if p.is_file()]
+missing = {}
+for group, group_markers in markers.items():
+    for marker in group_markers:
+        if not any(marker in path.read_text(errors="ignore") for path in files):
+            missing.setdefault(group, []).append(marker)
+if missing:
+    raise RuntimeError(f"missing Ultra markers: {missing}")
+print("ULTRA_FALLBACK_MARKERS_OK", sorted(markers))
+print("humming-kernels", importlib.metadata.version("humming-kernels"))
+ULTRA_MARKER_PY
+{% endif %}
+
 {% endif %}
 {% endif %}
 
