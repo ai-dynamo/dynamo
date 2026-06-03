@@ -76,7 +76,7 @@ Lifecycle and runtime:
 - `drain()` hook for pre-cleanup work (e.g. in-flight NIXL transfers)
 - `DynamoException` error chain wrapping
 - Finish reason normalization (handled by the Rust layer)
-- Engine control plumbing, with per-backend profiling, quiesce/resume, and supported weight-update controls
+- Engine control plumbing, with per-backend profiling, pause/resume, and supported weight-update controls
 
 Observability:
 - Health-check canary via `health_check_payload()` (plus
