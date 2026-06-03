@@ -64,6 +64,10 @@ type DynamoGraphDeploymentSpec struct {
 	// Service-level labels take precedence over these values.
 	// +optional
 	Labels map[string]string `json:"labels,omitempty"`
+	// PriorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.
+	// Requires the Grove pathway.
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
 	// PVCs defines a list of persistent volume claims that can be referenced by components.
 	// Each PVC must have a unique name that can be referenced in component specifications.
 	// +kubebuilder:validation:Optional
