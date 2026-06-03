@@ -29,4 +29,4 @@ Most deployments start with the core performance loop:
 | Build agent workloads | [Agents](../agents/README.md) |
 | Serve specialized workloads | [LoRA Adapters](lora/README.md), [Multimodal](multimodal/README.md), and [Diffusion](diffusion/README.md) |
 
-For cluster deployments, pair these guides with the [Kubernetes Deployment](../kubernetes/README.md) docs.
+For cluster deployments, pair these guides with the [Kubernetes Deployment](../kubernetes/README.md) docs. The same features can be explored locally, then expressed through Dynamo's Kubernetes-native CRDs and operator when you move to a shared GPU cluster.

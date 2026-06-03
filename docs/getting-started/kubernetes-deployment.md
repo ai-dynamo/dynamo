@@ -2,10 +2,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Kubernetes Deployment
-subtitle: Follow the Kubernetes guides when you are ready to deploy Dynamo on a GPU cluster.
+subtitle: Use Dynamo's Kubernetes-native path when you are ready to deploy on a GPU cluster.
 ---
 
-Use the Kubernetes guides when you are ready to move beyond a local Dynamo process and deploy on a GPU cluster.
+Use the Kubernetes guides when you are ready to move beyond a local Dynamo
+process and deploy on a GPU cluster. Dynamo's Kubernetes path is native to the
+platform: inference graphs are expressed as Dynamo CRDs, reconciled by the
+Dynamo operator, installed with Helm, and integrated with Kubernetes service
+discovery, Gateway API Inference Extension, scheduling, observability, and
+model-loading workflows.
+
+This does not make Kubernetes the only way to use Dynamo. Local containers,
+PyPI installs, and standalone components remain the right path for evaluation,
+development, and incremental adoption.
 
 Start with the [Kubernetes Quickstart](../kubernetes/README.md) to run one model end to end. Then use the rest of the Kubernetes Deployment section based on what you need next:
 

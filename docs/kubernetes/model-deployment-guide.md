@@ -13,6 +13,12 @@ that graph into one or more
 resources, which run the frontend, router, prefill workers, decode workers, and
 other graph components.
 
+This is the Kubernetes-native control path for Dynamo: you author or generate
+Dynamo resources, and the operator translates them into Kubernetes workloads,
+services, routing metadata, model-loading resources, and status conditions. For
+local development or incremental adoption, you can still run the same frontend,
+router, and worker components outside Kubernetes.
+
 You can create a DGD directly from a known-good manifest, or you can use a
 [`DynamoGraphDeploymentRequest`](dgdr.md) (DGDR) to profile your model and
 generate a DGD for you.

@@ -6,6 +6,12 @@ title: Kubernetes Quickstart
 
 Get a model running on Kubernetes in minutes.
 
+Dynamo's production path is Kubernetes-native: you install the platform with
+Helm, submit Dynamo CRDs, and let the operator reconcile inference graphs into
+pods, services, routing, model-loading, and scaling resources. The local and
+container guides remain useful for development, but Kubernetes is the canonical
+path for shared GPU clusters and multi-node serving.
+
 > [!NOTE]
 > **Deployment modes.** Dynamo supports two deployment modes on Kubernetes. This quickstart uses **standalone mode**, where the Dynamo Frontend serves requests and the integrated Dynamo Router does KV-aware routing. Dynamo can also run in **gateway mode** behind a [Gateway API Inference Extension](https://gateway-api-inference-extension.sigs.k8s.io/) gateway, where KV-aware routing happens in the Dynamo Endpoint Picker Plugin (EPP) at the gateway layer and the Frontend runs as a sidecar in `--router-mode direct`. See the [Inference Gateway (GAIE) guide](inference-gateway.md) to set up gateway mode.
 
@@ -81,7 +87,10 @@ kubectl get pods -n $NAMESPACE
 
 ## Understand Dynamo Deployment Resources
 
-Before applying the first YAML, it helps to know the resources Dynamo uses:
+Before applying the first YAML, it helps to know the Kubernetes resources Dynamo
+uses. These are Dynamo's native control-plane objects; you describe the
+inference graph, and the operator owns the Kubernetes deployments, services, and
+component rollout around it:
 
 | Resource or path | What it does | In this quickstart |
 |---|---|---|
