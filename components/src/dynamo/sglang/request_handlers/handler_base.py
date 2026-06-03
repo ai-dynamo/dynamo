@@ -7,7 +7,6 @@ import importlib
 import inspect
 import json
 import logging
-import os
 import random
 import threading
 from abc import ABC, abstractmethod
@@ -901,11 +900,9 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
     async def open_session(self, body: dict) -> dict:
         """Open a session for subagent KV isolation.
 
-        Default mode pins KV in a streaming slot. With SGLANG_SESSION_RADIX_NATIVE=1
-        on the worker, the session instead holds ordinary evictable radix KV
-        (tagged + floor-priority + bulk-evicted on close): it cannot deadlock on
-        non-evictable KV, and `streaming` is forced off so SGLang takes the
-        full-context (no slot, no reconstruction) path.
+        With --enable-session-radix-cache on the worker, the session holds
+        ordinary evictable radix KV (tagged + floor-priority + bulk-evicted on
+        close) and `streaming` is forced off; otherwise it uses the streaming slot.
 
         Args:
             body: Dict with "session_id", optional "timeout" (default 120),
@@ -918,7 +915,9 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             return {"status": "error", "message": "session_id required"}
         timeout = body.get("timeout", 120)
         capacity = body.get("capacity_of_str_len", 65536)
-        radix_native = os.environ.get("SGLANG_SESSION_RADIX_NATIVE") == "1"
+        radix_native = getattr(
+            self.config.server_args, "enable_session_radix_cache", False
+        )
         try:
             obj = OpenSessionReqInput(
                 capacity_of_str_len=capacity,

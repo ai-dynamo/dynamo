@@ -43,10 +43,10 @@ async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
 
 def _session_control_enabled(server_args) -> bool:
     """The session_control endpoint (open/close) is needed for streaming sessions
-    OR for radix-native sessions (SGLANG_SESSION_RADIX_NATIVE=1), which use it for
-    lifecycle/close-driven KV release without the streaming-session slot cache."""
-    return bool(getattr(server_args, "enable_streaming_session", False)) or (
-        os.environ.get("SGLANG_SESSION_RADIX_NATIVE") == "1"
+    OR for session-radix-cache sessions (--enable-session-radix-cache), which use
+    it for close-driven KV release without the streaming-session slot cache."""
+    return bool(getattr(server_args, "enable_streaming_session", False)) or bool(
+        getattr(server_args, "enable_session_radix_cache", False)
     )
 
 
