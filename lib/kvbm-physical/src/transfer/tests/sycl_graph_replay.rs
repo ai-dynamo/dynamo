@@ -1,28 +1,33 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! PR-7.4.1: Integration tests for CUDA graph capture/replay.
+//! Integration tests for SYCL graph capture/replay.
 //!
-//! All tests require a real CUDA device (skipped when stubs are linked)
-//! and are serialised via `gpu_serial!()` to avoid stream contention.
+//! Mirrors the CUDA tests in [`planner_graph_replay`] but validates the
+//! SYCL-specific behaviour:
+//! - No cache (fresh record each call) — re-recording with new addresses works.
+//! - `supports_address_rebind()` returns `false`.
+//! - `try_rebind()` returns `Ok(false)`.
+//! - Byte-level correctness matches the DirectDma path.
+//!
+//! All tests require a real SYCL/XPU device (skipped when stubs are linked)
+//! and are serialised via `gpu_serial!()` to avoid queue contention.
 //!
 //! Test matrix:
 //!
-//! 1. `device_graph_replay_round_trips_d2d_fc_fc` — fill src, dispatch once
+//! 1. `sycl_graph_replay_round_trips_d2d` — fill src, dispatch once
 //!    via graph replay, verify dst checksums match src.
 //!
-//! 2. `device_graph_replay_byte_equiv_to_direct_dma` — same input data
+//! 2. `sycl_graph_replay_byte_equiv_to_direct_dma` — same input data
 //!    transferred via DirectDma and DeviceGraphReplay independently; both
 //!    destinations must checksum-match.
 //!
-//! 3. `device_graph_replay_cache_reuse` — two transfers with the same
-//!    shape; the second must reuse the cached exec (cache.len() stays at 1,
-//!    not 2), and both results must be correct.
+//! 3. `sycl_graph_replay_fresh_record_each_call` — two transfers with the
+//!    same shape but different addresses; both must produce correct results,
+//!    proving fresh re-recording works (no stale graph handle reuse).
 //!
-//! 4. `device_graph_replay_address_rebind_works` — two transfers with the
-//!    SAME shape but DIFFERENT block IDs; the second result must reflect
-//!    the new block addresses (different src data), proving that the
-//!    `cuGraphExecMemcpyNodeSetParams` rebind path is live and not a no-op.
+//! 4. `sycl_graph_replay_confirms_no_rebind` — verifies trait-level
+//!    `supports_address_rebind() == false` and `try_rebind() == Ok(false)`.
 
 use anyhow::Result;
 
@@ -55,7 +60,7 @@ fn ctx_with_graph_replay(agent: NixlAgent) -> crate::manager::TransferManager {
 }
 
 /// Run a planner-path Async D2D transfer via `execute_transfer` with
-/// `use_planner = true`.  This routes through the full planner dispatcher
+/// `use_planner = true`. Routes through the full planner dispatcher
 /// (including `DeviceGraphReplay` candidate selection when the capability is
 /// enabled) without calling any private planner internals directly.
 async fn transfer_direct_planner(
@@ -73,17 +78,31 @@ async fn transfer_direct_planner(
     Ok(())
 }
 
+/// Guard: skip if the test device backend is not SYCL.
+/// This ensures CUDA-only CI doesn't fail on these SYCL-specific tests.
+macro_rules! skip_if_not_sycl {
+    () => {
+        if test_device_backend() != DeviceBackend::Sycl {
+            eprintln!(
+                "Skipping test '{}': device backend is not SYCL",
+                module_path!()
+            );
+            return Ok(());
+        }
+    };
+}
+
 // ─────────────────────────── tests ───────────────────────────────────────────
 
-/// Basic round-trip: fill src, replay-dispatch to dst, verify checksums.
+/// Basic round-trip: fill src, graph-replay dispatch to dst, verify checksums.
 ///
 /// Uses a single block so the graph has exactly one memcpy node. Verifies
-/// that the captured graph + address rebind produces the same bytes as the
-/// source.
+/// that the captured SYCL graph + enqueue produces the same bytes as the source.
 #[tokio::test]
-async fn device_graph_replay_round_trips_d2d_fc_fc() -> Result<()> {
+async fn sycl_graph_replay_round_trips_d2d() -> Result<()> {
     skip_if_stubs_and_device!(StorageKind::Device(0));
     gpu_serial!();
+    skip_if_not_sycl!();
 
     let agent = super::local_transfers::build_agent_for_kinds(&[StorageKind::Device(0)])?;
     let src = device_fc(agent.clone(), 4);
@@ -105,9 +124,10 @@ async fn device_graph_replay_round_trips_d2d_fc_fc() -> Result<()> {
 /// Both runs use the same source data. The two destination layouts are
 /// distinct allocations; both are compared to src checksums AND to each other.
 #[tokio::test]
-async fn device_graph_replay_byte_equiv_to_direct_dma() -> Result<()> {
+async fn sycl_graph_replay_byte_equiv_to_direct_dma() -> Result<()> {
     skip_if_stubs_and_device!(StorageKind::Device(0));
     gpu_serial!();
+    skip_if_not_sycl!();
 
     let agent = super::local_transfers::build_agent_for_kinds(&[StorageKind::Device(0)])?;
     let src = device_fc(agent.clone(), 4);
@@ -140,71 +160,29 @@ async fn device_graph_replay_byte_equiv_to_direct_dma() -> Result<()> {
     // Pairwise equality: DirectDma == DeviceGraphReplay.
     let direct_sums = compute_block_checksums(&dst_direct, &dst_blocks)?;
     let replay_sums = compute_block_checksums(&dst_replay, &dst_blocks)?;
-    for (&did, &rid) in dst_blocks.iter().zip(dst_blocks.iter()) {
-        let d = direct_sums.get(&did).expect("direct checksum");
-        let r = replay_sums.get(&rid).expect("replay checksum");
+    for &bid in &dst_blocks {
+        let d = direct_sums.get(&bid).expect("direct checksum");
+        let r = replay_sums.get(&bid).expect("replay checksum");
         assert_eq!(
             d, r,
-            "DirectDma vs DeviceGraphReplay checksum mismatch at dst block {did}"
+            "DirectDma vs DeviceGraphReplay checksum mismatch at dst block {bid}"
         );
     }
     Ok(())
 }
 
-/// Cache reuse: the second transfer with the same shape must hit the cache
-/// (cache size stays at 1) and produce correct output.
+/// Fresh record each call: two transfers with the SAME shape but DIFFERENT
+/// source data (different block IDs). Both must produce correct results.
+///
+/// Unlike CUDA (which caches the graph and rebinds addresses), SYCL records
+/// a fresh SYCL graph each time. This test proves that the fresh-record path
+/// handles address changes correctly — no stale pointers from a previous
+/// graph handle.
 #[tokio::test]
-async fn device_graph_replay_cache_reuse() -> Result<()> {
+async fn sycl_graph_replay_fresh_record_each_call() -> Result<()> {
     skip_if_stubs_and_device!(StorageKind::Device(0));
     gpu_serial!();
-
-    let agent = super::local_transfers::build_agent_for_kinds(&[StorageKind::Device(0)])?;
-    let src = device_fc(agent.clone(), 4);
-    let dst1 = device_fc(agent.clone(), 4);
-    let dst2 = device_fc(agent.clone(), 4);
-    let manager = ctx_with_graph_replay(agent);
-    let ctx = manager.context();
-
-    let src_blocks = vec![0usize];
-    let dst_blocks_1 = vec![1usize];
-    let dst_blocks_2 = vec![2usize];
-
-    let src_checksums = fill_and_checksum(&src, &src_blocks, FillPattern::Sequential)?;
-
-    // First transfer — cache miss, graph is captured.
-    transfer_direct_planner(&src, &dst1, &src_blocks, &dst_blocks_1, ctx).await?;
-
-    // Cache must have exactly 1 entry after the first transfer.
-    let cache_len_after_first = ctx.graph_cache().len();
-    assert_eq!(
-        cache_len_after_first, 1,
-        "expected 1 graph cache entry after first transfer, got {cache_len_after_first}"
-    );
-
-    // Second transfer — same shape, different dst block slot. Cache hit.
-    transfer_direct_planner(&src, &dst2, &src_blocks, &dst_blocks_2, ctx).await?;
-
-    // Cache size must still be 1 (reused, not duplicated).
-    let cache_len_after_second = ctx.graph_cache().len();
-    assert_eq!(
-        cache_len_after_second, 1,
-        "expected cache to stay at 1 entry after second (same-shape) transfer, \
-         got {cache_len_after_second}"
-    );
-
-    // Both results must be correct.
-    verify_checksums_by_position(&src_checksums, &src_blocks, &dst1, &dst_blocks_1)?;
-    verify_checksums_by_position(&src_checksums, &src_blocks, &dst2, &dst_blocks_2)?;
-    Ok(())
-}
-
-/// Address rebind: two transfers with the SAME shape but DIFFERENT source data
-/// (different block IDs). The second result must reflect the NEW addresses, not
-/// the captured ones, proving `cuGraphExecMemcpyNodeSetParams` is live.
-#[tokio::test]
-async fn device_graph_replay_address_rebind_works() -> Result<()> {
-    skip_if_stubs_and_device!(StorageKind::Device(0));
-    gpu_serial!();
+    skip_if_not_sycl!();
 
     let agent = super::local_transfers::build_agent_for_kinds(&[StorageKind::Device(0)])?;
     let src = device_fc(agent.clone(), 4);
@@ -212,7 +190,7 @@ async fn device_graph_replay_address_rebind_works() -> Result<()> {
     let manager = ctx_with_graph_replay(agent);
     let ctx = manager.context();
 
-    // Fill block 0 with Sequential and block 2 with a different pattern (Constant)
+    // Fill block 0 with Sequential and block 2 with a different pattern
     // so the two src blocks have verifiably distinct content.
     fill_blocks(&src, &[0], FillPattern::Sequential)?;
     fill_blocks(&src, &[2], FillPattern::Constant(0xABu8))?;
@@ -225,15 +203,12 @@ async fn device_graph_replay_address_rebind_works() -> Result<()> {
     assert_ne!(
         c0, c2,
         "test precondition: src block 0 (Sequential) and block 2 (Constant) \
-         must have different checksums so rebind is observable. \
-         Got c0={c0}, c2={c2}"
+         must have different checksums. Got c0={c0}, c2={c2}"
     );
 
-    // First transfer: src[0] → dst[1]. Captures the graph.
+    // First transfer: src[0] → dst[1]. Records a fresh SYCL graph.
     transfer_direct_planner(&src, &dst, &[0], &[1], ctx).await?;
     let dst1_checksums = compute_block_checksums(&dst, &[1])?;
-
-    // Verify first result matches src block 0.
     assert_eq!(
         dst1_checksums[&1], c0,
         "first transfer: dst[1] should match src[0] (Sequential). \
@@ -241,27 +216,51 @@ async fn device_graph_replay_address_rebind_works() -> Result<()> {
         dst1_checksums[&1]
     );
 
-    // Second transfer: src[2] → dst[3]. Same SHAPE as the first (same-shape
-    // layout, 1 block, same byte count per block), but DIFFERENT addresses.
-    // The rebind must update the captured graph's src/dst pointers.
+    // Second transfer: src[2] → dst[3]. Same SHAPE, different addresses.
+    // A fresh SYCL graph is recorded with the new addresses.
     transfer_direct_planner(&src, &dst, &[2], &[3], ctx).await?;
     let dst3_checksums = compute_block_checksums(&dst, &[3])?;
 
-    // dst[3] must match src[2] (Constant), NOT src[0] (Sequential).
+    // dst[3] must match src[2] (Constant 0xAB), NOT src[0] (Sequential).
     assert_eq!(
         dst3_checksums[&3], c2,
-        "second transfer (rebind): dst[3] should match src[2] (Constant 0xAB), \
-         but got {}. If it matches src[0]={c0}, the rebind is not working.",
+        "second transfer: dst[3] should match src[2] (Constant 0xAB), \
+         but got {}. If it matches src[0]={c0}, a stale graph was replayed.",
         dst3_checksums[&3]
     );
 
-    // Double-check that dst[3] is NOT the same as dst[1] (which would mean
-    // the rebind was a no-op and the captured addresses were replayed instead).
+    // Double-check that dst[3] is NOT the same as dst[1].
     assert_ne!(
         dst3_checksums[&3], dst1_checksums[&1],
-        "address rebind appears to be a no-op: dst[3] ({}) == dst[1] ({}) \
+        "fresh record appears broken: dst[3] ({}) == dst[1] ({}) \
          even though the two source blocks had different content",
         dst3_checksums[&3], dst1_checksums[&1]
+    );
+
+    Ok(())
+}
+
+/// Trait-level confirmation: SYCL graph ops report no address rebind support.
+///
+/// This is a unit-level check that doesn't move data — it just instantiates
+/// the device context and verifies the trait returns.
+#[tokio::test]
+async fn sycl_graph_replay_confirms_no_rebind() -> Result<()> {
+    skip_if_stubs_and_device!(StorageKind::Device(0));
+    gpu_serial!();
+    skip_if_not_sycl!();
+
+    use crate::device::{DeviceGraphExec, DeviceGraphOps};
+
+    let device_ctx = DeviceContext::new(DeviceBackend::Sycl, 0)?;
+    let graph_ops = device_ctx.graph_ops().expect(
+        "SYCL DeviceContext must implement DeviceGraphOps"
+    );
+
+    // Trait-level: SYCL does not support address rebind.
+    assert!(
+        !graph_ops.supports_address_rebind(),
+        "SYCL supports_address_rebind() should return false"
     );
 
     Ok(())

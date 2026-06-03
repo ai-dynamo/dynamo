@@ -656,45 +656,12 @@ impl TransferContext {
             uuid: Uuid::new_v4(),
             checker: notifications::DeviceEventChecker::new(event),
             event_handle: handle,
+            telemetry: None,
         };
 
         if let Err(e) = self.tx_device_event.try_send(notification) {
             tracing::error!(
                 "Failed to enqueue device event notification: channel full or closed: {}",
-                e
-            );
-        }
-
-        TransferCompleteNotification::from_awaiter(awaiter)
-    }
-
-    /// Register a CUDA event for polling completion.
-    ///
-    /// CUDA-typed counterpart to `register_device_event`. Used by the
-    /// planner-driven Staged executor, which still works against raw
-    /// `cudarc::driver::CudaEvent`s.
-    #[cfg(feature = "cuda")]
-    pub(crate) fn register_cuda_event(&self, event: CudaEvent) -> TransferCompleteNotification {
-        let new_event = self
-            .event_system
-            .new_event()
-            .expect("Failed to allocate event");
-        let handle = new_event.into_handle();
-        let awaiter = self
-            .event_system
-            .awaiter(handle)
-            .expect("Failed to get awaiter");
-
-        let notification = notifications::RegisterPollingNotification {
-            uuid: Uuid::new_v4(),
-            checker: notifications::CudaEventChecker::new(event),
-            event_handle: handle,
-            telemetry: None,
-        };
-
-        if let Err(e) = self.tx_cuda_event.try_send(notification) {
-            tracing::error!(
-                "Failed to enqueue CUDA event notification: channel full or closed: {}",
                 e
             );
         }

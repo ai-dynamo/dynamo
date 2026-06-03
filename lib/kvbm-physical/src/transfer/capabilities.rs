@@ -90,11 +90,14 @@ pub struct TransferCapabilities {
     ///   (stream capture mode, no blocking ops, etc.) that callers must
     ///   verify before enabling.
     ///
-    /// **Status (PR-7.4):** Scaffolding only. No path emits
-    /// `Candidate::CudaGraphReplay` today, so this flag has no runtime
-    /// effect. The capture/replay executor wiring is deferred to PR-7.4.1.
+    /// When enabled on SYCL, the planner emits `DeviceGraphReplay` candidates
+    /// that are dispatched via SYCL graph capture/replay
+    /// (`dispatch_sycl_graph_replay_planner`). SYCL does not require stream-capture
+    /// semantics — SYCL graph captures are recorded explicitly — but does
+    /// require `libur_loader.so` at runtime (gracefully returns an error if
+    /// unavailable).
     #[serde(default)]
-    pub cuda_graph_replay: bool,
+    pub device_graph_replay: bool,
 
     /// PR-7.5: Enable optional startup benchmarking.
     ///
@@ -131,7 +134,7 @@ impl TransferCapabilities {
         Self {
             allow_gds: true,
             allow_gpu_rdma: true,
-            cuda_graph_replay: false, // remains opt-in; requires capturable stream
+            device_graph_replay: false, // remains opt-in; requires capturable stream
             startup_benchmark: false, // opt-in; caller decides when to benchmark
         }
     }
@@ -197,19 +200,19 @@ impl TransferCapabilities {
         self
     }
 
-    /// PR-7.4: Set the CUDA graph capture/replay capability.
+    /// PR-7.4: Set the device graph capture/replay capability.
     ///
     /// Defaulting to `false` is intentional — graph capture has
-    /// CUDA-side preconditions (stream capture mode, no blocking ops, etc.)
+    /// backend-specific preconditions (CUDA: stream capture mode; SYCL: libur_loader.so)
     /// that the caller must verify. Enable only when the caller is certain
     /// the transfer stream is graph-capturable and the shapes are stable
     /// enough to amortise the capture cost.
     ///
     /// **Status (PR-7.4):** Flag scaffolding only; no executor path exists yet.
     /// Enabling this flag currently has no runtime effect (no path emits
-    /// `Candidate::CudaGraphReplay`). Full wiring deferred to PR-7.4.1.
-    pub fn with_cuda_graph_replay(mut self, enabled: bool) -> Self {
-        self.cuda_graph_replay = enabled;
+    /// `Candidate::DeviceGraphReplay`). Full wiring deferred to PR-7.4.1.
+    pub fn with_device_graph_replay(mut self, enabled: bool) -> Self {
+        self.device_graph_replay = enabled;
         self
     }
 

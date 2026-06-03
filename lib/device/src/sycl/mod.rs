@@ -974,3 +974,111 @@ mod tests {
         );
     }
 }
+
+
+// =====================================================================
+// DeviceGraphOps / DeviceGraphExec — SYCL graph capture/replay.
+// =====================================================================
+
+use oneapi_rs::safe::SyclGraph;
+
+/// An instantiated UR executable graph holding N captured USM memcpy nodes.
+///
+/// Created by [`SyclDeviceContext::record_memcpy_graph`] via queue-capture.
+/// Replayed via [`DeviceGraphExec::launch`] → `urEnqueueGraphExp`.
+struct SyclGraphExec {
+    graph: SyclGraph,
+    count: usize,
+}
+
+unsafe impl Send for SyclGraphExec {}
+unsafe impl Sync for SyclGraphExec {}
+
+impl crate::DeviceGraphExec for SyclGraphExec {
+    fn node_count(&self) -> usize {
+        self.count
+    }
+
+    fn try_rebind(
+        &self,
+        _src_ptrs: &[u64],
+        _dst_ptrs: &[u64],
+        _size: usize,
+    ) -> Result<bool> {
+        // SYCL graph API does not yet support per-node USM memcpy address rebind.
+        Ok(false)
+    }
+
+    fn launch(&self, stream: &dyn crate::DeviceStreamOps) -> Result<()> {
+        let sycl_stream = stream
+            .as_any()
+            .downcast_ref::<SyclDeviceStream>()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "SyclGraphExec::launch: stream is not a SyclDeviceStream"
+                )
+            })?;
+        self.graph
+            .enqueue(&sycl_stream.queue)
+            .map_err(|e| anyhow::anyhow!("SyclGraphExec::launch failed: {}", e))
+    }
+}
+
+impl crate::DeviceGraphOps for SyclDeviceContext {
+    fn record_memcpy_graph(
+        &self,
+        src_ptrs: &[u64],
+        dst_ptrs: &[u64],
+        size: usize,
+        stream: &dyn crate::DeviceStreamOps,
+    ) -> Result<Box<dyn crate::DeviceGraphExec>> {
+        assert_eq!(
+            src_ptrs.len(),
+            dst_ptrs.len(),
+            "record_memcpy_graph: src/dst length mismatch"
+        );
+        let count = src_ptrs.len();
+        if count == 0 {
+            anyhow::bail!("record_memcpy_graph: empty op list");
+        }
+
+        // Derive the SyclQueue from the stream for graph creation.
+        let sycl_stream = stream
+            .as_any()
+            .downcast_ref::<SyclDeviceStream>()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "record_memcpy_graph: stream is not a SyclDeviceStream"
+                )
+            })?;
+
+        // Check runtime availability of SYCL graph capture support.
+        if !SyclGraph::is_available() {
+            anyhow::bail!(
+                "record_memcpy_graph: SYCL graph capture API not available \
+                 (libur_loader.so not found or UR headers were not present at \
+                 build time)"
+            );
+        }
+
+        // Build pointer arrays for the C FFI call.
+        let c_src_ptrs: Vec<*const c_void> =
+            src_ptrs.iter().map(|&p| p as *const c_void).collect();
+        let c_dst_ptrs: Vec<*mut c_void> =
+            dst_ptrs.iter().map(|&p| p as *mut c_void).collect();
+
+        // Single call: queue-capture N memcpy + instantiate executable graph.
+        let graph = unsafe {
+            SyclGraph::record(&sycl_stream.queue, &c_src_ptrs, &c_dst_ptrs, size)
+        }
+        .map_err(|e| {
+            anyhow::anyhow!("record_memcpy_graph: graph capture failed: {}", e)
+        })?;
+
+        Ok(Box::new(SyclGraphExec { graph, count }))
+    }
+
+    fn supports_address_rebind(&self) -> bool {
+        false
+    }
+}

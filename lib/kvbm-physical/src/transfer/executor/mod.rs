@@ -14,8 +14,8 @@
 //!   backend-agnostic entry that dispatches per-backend via
 //!   `match stream.backend()`. The Transform arm runs on both CUDA
 //!   and SYCL through the unified `dispatch_transform_kernel`. The
-//!   Direct / SmallStridedCopy / CudaGraphReplay arms are CUDA-only
-//!   today; the SYCL backend bails explicitly on those until SYCL
+//!   Direct / SmallStridedCopy arms are CUDA-only; DeviceGraphReplay runs on both
+//!   CUDA and SYCL. The SYCL backend bails on SmallStridedCopy until SYCL
 //!   lowering helpers land in `kvbm-kernels`.
 //!
 //! Caller-provided streams come in via `device_stream` for both paths.

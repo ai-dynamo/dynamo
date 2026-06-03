@@ -7,9 +7,9 @@
 //! handles all `PlanOutcome` arms across CUDA and SYCL via the
 //! device-agnostic `DeviceStream` API (`batch_copy`,
 //! `vectorized_copy`, `clone_htod`, `with_device_ptr`). Only the
-//! `CudaGraphReplay` arm still branches per-backend internally —
-//! CUDA drives `cuStreamBeginCapture` / `cuGraphLaunch` while SYCL
-//! bails until L0 / UR command-buffer record/replay lands.
+//! `DeviceGraphReplay` arm still branches per-backend internally —
+//! CUDA drives `cuStreamBeginCapture` / `cuGraphLaunch`; SYCL uses
+//! SYCL graph capture/replay via `dispatch_sycl_graph_replay_planner`.
 //!
 //! Wires `transfer::plan::plan_copy` into the existing transfer
 //! infrastructure for two strategy families:
@@ -169,9 +169,9 @@ where
 /// The `Direct`, `SmallStridedCopy`, and `Transform` arms run on both
 /// CUDA and SYCL through device-agnostic helpers
 /// (`dispatch_ops_grouped_by_size`, `dispatch_small_strided_copy`,
-/// `dispatch_transform_kernel`). Only `CudaGraphReplay` is still
-/// cuda-only — the arm bails on SYCL until L0 / UR command-buffer
-/// record/replay lands.
+/// `dispatch_transform_kernel`). The `DeviceGraphReplay` arm branches per-backend: CUDA uses
+/// `cuStreamBeginCapture` / `cuGraphLaunch`; SYCL uses sycl_ext_oneapi_graph
+/// capture/replay via `dispatch_sycl_graph_replay_planner`.
 ///
 /// Bails (no fallback) when:
 /// - the strategy is not one of `Async{H2D, D2H, D2D}` —
@@ -297,11 +297,10 @@ pub(crate) fn execute_planner_device_transfer(
 /// `DeviceStream::vectorized_copy`. The `Transform` arm goes through
 /// [`dispatch_transform_kernel`].
 ///
-/// `CudaGraphReplay` is still cuda-only: under `cuda` it dispatches via
+/// `DeviceGraphReplay` branches per-backend: under `cuda` it dispatches via
 /// `dispatch_cuda_graph_replay_planner` (which uses
-/// `cuStreamBeginCapture` / `cuGraphLaunch`); under SYCL it bails with
-/// an explicit "not yet implemented" message until an L0 / UR
-/// command-buffer record/replay surface lands.
+/// `cuStreamBeginCapture` / `cuGraphLaunch`); under SYCL it dispatches
+/// via `dispatch_sycl_graph_replay_planner` (SYCL graph capture/replay).
 fn execute_outcome_device(
     outcome: PlanOutcome,
     src: &PhysicalLayout,
@@ -336,10 +335,9 @@ fn execute_outcome_device(
         PlanOutcome::SmallStridedCopy(ops) => {
             dispatch_small_strided_copy(&ops, device_stream)?;
         }
-        PlanOutcome::CudaGraphReplay {
+        PlanOutcome::DeviceGraphReplay {
             #[cfg(feature = "cuda")]
             cache_key,
-            #[cfg(feature = "cuda")]
             ops,
             ..
         } => match device_stream.backend() {
@@ -367,12 +365,7 @@ fn execute_outcome_device(
                 );
             }
             crate::device::DeviceBackend::Sycl => {
-                bail!(
-                    "execute_outcome_device: PlanOutcome::CudaGraphReplay has no \
-                     SYCL equivalent yet (record/replay via Level Zero command-list \
-                     or Unified Runtime command-buffer is tracked as a separate \
-                     workstream)"
-                );
+                dispatch_sycl_graph_replay_planner(&ops, device_stream, _ctx)?;
             }
         },
     }
@@ -488,9 +481,9 @@ pub(crate) fn execute_planner_nixl_transfer(
              NIXL paths use min_inner_bytes = 0 and must always produce Direct. \
              This is an internal routing bug."
         ),
-        PlanOutcome::CudaGraphReplay { .. } => bail!(
-            "execute_planner_nixl_transfer: unexpected CudaGraphReplay outcome — \
-             graph replay is only valid on Cuda-family routes, not NIXL. \
+        PlanOutcome::DeviceGraphReplay { .. } => bail!(
+            "execute_planner_nixl_transfer: unexpected DeviceGraphReplay outcome — \
+             graph replay is only valid on device-async routes, not NIXL. \
              This is an internal routing bug."
         ),
     };
@@ -667,9 +660,9 @@ enum PlanOutcome {
     /// `size` (inner_bytes at the cut point). Dispatched via
     /// `kvbm_kernels::vectorized_copy` on the Cuda path.
     SmallStridedCopy(Vec<CopyOp>),
-    /// PR-7.4.1: CUDA graph capture/replay. `ops` are the copy
+    /// PR-7.4.1: Device graph capture/replay. `ops` are the copy
     /// descriptors whose addresses are rebound on each replay.
-    CudaGraphReplay {
+    DeviceGraphReplay {
         cache_key: GraphCacheKey,
         ops: Vec<CopyOp>,
     },
@@ -689,7 +682,7 @@ impl PlanOutcome {
             PlanOutcome::Direct(_) => "DirectDma",
             PlanOutcome::Transform { .. } => "TransformKernel",
             PlanOutcome::SmallStridedCopy(_) => "SmallStridedCopy",
-            PlanOutcome::CudaGraphReplay { .. } => "CudaGraphReplay",
+            PlanOutcome::DeviceGraphReplay { .. } => "DeviceGraphReplay",
         }
     }
 
@@ -707,13 +700,13 @@ impl PlanOutcome {
             PlanOutcome::Direct(ops) => ops.iter().map(|o| o.size).sum(),
             PlanOutcome::Transform { block_pairs, .. } => block_pairs.len() * src_bytes_per_block,
             PlanOutcome::SmallStridedCopy(ops) => ops.iter().map(|o| o.size).sum(),
-            PlanOutcome::CudaGraphReplay { ops, .. } => ops.iter().map(|o| o.size).sum(),
+            PlanOutcome::DeviceGraphReplay { ops, .. } => ops.iter().map(|o| o.size).sum(),
         }
     }
 
     /// Number of descriptors / ops in the outcome.
     ///
-    /// For `Direct` / `SmallStridedCopy` / `CudaGraphReplay`: op count.
+    /// For `Direct` / `SmallStridedCopy` / `DeviceGraphReplay`: op count.
     /// For `Transform`: block-pair count (one kernel call per pair group).
     fn descriptor_count(&self) -> usize {
         match self {
@@ -721,7 +714,7 @@ impl PlanOutcome {
             PlanOutcome::Direct(ops) => ops.len(),
             PlanOutcome::Transform { block_pairs, .. } => block_pairs.len(),
             PlanOutcome::SmallStridedCopy(ops) => ops.len(),
-            PlanOutcome::CudaGraphReplay { ops, .. } => ops.len(),
+            PlanOutcome::DeviceGraphReplay { ops, .. } => ops.len(),
         }
     }
 }
@@ -983,13 +976,13 @@ fn plan_and_lower(
                 [Candidate::DirectDma { ops }] => ops.iter().map(|o| o.size).sum(),
                 _ => 0,
             };
-            // PR-7.4.1: emit a CudaGraphReplay candidate alongside DirectDma on
-            // Cuda-family routes when cuda_graph_replay is enabled. The scorer
-            // gives CudaGraphReplay a higher score (1050) than DirectDma (1000),
+            // PR-7.4.1: emit a DeviceGraphReplay candidate alongside DirectDma on
+            // device-async routes when device_graph_replay is enabled. The scorer
+            // gives DeviceGraphReplay a higher score (1050) than DirectDma (1000),
             // so select_candidate picks it when the cap is on. The ops are shared
             // with the DirectDma candidate; rebinding happens per-launch.
-            if capabilities.cuda_graph_replay
-                && strategy.is_cuda_family()
+            if capabilities.device_graph_replay
+                && strategy.is_device_family()
                 && let [Candidate::DirectDma { ops }] = &candidates[..]
             {
                 let route_family = match strategy {
@@ -1011,7 +1004,7 @@ fn plan_and_lower(
                     candidate_class: 0, // DirectDma-shaped
                 };
                 let replay_ops = ops.clone();
-                candidates.push(Candidate::CudaGraphReplay {
+                candidates.push(Candidate::DeviceGraphReplay {
                     cache_key,
                     ops: replay_ops,
                 });
@@ -1027,8 +1020,8 @@ fn plan_and_lower(
             let chosen = select_candidate(&candidates, &sel_ctx)?;
             match chosen {
                 Candidate::DirectDma { ops } => Ok(PlanOutcome::Direct(ops.clone())),
-                // PR-7.4.1: CudaGraphReplay selected — emit with ops for capture/rebind.
-                Candidate::CudaGraphReplay { cache_key, ops } => Ok(PlanOutcome::CudaGraphReplay {
+                // PR-7.4.1: DeviceGraphReplay selected — emit with ops for capture/rebind.
+                Candidate::DeviceGraphReplay { cache_key, ops } => Ok(PlanOutcome::DeviceGraphReplay {
                     cache_key: cache_key.clone(),
                     ops: ops.clone(),
                 }),
@@ -1858,9 +1851,9 @@ impl OwnedStagedContext {
                  outcome — staged NIXL leg uses min_inner_bytes = 0 and must go Direct. \
                  This is an internal routing bug."
             ),
-            PlanOutcome::CudaGraphReplay { .. } => bail!(
-                "OwnedStagedContext::build_and_post_nixl_leg: unexpected CudaGraphReplay \
-                 outcome — staged NIXL legs use min_inner_bytes = 0 and cuda_graph_replay \
+            PlanOutcome::DeviceGraphReplay { .. } => bail!(
+                "OwnedStagedContext::build_and_post_nixl_leg: unexpected DeviceGraphReplay \
+                 outcome — staged NIXL legs use min_inner_bytes = 0 and device_graph_replay \
                  is disabled on NIXL routes. This is an internal routing bug."
             ),
         };
@@ -2459,11 +2452,11 @@ fn dispatch_cuda_graph_replay_planner(
         let mut src_ptrs: Vec<*const c_void> = Vec::with_capacity(ops.len());
         let mut dst_ptrs: Vec<*mut c_void> = Vec::with_capacity(ops.len());
         // All ops must share the same size for the batch dispatch.
-        // The DirectDma path groups by size upstream; CudaGraphReplay
+        // The DirectDma path groups by size upstream; DeviceGraphReplay
         // is only emitted for same-size groups (descriptor_count encodes
         // the count, total_bytes = count * size_per_op for uniform ops).
         // We dispatch all ops in one memcpy_batch call using the first op's
-        // size — mixed sizes within a CudaGraphReplay batch are currently
+        // size — mixed sizes within a DeviceGraphReplay batch are currently
         // not supported and would be caught by the cache-key collision check.
         let first_size = ops[0].size;
         for op in ops {
@@ -2648,6 +2641,66 @@ fn dispatch_cuda_graph_replay_planner(
     }
 
     Ok(())
+}
+
+/// SYCL graph replay dispatcher: record a SYCL graph, launch once.
+///
+/// Unlike the CUDA path which captures once and rebinds addresses on each
+/// replay, the SYCL/UR path records fresh each time because UR does not yet
+/// support per-node USM memcpy address rebinding. The performance benefit
+/// comes from the single O(1) graph enqueue vs O(N) individual
+/// `queue.memcpy()` submissions, plus L0 driver-level batching of the
+/// finalized command list.
+///
+/// Future: when UR stabilizes graph-node address update, add a
+/// SYCL-side graph cache with shape-based lookup + address rebinding,
+/// matching the CUDA path's cache-hit fast path.
+#[cfg(feature = "xpu-sycl")]
+fn dispatch_sycl_graph_replay_planner(
+    ops: &[CopyOp],
+    device_stream: &Arc<DeviceStream>,
+    ctx: &TransferContext,
+) -> Result<()> {
+    use crate::device::{DeviceGraphExec, DeviceGraphOps};
+
+    if ops.is_empty() {
+        return Ok(());
+    }
+
+    let device_ctx = ctx.device_context();
+    let graph_ops = device_ctx.graph_ops().ok_or_else(|| {
+        anyhow!(
+            "dispatch_sycl_graph_replay_planner: device context does not implement \
+             DeviceGraphOps (SYCL graph capture not available)"
+        )
+    })?;
+
+    let src_ptrs: Vec<u64> = ops.iter().map(|op| op.src_addr as u64).collect();
+    let dst_ptrs: Vec<u64> = ops.iter().map(|op| op.dst_addr as u64).collect();
+    let size = ops[0].size;
+
+    let exec = graph_ops.record_memcpy_graph(
+        &src_ptrs,
+        &dst_ptrs,
+        size,
+        device_stream.stream_ops(),
+    )?;
+
+    exec.launch(device_stream.stream_ops())?;
+
+    Ok(())
+}
+
+/// Stub for when xpu-sycl feature is not compiled.
+#[cfg(not(feature = "xpu-sycl"))]
+fn dispatch_sycl_graph_replay_planner(
+    _ops: &[CopyOp],
+    _device_stream: &Arc<DeviceStream>,
+    _ctx: &TransferContext,
+) -> Result<()> {
+    bail!(
+        "dispatch_sycl_graph_replay_planner: xpu-sycl feature not compiled"
+    )
 }
 
 #[cfg(all(test, feature = "testing-kvbm"))]

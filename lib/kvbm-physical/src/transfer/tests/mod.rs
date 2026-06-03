@@ -15,6 +15,8 @@ mod local_transfers;
 mod planner_graph_replay;
 mod planner_nixl;
 mod planner_path;
+#[cfg(feature = "xpu-sycl")]
+mod sycl_graph_replay;
 mod prepared_plan;
 
 /// Skip test if stub kernels are in use (no real CUDA available).
@@ -33,12 +35,14 @@ mod prepared_plan;
 #[allow(unused_macros)]
 macro_rules! skip_if_stubs {
     () => {
-        if kvbm_kernels::is_using_stubs() {
-            eprintln!(
-                "Skipping test '{}': stub kernels in use (no real CUDA)",
-                module_path!()
-            );
-            return;
+        if !DeviceBackend::Sycl.is_available() {
+            if kvbm_kernels::is_using_stubs() {
+                eprintln!(
+                    "Skipping test '{}': stub kernels in use (no real CUDA)",
+                    module_path!()
+                );
+                return;
+            }
         }
     };
 }
@@ -49,14 +53,16 @@ macro_rules! skip_if_stubs {
 #[allow(unused_macros)]
 macro_rules! skip_if_stubs_and_device {
     ($($kind:expr),+ $(,)?) => {
-        if kvbm_kernels::is_using_stubs() {
-            let needs_cuda = false $(|| matches!($kind, StorageKind::Device(_)))+;
-            if needs_cuda {
-                eprintln!(
-                    "Skipping test '{}': stub kernels in use and test requires Device storage",
-                    module_path!()
-                );
-                return Ok(());
+        if !DeviceBackend::Sycl.is_available() {
+            if kvbm_kernels::is_using_stubs() {
+                let needs_cuda = false $(|| matches!($kind, StorageKind::Device(_)))+;
+                if needs_cuda {
+                    eprintln!(
+                        "Skipping test '{}': stub kernels in use and test requires Device storage",
+                        module_path!()
+                    );
+                    return Ok(());
+                }
             }
         }
     };

@@ -36,6 +36,7 @@ use std::str::FromStr;
 pub use traits::{
     DeviceContextOps, DeviceStreamOps, DeviceEventOps, DeviceMemPoolOps,
     DeviceDtype, DeviceSliceOps, HtodDtype,
+    DeviceGraphExec, DeviceGraphOps,
 };
 
 /// Device backend type selector.
@@ -239,6 +240,29 @@ impl DeviceContext {
             .downcast_ref::<cuda::CudaDeviceContext>()
             .map(|c| c.inner().clone())
     }
+
+    /// Attempt to get graph record/replay operations for this context.
+    ///
+    /// Returns `Some` if the backend implements `DeviceGraphOps`
+    /// (SYCL with SYCL graph support). Returns `None` for
+    /// backends that do not yet implement the trait (CUDA uses raw
+    /// `cuGraph` APIs directly in the planner; Phase 5 would refactor).
+    pub fn graph_ops(&self) -> Option<&dyn DeviceGraphOps> {
+        match self.backend {
+            DeviceBackend::Sycl => {
+                #[cfg(feature = "xpu-sycl")]
+                {
+                    self.ops
+                        .as_any()
+                        .downcast_ref::<sycl::SyclDeviceContext>()
+                        .map(|ctx| ctx as &dyn DeviceGraphOps)
+                }
+                #[cfg(not(feature = "xpu-sycl"))]
+                { None }
+            }
+            DeviceBackend::Cuda => None, // CUDA uses raw cuGraph APIs directly
+        }
+    }
 }
 
 impl std::fmt::Debug for DeviceContext {
@@ -259,6 +283,14 @@ pub struct DeviceStream {
 impl DeviceStream {
     pub fn backend(&self) -> DeviceBackend {
         self.backend
+    }
+
+    /// Access the underlying stream operations trait object.
+    ///
+    /// Used by `DeviceGraphOps` callers that need to pass the stream
+    /// as `&dyn DeviceStreamOps` (e.g. `record_memcpy_graph`, `launch`).
+    pub fn stream_ops(&self) -> &dyn DeviceStreamOps {
+        &*self.ops
     }
 
     pub fn bind_to_thread(&self) -> Result<()> {

@@ -376,3 +376,115 @@ pub trait DeviceSliceOps<T: DeviceDtype>: Send + Sync {
     /// the slice's lifetime; the closure shape is for API symmetry.
     fn with_device_ptr(&self, f: &mut dyn FnMut(u64));
 }
+
+
+// =====================================================================
+// DeviceGraphExec / DeviceGraphOps — record/replay for batch memcpy.
+// =====================================================================
+
+/// A recorded and instantiated graph of memcpy operations that can be
+/// replayed (launched) multiple times on a stream.
+///
+/// Conceptually equivalent to a `CUgraphExec` (CUDA) or a finalized
+/// `command_graph<executable>` (SYCL). Implementations are
+/// created via [`DeviceGraphOps::record_memcpy_graph`].
+///
+/// # Lifecycle
+///
+/// ```text
+/// record_memcpy_graph(ptrs, size, stream)
+///   → DeviceGraphExec  ──┐
+///                         │ try_rebind(new_ptrs)  [CUDA: O(N) set-params]
+///                         │ launch(stream)        [O(1) kernel launch]
+///                         │    ... repeat ...
+///                         └─ Drop                [destroy exec handle]
+/// ```
+pub trait DeviceGraphExec: Send + Sync {
+    /// Number of memcpy operations recorded in this graph.
+    fn node_count(&self) -> usize;
+
+    /// Attempt to rebind source/destination addresses for all recorded
+    /// memcpy nodes *in place*, without re-recording the graph.
+    ///
+    /// # Arguments
+    /// * `src_ptrs` — new source addresses, length must equal `node_count()`
+    /// * `dst_ptrs` — new destination addresses, length must equal `node_count()`
+    /// * `size` — per-op byte count (must match the size used at record time)
+    ///
+    /// # Returns
+    /// * `Ok(true)` — rebind succeeded; caller may proceed with `launch`.
+    /// * `Ok(false)` — backend does not support in-place rebinding
+    ///   (SYCL/UR path). Caller must discard this exec and call
+    ///   `record_memcpy_graph` again with the new addresses.
+    ///
+    /// # CUDA
+    /// Calls `cuGraphExecMemcpyNodeSetParams` per node — O(N) but
+    /// avoids the capture/instantiate/get-nodes overhead of a full
+    /// re-recording.
+    ///
+    /// # SYCL (sycl_ext_oneapi_graph)
+    /// UR does not yet support per-node USM memcpy address update
+    /// in graph captures; returns `Ok(false)` unconditionally.
+    fn try_rebind(
+        &self,
+        src_ptrs: &[u64],
+        dst_ptrs: &[u64],
+        size: usize,
+    ) -> Result<bool>;
+
+    /// Launch (enqueue) this graph on the given stream.
+    ///
+    /// The graph executes asynchronously — work is ordered after all
+    /// prior operations on `stream` and before any subsequent ones.
+    /// Callers track completion via `stream.record_event()` or
+    /// `stream.synchronize()`.
+    fn launch(&self, stream: &dyn DeviceStreamOps) -> Result<()>;
+}
+
+/// Graph record/replay operations — captures a batch of uniform-size
+/// memcpy operations into a replayable executable handle.
+///
+/// Implemented on the device *context* (not stream) because the
+/// recorded graph is stream-independent at construction time — it
+/// can be launched on any compatible stream.
+///
+/// # Backends
+///
+/// | Backend | Record mechanism | Rebind? |
+/// |---------|------------------|---------|
+/// | CUDA    | `cuStreamBeginCapture` → `cuGraphInstantiate` | Yes (`cuGraphExecMemcpyNodeSetParams`) |
+/// | SYCL    | `urGraphCreateExp` → queue capture → `urGraphInstantiateGraphExp` | No (re-record) |
+pub trait DeviceGraphOps: Send + Sync {
+    /// Record `src_ptrs.len()` memcpy operations of `size` bytes each
+    /// into an executable graph.
+    ///
+    /// The initial addresses in `src_ptrs`/`dst_ptrs` are baked into the
+    /// recording. For backends that support rebinding (CUDA), the caller
+    /// can later update addresses via [`DeviceGraphExec::try_rebind`];
+    /// for others (SYCL), a fresh recording is required for new addresses.
+    ///
+    /// # Arguments
+    /// * `src_ptrs` — source device/host pointers (one per op)
+    /// * `dst_ptrs` — destination device/host pointers (one per op)
+    /// * `size` — bytes to copy per op (uniform across all ops)
+    /// * `stream` — stream used during recording (CUDA capture stream;
+    ///   SYCL uses it to derive context/device handles)
+    ///
+    /// # Errors
+    /// Returns an error if the underlying driver API fails during
+    /// capture, instantiation, or finalisation.
+    fn record_memcpy_graph(
+        &self,
+        src_ptrs: &[u64],
+        dst_ptrs: &[u64],
+        size: usize,
+        stream: &dyn DeviceStreamOps,
+    ) -> Result<Box<dyn DeviceGraphExec>>;
+
+    /// Whether this backend supports in-place address rebinding on an
+    /// existing [`DeviceGraphExec`] without re-recording.
+    ///
+    /// * CUDA: `true` (uses `cuGraphExecMemcpyNodeSetParams`)
+    /// * SYCL: `false` (UR does not yet support USM memcpy node update)
+    fn supports_address_rebind(&self) -> bool;
+}
