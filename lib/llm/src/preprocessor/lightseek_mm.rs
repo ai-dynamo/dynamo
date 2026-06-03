@@ -364,9 +364,11 @@ mod tests {
     /// a `(family_label, hf_id, model_type)` triple. A row "passes" when the
     /// upstream registry can match it via either the HF id substring OR the
     /// `model_type` config field. A failure here means either:
-    ///   - the documented family lost coverage in a smg release (need to
-    ///     pin or pick up the fix upstream), or
-    ///   - we should remove that family from our supported-list claim.
+    ///
+    /// - the documented family lost coverage in a smg release (need to
+    ///   pin or pick up the fix upstream), or
+    /// - we should remove that family from our supported-list claim.
+    ///
     /// Update this list whenever we add a new supported family in docs.
     #[test]
     fn image_processor_registry_covers_documented_families() {
