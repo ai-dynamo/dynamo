@@ -10,7 +10,9 @@ import logging
 import math
 import os
 import signal
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Optional
+
+from dynamo.runtime import DistributedRuntime
 
 if TYPE_CHECKING:
     from dynamo.trtllm.engine import TensorRTLLMEngine
@@ -44,7 +46,7 @@ class TrtllmEngineMonitor:
     def __init__(
         self,
         engine: "TensorRTLLMEngine",
-        runtime: Optional[Any] = None,
+        runtime: DistributedRuntime,
         shutdown_event: Optional[asyncio.Event] = None,
         *,
         interval: Optional[float] = None,
@@ -97,21 +99,24 @@ class TrtllmEngineMonitor:
                     )
                     break
 
+                threw_exception = False
+                healthy = True
                 try:
                     healthy = await asyncio.to_thread(self.engine.check_health)
                 except Exception as exc:
                     logger.error("TRT-LLM health check raised: %r", exc, exc_info=True)
-                    await self._shutdown_worker(f"health check raised {exc!r}")
-                    break
+                    threw_exception = True
 
-                if not healthy:
+                if threw_exception or not healthy:
                     fatal_error = self.engine.get_health_check_fatal_error()
                     if fatal_error is not None:
                         logger.error("TRT-LLM engine is unhealthy: %r", fatal_error)
                     else:
                         logger.error("TRT-LLM engine is unhealthy.")
-                    await self._shutdown_worker("TRT-LLM health check failed")
-                    break
+                    logger.warning("Initiating Dynamo Runtime shutdown.")
+                    self._shutdown_engine()
+                    self.runtime.shutdown()
+                    os._exit(1)
 
                 if self.shutdown_event is not None:
                     try:
@@ -142,13 +147,3 @@ class TrtllmEngineMonitor:
             logger.warning("TRT-LLM engine shutdown failed: %r", exc, exc_info=True)
         finally:
             signal.alarm(0)
-
-    async def _shutdown_worker(self, reason: str) -> None:
-        logger.warning(
-            "Initiating worker shutdown after TRT-LLM fatal health state: %s", reason
-        )
-        self._shutdown_engine()
-        if self.runtime is not None:
-            logger.warning("Initiating Dynamo Runtime shutdown.")
-            self.runtime.shutdown()
-        os._exit(1)
