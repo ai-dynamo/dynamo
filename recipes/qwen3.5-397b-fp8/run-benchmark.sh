@@ -226,10 +226,22 @@ retrieve() {
   # workspace layout differs from the default.
   local base="${BENCHMARK_RESULTS_DIR:-$HOME/workspace/dynamo-tmp/logs}"
   local dest="$base/$(date +%m-%d)/qwen35-fp8-${HW}/${CONFIG}"
-  mkdir -p "$dest"
-  $K exec "$BENCH_POD" -- \
-      tar c --exclude='inputs.json' -C /perf-cache artifacts \
-    | tar x -C "$dest"
+  mkdir -p "$dest/logs"
+  # `kubectl exec -- tar c | tar x` is fragile across Teleport — under
+  # transient network hiccups the exec stream returns "i/o timeout"
+  # mid-stream and the local tar receives a truncated archive. Use
+  # `kubectl cp` on the specific files instead (per convention/k8s.md):
+  # the bench writes a fixed set of small artifacts (~few MB total
+  # without inputs.json), each retried independently.
+  local src="/perf-cache/artifacts/qwen35_fp8/${BENCH_RUN_LABEL}"
+  for f in profile_export_aiperf.json profile_export_aiperf.csv \
+           server_metrics_export.json server_metrics_export.csv \
+           profile_export.jsonl; do
+    $K cp "$BENCH_POD:$src/$f" "$dest/$f"
+  done
+  # The logs/aiperf.log is optional — present on most runs but absent
+  # if aiperf crashed before writing it. Don't fail retrieve over it.
+  $K cp "$BENCH_POD:$src/logs/aiperf.log" "$dest/logs/aiperf.log" 2>/dev/null || true
   echo "[retrieve] landed at $dest"
   find "$dest" -name 'profile_export_aiperf.json' -print
 }
