@@ -24,7 +24,6 @@ We ship Dynamo + vLLM deployment profiles across two GPU SKUs and two serving mo
 | **All2All backend**      | DeepEP high-throughput       | FlashInfer NVLink one-sided   | DeepEP low-latency           | DeepEP high-throughput       |
 | **Routing**              | KV-aware                     | KV-aware                      | KV-aware                     | KV-aware                     |
 | **Speculative decoding** | MTP (DL=3)                   | MTP (DL=3)                    | MTP (DL=3)                   | MTP (DL=3)                   |
-| **KV cache offloading**  | none                         | none                          | none                         | none                         |
 
 ## Supported features
 
