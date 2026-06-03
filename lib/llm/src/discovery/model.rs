@@ -165,25 +165,22 @@ impl Model {
             .any(|entry| entry.value().has_realtime_engine())
     }
 
-    // -- Topology readiness --
+    // -- Model serving readiness --
     //
-    // A *topology* is the set of WorkerSets in this Model that share the same
-    // `namespace` string and collectively serve traffic for one deployment.
-    // A worker's `needs` is in DNF: a list of alternative AND-sets of
-    // required peer worker types. The topology is ready when, for every
-    // WorkerSet in it, at least one alternative is fully covered by the
-    // worker types currently present in the topology (workers with
-    // worker_count > 0).
+    // The set of WorkerSets in this Model that share the same `namespace`
+    // string collectively serve traffic for one deployment. A worker's
+    // `needs` is in DNF: a list of alternative AND-sets of required peer
+    // worker types. The namespace is ready when, for every WorkerSet in it,
+    // at least one alternative is fully covered by the worker types
+    // currently present (workers with worker_count > 0).
     //
-    // The design target is that every worker registers an explicit
-    // `worker_type` and `needs`. A temporary shim in [`ws_role_and_needs`]
-    // reads `worker_type = None` as `Aggregated` with no `needs` so that the
-    // frontend can keep serving existing deployments while backends are
-    // being updated. The shim is removed once backend-side registration is
-    // strict; see `docs/proposals/health-disagg-readiness.md` (Phase 3).
+    // Every worker must register an explicit `worker_type` and `needs`.
+    // `register_model` rejects a missing `worker_type`, so a card without
+    // one is a genuinely misconfigured worker and must *not* count toward
+    // readiness.
 
     /// Distinct namespaces represented by this model's WorkerSets, sorted.
-    /// Each namespace identifies one topology in the model.
+    /// Each namespace identifies one deployment of the model.
     pub fn distinct_namespaces_sorted(&self) -> Vec<String> {
         let mut ns: Vec<String> = self
             .worker_sets
@@ -195,35 +192,27 @@ impl Model {
         ns
     }
 
-    /// Return `(worker_type, needs)` for this WorkerSet, applying the
-    /// temporary missing-field shim.
-    ///
-    /// TEMPORARY: contains a shim for `worker_type = None`, removed once
-    /// every backend registers explicit values.
+    /// Return `(worker_type, needs)` for this WorkerSet, or `None` if the
+    /// card has no declared `worker_type`. A `None` here means
+    /// "misconfigured worker"; the serving-readiness gate treats it as
+    /// missing.
     fn ws_role_and_needs(
         ws: &WorkerSet,
-    ) -> (
+    ) -> Option<(
         crate::worker_type::WorkerType,
         Vec<Vec<crate::worker_type::WorkerType>>,
-    ) {
+    )> {
         let card = ws.card();
-        match card.worker_type {
-            Some(wt) => (wt, card.needs.clone()),
-            None => {
-                // TEMPORARY shim: missing worker_type → treat as Aggregated
-                // with no peer needs. Removed when backend-side registration
-                // is strict and missing means "misconfigured".
-                (crate::worker_type::WorkerType::Aggregated, Vec::new())
-            }
-        }
+        card.worker_type.map(|wt| (wt, card.needs.clone()))
     }
 
     /// Whether the workers in the given namespace are ready to serve traffic.
     ///
     /// Iterates the WorkerSets sharing this namespace and checks that every
     /// WorkerSet's `needs` (DNF) has at least one alternative fully covered
-    /// by the present worker types. Returns false for an unknown namespace
-    /// or one with no WorkerSets.
+    /// by the present worker types. Returns false for an unknown namespace,
+    /// for one with no WorkerSets, or for one that contains a misconfigured
+    /// worker (card with no declared `worker_type`).
     pub fn is_workers_ready(&self, namespace: &str) -> bool {
         let mut present: std::collections::HashSet<crate::worker_type::WorkerType> =
             std::collections::HashSet::new();
@@ -233,7 +222,12 @@ impl Model {
             if ws.namespace() != namespace {
                 continue;
             }
-            let (wt, _needs) = Self::ws_role_and_needs(ws);
+            // A misconfigured card (no `worker_type` declared) makes the
+            // whole namespace not-ready: we can't tell what role it plays,
+            // so we refuse to vouch for the namespace.
+            let Some((wt, _needs)) = Self::ws_role_and_needs(ws) else {
+                return false;
+            };
             if ws.worker_count() > 0 {
                 present.insert(wt);
             }
@@ -242,10 +236,18 @@ impl Model {
         if wsets.is_empty() {
             return false;
         }
-        // Every WorkerSet's needs (DNF) must have at least one alternative
-        // (AND-set) fully present.
+        // Every WorkerSet must (a) have at least one live worker of its own
+        // role, and (b) have its `needs` DNF satisfied by the present roles.
+        // (a) is what rejects an Aggregated WorkerSet with worker_count == 0:
+        // its `needs` is empty, but without a live worker the namespace
+        // cannot serve traffic.
         for ws in &wsets {
-            let (_wt, needs) = Self::ws_role_and_needs(ws);
+            let Some((wt, needs)) = Self::ws_role_and_needs(ws) else {
+                return false;
+            };
+            if !present.contains(&wt) {
+                return false;
+            }
             if needs.is_empty() {
                 continue;
             }
@@ -876,13 +878,13 @@ mod tests {
         );
     }
 
-    // -- Topology readiness --
+    // -- Model serving readiness --
     //
     // These tests exercise the live-compute readiness methods on `Model`.
     // They construct WorkerSets with specific `worker_type` / `needs` values
     // on their cards and verify DNF readiness math, including the encode
-    // worker's two-alternative needs and the temporary missing-field shim
-    // in `ws_role_and_needs`.
+    // worker's two-alternative needs and the rejection of cards with no
+    // declared `worker_type`.
 
     use crate::worker_type::WorkerType;
 
@@ -1096,18 +1098,40 @@ mod tests {
     }
 
     #[test]
-    fn readiness_missing_worker_type_field_treated_as_aggregated() {
-        // TEMPORARY: verifies the shim in `ws_role_and_needs` that maps a
-        // missing worker_type (None) to Aggregated with no needs while
-        // backends are being updated to populate the field. This test (and
-        // the shim itself) are removed once every worker registers an
-        // explicit worker_type.
+    fn readiness_missing_worker_type_field_is_not_ready() {
+        // A card with no declared `worker_type` is considered misconfigured,
+        // and the serving-readiness gate must refuse to call the namespace
+        // ready — otherwise a broken backend registration would silently
+        // pass the gate.
         let model = Model::new("llama".to_string());
-        // Default card → worker_type is None.
-        let (_ws, _tx) = make_worker_set_with_count("dynamo", "mdc-agg", vec![1]);
+        let (_ws, _tx) = make_worker_set_with_count("dynamo", "mdc-default", vec![1]);
         model.add_worker_set("dynamo".to_string(), _ws);
 
-        assert!(model.is_workers_ready("dynamo"));
+        assert!(
+            !model.is_workers_ready("dynamo"),
+            "a worker set with no worker_type must NOT be considered ready"
+        );
+    }
+
+    #[test]
+    fn readiness_aggregated_zero_workers_not_ready() {
+        // An Aggregated WorkerSet with `worker_count() == 0` must NOT be
+        // considered ready: its `needs` is empty, but with no live worker
+        // the namespace can't serve traffic.
+        let model = Model::new("llama".to_string());
+        let (agg, _tx) = ws_with_role(
+            "dynamo",
+            "mdc-a",
+            WorkerType::Aggregated,
+            vec![],
+            vec![], // zero workers
+        );
+        model.add_worker_set("dynamo".to_string(), agg);
+
+        assert!(
+            !model.is_workers_ready("dynamo"),
+            "an Aggregated worker set with zero live workers must NOT be ready"
+        );
     }
 
     // -- is_ready_to_serve tests --

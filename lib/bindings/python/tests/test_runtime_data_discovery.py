@@ -6,7 +6,13 @@ import json
 
 import pytest
 
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
+from dynamo.llm import (
+    ModelInput,
+    ModelRuntimeConfig,
+    ModelType,
+    WorkerType,
+    register_model,
+)
 from dynamo.runtime import DistributedRuntime
 
 pytestmark = [
@@ -42,6 +48,7 @@ async def _register_leader(
         endpoint,
         "tensor",
         runtime_config=runtime_config,
+        worker_type=WorkerType.Aggregated,
     )
     return endpoint.connection_id()
 

@@ -398,9 +398,14 @@ async def init_llm_worker(
         default_sampling_params.return_perf_metrics = True
     model_input = ModelInput.Tokens
 
-    # Set model type based on disaggregation mode for unified frontend support
-    if config.disaggregation_mode == DisaggregationMode.PREFILL:
-        model_type = ModelType.Prefill
+    # Set model type based on disaggregation mode. Prefill and encode workers
+    # carry no OpenAI surface — their role is declared via `worker_type`, and
+    # `model_type` is empty.
+    if config.disaggregation_mode in (
+        DisaggregationMode.PREFILL,
+        DisaggregationMode.ENCODE,
+    ):
+        model_type = ModelType.Empty
     else:
         model_type = parse_endpoint_types(config.endpoint_types)
         logging.info(f"Registering model with endpoint types: {config.endpoint_types}")
@@ -648,37 +653,53 @@ async def init_llm_worker(
             media_fetcher.allow_direct_ip(allow_internal)
             media_fetcher.allow_direct_port(allow_internal)
 
-        # Register the model with runtime config
-        # Encode workers do NOT register - they're internal workers only.
-        # Prefill and decode workers register
-        if config.disaggregation_mode != DisaggregationMode.ENCODE:
-            if config.disaggregation_mode == DisaggregationMode.PREFILL:
-                worker_type = WorkerType.Prefill
-                needs_set: list[WorkerType] = [WorkerType.Decode]
-            elif config.disaggregation_mode == DisaggregationMode.DECODE:
-                worker_type = WorkerType.Decode
-                needs_set = [WorkerType.Prefill]
-            else:
-                # AGGREGATED ("prefill_and_decode")
-                worker_type = WorkerType.Aggregated
-                needs_set = []
-            needs: list[list[WorkerType]] = [needs_set] if needs_set else []
+        # Register the model with runtime config for every disaggregation
+        # role, including ENCODE. Encode workers get their own bucket in the
+        # WorkerSet via `worker_type` in the ws_key.
+        if config.disaggregation_mode == DisaggregationMode.PREFILL:
+            worker_type = WorkerType.Prefill
+            needs_set: list[WorkerType] = [WorkerType.Decode]
+        elif config.disaggregation_mode == DisaggregationMode.DECODE:
+            worker_type = WorkerType.Decode
+            needs_set = [WorkerType.Prefill]
+        elif config.disaggregation_mode == DisaggregationMode.ENCODE:
+            worker_type = WorkerType.Encode
+            # Encode workers want either a P+D pair, or a single Aggregated
+            # peer that handles both stages. DNF: outer OR, inner AND.
+            needs_set = []  # placeholder, overridden below
+        else:
+            # AGGREGATED ("prefill_and_decode")
+            worker_type = WorkerType.Aggregated
+            needs_set = []
+        # `--encode-endpoint` is non-empty when this worker talks to a
+        # separate encode worker; that adds Encode to its needs.
+        if worker_type != WorkerType.Encode and getattr(
+            config, "encode_endpoint", None
+        ):
+            needs_set.append(WorkerType.Encode)
+        if worker_type == WorkerType.Encode:
+            needs: list[list[WorkerType]] = [
+                [WorkerType.Prefill, WorkerType.Decode],
+                [WorkerType.Aggregated],
+            ]
+        else:
+            needs = [needs_set] if needs_set else []
 
-            await register_model(
-                model_input,
-                model_type,
-                endpoint,
-                config.model,
-                config.served_model_name,
-                context_length=config.max_seq_len,
-                kv_cache_block_size=config.kv_block_size,
-                runtime_config=runtime_config,
-                custom_template_path=config.custom_jinja_template,
-                media_decoder=media_decoder,
-                media_fetcher=media_fetcher,
-                worker_type=worker_type,
-                needs=needs,
-            )
+        await register_model(
+            model_input,
+            model_type,
+            endpoint,
+            config.model,
+            config.served_model_name,
+            context_length=config.max_seq_len,
+            kv_cache_block_size=config.kv_block_size,
+            runtime_config=runtime_config,
+            custom_template_path=config.custom_jinja_template,
+            media_decoder=media_decoder,
+            media_fetcher=media_fetcher,
+            worker_type=worker_type,
+            needs=needs,
+        )
 
         health_check_payload = TrtllmHealthCheckPayload(
             tokenizer=tokenizer,

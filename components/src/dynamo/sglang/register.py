@@ -56,7 +56,8 @@ async def _register_model_with_runtime_config(
     dynamo_args: DynamoConfig,
     input_type: ModelInput = ModelInput.Tokens,
     output_type: ModelType = ModelType.Chat | ModelType.Completions,
-    worker_type: Optional[WorkerType] = None,
+    *,
+    worker_type: WorkerType,
     needs: Optional[List[List[WorkerType]]] = None,
 ) -> bool:
     """Register LLM with the Dynamo runtime.
@@ -69,10 +70,7 @@ async def _register_model_with_runtime_config(
         input_type: Expected model input type. Defaults to ModelInput.Tokens.
         output_type: Expected model output type. Defaults to ModelType.Chat | ModelType.Completions.
         worker_type: Topology role of this worker (Prefill/Decode/Encode/Aggregated).
-            Callers are expected to pass an explicit value; `None` is accepted only
-            so the optional kwarg can flow through the wrapper unchanged. Once the
-            PR 1 compat shim in `Model::ws_role_and_needs` is removed (Phase 3),
-            registration with `None` will fail in the Rust binding.
+            Required (keyword-only); the Rust binding rejects a missing `worker_type`.
         needs: DNF list of peer roles this worker requires to serve. Empty (or
             `None`) means no peer dependency, which is the correct value for
             Aggregated workers.
@@ -400,7 +398,8 @@ async def register_model_with_readiness_gate(
     input_type: ModelInput = ModelInput.Tokens,
     output_type: ModelType = ModelType.Chat | ModelType.Completions,
     readiness_gate: Optional[asyncio.Event] = None,
-    worker_type: Optional[WorkerType] = None,
+    *,
+    worker_type: WorkerType,
     needs: Optional[List[List[WorkerType]]] = None,
 ) -> None:
     """Wrapper function to register LLM with the Dynamo runtime and use optional readiness gate to signal success.

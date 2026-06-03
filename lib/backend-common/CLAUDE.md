@@ -188,8 +188,9 @@ flag automatically.
 
 What the **`Worker`** does with the mode at registration time:
 
-- `Prefill` → register with `ModelType::Prefill` regardless of
-  `endpoint_types`, so the frontend's `PrefillRouter` targets it.
+- `Prefill` → register with `ModelType::empty()` and `WorkerType::Prefill`
+  regardless of `endpoint_types`, so the frontend's `PrefillRouter` targets
+  it via `worker_type`.
 - `Decode` → keep `endpoint_types`, but force-disable
   `enable_local_indexer` (decode workers don't host the indexer
   endpoint, so they must not advertise it).

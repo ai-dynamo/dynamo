@@ -25,7 +25,7 @@ import logging
 
 import uvloop
 
-from dynamo.llm import ModelInput, ModelType, register_model
+from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -102,10 +102,14 @@ async def _serve_disagg(
     logger.info("Registering as prefill worker...")
     await register_model(
         model_input=ModelInput.Tokens,
-        model_type=ModelType.Prefill,
+        # Prefill workers have no OpenAI surface; the role is declared via
+        # `worker_type=Prefill`.
+        model_type=ModelType.Empty,
         endpoint=prefill_endpoint,
         model_path=config.model_name,
         model_name=config.model_name,
+        worker_type=WorkerType.Prefill,
+        needs=[[WorkerType.Decode]],
     )
     logger.info(
         f"Registered prefill endpoint: {config.namespace}.{config.component_name}.prefill_generate"
@@ -118,6 +122,8 @@ async def _serve_disagg(
         endpoint=decode_endpoint,
         model_path=config.model_name,
         model_name=config.model_name,
+        worker_type=WorkerType.Decode,
+        needs=[[WorkerType.Prefill]],
     )
     logger.info(
         f"Registered decode endpoint: {config.namespace}.{config.component_name}.decode_generate"
@@ -169,6 +175,7 @@ async def _serve_agg(
         endpoint=generate_endpoint,
         model_path=config.model_name,
         model_name=config.model_name,
+        worker_type=WorkerType.Aggregated,
     )
     logger.info(
         f"Registered agg endpoint: {config.namespace}.{config.component_name}.generate"

@@ -618,7 +618,7 @@ async def register_vllm_model(
     config: Config,
     engine_client: AsyncLLM,
     vllm_config: VllmConfig,
-    worker_type: WorkerType | None = None,
+    worker_type: WorkerType,
     needs: list[list[WorkerType]] | None = None,
 ) -> None:
     """
@@ -626,14 +626,16 @@ async def register_vllm_model(
 
     Args:
         model_input: Input type for the model (e.g., ModelInput.Tokens)
-        model_type: Type of model (e.g., ModelType.Chat, ModelType.Prefill)
+        model_type: OpenAI surface this card exposes (e.g., ModelType.Chat).
+            Prefill workers pass `ModelType.Empty` — they have no OpenAI surface,
+            their role is carried by `worker_type=WorkerType.Prefill`.
         generate_endpoint: Endpoint to register
         config: Configuration object
         engine_client: vLLM engine client
         vllm_config: vLLM configuration
         worker_type: The disaggregation role this worker plays
-            (Prefill / Decode / Encode / Aggregated). Required for the
-            frontend's topology readiness check once strict mode lands.
+            (Prefill / Decode / Encode / Aggregated). Required by the
+            frontend's model-serving-readiness check.
         needs: Peer worker types required to serve traffic, in DNF form
             (list of alternative AND-sets).
     """
@@ -668,8 +670,10 @@ async def register_vllm_model(
         and config.disaggregation_mode != DisaggregationMode.DECODE
     )
 
-    # Add tool/reasoning parsers for decode models
-    if model_type != ModelType.Prefill:
+    # Add tool/reasoning parsers for decode/aggregated workers. Prefill
+    # workers have no OpenAI surface and don't run a parser — key off
+    # `worker_type` to skip them.
+    if worker_type != WorkerType.Prefill:
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
     runtime_config.exclude_tools_when_tool_choice_none = (

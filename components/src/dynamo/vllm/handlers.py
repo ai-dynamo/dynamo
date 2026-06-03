@@ -61,6 +61,7 @@ from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
+    WorkerType,
     lora_name_to_id,
     register_model,
     unregister_model,
@@ -1275,10 +1276,43 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 self.config.dyn_reasoning_parser
                             )
 
+                            # Match the base-model registration topology (see
+                            # worker_factory.py _create_decode_worker /
+                            # _create_prefill_worker) so the router activates for the
+                            # LoRA model name the same way it does for the base model.
+                            # A prefill worker carries its role via worker_type=Prefill
+                            # with model_type=Empty (no OpenAI surface); decode and
+                            # aggregated workers expose the LoRA on the same
+                            # chat/completions surface. --route-to-encoder adds Encode
+                            # to the AND-set of required peers.
+                            if (
+                                self.config.disaggregation_mode
+                                == DisaggregationMode.PREFILL
+                            ):
+                                lora_model_type = ModelType.Empty
+                                lora_worker_type = WorkerType.Prefill
+                                lora_needs_set: list[WorkerType] = [WorkerType.Decode]
+                            elif (
+                                self.config.disaggregation_mode
+                                == DisaggregationMode.DECODE
+                            ):
+                                lora_model_type = ModelType.Chat | ModelType.Completions
+                                lora_worker_type = WorkerType.Decode
+                                lora_needs_set = [WorkerType.Prefill]
+                            else:  # AGGREGATED
+                                lora_model_type = ModelType.Chat | ModelType.Completions
+                                lora_worker_type = WorkerType.Aggregated
+                                lora_needs_set = []
+                            if self.config.route_to_encoder:
+                                lora_needs_set.append(WorkerType.Encode)
+                            lora_needs: list[list[WorkerType]] = (
+                                [lora_needs_set] if lora_needs_set else []
+                            )
+
                             # Publish with format: v1/mdc/dynamo/backend/generate/{instance_id}/{lora_slug}
                             await register_model(
                                 model_input=ModelInput.Tokens,
-                                model_type=ModelType.Chat | ModelType.Completions,
+                                model_type=lora_model_type,
                                 endpoint=self.generate_endpoint,
                                 model_path=self.config.model,
                                 kv_cache_block_size=self.config.engine_args.block_size,
@@ -1286,6 +1320,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 user_data=user_data,
                                 lora_name=lora_name,
                                 base_model_path=self.config.model,
+                                worker_type=lora_worker_type,
+                                needs=lora_needs,
                             )
                             logger.info(
                                 f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
