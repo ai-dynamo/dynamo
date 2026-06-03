@@ -13,7 +13,7 @@ use crate::http::service::service_v2 as http_service;
 use crate::discovery::ModelManager;
 use crate::protocols::tensor::TensorModelConfig;
 use crate::protocols::tensor::{NvCreateTensorRequest, NvCreateTensorResponse};
-use crate::request_template::RequestTemplate;
+use crate::request_template::{RequestTemplate, resolve_request_model};
 use anyhow::Result;
 use derive_builder::Builder;
 use futures::pin_mut;
@@ -67,7 +67,7 @@ impl GrpcTuningConfig {
 use crate::grpc::service::openai::completion_response_stream;
 use crate::grpc::service::tensor::{ExtendedNvCreateTensorResponse, tensor_response_stream};
 use std::convert::{TryFrom, TryInto};
-use tonic::{Request, Response, Status, transport::Server};
+use tonic::{Request, Response, Status, metadata::MetadataMap, transport::Server};
 
 use crate::protocols::openai::completions::{
     NvCreateCompletionRequest, NvCreateCompletionResponse,
@@ -83,6 +83,9 @@ use inference::{
 };
 
 use prost::Message;
+
+type ModelStreamInferResultStream =
+    Pin<Box<dyn Stream<Item = Result<ModelStreamInferResponse, Status>> + Send + 'static>>;
 
 /// gRPC service state - shares metrics with HTTP service for unified metrics collection
 pub struct State {
@@ -122,8 +125,18 @@ impl State {
         self.manager.clone()
     }
 
-    fn is_tensor_model(&self, model: &String) -> bool {
-        self.manager.list_tensor_models().contains(model)
+    fn is_tensor_model(&self, model: &str) -> bool {
+        self.manager
+            .list_tensor_models()
+            .iter()
+            .any(|candidate| candidate == model)
+    }
+
+    fn is_completions_model(&self, model: &str) -> bool {
+        self.manager
+            .list_completions_models()
+            .iter()
+            .any(|candidate| candidate == model)
     }
 }
 
@@ -315,6 +328,237 @@ impl Config {
     }
 }
 
+enum InferRequest {
+    Tensor {
+        request_id: String,
+        request: Box<NvCreateTensorRequest>,
+        set_raw_output_contents: bool,
+    },
+    Completion {
+        request_id: String,
+        request: Box<NvCreateCompletionRequest>,
+    },
+}
+
+impl InferRequest {
+    #[allow(clippy::result_large_err)]
+    fn from_model_infer(
+        state: &State,
+        request: ModelInferRequest,
+        template: Option<&RequestTemplate>,
+    ) -> Result<Self, Status> {
+        let mut request = request;
+        let model = resolve_request_model(&request.model_name, template).to_string();
+        if request.model_name.is_empty() && !model.is_empty() {
+            request.model_name = model.clone();
+        }
+        let request_id = request.id.clone();
+
+        if state.is_tensor_model(&model) {
+            let set_raw_output_contents = !request.raw_input_contents.is_empty();
+            let request = request
+                .try_into()
+                .map_err(|e| Status::invalid_argument(format!("Failed to parse request: {}", e)))?;
+            return Ok(Self::Tensor {
+                request_id,
+                request: Box::new(request),
+                set_raw_output_contents,
+            });
+        }
+
+        if !state.is_completions_model(&model) {
+            return Err(Status::not_found(format!("Model '{}' not found", model)));
+        }
+
+        let mut request: NvCreateCompletionRequest = request
+            .try_into()
+            .map_err(|e| Status::invalid_argument(format!("Failed to parse request: {}", e)))?;
+        apply_request_template(&mut request, template);
+
+        Ok(Self::Completion {
+            request_id,
+            request: Box::new(request),
+        })
+    }
+
+    async fn unary_response(
+        self,
+        state: Arc<State>,
+        metadata: &MetadataMap,
+    ) -> Result<ModelInferResponse, Status> {
+        match self {
+            Self::Tensor {
+                request_id,
+                request,
+                set_raw_output_contents,
+            } => {
+                let stream = tensor_response_stream(state, *request, false, metadata).await?;
+
+                let tensor_response = ExtendedNvCreateTensorResponse {
+                    response: NvCreateTensorResponse::from_annotated_stream(stream)
+                        .await
+                        .map_err(|e| {
+                            tracing::error!("Failed to fold completions stream: {:?}", e);
+                            Status::internal(format!("Failed to fold completions stream: {}", e))
+                        })?,
+                    set_raw_output_contents,
+                };
+
+                let mut reply: ModelInferResponse = tensor_response.try_into().map_err(|e| {
+                    Status::invalid_argument(format!("Failed to parse response: {}", e))
+                })?;
+                reply.id = request_id;
+
+                Ok(reply)
+            }
+            Self::Completion {
+                request_id,
+                request,
+            } => {
+                if request.inner.stream.unwrap_or(false) {
+                    return Err(Status::invalid_argument(
+                        "Streaming is not supported for this endpoint",
+                    ));
+                }
+
+                let (stream, parsing_options) =
+                    completion_response_stream(state, *request, metadata).await?;
+
+                let completion_response =
+                    NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
+                        .await
+                        .map_err(|e| {
+                            tracing::error!("Failed to fold completions stream: {:?}", e);
+                            Status::internal(format!("Failed to fold completions stream: {}", e))
+                        })?;
+
+                let mut reply: ModelInferResponse =
+                    completion_response.try_into().map_err(|e| {
+                        Status::invalid_argument(format!("Failed to parse response: {}", e))
+                    })?;
+                reply.id = request_id;
+
+                Ok(reply)
+            }
+        }
+    }
+
+    fn stream_response(
+        self,
+        state: Arc<State>,
+        metadata: MetadataMap,
+    ) -> ModelStreamInferResultStream {
+        Box::pin(async_stream::try_stream! {
+            match self {
+                Self::Tensor {
+                    request_id,
+                    request,
+                    set_raw_output_contents,
+                } => {
+                    let stream = tensor_response_stream(state, *request, true, &metadata).await?;
+
+                    pin_mut!(stream);
+                    while let Some(delta) = stream.next().await {
+                        let response = match delta.ok() {
+                            Err(e) => {
+                                yield ModelStreamInferResponse {
+                                    error_message: e.to_string(),
+                                    infer_response: None,
+                                };
+                                continue;
+                            }
+                            Ok(response) => response,
+                        };
+                        if let Some(data) = response.data {
+                            let data = ExtendedNvCreateTensorResponse {
+                                response: data,
+                                set_raw_output_contents,
+                            };
+                            let mut reply = ModelStreamInferResponse::try_from(data).map_err(|e| {
+                                Status::invalid_argument(format!("Failed to parse response: {}", e))
+                            })?;
+                            if let Some(infer_response) = reply.infer_response.as_mut() {
+                                infer_response.id = request_id.clone();
+                            }
+                            yield reply;
+                        }
+                    }
+                }
+                Self::Completion {
+                    request_id,
+                    request,
+                } => {
+                    let streaming = request.inner.stream.unwrap_or(false);
+                    let (stream, parsing_options) =
+                    completion_response_stream(state, *request, &metadata).await?;
+
+                    if streaming {
+                        pin_mut!(stream);
+                        while let Some(delta) = stream.next().await {
+                            let response = match delta.ok() {
+                                Err(e) => {
+                                    yield ModelStreamInferResponse {
+                                        error_message: e.to_string(),
+                                        infer_response: None,
+                                    };
+                                    continue;
+                                }
+                                Ok(response) => response,
+                            };
+                            if let Some(data) = response.data {
+                                let mut reply = ModelStreamInferResponse::try_from(data).map_err(|e| {
+                                    Status::invalid_argument(format!("Failed to parse response: {}", e))
+                                })?;
+                                if let Some(infer_response) = reply.infer_response.as_mut() {
+                                    infer_response.id = request_id.clone();
+                                }
+                                yield reply;
+                            }
+                        }
+                    } else {
+                        let completion_response =
+                            NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
+                                .await
+                                .map_err(|e| {
+                                    tracing::error!("Failed to fold completions stream: {:?}", e);
+                                    Status::internal(format!(
+                                        "Failed to fold completions stream: {}",
+                                        e
+                                    ))
+                                })?;
+
+                        let mut response: ModelStreamInferResponse =
+                            completion_response.try_into().map_err(|e| {
+                                Status::invalid_argument(format!("Failed to parse response: {}", e))
+                            })?;
+                        if let Some(infer_response) = response.infer_response.as_mut() {
+                            infer_response.id = request_id;
+                        }
+                        yield response;
+                    }
+                }
+            }
+        })
+    }
+}
+
+fn apply_request_template(
+    request: &mut NvCreateCompletionRequest,
+    template: Option<&RequestTemplate>,
+) {
+    if let Some(template) = template {
+        if request.inner.model.is_empty() {
+            request.inner.model = template.model.clone();
+        }
+        if request.inner.temperature.unwrap_or(0.0) == 0.0 {
+            request.inner.temperature = Some(template.temperature);
+        }
+        if request.inner.max_tokens.unwrap_or(0) == 0 {
+            request.inner.max_tokens = Some(template.max_completion_tokens);
+        }
+    }
+}
+
 #[tonic::async_trait]
 impl GrpcInferenceService for KserveService {
     async fn model_infer(
@@ -322,85 +566,16 @@ impl GrpcInferenceService for KserveService {
         request: Request<ModelInferRequest>,
     ) -> Result<Response<ModelInferResponse>, Status> {
         let (metadata, _extensions, request) = request.into_parts();
-        let model = request.model_name.clone();
-        let request_id = request.id.clone();
-
-        // [gluo TODO] refactor to reuse code, inference logic is largely the same
-        if self.state().is_tensor_model(&model) {
-            let set_raw_output_contents = !request.raw_input_contents.is_empty();
-            let tensor_request: NvCreateTensorRequest = NvCreateTensorRequest::try_from(request)
-                .map_err(|e| Status::invalid_argument(format!("Failed to parse request: {}", e)))?;
-
-            let stream =
-                tensor_response_stream(self.state_clone(), tensor_request, false, &metadata)
-                    .await?;
-
-            let tensor_response = ExtendedNvCreateTensorResponse {
-                response: NvCreateTensorResponse::from_annotated_stream(stream)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!("Failed to fold completions stream: {:?}", e);
-                        Status::internal(format!("Failed to fold completions stream: {}", e))
-                    })?,
-                set_raw_output_contents,
-            };
-
-            let mut reply: ModelInferResponse = tensor_response.try_into().map_err(|e| {
-                Status::invalid_argument(format!("Failed to parse response: {}", e))
-            })?;
-            reply.id = request_id;
-
-            return Ok(Response::new(reply));
-        }
-
-        // [gluo FIXME] check model existence first, otherwise the true error
-        // is masked by "Failed to parse request" below.
-        // Fallback handling by assuming the model is OpenAI Completions model
-        let mut completion_request: NvCreateCompletionRequest = request
-            .try_into()
-            .map_err(|e| Status::invalid_argument(format!("Failed to parse request: {}", e)))?;
-
-        if completion_request.inner.stream.unwrap_or(false) {
-            // return error that streaming is not supported
-            return Err(Status::invalid_argument(
-                "Streaming is not supported for this endpoint",
-            ));
-        }
-
-        // Apply template values if present
-        if let Some(template) = self.request_template.as_ref() {
-            if completion_request.inner.model.is_empty() {
-                completion_request.inner.model = template.model.clone();
-            }
-            if completion_request.inner.temperature.unwrap_or(0.0) == 0.0 {
-                completion_request.inner.temperature = Some(template.temperature);
-            }
-            if completion_request.inner.max_tokens.unwrap_or(0) == 0 {
-                completion_request.inner.max_tokens = Some(template.max_completion_tokens);
-            }
-        }
-
-        let (stream, parsing_options) =
-            completion_response_stream(self.state_clone(), completion_request, &metadata).await?;
-
-        let completion_response =
-            NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
-                .await
-                .map_err(|e| {
-                    tracing::error!("Failed to fold completions stream: {:?}", e);
-                    Status::internal(format!("Failed to fold completions stream: {}", e))
-                })?;
-
-        let mut reply: ModelInferResponse = completion_response
-            .try_into()
-            .map_err(|e| Status::invalid_argument(format!("Failed to parse response: {}", e)))?;
-        reply.id = request_id;
+        let infer_request =
+            InferRequest::from_model_infer(self.state(), request, self.request_template.as_ref())?;
+        let reply = infer_request
+            .unary_response(self.state_clone(), &metadata)
+            .await?;
 
         Ok(Response::new(reply))
     }
 
-    type ModelStreamInferStream =
-        Pin<Box<dyn Stream<Item = Result<ModelStreamInferResponse, Status>> + Send + 'static>>;
+    type ModelStreamInferStream = ModelStreamInferResultStream;
 
     async fn model_stream_infer(
         &self,
@@ -430,133 +605,15 @@ impl GrpcInferenceService for KserveService {
                     }
                 };
 
-                let model = request.model_name.clone();
-
-                // [gluo TODO] refactor to reuse code, inference logic is largely the same
-                if state.is_tensor_model(&model) {
-                    // Must keep track of 'request_id' which will be returned in corresponding response
-                    let request_id = request.id.clone();
-                    let set_raw_output_contents = !request.raw_input_contents.is_empty();
-                    let tensor_request: NvCreateTensorRequest = request.try_into().map_err(|e| {
-                        Status::invalid_argument(format!("Failed to parse request: {}", e))
-                    })?;
-
-                    let stream = tensor_response_stream(
-                        state.clone(),
-                        tensor_request,
-                        true,
-                        &metadata,
-                    )
-                    .await?;
-
-                    pin_mut!(stream);
-                    while let Some(delta) = stream.next().await {
-                        let response = match delta.ok() {
-                            Err(e) => {
-                                yield ModelStreamInferResponse {
-                                    error_message: e.to_string(),
-                                    infer_response: None
-                                };
-                                continue;
-                            }
-                            Ok(response) => response,
-                        };
-                        match response.data {
-                            Some(data) => {
-                                let data = ExtendedNvCreateTensorResponse {response: data,
-                                    set_raw_output_contents,
-                                };
-                                let mut reply = ModelStreamInferResponse::try_from(data).map_err(|e| {
-                                    Status::invalid_argument(format!("Failed to parse response: {}", e))
-                                })?;
-                                if let Some(infer_response) = reply.infer_response.as_mut() {
-                                    infer_response.id = request_id.clone();
-                                }
-                                yield reply;
-                            },
-                            None => {
-                                // Skip if no data is present, the response is for annotation
-                            },
-                        }
-                    }
-                    continue;
-                }
-
-                // Fallback handling by assuming the model is OpenAI Completions model
-                // Must keep track of 'request_id' which will be returned in corresponding response
-                let request_id = request.id.clone();
-                let mut completion_request: NvCreateCompletionRequest = request.try_into().map_err(|e| {
-                    Status::invalid_argument(format!("Failed to parse request: {}", e))
-                })?;
-
-                // Apply template values if present
-                if let Some(template) = &template {
-                    if completion_request.inner.model.is_empty() {
-                        completion_request.inner.model = template.model.clone();
-                    }
-                    if completion_request.inner.temperature.unwrap_or(0.0) == 0.0 {
-                        completion_request.inner.temperature = Some(template.temperature);
-                    }
-                    if completion_request.inner.max_tokens.unwrap_or(0) == 0 {
-                        completion_request.inner.max_tokens = Some(template.max_completion_tokens);
-                    }
-                }
-
-                let streaming = completion_request.inner.stream.unwrap_or(false);
-
-                let (stream, parsing_options) = completion_response_stream(
-                    state.clone(),
-                    completion_request,
-                    &metadata,
-                )
-                .await?;
-
-                if streaming {
-                    pin_mut!(stream);
-                    while let Some(delta) = stream.next().await {
-                        let response = match delta.ok() {
-                            Err(e) => {
-                                yield ModelStreamInferResponse {
-                                    error_message: e.to_string(),
-                                    infer_response: None
-                                };
-                                continue;
-                            }
-                            Ok(response) => response,
-                        };
-                        match response.data {
-                            Some(data) => {
-                                let mut reply = ModelStreamInferResponse::try_from(data).map_err(|e| {
-                                    Status::invalid_argument(format!("Failed to parse response: {}", e))
-                                })?;
-                                if let Some(infer_response) = reply.infer_response.as_mut() {
-                                    infer_response.id = request_id.clone();
-                                }
-                                yield reply;
-                            },
-                            None => {
-                                // Skip if no data is present, the response is for annotation
-                            },
-                        }
-                    }
-                } else {
-                    let completion_response = NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
-                        .await
-                        .map_err(|e| {
-                            tracing::error!(
-                                "Failed to fold completions stream: {:?}",
-                                e
-                            );
-                            Status::internal(format!("Failed to fold completions stream: {}", e))
-                        })?;
-
-                    let mut response: ModelStreamInferResponse = completion_response.try_into().map_err(|e| {
-                        Status::invalid_argument(format!("Failed to parse response: {}", e))
-                    })?;
-                    if let Some(infer_response) = response.infer_response.as_mut() {
-                        infer_response.id = request_id.clone();
-                    }
-                    yield response;
+                let infer_request = InferRequest::from_model_infer(
+                    &state,
+                    request,
+                    template.as_ref(),
+                )?;
+                let stream = infer_request.stream_response(state.clone(), metadata.clone());
+                pin_mut!(stream);
+                while let Some(response) = stream.next().await {
+                    yield response?;
                 }
             }
         };
@@ -820,5 +877,108 @@ impl GrpcInferenceService for KserveService {
                 .manager()
                 .is_model_ready_to_serve(request_model_name),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dynamo_protocols::types::CreateCompletionRequest;
+    use tonic::Code;
+
+    fn template() -> RequestTemplate {
+        RequestTemplate {
+            model: "template-model".to_string(),
+            temperature: 0.7,
+            max_completion_tokens: 128,
+        }
+    }
+
+    fn completion_request(
+        model: &str,
+        temperature: Option<f32>,
+        max_tokens: Option<u32>,
+    ) -> NvCreateCompletionRequest {
+        NvCreateCompletionRequest {
+            inner: CreateCompletionRequest {
+                model: model.to_string(),
+                temperature,
+                max_tokens,
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: None,
+            metadata: None,
+            return_tokens_as_token_ids: None,
+            unsupported_fields: Default::default(),
+        }
+    }
+
+    #[test]
+    fn apply_request_template_fills_empty_model() {
+        let mut request = completion_request("", Some(0.9), Some(64));
+
+        apply_request_template(&mut request, Some(&template()));
+
+        assert_eq!(request.inner.model, "template-model");
+        assert_eq!(request.inner.temperature, Some(0.9));
+        assert_eq!(request.inner.max_tokens, Some(64));
+    }
+
+    #[test]
+    fn apply_request_template_fills_zero_temperature() {
+        let mut request = completion_request("request-model", Some(0.0), Some(64));
+
+        apply_request_template(&mut request, Some(&template()));
+
+        assert_eq!(request.inner.model, "request-model");
+        assert_eq!(request.inner.temperature, Some(0.7));
+        assert_eq!(request.inner.max_tokens, Some(64));
+    }
+
+    #[test]
+    fn apply_request_template_fills_zero_max_tokens() {
+        let mut request = completion_request("request-model", Some(0.9), Some(0));
+
+        apply_request_template(&mut request, Some(&template()));
+
+        assert_eq!(request.inner.model, "request-model");
+        assert_eq!(request.inner.temperature, Some(0.9));
+        assert_eq!(request.inner.max_tokens, Some(128));
+    }
+
+    #[test]
+    fn missing_completion_model_returns_not_found_before_parsing() {
+        let state = State::builder().build().unwrap();
+        let request = ModelInferRequest {
+            model_name: "missing-model".to_string(),
+            ..Default::default()
+        };
+
+        let err = match InferRequest::from_model_infer(&state, request, None) {
+            Ok(_) => panic!("missing model unexpectedly parsed as an inference request"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.code(), Code::NotFound);
+        assert_eq!(err.message(), "Model 'missing-model' not found");
+    }
+
+    #[test]
+    fn missing_templated_completion_model_uses_resolved_model_in_error() {
+        let state = State::builder().build().unwrap();
+        let request = ModelInferRequest {
+            model_name: String::new(),
+            ..Default::default()
+        };
+        let template = template();
+
+        let err = match InferRequest::from_model_infer(&state, request, Some(&template)) {
+            Ok(_) => panic!("missing model unexpectedly parsed as an inference request"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.code(), Code::NotFound);
+        assert_eq!(err.message(), "Model 'template-model' not found");
     }
 }
