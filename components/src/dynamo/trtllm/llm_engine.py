@@ -336,6 +336,8 @@ class TrtllmLLMEngine(LLMEngine):
         # Resolve the engine-declared spec now the engine (and its tokenizer)
         # is initialized; see `logits_processor_spec()`.
         self._logits_processor_spec = await self.logits_processor_spec()
+        # TODO: Thread runtime and shutdown_event through unified LLMEngine
+        # startup so the TRT-LLM monitor can match the legacy shutdown path.
         self._engine.start_health_monitor()
 
         from tensorrt_llm.metrics import MetricsCollector
