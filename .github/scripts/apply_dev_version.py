@@ -12,6 +12,12 @@ argument -- a suffix like '.dev20260423' -- and rewrites, in place:
   - The `version = "1.1.0"` pins on dynamo-*/kvbm-* path deps in root Cargo.toml
 
 Empty suffix is a no-op, so safe to run unconditionally in every workflow.
+
+With `--set-version X.Y.Z[.postN]` it instead SETS an absolute release version:
+it replaces the current workspace version M wherever it appears in those same
+files, plus the Helm Chart.yaml version/appVersion/dependency sites. Python
+keeps PEP 440 form ('0.8.1.post1'); Cargo/Helm use SemVer build metadata
+('0.8.1+post1'). Sites holding an independent version (not M) are left alone.
 """
 from __future__ import annotations
 
@@ -43,6 +49,17 @@ SUBCRATE_CARGO_TARGETS = [
     "lib/kvbm-logical/Cargo.toml",
     "lib/kvbm-physical/Cargo.toml",
 ]
+
+# Helm charts carry the unified version in version / appVersion / dependency
+# version. Only touched in --set-version (release) mode; nightly never bumps charts.
+HELM_CHART_TARGETS = [
+    "deploy/helm/charts/platform/Chart.yaml",
+    "deploy/helm/charts/platform/components/operator/Chart.yaml",
+    "deploy/helm/charts/snapshot/Chart.yaml",
+]
+
+# X.Y.Z.postN -> X.Y.Z+postN so SemVer ecosystems (Cargo, Helm) stay valid.
+SET_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:\.(post\d+))?$")
 
 # Line-anchored: matches `version = "X.Y.Z"` lines. Skips `version.workspace = true`
 # (no quotes) and `version = { ... }` (no string). Safe for sub-crate Cargo.tomls
@@ -148,17 +165,90 @@ def rewrite_root_cargo(root: Path, suffix: str) -> None:
     path.write_text(text)
 
 
+def _workspace_version(root: Path) -> str:
+    text = (root / "Cargo.toml").read_text()
+    m = re.search(r'\[workspace\.package\][^\[]*?\n\s*version\s*=\s*"([^"]+)"', text)
+    if not m:
+        raise RuntimeError("no [workspace.package].version in root Cargo.toml")
+    return m.group(1)
+
+
+def _semver_form(new: str) -> str:
+    m = SET_RE.match(new)
+    if not m:
+        raise RuntimeError(f"--set-version must be X.Y.Z or X.Y.Z.postN (got '{new}')")
+    base = f"{m.group(1)}.{m.group(2)}.{m.group(3)}"
+    return f"{base}+{m.group(4)}" if m.group(4) else base
+
+
+def set_pyproject(path: Path, old: str, new: str, is_root: bool) -> None:
+    text = VERSION_LINE_RE.sub(
+        lambda m: f"{m.group(1)}{new}{m.group(3)}" if m.group(2) == old else m.group(0),
+        path.read_text(),
+        count=1,
+    )
+    if is_root:
+        text = PY_RUNTIME_PIN_RE.sub(
+            lambda m: f"{m.group(1)}{new}{m.group(3)}" if m.group(2) == old else m.group(0),
+            text,
+        )
+    path.write_text(text)
+
+
+def set_cargo(path: Path, old: str, new: str) -> None:
+    text = re.sub(
+        rf'(\bversion\s*=\s*"){re.escape(old)}(")',
+        lambda m: f"{m.group(1)}{new}{m.group(2)}",
+        path.read_text(),
+    )
+    path.write_text(text)
+
+
+def set_helm(path: Path, old: str, new: str) -> None:
+    pat = re.compile(
+        r'^(?P<pre>\s*(?:appVersion|version)\s*:\s*)(?P<q>"?)'
+        + re.escape(old)
+        + r'(?P=q)(?P<post>\s*)$',
+        re.MULTILINE,
+    )
+    text = pat.sub(
+        lambda m: f"{m.group('pre')}{m.group('q')}{new}{m.group('q')}{m.group('post')}",
+        path.read_text(),
+    )
+    path.write_text(text)
+
+
+def set_release_version(root: Path, new_version: str) -> None:
+    old = _workspace_version(root)
+    semver = _semver_form(new_version)
+    for rel in PYPROJECT_TARGETS:
+        set_pyproject(root / rel, old, new_version, is_root=(rel == "pyproject.toml"))
+    set_cargo(root / "Cargo.toml", old, semver)
+    for rel in SUBCRATE_CARGO_TARGETS:
+        set_cargo(root / rel, old, semver)
+    for rel in HELM_CHART_TARGETS:
+        set_helm(root / rel, old, semver)
+    print(f"set_release_version: {old} -> py={new_version} semver={semver}", file=sys.stderr)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("suffix", help="e.g. .dev20260423 (empty = no-op)")
+    ap.add_argument("suffix", nargs="?", default="", help="e.g. .dev20260423 (empty = no-op)")
     ap.add_argument("root", nargs="?", default=".", help="repo root")
+    ap.add_argument("--set-version", dest="set_version", default="",
+                    help="set an absolute release version X.Y.Z[.postN] instead of appending a suffix")
     args = ap.parse_args()
+
+    root = Path(args.root).resolve()
+
+    if args.set_version:
+        set_release_version(root, args.set_version)
+        return 0
 
     if not args.suffix:
         print("apply_dev_version: empty suffix, no-op", file=sys.stderr)
         return 0
 
-    root = Path(args.root).resolve()
     for rel in PYPROJECT_TARGETS:
         rewrite_pyproject(root / rel, args.suffix, is_root=(rel == "pyproject.toml"))
     rewrite_root_cargo(root, args.suffix)
