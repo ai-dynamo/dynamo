@@ -170,7 +170,16 @@ deploy() {
     dgd)
       local sel_fe="nvidia.com/dynamo-graph-deployment-name=$DEPLOY_NAME,nvidia.com/dynamo-component-type=frontend"
       local sel_wk="nvidia.com/dynamo-graph-deployment-name=$DEPLOY_NAME,nvidia.com/dynamo-component-type=worker"
-      echo "[deploy] waiting for DGD Frontend pod ..."
+      # The Dynamo operator takes 5-10s to reconcile a DGD into pods —
+      # `kubectl wait -l ...` issued immediately after `apply` returns
+      # "no matching resources found" because the pods don't exist yet.
+      # Poll for pod materialization (up to 60s) before waiting on Ready.
+      echo "[deploy] waiting for operator to materialize DGD pods ..."
+      for _ in $(seq 1 30); do
+        [[ $($K get pod -l "$sel_fe" --no-headers 2>/dev/null | wc -l) -gt 0 ]] && break
+        sleep 2
+      done
+      echo "[deploy] waiting for DGD Frontend pod Ready ..."
       $K wait --for=condition=Ready pod -l "$sel_fe" --timeout=900s
       echo "[deploy] waiting for VllmWorker pod (397B FP8 cold load can take 30+ min) ..."
       $K wait --for=condition=Ready pod -l "$sel_wk" --timeout=2700s
