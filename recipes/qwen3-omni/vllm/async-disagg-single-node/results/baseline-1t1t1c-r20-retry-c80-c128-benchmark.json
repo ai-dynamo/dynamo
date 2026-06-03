@@ -1,0 +1,97 @@
+{
+  "url": "http://127.0.0.1:18069",
+  "model": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+  "prompt": "Read the following paragraph clearly and naturally: Independent stage scaling lets a disaggregated multimodal serving stack add capacity to the stage that is saturated. In this workload the audio talker must produce a longer spoken response, while the thinker and code to waveform stages should remain shared. This benchmark repeats the same paragraph to measure sustained audio generation throughput under concurrent requests.",
+  "max_tokens": 512,
+  "warmup": 1,
+  "levels": [
+    {
+      "concurrency": 80,
+      "requests": 160,
+      "elapsed_s": 59.56192898377776,
+      "successes": 160,
+      "failures": 0,
+      "success_rps": 2.6862796878787703,
+      "audio_seconds_per_s": 85.28166752932837,
+      "audio_seconds_total": 5079.540625000002,
+      "latency_avg_s": 26.083696089917794,
+      "latency_p50_s": 25.779913910198957,
+      "latency_p90_s": 31.021040866430845,
+      "latency_p95_s": 35.7349238931667,
+      "latency_max_s": 37.875526720657945,
+      "sample_rate": 24000,
+      "audio_samples_avg": 761931.09375,
+      "response_bytes_avg": 4073462.8875,
+      "first_error": null,
+      "statuses": [
+        200
+      ]
+    },
+    {
+      "concurrency": 96,
+      "requests": 192,
+      "elapsed_s": 67.99833812471479,
+      "successes": 192,
+      "failures": 0,
+      "success_rps": 2.8235984186533427,
+      "audio_seconds_per_s": 89.66135486749549,
+      "audio_seconds_total": 6096.823125000001,
+      "latency_avg_s": 28.800366811240867,
+      "latency_p50_s": 27.93592669814825,
+      "latency_p90_s": 38.71967856539414,
+      "latency_p95_s": 40.051315165217964,
+      "latency_max_s": 41.90830603800714,
+      "sample_rate": 24000,
+      "audio_samples_avg": 762102.890625,
+      "response_bytes_avg": 4074401.75,
+      "first_error": null,
+      "statuses": [
+        200
+      ]
+    },
+    {
+      "concurrency": 128,
+      "requests": 256,
+      "elapsed_s": 84.90473345853388,
+      "successes": 256,
+      "failures": 0,
+      "success_rps": 3.015144027570928,
+      "audio_seconds_per_s": 96.57765434249552,
+      "audio_seconds_total": 8199.9,
+      "latency_avg_s": 35.96460181146904,
+      "latency_p50_s": 37.892568957060575,
+      "latency_p90_s": 43.74703105073422,
+      "latency_p95_s": 45.192716118879616,
+      "latency_max_s": 47.977898543700576,
+      "sample_rate": 24000,
+      "audio_samples_avg": 768740.625,
+      "response_bytes_avg": 4109885.734375,
+      "first_error": null,
+      "statuses": [
+        200
+      ]
+    }
+  ],
+  "best": {
+    "concurrency": 128,
+    "requests": 256,
+    "elapsed_s": 84.90473345853388,
+    "successes": 256,
+    "failures": 0,
+    "success_rps": 3.015144027570928,
+    "audio_seconds_per_s": 96.57765434249552,
+    "audio_seconds_total": 8199.9,
+    "latency_avg_s": 35.96460181146904,
+    "latency_p50_s": 37.892568957060575,
+    "latency_p90_s": 43.74703105073422,
+    "latency_p95_s": 45.192716118879616,
+    "latency_max_s": 47.977898543700576,
+    "sample_rate": 24000,
+    "audio_samples_avg": 768740.625,
+    "response_bytes_avg": 4109885.734375,
+    "first_error": null,
+    "statuses": [
+      200
+    ]
+  }
+}

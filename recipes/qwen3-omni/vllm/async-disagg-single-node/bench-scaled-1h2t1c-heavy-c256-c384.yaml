@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qwen3-omni-async-1h2t1c-bench-heavy-c256-c384
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: qwen3-omni-async-1h2t1c-bench-heavy-c256-c384
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-H200
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      imagePullSecrets:
+        - name: nvcr-dynamo-dev-pullsecret
+        - name: nvcr-imagepullsecret
+      containers:
+        - name: benchmark
+          image: nvcr.io/nvidian/dynamo-dev/dynamo:vllm-runtime-ptarasiewicz-dyn3068-qwen3-async-38584b4-r20-current-omni-20260602
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -lc
+            - "python3 /bench/chat_audio_benchmark.py --url http://qwen3-omni-async-1h2t1c:8000 --prompt 'Read the following paragraph clearly and naturally: Independent stage scaling lets a disaggregated multimodal serving stack add capacity to the stage that is saturated. In this workload the audio talker must produce a longer spoken response, while the thinker and code to waveform stages should remain shared. This benchmark repeats the same paragraph to measure sustained audio generation throughput under concurrent requests.' --max-tokens 512 --concurrency 256,320,384 --request-timeout-s 900 --requests-multiplier 2 --min-requests 4 --warmup 1 --voice Chelsie --output-json /tmp/benchmark-result.json; status=$?; echo __RESULT_JSON__; cat /tmp/benchmark-result.json || true; exit $status"
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "8"
+              memory: 16Gi
+          volumeMounts:
+            - name: benchmark-script
+              mountPath: /bench
+              readOnly: true
+      volumes:
+        - name: benchmark-script
+          configMap:
+            name: qwen3-omni-audio-benchmark-script
+            defaultMode: 0755

@@ -1,0 +1,197 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Generated Qwen3-Omni async disaggregated experiment: 1 thinker, 1 talker, 1 code2wav.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: qwen3-omni-async-1h1t1c-launcher
+data:
+  launch.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+    APP_NAME=qwen3-omni-async-1h1t1c
+    trap "echo [${APP_NAME}] cleaning up; kill 0" EXIT
+
+    MODEL="${MODEL:-Qwen/Qwen3-Omni-30B-A3B-Instruct}"
+    BASE_STAGE_CONFIG="/usr/local/lib/python3.12/dist-packages/vllm_omni/deploy/qwen3_omni_moe.yaml"
+    STAGE_CONFIG_DIR="/tmp/qwen3_omni_stage_configs"
+
+    export HF_HOME=/home/dynamo/.cache/huggingface
+    export FLASHINFER_DISABLE_VERSION_CHECK=1
+    export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+    export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+    export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
+    export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
+    export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-1}"
+    export RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-1}"
+    export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+    export DYN_NAMESPACE="${DYN_NAMESPACE:-qwen3-omni-async-1h1t1c}"
+    export DYN_HEALTH_CHECK_ENABLED="${DYN_HEALTH_CHECK_ENABLED:-false}"
+    export DYN_DISCOVERY_BACKEND="${DYN_DISCOVERY_BACKEND:-file}"
+    export DYN_FILE_KV="${DYN_FILE_KV:-/tmp/dynamo_store_kv}"
+    export DYN_REQUEST_PLANE="${DYN_REQUEST_PLANE:-tcp}"
+    export DYN_EVENT_PLANE="${DYN_EVENT_PLANE:-zmq}"
+
+    OMNI_FLAGS=(
+      --model "$MODEL"
+      --output-modalities text audio
+      --media-output-fs-url file:///tmp/dynamo_media
+      --trust-remote-code
+    )
+
+    make_stage_config() {
+      local stage_id="$1"
+      local gpu_id="$2"
+      local out="${STAGE_CONFIG_DIR}/stage_${stage_id}_${gpu_id}.yaml"
+      mkdir -p "${STAGE_CONFIG_DIR}"
+      python3 - "${BASE_STAGE_CONFIG}" "${out}" "${stage_id}" "${gpu_id}" <<PY
+    import sys
+    import yaml
+
+    src, out, stage_id, gpu_id = sys.argv[1:5]
+    stage_id = int(stage_id)
+    with open(src, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    for stage in cfg.get("stages", []):
+        if int(stage.get("stage_id")) == stage_id:
+            stage["devices"] = str(gpu_id)
+    with open(out, "w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg, f, sort_keys=False)
+    PY
+      printf "%s\\n" "${out}"
+    }
+
+    start_stage() {
+      local stage_id="$1"
+      local stage_name="$2"
+      local gpu_id="$3"
+      local system_port="$4"
+      echo "[${APP_NAME}] starting stage ${stage_id} ${stage_name} on GPU ${gpu_id}"
+      local stage_config
+      stage_config="$(make_stage_config "${stage_id}" "${gpu_id}")"
+      CUDA_VISIBLE_DEVICES="${gpu_id}" DYN_SYSTEM_PORT="${system_port}"         python3 -m dynamo.vllm.omni --stage-id "${stage_id}" --stage-configs-path "${stage_config}" "${OMNI_FLAGS[@]}" &
+      sleep "${STAGE_START_DELAY:-15}"
+    }
+
+    echo "[${APP_NAME}] namespace=${DYN_NAMESPACE}"
+    echo "[${APP_NAME}] base_stage_config=${BASE_STAGE_CONFIG}"
+    start_stage 0 thinker-0 0 8081
+
+    start_stage 1 talker-0 1 8082
+
+    start_stage 2 code2wav-0 2 8083
+
+    echo "[${APP_NAME}] starting omni router"
+    DYN_SYSTEM_PORT=8090 python3 -m dynamo.vllm.omni --omni-router --stage-configs-path "${BASE_STAGE_CONFIG}" "${OMNI_FLAGS[@]}" &
+    sleep 5
+
+    echo "[${APP_NAME}] starting frontend on :8000"
+    python3 -m dynamo.frontend &
+
+    wait -n
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qwen3-omni-async-1h1t1c
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qwen3-omni-async-1h1t1c
+  template:
+    metadata:
+      labels:
+        app: qwen3-omni-async-1h1t1c
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 0
+        fsGroup: 1000
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-H200
+      imagePullSecrets:
+        - name: nvcr-dynamo-dev-pullsecret
+        - name: nvcr-imagepullsecret
+      containers:
+        - name: dynamo-omni
+          image: nvcr.io/nvidian/dynamo-dev/dynamo:vllm-runtime-ptarasiewicz-dyn3068-qwen3-async-38584b4-r20-current-omni-20260602
+          imagePullPolicy: Always
+          command: ["bash", "/etc/dynamo/launcher/launch.sh"]
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+          env:
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+            - name: DYN_NAMESPACE
+              value: qwen3-omni-async-1h1t1c
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: "false"
+            - name: DYN_DISCOVERY_BACKEND
+              value: file
+            - name: DYN_FILE_KV
+              value: /tmp/dynamo_store_kv
+            - name: DYN_REQUEST_PLANE
+              value: tcp
+            - name: DYN_EVENT_PLANE
+              value: zmq
+            - name: OMP_NUM_THREADS
+              value: "1"
+            - name: MKL_NUM_THREADS
+              value: "1"
+            - name: OPENBLAS_NUM_THREADS
+              value: "1"
+            - name: NUMEXPR_NUM_THREADS
+              value: "1"
+            - name: RAYON_NUM_THREADS
+              value: "1"
+            - name: TOKENIZERS_PARALLELISM
+              value: "false"
+          resources:
+            requests:
+              memory: 338Gi
+              nvidia.com/gpu: "3"
+            limits:
+              memory: 525Gi
+              nvidia.com/gpu: "3"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /home/dynamo/.cache/huggingface
+            - name: launcher
+              mountPath: /etc/dynamo/launcher
+              readOnly: true
+            - name: dshm
+              mountPath: /dev/shm
+            - name: media
+              mountPath: /tmp/dynamo_media
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+        - name: launcher
+          configMap:
+            name: qwen3-omni-async-1h1t1c-launcher
+            defaultMode: 0755
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 24Gi
+        - name: media
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen3-omni-async-1h1t1c
+spec:
+  type: ClusterIP
+  selector:
+    app: qwen3-omni-async-1h1t1c
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
