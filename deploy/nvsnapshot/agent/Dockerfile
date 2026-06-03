@@ -47,6 +47,21 @@ RUN go mod download
 COPY . .
 
 # =============================================================================
+# Stage: linter — run golangci-lint against the module
+# =============================================================================
+FROM go-base AS linter
+
+RUN go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+RUN golangci-lint run --timeout=5m ./...
+
+# =============================================================================
+# Stage: tester — run unit tests
+# =============================================================================
+FROM go-base AS tester
+
+RUN go test ./... -v
+
+# =============================================================================
 # Stage: builder — compile Go binaries
 # =============================================================================
 FROM go-base AS builder
