@@ -77,6 +77,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     event_plane: Optional[str] = None
     chat_processor: str
     routed_engine_adapter: str
+    global_router_response_prologue_timeout_s: Optional[float]
     enable_anthropic_api: bool
     strip_anthropic_preamble: bool
     debug_perf: bool
@@ -129,6 +130,13 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
             raise ValueError(
                 "--dyn-routed-engine-adapter=global-router currently requires "
                 "--dyn-chat-processor=vllm or --dyn-chat-processor=sglang"
+            )
+        if (
+            self.global_router_response_prologue_timeout_s is not None
+            and self.global_router_response_prologue_timeout_s <= 0
+        ):
+            raise ValueError(
+                "--dyn-global-router-response-prologue-timeout-s must be > 0"
             )
         if self.router_prefill_load_model == "aic":
             if self.router_mode != "kv":
@@ -472,6 +480,20 @@ class FrontendArgGroup(ArgGroup):
                 "through a global router."
             ),
             choices=["default", "global-router"],
+        )
+        add_argument(
+            g,
+            flag_name="--dyn-global-router-response-prologue-timeout-s",
+            env_var="DYN_GLOBAL_ROUTER_RESPONSE_PROLOGUE_TIMEOUT_S",
+            default=30.0,
+            dest="global_router_response_prologue_timeout_s",
+            help=(
+                "[EXPERIMENTAL] Timeout in seconds for the frontend to wait for "
+                "a global-router delegated response stream prologue before "
+                "retrying the next priority pool. Applies only with "
+                "--dyn-routed-engine-adapter=global-router."
+            ),
+            arg_type=float,
         )
 
         add_negatable_bool_argument(

@@ -3,6 +3,7 @@
 
 """Topology-specific wrappers for frontend routed-engine calls."""
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
@@ -28,6 +29,7 @@ VALID_ROUTED_ENGINE_ADAPTERS = {
 }
 
 _MAX_GLOBAL_ROUTER_RETRY_CONTROLS = 32
+_DEFAULT_GLOBAL_ROUTER_RESPONSE_PROLOGUE_TIMEOUT_S = 30.0
 
 
 class _GlobalRouterControlError(RuntimeError):
@@ -41,7 +43,14 @@ class _GlobalRouterRetryExhausted(_GlobalRouterControlError):
 def wrap_routed_engine(config: Any, routed_engine: RoutedEngine) -> RoutedEngine:
     adapter = getattr(config, "routed_engine_adapter", ROUTED_ENGINE_ADAPTER_DEFAULT)
     if adapter == ROUTED_ENGINE_ADAPTER_GLOBAL_ROUTER:
-        return GlobalRouterRoutedEngineAdapter(routed_engine)
+        return GlobalRouterRoutedEngineAdapter(
+            routed_engine,
+            response_prologue_timeout_s=getattr(
+                config,
+                "global_router_response_prologue_timeout_s",
+                _DEFAULT_GLOBAL_ROUTER_RESPONSE_PROLOGUE_TIMEOUT_S,
+            ),
+        )
     return routed_engine
 
 
@@ -54,8 +63,14 @@ class GlobalRouterRoutedEngineAdapter:
     the same request with the next retry attempt.
     """
 
-    def __init__(self, routed_engine: RoutedEngine):
+    def __init__(
+        self,
+        routed_engine: RoutedEngine,
+        response_prologue_timeout_s: float
+        | None = (_DEFAULT_GLOBAL_ROUTER_RESPONSE_PROLOGUE_TIMEOUT_S),
+    ):
         self._routed_engine = routed_engine
+        self._response_prologue_timeout_s = response_prologue_timeout_s
 
     async def generate(self, request: Any, **kwargs: Any) -> AsyncIterator[Any]:
         return self._generate_with_global_router_retries(request, **kwargs)
@@ -64,7 +79,7 @@ class GlobalRouterRoutedEngineAdapter:
         self, request: Any, **kwargs: Any
     ) -> AsyncIterator[Any]:
         attempt = 0
-        retry_controls = 0
+        retry_steps = 0
 
         while True:
             yielded_output = False
@@ -72,53 +87,65 @@ class GlobalRouterRoutedEngineAdapter:
             retry_error = None
 
             try:
-                stream = await self._routed_engine.generate(
+                stream = await self._generate_attempt(
                     _request_for_retry_attempt(request, attempt), **kwargs
                 )
-
-                async for output in stream:
-                    data = output.data() if hasattr(output, "data") else output
-                    control = get_global_router_control(data)
-                    if control is not None:
-                        if yielded_output:
-                            raise RuntimeError(
-                                "global router retry control received after response "
-                                "streaming started"
-                            )
-                        action = control.get("action")
-                        if action == GLOBAL_ROUTER_ACTION_EXHAUSTED:
-                            raise _GlobalRouterRetryExhausted(
-                                _retry_exhausted_message(control)
-                            )
-                        next_attempt = _next_retry_attempt(control)
-                        logger.warning(
-                            "Retrying global-router request via next pool: "
-                            "attempt=%s next_attempt=%s failed_namespace=%s "
-                            "next_namespace=%s error=%s",
-                            attempt,
-                            next_attempt,
-                            control.get("failed_namespace"),
-                            control.get("next_namespace"),
-                            control.get("error"),
-                        )
-                        break
-
-                    yielded_output = True
-                    yield output
-            except _GlobalRouterControlError:
-                raise
-            except Exception as exc:
-                if yielded_output:
-                    raise
+            except TimeoutError as exc:
                 next_attempt = attempt + 1
                 retry_error = exc
                 logger.warning(
-                    "Retrying global-router request after pre-output delegated "
-                    "response failure: attempt=%s next_attempt=%s error=%s",
+                    "Retrying global-router request after response prologue "
+                    "timeout: attempt=%s next_attempt=%s timeout_s=%s",
                     attempt,
                     next_attempt,
-                    exc,
+                    self._response_prologue_timeout_s,
                 )
+            else:
+                try:
+                    async for output in stream:
+                        data = output.data() if hasattr(output, "data") else output
+                        control = get_global_router_control(data)
+                        if control is not None:
+                            if yielded_output:
+                                raise RuntimeError(
+                                    "global router retry control received after response "
+                                    "streaming started"
+                                )
+                            action = control.get("action")
+                            if action == GLOBAL_ROUTER_ACTION_EXHAUSTED:
+                                raise _GlobalRouterRetryExhausted(
+                                    _retry_exhausted_message(control)
+                                )
+                            next_attempt = _next_retry_attempt(control)
+                            logger.warning(
+                                "Retrying global-router request via next pool: "
+                                "attempt=%s next_attempt=%s failed_namespace=%s "
+                                "next_namespace=%s error=%s",
+                                attempt,
+                                next_attempt,
+                                control.get("failed_namespace"),
+                                control.get("next_namespace"),
+                                control.get("error"),
+                            )
+                            break
+
+                        yielded_output = True
+                        yield output
+                except _GlobalRouterControlError:
+                    raise
+                except Exception as exc:
+                    if yielded_output:
+                        raise
+                    next_attempt = attempt + 1
+                    retry_error = exc
+                    logger.warning(
+                        "Retrying global-router request after established delegated "
+                        "response stream failed before output: attempt=%s "
+                        "next_attempt=%s error=%s",
+                        attempt,
+                        next_attempt,
+                        exc,
+                    )
 
             if next_attempt is None:
                 return
@@ -128,12 +155,23 @@ class GlobalRouterRoutedEngineAdapter:
                     f"attempt={attempt} next_attempt={next_attempt}"
                 )
 
-            retry_controls += 1
-            if retry_controls > _MAX_GLOBAL_ROUTER_RETRY_CONTROLS:
+            retry_steps += 1
+            if retry_steps > _MAX_GLOBAL_ROUTER_RETRY_CONTROLS:
                 raise RuntimeError(
-                    "global router retry control loop exceeded limit"
+                    "global router retry loop exceeded limit"
                 ) from retry_error
             attempt = next_attempt
+
+    async def _generate_attempt(
+        self, request: Any, **kwargs: Any
+    ) -> AsyncIterator[Any]:
+        generate = self._routed_engine.generate(request, **kwargs)
+        if self._response_prologue_timeout_s is None:
+            return await generate
+        return await asyncio.wait_for(
+            generate,
+            timeout=self._response_prologue_timeout_s,
+        )
 
 
 def _retry_exhausted_message(control: Any) -> str:

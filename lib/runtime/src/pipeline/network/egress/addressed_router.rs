@@ -230,7 +230,7 @@ impl AddressedPushRouter {
             frontend_send_ts_ns: None,
         };
 
-        let ctrl = serde_json::to_vec(&control_message)?;
+        let ctrl = serialize_control_message(&control_message)?;
         let data = serde_json::to_vec(&request)?;
 
         let msg = TwoPartMessage::from_parts(ctrl.into(), data.into());

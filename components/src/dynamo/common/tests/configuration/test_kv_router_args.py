@@ -448,6 +448,35 @@ def test_frontend_global_router_adapter_accepts_vllm_processor(monkeypatch) -> N
     assert config.routed_engine_adapter == "global-router"
 
 
+def test_frontend_global_router_prologue_timeout_flag(monkeypatch) -> None:
+    monkeypatch.delenv("DYN_GLOBAL_ROUTER_RESPONSE_PROLOGUE_TIMEOUT_S", raising=False)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(
+        ["--dyn-global-router-response-prologue-timeout-s", "12.5"]
+    )
+
+    config = FrontendConfig.from_cli_args(args)
+    config.validate()
+
+    assert config.global_router_response_prologue_timeout_s == 12.5
+
+
+def test_frontend_global_router_prologue_timeout_must_be_positive(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("DYN_GLOBAL_ROUTER_RESPONSE_PROLOGUE_TIMEOUT_S", raising=False)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--dyn-global-router-response-prologue-timeout-s", "0"])
+
+    config = FrontendConfig.from_cli_args(args)
+    with pytest.raises(ValueError, match="response-prologue-timeout-s must be > 0"):
+        config.validate()
+
+
 def test_frontend_admission_control_defaults_to_none(monkeypatch) -> None:
     """Default --admission-control is 'none': busy thresholds are cleared
     even though the underlying threshold flags have non-None defaults."""

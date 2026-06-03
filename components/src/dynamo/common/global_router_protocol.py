@@ -20,9 +20,9 @@ def get_global_router_retry_attempt(request: Mapping[str, Any]) -> Optional[int]
         return None
 
     value = routing[GLOBAL_ROUTER_RETRY_ATTEMPT_KEY]
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{GLOBAL_ROUTER_RETRY_ATTEMPT_KEY} must be an integer")
-    retry_attempt = int(value)
+    retry_attempt = value
     if retry_attempt < 0:
         raise ValueError(f"{GLOBAL_ROUTER_RETRY_ATTEMPT_KEY} must be >= 0")
     return retry_attempt

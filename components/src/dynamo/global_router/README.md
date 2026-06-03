@@ -254,7 +254,15 @@ When delegated response streaming is enabled with priority retry, the frontend m
 --dyn-routed-engine-adapter=global-router
 ```
 
-The adapter lets the frontend reissue the request with the next retry attempt if the delegated response path fails before any output has been streamed. If priority retry has multiple candidate pools and the frontend adapter is not enabled, the global router rejects the request instead of falling back to a relayed stream with delayed response-stream setup.
+The adapter lets the frontend reissue the request with the next retry attempt when the global router returns retry control, or when an already-established delegated response stream fails before any output has been streamed. If priority retry has multiple candidate pools and the frontend adapter is not enabled, the global router rejects the request instead of falling back to a relayed stream with delayed response-stream setup.
+
+The frontend adapter also bounds how long it waits for the delegated response stream prologue. Configure this with:
+
+```bash
+--dyn-global-router-response-prologue-timeout-s 30
+```
+
+If the timeout expires before the response prologue is observed, the frontend treats the selected pool as too slow or unavailable and retries the next priority attempt when one is available.
 
 ### Passing SLA Targets
 

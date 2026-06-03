@@ -12,6 +12,7 @@ import pytest
 from dynamo.common.global_router_protocol import (
     GLOBAL_ROUTER_CONTROL_FIELD,
     GLOBAL_ROUTER_RETRY_ATTEMPT_KEY,
+    get_global_router_retry_attempt,
 )
 from dynamo.global_router.handler import GlobalRouterHandler
 
@@ -167,6 +168,27 @@ def _handler(
         model_name="test-model",
         enable_delegated_response_stream=enable_delegated_response_stream,
     )
+
+
+@pytest.mark.parametrize("value", [True, False, "1", 1.9, None])
+def test_global_router_retry_attempt_must_be_integer(value: Any) -> None:
+    request = {"routing": {GLOBAL_ROUTER_RETRY_ATTEMPT_KEY: value}}
+
+    with pytest.raises(ValueError, match="must be an integer"):
+        get_global_router_retry_attempt(request)
+
+
+def test_global_router_retry_attempt_rejects_negative_integer() -> None:
+    request = {"routing": {GLOBAL_ROUTER_RETRY_ATTEMPT_KEY: -1}}
+
+    with pytest.raises(ValueError, match="must be >= 0"):
+        get_global_router_retry_attempt(request)
+
+
+def test_global_router_retry_attempt_accepts_integer() -> None:
+    request = {"routing": {GLOBAL_ROUTER_RETRY_ATTEMPT_KEY: 1}}
+
+    assert get_global_router_retry_attempt(request) == 1
 
 
 @pytest.mark.asyncio

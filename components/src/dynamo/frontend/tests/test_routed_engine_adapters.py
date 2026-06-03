@@ -3,6 +3,7 @@
 
 """Tests for frontend routed-engine topology adapters."""
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -12,9 +13,17 @@ from dynamo.common.global_router_protocol import (
     make_global_router_retry_control,
     make_global_router_retry_exhausted_control,
 )
-from dynamo.frontend.routed_engine_adapters import GlobalRouterRoutedEngineAdapter
+from dynamo.frontend.routed_engine_adapters import (
+    GlobalRouterRoutedEngineAdapter,
+    wrap_routed_engine,
+)
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.asyncio,
+]
 
 
 class FakeRoutedItem:
@@ -35,6 +44,9 @@ class SequenceRoutedEngine:
         self.requests.append(request)
         self.kwargs.append(kwargs)
         items = self._streams.pop(0)
+        if isinstance(items, DelayedGenerate):
+            await asyncio.sleep(items.delay_s)
+            items = items.items
         if isinstance(items, Exception):
             raise items
 
@@ -47,11 +59,28 @@ class SequenceRoutedEngine:
         return stream()
 
 
+class DelayedGenerate:
+    def __init__(self, delay_s: float, items: list[FakeRoutedItem]):
+        self.delay_s = delay_s
+        self.items = items
+
+
+class FakeConfig:
+    def __init__(
+        self,
+        routed_engine_adapter: str = "global-router",
+        global_router_response_prologue_timeout_s: float | None = 30.0,
+    ):
+        self.routed_engine_adapter = routed_engine_adapter
+        self.global_router_response_prologue_timeout_s = (
+            global_router_response_prologue_timeout_s
+        )
+
+
 async def _collect(stream) -> list[dict[str, Any]]:
     return [item.data() async for item in stream]
 
 
-@pytest.mark.asyncio
 async def test_global_router_adapter_reissues_request_on_retry_control():
     control = make_global_router_retry_control(
         request_type="prefill",
@@ -91,7 +120,6 @@ async def test_global_router_adapter_reissues_request_on_retry_control():
     ]
 
 
-@pytest.mark.asyncio
 async def test_global_router_adapter_does_not_yield_retry_control():
     control = make_global_router_retry_control(
         request_type="agg",
@@ -117,7 +145,6 @@ async def test_global_router_adapter_does_not_yield_retry_control():
     assert outputs == [{"done": True}]
 
 
-@pytest.mark.asyncio
 async def test_global_router_adapter_rejects_retry_control_after_output():
     control = make_global_router_retry_control(
         request_type="prefill",
@@ -144,8 +171,7 @@ async def test_global_router_adapter_rejects_retry_control_after_output():
         await _collect(stream)
 
 
-@pytest.mark.asyncio
-async def test_global_router_adapter_retries_generate_failure_before_output():
+async def test_global_router_adapter_does_not_retry_generate_failure_before_output():
     routed_engine = SequenceRoutedEngine(
         streams=[
             RuntimeError("response prologue failed"),
@@ -153,6 +179,28 @@ async def test_global_router_adapter_retries_generate_failure_before_output():
         ]
     )
     adapter = GlobalRouterRoutedEngineAdapter(routed_engine)
+
+    stream = await adapter.generate({"token_ids": [1]})
+    with pytest.raises(RuntimeError, match="response prologue failed"):
+        await _collect(stream)
+
+    assert [
+        request["routing"][GLOBAL_ROUTER_RETRY_ATTEMPT_KEY]
+        for request in routed_engine.requests
+    ] == [0]
+
+
+async def test_global_router_adapter_retries_generate_timeout_before_output():
+    routed_engine = SequenceRoutedEngine(
+        streams=[
+            DelayedGenerate(0.05, [FakeRoutedItem({"late": True})]),
+            [FakeRoutedItem({"done": True})],
+        ]
+    )
+    adapter = GlobalRouterRoutedEngineAdapter(
+        routed_engine,
+        response_prologue_timeout_s=0.001,
+    )
 
     stream = await adapter.generate({"token_ids": [1]})
     outputs = await _collect(stream)
@@ -164,7 +212,18 @@ async def test_global_router_adapter_retries_generate_failure_before_output():
     ] == [0, 1]
 
 
-@pytest.mark.asyncio
+async def test_wrap_global_router_adapter_passes_prologue_timeout():
+    routed_engine = SequenceRoutedEngine(streams=[])
+
+    adapter = wrap_routed_engine(
+        FakeConfig(global_router_response_prologue_timeout_s=12.5),
+        routed_engine,
+    )
+
+    assert isinstance(adapter, GlobalRouterRoutedEngineAdapter)
+    assert adapter._response_prologue_timeout_s == 12.5
+
+
 async def test_global_router_adapter_retries_stream_failure_before_output():
     routed_engine = SequenceRoutedEngine(
         streams=[
@@ -184,7 +243,6 @@ async def test_global_router_adapter_retries_stream_failure_before_output():
     ] == [0, 1]
 
 
-@pytest.mark.asyncio
 async def test_global_router_adapter_does_not_retry_stream_failure_after_output():
     routed_engine = SequenceRoutedEngine(
         streams=[
@@ -204,7 +262,6 @@ async def test_global_router_adapter_does_not_retry_stream_failure_after_output(
     assert len(routed_engine.requests) == 1
 
 
-@pytest.mark.asyncio
 async def test_global_router_adapter_raises_retry_exhausted_control():
     control = make_global_router_retry_exhausted_control(
         request_type="prefill",
