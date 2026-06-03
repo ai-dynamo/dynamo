@@ -1052,7 +1052,9 @@ class HandlerBase(BaseGenerativeHandler):
 
         stop_conditions = request["stop_conditions"]
         ignore_eos = stop_conditions.get("ignore_eos")
-        visible_stop_token_ids = set(stop_conditions.get("stop_token_ids_visible") or [])
+        visible_stop_token_ids = set(
+            stop_conditions.get("stop_token_ids_visible") or []
+        )
         if ignore_eos or visible_stop_token_ids:
             sampling_params.ignore_eos = True
 
