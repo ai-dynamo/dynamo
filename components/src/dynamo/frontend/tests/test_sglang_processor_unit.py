@@ -1364,6 +1364,81 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert captured["messages"][0]["tools"][0]["function"]["name"] == "get_weather"
         assert captured["messages"][1]["role"] == "user"
 
+    def test_deepseek_v4_accepts_openai_thinking_payload(self, monkeypatch):
+        """OpenAI-style thinking payload maps to DS-V4 thinking."""
+        captured = {}
+        fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
+
+        def fake_encode_messages(messages, *, thinking_mode, reasoning_effort=None):
+            captured["thinking_mode"] = thinking_mode
+            captured["reasoning_effort"] = reasoning_effort
+            return "<dsv4-prompt>"
+
+        fake_module.encode_messages = fake_encode_messages
+        monkeypatch.setitem(
+            sys.modules,
+            "sglang.srt.entrypoints.openai.encoding_dsv4",
+            fake_module,
+        )
+
+        class NoTemplateTokenizer:
+            chat_template = None
+
+            def apply_chat_template(self, *args, **kwargs):
+                raise AssertionError("apply_chat_template should not be called")
+
+            def encode(self, prompt):
+                assert prompt == "<dsv4-prompt>"
+                return [1, 2, 3]
+
+        request = {
+            "model": "deepseek-ai/DeepSeek-V4-Pro",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "max",
+        }
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=NoTemplateTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name="deepseek-v4",
+        )
+
+        assert result.prompt_token_ids == [1, 2, 3]
+        assert captured["thinking_mode"] == "thinking"
+        assert captured["reasoning_effort"] == "max"
+
+    def test_openai_thinking_payload_reaches_generic_chat_template(self):
+        """Root thinking payload is normalized before generic rendering."""
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["messages"] = messages
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        request = {
+            "model": "generic-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "thinking": {"type": "enabled"},
+        }
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+        )
+
+        assert result.prompt_token_ids == [1, 2, 3]
+        assert captured["kwargs"]["thinking"] is True
+        assert result.request["chat_template_kwargs"]["thinking"] is True
+        assert "chat_template_kwargs" not in request
+
     def test_deepseek_v4_named_tool_choice_filters_encoder_tools(self, monkeypatch):
         captured = {}
         fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")

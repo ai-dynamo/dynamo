@@ -112,6 +112,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             disaggregated_params: None,
             worker_trace_link: None,
             engine_data: None,
+            routing_data: None,
         },
         BackendOutput {
             token_ids: vec![1917],
@@ -127,6 +128,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             disaggregated_params: None,
             worker_trace_link: None,
             engine_data: None,
+            routing_data: None,
         },
         BackendOutput {
             token_ids: vec![0],
@@ -151,6 +153,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             disaggregated_params: None,
             worker_trace_link: None,
             engine_data: None,
+            routing_data: None,
         },
     ]
 }
@@ -196,6 +199,7 @@ fn create_chat_request(
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
         unsupported_fields: Default::default(),
@@ -536,6 +540,7 @@ fn create_nonstreaming_chat_request() -> NvCreateChatCompletionRequest {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
         unsupported_fields: Default::default(),
