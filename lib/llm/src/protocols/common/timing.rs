@@ -167,6 +167,23 @@ pub struct RequestTracker {
     /// When the prefill result arrived at the router (disaggregated, original path only).
     /// Set in execute_prefill() after the first output is received from the prefill worker.
     prefill_complete_time: OnceLock<Instant>,
+
+    /// Timing computed in another process — a standalone router built on the
+    /// KV-router bindings (`PushRouter`) — and injected here so `get_timing_info()`
+    /// reports it even though the local `record_*` timestamps were never set in this
+    /// process. First-write-wins.
+    external_timing: OnceLock<TimingInfo>,
+}
+
+/// Data a standalone router (running the `PushRouter` bindings in its own process)
+/// hands back to the frontend on the engine output's `routing_data` field,
+/// so router-side measurements join the frontend's per-request trace/metrics. Plain
+/// data, so it survives the Rust->Python->Rust router round-trip (annotations don't).
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct RoutingData {
+    /// Per-request timing measured by the router (prefill/ttft/kv_hit/queue/total).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<TimingInfo>,
 }
 
 impl RequestTracker {
@@ -203,6 +220,7 @@ impl RequestTracker {
             detokenize_count: AtomicU64::new(0),
             router_queue_depth: OnceLock::new(),
             prefill_complete_time: OnceLock::new(),
+            external_timing: OnceLock::new(),
         }
     }
 
@@ -584,8 +602,20 @@ impl RequestTracker {
         }
     }
 
+    /// Inject timing measured in another process (a standalone router); `get_timing_info`
+    /// merges its fields in (see there). First-write-wins: with `n > 1` the first terminal
+    /// choice to arrive fixes the request-level snapshot (per-choice timing is out of scope).
+    pub fn set_external_timing(&self, timing: TimingInfo) {
+        let _ = self.external_timing.set(timing);
+    }
+
+    /// Per-request timing. Starts from this process's own measurements; in the split-router
+    /// topology, router-injected fields (`prefill_*`/`ttft_ms`/`kv_hit_rate`/`router_queue_depth`/
+    /// `kv_transfer_estimated_latency_ms`) fill the gaps the frontend can't measure. This
+    /// process keeps its own `request_received_ms` and `total_time_ms` (true end-to-end) wherever
+    /// it has them — each field uses the local value if set, else the router's.
     pub fn get_timing_info(&self) -> TimingInfo {
-        TimingInfo {
+        let mut info = TimingInfo {
             request_received_ms: self.request_received_epoch_ms,
             prefill_wait_time_ms: self.prefill_wait_time_ms(),
             prefill_time_ms: self.prefill_time_ms(),
@@ -596,7 +626,20 @@ impl RequestTracker {
             kv_transfer_estimated_latency_ms: self
                 .kv_transfer_estimated_latency_secs()
                 .map(|s| s * 1000.0),
+        };
+        if let Some(ext) = self.external_timing.get() {
+            // Local value wins where measured; the router fills the rest.
+            info.prefill_wait_time_ms = info.prefill_wait_time_ms.or(ext.prefill_wait_time_ms);
+            info.prefill_time_ms = info.prefill_time_ms.or(ext.prefill_time_ms);
+            info.ttft_ms = info.ttft_ms.or(ext.ttft_ms);
+            info.total_time_ms = info.total_time_ms.or(ext.total_time_ms);
+            info.kv_hit_rate = info.kv_hit_rate.or(ext.kv_hit_rate);
+            info.router_queue_depth = info.router_queue_depth.or(ext.router_queue_depth);
+            info.kv_transfer_estimated_latency_ms = info
+                .kv_transfer_estimated_latency_ms
+                .or(ext.kv_transfer_estimated_latency_ms);
         }
+        info
     }
 }
 
@@ -753,6 +796,38 @@ mod tests {
 
         let timing = tracker.get_timing_info();
         assert_eq!(timing.router_queue_depth, Some(42));
+    }
+
+    #[test]
+    fn test_get_timing_info_merges_external() {
+        let tracker = RequestTracker::new();
+        // Frontend-local measurement in split mode: only total_time_ms is known.
+        thread::sleep(Duration::from_millis(5));
+        tracker.record_finish();
+        let local_total = tracker.total_time_ms().expect("local total set");
+
+        // Router snapshot: prefill/ttft/kv it measured, plus its own (shorter) total.
+        tracker.set_external_timing(TimingInfo {
+            request_received_ms: 0,
+            prefill_wait_time_ms: Some(1.0),
+            prefill_time_ms: Some(2.0),
+            ttft_ms: Some(3.0),
+            total_time_ms: Some(999.0),
+            kv_hit_rate: Some(0.5),
+            router_queue_depth: Some(7),
+            kv_transfer_estimated_latency_ms: Some(4.0),
+        });
+
+        let info = tracker.get_timing_info();
+        // Router fills the gaps the frontend can't measure.
+        assert_eq!(info.prefill_time_ms, Some(2.0));
+        assert_eq!(info.ttft_ms, Some(3.0));
+        assert_eq!(info.kv_hit_rate, Some(0.5));
+        assert_eq!(info.router_queue_depth, Some(7));
+        assert_eq!(info.kv_transfer_estimated_latency_ms, Some(4.0));
+        // Frontend keeps its own end-to-end total, not the router's shorter one.
+        assert_eq!(info.total_time_ms, Some(local_total));
+        assert_ne!(info.total_time_ms, Some(999.0));
     }
 
     #[test]
