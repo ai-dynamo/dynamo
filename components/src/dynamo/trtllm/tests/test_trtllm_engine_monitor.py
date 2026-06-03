@@ -129,7 +129,7 @@ async def test_monitor_shuts_down_engine_runtime_and_exits_when_unhealthy(monkey
 
     assert engine.shutdown_count == 1
     assert runtime.shutdown_count == 1
-    assert shutdown_event.is_set()
+    assert not shutdown_event.is_set()
     assert exit_calls == [1]
 
 

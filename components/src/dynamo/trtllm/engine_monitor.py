@@ -148,8 +148,6 @@ class TrtllmEngineMonitor:
             "Initiating worker shutdown after TRT-LLM fatal health state: %s", reason
         )
         self._shutdown_engine()
-        if self.shutdown_event is not None:
-            self.shutdown_event.set()
         if self.runtime is not None:
             logger.warning("Initiating Dynamo Runtime shutdown.")
             self.runtime.shutdown()
