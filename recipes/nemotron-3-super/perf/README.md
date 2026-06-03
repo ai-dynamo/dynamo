@@ -17,10 +17,10 @@ Edit the `env` block in [perf.yaml](perf.yaml):
 
 | Variant target           | `ENDPOINT`                                            | `TARGET_MODEL`                                            | `TRACE_FILE` (chat / agent)                                             |
 | ------------------------ | ----------------------------------------------------- | --------------------------------------------------------- | ----------------------------------------------------------------------- |
-| B200 agg, chat workload  | `turbo-nemotron-3-super-b200-chat-frontend:8000`      | `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` | `/model-cache/traces/nim_turbo_8k_1k_70kv_chat_new_noschedule.jsonl`    |
-| B200 agg, agent workload | `turbo-nemotron-3-super-b200-agentic-frontend:8000`   | `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` | `/model-cache/traces/nim_turbo_64k_400_90kv_agent_new_noschedule.jsonl` |
-| H200 agg, chat workload  | `turbo-nemotron-3-super-h200-chat-frontend:8000`      | `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8`   | `/model-cache/traces/nim_turbo_8k_1k_70kv_chat_new_noschedule.jsonl`    |
-| H200 agg, agent workload | `turbo-nemotron-3-super-h200-agentic-frontend:8000`   | `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8`   | `/model-cache/traces/nim_turbo_64k_400_90kv_agent_new_noschedule.jsonl` |
+| B200 agg, chat workload  | `nemotron-3-super-b200-chat-frontend:8000`      | `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` | `/model-cache/traces/8k_1k_70kv_chat_new_noschedule.jsonl`    |
+| B200 agg, agent workload | `nemotron-3-super-b200-agentic-frontend:8000`   | `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule.jsonl` |
+| H200 agg, chat workload  | `nemotron-3-super-h200-chat-frontend:8000`      | `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8`   | `/model-cache/traces/8k_1k_70kv_chat_new_noschedule.jsonl`    |
+| H200 agg, agent workload | `nemotron-3-super-h200-agentic-frontend:8000`   | `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8`   | `/model-cache/traces/64k_400_90kv_agent_new_noschedule.jsonl` |
 
 Both DGDs of a given SKU serve the same `--served-model-name`, so either trace can be replayed against either DGD by swapping `TRACE_FILE`. `TARGET_MODEL` only changes between B200 (NVFP4) and H200 (FP8).
 
@@ -32,8 +32,8 @@ The benchmark replays a [Mooncake-format](https://github.com/kvcache-ai/Mooncake
 
 Trace flavours expected on the PVC:
 
-- **Chat** — `/model-cache/traces/nim_turbo_8k_1k_70kv_chat_new_noschedule.jsonl`
-- **Agent** — `/model-cache/traces/nim_turbo_64k_400_90kv_agent_new_noschedule.jsonl`
+- **Chat** — `/model-cache/traces/8k_1k_70kv_chat_new_noschedule.jsonl`
+- **Agent** — `/model-cache/traces/64k_400_90kv_agent_new_noschedule.jsonl`
 
 For shorter runs (smoke tests, faster iteration), point `TRACE_FILE` at a smaller variant of the same trace rather than capping run time. Typical staging:
 
@@ -80,24 +80,24 @@ Keep `pvc-helper` around for fetching artifacts later, or `kubectl delete pod pv
 kubectl apply -f perf.yaml -n ${NAMESPACE}
 
 # Stream logs
-kubectl logs -n ${NAMESPACE} -l job-name=turbo-nemotron-3-super-bench -f
+kubectl logs -n ${NAMESPACE} -l job-name=nemotron-3-super-bench -f
 
 # Wait for completion (2h hard cap on the Job)
 kubectl wait --for=condition=Complete \
-  job/turbo-nemotron-3-super-bench \
+  job/nemotron-3-super-bench \
   -n ${NAMESPACE} --timeout=7200s
 ```
 
 ### 4. Fetch artifacts
 
 ```bash
-kubectl cp ${NAMESPACE}/pvc-helper:/model-cache/perf/<epoch>_turbo-nemotron-3-super-bench ./results
+kubectl cp ${NAMESPACE}/pvc-helper:/model-cache/perf/<epoch>_nemotron-3-super-bench ./results
 ```
 
 ### 5. Cleanup
 
 ```bash
-kubectl delete job turbo-nemotron-3-super-bench -n ${NAMESPACE}
+kubectl delete job nemotron-3-super-bench -n ${NAMESPACE}
 kubectl delete pod pvc-helper -n ${NAMESPACE}   # if you kept it around
 ```
 
@@ -109,18 +109,18 @@ For each concurrency value you want to measure:
 
 ```bash
 # 1. Delete the previous bench job
-kubectl delete job turbo-nemotron-3-super-bench -n ${NAMESPACE} --ignore-not-found
+kubectl delete job nemotron-3-super-bench -n ${NAMESPACE} --ignore-not-found
 
 # 2. Drop KV / prefix-cache by deleting the worker pods; Grove respawns them
 #    (Dynamo workers are PodClique pods, not k8s Deployments — `kubectl rollout
 #    restart deployment ...` is a silent no-op against the Grove resource chain.)
-DGD=turbo-nemotron-3-super-b200-chat   # or any of the four variants
+DGD=nemotron-3-super-b200-chat   # or any of the four variants
 kubectl delete pods -n ${NAMESPACE} \
   -l nvidia.com/dynamo-graph-deployment-name=${DGD},nvidia.com/dynamo-component-type=worker
 
 # 3. Bump CONCURRENCY in perf.yaml, then re-apply
 kubectl apply -f perf.yaml -n ${NAMESPACE}
-kubectl wait --for=condition=Complete job/turbo-nemotron-3-super-bench -n ${NAMESPACE} --timeout=7200s
+kubectl wait --for=condition=Complete job/nemotron-3-super-bench -n ${NAMESPACE} --timeout=7200s
 ```
 
 (The bench Job's `wait_for_model_ready` loop handles the worker restart window — it re-polls `/v1/models` until the frontend reports ready again.)
@@ -131,8 +131,8 @@ Edit the `env` block on the `Job` to adjust:
 
 | Variable       | Default                                                          | Notes                                                                           |
 | -------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| `ENDPOINT`     | `turbo-nemotron-3-super-b200-chat-frontend:8000`                 | DGD frontend service:port — change per variant                                  |
-| `TRACE_FILE`   | `/model-cache/traces/nim_turbo_8k_1k_70kv_chat_new_noschedule.jsonl` | Swap to agent or to a smaller subset (`...short_15perc.jsonl`) for shorter runs |
+| `ENDPOINT`     | `nemotron-3-super-b200-chat-frontend:8000`                 | DGD frontend service:port — change per variant                                  |
+| `TRACE_FILE`   | `/model-cache/traces/8k_1k_70kv_chat_new_noschedule.jsonl` | Swap to agent or to a smaller subset (`...short_15perc.jsonl`) for shorter runs |
 | `CONCURRENCY`  | `24`                                                             | Single value — see [Running a concurrency sweep](#running-a-concurrency-sweep)  |
 | `TARGET_MODEL` | `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4`                 | Must match `--served-model-name` on the DGD frontend (NVFP4 for B200, FP8 for H200) |
 

@@ -14,10 +14,10 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: turbo-nemotron-3-super-b200-chat-config
+  name: nemotron-3-super-b200-chat-config
   labels:
-    app.kubernetes.io/name: turbo-nemotron-3-super-b200-chat
-    app.kubernetes.io/part-of: nim-turbo-dynamo
+    app.kubernetes.io/name: nemotron-3-super-b200-chat
+    app.kubernetes.io/part-of: dynamo
 data:
   # Stripped compilation passes for the spec-dec path (no inductor graph
   # partitioning, no fuse passes — they don't compose with the MTP draft
@@ -63,10 +63,10 @@ data:
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: turbo-nemotron-3-super-b200-chat
+  name: nemotron-3-super-b200-chat
   labels:
-    app.kubernetes.io/name: turbo-nemotron-3-super-b200-chat
-    app.kubernetes.io/part-of: nim-turbo-dynamo
+    app.kubernetes.io/name: nemotron-3-super-b200-chat
+    app.kubernetes.io/part-of: dynamo
 spec:
   backendFramework: vllm
   components:
@@ -181,12 +181,12 @@ spec:
                 - name: COMPILATION_CONFIG
                   valueFrom:
                     configMapKeyRef:
-                      name: turbo-nemotron-3-super-b200-chat-config
+                      name: nemotron-3-super-b200-chat-config
                       key: compilation-config
                 - name: SPECULATIVE_CONFIG
                   valueFrom:
                     configMapKeyRef:
-                      name: turbo-nemotron-3-super-b200-chat-config
+                      name: nemotron-3-super-b200-chat-config
                       key: speculative-config
                 # Tracks the spec-dec mode: 65536 when --speculative-config is
                 # active, 131072 when running without spec-dec. Update this

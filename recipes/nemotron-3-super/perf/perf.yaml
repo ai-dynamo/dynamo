@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# AIPerf trace-replay benchmark for Nemotron-3-Super NIM Turbo DGDs.
+# AIPerf trace-replay benchmark for Nemotron-3-Super DGDs.
 #
 # One Job covers every variant (B200/H200 × chat/agent traces) — the
 # benchmark itself is identical regardless of GPU SKU. To target a specific
@@ -22,7 +22,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: turbo-nemotron-3-super-bench
+  name: nemotron-3-super-bench
 spec:
   backoffLimit: 1
   activeDeadlineSeconds: 7200 # 2h hard cap on the Job
@@ -31,7 +31,7 @@ spec:
   template:
     metadata:
       labels:
-        app: turbo-nemotron-3-super-bench
+        app: nemotron-3-super-bench
     spec:
       # Co-locate the bench pod with the DGD frontend to minimise client/server
       # network overhead.
@@ -47,10 +47,10 @@ spec:
               - key: nvidia.com/dynamo-graph-deployment-name
                 operator: In
                 values:
-                - turbo-nemotron-3-super-b200-chat
-                - turbo-nemotron-3-super-b200-agentic
-                - turbo-nemotron-3-super-h200-chat
-                - turbo-nemotron-3-super-h200-agentic
+                - nemotron-3-super-b200-chat
+                - nemotron-3-super-b200-agentic
+                - nemotron-3-super-h200-chat
+                - nemotron-3-super-h200-agentic
             topologyKey: kubernetes.io/hostname
       # tolerations: # uncomment to populate any tolerations for the gpu nodes
       containers:
@@ -148,9 +148,9 @@ spec:
         env:
         # --- Edit these to target the DGD + trace you want to benchmark ---
         - name: ENDPOINT
-          value: turbo-nemotron-3-super-b200-chat-frontend:8000
+          value: nemotron-3-super-b200-chat-frontend:8000
         - name: TRACE_FILE
-          value: /model-cache/traces/nim_turbo_8k_1k_70kv_chat_new_noschedule.jsonl  # use /model-cache/traces/nim_turbo_64k_400_90kv_agent_new_noschedule.jsonl for agent
+          value: /model-cache/traces/8k_1k_70kv_chat_new_noschedule.jsonl  # use /model-cache/traces/64k_400_90kv_agent_new_noschedule.jsonl for agent
         - name: CONCURRENCY
           value: "24"
         # B200 deploys serve the NVFP4 model id; H200 deploys serve FP8 — swap

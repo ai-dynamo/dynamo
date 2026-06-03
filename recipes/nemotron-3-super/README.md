@@ -93,8 +93,8 @@ Pick the use-case variant and apply:
 SKU=b200       # or h200
 USECASE=chat   # or agentic
 
-kubectl apply -f vllm/turbo_nemotron_3_super_agg_${SKU}_${USECASE}.yaml -n ${NAMESPACE}
-kubectl get dgd turbo-nemotron-3-super-${SKU}-${USECASE} -n ${NAMESPACE} -w
+kubectl apply -f vllm/nemotron_3_super_agg_${SKU}_${USECASE}.yaml -n ${NAMESPACE}
+kubectl get dgd nemotron-3-super-${SKU}-${USECASE} -n ${NAMESPACE} -w
 ```
 
 Two worker replicas, 4× B200/H200 each (half a node). First-time boot per worker ≈ 6–9 min (image pull + vLLM engine init + Inductor + CUDA graph capture up to size 512).
@@ -102,7 +102,7 @@ Two worker replicas, 4× B200/H200 each (half a node). First-time boot per worke
 ### 4. Smoke test
 
 ```bash
-kubectl port-forward svc/turbo-nemotron-3-super-${SKU}-${USECASE}-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/nemotron-3-super-${SKU}-${USECASE}-frontend 8000:8000 -n ${NAMESPACE}
 
 # B200 uses the NVFP4 model id; H200 uses the FP8 model id
 MODEL_ID=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4   # or -FP8 for H200
@@ -149,10 +149,10 @@ recipes/nemotron-3-super/
     model-download.yaml       # Job: hf download NVFP4 checkpoint (B200)
     model-download-fp8.yaml   # Job: hf download FP8 checkpoint (H200)
   vllm/
-    turbo_nemotron_3_super_agg_b200_chat.yaml      # DGD: B200×4, NVFP4, DeepEP high-throughput
-    turbo_nemotron_3_super_agg_b200_agentic.yaml   # DGD: B200×4, NVFP4, DeepEP low-latency
-    turbo_nemotron_3_super_agg_h200_chat.yaml      # DGD: H200×4, FP8, FlashInfer NVLink one-sided, MTP spec-dec
-    turbo_nemotron_3_super_agg_h200_agentic.yaml   # DGD: H200×4, FP8, DeepEP high-throughput, MTP spec-dec
+    nemotron_3_super_agg_b200_chat.yaml      # DGD: B200×4, NVFP4, DeepEP high-throughput
+    nemotron_3_super_agg_b200_agentic.yaml   # DGD: B200×4, NVFP4, DeepEP low-latency
+    nemotron_3_super_agg_h200_chat.yaml      # DGD: H200×4, FP8, FlashInfer NVLink one-sided, MTP spec-dec
+    nemotron_3_super_agg_h200_agentic.yaml   # DGD: H200×4, FP8, DeepEP high-throughput, MTP spec-dec
   perf/
     README.md                 # benchmark workflow
     perf.yaml                 # AIPerf trace-replay Job

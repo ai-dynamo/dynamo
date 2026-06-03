@@ -2,17 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Aggregated FP8 deployment of NVIDIA-Nemotron-3-Super-120B-A12B-FP8 on
-# H200x4 (TP=4) with Expert Parallel + DeepEP high-throughput all-to-all.
-# Differs from the chat variant (turbo_nemotron_3_super_agg_h200_chat.yaml),
-# which uses the FlashInfer NVLink one-sided all-to-all backend; see that
-# file for the rationale on dropped Blackwell-specific NCCL env.
+# H200x4 (TP=4) with Expert Parallel + FlashInfer NVLink one-sided all-to-all.
+# Hopper variant — drops Blackwell-specific NCCL SHARP / symmetric-memory
+# env vars and the FlashInfer NVFP4 MoE backend (those are B200-only).
+#
+# Cluster requirements (same as B200): see nemotron_3_super_agg_b200_chat.yaml.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: turbo-nemotron-3-super-h200-agentic-config
+  name: nemotron-3-super-h200-chat-config
   labels:
-    app.kubernetes.io/name: turbo-nemotron-3-super-h200-agentic
-    app.kubernetes.io/part-of: nim-turbo-dynamo
+    app.kubernetes.io/name: nemotron-3-super-h200-chat
+    app.kubernetes.io/part-of: dynamo
 data:
   compilation-config: |-
     {
@@ -43,10 +44,10 @@ data:
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: turbo-nemotron-3-super-h200-agentic
+  name: nemotron-3-super-h200-chat
   labels:
-    app.kubernetes.io/name: turbo-nemotron-3-super-h200-agentic
-    app.kubernetes.io/part-of: nim-turbo-dynamo
+    app.kubernetes.io/name: nemotron-3-super-h200-chat
+    app.kubernetes.io/part-of: dynamo
 spec:
   backendFramework: vllm
   components:
@@ -131,7 +132,7 @@ spec:
                 - --max-num-batched-tokens
                 - "16384"
                 - --all2all-backend
-                - deepep_high_throughput
+                - flashinfer_nvlink_one_sided
                 - --kv-cache-dtype
                 - fp8_e4m3
                 - --mamba-ssm-cache-dtype
@@ -160,12 +161,12 @@ spec:
                 - name: COMPILATION_CONFIG
                   valueFrom:
                     configMapKeyRef:
-                      name: turbo-nemotron-3-super-h200-agentic-config
+                      name: nemotron-3-super-h200-chat-config
                       key: compilation-config
                 - name: SPECULATIVE_CONFIG
                   valueFrom:
                     configMapKeyRef:
-                      name: turbo-nemotron-3-super-h200-agentic-config
+                      name: nemotron-3-super-h200-chat-config
                       key: speculative-config
                 - name: NCCL_IB_DISABLE
                   value: "1"
