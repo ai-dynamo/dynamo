@@ -349,6 +349,34 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         },
         extra_vllm_args=["--dtype", "bfloat16"],
     ),
+    # google/gemma-4-12B-it — unified, encoder-free text+image+audio decoder
+    # (Gemma4UnifiedForConditionalGeneration), served by recipes/gemma-4-12b on a
+    # vLLM PR #44429 image. Skipped in standard CI until that PR merges and the
+    # runtime base ships gemma4_unified: the stock CI image cannot load this
+    # architecture, and the 12B (~24 GiB bf16 weights + activations) needs a
+    # ≥40 GiB GPU rather than the small pre_merge runners that host the E2B
+    # variant above. Run manually against the recipe image — see
+    # recipes/gemma-4-12b/README.md.
+    MultimodalModelProfile(
+        name="google/gemma-4-12B-it",
+        short_name="gemma4-12b-it",
+        topologies={
+            "agg": TopologyConfig(
+                marks=[
+                    pytest.mark.skip(
+                        reason="Requires vLLM PR #44429 "
+                        "(Gemma4UnifiedForConditionalGeneration) image and a "
+                        "≥40 GiB GPU; see recipes/gemma-4-12b."
+                    ),
+                    pytest.mark.post_merge,
+                ],
+                timeout_s=900,
+                profiled_vram_gib=28.0,
+                tests=[MmCase(payload=make_image_payload(["green"]))],
+            ),
+        },
+        extra_vllm_args=["--dtype", "bfloat16"],
+    ),
     # [gluo NOTE] LLaVA 1.5 7B is big model and require at least 3 GPUs to run.
     # We may use less GPUs by squeezing the model onto 2 GPUs.
     #

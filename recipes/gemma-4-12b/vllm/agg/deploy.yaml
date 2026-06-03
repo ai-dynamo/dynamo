@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Gemma 4 12B aggregated vLLM deployment (text + image).
+#
+# Prerequisites:
+#   - Dynamo Platform installed
+#   - Model weights downloaded into the model-cache PVC
+#   - Container built from recipes/gemma-4-12b/Dockerfile (carries vLLM PR #44429
+#     + transformers with models/gemma4_unified)
+#   - HF_TOKEN secret created (gated model):
+#       kubectl create secret generic hf-token-secret \
+#         --from-literal=HF_TOKEN=<your-token> -n <namespace>
+#
+# Replace image references before applying:
+#   <your-registry>/gemma4-12b-vllm:latest
+#
+# Gemma 4 is encoder-free (image patches project directly into the decoder), so
+# this recipe intentionally OMITS the multimodal-embedding-cache / NIXL
+# embedding-transfer block used by tower-based VLMs (e.g. qwen3-vl) — there is
+# no separate encoder output to cache or transfer.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: gemma4-12b-agg
+spec:
+  backendFramework: vllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      envFromSecret: hf-token-secret
+      replicas: 1
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /model-store
+      extraPodSpec:
+        mainContainer:
+          image: <your-registry>/gemma4-12b-vllm:latest
+          imagePullPolicy: IfNotPresent
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 1800
+            failureThreshold: 60
+          env:
+            - name: HF_HOME
+              value: /model-store
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - >-
+              exec python3 -m dynamo.frontend
+              --router-mode kv
+              --no-kv-events
+              --http-port 8000
+
+    VllmWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          gpu: "1"
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /model-store
+      sharedMemory:
+        size: 16Gi
+      extraPodSpec:
+        mainContainer:
+          image: <your-registry>/gemma4-12b-vllm:latest
+          imagePullPolicy: IfNotPresent
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 120
+          env:
+            - name: HF_HOME
+              value: /model-store
+            # Permit the COCO http:// image URLs in the multimodal benchmark dataset.
+            - name: DYN_MM_ALLOW_INTERNAL
+              value: "1"
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - >-
+              exec python3 -m dynamo.vllm
+              --model google/gemma-4-12B-it
+              --served-model-name google/gemma-4-12B-it
+              --enable-multimodal
+              --tensor-parallel-size 1
+              --gpu-memory-utilization 0.85
+              --max-model-len 32768
+              --enable-prefix-caching
+              --no-enable-log-requests
+              --dyn-tool-call-parser gemma4
+              --dyn-reasoning-parser gemma4
