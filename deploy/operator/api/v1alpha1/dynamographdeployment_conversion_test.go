@@ -446,9 +446,10 @@ func TestDGD_RoundTrip_SpecLevelFields(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "spec", Namespace: "ns"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
-			Annotations:      map[string]string{"a": "1"},
-			Labels:           map[string]string{"l": "v"},
-			BackendFramework: backendFrameworkSGLang,
+			Annotations:       map[string]string{"a": "1"},
+			Labels:            map[string]string{"l": "v"},
+			PriorityClassName: "high-priority",
+			BackendFramework:  backendFrameworkSGLang,
 			Env: []corev1.EnvVar{
 				{Name: "FOO", Value: "bar"},
 			},

@@ -32,6 +32,7 @@ fn create_test_request() -> NvCreateChatCompletionRequest {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
         unsupported_fields: Default::default(),
@@ -53,6 +54,7 @@ fn build_backend_output_with_finish(text: &str, finish: common::FinishReason) ->
         disaggregated_params: None,
         worker_trace_link: None,
         engine_data: None,
+        routing_data: None,
     }
 }
 

@@ -294,6 +294,11 @@ spec:
                     Labels to propagate to all child resources (PCS, DCD, Deployments, and pod templates).
                     Service-level labels take precedence over these values.
                   type: object
+                priorityClassName:
+                  description: |-
+                    PriorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.
+                    Requires the Grove pathway.
+                  type: string
                 pvcs:
                   description: |-
                     PVCs defines a list of persistent volume claims that can be referenced by components.
@@ -11120,9 +11125,11 @@ spec:
                             description: |-
                               ExtraClientContainers lists additional user-declared containers that should
                               be wired as GMS clients in pods rendered from the enclosing spec.
-                              DGD/DCD services apply this to service pods; DynamoCheckpoint applies this
-                              to checkpoint Job pods. In each rendered pod, only matching container
-                              names are wired; absent names are ignored.
+                              DGD/DCD services apply this to service pods. Auto-created checkpoints
+                              apply checkpoint job clients before creating the DynamoCheckpoint; manual
+                              DynamoCheckpoint users must provide an already-prepared pod template.
+                              In each rendered pod, only matching container names are wired; absent
+                              names are ignored.
                             items:
                               maxLength: 63
                               minLength: 1
@@ -20851,6 +20858,11 @@ spec:
                     type: string
                   description: labels to propagate to all child resources. Same precedence rules as `annotations`.
                   type: object
+                priorityClassName:
+                  description: |-
+                    priorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.
+                    Requires the Grove pathway.
+                  type: string
                 restart:
                   description: restart specifies the restart policy for the graph deployment.
                   properties:
