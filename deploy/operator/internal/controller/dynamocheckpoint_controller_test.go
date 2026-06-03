@@ -249,7 +249,8 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.Equal(t, int32(0), *job.Spec.BackoffLimit)
 	assert.Equal(t, int32(300), *job.Spec.TTLSecondsAfterFinished)
 
-	// Multi-GPU: wrapping decision uses the target container's captured GPU request.
+	// Multi-GPU: wrapping decision uses identity.TensorParallelSize, not container GPU limits.
+	ckpt.Spec.Identity.TensorParallelSize = 2
 	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Resources = corev1.ResourceRequirements{
 		Limits: corev1.ResourceList{
 			corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2"),
