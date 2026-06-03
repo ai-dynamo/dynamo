@@ -433,6 +433,11 @@ pub struct ResponseMetricCollector {
     decode_dp_rank: Option<u32>,
     // Decode worker type for Prometheus labeling - stored at routing time to avoid MDC lookup
     decode_worker_type: Option<String>,
+    // Cached per-worker ITL gauge handle. The decode-worker labels are latched once at
+    // routing time (`set_worker_info` only sets when unset), so this GaugeVec handle is
+    // resolved a single time and reused — the per-token observe path then does no label
+    // formatting (`worker_id.to_string()`) or label hashing, only `set`.
+    decode_itl_gauge: Option<prometheus::Gauge>,
 }
 
 impl Default for Metrics {
@@ -1384,6 +1389,7 @@ impl ResponseMetricCollector {
             decode_worker_id: None,
             decode_dp_rank: None,
             decode_worker_type: None,
+            decode_itl_gauge: None,
         }
     }
 
@@ -1530,7 +1536,14 @@ impl ResponseMetricCollector {
             // Update per-worker ITL gauge - attributed to decode worker.
             // Use stored worker_type (from routing time) to avoid MDC lookup.
             // Falls back to WORKER_TYPE_DECODE if not available.
-            if let Some(worker_id) = self.decode_worker_id {
+            //
+            // The worker labels are fixed for the request's lifetime (latched in
+            // `set_worker_info`), so resolve the GaugeVec handle once and cache it.
+            // This keeps the per-token path free of `to_string()` allocations and
+            // label hashing; subsequent tokens only call `set`.
+            if self.decode_itl_gauge.is_none()
+                && let Some(worker_id) = self.decode_worker_id
+            {
                 let worker_id_str = worker_id.to_string();
                 let dp_rank_str = self
                     .decode_dp_rank
@@ -1539,9 +1552,12 @@ impl ResponseMetricCollector {
                     .decode_worker_type
                     .as_deref()
                     .unwrap_or(WORKER_TYPE_DECODE);
-                WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
-                    .with_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type])
-                    .set(itl);
+                self.decode_itl_gauge = Some(WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.with_label_values(
+                    &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type],
+                ));
+            }
+            if let Some(gauge) = &self.decode_itl_gauge {
+                gauge.set(itl);
             }
         }
 
@@ -2047,6 +2063,50 @@ mod tests {
             .with_label_values(&[model])
             .get();
         assert_eq!(out, 7, "output tokens = 3 + 4 via cached counter handle");
+    }
+
+    #[test]
+    fn test_cached_decode_itl_gauge_records_for_worker() {
+        // The per-worker ITL gauge handle is resolved once (worker labels are latched
+        // at routing time via `set_worker_info`) and reused on every output token.
+        // Verify observations through the cached handle land on the same GaugeVec
+        // series the labels address. Regression guard for the per-token handle cache.
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).ok();
+        let model = "itl-gauge-model";
+
+        // Distinctive worker id so this never collides with other tests on the
+        // process-global WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.
+        let worker_id: u64 = 9_876_543_210;
+        let mut collector = metrics.clone().create_response_collector(model);
+        collector.set_worker_info(
+            None,
+            None,
+            None,
+            Some(worker_id),
+            Some(0),
+            Some("decode".to_string()),
+        );
+
+        // First chunk: TTFT only, no ITL yet (no prior response time) -> gauge unset.
+        collector.observe_response(10, 1);
+        // Elapse measurable time so ITL > 0, then a second chunk drives the cached
+        // per-worker ITL gauge.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        collector.observe_response(10, 1);
+
+        let worker_id_str = worker_id.to_string();
+        let gauge = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.with_label_values(&[
+            worker_id_str.as_str(),
+            "0",
+            "decode",
+        ]);
+        assert!(
+            gauge.get() > 0.0,
+            "cached per-worker ITL gauge must record a positive ITL through the vec, got {}",
+            gauge.get()
+        );
     }
 
     #[test]
