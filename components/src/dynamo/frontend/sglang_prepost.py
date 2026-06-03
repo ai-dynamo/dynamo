@@ -773,44 +773,6 @@ class SglangStreamingPostProcessor:
             self.history_tool_calls_count,
         )
 
-    def _incremental_decode(self, new_token_ids: list[int]) -> str:
-        """Decode new tokens with lookback window for multi-byte char boundaries.
-
-        Re-decodes a small window of previous tokens alongside new tokens so that
-        multi-byte characters spanning token boundaries are correctly resolved.
-        Only retains the last LOOKBACK tokens to bound memory usage.
-        """
-        prev_count = len(self._all_token_ids)
-        self._all_token_ids.extend(new_token_ids)
-
-        start = max(0, prev_count - self.LOOKBACK)
-
-        # Trim to avoid unbounded growth -- only the tail matters for decoding
-        if len(self._all_token_ids) > self.LOOKBACK * 16:
-            self._all_token_ids = self._all_token_ids[
-                -(self.LOOKBACK + len(new_token_ids)) :
-            ]
-            prev_count = len(self._all_token_ids) - len(new_token_ids)
-            start = max(0, prev_count - self.LOOKBACK)
-
-        # Decode lookback-only prefix (before new tokens)
-        prefix_tokens = self._all_token_ids[start:prev_count]
-        prefix_text = (
-            self.tokenizer.decode(
-                prefix_tokens, skip_special_tokens=self._skip_special_tokens
-            )
-            if prefix_tokens
-            else ""
-        )
-
-        # Decode lookback + new tokens together
-        window_tokens = self._all_token_ids[start:]
-        window_text = self.tokenizer.decode(
-            window_tokens, skip_special_tokens=self._skip_special_tokens
-        )
-
-        return window_text[len(prefix_text) :]
-
     def process_output(self, engine_response: dict[str, Any]) -> dict[str, Any] | None:
         """Process a single engine response chunk into an OpenAI SSE choice dict.
 
@@ -820,11 +782,8 @@ class SglangStreamingPostProcessor:
         Returns:
             OpenAI choice dict or ``None`` if nothing to emit yet.
         """
-        raw_ids = engine_response.get("token_ids")
-        token_ids = raw_ids if isinstance(raw_ids, list) else list(raw_ids or [])
+        delta_text = engine_response.get("text", "")
         finish_reason = engine_response.get("finish_reason")
-
-        delta_text = self._incremental_decode(token_ids) if token_ids else ""
 
         if self._fast_plain_text:
             if delta_text:

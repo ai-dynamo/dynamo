@@ -520,7 +520,7 @@ class SglangProcessor:
                 flush_threshold = 1 if first_chunk else stream_interval
                 if finish_reason or len(pending_token_ids) >= flush_threshold:
                     mapped_response = {
-                        "token_ids": pending_token_ids,
+                        "text": engine_response.get("text", ""),
                         "finish_reason": finish_reason,
                     }
 
