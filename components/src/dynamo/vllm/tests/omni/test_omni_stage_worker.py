@@ -21,6 +21,7 @@ try:
         _ensure_stage_connectors,
         _normalize_single_stage_runtime_devices,
         _prepare_connector_payload,
+        _preserve_external_request_ids,
         _Proxy,
         _stage_config_to_dict,
     )
@@ -133,6 +134,19 @@ def _make_worker(engine=None, stage_config=None, connectors=None, stage_id=0):
         connectors=connectors or {},
         stage_id=stage_id,
     )
+
+
+def test_preserve_external_request_ids_disables_async_omni_suffixing():
+    class _SuffixingEngine:
+        def _get_unique_request_id(self, external_request_id):
+            return f"{external_request_id}-deadbeef"
+
+    engine = _SuffixingEngine()
+
+    _preserve_external_request_ids(engine)
+
+    assert engine._get_unique_request_id("req-1") == "req-1"
+    assert engine._get_unique_request_id("")
 
 
 @pytest.mark.asyncio

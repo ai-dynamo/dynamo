@@ -12,6 +12,7 @@ import logging
 import os
 import shutil
 import tempfile
+import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator
 
@@ -1088,9 +1089,22 @@ def _create_engine(
         tmp_path = tmp.name
 
     try:
-        return AsyncOmni(model=model, stage_configs_path=tmp_path)
+        engine = AsyncOmni(model=model, stage_configs_path=tmp_path)
+        if use_async_chunk:
+            _preserve_external_request_ids(engine)
+        return engine
     finally:
         os.unlink(tmp_path)
+
+
+def _preserve_external_request_ids(engine: Any) -> None:
+    """Keep Dynamo's request ids stable inside single-stage AsyncOmni workers."""
+
+    def _stable_request_id(external_request_id: str) -> str:
+        return external_request_id or str(uuid.uuid4())
+
+    if hasattr(engine, "_get_unique_request_id"):
+        engine._get_unique_request_id = _stable_request_id
 
 
 def _stage_config_to_dict(
