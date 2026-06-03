@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Disagg DP=2 + expert-parallel unit template for the engine-stall /
+# stale-routing methodology test. Shape only — the MODEL is configurable:
+# set `deployment.model` in the scenario to serve any HF model on this same
+# topology (default below is a small MoE so DP+EP is exercised cheaply).
+#
+# Why DP=2 + EP: the stall signature we reproduce is a *data-parallel* engine
+# rank going unresponsive — one rank SIGSTOPped → the surviving rank blocks on
+# `shm_broadcast` → its `sample_tokens` RPC times out → EngineCore fatal → the
+# whole worker pod exits 1 → restart → NEW instance_id. That requires ≥2 DP
+# ranks per worker (one to stall, one to time out), so every worker is DP=2
+# (2 GPU each). `--enable-expert-parallel` shards the MoE experts across the
+# two ranks, matching a multi-DP-rank MoE worker topology.
+#
+# Disagg: prefill pulls KV → decode via NixlConnector (kv_both). The KV router
+# dispatches to DECODE workers, so decode is where the churn → stale-routing
+# 500s surface. Replica counts, image, and model are overridden by the
+# scenario's deployment block.
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg-dp2-ep
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+
+    VllmPrefillWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        requests: { gpu: "2" }
+        limits: { gpu: "2" }
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          workingDir: /workspace/examples/backends/vllm
+          command: [python3, -m, dynamo.vllm]
+          args:
+            - --model
+            - deepseek-ai/DeepSeek-V2-Lite      # configurable via deployment.model
+            - --disaggregation-mode
+            - prefill
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+            - --data-parallel-size
+            - "2"
+            - --enable-expert-parallel
+            - --trust-remote-code
+            - --max-model-len
+            - "32768"
+            - --enable-prefix-caching
+            - --enable-chunked-prefill
+            - --gpu-memory-utilization
+            - "0.85"
+            - --kv-events-config
+            - '{"enable_kv_cache_events":false}'
+
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 3
+      resources:
+        requests: { gpu: "2" }
+        limits: { gpu: "2" }
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          workingDir: /workspace/examples/backends/vllm
+          command: [python3, -m, dynamo.vllm]
+          args:
+            - --model
+            - deepseek-ai/DeepSeek-V2-Lite      # configurable via deployment.model
+            - --disaggregation-mode
+            - decode
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+            - --data-parallel-size
+            - "2"
+            - --enable-expert-parallel
+            - --trust-remote-code
+            - --max-model-len
+            - "32768"
+            - --enable-prefix-caching
+            - --enable-chunked-prefill
+            - --gpu-memory-utilization
+            - "0.85"
+            - --kv-events-config
+            - '{"enable_kv_cache_events":false}'

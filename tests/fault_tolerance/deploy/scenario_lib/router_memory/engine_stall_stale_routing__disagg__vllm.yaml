@@ -1,0 +1,174 @@
+# Engine-stall → instance_id churn → KV-router stale-routing 500 storm
+# (ramp → peak → slow decay). Disagg, DP=2 + EP, configurable model.
+#
+# Generic Dynamo reliability repro (no deployment-specific tuning):
+#   SIGSTOP one DP rank of a worker → the surviving rank blocks on
+#   `shm_broadcast` → its `sample_tokens`/execute_model RPC times out
+#   (VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS) → EngineCore fatal → worker pod exits 1
+#   → restart → NEW instance_id. The KV router's dispatch is single-shot
+#   (push_router.rs `direct(instance_id).await?`, no reselect) and prefix
+#   affinity keeps re-selecting the OLD (dead) id → HTTP 500 "instance not
+#   found". In disagg the router holds instance_ids for BOTH roles, so we stall
+#   prefill AND decode — each churn produces its own stale-routing 500s.
+#   Staggered stalls under steady open-loop load reproduce a gradual
+#   ramp → peak → slow self-recovery error curve.
+#
+# ── Arms (KV only) ─────────────────────────────────────────────────────────
+#   A1  KV baseline, current image          → expect the 500 storm.   [THIS FILE]
+#   A2  + reselect-on-not-found fix build    → swap deployment.image to a build
+#       that reselects when the dispatched id is gone → expect ~0 user 500s.
+#       (Run when such a build is available.)
+#
+# ── Injection robustness (see events) ─────────────────────────────────────
+#   * PRIMARY: SIGSTOP a DP rank (reproduces the exact stall→timeout→death path).
+#   * FALLBACK: if the timeout-death doesn't fire at near-idle, a SIGKILL /
+#     DeletePod forces the churn (cruder, but guarantees a new instance_id).
+#   * NEGATIVE CONTROL: a SIGTERM (graceful) — clean deregister, NO stale
+#     routing → ~0 new 500s. This isolates "abrupt death" as the cause.
+
+kind: router_memory
+name: engine_stall_stale_routing__disagg__vllm
+description: >
+  Engine-stall → instance_id churn → KV-router stale-routing 500 storm,
+  disagg DP=2+EP, configurable model. A1 = KV baseline (no reselect).
+
+labels:
+  purpose: engine_stall_stale_routing_repro
+  router_mode: kv
+  deployment: disagg
+  backend: vllm
+  arm: a1_kv_baseline_no_reselect
+
+deployment:
+  backend: vllm
+  topology: disagg
+  template: disagg_dp2_ep_unit            # shape only (disagg, DP=2, EP)
+  model: deepseek-ai/DeepSeek-V2-Lite     # CONFIGURABLE — one line to swap models
+  image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0   # latest GA release (public)
+  model_cache_pvc: shared-model-cache
+  # Disagg DP=2 ⇒ 2 GPU/worker.
+  #   3 FE (CPU) + 2 prefill (4 GPU) + 2 decode (4 GPU) = 8 GPU = 1 node.
+  # The router holds instance_ids for both roles. Each pool is 2, so stall ONE
+  # pod per role at a time → the surviving pod keeps the role's capacity (at
+  # near-idle 2 r/s it easily covers the load) while the router stale-routes to
+  # the churned id → the 500s are stale-routing, NOT lost capacity. Never stall
+  # both pods of a role at once.
+  replicas:
+    Frontend: 3                           # ≥3 FE — per-FE router state churns independently
+    VllmPrefillWorker: 2
+    VllmDecodeWorker: 2
+
+router:
+  mode: kv
+  knobs:
+    DYN_EVENT_PLANE: "zmq"                # transport-level → propagates to workers too
+    DYN_ROUTER_REPLICA_SYNC: "true"       # cross-FE router-state sync
+    DYN_ROUTER_USE_KV_EVENTS: "false"
+    DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD: "0.85"
+    DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC: "0.85"
+    # Tier-1 observability: worker_monitor=debug shows the instance_id
+    # add/remove churn; kv_router::scheduling shows the (stale) selection.
+    DYN_LOG: "info,dynamo_llm::discovery::worker_monitor=debug,dynamo_kv_router::scheduling=debug,dynamo_runtime::pipeline::network::egress::push_router=debug"
+
+admission:
+  knobs:
+    # The death trigger. The stall (below) is held > this so the surviving rank
+    # reliably times out → EngineCore fatal → exit. Lower to 20-30 for faster
+    # smoke cycles (keep StallProcess.duration > this).
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "60"
+
+load:
+  # Long shared prefix + small unique suffix = a RAG/agent shape where KV-router
+  # prefix affinity holds the (dead) instance_id → amplifies + slows
+  # reconvergence. ISL scaled to ~6K so a 2-decode fleet stays genuinely
+  # near-idle (so any 500 is stale-routing, not overload). For a production-scale
+  # ISL (~30K) bump shared_system_prompt_length and recalibrate the rate down.
+  shape:
+    type: custom
+    shared_system_prompt_length: 5000     # shared prefix → strong affinity
+    input_tokens_mean: 1000               # unique suffix → ISL ≈ 6K
+    input_tokens_stddev: 200
+    output_tokens_mean: 750               # OSL ≈ 750
+    output_tokens_stddev: 75
+  rungs:
+    - name: steady
+      # OPEN-LOOP near-idle: constant arrivals as workers die (the faithful
+      # error-rate-shape model). CALIBRATE: the baseline phase must show decode
+      # KV-util well below the 0.85 gate; if it saturates, lower this. 2 r/s also
+      # guarantees the stalled worker gets in-flight work within the timeout.
+      request_rate: 2.0
+      concurrency: 128                    # max-in-flight cap only
+      duration_minutes: 95.0
+  common:
+    request_timeout_seconds: 120          # ISL~6K + OSL~750 needs headroom
+    goodput: ["request_latency:120000"]
+    streaming: true
+    ignore_eos: true
+    connection_reuse_strategy: never
+
+events:
+  - { kind: WaitForModelReady, timeout: 2400 }   # DP=2 disagg load is slow
+  # Continuous capture: snapshots FE counters + in-flight aiperf +
+  # server_metrics_export.jsonl every 0.5 min → the not-found-500 counter delta
+  # per interval IS the ramp/peak/decay curve.
+  - { kind: PeriodicSnapshot, interval_minutes: 0.5 }
+  - { kind: StartLoad, load_ref: steady }        # non-blocking, runs ~95 min
+
+  # ── Phase 0: baseline (also the near-idle calibration check) ──────────────
+  - { kind: Wait, duration: 600 }                 # 10 min healthy near-idle
+  - { kind: CaptureMetrics, suffix: ".baseline" } # confirm 0 errors + KV-util ≪ 0.85
+
+  # ── Phase 1: single DECODE stall → reconvergence (isolated stale-routing) ──
+  # 1 decode stays healthy → any 500 here is the router holding the dead id,
+  # NOT loss of capacity. Watch the ramp + how long reconvergence takes.
+  - { kind: StallProcess, services: [VllmDecodeWorker], process_name: dynamo.vllm, pod_indices: [0], rank_index: 1, duration: 75 }
+  - { kind: Wait, duration: 450 }                 # 7.5 min — observe decode ramp + decay
+  - { kind: CaptureMetrics, suffix: ".after-decode-stall" }
+
+  # ── Phase 2: single PREFILL stall → reconvergence (the OTHER role churns) ──
+  # 1 prefill stays healthy. Proves the stale-routing 500s also come from a
+  # churned PREFILL instance_id, not only decode. Carved from Phase 1's old
+  # 15-min window (now 7.5 + 7.5) → no added wall time.
+  - { kind: StallProcess, services: [VllmPrefillWorker], process_name: dynamo.vllm, pod_indices: [0], rank_index: 1, duration: 75 }
+  - { kind: Wait, duration: 450 }                 # 7.5 min — observe prefill ramp + decay
+  - { kind: CaptureMetrics, suffix: ".after-prefill-stall" }
+
+  # ── Phase 3: staggered burst across BOTH roles → the PEAK ──────────────────
+  # Rolling churn (each restarts in ~60-90 s) so 1 decode + 1 prefill id churn
+  # at once → overlapping stale-routing windows build the peak. One pod per role
+  # at a time → never zeroes a pool → still capacity-bounded.
+  - { kind: StallProcess, services: [VllmDecodeWorker], process_name: dynamo.vllm, pod_indices: [1], rank_index: 1, duration: 75 }
+  - { kind: Wait, duration: 120 }
+  - { kind: StallProcess, services: [VllmPrefillWorker], process_name: dynamo.vllm, pod_indices: [1], rank_index: 1, duration: 75 }
+  - { kind: Wait, duration: 120 }
+  - { kind: StallProcess, services: [VllmDecodeWorker], process_name: dynamo.vllm, pod_indices: [0], rank_index: 1, duration: 75 }
+
+  # ── Phase 4: FE rollout-restart MID-STORM (the "does bouncing the FE help?"
+  # probe). Same image → rolling restart of the 3 FEs while errors are elevated.
+  # Expect a NO-OP: each restarted FE rebuilds router state and re-converges to
+  # the same stale selection (or it clears — that's the finding).
+  - { kind: RollingUpgrade, services: [Frontend], name: fe-restart-mid-storm }
+  - { kind: CaptureMetrics, suffix: ".peak" }
+
+  # ── Phase 5: recovery — stop stalling, observe self-decay toward ~0 ───────
+  - { kind: Wait, duration: 1200 }                # 20 min
+  - { kind: CaptureMetrics, suffix: ".recovery" }
+
+  # ── Phase 6: SIGTERM negative control — graceful death deregisters cleanly,
+  # so the router drops the id BEFORE churn → expect ~0 new 500s. Contrasts with
+  # the abrupt SIGSTOP→timeout death above. (Fallback if SIGSTOP didn't churn:
+  # swap this to signal SIGKILL, or use a DeletePod, to force a new instance_id.)
+  - { kind: TerminateProcess, services: [VllmDecodeWorker], process_name: dynamo.vllm, signal: SIGTERM, pod_indices: [1], name: sigterm-control }
+  - { kind: Wait, duration: 300 }
+  - { kind: CaptureMetrics, suffix: ".sigterm-control" }
+
+  - { kind: WaitForLoadCompletion, name: steady }
+
+reports:
+  - FaultToleranceReport
+  - ErrorBreakdownReport
+  - PerWorkerLatencyReport
+
+checks:
+  # Workers DO crash here (that's the trigger) — panics/restarts are expected.
+  - { kind: WorkerPanics, services: [VllmPrefillWorker, VllmDecodeWorker], acceptable: true }
