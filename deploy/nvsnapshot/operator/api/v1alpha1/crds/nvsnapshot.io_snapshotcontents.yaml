@@ -1,0 +1,229 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: snapshotcontents.nvsnapshot.io
+spec:
+  group: nvsnapshot.io
+  names:
+    kind: SnapshotContent
+    listKind: SnapshotContentList
+    plural: snapshotcontents
+    shortNames:
+    - snapcontent
+    singular: snapshotcontent
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.snapshotRef.name
+      name: Snapshot
+      type: string
+    - jsonPath: .spec.snapshotRef.namespace
+      name: Namespace
+      type: string
+    - jsonPath: .status.restoreSize
+      name: Size
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          SnapshotContent is the cluster-scoped artifact-of-record for a
+          captured container checkpoint. Equivalent in role to VolumeSnapshotContent.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: SnapshotContentSpec describes the artifact and its lifecycle
+              policy.
+            properties:
+              runtimeInformation:
+                additionalProperties:
+                  type: string
+                description: |-
+                  RuntimeInformation is a free-form map describing the runtime
+                  environment that produced the artifact — typically GPU model,
+                  driver version, node arch, CRIU version, etc. The agent uses it
+                  at restore time to verify the node is compatible.
+
+                  MaxProperties=32 bounds the CEL immutability rule's evaluation
+                  cost; far above the ~4 conventional keys for the v1alpha1 driver.
+                maxProperties: 32
+                type: object
+              snapshotRef:
+                description: |-
+                  SnapshotRef is the back-pointer to the bound Snapshot. May span
+                  namespaces since SnapshotContent is cluster-scoped. Immutable
+                  after binding.
+                properties:
+                  name:
+                    description: Name of the referent.
+                    type: string
+                  namespace:
+                    description: Namespace of the referent.
+                    type: string
+                  uid:
+                    description: |-
+                      UID of the referent. Populated at binding time to detect stale
+                      references. Safe to live in spec because the controller sets it
+                      once at SnapshotContent creation, not via subsequent updates.
+                    type: string
+                required:
+                - name
+                - namespace
+                type: object
+              source:
+                description: |-
+                  Source describes where the artifact is stored. v1alpha1: PVC only.
+                  Immutable after binding.
+                properties:
+                  snapshotHandle:
+                    description: |-
+                      SnapshotHandle is an opaque, driver-specific identifier for the
+                      physical artifact.
+
+                      For the v1alpha1 PVC backend, the format is:
+                        pvc://<namespace>/<claimName>/<basePath>
+
+                      Set ONLY for pre-provisioned (imported) SnapshotContents. For
+                      dynamic creation, leave nil — the controller writes the resolved
+                      handle to Status.SnapshotHandle. The presence of this field is
+                      the discriminator between import (set) and dynamic (nil). Keeping
+                      the controller-assigned handle in status (not spec) avoids
+                      fighting the spec.source immutability CEL.
+
+                      Immutable after binding (CEL on enclosing spec.source).
+                    minLength: 1
+                    type: string
+                type: object
+            required:
+            - snapshotRef
+            - source
+            type: object
+            x-kubernetes-validations:
+            - message: snapshotRef is immutable after binding
+              rule: self.snapshotRef == oldSelf.snapshotRef
+            - message: source is immutable after binding
+              rule: self.source == oldSelf.source
+            - message: runtimeInformation is immutable after binding
+              rule: '!has(oldSelf.runtimeInformation) || (has(self.runtimeInformation)
+                && self.runtimeInformation == oldSelf.runtimeInformation)'
+          status:
+            description: SnapshotContentStatus is the observed state of a SnapshotContent.
+            properties:
+              conditions:
+                description: |-
+                  Conditions reflect the latest observations of the SnapshotContent.
+                  Standard condition types:
+                    Ready  — True when the artifact is complete and usable for restore.
+                    Failed — True if artifact provisioning or validation failed
+                             terminally; reason and message carry the detail.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              creationTime:
+                description: |-
+                  CreationTime is the timestamp at which the artifact was created
+                  (CRIU dump complete, manifest finalized). For pre-provisioned
+                  imports, this is the time recorded in the artifact manifest.
+                format: date-time
+                type: string
+              restoreSize:
+                description: |-
+                  RestoreSize is the on-PVC artifact size in bytes. Consumers may
+                  use this to size restore-target volumes / nodes.
+                format: int64
+                minimum: 0
+                type: integer
+              snapshotHandle:
+                description: |-
+                  SnapshotHandle is the canonical, validated handle for the artifact.
+                  Authoritative location:
+                    - Dynamic creation: controller resolves the handle post-dump and
+                      writes it here; Spec.Source.SnapshotHandle is nil.
+                    - Pre-provisioned import: controller accepts the user-supplied
+                      Spec.Source.SnapshotHandle, validates the artifact, and mirrors
+                      the validated value here.
+                  Consumers should read this field, not Spec.Source.SnapshotHandle.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

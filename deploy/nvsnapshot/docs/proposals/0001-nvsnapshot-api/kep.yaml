@@ -1,0 +1,15 @@
+title: NVSnapshot v1alpha1 API
+kep-number: "0001"
+authors:
+  - "@Ronkahn21"
+owning-sig: nvsnapshot
+status: provisional
+creation-date: 2026-05-25
+reviewers:
+  - TBD
+approvers:
+  - TBD
+stage: alpha
+latest-milestone: "v1alpha1"
+milestone:
+  alpha: "v1alpha1"

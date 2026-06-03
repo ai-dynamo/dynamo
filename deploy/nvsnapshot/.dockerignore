@@ -1,0 +1,21 @@
+# Git
+.git
+.github
+
+# IDE
+.idea
+.vscode
+
+# Build artifacts
+bin/
+cover.out
+*.test
+*.out
+
+# OS
+.DS_Store
+
+# Repo content not needed in the build context
+docs/
+hack/
+**/.gitkeep

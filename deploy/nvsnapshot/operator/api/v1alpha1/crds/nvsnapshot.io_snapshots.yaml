@@ -1,0 +1,378 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: snapshots.nvsnapshot.io
+spec:
+  group: nvsnapshot.io
+  names:
+    kind: Snapshot
+    listKind: SnapshotList
+    plural: snapshots
+    shortNames:
+    - snap
+    singular: snapshot
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.boundSnapshotContentName
+      name: Bound-Content
+      type: string
+    - jsonPath: .status.creationTime
+      name: Created
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Snapshot is the user-facing binding for a container checkpoint.
+          It identifies what was captured and is consumed by restore paths.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              SnapshotSpec describes what this Snapshot is OF and how it should be
+              captured. Two creation flows:
+               1. SnapshotJob-produced: the SnapshotJob controller creates a
+                  Snapshot, copying its QuiesceProbe and Storage into Snapshot.Spec.
+               2. Direct user creation (live pod): the user creates a Snapshot with
+                  PodRef pointing at an existing pod that already satisfies the
+                  snapshot contract (control volume, target-container labels, etc.).
+            properties:
+              quiesceProbe:
+                description: |-
+                  QuiesceProbe defines how the agent detects that the target
+                  containers are safe to dump. When omitted, the agent uses the
+                  pod's standard Ready condition as the quiesce gate.
+                properties:
+                  action:
+                    description: Action is the probe operation. Exactly one variant
+                      in Action must be set.
+                    properties:
+                      exec:
+                        description: Exec runs a command inside the target container.
+                        properties:
+                          command:
+                            description: |-
+                              Command is the command line to execute inside the container, the working directory for the
+                              command  is root ('/') in the container's filesystem. The command is simply exec'd, it is
+                              not run inside a shell, so traditional shell instructions ('|', etc) won't work. To use
+                              a shell, you need to explicitly call out to that shell.
+                              Exit status of 0 is treated as live/healthy and non-zero is unhealthy.
+                            items:
+                              type: string
+                            type: array
+                            x-kubernetes-list-type: atomic
+                        type: object
+                      file:
+                        description: |-
+                          File probes for the existence of a sentinel file in the target
+                          container's filesystem. NVSnapshot-specific (no corev1 equivalent).
+                        properties:
+                          path:
+                            description: Path is the absolute path to the sentinel
+                              file inside the container.
+                            type: string
+                        required:
+                        - path
+                        type: object
+                      grpc:
+                        description: GRPC probes via the standard gRPC health protocol.
+                        properties:
+                          port:
+                            description: Port number of the gRPC service. Number must
+                              be in the range 1 to 65535.
+                            format: int32
+                            type: integer
+                          service:
+                            default: ""
+                            description: |-
+                              Service is the name of the service to place in the gRPC HealthCheckRequest
+                              (see https://github.com/grpc/grpc/blob/master/doc/health-checking.md).
+
+                              If this is not specified, the default behavior is defined by gRPC.
+                            type: string
+                        required:
+                        - port
+                        type: object
+                      httpGet:
+                        description: HTTPGet probes an HTTP endpoint on the target
+                          container.
+                        properties:
+                          host:
+                            description: |-
+                              Host name to connect to, defaults to the pod IP. You probably want to set
+                              "Host" in httpHeaders instead.
+                            type: string
+                          httpHeaders:
+                            description: Custom headers to set in the request. HTTP
+                              allows repeated headers.
+                            items:
+                              description: HTTPHeader describes a custom header to
+                                be used in HTTP probes
+                              properties:
+                                name:
+                                  description: |-
+                                    The header field name.
+                                    This will be canonicalized upon output, so case-variant names will be understood as the same header.
+                                  type: string
+                                value:
+                                  description: The header field value
+                                  type: string
+                              required:
+                              - name
+                              - value
+                              type: object
+                            type: array
+                            x-kubernetes-list-type: atomic
+                          path:
+                            description: Path to access on the HTTP server.
+                            type: string
+                          port:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            description: |-
+                              Name or number of the port to access on the container.
+                              Number must be in the range 1 to 65535.
+                              Name must be an IANA_SVC_NAME.
+                            x-kubernetes-int-or-string: true
+                          scheme:
+                            description: |-
+                              Scheme to use for connecting to the host.
+                              Defaults to HTTP.
+                            type: string
+                        required:
+                        - port
+                        type: object
+                      tcpSocket:
+                        description: TCPSocket probes a TCP port on the target container.
+                        properties:
+                          host:
+                            description: 'Optional: Host name to connect to, defaults
+                              to the pod IP.'
+                            type: string
+                          port:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            description: |-
+                              Number or name of the port to access on the container.
+                              Number must be in the range 1 to 65535.
+                              Name must be an IANA_SVC_NAME.
+                            x-kubernetes-int-or-string: true
+                        required:
+                        - port
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: exactly one probe action must be set
+                      rule: '[has(self.httpGet),has(self.exec),has(self.tcpSocket),has(self.grpc),has(self.file)].exists_one(x,x)'
+                  failureThreshold:
+                    default: 7200
+                    description: |-
+                      FailureThreshold is the number of consecutive failures after which
+                      the agent abandons the probe. Bounded; SnapshotJob.ActiveDeadlineSeconds
+                      is the wall-clock hard deadline.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  periodSeconds:
+                    default: 1
+                    description: PeriodSeconds is the interval between consecutive
+                      probe attempts.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  successThreshold:
+                    default: 1
+                    description: |-
+                      SuccessThreshold is the number of consecutive successes required
+                      before the probe is considered satisfied and the dump begins.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  timeoutSeconds:
+                    default: 1
+                    description: |-
+                      TimeoutSeconds is the per-attempt timeout. A probe attempt that
+                      does not complete within this many seconds counts as a failure.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                required:
+                - action
+                type: object
+              source:
+                description: Source identifies the origin of this snapshot. Immutable
+                  after binding.
+                properties:
+                  podRef:
+                    description: |-
+                      PodRef references the pod whose containers were (or will be)
+                      captured. For direct creation, the pod must exist at Snapshot
+                      creation time and satisfy the snapshot contract.
+                    properties:
+                      containers:
+                        description: |-
+                          Containers narrows the snapshot scope to specific containers
+                          within the pod. If empty, all containers in the pod are captured.
+                        items:
+                          type: string
+                        type: array
+                      name:
+                        description: Name of the source pod, in the same namespace
+                          as the Snapshot.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - podRef
+                type: object
+              storage:
+                description: |-
+                  Storage describes where the artifact will be written. Required for
+                  direct creation; for SnapshotJob-produced Snapshots, copied from
+                  SnapshotJob.Spec.Storage at creation time.
+                properties:
+                  pvc:
+                    description: |-
+                      PVC names the PersistentVolumeClaim that will store the artifact.
+                      The artifact directory inside the PVC is producer-assigned (derived
+                      from the producing Snapshot or SnapshotJob UID), not user-settable.
+                    properties:
+                      claimName:
+                        description: |-
+                          ClaimName of the PVC. Must support the access mode required by
+                          the deployment (ReadWriteMany for production; ReadWriteOnce
+                          permitted for single-node test/dev with appropriate nodeAffinity).
+                        minLength: 1
+                        type: string
+                    required:
+                    - claimName
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: exactly one storage variant must be set; v1alpha1 supports
+                    only pvc
+                  rule: has(self.pvc)
+            required:
+            - source
+            - storage
+            type: object
+            x-kubernetes-validations:
+            - message: source is immutable after binding
+              rule: self.source == oldSelf.source
+          status:
+            description: SnapshotStatus is the observed state of a Snapshot.
+            properties:
+              boundSnapshotContentName:
+                description: |-
+                  BoundSnapshotContentName is the name of the SnapshotContent object
+                  this Snapshot is bound to. nil until the binding is established.
+
+                  Consumers MUST verify binding by checking that both Snapshot and
+                  SnapshotContent point at each other before treating this object as
+                  usable for restore.
+                type: string
+              conditions:
+                description: |-
+                  Conditions reflect the latest observations of the Snapshot's state.
+                  Standard condition types:
+                    Ready  — True when the bound SnapshotContent is Ready and the
+                             artifact is usable for restore.
+                    Failed — True if creation or binding failed terminally; reason
+                             and message carry the detail.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              creationTime:
+                description: |-
+                  CreationTime is the timestamp at which the artifact was created
+                  (CRIU dump complete, manifest finalized). Mirrors the bound
+                  SnapshotContent's CreationTime.
+                format: date-time
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
