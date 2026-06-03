@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 
-	snapshotprotocol "github.com/run-ai/snapshot/agent/pkg/protocol"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/nvsnapshot/agent/pkg/protocol"
 )
 
 // WriteControlSentinel writes a sentinel file into the workload container's

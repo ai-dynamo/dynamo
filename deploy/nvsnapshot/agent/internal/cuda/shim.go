@@ -13,7 +13,7 @@ import (
 
 	"github.com/go-logr/logr"
 
-	snapshotruntime "github.com/run-ai/snapshot/agent/internal/runtime"
+	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/nvsnapshot/agent/internal/runtime"
 )
 
 const (

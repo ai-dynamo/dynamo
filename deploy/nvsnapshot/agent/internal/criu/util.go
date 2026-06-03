@@ -12,7 +12,7 @@ import (
 	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/run-ai/snapshot/agent/internal/types"
+	"github.com/ai-dynamo/dynamo/deploy/nvsnapshot/agent/internal/types"
 )
 
 // parseManageCgroupsMode normalizes and validates the CRIU cgroup mode setting.

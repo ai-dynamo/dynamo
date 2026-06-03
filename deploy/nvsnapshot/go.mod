@@ -1,4 +1,4 @@
-module github.com/run-ai/snapshot
+module github.com/ai-dynamo/dynamo/deploy/nvsnapshot
 
 go 1.26.0
 
@@ -106,3 +106,5 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.2 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+replace github.com/ai-dynamo/dynamo/deploy/nvsnapshot/operator/api => ./operator/api

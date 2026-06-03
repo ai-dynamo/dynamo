@@ -13,7 +13,7 @@ import (
 	"github.com/moby/sys/mountinfo"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
-	"github.com/run-ai/snapshot/agent/internal/types"
+	"github.com/ai-dynamo/dynamo/deploy/nvsnapshot/agent/internal/types"
 )
 
 // ReadMountInfo reads and parses mountinfo for a container process via /host/proc.

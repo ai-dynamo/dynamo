@@ -12,7 +12,7 @@ import (
 
 	"github.com/go-logr/logr"
 
-	snapshotruntime "github.com/run-ai/snapshot/agent/internal/runtime"
+	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/nvsnapshot/agent/internal/runtime"
 )
 
 // LogProcessDiagnostics logs process state and CRIU restore log for debugging a failed restore.

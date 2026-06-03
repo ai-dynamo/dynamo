@@ -15,8 +15,8 @@ import (
 	"github.com/go-logr/logr"
 	"google.golang.org/protobuf/proto"
 
-	snapshotruntime "github.com/run-ai/snapshot/agent/internal/runtime"
-	"github.com/run-ai/snapshot/agent/internal/types"
+	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/nvsnapshot/agent/internal/runtime"
+	"github.com/ai-dynamo/dynamo/deploy/nvsnapshot/agent/internal/types"
 )
 
 const (

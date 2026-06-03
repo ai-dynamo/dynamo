@@ -13,7 +13,7 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/run-ai/snapshot/agent/internal/types"
+	"github.com/ai-dynamo/dynamo/deploy/nvsnapshot/agent/internal/types"
 )
 
 const (

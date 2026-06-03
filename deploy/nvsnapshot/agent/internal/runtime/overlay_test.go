@@ -11,7 +11,7 @@ import (
 
 	"github.com/go-logr/logr/testr"
 
-	"github.com/run-ai/snapshot/agent/internal/types"
+	"github.com/ai-dynamo/dynamo/deploy/nvsnapshot/agent/internal/types"
 )
 
 func TestBuildExclusions(t *testing.T) {

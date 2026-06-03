@@ -29,10 +29,10 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/retry"
 
-	"github.com/run-ai/snapshot/agent/internal/executor"
-	snapshotruntime "github.com/run-ai/snapshot/agent/internal/runtime"
-	"github.com/run-ai/snapshot/agent/internal/types"
-	snapshotprotocol "github.com/run-ai/snapshot/agent/pkg/protocol"
+	"github.com/ai-dynamo/dynamo/deploy/nvsnapshot/agent/internal/executor"
+	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/nvsnapshot/agent/internal/runtime"
+	"github.com/ai-dynamo/dynamo/deploy/nvsnapshot/agent/internal/types"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/nvsnapshot/agent/pkg/protocol"
 )
 
 // NodeController watches local-node pods with checkpoint metadata and reconciles

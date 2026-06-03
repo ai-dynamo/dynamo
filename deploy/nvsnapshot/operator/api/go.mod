@@ -1,4 +1,4 @@
-module github.com/run-ai/snapshot/operator/api
+module github.com/ai-dynamo/dynamo/deploy/nvsnapshot/operator/api
 
 go 1.26.0
 

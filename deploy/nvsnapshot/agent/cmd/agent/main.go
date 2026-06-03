@@ -16,9 +16,9 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/run-ai/snapshot/agent/internal/controller"
-	"github.com/run-ai/snapshot/agent/internal/logging"
-	snapshotruntime "github.com/run-ai/snapshot/agent/internal/runtime"
+	"github.com/ai-dynamo/dynamo/deploy/nvsnapshot/agent/internal/controller"
+	"github.com/ai-dynamo/dynamo/deploy/nvsnapshot/agent/internal/logging"
+	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/nvsnapshot/agent/internal/runtime"
 )
 
 func main() {

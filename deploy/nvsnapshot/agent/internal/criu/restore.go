@@ -14,8 +14,8 @@ import (
 	"github.com/go-logr/logr"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/run-ai/snapshot/agent/internal/diagnostics"
-	"github.com/run-ai/snapshot/agent/internal/types"
+	"github.com/ai-dynamo/dynamo/deploy/nvsnapshot/agent/internal/diagnostics"
+	"github.com/ai-dynamo/dynamo/deploy/nvsnapshot/agent/internal/types"
 )
 
 // RestoreLogFilename is the CRIU restore log filename (also used by executor/restore.go).

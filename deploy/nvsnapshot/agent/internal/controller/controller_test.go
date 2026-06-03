@@ -22,9 +22,9 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	clientgotesting "k8s.io/client-go/testing"
 
-	snapshotruntime "github.com/run-ai/snapshot/agent/internal/runtime"
-	"github.com/run-ai/snapshot/agent/internal/types"
-	snapshotprotocol "github.com/run-ai/snapshot/agent/pkg/protocol"
+	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/nvsnapshot/agent/internal/runtime"
+	"github.com/ai-dynamo/dynamo/deploy/nvsnapshot/agent/internal/types"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/nvsnapshot/agent/pkg/protocol"
 )
 
 const testNodeName = "test-node"
