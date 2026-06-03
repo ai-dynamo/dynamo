@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Aggregated FP8 deployment of NVIDIA-Nemotron-3-Super-120B-A12B-FP8 on
-# H200x4 (TP=4) with Expert Parallel + DeepEP high-throughput all-to-all.
+# H200x4 (TP=4) with Expert Parallel + FlashInfer NVLink one-sided all-to-all.
 # Hopper variant — drops Blackwell-specific NCCL SHARP / symmetric-memory
 # env vars and the FlashInfer NVFP4 MoE backend (those are B200-only).
 #
