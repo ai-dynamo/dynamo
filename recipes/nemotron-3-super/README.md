@@ -18,9 +18,9 @@ We ship Dynamo + vLLM deployment profiles across two GPU SKUs and two serving mo
 | **Framework**            | vLLM 0.21.0                  | vLLM 0.21.0                   | vLLM 0.21.0                  | vLLM 0.21.0                  |
 | **Precision**            | NVFP4 + FP8 KV               | FP8 + FP8 KV                  | NVFP4 + FP8 KV               | FP8 + FP8 KV                 |
 | **Parallelism**          | TP4 + EP                     | TP4 + EP                      | TP4 + EP                     | TP4 + EP                     |
-| **MoE backend**          | FLASHINFER_TRTLLM            | FLASHINFER_CUTLASS            | FLASHINFER_TRTLLM            | FLASHINFER_CUTLASS           |
-| **Attention backend**    | FLASH_ATTN                   | FLASH_ATTN                    | FLASH_ATTN                   | FLASH_ATTN                   |
-| **AllReduce backend**    | FlashInfer TRTLLM            | FlashInfer TRTLLM             | FlashInfer TRTLLM            | FlashInfer TRTLLM            |
+| **MoE backend**          | FLASHINFER_TRTLLM            | FLASHINFER_CUTLASS (default)  | FLASHINFER_TRTLLM            | FLASHINFER_CUTLASS (default) |
+| **Attention backend**    | FLASH_ATTN                   | FLASH_ATTN (default)          | FLASH_ATTN                   | FLASH_ATTN (default)         |
+| **AllReduce backend**    | FlashInfer TRTLLM            | FlashInfer TRTLLM (default)   | FlashInfer TRTLLM            | FlashInfer TRTLLM (default)  |
 | **All2All backend**      | DeepEP high-throughput       | FlashInfer NVLink one-sided   | DeepEP low-latency           | DeepEP high-throughput       |
 | **Routing**              | KV-aware                     | KV-aware                      | KV-aware                     | KV-aware                     |
 | **Speculative decoding** | MTP (DL=3)                   | MTP (DL=3)                    | MTP (DL=3)                   | MTP (DL=3)                   |
