@@ -46,7 +46,7 @@ class TrtllmEngineMonitor:
     def __init__(
         self,
         engine: "TensorRTLLMEngine",
-        runtime: DistributedRuntime,
+        runtime: Optional[DistributedRuntime] = None,
         shutdown_event: Optional[asyncio.Event] = None,
         *,
         interval: Optional[float] = None,
@@ -113,10 +113,12 @@ class TrtllmEngineMonitor:
                         logger.error("TRT-LLM engine is unhealthy: %r", fatal_error)
                     else:
                         logger.error("TRT-LLM engine is unhealthy.")
-                    logger.warning("Initiating Dynamo Runtime shutdown.")
                     self._shutdown_engine()
-                    self.runtime.shutdown()
+                    if self.runtime is not None:
+                        logger.warning("Initiating Dynamo Runtime shutdown.")
+                        self.runtime.shutdown()
                     os._exit(1)
+                    return
 
                 if self.shutdown_event is not None:
                     try:
