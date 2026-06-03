@@ -181,7 +181,7 @@ jobs:
         working-directory: /workspace
         shell: bash
         run: |
-          MYPYPATH=lib/bindings/python/src mypy -p dynamo
+          MYPYPATH=components/src:lib/bindings/python/src mypy -p dynamo
 
   # TODO: real xdist parallelism port conflicts. cpu_parallel_mode='none'
   # below runs -n 0, so this job is NOT actually parallel right now.
