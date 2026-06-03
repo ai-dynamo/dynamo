@@ -29,6 +29,21 @@ on:
         required: false
         type: string
         default: ''
+      on_demand:
+        description: 'On-demand release: bare X.Y.Z[.postN] NGC tag (no rc), set by on-demand-release.yml. Requires release_version.'
+        required: false
+        type: boolean
+        default: false
+      release_version:
+        description: 'Release version X.Y.Z[.postN] for on_demand runs (already committed on the release branch).'
+        required: false
+        type: string
+        default: ''
+      artifacts:
+        description: 'On-demand artifact selection forwarded to GitLab (e.g. crate,container,wheel,helm).'
+        required: false
+        type: string
+        default: ''
   workflow_call:
     inputs:
       commit_sha:
@@ -46,6 +61,18 @@ on:
         type: boolean
         default: false
       slack_thread_ts:
+        required: false
+        type: string
+        default: ''
+      on_demand:
+        required: false
+        type: boolean
+        default: false
+      release_version:
+        required: false
+        type: string
+        default: ''
+      artifacts:
         required: false
         type: string
         default: ''
@@ -72,10 +99,12 @@ jobs:
       version: ${{ steps.extract.outputs.version }}
       commit_sha: ${{ steps.extract.outputs.commit_sha }}
       nightly: ${{ steps.extract.outputs.nightly }}
+      on_demand: ${{ steps.extract.outputs.on_demand }}
       rc_number: ${{ steps.rc_tag.outputs.rc_number }}
       ngc_version_tag: ${{ steps.rc_tag.outputs.ngc_version_tag }}
       helm_chart_version: ${{ steps.rc_tag.outputs.helm_chart_version }}
       wheel_version: ${{ steps.rc_tag.outputs.wheel_version }}
+      crate_version: ${{ steps.rc_tag.outputs.crate_version }}
     steps:
       - name: Extract version and validate inputs
         id: extract
@@ -83,6 +112,8 @@ jobs:
           COMMIT_SHA: ${{ inputs.commit_sha }}
           BRANCH_NAME: ${{ github.ref_name }}
           NIGHTLY: ${{ inputs.nightly }}
+          ON_DEMAND: ${{ inputs.on_demand }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
         run: |
           set -euo pipefail
 
@@ -91,7 +122,15 @@ jobs:
             exit 1
           fi
 
-          if [[ "${NIGHTLY}" == "true" ]]; then
+          if [[ "${ON_DEMAND}" == "true" ]]; then
+            # Branch + version bump are created/validated by on-demand-release.yml;
+            # the version is passed explicitly rather than derived from the ref.
+            if [[ ! "${RELEASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?$ ]]; then
+              echo "Error: on_demand=true requires release_version X.Y.Z[.postN] (got: '${RELEASE_VERSION}')"
+              exit 1
+            fi
+            VERSION="${RELEASE_VERSION}"
+          elif [[ "${NIGHTLY}" == "true" ]]; then
             if [[ "${BRANCH_NAME}" != "main" ]]; then
               echo "Error: nightly=true requires branch=main (got: ${BRANCH_NAME})"
               exit 1
@@ -109,6 +148,7 @@ jobs:
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "commit_sha=${COMMIT_SHA}" >> $GITHUB_OUTPUT
           echo "nightly=${NIGHTLY}" >> $GITHUB_OUTPUT
+          echo "on_demand=${ON_DEMAND}" >> $GITHUB_OUTPUT
           echo "Detected version: ${VERSION}"
           echo "Source commit SHA: ${COMMIT_SHA}"
           echo "Nightly: ${NIGHTLY}"
@@ -132,13 +172,15 @@ jobs:
           VERSION: ${{ steps.extract.outputs.version }}
           COMMIT_SHA: ${{ steps.extract.outputs.commit_sha }}
           NIGHTLY: ${{ steps.extract.outputs.nightly }}
+          ON_DEMAND: ${{ steps.extract.outputs.on_demand }}
         run: |
           set -euo pipefail
 
           # Base version pinned in pyproject.toml at the source SHA. Same value
-          # cargo and maturin stamp into the wheel filename / METADATA.
+          # cargo and maturin stamp into the wheel filename / METADATA. The
+          # optional .postN tail covers post-release respins.
           BASE_VERSION=$(awk '/^version = / {gsub(/"/, "", $3); print $3; exit}' pyproject.toml)
-          if [[ ! "${BASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if [[ ! "${BASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?$ ]]; then
             echo "Error: cannot parse base version from pyproject.toml (got '${BASE_VERSION}')"
             exit 1
           fi
@@ -157,6 +199,21 @@ jobs:
             echo "wheel_version=${WHEEL_VERSION}" >> $GITHUB_OUTPUT
             echo "Nightly NGC tag: ${NGC_VERSION_TAG}"
             echo "Nightly wheel version: ${WHEEL_VERSION}"
+            exit 0
+          fi
+
+          if [[ "${ON_DEMAND}" == "true" ]]; then
+            # Bare GA tags (no rc suffix). NGC tag keeps PEP 440 form (e.g.
+            # 0.8.1.post1); Helm needs SemVer (.postN -> -postN); crate version
+            # uses SemVer build metadata (.postN -> +postN).
+            HELM_VERSION=$(echo "${VERSION}" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)\.(.+)/\1-\2/')
+            CRATE_VERSION=$(echo "${VERSION}" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)\.(.+)/\1+\2/')
+            echo "rc_number=" >> $GITHUB_OUTPUT
+            echo "ngc_version_tag=${VERSION}" >> $GITHUB_OUTPUT
+            echo "helm_chart_version=${HELM_VERSION}" >> $GITHUB_OUTPUT
+            echo "wheel_version=${BASE_VERSION}" >> $GITHUB_OUTPUT
+            echo "crate_version=${CRATE_VERSION}" >> $GITHUB_OUTPUT
+            echo "On-demand release: NGC ${VERSION}, helm ${HELM_VERSION}, wheel ${BASE_VERSION}, crate ${CRATE_VERSION}"
             exit 0
           fi
 
@@ -739,6 +796,116 @@ jobs:
             rm -f "${BODY_FILE}"
           done
 
+  # ============================================================================
+  # ARTIFACTORY STAGING: build + verify the publishable crates with cargo
+  # package (inside the dynamo build image so native deps resolve), then upload
+  # the .crate files alongside the wheels. On-demand releases only.
+  # ============================================================================
+
+  stage-crates-artifactory:
+    name: Stage Crates to Artifactory
+    needs: [prepare-release]
+    if: ${{ needs.prepare-release.result == 'success' && needs.prepare-release.outputs.on_demand == 'true' && contains(inputs.artifacts, 'crate') }}
+    runs-on: prod-tester-amd-v2
+    environment: automated-release
+    container:
+      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ needs.prepare-release.outputs.commit_sha }}-dynamo-runtime-test
+      env:
+        HOME: /__w/dynamo/dynamo
+        USER: dynamo
+    env:
+      COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
+      VERSION: ${{ needs.prepare-release.outputs.version }}
+      # Crates uploaded to Artifactory (the public set). UPLOAD ⊆ PACKAGE.
+      UPLOAD_CRATES: "dynamo-runtime dynamo-llm dynamo-protocols dynamo-parsers dynamo-memory dynamo-tokens dynamo-mocker dynamo-kv-router"
+      # Verified together so workspace-only deps (tokenizers, renderer) resolve
+      # during the package verify build. Extend if cargo reports more unpublished
+      # path-deps (see release plan concern C1).
+      PACKAGE_CRATES: "dynamo-runtime dynamo-llm dynamo-protocols dynamo-parsers dynamo-memory dynamo-tokens dynamo-mocker dynamo-kv-router dynamo-tokenizers dynamo-renderer"
+      CARGO_TARGET_DIR: /tmp/cargo-target
+    steps:
+      - name: Checkout at source commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ needs.prepare-release.outputs.commit_sha }}
+
+      - name: Build and verify crates
+        id: package
+        env:
+          SCCACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+          SCCACHE_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+        run: |
+          set -euo pipefail
+
+          /workspace/container/use-sccache.sh install || true
+          eval "$(/workspace/container/use-sccache.sh setup-env)" || true
+
+          PKG_ARGS=()
+          for c in ${PACKAGE_CRATES}; do PKG_ARGS+=("-p" "${c}"); done
+          # cargo cross-verifies the listed crates against each other, so
+          # workspace-only path-deps resolve without being on crates.io.
+          cargo package --locked "${PKG_ARGS[@]}"
+
+          OUT="${RUNNER_TEMP}/crates"
+          mkdir -p "${OUT}"
+          missing=0
+          for c in ${UPLOAD_CRATES}; do
+            f=$(ls "${CARGO_TARGET_DIR}/package/${c}-"*.crate 2>/dev/null | head -1 || true)
+            if [ -z "${f}" ]; then
+              echo "::error::missing .crate for ${c} in ${CARGO_TARGET_DIR}/package"
+              missing=1
+              continue
+            fi
+            cp "${f}" "${OUT}/"
+            echo "staged $(basename "${f}")"
+          done
+          [ "${missing}" -eq 0 ] || exit 1
+          echo "upload_dir=${OUT}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload crates to Artifactory
+        env:
+          ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }}
+          ARTIFACTORY_USER: ${{ secrets.ARTIFACTORY_USER }}
+          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
+          UPLOAD_DIR: ${{ steps.package.outputs.upload_dir }}
+        run: |
+          set -euo pipefail
+
+          BASE_URL="${ARTIFACTORY_URL%/}/release/${VERSION}/crates"
+          echo "Uploading to: ${BASE_URL}/"
+
+          echo "## Crate Staging Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Crate | Target |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          shopt -s nullglob
+          CRATE_FILES=("${UPLOAD_DIR}"/*.crate)
+          if [ ${#CRATE_FILES[@]} -eq 0 ]; then
+            echo "Error: no .crate files in ${UPLOAD_DIR}"
+            exit 1
+          fi
+
+          for CRATE in "${CRATE_FILES[@]}"; do
+            CRATE_FILENAME=$(basename "${CRATE}")
+            TARGET_URL="${BASE_URL}/${CRATE_FILENAME}"
+            BODY_FILE=$(mktemp)
+            HTTP_CODE=$(curl -sSL -o "${BODY_FILE}" -w "%{http_code}" \
+              --connect-timeout 30 --max-time 300 \
+              --retry 3 --retry-delay 5 --retry-all-errors \
+              -u "${ARTIFACTORY_USER}:${ARTIFACTORY_TOKEN}" \
+              -T "${CRATE}" \
+              "${TARGET_URL}")
+            if [ "${HTTP_CODE}" != "201" ]; then
+              echo "::error::Artifactory deploy failed: HTTP ${HTTP_CODE} at ${TARGET_URL}"
+              cat "${BODY_FILE}" || true
+              exit 1
+            fi
+            echo "Uploaded: ${CRATE_FILENAME} -> ${TARGET_URL}"
+            echo "| \`${CRATE_FILENAME}\` | ${TARGET_URL} |" >> $GITHUB_STEP_SUMMARY
+            rm -f "${BODY_FILE}"
+          done
+
   # Combined NGC + Artifactory staging reply on the nightly thread.
   notify-slack-staging:
     name: Notify Slack — staging complete
@@ -834,7 +1001,7 @@ jobs:
 
   trigger-gitlab-release-pipeline:
     name: Trigger GitLab Release Pipeline
-    needs: [prepare-release, release-publish, stage-wheels-artifactory]
+    needs: [prepare-release, release-publish, stage-wheels-artifactory, stage-crates-artifactory]
     if: ${{ inputs.skip_gitlab_pipeline != true }}
     runs-on:
       group: gitlab_ci_runners
@@ -854,9 +1021,12 @@ jobs:
           VERSION:              ${{ needs.prepare-release.outputs.version }}
           NGC_VERSION_TAG:      ${{ needs.prepare-release.outputs.ngc_version_tag }}
           WHEEL_VERSION:        ${{ needs.prepare-release.outputs.wheel_version }}
+          CRATE_VERSION:        ${{ needs.prepare-release.outputs.crate_version }}
           COMMIT_SHA:           ${{ needs.prepare-release.outputs.commit_sha }}
           NIGHTLY:              ${{ needs.prepare-release.outputs.nightly }}
+          ON_DEMAND:            ${{ needs.prepare-release.outputs.on_demand }}
           RC_NUMBER:            ${{ needs.prepare-release.outputs.rc_number }}
+          INPUT_ARTIFACTS:      ${{ inputs.artifacts }}
           # Forwarded so the GitLab pipeline can reply on the same thread.
           SLACK_THREAD_TS:      ${{ inputs.slack_thread_ts }}
           SLACK_CHANNEL_ID:     ${{ secrets.SLACK_RELEASE_CHANNEL_ID }}
@@ -868,12 +1038,20 @@ jobs:
           # NIGHTLY_TAG carries the resolved nightly tag (date+shortsha) for
           # the GitLab pipeline summary; the nspect version-name is hardcoded
           # to "Dynamo Nightlies" inside dynamo.yml, so we don't pass it.
+          RELEASE_TAG=""
           if [ "${NIGHTLY}" = "true" ]; then
             PIPELINE_TYPE="security"
             RELEASE_TYPE="nightly"
             ARTIFACTS="wheel,container"
             NIGHTLY_TAG="${NGC_VERSION_TAG}"
             RC_TAG=""
+          elif [ "${ON_DEMAND}" = "true" ]; then
+            PIPELINE_TYPE="rc"
+            RELEASE_TYPE="on-demand"
+            ARTIFACTS="${INPUT_ARTIFACTS:-crate,container,wheel,helm}"
+            NIGHTLY_TAG=""
+            RC_TAG=""
+            RELEASE_TAG="v${VERSION}"
           else
             PIPELINE_TYPE="rc"
             RELEASE_TYPE="rc"
@@ -881,6 +1059,8 @@ jobs:
             NIGHTLY_TAG=""
             RC_TAG="v${VERSION}-rc${RC_NUMBER}"
           fi
+
+          case "${ARTIFACTS}" in *crate*) ENABLE_CRATE_SCAN="true" ;; *) ENABLE_CRATE_SCAN="false" ;; esac
 
           # Pipe the trigger token via @file rather than inline form value so
           # it never appears in process listings or `set -x` output.
@@ -901,13 +1081,16 @@ jobs:
             --form "variables[PROJECT]=dynamo" \
             --form "variables[NIGHTLY_TAG]=${NIGHTLY_TAG}" \
             --form "variables[RC_TAG]=${RC_TAG}" \
+            --form "variables[RELEASE_TAG]=${RELEASE_TAG}" \
             --form "variables[WHEEL_VERSION]=${WHEEL_VERSION}" \
+            --form "variables[CRATE_VERSION]=${CRATE_VERSION}" \
             --form "variables[CONTAINER_TAG]=${NGC_VERSION_TAG}" \
             --form "variables[COMMIT_SHA]=${COMMIT_SHA}" \
             --form "variables[GITHUB_RUN_ID]=${GITHUB_RUN_ID}" \
             --form "variables[ARTIFACTS]=${ARTIFACTS}" \
             --form "variables[ENABLE_PULSE_SCAN]=true" \
             --form "variables[ENABLE_WHEEL_SCAN]=true" \
+            --form "variables[ENABLE_CRATE_SCAN]=${ENABLE_CRATE_SCAN}" \
             --form "variables[ENABLE_SONARQUBE]=true" \
             --form "variables[SONAR_BRANCH]=main" \
             --form "variables[NSPECT_REGISTERED]=false" \
