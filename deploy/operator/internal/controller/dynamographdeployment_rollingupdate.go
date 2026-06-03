@@ -827,64 +827,106 @@ func (r *DynamoGraphDeploymentReconciler) getDesiredWorkerReplicas(
 	return total
 }
 
-type oldWorkerDCDAllocation struct {
-	dcd         *nvidiacomv1beta1.DynamoComponentDeployment
-	currentSpec int32
-	target      int32
+type oldWorkerReplicaPlan struct {
+	name      string
+	createdAt metav1.Time
+	spec      int32
+	target    int32
 }
 
 func allocateOldWorkerDCDReplicas(
 	dcds []*nvidiacomv1beta1.DynamoComponentDeployment,
-	oldNeeded int32,
-) map[*nvidiacomv1beta1.DynamoComponentDeployment]int32 {
-	allocations := make([]oldWorkerDCDAllocation, 0, len(dcds))
-	allocated := int32(0)
+	oldTarget int32,
+) map[string]int32 {
+	plans := buildOldWorkerReplicaPlans(dcds)
+	servingTarget := sumTargetReplicas(plans)
+
+	if servingTarget > oldTarget {
+		removeServingReplicasOldestFirst(plans, servingTarget-oldTarget)
+	} else if servingTarget < oldTarget {
+		addUnavailableReplicasNewestFirst(plans, oldTarget-servingTarget)
+	}
+
+	return replicaTargetsByDCDName(plans)
+}
+
+func buildOldWorkerReplicaPlans(
+	dcds []*nvidiacomv1beta1.DynamoComponentDeployment,
+) []oldWorkerReplicaPlan {
+	plans := make([]oldWorkerReplicaPlan, 0, len(dcds))
 
 	for _, dcd := range dcds {
 		state := dcdComponentStateFromDCD(dcd)
+		// Start by preserving replicas that are currently serving traffic.
 		target := min(state.Spec, state.Available)
-		allocations = append(allocations, oldWorkerDCDAllocation{
-			dcd:         dcd,
-			currentSpec: state.Spec,
-			target:      target,
+		plans = append(plans, oldWorkerReplicaPlan{
+			name:      dcd.Name,
+			createdAt: dcd.CreationTimestamp,
+			spec:      state.Spec,
+			target:    target,
 		})
-		allocated += target
 	}
 
-	if surplus := allocated - oldNeeded; surplus > 0 {
-		// Once serving availability exceeds the old target, drain older healthy
-		// generations first, matching Kubernetes Deployment behavior.
-		sort.SliceStable(allocations, func(i, j int) bool {
-			return allocations[i].dcd.CreationTimestamp.Time.Before(allocations[j].dcd.CreationTimestamp.Time)
-		})
-		for i := range allocations {
-			if surplus <= 0 {
-				break
-			}
-			reduced := min(allocations[i].target, surplus)
-			allocations[i].target -= reduced
-			surplus -= reduced
-		}
-	} else if remaining := oldNeeded - allocated; remaining > 0 {
-		// Preserve existing newest-first behavior for non-serving capacity after
-		// all currently available old replicas have been retained.
-		sort.SliceStable(allocations, func(i, j int) bool {
-			return allocations[i].dcd.CreationTimestamp.After(allocations[j].dcd.CreationTimestamp.Time)
-		})
-		for i := range allocations {
-			if remaining <= 0 {
-				break
-			}
-			extraCapacity := allocations[i].currentSpec - allocations[i].target
-			added := min(extraCapacity, remaining)
-			allocations[i].target += added
-			remaining -= added
-		}
-	}
+	return plans
+}
 
-	targets := make(map[*nvidiacomv1beta1.DynamoComponentDeployment]int32, len(allocations))
-	for i := range allocations {
-		targets[allocations[i].dcd] = allocations[i].target
+func sumTargetReplicas(plans []oldWorkerReplicaPlan) int32 {
+	var total int32
+	for i := range plans {
+		total += plans[i].target
+	}
+	return total
+}
+
+func removeServingReplicasOldestFirst(plans []oldWorkerReplicaPlan, replicasToRemove int32) {
+	sort.Slice(plans, func(i, j int) bool {
+		return olderOldWorkerReplicaPlanFirst(plans[i], plans[j])
+	})
+
+	for i := range plans {
+		if replicasToRemove <= 0 {
+			break
+		}
+		removed := min(plans[i].target, replicasToRemove)
+		plans[i].target -= removed
+		replicasToRemove -= removed
+	}
+}
+
+func addUnavailableReplicasNewestFirst(plans []oldWorkerReplicaPlan, replicasToAdd int32) {
+	sort.Slice(plans, func(i, j int) bool {
+		return newerOldWorkerReplicaPlanFirst(plans[i], plans[j])
+	})
+
+	for i := range plans {
+		if replicasToAdd <= 0 {
+			break
+		}
+		unavailable := plans[i].spec - plans[i].target
+		added := min(unavailable, replicasToAdd)
+		plans[i].target += added
+		replicasToAdd -= added
+	}
+}
+
+func olderOldWorkerReplicaPlanFirst(a, b oldWorkerReplicaPlan) bool {
+	if a.createdAt.Time.Equal(b.createdAt.Time) {
+		return a.name < b.name
+	}
+	return a.createdAt.Time.Before(b.createdAt.Time)
+}
+
+func newerOldWorkerReplicaPlanFirst(a, b oldWorkerReplicaPlan) bool {
+	if a.createdAt.Time.Equal(b.createdAt.Time) {
+		return a.name < b.name
+	}
+	return a.createdAt.Time.After(b.createdAt.Time)
+}
+
+func replicaTargetsByDCDName(plans []oldWorkerReplicaPlan) map[string]int32 {
+	targets := make(map[string]int32, len(plans))
+	for i := range plans {
+		targets[plans[i].name] = plans[i].target
 	}
 	return targets
 }
@@ -1161,8 +1203,8 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 		oldWorkerComponentReplicas[componentName] = oldTarget
 		newWorkerReplicas[componentName] = newTarget
 
-		for dcd, target := range allocateOldWorkerDCDReplicas(oldDCDsByComponent[componentName], oldTarget) {
-			oldWorkerDCDReplicas[dcd.Name] = target
+		for dcdName, target := range allocateOldWorkerDCDReplicas(oldDCDsByComponent[componentName], oldTarget) {
+			oldWorkerDCDReplicas[dcdName] = target
 		}
 
 		logger.V(1).Info("Rolling update replica calculation",

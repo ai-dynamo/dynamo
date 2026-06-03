@@ -2638,6 +2638,106 @@ func TestScaleOldWorkerDCDs_MultipleOldGenerations(t *testing.T) {
 	assert.Equal(t, int32(0), *updatedA.Spec.Replicas, "Oldest old DCD should be drained to 0")
 }
 
+func TestAllocateOldWorkerDCDReplicas(t *testing.T) {
+	now := metav1.Now()
+	earlier := metav1.NewTime(now.Add(-1 * 60 * 1e9))
+
+	dcd := func(name string, createdAt metav1.Time, spec, available int32) *nvidiacomv1beta1.DynamoComponentDeployment {
+		return &nvidiacomv1beta1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              name,
+				CreationTimestamp: createdAt,
+			},
+			Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+					Replicas: ptr.To(spec),
+				},
+			},
+			Status: nvidiacomv1beta1.DynamoComponentDeploymentStatus{
+				Component: &nvidiacomv1beta1.ComponentReplicaStatus{
+					Replicas:          spec,
+					AvailableReplicas: ptr.To(available),
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name      string
+		oldTarget int32
+		dcds      []*nvidiacomv1beta1.DynamoComponentDeployment
+		want      map[string]int32
+	}{
+		{
+			name:      "preserves healthy old DCD before unavailable newer old DCD",
+			oldTarget: 15,
+			dcds: []*nvidiacomv1beta1.DynamoComponentDeployment{
+				dcd("oldest-healthy", earlier, 15, 15),
+				dcd("newer-unavailable", now, 10, 0),
+			},
+			want: map[string]int32{
+				"oldest-healthy":    15,
+				"newer-unavailable": 0,
+			},
+		},
+		{
+			name:      "removes serving surplus oldest first",
+			oldTarget: 2,
+			dcds: []*nvidiacomv1beta1.DynamoComponentDeployment{
+				dcd("oldest-healthy", earlier, 3, 3),
+				dcd("newer-healthy", now, 2, 2),
+			},
+			want: map[string]int32{
+				"oldest-healthy": 0,
+				"newer-healthy":  2,
+			},
+		},
+		{
+			name:      "adds unavailable capacity newest first when serving replicas are below target",
+			oldTarget: 15,
+			dcds: []*nvidiacomv1beta1.DynamoComponentDeployment{
+				dcd("oldest-partially-available", earlier, 15, 12),
+				dcd("newer-unavailable", now, 10, 0),
+			},
+			want: map[string]int32{
+				"oldest-partially-available": 12,
+				"newer-unavailable":          3,
+			},
+		},
+		{
+			name:      "keeps serving targets when already at old target",
+			oldTarget: 2,
+			dcds: []*nvidiacomv1beta1.DynamoComponentDeployment{
+				dcd("oldest-healthy", earlier, 2, 2),
+				dcd("newer-unavailable", now, 2, 0),
+			},
+			want: map[string]int32{
+				"oldest-healthy":    2,
+				"newer-unavailable": 0,
+			},
+		},
+		{
+			name:      "caps targets at total old DCD spec",
+			oldTarget: 5,
+			dcds: []*nvidiacomv1beta1.DynamoComponentDeployment{
+				dcd("oldest-healthy", earlier, 1, 1),
+				dcd("newer-unavailable", now, 1, 0),
+			},
+			want: map[string]int32{
+				"oldest-healthy":    1,
+				"newer-unavailable": 1,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := allocateOldWorkerDCDReplicas(tt.dcds, tt.oldTarget)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestScaleOldWorkerDCDs_MultipleOldGenerationsPreservesAvailableReplicas(t *testing.T) {
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {
