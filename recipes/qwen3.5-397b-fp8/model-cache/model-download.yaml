@@ -52,7 +52,7 @@ spec:
           args:
             - |
               set -eux
-              pip install --no-cache-dir huggingface_hub==1.11.0
+              pip install --no-cache-dir huggingface_hub==1.11.0 click
               hf download "$MODEL_NAME" --revision "$MODEL_REVISION"
           volumeMounts:
             - name: shared-model-cache
