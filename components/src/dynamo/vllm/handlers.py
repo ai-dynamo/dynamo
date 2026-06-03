@@ -2985,7 +2985,14 @@ class EmbeddingWorkerHandler:
                 "expected 'float' or 'base64'"
             )
 
-        pooling_params = PoolingParams()
+        # Request the pooled, normalized sentence embedding. With no task,
+        # vLLM 0.21's encode() resolves to per-token output (the full
+        # ``n_tokens x hidden`` hidden-state matrix, un-normalized), so the
+        # OpenAI ``/v1/embeddings`` response ends up with the wrong shape
+        # (dim scales with input length) instead of one vector per input.
+        # ``task="embed"`` selects the pooled+normalized embedding, matching
+        # vLLM's own embedding server.
+        pooling_params = PoolingParams(task="embed")
         # Use the per-request context id (same as the chat/completion paths
         # in this file) so concurrent embeddings never collide inside
         # ``AsyncLLM``. ``context.trace_id`` is a distributed-trace id
