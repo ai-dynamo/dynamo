@@ -119,12 +119,12 @@ def test_shared_hicache_plan_adapter_uses_string_worker_ids():
     assert "source_endpoint" not in plan
 
 
-def test_shared_hicache_auto_bootstrap_derives_from_dynamo_system_port(monkeypatch):
+def test_shared_hicache_auto_bootstrap_offsets_dynamo_system_port(monkeypatch):
     monkeypatch.setenv("DYN_SYSTEM_PORT", "9102")
 
-    base_port = _derive_shared_hicache_bootstrap_port(tp_size=4)
+    base_port = _derive_shared_hicache_bootstrap_port()
 
-    assert base_port == 20000 + (9102 % 3192) * 4
+    assert base_port == 29102
 
 
 def test_compat_keeps_async_generate_kwargs_for_newer_engines():

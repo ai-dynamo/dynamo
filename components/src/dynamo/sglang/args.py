@@ -27,6 +27,8 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang._compat import enable_disjoint_streaming_output
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 
+SHARED_HICACHE_BOOTSTRAP_PORT_OFFSET = 20000
+
 configure_dynamo_logging()
 
 
@@ -247,12 +249,8 @@ async def parse_args(args: list[str]) -> Config:
         and not _has_cli_flag(unknown, "--shared-hicache-bootstrap-port")
     ):
         args_dict = vars(parsed_args)
-        tp_size = getattr(
-            parsed_args, "tensor_parallel_size", getattr(parsed_args, "tp_size", 1)
-        )
         args_dict["shared_hicache_bootstrap_port"] = (
-            _derive_shared_hicache_bootstrap_port(tp_size)
-            or _reserve_disaggregation_bootstrap_port()
+            _derive_shared_hicache_bootstrap_port() or bootstrap_port
         )
         parsed_args = Namespace(**args_dict)
 
@@ -485,19 +483,8 @@ def _reserve_disaggregation_bootstrap_port() -> int:
         return port
 
 
-def _derive_shared_hicache_bootstrap_port(tp_size: int) -> Optional[int]:
+def _derive_shared_hicache_bootstrap_port() -> Optional[int]:
     raw_system_port = os.getenv("DYN_SYSTEM_PORT")
     if raw_system_port is None:
         return None
-    try:
-        system_port = int(raw_system_port)
-    except ValueError:
-        return None
-    if system_port <= 0:
-        return None
-
-    width = max(1, int(tp_size))
-    first_port = 20000
-    last_port = 32767
-    slot_count = max(1, (last_port - first_port + 1) // width)
-    return first_port + (system_port % slot_count) * width
+    return int(raw_system_port) + SHARED_HICACHE_BOOTSTRAP_PORT_OFFSET
