@@ -294,6 +294,11 @@ spec:
                     Labels to propagate to all child resources (PCS, DCD, Deployments, and pod templates).
                     Service-level labels take precedence over these values.
                   type: object
+                priorityClassName:
+                  description: |-
+                    PriorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.
+                    Requires the Grove pathway.
+                  type: string
                 pvcs:
                   description: |-
                     PVCs defines a list of persistent volume claims that can be referenced by components.
@@ -20853,6 +20858,11 @@ spec:
                     type: string
                   description: labels to propagate to all child resources. Same precedence rules as `annotations`.
                   type: object
+                priorityClassName:
+                  description: |-
+                    priorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.
+                    Requires the Grove pathway.
+                  type: string
                 restart:
                   description: restart specifies the restart policy for the graph deployment.
                   properties:
