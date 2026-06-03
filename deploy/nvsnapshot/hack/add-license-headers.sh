@@ -13,7 +13,7 @@ set -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ADDLICENSE="${ADDLICENSE:-addlicense}"
-BOILERPLATE="${REPO_ROOT}/hack/boilerplate.go.txt"
+BOILERPLATE="${REPO_ROOT}/hack/boilerplate.go.txt_"
 YEAR="${YEAR:-$(date +%Y)}"
 
 MODE="${1:-add}"

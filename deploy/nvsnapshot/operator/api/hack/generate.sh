@@ -19,7 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODULE_DIR="$(dirname "${SCRIPT_DIR}")"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 CONTROLLER_GEN="${CONTROLLER_GEN:-controller-gen}"
-BOILERPLATE="${REPO_ROOT}/hack/boilerplate.generatego.txt"
+BOILERPLATE="${REPO_ROOT}/hack/boilerplate.generatego.txt_"
 
 if ! command -v "${CONTROLLER_GEN}" >/dev/null 2>&1 && [[ ! -x "${CONTROLLER_GEN}" ]]; then
   echo >&2 "controller-gen not found at: ${CONTROLLER_GEN}"
