@@ -2669,63 +2669,39 @@ func TestAllocateOldWorkerDCDReplicas(t *testing.T) {
 		want      map[string]int32
 	}{
 		{
-			name:      "preserves healthy old DCD before unavailable newer old DCD",
+			name:      "overlapping update keeps healthy original and drops unavailable intermediate",
 			oldTarget: 15,
 			dcds: []*nvidiacomv1beta1.DynamoComponentDeployment{
-				dcd("oldest-healthy", earlier, 15, 15),
-				dcd("newer-unavailable", now, 10, 0),
+				dcd("test-dgd-worker-hashaaaa", earlier, 15, 15),
+				dcd("test-dgd-worker-hashbbbb", now, 10, 0),
 			},
 			want: map[string]int32{
-				"oldest-healthy":    15,
-				"newer-unavailable": 0,
+				"test-dgd-worker-hashaaaa": 15,
+				"test-dgd-worker-hashbbbb": 0,
 			},
 		},
 		{
-			name:      "removes serving surplus oldest first",
-			oldTarget: 2,
+			name:      "available surplus removes replicas from oldest generation first",
+			oldTarget: 3,
 			dcds: []*nvidiacomv1beta1.DynamoComponentDeployment{
-				dcd("oldest-healthy", earlier, 3, 3),
-				dcd("newer-healthy", now, 2, 2),
+				dcd("test-dgd-worker-hashaaaa", earlier, 3, 3),
+				dcd("test-dgd-worker-hashbbbb", now, 1, 1),
 			},
 			want: map[string]int32{
-				"oldest-healthy": 0,
-				"newer-healthy":  2,
+				"test-dgd-worker-hashaaaa": 2,
+				"test-dgd-worker-hashbbbb": 1,
 			},
 		},
 		{
-			name:      "adds unavailable capacity newest first when serving replicas are below target",
+			name:      "degraded original fills remaining target from newest old generation",
 			oldTarget: 15,
 			dcds: []*nvidiacomv1beta1.DynamoComponentDeployment{
-				dcd("oldest-partially-available", earlier, 15, 12),
-				dcd("newer-unavailable", now, 10, 0),
+				dcd("test-dgd-worker-hashaaaa", earlier, 15, 12),
+				dcd("test-dgd-worker-hashbbbb", now, 10, 0),
 			},
 			want: map[string]int32{
-				"oldest-partially-available": 12,
-				"newer-unavailable":          3,
-			},
-		},
-		{
-			name:      "keeps serving targets when already at old target",
-			oldTarget: 2,
-			dcds: []*nvidiacomv1beta1.DynamoComponentDeployment{
-				dcd("oldest-healthy", earlier, 2, 2),
-				dcd("newer-unavailable", now, 2, 0),
-			},
-			want: map[string]int32{
-				"oldest-healthy":    2,
-				"newer-unavailable": 0,
-			},
-		},
-		{
-			name:      "caps targets at total old DCD spec",
-			oldTarget: 5,
-			dcds: []*nvidiacomv1beta1.DynamoComponentDeployment{
-				dcd("oldest-healthy", earlier, 1, 1),
-				dcd("newer-unavailable", now, 1, 0),
-			},
-			want: map[string]int32{
-				"oldest-healthy":    1,
-				"newer-unavailable": 1,
+				"test-dgd-worker-hashaaaa": 12,
+				"test-dgd-worker-hashbbbb": 3,
 			},
 		},
 	}
