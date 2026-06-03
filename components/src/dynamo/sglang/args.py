@@ -247,8 +247,11 @@ async def parse_args(args: list[str]) -> Config:
         and not _has_cli_flag(unknown, "--shared-hicache-bootstrap-port")
     ):
         args_dict = vars(parsed_args)
+        tp_size = getattr(
+            parsed_args, "tensor_parallel_size", getattr(parsed_args, "tp_size", 1)
+        )
         args_dict["shared_hicache_bootstrap_port"] = (
-            _derive_shared_hicache_bootstrap_port(getattr(parsed_args, "tp_size", 1))
+            _derive_shared_hicache_bootstrap_port(tp_size)
             or _reserve_disaggregation_bootstrap_port()
         )
         parsed_args = Namespace(**args_dict)
