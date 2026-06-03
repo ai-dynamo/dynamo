@@ -52,6 +52,9 @@ navigation:
     path: digest/index.mdx
     slug: digest
     contents:
+      - page: "NVIDIA Dynamo Snapshot: Fast Startup for Inference Workloads on Kubernetes"
+        path: digest/snapshot/dynamo-snapshot-fast-startup.md
+        slug: dynamo-snapshot-fast-startup
       - page: "DynoSim: Simulating the Pareto Frontier"
         path: digest/dynosim/dynosim-pareto-frontier.md
         slug: dynosim-pareto-frontier
