@@ -119,6 +119,15 @@ class StandaloneRouterHandler:
         async for worker_output in await self.kv_router.generate_from_request(
             preprocessed_request  # type: ignore[arg-type]
         ):
+            # The kv_router stream can yield None when an in-flight request is
+            # aborted mid-generation — e.g. an MX weight refit calls
+            # pause_generation()/abort on the worker. Without this guard the
+            # worker_output.get(...) calls below raise
+            # "'NoneType' object has no attribute 'get'", which the Rust runtime
+            # surfaces to callers as BackendUnknown (a hard 500). Skip the None
+            # chunk so the stream ends gracefully and the caller can retry.
+            if worker_output is None:
+                continue
             # Wrap worker output into LLMEngineOutput format
             # Worker should return dict with at minimum kv_transfer_params in extra_args
             llm_engine_output = {
