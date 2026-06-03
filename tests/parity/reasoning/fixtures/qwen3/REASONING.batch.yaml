@@ -164,3 +164,20 @@ cases:
         reasoning_text: first
         normal_text: ' middle <think>second</think> done'
         reason: Dynamo extracts every complete reasoning span and concatenates them; SGLang exits reasoning at the first end marker and leaves the later span, with its literal markers, in normal_text.
+  REASONING.batch.6.b:
+    description: Stray end marker after a complete reasoning span(unbalanced-tag)
+    ref: dynamo
+    spec_ref: tests/parity/README.md
+    model_text: '<think>preamble</think>body</think>answer'
+    dynamo_leak: true
+    expected:
+      dynamo:
+        reasoning_text: preamble
+        normal_text: 'body</think>answer'
+        reason: "Dynamo's BasicReasoningParser splits at the first close marker and leaves the stray second close marker as a literal in normal_text (see lib/parsers/src/reasoning/base_parser.rs first-close-wins logic). Repro: F6 case#2 on Nemotron-3-Ultra."
+      vllm:
+        reasoning_text: 'preamble'
+        normal_text: 'body</think>answer'
+      sglang:
+        reasoning_text: 'preamble'
+        normal_text: 'body</think>answer'

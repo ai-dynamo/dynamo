@@ -101,3 +101,22 @@ cases:
       vllm:
         unavailable: vLLM has no Kimi reasoning parser for this delimiter family.
       sglang: *d_s4
+  REASONING.stream.2.c:
+    description: Stray end marker after a complete reasoning span, across chunks(unbalanced-tag)
+    ref: dynamo
+    spec_ref: tests/parity/README.md
+    chunks:
+    - '◁think▷preamble◁/think▷'
+    - 'body◁/think▷'
+    - 'answer'
+    dynamo_leak: true
+    expected:
+      dynamo:
+        reasoning_text: preamble
+        normal_text: 'body◁/think▷answer'
+        reason: 'Same first-close-wins defect as batch mode: chunks after the first close are forwarded as normal_text with the stray second close marker intact. Repro: F6 case#2.'
+      vllm:
+        unavailable: "UNAVAILABLE: vLLM has no reasoning parser for family='kimi'"
+      sglang:
+        reasoning_text: 'preamble'
+        normal_text: 'body◁/think▷answer'

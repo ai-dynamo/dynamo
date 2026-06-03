@@ -164,3 +164,20 @@ cases:
         reasoning_text: choose tool
         normal_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
       sglang: *id004
+  REASONING.batch.6.b:
+    description: Stray end marker after a complete reasoning span(unbalanced-tag)
+    ref: dynamo
+    spec_ref: tests/parity/README.md
+    model_text: '<think>preamble</think>body</think>answer'
+    dynamo_leak: true
+    expected:
+      dynamo:
+        reasoning_text: preamble
+        normal_text: 'body</think>answer'
+        reason: "Dynamo's BasicReasoningParser splits at the first close marker and leaves the stray second close marker as a literal in normal_text (see lib/parsers/src/reasoning/base_parser.rs first-close-wins logic). Repro: F6 case#2 on Nemotron-3-Ultra."
+      vllm:
+        reasoning_text: 'preamble'
+        normal_text: 'body</think>answer'
+      sglang:
+        reasoning_text: 'preamble'
+        normal_text: 'body</think>answer'

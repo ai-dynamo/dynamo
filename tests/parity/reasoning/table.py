@@ -72,7 +72,7 @@ CASE_GROUPS = [
         ("stream.1.a", "stream.1.b"),
     ),
     ("Reasoning extraction", ("stream.2.a",)),
-    ("Multi-span", ("stream.2.b",)),
+    ("Multi-span", ("stream.2.b", "stream.2.c")),
     ("Chunk boundaries", ("stream.3.a", "stream.3.b", "stream.3.c")),
 ]
 _CASE_GROUP_BY_CASE = {
