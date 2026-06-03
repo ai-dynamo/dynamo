@@ -269,14 +269,16 @@ func (r RollingUpdateContext) InProgress() bool {
 type RollingUpdateContext struct {
 	// NewWorkerHash is the short hash (8 chars) for the new worker spec, used for DCD naming
 	NewWorkerHash string
-	// OldWorkerComponentReplicas maps component name to the aggregate old-worker replica target.
-	// It preserves the component-level rollout decision used for rollout state and status aggregation.
+
+	// Aggregate desired replica targets for old worker generations, keyed by logical component name.
+	// Example: worker -> 3 means all old DCDs for component "worker" should sum to 3 replicas.
 	OldWorkerComponentReplicas map[string]int32
-	// OldWorkerDCDReplicas maps old worker DCD name to the concrete replica target.
-	// It is derived from OldWorkerComponentReplicas after accounting for availability across old generations,
-	// and is used by the controller to patch each old worker DCD without recomputing allocation.
+
+	// Concrete desired replica targets for each old worker DCD, keyed by DCD object name.
+	// Example: dgd-worker-a -> 3, dgd-worker-b -> 0.
 	OldWorkerDCDReplicas map[string]int32
-	// NewWorkerReplicas maps service name to the desired replica count for new workers.
+
+	// Desired replica targets for the new worker generation, keyed by logical component name.
 	NewWorkerReplicas map[string]int32
 }
 
