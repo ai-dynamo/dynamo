@@ -2128,6 +2128,7 @@ func GenerateGrovePodCliqueSet(
 		PublishNotReadyAddresses: true,
 	}
 	gangSet.Spec.Template.StartupType = ptr.To(grovev1alpha1.CliqueStartupTypeAnyOrder)
+	gangSet.Spec.Template.PriorityClassName = dynamoDeployment.Spec.PriorityClassName
 	if operatorConfig.Orchestrators.Grove.TerminationDelay.Duration > 0 {
 		gangSet.Spec.Template.TerminationDelay = &operatorConfig.Orchestrators.Grove.TerminationDelay
 	}

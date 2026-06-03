@@ -159,6 +159,14 @@ impl LLMMetricAnnotation {
     }
 }
 
+/// Take a standalone router's timing out of `routing_data` (see
+/// `inject_timing_from_tracker`). Removing it keeps the field off the client wire.
+fn take_router_timing(
+    data: &mut Option<BackendOutput>,
+) -> Option<crate::protocols::common::timing::TimingInfo> {
+    data.as_mut()?.routing_data.take()?.timing
+}
+
 // Reasoning State for reasoning parsing transformation step
 struct ReasoningState {
     stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
@@ -2008,7 +2016,15 @@ impl OpenAIPreprocessor {
                     return None;
                 }
 
-                if let Some(response) = inner.response_stream.next().await {
+                if let Some(mut response) = inner.response_stream.next().await {
+                    // Split topology: overlay a standalone router's forwarded timing onto
+                    // this request's tracker so the frontend's timing surfaces populate.
+                    if let Some(timing) = take_router_timing(&mut response.data)
+                        && let Some(tracker) = inner.response_generator.tracker()
+                    {
+                        tracker.set_external_timing(timing);
+                    }
+
                     if inner.cancelled {
                         tracing::debug!(
                             request_id = inner.context.id(),
