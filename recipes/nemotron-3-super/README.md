@@ -11,25 +11,20 @@ We ship Dynamo + vLLM deployment profiles across two GPU SKUs and two serving mo
 
 ## Configurations
 
-|                              | B200 chat | B200 agentic | H200 chat | H200 agentic |
-|------------------------------|-----------|--------------|-----------|--------------|
-| **GPU**                      | 4× B200 (per worker), 2 replicas | 4× B200 (per worker), 2 replicas | 4× H200 (per worker), 2 replicas | 4× H200 (per worker), 2 replicas |
-| **Mode**                     | aggregated | aggregated | aggregated | aggregated |
-| **Framework**                | vLLM 0.21 | vLLM 0.21 | vLLM 0.21 | vLLM 0.21 |
-| **HF checkpoint**            | `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` | NVFP4 (same) | `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8` | FP8 (same) |
-| **Precision**                | NVFP4 weights + FP8 KV (`fp8_e4m3`) | NVFP4 weights + FP8 KV | FP8 weights + FP8 KV | FP8 weights + FP8 KV |
-| **Mamba SSM cache dtype**    | `float16` | `float16` | `float16` | `float16` |
-| **Parallelism**              | TP=4, Expert Parallel | TP=4, Expert Parallel | TP=4, Expert Parallel | TP=4, Expert Parallel |
-| **MoE GEMM backend**         | FlashInfer TRT-LLM (`--moe-backend flashinfer_trtllm`) + FlashInfer autotune | same | vLLM default (Hopper) + FlashInfer autotune | same |
-| **All-to-All backend**       | DeepEP high-throughput | DeepEP low-latency | FlashInfer NVLink one-sided | DeepEP high-throughput |
-| **AllReduce backend**        | FlashInfer pinned to TRTLLM (`VLLM_FLASHINFER_ALLREDUCE_BACKEND=trtllm`); NCCL default (NVLS / symm-mem are disabled on the MTP path) | same | NCCL default (Hopper) | NCCL default |
-| **Compilation**              | stripped (`max_cudagraph_capture_size=512` only — MTP path; fused passes available as `compilation-config-fused` for the MTP-OFF path) | same | `use_inductor_graph_partition=true`; `fuse_allreduce_rms` + `fuse_attn_quant`; `max_cudagraph_capture_size=512` | same |
-| **Prefix caching**           | `--enable-prefix-caching` + chunked prefill | same | same | same |
-| **Routing**                  | KV-aware (`DYN_ROUTER_MODE=kv`) | same | same | same |
-| **Speculative decoding**     | MTP (DL=3, `moe_backend=triton`) | MTP (DL=3, `moe_backend=triton`) | MTP (DL=3) | MTP (DL=3) |
-| **KV cache offloading**      | none | none | none | none |
-| **Max model length**         | 131072 (128k) | 131072 (128k) | 131072 (128k) | 131072 (128k) |
-| **Max batched tokens**       | 65536 (MTP-ON default; bump to 131072 with MTP off) | 65536 (MTP-ON default; bump to 131072 with MTP off) | 16384 | 16384 |
+|                          | B200 chat                    | H200 chat                     | B200 agentic                 | H200 agentic                 |
+|--------------------------|------------------------------|-------------------------------|------------------------------|------------------------------|
+| **GPU** (per worker)     | 4× B200                      | 4× H200                       | 4× B200                      | 4× H200                      |
+| **Mode**                 | aggregated                   | aggregated                    | aggregated                   | aggregated                   |
+| **Framework**            | vLLM 0.21.0                  | vLLM 0.21.0                   | vLLM 0.21.0                  | vLLM 0.21.0                  |
+| **Precision**            | NVFP4 + FP8 KV               | FP8 + FP8 KV                  | NVFP4 + FP8 KV               | FP8 + FP8 KV                 |
+| **Parallelism**          | TP4 + EP                     | TP4 + EP                      | TP4 + EP                     | TP4 + EP                     |
+| **MoE backend**          | FLASHINFER_TRTLLM            | FLASHINFER_CUTLASS            | FLASHINFER_TRTLLM            | FLASHINFER_CUTLASS           |
+| **Attention backend**    | FLASH_ATTN                   | FLASH_ATTN                    | FLASH_ATTN                   | FLASH_ATTN                   |
+| **AllReduce backend**    | FlashInfer TRTLLM            | FlashInfer TRTLLM             | FlashInfer TRTLLM            | FlashInfer TRTLLM            |
+| **All2All backend**      | DeepEP high-throughput       | FlashInfer NVLink one-sided   | DeepEP low-latency           | DeepEP high-throughput       |
+| **Routing**              | KV-aware                     | KV-aware                      | KV-aware                     | KV-aware                     |
+| **Speculative decoding** | MTP (DL=3)                   | MTP (DL=3)                    | MTP (DL=3)                   | MTP (DL=3)                   |
+| **KV cache offloading**  | none                         | none                          | none                         | none                         |
 
 ## Supported features
 
