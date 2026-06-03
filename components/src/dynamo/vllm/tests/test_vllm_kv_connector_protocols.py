@@ -224,6 +224,76 @@ def test_make_kv_connector_protocol_dispatches_mooncake(fake_mooncake):
     assert isinstance(proto, MooncakeConnectorProtocol)
 
 
+def test_make_kv_connector_protocol_dispatches_multiconnector_to_nixl():
+    """MultiConnector delegates PD coordination to its single PD-capable child."""
+    proto = make_kv_connector_protocol(
+        _config(
+            "MultiConnector",
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "NixlConnector"},
+                    {
+                        "kv_connector": "MooncakeStoreConnector",
+                        "kv_connector_extra_config": {"load_async": True},
+                    },
+                ]
+            },
+        )
+    )
+    assert isinstance(proto, NixlConnectorProtocol)
+
+
+def test_make_kv_connector_protocol_dispatches_multiconnector_to_mooncake(
+    fake_mooncake,
+):
+    """Non-PD sub-connectors are ignored when selecting the PD protocol."""
+    proto = make_kv_connector_protocol(
+        _config(
+            "MultiConnector",
+            kv_connector_extra_config={
+                "connectors": [
+                    {
+                        "kv_connector": "MooncakeStoreConnector",
+                        "kv_connector_extra_config": {"load_async": True},
+                    },
+                    {"kv_connector": "MooncakeConnector"},
+                ]
+            },
+        )
+    )
+    assert isinstance(proto, MooncakeConnectorProtocol)
+
+
+def test_make_kv_connector_protocol_raises_when_multiconnector_has_no_pd_child():
+    with pytest.raises(ValueError, match="no PD-capable sub-connector") as exc:
+        make_kv_connector_protocol(
+            _config(
+                "MultiConnector",
+                kv_connector_extra_config={
+                    "connectors": [{"kv_connector": "MooncakeStoreConnector"}]
+                },
+            )
+        )
+    assert "MooncakeStoreConnector" in str(exc.value)
+
+
+def test_make_kv_connector_protocol_raises_when_multiconnector_is_ambiguous():
+    with pytest.raises(ValueError, match="multiple PD-capable sub-connectors") as exc:
+        make_kv_connector_protocol(
+            _config(
+                "MultiConnector",
+                kv_connector_extra_config={
+                    "connectors": [
+                        {"kv_connector": "NixlConnector"},
+                        {"kv_connector": "MooncakeConnector"},
+                    ]
+                },
+            )
+        )
+    assert "NixlConnector" in str(exc.value)
+    assert "MooncakeConnector" in str(exc.value)
+
+
 def test_make_kv_connector_protocol_falls_back_to_nixl_for_missing_config():
     """No KVTransferConfig at all — preserve pre-existing (NIXL) behavior."""
     proto = make_kv_connector_protocol(SimpleNamespace())

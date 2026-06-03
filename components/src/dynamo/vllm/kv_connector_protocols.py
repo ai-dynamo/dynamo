@@ -120,11 +120,20 @@ def make_kv_connector_protocol(vllm_config: Any) -> KvConnectorProtocol:
     protocol — a mismatch between dynamo and the vLLM engine is a
     misconfiguration, not a benign default; silently falling back to NIXL
     would emit the wrong wire shape and surface as opaque decode failures.
+
+    ``MultiConnector`` is special-cased: vLLM enforces that exactly one
+    sub-connector produces ``kv_transfer_params`` (see
+    ``MultiConnector.request_finished`` — "Only one connector can produce KV
+    transfer params"), so we pick the single PD-capable sub-connector and
+    delegate to its protocol. Non-PD sub-connectors (e.g. MooncakeStore in
+    ``load_async`` mode) ride along as save-only side effects inside vLLM.
     """
     kv_cfg = getattr(vllm_config, "kv_transfer_config", None)
     name = getattr(kv_cfg, "kv_connector", None) if kv_cfg is not None else None
     if name is None:
         return NixlConnectorProtocol(vllm_config)
+    if name == "MultiConnector":
+        return _resolve_multi_connector_protocol(vllm_config, kv_cfg)
     cls = KV_CONNECTOR_PROTOCOLS.get(name)
     if cls is None:
         raise ValueError(
@@ -134,3 +143,25 @@ def make_kv_connector_protocol(vllm_config: Any) -> KvConnectorProtocol:
             f"is a new connector, add it to KV_CONNECTOR_PROTOCOLS."
         )
     return cls(vllm_config)
+
+
+def _resolve_multi_connector_protocol(
+    vllm_config: Any, kv_cfg: Any
+) -> KvConnectorProtocol:
+    extra = getattr(kv_cfg, "kv_connector_extra_config", None) or {}
+    sub_configs = extra.get("connectors") or []
+    sub_names = [s.get("kv_connector") for s in sub_configs]
+    matches = [n for n in sub_names if n in KV_CONNECTOR_PROTOCOLS]
+    if not matches:
+        raise ValueError(
+            f"MultiConnector has no PD-capable sub-connector. Sub-connectors: "
+            f"{sub_names}. Supported PD connectors: "
+            f"{sorted(KV_CONNECTOR_PROTOCOLS)}."
+        )
+    if len(matches) > 1:
+        raise ValueError(
+            f"MultiConnector has multiple PD-capable sub-connectors ({matches}); "
+            f"vLLM forbids more than one connector from producing "
+            f"kv_transfer_params, so dynamo cannot pick one unambiguously."
+        )
+    return KV_CONNECTOR_PROTOCOLS[matches[0]](vllm_config)
