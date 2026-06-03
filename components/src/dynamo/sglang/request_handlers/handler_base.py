@@ -1039,7 +1039,13 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         }
 
     def _session_kwargs(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        if not getattr(self.config.server_args, "enable_streaming_session", False):
+        # Both session modes need the session id on each generate: streaming
+        # sessions for slot routing, session-radix-cache for KV tagging.
+        sa = self.config.server_args
+        if not (
+            getattr(sa, "enable_streaming_session", False)
+            or getattr(sa, "enable_session_radix_cache", False)
+        ):
             return {}
         routing = request.get("routing") or {}
         session_control = routing.get("session_control") or {}
@@ -1047,7 +1053,7 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         if not session_id:
             return {}
 
-        # Streaming sessions only need the session identifier on each turn.
+        # Sessions only need the session identifier on each turn.
         return {"session_params": {"id": session_id}}
 
     @staticmethod
