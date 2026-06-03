@@ -363,7 +363,8 @@ impl ReasoningParser for BasicReasoningParser {
                         self.stripped_think_start = true;
                         continue;
                     }
-                    (Some(s), _) => {
+                    (Some(s), None) => {
+                        // Only <think> remains; enter reasoning.
                         accumulated_normal.push_str(&current_text[..s]);
                         let after_start = s + self.think_start_token.len();
                         self._buffer = current_text[after_start..].to_string();
@@ -371,8 +372,12 @@ impl ReasoningParser for BasicReasoningParser {
                         self.stripped_think_start = true;
                         continue;
                     }
-                    (None, Some(e)) => {
-                        // Stray </think> with no opening tag — drop the marker, stay in normal.
+                    (_, Some(e)) => {
+                        // Stray </think> arrives before the next <think> (or with no
+                        // opener remaining). Drop the marker, keep the text on either
+                        // side, stay in normal mode. Mirrors the batch path so a
+                        // pattern like `<o>A</c>B</c>C<o>D</c>E` does not leak the
+                        // middle stray close even when a later opener is in buffer.
                         accumulated_normal.push_str(&current_text[..e]);
                         let after_end = e + self.think_end_token.len();
                         self._buffer = current_text[after_end..].to_string();
@@ -682,6 +687,26 @@ mod tests {
         let result = parser.detect_and_parse_reasoning("no think tags here", &[]);
         assert_eq!(result.normal_text, "");
         assert_eq!(result.reasoning_text, "no think tags here");
+    }
+
+    #[test] // REASONING.batch.6.b — streaming parity for stray close after complete pair
+    fn test_streaming_stray_close_between_two_reasoning_spans() {
+        // Pattern: <open>A</close>B</close>C<open>D</close>E — the middle </close>
+        // has no matching open and must be stripped, even though a later <open>
+        // exists in the buffer. Previously the streaming path entered the next
+        // reasoning block first and leaked the middle stray close into
+        // normal_text. The batch path was already correct.
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+        let input = "<think>checking the weather</think>It is sunny.</think> Have a nice day.<think>double-checking</think> Confirmed.";
+        let r = parser.parse_reasoning_streaming_incremental(input, &[]);
+        assert!(
+            !r.normal_text.contains("</think>"),
+            "stray </think> must not leak into normal_text; got {:?}",
+            r.normal_text
+        );
+        assert_eq!(r.normal_text, "It is sunny. Have a nice day. Confirmed.");
+        assert_eq!(r.reasoning_text, "checking the weatherdouble-checking");
     }
 
     #[test] // REASONING.stream.2.b, REASONING.batch.2.c, REASONING.stream.1.b
