@@ -204,8 +204,6 @@ cases:
       dynamo:
         unavailable: 'Pattern not applicable: gpt_oss does not use paired open/close markers, so the 1-open + 2-close unbalanced-tag shape has no direct analog.'
       vllm:
-        reasoning_text: ''
-        normal_text: ''
+        unavailable: 'Pattern not applicable: gpt_oss does not use paired open/close markers, so the 1-open + 2-close unbalanced-tag shape has no direct analog.'
       sglang:
-        reasoning_text: ''
-        normal_text: ''
+        unavailable: 'Pattern not applicable: gpt_oss does not use paired open/close markers, so the 1-open + 2-close unbalanced-tag shape has no direct analog.'
