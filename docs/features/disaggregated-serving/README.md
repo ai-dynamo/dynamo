@@ -78,6 +78,179 @@ Symptoms usually look like high TTFT despite available prefill capacity, decode
 workers sitting idle while prefill workers are busy, or disaggregated throughput
 falling below an aggregated baseline after splitting workers across nodes.
 
+> [!IMPORTANT]
+> Production cross-node disaggregated deployments usually require RDMA or an
+> equivalent fast fabric for KV cache transfer. Without it, the backend may fall
+> back to TCP and KV transfer can dominate TTFT and throughput. Validate the
+> transfer path before spending time tuning replica counts.
+
+### Deploying Disaggregated with RDMA
+
+Disaggregated deployments transfer KV cache between prefill and decode workers.
+Without RDMA or another fast transfer path, this movement can become the main
+performance bottleneck.
+
+Prerequisites for a production cross-node deployment:
+
+1. **RDMA-capable network** such as InfiniBand, RoCE, or an equivalent fast
+   fabric.
+2. **RDMA device plugin** installed on the cluster so worker pods can request
+   `rdma/ib` resources.
+3. **ETCD and NATS** deployed for Dynamo coordination.
+
+The following example shows the RDMA-relevant fields in a disaggregated vLLM
+`DynamoGraphDeployment`. Start from a validated recipe when one exists, then
+adapt the resource requests, model, image, and parallelism for your cluster.
+
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: dynamo-disagg
+  namespace: your-namespace
+spec:
+  backendFramework: vllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      envs:
+        - name: HF_HOME
+          value: /opt/models
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          imagePullPolicy: IfNotPresent
+
+    VLLMPrefillWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 2
+      resources:
+        limits:
+          gpu: "2"
+      sharedMemory:
+        size: 16Gi
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      envs:
+        - name: HF_HOME
+          value: /opt/models
+        - name: UCX_TLS
+          value: "rc_x,rc,dc_x,dc,cuda_copy,cuda_ipc"
+        - name: UCX_RNDV_SCHEME
+          value: "get_zcopy"
+        - name: UCX_RNDV_THRESH
+          value: "0"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          workingDir: /workspace
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            capabilities:
+              add: ["IPC_LOCK"]
+          resources:
+            limits:
+              rdma/ib: "2"
+            requests:
+              rdma/ib: "2"
+          command: ["python3", "-m", "dynamo.vllm"]
+          args:
+            - --model
+            - "Qwen/Qwen3-32B-FP8"
+            - "--tensor-parallel-size"
+            - "2"
+            - "--kv-cache-dtype"
+            - "fp8"
+            - "--max-num-seqs"
+            - "1"
+            - --disaggregation-mode
+            - prefill
+
+    VLLMDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+      sharedMemory:
+        size: 16Gi
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      envs:
+        - name: HF_HOME
+          value: /opt/models
+        - name: UCX_TLS
+          value: "rc_x,rc,dc_x,dc,cuda_copy,cuda_ipc"
+        - name: UCX_RNDV_SCHEME
+          value: "get_zcopy"
+        - name: UCX_RNDV_THRESH
+          value: "0"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          workingDir: /workspace
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            capabilities:
+              add: ["IPC_LOCK"]
+          resources:
+            limits:
+              rdma/ib: "4"
+            requests:
+              rdma/ib: "4"
+          command: ["python3", "-m", "dynamo.vllm"]
+          args:
+            - --model
+            - "Qwen/Qwen3-32B-FP8"
+            - "--tensor-parallel-size"
+            - "4"
+            - "--kv-cache-dtype"
+            - "fp8"
+            - "--max-num-seqs"
+            - "1024"
+            - --disaggregation-mode
+            - decode
+```
+
+Critical RDMA settings:
+
+| Setting | Purpose |
+|---|---|
+| `rdma/ib: "N"` | Requests RDMA resources for the worker pod. In most disaggregated vLLM deployments, match this to the worker TP size. |
+| `IPC_LOCK` capability | Allows RDMA memory registration and pinned-memory use. |
+| `UCX_TLS` | Enables RDMA-capable UCX transports such as `rc_x` and `dc_x`, plus CUDA transports for GPU buffers. |
+| `UCX_RNDV_SCHEME=get_zcopy` | Enables zero-copy RDMA transfers for large KV-cache movement. |
+
+After deployment, check the worker logs for UCX/NIXL initialization:
+
+```bash
+kubectl logs <prefill-worker-pod> | grep -i "UCX\|NIXL"
+```
+
+Expected output includes:
+
+```text
+NIXL INFO Backend UCX was instantiated
+```
+
+If logs only show TCP transports, RDMA is not active. Check the RDMA device
+plugin, worker `rdma/ib` resource requests, security context, and UCX settings.
+For full transport setup and troubleshooting, see the
+[Disaggregated Communication Guide](../../kubernetes/disagg-communication-guide.md).
+
 ## Deployment Paths
 
 Choose the path that matches how much control you need:
