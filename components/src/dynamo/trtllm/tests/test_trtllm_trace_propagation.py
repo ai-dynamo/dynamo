@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -60,6 +61,11 @@ def _make_engine(generate_async) -> TrtllmLLMEngine:
     engine.max_seq_len = 1024
     engine._active_requests = {}
     engine._additional_metrics = None
+    engine._inflight_lock = asyncio.Lock()
+    engine._inflight_requests = 0
+    engine._no_inflight_requests = asyncio.Event()
+    engine._no_inflight_requests.set()
+    engine._reject_new_requests = False
     # Single-rank default: validate_global_dp_rank(None, 0, 1, ...) -> None,
     # so scheduling_params stays None and never touches a real SchedulingParams.
     engine._attention_dp_size = 1

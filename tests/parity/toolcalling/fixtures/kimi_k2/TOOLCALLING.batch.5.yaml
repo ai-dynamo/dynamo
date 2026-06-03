@@ -123,3 +123,21 @@ cases:
             location: Boston
         normal_text: <|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
         reason: SGLang parses the bare Kimi call as a structured call and also preserves the orphan section as normal_text; Dynamo recovers both calls and strips the orphan section markers.
+  TOOLCALLING.batch.5.g:
+    description: Closing section_end without matching section_begin after prefix prose
+    ref: dynamo
+    model_text: 'I will check that. <|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>'
+    tools:
+    - *id002
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: I will check that.
+      vllm: &id007
+        reason: "vLLM and SGLang preserve orphan Kimi tool-call markers as content when opening <|tool_calls_section_begin|> is missing; Dynamo preserves the prefix prose, recovers the complete bare <|tool_call_begin|> body, and strips the orphan section close marker."
+        calls: []
+        normal_text: 'I will check that. <|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>'
+      sglang: *id007

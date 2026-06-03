@@ -399,6 +399,8 @@ struct MockEngineArgsSerde {
     aic_moe_tp_size: OptionalConfigValue<usize>,
     aic_moe_ep_size: OptionalConfigValue<usize>,
     aic_attention_dp_size: OptionalConfigValue<usize>,
+    aic_nextn: OptionalConfigValue<usize>,
+    aic_nextn_accept_rates: OptionalConfigValue<String>,
     gpu_memory_utilization: OptionalConfigValue<f64>,
     mem_fraction_static: OptionalConfigValue<f64>,
     enable_local_indexer: OptionalConfigValue<bool>,
@@ -587,6 +589,21 @@ pub struct MockEngineArgs {
     #[serde(skip)]
     #[builder(default = "None")]
     pub aic_attention_dp_size: Option<usize>,
+
+    /// MTP/Eagle speculative-decoding draft-token count (1..=5). When set,
+    /// AIC's perf model applies the spec-dec speedup to decode latency.
+    /// Validated here so the mocker/replay JSON path shares the same 1..=5
+    /// contract as `AicPerfConfig` (omit to disable spec dec).
+    #[serde(skip)]
+    #[builder(default = "None")]
+    #[validate(range(min = 1, max = 5))]
+    pub aic_nextn: Option<usize>,
+
+    /// Per-position accept rates for MTP draft tokens, comma-separated
+    /// (e.g. "0.85,0.3,0,0,0"). Padded to length 5 by the Python layer.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub aic_nextn_accept_rates: Option<String>,
 
     /// GPU memory fraction for AIC KV capacity estimation with vLLM.
     #[builder(default = "None")]
@@ -883,6 +900,12 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         }
         if let Some(aic_attention_dp_size) = compat.aic_attention_dp_size.into_nullable() {
             builder = builder.aic_attention_dp_size(aic_attention_dp_size);
+        }
+        if let Some(aic_nextn) = compat.aic_nextn.into_nullable() {
+            builder = builder.aic_nextn(aic_nextn);
+        }
+        if let Some(aic_nextn_accept_rates) = compat.aic_nextn_accept_rates.into_nullable() {
+            builder = builder.aic_nextn_accept_rates(aic_nextn_accept_rates);
         }
         if let Some(gpu_memory_utilization) = compat.gpu_memory_utilization.into_nullable() {
             builder = builder.gpu_memory_utilization(gpu_memory_utilization);
@@ -1261,6 +1284,29 @@ mod tests {
             missing_g2.to_string().contains("requires num_g2_blocks"),
             "unexpected error: {missing_g2}",
         );
+    }
+
+    #[test]
+    fn test_normalized_rejects_out_of_range_aic_nextn() {
+        // The mocker/replay JSON path must share AicPerfConfig's 1..=5 contract.
+        for bad in [0_usize, 6] {
+            let err = MockEngineArgs::builder()
+                .aic_nextn(Some(bad))
+                .build()
+                .unwrap()
+                .normalized()
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("aic_nextn"),
+                "unexpected error for nextn={bad}: {err}",
+            );
+        }
+        MockEngineArgs::builder()
+            .aic_nextn(Some(3))
+            .build()
+            .unwrap()
+            .normalized()
+            .expect("in-range aic_nextn should validate");
     }
 
     #[test]
