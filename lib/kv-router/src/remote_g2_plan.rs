@@ -21,8 +21,8 @@ pub struct RemoteKvReusePlan {
     pub source_host: String,
     pub source_bootstrap_port: u16,
     pub source_tier: StorageTier,
-    pub block_hashes: Vec<LocalBlockHash>,
-    /// Position in the request's prefix where `block_hashes[0]` lives.
+    pub router_block_hashes: Vec<LocalBlockHash>,
+    /// Position in the request's prefix where `router_block_hashes[0]` lives.
     /// Equals the source worker's device-tier match count at plan time.
     /// The target's connector uses this to verify alignment with its own
     /// `num_computed_tokens` before attaching descriptors.
@@ -32,15 +32,10 @@ pub struct RemoteKvReusePlan {
     pub created_at_ms: u64,
     pub expires_at_ms: u64,
     pub plan_version: u32,
-    /// Parallel to `block_hashes`, carrying each block's source-side
-    /// KV-cache-manager hash (TRT-LLM splitmix). The TRT-LLM source side
-    /// uses these values to look up blocks via `find_block_by_hash`;
-    /// `block_hashes` (XXH3 tokens hash) remains the plan's identity.
-    /// Empty when the producer has not been updated to populate the new
-    /// field — TRT-LLM's source falls back to using `block_hashes` for
-    /// the lookup (legacy behavior).
-    #[serde(default)]
-    pub kv_block_hashes: Vec<u64>,
+    /// Parallel to `router_block_hashes`, carrying each block's framework
+    /// KV-event hash. The source framework uses these values to look up actual
+    /// HostPinned blocks; `router_block_hashes` remains the plan identity.
+    pub engine_block_hashes: Vec<u64>,
 }
 
 // Compatibility identity is intentionally deferred in v1; source resolve remains authoritative.
@@ -227,7 +222,7 @@ pub fn select_remote_g2_reuse_plan(
             source_host: String::new(),
             source_bootstrap_port: 0,
             source_tier: StorageTier::HostPinned,
-            block_hashes: input.block_hashes[start..end].to_vec(),
+            router_block_hashes: input.block_hashes[start..end].to_vec(),
             start_block_index: start as u32,
             planned_prefix_blocks,
             block_size_tokens: input.block_size_tokens,
@@ -237,7 +232,7 @@ pub fn select_remote_g2_reuse_plan(
             // Caller fills this in post-selection by walking the indexer for
             // the chosen source. Left empty here so the planner stays a pure
             // function of `tiered_matches` and does not depend on the indexer.
-            kv_block_hashes: Vec::new(),
+            engine_block_hashes: Vec::new(),
         },
         stats,
     }
@@ -263,14 +258,14 @@ mod tests {
             source_host: "10.0.0.7".to_string(),
             source_bootstrap_port: 41000,
             source_tier: StorageTier::HostPinned,
-            block_hashes: vec![LocalBlockHash(11), LocalBlockHash(22)],
+            router_block_hashes: vec![LocalBlockHash(11), LocalBlockHash(22)],
             start_block_index: 0,
             planned_prefix_blocks: 2,
             block_size_tokens: 16,
             created_at_ms: 1000,
             expires_at_ms: 2000,
             plan_version: REMOTE_KV_REUSE_PLAN_VERSION,
-            kv_block_hashes: vec![],
+            engine_block_hashes: vec![],
         }
     }
 
@@ -324,42 +319,24 @@ mod tests {
     }
 
     #[test]
-    fn remote_kv_reuse_plan_round_trips_kv_block_hashes() {
-        // Populated kv_block_hashes must appear in the JSON and survive
+    fn remote_kv_reuse_plan_round_trips_engine_block_hashes() {
+        // Populated engine_block_hashes must appear in the JSON and survive
         // a serialize → deserialize round trip with the exact same values.
         let mut plan = test_plan();
-        plan.kv_block_hashes = vec![
+        plan.engine_block_hashes = vec![
             0xAAAA_AAAA_AAAA_AAAA,
             0xBBBB_BBBB_BBBB_BBBB,
             0xCCCC_CCCC_CCCC_CCCC,
         ];
         let json = serde_json::to_string(&plan).unwrap();
         assert!(
-            json.contains("\"kv_block_hashes\""),
-            "serialized plan missing kv_block_hashes field: {json}"
+            json.contains("\"engine_block_hashes\""),
+            "serialized plan missing engine_block_hashes field: {json}"
         );
         // Big values must serialize as integers, not stringified
         assert!(json.contains("12297829382473034410"));
         let decoded: RemoteKvReusePlan = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.kv_block_hashes, plan.kv_block_hashes);
-    }
-
-    #[test]
-    fn remote_kv_reuse_plan_accepts_legacy_payload_without_kv_block_hashes() {
-        // A producer that has not been updated to populate kv_block_hashes
-        // emits the field-less JSON; it must still deserialize, with the
-        // new field defaulting to empty.
-        let plan = test_plan();
-        let json = serde_json::to_string(&plan).unwrap();
-        // Strip the kv_block_hashes field from the JSON to simulate a
-        // legacy producer.
-        let legacy = json.replace(",\"kv_block_hashes\":[]", "");
-        assert!(
-            !legacy.contains("kv_block_hashes"),
-            "legacy payload should not contain kv_block_hashes"
-        );
-        let decoded: RemoteKvReusePlan = serde_json::from_str(&legacy).unwrap();
-        assert!(decoded.kv_block_hashes.is_empty());
+        assert_eq!(decoded.engine_block_hashes, plan.engine_block_hashes);
     }
 
     #[test]
@@ -407,7 +384,7 @@ mod tests {
                 assert_eq!(plan.source_worker_id, 8);
                 assert_eq!(plan.source_dp_rank, 0);
                 assert_eq!(plan.planned_prefix_blocks, 4);
-                assert_eq!(plan.block_hashes, hashes[..4].to_vec());
+                assert_eq!(plan.router_block_hashes, hashes[..4].to_vec());
             }
             other => panic!("expected plan, got {other:?}"),
         }
@@ -518,7 +495,7 @@ mod tests {
             RemoteKvReuseDecision::Plan { plan, .. } => {
                 assert_eq!(plan.start_block_index, 0);
                 assert_eq!(plan.planned_prefix_blocks, 3);
-                assert_eq!(plan.block_hashes, hashes[..3].to_vec());
+                assert_eq!(plan.router_block_hashes, hashes[..3].to_vec());
             }
             other => panic!("expected plan, got {other:?}"),
         }
@@ -540,7 +517,7 @@ mod tests {
             RemoteKvReuseDecision::Plan { plan, .. } => {
                 assert_eq!(plan.start_block_index, 2);
                 assert_eq!(plan.planned_prefix_blocks, 2);
-                assert_eq!(plan.block_hashes, hashes[2..4].to_vec());
+                assert_eq!(plan.router_block_hashes, hashes[2..4].to_vec());
             }
             other => panic!("expected plan, got {other:?}"),
         }

@@ -689,7 +689,7 @@ where
         };
 
         // Post-selection: extract the chosen source's host-pinned chain of
-        // TRT-LLM-side block_hashes and populate the plan. The chain may
+        // framework block hashes and populate the plan. The chain may
         // come back shorter than `planned_prefix_blocks` if eviction races
         // with our walk; in that case shrink the plan to the chain length,
         // or demote to NoPlan if the chain is empty entirely.
@@ -737,9 +737,9 @@ where
                     if chain.len() < end - start {
                         let new_len = chain.len();
                         plan.planned_prefix_blocks = new_len as u32;
-                        plan.block_hashes.truncate(new_len);
+                        plan.router_block_hashes.truncate(new_len);
                     }
-                    plan.kv_block_hashes = chain.into_iter().map(|h| h.0).collect();
+                    plan.engine_block_hashes = chain.into_iter().map(|h| h.0).collect();
                 }
             } else {
                 let stats_copy = *plan_stats;
@@ -1416,14 +1416,14 @@ mod tests {
             source_host: "10.0.0.7".to_string(),
             source_bootstrap_port: 41000,
             source_tier: StorageTier::HostPinned,
-            block_hashes: vec![LocalBlockHash(11), LocalBlockHash(22)],
+            router_block_hashes: vec![LocalBlockHash(11), LocalBlockHash(22)],
             start_block_index: 0,
             planned_prefix_blocks: 2,
             block_size_tokens: 16,
             created_at_ms: 1000,
             expires_at_ms: 2000,
             plan_version: REMOTE_KV_REUSE_PLAN_VERSION,
-            kv_block_hashes: vec![],
+            engine_block_hashes: vec![],
         }
     }
 
