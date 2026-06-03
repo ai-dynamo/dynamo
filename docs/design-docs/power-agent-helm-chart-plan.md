@@ -1,8 +1,13 @@
 # Power Agent — Helm Chart Packaging Plan
 
-**Status:** Draft v1 — design plan; no code authored yet (2026-05-19)
+**Status:** Implemented — chart shipped at `deploy/helm/charts/power-agent/`
+(`Chart.yaml` `version: 1.0.0`, `appVersion: "1.0.0"`). Landed in
+[PR #9682](https://github.com/ai-dynamo/dynamo/pull/9682) (PR 1a of the
+PR-9369 split). The container image is built from
+`components/power_agent/Dockerfile` by the `power-agent` CI job. This
+document remains the chart-shape source of truth.
 **Author:** Kai Ma
-**Date:** 2026-05-19
+**Date:** 2026-05-19 (initial); refreshed 2026-06-03 (status + build wiring)
 **Goal:** Replace the raw `deploy/power_agent/{daemonset,rbac,dev-pod}.yaml`
 manifests (shipped in [PR #9682](https://github.com/ai-dynamo/dynamo/pull/9682),
 PR 1a of the PR-9369 split) with a Helm chart at
@@ -17,6 +22,7 @@ Major CodeRabbit comments on PR9682 about parameterization and reproducibility.
 | v1 | 2026-05-19 | Initial plan. All five §6 decisions from the 2026-05-19 design session locked in: (§6.1) smaller scope — Power Agent only, planner-dev artifacts in PR9683/9687 untouched; (§6.2) Option α — fold chart into PR9682 directly; (§6.3) Option A — `dev-pod.yaml` ships as a gated template inside the same chart; (§6.4) delete the raw `deploy/power_agent/{daemonset,rbac,dev-pod}.yaml` in the same PR as the chart lands; (§6.5) this document. |
 | v1.1 | 2026-05-19 | Added §1.4 — End-to-end user flow. Pre-empts the "does this actually deliver a `helm something → ready to run` experience" question by making the post-plan three-command flow (2 × `helm install` + 1 × `kubectl apply` for the workload DGD) explicit, and by mapping every infrastructure primitive a power-aware planner needs to the chart that installs it. No decision change; doc-only refinement. |
 | v1.2 | 2026-05-19 | Incorporated review-cycle feedback (evidence-based accept/reject pass): (1) **§4.2** — removed dead `agent.reconcileIntervalSeconds` knob (verified `power_agent.py:529-552` exposes only 4 CLI flags; `RECONCILE_INTERVAL_S = 15` is a hardcoded module constant with no flag); added a maintenance-window rationale comment to `daemonset.updateStrategy.rollingUpdate.maxUnavailable: 1` explaining why the conservative safety default is kept and when to override for large fleets. (2) **§4.4** — added a third template helper `power-agent.effectiveNamespaceRestricted` that forces namespace-scoped RBAC when `dev.enabled=true` (justified by `power_agent.py:541-546` already accepting `--namespace`; dev mode pins to one node + one namespace, so cluster-wide RBAC is gratuitous). (3) **§5.3** — strengthened chart-README requirements: dev-mode `kubectl create configmap` recipe is now ordered as a *prerequisite* step (before `helm install`), not just a post-install NOTES.txt hint; added a one-line note that the chart uses the canonical NVIDIA monitoring-agent pattern (privileged + `NVIDIA_VISIBLE_DEVICES=all`, no `nvidia.com/gpu` claim — privileged container bypasses the unprivileged-visibility edge case). (4) **§6** risk register — updated row 7 (ConfigMap prerequisite escalation); added row 9 covering the dead-knob audit principle (every `values.yaml` key must have a verified template-side or CLI-side wiring). Three of four reviewer points fully accepted; one (Consideration 1 default change) partial-accepted as "preserve `maxUnavailable: 1` default, document the override for large fleets" because power-cap enforcement is safety-critical and the parameterization the reviewer asked for is already in the proposed values surface. |
+| v1.3 | 2026-06-03 | Status-line + build refresh (PR #9682 review by @sttts): (1) flipped the header **Status** from "Draft v1 — no code authored yet" to "Implemented" now that the chart, templates, and `power_agent.py` are all in the tree on this PR — the stale draft marker no longer matched reality. (2) Added a container build: `components/power_agent/Dockerfile` (single-stage `python:3.11-slim-bookworm`, NVML injected at runtime by `runtimeClassName: nvidia`, deps `pynvml` / `kubernetes` / `prometheus-client`) plus a dedicated `power-agent` CI job in `pr.yaml` + `post-merge-ci.yml`, gated on a new `power_agent` changed-files filter — answers the reviewer's "where is it built?" on `values.yaml` `image.repository`. |
 
 ---
 
