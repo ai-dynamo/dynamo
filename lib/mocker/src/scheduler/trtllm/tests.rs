@@ -234,26 +234,6 @@ fn capacity_args() -> MockEngineArgs {
         .unwrap()
 }
 
-/// Enqueue normalization rejects a prompt that leaves no decode room (prompt
-/// alone exceeds the KV pool): it never enters the scheduler, so a following
-/// valid request still runs and the queue drains (no FIFO-head stall).
-#[test]
-fn enqueue_rejects_prompt_with_no_decode_room() {
-    let mut core = VllmCore::new(capacity_args());
-    let r1 = Uuid::from_u128(1);
-    let r2 = Uuid::from_u128(2);
-    receive(&mut core, r1, 0..20, 4); // 20-token prompt > 16-token pool -> rejected
-    receive(&mut core, r2, 100..104, 4); // fits
-
-    assert!(
-        !core.state().requests.contains_key(&r1),
-        "no-decode-room r1 must be rejected at enqueue, never entering the scheduler"
-    );
-    let completed = drain(&mut core);
-    assert_eq!(completed, 1, "valid r2 still completes");
-    assert!(core.state().requests.is_empty(), "queue fully drains");
-}
-
 /// Enqueue normalization clamps an over-long output to the room left in the KV
 /// pool, so a request asking for more than fits still runs to the clamped
 /// length instead of being dropped. (Without clamping, r1's 4+40=44 tokens =
@@ -271,4 +251,78 @@ fn enqueue_clamps_excess_output_to_capacity() {
     let completed = drain(&mut core);
     assert_eq!(completed, 1, "clamped r1 runs to completion");
     assert!(core.state().requests.is_empty(), "queue fully drains");
+}
+
+/// Scheduler-level regression for the active-vs-inactive cached-prefix split:
+/// a request reusing an INACTIVE cached prefix must NOT discount it from the
+/// no-evict reservation, so it stays waiting while a holder occupies capacity
+/// and is admitted only once that capacity frees. (With the old all-cached
+/// discount it would be over-admitted into a pool that cannot hold it.)
+#[test]
+fn inactive_cached_prefix_not_discounted_keeps_request_waiting() {
+    // 8 blocks * block_size 4, prefix caching on so reuse is modeled.
+    let args = MockEngineArgs::builder()
+        .engine_type(EngineType::Trtllm)
+        .block_size(4)
+        .num_gpu_blocks(8)
+        .max_num_batched_tokens(Some(64))
+        .max_num_seqs(Some(8))
+        .enable_chunked_prefill(true)
+        .enable_prefix_caching(true)
+        .speedup_ratio(0.0)
+        .build()
+        .unwrap();
+    let mut core = VllmCore::new(args);
+    let holder = Uuid::from_u128(1);
+    let seeder = Uuid::from_u128(2);
+    let reuser = Uuid::from_u128(3);
+    // holder: full = ceil((4+12)/4) = 4 blocks, long output -> holds capacity;
+    //   while it runs, free-for-others = 8 - 4 = 4 blocks.
+    receive(&mut core, holder, 0..4, 12);
+    // seeder: a 2-block prefix (100..108), short output -> completes and leaves
+    //   that prefix INACTIVE-but-registered.
+    receive(&mut core, seeder, 100..108, 4);
+    // reuser: SAME 2-block prefix + output -> full = ceil((8+12)/4) = 5 blocks.
+    //   Discounting the inactive prefix (the bug) -> needs 5-2=3 <= 4 -> admitted;
+    //   discounting only ACTIVE reuse -> needs 5 > 4 -> must wait for the holder.
+    receive(&mut core, reuser, 100..108, 12);
+
+    let mut collector = crate::replay::TraceCollector::default();
+    let mut now_ms = 0.0;
+    let mut max_preemptions = 0u64;
+    let mut checked = false;
+    for _ in 0..400 {
+        if core.state().requests.is_empty() {
+            break;
+        }
+        // Once the seeder has completed (prefix now inactive) but the holder is
+        // still running, the reuser must remain waiting.
+        if !checked
+            && !core.state().requests.contains_key(&seeder)
+            && core.state().requests.contains_key(&holder)
+        {
+            assert!(
+                !core.state().running.contains(&reuser),
+                "reuser hits the seeder's INACTIVE prefix; un-discounted it needs 5 > 4 free, \
+                 so it must wait while the holder holds capacity"
+            );
+            assert_eq!(
+                core.state().requests.get(&reuser).map(|r| r.status),
+                Some(RequestStatus::Waiting),
+            );
+            checked = true;
+        }
+        let pass = core.execute_pass(&mut collector, now_ms);
+        now_ms = pass.end_ms.max(now_ms + 1.0);
+        max_preemptions = max_preemptions.max(pass.mocker_metrics.vllm_preemptions_total);
+    }
+    assert!(
+        checked,
+        "test must observe the seeder-done / holder-running window"
+    );
+    assert!(
+        core.state().requests.is_empty(),
+        "reuser is admitted once the holder frees capacity; all requests drain"
+    );
+    assert_eq!(max_preemptions, 0, "GUARANTEED_NO_EVICT must never preempt");
 }

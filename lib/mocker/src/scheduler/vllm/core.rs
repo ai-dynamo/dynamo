@@ -331,29 +331,28 @@ impl VllmCore {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
         let mut max_output_tokens = request.max_output_tokens;
         if trtllm::is_no_evict(self.args.scheduling_policy()) {
-            // TRT-LLM enqueue normalization: clamp output to KV-pool capacity, or
-            // reject a prompt with no decode room (never enqueue). The admission
-            // gate keeps a defensive terminal-drop for any oversized leftover.
-            match trtllm::normalize_max_output_tokens(
+            // TRT-LLM enqueue normalization: clamp the output so prompt + output
+            // fits the KV pool (keeps the request valid and admittable).
+            if let Some(clamped) = trtllm::normalize_max_output_tokens(
                 request.tokens.len(),
                 max_output_tokens,
                 self.args.num_gpu_blocks,
                 self.args.block_size,
             ) {
-                Some(clamped) => {
-                    if clamped != max_output_tokens {
-                        tracing::warn!(%uuid, requested = max_output_tokens, clamped,
-                            "clamped TRT-LLM max_output_tokens to KV-pool capacity");
-                        max_output_tokens = clamped;
-                    }
+                if clamped != max_output_tokens {
+                    tracing::warn!(%uuid, requested = max_output_tokens, clamped,
+                        "clamped TRT-LLM max_output_tokens to KV-pool capacity");
                 }
-                None => {
-                    tracing::warn!(%uuid, prompt_len = request.tokens.len(),
-                        capacity_blocks = self.args.num_gpu_blocks,
-                        "rejecting TRT-LLM request: prompt leaves no room for decode");
-                    return uuid;
-                }
+                max_output_tokens = clamped;
             }
+            // TODO(trtllm-reject-propagation): reject a prompt that leaves no decode
+            // room (prompt_len >= pool capacity — the `None` case above). DISABLED as
+            // a NO-OP: any in-PR handling (silent reject via `return uuid`, or clamping
+            // output to 0) emits no terminal signal, dead-ending aggregated offline
+            // replay (in_flight) and live replay (waiter) — verified to hang. MUST NOT
+            // be enabled until offline + live replay propagate an explicit terminal-
+            // rejection outcome. Until then the request is left unchanged and stalls at
+            // the FIFO head like any oversized request (also deferred).
         }
         let sequence = ActiveSequence::new(
             request.tokens,
@@ -732,19 +731,19 @@ impl VllmCore {
                         &self.kv_manager,
                     )
                 {
-                    // Normal TRT-LLM receive() normalizes requests before enqueue, so this should
-                    // only catch bypassed/malformed scheduler state. Keep it as a terminal fallback
-                    // so an impossible FIFO head cannot stall replay.
-                    if needed > self.args.num_gpu_blocks {
-                        tracing::warn!(
-                            %uuid,
-                            needed_blocks = needed,
-                            capacity_blocks = self.args.num_gpu_blocks,
-                            "rejecting TRT-LLM request: prompt + max_output exceeds the entire KV pool"
-                        );
-                        self.drop_request(uuid);
-                        continue;
-                    }
+                    // TODO(trtllm-reject-propagation): terminal-reject a request
+                    // whose footprint exceeds the whole pool — it can never be
+                    // admitted, so an oversized FIFO head stalls replay. DISABLED —
+                    // drop_request here removes the request without a terminal
+                    // signal, which dead-ends offline (in_flight) and live (waiter)
+                    // replay the same way a silent enqueue-reject would. MUST NOT be
+                    // enabled until both propagate an explicit terminal-rejection
+                    // outcome. For now, break (FIFO) as before:
+                    //     if needed > self.args.num_gpu_blocks {
+                    //         tracing::warn!(%uuid, "exceeds entire KV pool");
+                    //         self.drop_request(uuid);
+                    //         continue;
+                    //     }
                     break;
                 }
             }
