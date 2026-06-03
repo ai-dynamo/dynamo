@@ -771,3 +771,199 @@ def test_build_dgd_config_pvc_with_model_path_no_hf_home() -> None:
         assert (
             len(hf_homes) == 0
         ), f"HF_HOME should not be set on {svc_name} when model_path is a PVC subpath"
+
+
+# -----------------------------------------------------------------------------
+# auto_inject_trust_remote_code / model_has_auto_map
+# -----------------------------------------------------------------------------
+
+
+def _make_dgd_with_workers(*worker_names: str) -> dict:
+    """Build a minimal DGD dict with the given worker services + a Frontend."""
+    services: dict = {
+        "Frontend": {
+            "extraPodSpec": {
+                "mainContainer": {"args": ["--http-port", "8000"]},
+            },
+        },
+    }
+    for name in worker_names:
+        services[name] = {
+            "extraPodSpec": {
+                "mainContainer": {"args": ["--model", "some/model", "--tp", "1"]},
+            },
+        }
+    return {"spec": {"services": services}}
+
+
+def test_model_has_auto_map_local_dir_with_auto_map(tmp_path) -> None:
+    import json as _json
+
+    from dynamo.profiler.utils.model_info import model_has_auto_map
+
+    cfg = {
+        "model_type": "nemotron_h",
+        "auto_map": {
+            "AutoConfig": "configuration_nemotron_h.NemotronHConfig",
+            "AutoModelForCausalLM": "modeling_nemotron_h.NemotronHForCausalLM",
+        },
+    }
+    (tmp_path / "config.json").write_text(_json.dumps(cfg))
+    assert model_has_auto_map(tmp_path) is True
+
+
+def test_model_has_auto_map_local_dir_without_auto_map(tmp_path) -> None:
+    import json as _json
+
+    from dynamo.profiler.utils.model_info import model_has_auto_map
+
+    (tmp_path / "config.json").write_text(_json.dumps({"model_type": "llama"}))
+    assert model_has_auto_map(tmp_path) is False
+
+
+def test_model_has_auto_map_local_dir_missing_config_returns_false(tmp_path) -> None:
+    from dynamo.profiler.utils.model_info import model_has_auto_map
+
+    assert model_has_auto_map(tmp_path) is False
+
+
+def test_auto_inject_trust_remote_code_appends_for_vllm_with_auto_map() -> None:
+    from dynamo.profiler.utils.config_modifiers.protocol import (
+        auto_inject_trust_remote_code,
+    )
+
+    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    with patch(
+        "dynamo.profiler.utils.model_info.model_has_auto_map", return_value=True
+    ):
+        modified = auto_inject_trust_remote_code(cfg, "some/model", "vllm")
+
+    assert modified == ["VllmDecodeWorker"]
+    decode_args = cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert decode_args[-1] == "--trust-remote-code"
+    # Original args preserved.
+    assert decode_args[:-1] == ["--model", "some/model", "--tp", "1"]
+    # Frontend untouched.
+    assert "--trust-remote-code" not in (
+        cfg["spec"]["services"]["Frontend"]["extraPodSpec"]["mainContainer"]["args"]
+    )
+
+
+def test_auto_inject_trust_remote_code_appends_for_sglang_with_auto_map() -> None:
+    from dynamo.profiler.utils.config_modifiers.protocol import (
+        auto_inject_trust_remote_code,
+    )
+
+    cfg = _make_dgd_with_workers("SglangDecodeWorker", "SglangPrefillWorker")
+    with patch(
+        "dynamo.profiler.utils.model_info.model_has_auto_map", return_value=True
+    ):
+        modified = auto_inject_trust_remote_code(cfg, "some/model", "sglang")
+
+    assert set(modified) == {"SglangDecodeWorker", "SglangPrefillWorker"}
+    for svc in ("SglangDecodeWorker", "SglangPrefillWorker"):
+        args = cfg["spec"]["services"][svc]["extraPodSpec"]["mainContainer"]["args"]
+        assert args.count("--trust-remote-code") == 1
+
+
+def test_auto_inject_trust_remote_code_skips_when_no_auto_map() -> None:
+    from dynamo.profiler.utils.config_modifiers.protocol import (
+        auto_inject_trust_remote_code,
+    )
+
+    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    with patch(
+        "dynamo.profiler.utils.model_info.model_has_auto_map", return_value=False
+    ):
+        modified = auto_inject_trust_remote_code(cfg, "some/model", "vllm")
+
+    assert modified == []
+    args = cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert "--trust-remote-code" not in args
+
+
+def test_auto_inject_trust_remote_code_skips_trtllm_backend() -> None:
+    """TRT-LLM uses a YAML `trust_remote_code: true` field, not the CLI flag."""
+    from dynamo.profiler.utils.config_modifiers.protocol import (
+        auto_inject_trust_remote_code,
+    )
+
+    cfg = _make_dgd_with_workers("TRTLLMDecodeWorker")
+    # Even with auto_map=True the trtllm backend must not get the CLI flag.
+    with patch(
+        "dynamo.profiler.utils.model_info.model_has_auto_map", return_value=True
+    ):
+        modified = auto_inject_trust_remote_code(cfg, "some/model", "trtllm")
+
+    assert modified == []
+
+
+def test_auto_inject_trust_remote_code_is_idempotent() -> None:
+    """Running the injector twice must not duplicate the flag."""
+    from dynamo.profiler.utils.config_modifiers.protocol import (
+        auto_inject_trust_remote_code,
+    )
+
+    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    with patch(
+        "dynamo.profiler.utils.model_info.model_has_auto_map", return_value=True
+    ):
+        auto_inject_trust_remote_code(cfg, "some/model", "vllm")
+        modified_second = auto_inject_trust_remote_code(cfg, "some/model", "vllm")
+
+    assert modified_second == []
+    args = cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert args.count("--trust-remote-code") == 1
+
+
+def test_auto_inject_trust_remote_code_respects_user_override() -> None:
+    """An explicit user override (already merged) must not be duplicated."""
+    from dynamo.profiler.utils.config_modifiers.protocol import (
+        auto_inject_trust_remote_code,
+    )
+
+    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    # Simulate apply_dgd_overrides having already appended the flag.
+    cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"][
+        "args"
+    ].append("--trust-remote-code")
+
+    with patch(
+        "dynamo.profiler.utils.model_info.model_has_auto_map", return_value=True
+    ):
+        modified = auto_inject_trust_remote_code(cfg, "some/model", "vllm")
+
+    assert modified == []
+    args = cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert args.count("--trust-remote-code") == 1
+
+
+def test_auto_inject_trust_remote_code_excludes_frontend_and_planner() -> None:
+    from dynamo.profiler.utils.config_modifiers.protocol import (
+        auto_inject_trust_remote_code,
+    )
+
+    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    cfg["spec"]["services"]["Planner"] = {
+        "extraPodSpec": {"mainContainer": {"args": ["--interval", "30"]}},
+    }
+    with patch(
+        "dynamo.profiler.utils.model_info.model_has_auto_map", return_value=True
+    ):
+        modified = auto_inject_trust_remote_code(cfg, "some/model", "vllm")
+
+    assert modified == ["VllmDecodeWorker"]
+    assert "--trust-remote-code" not in (
+        cfg["spec"]["services"]["Frontend"]["extraPodSpec"]["mainContainer"]["args"]
+    )
+    assert "--trust-remote-code" not in (
+        cfg["spec"]["services"]["Planner"]["extraPodSpec"]["mainContainer"]["args"]
+    )

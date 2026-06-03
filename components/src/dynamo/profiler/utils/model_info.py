@@ -2,10 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import logging
 from pathlib import Path
 from typing import Optional, Union
 
-from huggingface_hub import model_info
+from huggingface_hub import hf_hub_download, model_info
 from pydantic import BaseModel
 from transformers import AutoConfig
 
@@ -13,6 +14,7 @@ try:
     from aiconfigurator.sdk.utils import get_model_config_from_model_path
 except ImportError:
     get_model_config_from_model_path = None
+logger = logging.getLogger(__name__)
 
 DTYPE_BYTES_MAP = {
     "F32": 4,  # FP32: 4 bytes per parameter
@@ -116,6 +118,48 @@ def get_model_weight_size(
     else:
         # HF Hub model
         return get_model_weight_size_from_hub(str(model_name_or_path))
+
+
+def model_has_auto_map(
+    model_name_or_path: Union[str, Path],
+    token: Optional[str] = None,
+) -> bool:
+    """Return True iff the HF ``config.json`` declares an ``auto_map`` field.
+
+    ``auto_map`` signals that the model ships its own loader code in the HF
+    repo (``modeling_*.py`` / ``configuration_*.py``), which HF, vLLM, and
+    sglang refuse to execute unless the caller explicitly opts in via
+    ``trust_remote_code=True`` / ``--trust-remote-code``.
+
+    Works for both local directories and Hub model IDs. Reads ``config.json``
+    directly (no ``AutoConfig`` load) so it works even for architectures
+    that ``transformers`` doesn't know about. Returns False on any read
+    error so callers can treat detection as best-effort.
+    """
+    path = Path(model_name_or_path)
+    try:
+        if path.exists() and path.is_dir():
+            config_path = path / "config.json"
+            if not config_path.is_file():
+                return False
+        else:
+            config_path = Path(
+                hf_hub_download(
+                    repo_id=str(model_name_or_path),
+                    filename="config.json",
+                    token=token,
+                )
+            )
+        with open(config_path) as f:
+            cfg = json.load(f)
+    except Exception as e:
+        logger.debug(
+            "model_has_auto_map: could not read config.json for %s: %s",
+            model_name_or_path,
+            e,
+        )
+        return False
+    return bool(cfg.get("auto_map"))
 
 
 class ModelInfo(BaseModel):

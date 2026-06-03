@@ -12,6 +12,10 @@ from typing import Any
 
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.dgd_override import apply_dgd_overrides
+from dynamo.profiler.utils.model_info import (
+    model_has_auto_map,
+    model_ref_allows_implicit_trust_remote_code,
+)
 from dynamo.profiler.utils.profile_common import inject_tolerations_into_dgd
 
 logger = logging.getLogger(__name__)
@@ -103,9 +107,49 @@ def _materialize_dgd_document(
         materialized = inject_tolerations_into_dgd(materialized, tolerations)
         applied_transforms.append("tolerations")
 
+    # Auto-inject --trust-remote-code for vLLM/SGLang workers when the model
+    # ships custom Python (auto_map in config.json). Runs after overrides so
+    # an explicit user --trust-remote-code wins and is not duplicated.
+    if (
+        runtime_backend in _TRUST_REMOTE_CODE_BACKENDS
+        and model_name_or_path
+        and model_has_auto_map(model_name_or_path)
+    ):
+        if not model_ref_allows_implicit_trust_remote_code(model_name_or_path):
+            raise RuntimeError(
+                "Refusing to auto-inject --trust-remote-code for mutable remote "
+                f"model ref {model_name_or_path!r}. Set --trust-remote-code "
+                "explicitly via overrides if this ref is intended."
+            )
+        _inject_trust_remote_code_flag(materialized)
+        applied_transforms.append("trust-remote-code")
+
     logger.debug(
         "Materialized %s DGD with transforms: %s",
         purpose.value,
         ", ".join(applied_transforms) if applied_transforms else "none",
     )
     return materialized
+
+
+# Backends whose worker engines read `--trust-remote-code` as a CLI flag.
+_TRUST_REMOTE_CODE_BACKENDS = frozenset({"vllm", "sglang"})
+_TRUST_REMOTE_CODE_FLAG = "--trust-remote-code"
+_NON_WORKER_SERVICES = frozenset({"Frontend", "Planner"})
+
+
+def _inject_trust_remote_code_flag(config: dict) -> None:
+    """Append --trust-remote-code to all worker services that don't already have it."""
+    services = config.get("spec", {}).get("services", {})
+    for svc_name, svc in services.items():
+        if not isinstance(svc, dict) or svc_name in _NON_WORKER_SERVICES:
+            continue
+        main_container = (
+            svc.get("extraPodSpec", {}).get("mainContainer", {})
+            if isinstance(svc.get("extraPodSpec"), dict)
+            else {}
+        )
+        args = main_container.get("args") or []
+        if _TRUST_REMOTE_CODE_FLAG in args:
+            continue
+        main_container["args"] = list(args) + [_TRUST_REMOTE_CODE_FLAG]
