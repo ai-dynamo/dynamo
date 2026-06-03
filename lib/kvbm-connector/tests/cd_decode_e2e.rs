@@ -143,6 +143,7 @@ fn build_harness() -> TestHarness {
     let cfg = DisaggConfig {
         role: DisaggregationRole::Decode,
         max_inflight_remote_prefill_tokens: usize::MAX,
+        min_remote_prefill_tokens: 0,
     };
     let wrapper = DecodeDisaggLeader::from_parts(
         inner.clone(),

@@ -199,6 +199,7 @@ fn build_harness(request_id: &str, g1_base: usize) -> (Harness, Vec<usize>) {
     let cfg = DisaggConfig {
         role: DisaggregationRole::Decode,
         max_inflight_remote_prefill_tokens: usize::MAX,
+        min_remote_prefill_tokens: 0,
     };
     let wrapper = DecodeDisaggLeader::from_parts(
         inner.clone(),
@@ -521,6 +522,7 @@ async fn concurrent_recompute_sibling_failure_does_not_cascade() -> Result<()> {
     let cfg = DisaggConfig {
         role: DisaggregationRole::Decode,
         max_inflight_remote_prefill_tokens: usize::MAX,
+        min_remote_prefill_tokens: 0,
     };
     let wrapper = DecodeDisaggLeader::from_parts(
         inner.clone(),

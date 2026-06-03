@@ -630,6 +630,10 @@ impl InnerLeaderShim for MockInnerLeaderShim {
         self.block_size
     }
 
+    fn cd_metrics(&self) -> Option<kvbm_observability::CdMetrics> {
+        None
+    }
+
     fn get_slot_total_tokens(&self, request_id: &str) -> Result<usize> {
         let slot = self.require_slot(request_id)?;
         Ok(slot.total_blocks * slot.block_size)

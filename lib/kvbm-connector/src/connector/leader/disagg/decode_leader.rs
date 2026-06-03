@@ -699,9 +699,25 @@ impl DecodeDisaggLeader {
             block_size,
             matched_tokens
         );
+
+        // CD observability (Prometheus; independent of the kvbm_audit log level
+        // — the durable channel for long benchmarks where audit is quieted).
+        let cd = self.inner.cd_metrics();
+        if let Some(cd) = &cd {
+            if num_computed_tokens > 0 {
+                cd.observe_prefix_cache_hit(num_computed_tokens as u64);
+            }
+        }
+
         match selection {
             PrefillSelection::Local => {
                 tracing::info!(?inner_result, "decode_gnmt: Local — passthrough");
+                if let Some(cd) = &cd {
+                    // Q1 + Q3: a Local decision and the tokens the decode will
+                    // itself prefill (uncached, unmatched = num_prefill_tokens()).
+                    cd.record_decision("local");
+                    cd.record_local_prefill_tokens(inputs.num_prefill_tokens() as u64);
+                }
                 Ok(inner_result)
             }
             PrefillSelection::Remote => {
@@ -720,6 +736,10 @@ impl DecodeDisaggLeader {
                         request_id,
                         prefill_window
                     );
+                    if let Some(cd) = &cd {
+                        cd.record_decision("remote_downgraded_zero_block");
+                        cd.record_remote_declined("zero_block");
+                    }
                     return Ok(inner_result);
                 }
 
@@ -729,6 +749,10 @@ impl DecodeDisaggLeader {
                         available = self.inflight_available(),
                         "decode_gnmt: remote prefill rejected — inflight budget exhausted"
                     );
+                    if let Some(cd) = &cd {
+                        cd.record_decision("remote_rejected_budget");
+                        cd.record_remote_declined("budget_exhausted");
+                    }
                     return Ok((None, false));
                 }
 
@@ -755,6 +779,22 @@ impl DecodeDisaggLeader {
                     request_id,
                     full_block_external_tokens
                 );
+                if let Some(cd) = &cd {
+                    // Q2 + Q4 + Q2-dist. Q4 = the block-aligned uncached
+                    // remote-COMPUTE remainder = full_block_external_tokens minus
+                    // the local-match (which the remote PULLS, not computes).
+                    // full_block_external_tokens already excludes the prefix-cache
+                    // hit (it is (total − num_computed) block-floored). Block-aligned
+                    // ⇒ reconciles 1:1 with the prefill-side computed tokens (Q6).
+                    // NOT full_block_external_tokens alone (that over-counts by the
+                    // local-match — the USAA-1 conflation class).
+                    let local_match_tokens = (matched_tokens / block_size) * block_size;
+                    let remote_compute_tokens =
+                        full_block_external_tokens.saturating_sub(local_match_tokens);
+                    cd.record_decision("remote");
+                    cd.record_remote_prefill_tokens(remote_compute_tokens as u64);
+                    cd.record_remote_prefill_window(full_block_external_tokens as u64);
+                }
                 Ok((Some(full_block_external_tokens), true))
             }
         }

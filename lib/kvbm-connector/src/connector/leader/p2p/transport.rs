@@ -158,6 +158,9 @@ pub trait InnerLeaderShim: Send + Sync {
     // ---- CD-specific helpers ----
 
     fn block_size(&self) -> usize;
+    /// CD observability metrics (Prometheus), if this leader is backed by a
+    /// runtime registry; `None` for test doubles.
+    fn cd_metrics(&self) -> Option<kvbm_observability::CdMetrics>;
     fn get_slot_total_tokens(&self, request_id: &str) -> Result<usize>;
     fn slot_match_split(&self, request_id: &str) -> Result<SlotMatchSplit>;
     /// Like [`Self::slot_match_split`] but with the caller supplying the
@@ -407,6 +410,10 @@ impl InnerLeaderShim for ConnectorLeaderShim {
 
     fn block_size(&self) -> usize {
         self.inner.block_size()
+    }
+
+    fn cd_metrics(&self) -> Option<kvbm_observability::CdMetrics> {
+        Some(self.inner.cd_metrics())
     }
 
     fn get_slot_total_tokens(&self, request_id: &str) -> Result<usize> {

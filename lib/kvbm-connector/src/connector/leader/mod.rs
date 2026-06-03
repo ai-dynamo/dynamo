@@ -359,6 +359,13 @@ impl ConnectorLeader {
         self.cache_stats.maybe_log();
     }
 
+    /// CD observability metrics handle (Prometheus; cheap, Arc-backed clone).
+    /// The decode wrapper reaches this through the `InnerLeaderShim::cd_metrics`
+    /// accessor so it can record per-request CD decisions/token counts.
+    pub fn cd_metrics(&self) -> kvbm_observability::CdMetrics {
+        self.runtime.observability().cd_metrics().clone()
+    }
+
     /// Get the total number of tokens in a slot's sequence.
     ///
     /// This is used to compare with the vLLM Request's token count to detect

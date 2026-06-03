@@ -106,6 +106,7 @@ fn make_disagg_config() -> DisaggConfig {
     DisaggConfig {
         role: DisaggregationRole::Decode,
         max_inflight_remote_prefill_tokens: usize::MAX,
+        min_remote_prefill_tokens: 0,
     }
 }
 

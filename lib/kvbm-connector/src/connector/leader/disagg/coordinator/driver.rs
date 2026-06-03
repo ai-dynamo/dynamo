@@ -1833,6 +1833,18 @@ impl ConditionalDisaggCoordinator {
             .filter(|h| !pulled.contains(h))
             .copied()
             .collect();
+
+        // Q6 + reconciliation: tokens the prefill worker is asked to forward-pass
+        // (the net-new blocks beyond the decode-provided prefix). Block-aligned,
+        // so it reconciles 1:1 with the decode-side Q4 (remote_compute_tokens).
+        // Also record the complementary pulled-from-decode prefix (PULLED, not
+        // computed) so the two are never conflated. Runs once per request (past
+        // the idempotent-retry early return above).
+        if let Some(cd) = self.inner.cd_metrics() {
+            cd.record_prefill_computed_tokens((expected_outputs.len() * block_size) as u64);
+            cd.record_prefill_pulled_tokens((pulled.len() * block_size) as u64);
+        }
+
         let observer_handle: ObserverHandle = self
             .observer
             .track(request_id.to_string(), expected_outputs);
@@ -2094,12 +2106,14 @@ impl ConditionalDisaggCoordinator {
         let runtime = self.runtime.clone();
         let coord_weak = self.weak_self.clone();
         let state_for_spawn = Arc::clone(&state);
+        let cd = self.inner.cd_metrics();
         runtime.spawn(async move {
             const FINALIZE_WAIT: Duration = Duration::from_secs(10);
             const POLL_INTERVAL: Duration = Duration::from_millis(2);
 
             let deadline = tokio::time::Instant::now() + FINALIZE_WAIT;
             let mut waited_for_observer = false;
+            let mut residual_undrained = false;
             while observer.has_pending(&request_id_owned) {
                 waited_for_observer = true;
                 if tokio::time::Instant::now() >= deadline {
@@ -2115,6 +2129,7 @@ impl ConditionalDisaggCoordinator {
                         request_id = %request_id_owned,
                         wait_secs = FINALIZE_WAIT.as_secs()
                     );
+                    residual_undrained = true;
                     break;
                 }
                 tokio::time::sleep(POLL_INTERVAL).await;
@@ -2125,6 +2140,18 @@ impl ConditionalDisaggCoordinator {
                     role = "prefill",
                     request_id = %request_id_owned
                 );
+            }
+            // Reconciliation signal: did the prefill produce all the net-new
+            // blocks the decode expected (Q6 set)? `undrained` = under-produced
+            // (the within-prefill divergence that would surface a USAA-1-class
+            // accounting bug as a metric, not a crash). Only recorded for requests
+            // that actually had pending output (genuine remote-prefill work).
+            if let Some(cd) = &cd {
+                if residual_undrained {
+                    cd.record_prefill_output_residual("undrained");
+                } else if waited_for_observer {
+                    cd.record_prefill_output_residual("drained");
+                }
             }
             if let Some(session) = session_opt {
                 session.finalize(Some("request_finished".to_string()));
