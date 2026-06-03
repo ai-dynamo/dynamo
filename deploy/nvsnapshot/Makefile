@@ -11,7 +11,7 @@ VERSION   := $(shell cat "$(REPO_ROOT)/VERSION")
 include hack/tools.mk
 
 # Image tag exported to component docker targets (overridable from the env).
-IMG ?= ghcr.io/run-ai/snapshot/agent:$(VERSION)
+IMG ?= nvcr.io/nvidian/dynamo-dev/nvsnapshot-agent:$(VERSION)
 export IMG
 
 # Containerized-test settings (used by test-qemu). CONTAINER_TOOL mirrors the var in

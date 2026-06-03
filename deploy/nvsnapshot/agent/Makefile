@@ -7,7 +7,7 @@ VERSION     := $(shell cat "$(REPO_ROOT)/VERSION")
 
 include $(REPO_ROOT)/hack/tools.mk
 
-IMG ?= ghcr.io/run-ai/snapshot/agent:$(VERSION)
+IMG ?= nvcr.io/nvidian/dynamo-dev/nvsnapshot-agent:$(VERSION)
 CONTAINER_TOOL ?= docker
 RUNTIME_IMAGE_PLATFORM ?= linux/amd64
 CRIU_BUILD_ARGS = $(if $(CRIU_REPO),--build-arg CRIU_REPO=$(CRIU_REPO),) $(if $(CRIU_REF),--build-arg CRIU_REF=$(CRIU_REF),)
