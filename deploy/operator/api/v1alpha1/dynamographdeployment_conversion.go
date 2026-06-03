@@ -101,6 +101,7 @@ func ConvertFromDynamoGraphDeploymentSpec(src *DynamoGraphDeploymentSpec, dst *v
 	// Convert fields represented by both versions from the live source.
 	dst.Annotations = src.Annotations
 	dst.Labels = src.Labels
+	dst.PriorityClassName = src.PriorityClassName
 	dst.BackendFramework = src.BackendFramework
 
 	if src.Restart != nil {
@@ -407,6 +408,7 @@ func ConvertToDynamoGraphDeploymentSpec(src *v1beta1.DynamoGraphDeploymentSpec, 
 	// Convert fields represented by both versions from the live source.
 	dst.Annotations = src.Annotations
 	dst.Labels = src.Labels
+	dst.PriorityClassName = src.PriorityClassName
 	dst.BackendFramework = src.BackendFramework
 
 	if src.Restart != nil {
