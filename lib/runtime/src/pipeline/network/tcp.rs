@@ -3,6 +3,10 @@
 
 //! TCP Transport Module
 //!
+//! TODO: this design-and-implementation overview should eventually move into
+//! the architecture docs (`docs/design-docs/architecture.md`); kept here for
+//! now until there's a home for transport-level design notes.
+//!
 //! Brief overview of the request-response transport:
 //!
 //! The request plane (TCP, NATS, etc.) carries a two-part message whose header is a

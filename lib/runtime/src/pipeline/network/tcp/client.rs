@@ -172,12 +172,13 @@ impl TcpClient {
     /// Symmetric to [`Self::create_response_stream`] for the request-stream half:
     /// dial the upstream TCP server with `StreamType::Request`, then return a
     /// [`StreamReceiver`] that yields the data frames the upstream pushes down.
-    /// The spawned reader task forwards `TwoPartMessage::DataOnly` payloads into
-    /// the channel and translates `ControlMessage::Stop` / `Kill` into context
-    /// cancellation. `ControlMessage::Sentinel` (or TCP close) terminates the
-    /// task cleanly. On exit the task sends `ControlMessage::Sentinel` back to
-    /// the upstream so the server-side `process_request_stream` can drain and
-    /// close its socket gracefully.
+    ///
+    /// The request stream is unidirectional after the handshake: the write half
+    /// is dropped as soon as the `CallHomeHandshake` is sent, so the downstream
+    /// never writes anything back (no `Sentinel` ack). The spawned reader task
+    /// forwards `TwoPartMessage::DataOnly` payloads into the channel and
+    /// translates `ControlMessage::Stop` / `Kill` into context cancellation;
+    /// `ControlMessage::Sentinel` (or TCP close) terminates the task cleanly.
     pub async fn create_request_stream(
         context: Arc<dyn AsyncEngineContext>,
         info: ConnectionInfo,

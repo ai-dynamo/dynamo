@@ -726,15 +726,20 @@ async fn tcp_listener(
 
         if let Some(ctrl) = closing_msg
             && let Ok(bytes) = serde_json::to_vec(&ctrl)
-        {
-            let _ = framed_writer
+            && let Err(err) = framed_writer
                 .send(TwoPartMessage::from_header(bytes.into()))
-                .await;
+                .await
+        {
+            tracing::trace!(?err, ?ctrl, "request-stream closing-frame send failed");
         }
 
         let mut inner = framed_writer.into_inner();
-        let _ = inner.flush().await;
-        let _ = inner.shutdown().await;
+        if let Err(err) = inner.flush().await {
+            tracing::trace!(?err, "request-stream socket flush failed");
+        }
+        if let Err(err) = inner.shutdown().await {
+            tracing::trace!(?err, "request-stream socket shutdown failed");
+        }
     }
 
     async fn process_response_stream(
