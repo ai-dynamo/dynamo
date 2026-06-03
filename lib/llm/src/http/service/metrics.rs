@@ -394,6 +394,16 @@ pub enum ErrorType {
 pub struct ResponseMetricCollector {
     metrics: Arc<Metrics>,
     model: String,
+    // Per-model metric handles resolved once at construction. The collector lives for a
+    // single request and `model` is fixed, so caching these avoids re-hashing the `model`
+    // label via `with_label_values` on every chunk (and, for ITL, on every output token —
+    // it was previously resolved inside a `for _ in 0..num_tokens` loop). Each handle
+    // shares the underlying metric with its vec, so observations are equivalent.
+    output_tokens_counter: prometheus::IntCounter,
+    time_to_first_token: prometheus::Histogram,
+    inter_token_latency: prometheus::Histogram,
+    input_sequence_length: prometheus::Histogram,
+    cached_tokens: prometheus::Histogram,
     start_time: Instant,
     // we use is_first_token to distinguish TTFT from ITL. It is true by default and
     // flipped to false when the first token is returned and TTFT is published.
@@ -1341,9 +1351,21 @@ impl std::fmt::Display for ErrorType {
 
 impl ResponseMetricCollector {
     fn new(metrics: Arc<Metrics>, model: String) -> Self {
+        // Resolve the per-model handles once (cheap clones of the vec entries) so the
+        // per-chunk / per-token hot path in `observe_response` does no label hashing.
+        let output_tokens_counter = metrics.output_tokens_counter.with_label_values(&[&model]);
+        let time_to_first_token = metrics.time_to_first_token.with_label_values(&[&model]);
+        let inter_token_latency = metrics.inter_token_latency.with_label_values(&[&model]);
+        let input_sequence_length = metrics.input_sequence_length.with_label_values(&[&model]);
+        let cached_tokens = metrics.cached_tokens.with_label_values(&[&model]);
         ResponseMetricCollector {
             metrics,
             model,
+            output_tokens_counter,
+            time_to_first_token,
+            inter_token_latency,
+            input_sequence_length,
+            cached_tokens,
             is_first_token: true,
             last_response_time: None,
             start_time: Instant::now(),
@@ -1413,10 +1435,7 @@ impl ResponseMetricCollector {
             && !self.cached_tokens_observed
         {
             self.cached_tokens_observed = true;
-            self.metrics
-                .cached_tokens
-                .with_label_values(&[&self.model])
-                .observe(tokens as f64);
+            self.cached_tokens.observe(tokens as f64);
         }
     }
 
@@ -1456,10 +1475,7 @@ impl ResponseMetricCollector {
         self.isl = isl;
 
         // Increment the real-time output tokens counter
-        self.metrics
-            .output_tokens_counter
-            .with_label_values(&[&self.model])
-            .inc_by(num_tokens as u64);
+        self.output_tokens_counter.inc_by(num_tokens as u64);
 
         if self.is_first_token {
             // NOTE: when there are multiple tokens in the first response,
@@ -1469,10 +1485,7 @@ impl ResponseMetricCollector {
             // Publish TTFT and store for span recording
             let ttft = self.start_time.elapsed().as_secs_f64();
             self.ttft_ms = Some(ttft * 1000.0);
-            self.metrics
-                .time_to_first_token
-                .with_label_values(&[&self.model])
-                .observe(ttft);
+            self.time_to_first_token.observe(ttft);
 
             // Update per-worker TTFT and input sequence tokens gauges - attributed to prefill worker.
             // Both gauges are updated atomically from the same request to correlate latency with input size.
@@ -1498,10 +1511,7 @@ impl ResponseMetricCollector {
 
             // Publish ISL
             // TODO: publish ISL as soon as the tokenization process completes
-            self.metrics
-                .input_sequence_length
-                .with_label_values(&[&self.model])
-                .observe(isl as f64);
+            self.input_sequence_length.observe(isl as f64);
         }
 
         let current_duration = self.start_time.elapsed();
@@ -1511,11 +1521,10 @@ impl ResponseMetricCollector {
             let itl = response_duration.as_secs_f64() / num_tokens as f64;
             self.itl_sum_secs += itl * num_tokens as f64;
             self.itl_count += num_tokens as u64;
+            // Handle resolved once at construction — the observe loop no longer re-hashes
+            // the `model` label on every output token.
             for _ in 0..num_tokens {
-                self.metrics
-                    .inter_token_latency
-                    .with_label_values(&[&self.model])
-                    .observe(itl);
+                self.inter_token_latency.observe(itl);
             }
 
             // Update per-worker ITL gauge - attributed to decode worker.
@@ -2005,6 +2014,39 @@ mod tests {
             .with_label_values(&[model])
             .get();
         assert_eq!(counter_value, 22);
+    }
+
+    #[test]
+    fn test_cached_handles_record_through_vec() {
+        // The collector resolves per-model handles once at construction; observing
+        // through them must update the same metric the vec exposes. Regression guard
+        // for the handle cache (incl. the per-token ITL loop using the cached handle).
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let model = "cached-handle-model";
+
+        let mut collector = metrics.clone().create_response_collector(model);
+        // First chunk (3 tokens): TTFT + ISL observed once; no ITL yet.
+        collector.observe_response(42, 3);
+        // Second chunk (4 tokens): ITL observed once per token via the cached handle.
+        collector.observe_response(42, 4);
+
+        let ttft = metrics.time_to_first_token.with_label_values(&[model]);
+        assert_eq!(ttft.get_sample_count(), 1, "TTFT observed once");
+
+        let isl = metrics.input_sequence_length.with_label_values(&[model]);
+        assert_eq!(isl.get_sample_count(), 1, "ISL observed once");
+        assert_eq!(isl.get_sample_sum(), 42.0);
+
+        let itl = metrics.inter_token_latency.with_label_values(&[model]);
+        assert_eq!(itl.get_sample_count(), 4, "ITL observed once per token of 2nd chunk");
+
+        let out = metrics
+            .output_tokens_counter
+            .with_label_values(&[model])
+            .get();
+        assert_eq!(out, 7, "output tokens = 3 + 4 via cached counter handle");
     }
 
     #[test]
