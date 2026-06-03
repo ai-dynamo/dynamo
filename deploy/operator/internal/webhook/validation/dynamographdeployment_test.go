@@ -106,8 +106,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 			groveEnabled: true,
 			wantErr:      true,
-			errContains:  true,
-			errMsg:       "spec.priorityClassName requires the Grove pathway",
+			errMsg:       "spec.priorityClassName requires the Grove pathway; remove or unset the \"nvidia.com/enable-grove\" annotation (currently \"false\")",
 		},
 		{
 			name: "priorityClassName requires Grove pathway when operator disables Grove",
@@ -127,8 +126,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 			groveEnabled: false,
 			wantErr:      true,
-			errContains:  true,
-			errMsg:       "spec.priorityClassName requires the Grove pathway",
+			errMsg:       "spec.priorityClassName requires the Grove pathway, but Grove is disabled in the operator configuration",
 		},
 		{
 			name: "no services",
@@ -922,7 +920,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 			wantErr:     true,
 			errContains: true,
-			errMsg:      "requires the Grove pathway",
+			errMsg:      "remove or unset the \"nvidia.com/enable-grove\" annotation",
 		},
 		{
 			name:         "GMS failover requires Grove pathway - operator grove disabled",
@@ -955,7 +953,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 			wantErr:     true,
 			errContains: true,
-			errMsg:      "requires the Grove pathway",
+			errMsg:      "Grove is disabled in the operator configuration",
 		},
 		{
 			name:         "inter-pod GMS rejected on non-vLLM backend",
