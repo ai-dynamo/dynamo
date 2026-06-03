@@ -75,7 +75,7 @@ Deploy the target DGD:
 SKU=b200 # or h200
 USECASE=chat # or agentic
 
-kubectl apply -f vllm/kimi_k26_agg_${SKU}_${USECASE}.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/agg-${SKU}-${USECASE}/deploy.yaml -n ${NAMESPACE}
 ```
 
 
