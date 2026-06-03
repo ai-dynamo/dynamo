@@ -69,9 +69,14 @@ spec:
               properties:
                 gpuMemoryService:
                   description: |-
-                    GPUMemoryService enables checkpoint-time GPU Memory Service wiring.
-                    It is intentionally outside spec.identity, so it does not affect the
-                    checkpoint identity hash or deduplication.
+                    GPUMemoryService records checkpoint-time GPU Memory Service metadata for
+                    a prepared checkpoint Job pod. The DynamoCheckpoint controller does not
+                    inject GMS/DRA resources; auto-created checkpoints from
+                    DynamoGraphDeployment prepare the pod template before creating this object.
+                    Manual GMS-enabled checkpoints must provide the prepared pod template; the
+                    controller fails the checkpoint if the required GMS/DRA wiring is missing.
+                    This field is intentionally outside spec.identity, so it does not affect
+                    the checkpoint identity hash or deduplication.
                   properties:
                     deviceClassName:
                       default: gpu.nvidia.com
@@ -86,9 +91,11 @@ spec:
                       description: |-
                         ExtraClientContainers lists additional user-declared containers that should
                         be wired as GMS clients in pods rendered from the enclosing spec.
-                        DGD/DCD services apply this to service pods; DynamoCheckpoint applies this
-                        to checkpoint Job pods. In each rendered pod, only matching container
-                        names are wired; absent names are ignored.
+                        DGD/DCD services apply this to service pods. Auto-created checkpoints
+                        apply checkpoint job clients before creating the DynamoCheckpoint; manual
+                        DynamoCheckpoint users must provide an already-prepared pod template.
+                        In each rendered pod, only matching container names are wired; absent
+                        names are ignored.
                       items:
                         maxLength: 63
                         minLength: 1
@@ -206,6 +213,9 @@ spec:
                       description: |-
                         PodTemplateSpec allows customizing the checkpoint Job pod
                         This should include the container that runs the workload to be checkpointed
+                        and any workload/runtime env, service account, GMS, or DRA wiring needed
+                        by that container. Auto-created checkpoints from DynamoGraphDeployment
+                        render Dynamo defaults before creating the DynamoCheckpoint.
                       properties:
                         metadata:
                           description: |-

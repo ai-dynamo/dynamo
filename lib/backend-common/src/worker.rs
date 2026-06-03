@@ -20,6 +20,7 @@ use dynamo_llm::local_model::runtime_config::{
 };
 use dynamo_llm::model_type::{ModelInput, ModelType};
 use dynamo_llm::worker_type::WorkerType;
+use dynamo_runtime::engine_routes::EngineRouteCallback;
 use dynamo_runtime::pipeline::network::Ingress;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{DistributedRuntime, Runtime};
@@ -504,6 +505,37 @@ impl Worker {
         Ok(())
     }
 
+    /// Register advertised engine controls on the runtime system server.
+    async fn register_engine_controls(
+        &self,
+        endpoint: &dynamo_runtime::component::Endpoint,
+    ) -> Result<(), DynamoError> {
+        let controls = self.engine.supported_controls().await?;
+        if controls.is_empty() {
+            tracing::debug!("engine returned no management controls");
+            return Ok(());
+        }
+
+        let registry = endpoint.drt().engine_routes();
+        let control_count = controls.len();
+        // Serialize discovery-mutating controls so a concurrent resume cannot
+        // re-register the endpoint between a quiesce control's unregister and
+        // its engine-state mutation (and vice versa).
+        let control_lock = Arc::new(tokio::sync::Mutex::new(()));
+        for control_name in controls {
+            let callback = engine_control_callback(control_name.clone(), self.engine.clone());
+            let callback = wrap_engine_control_callback(
+                control_name.clone(),
+                callback,
+                endpoint.clone(),
+                control_lock.clone(),
+            );
+            registry.register(&control_name, callback);
+        }
+        tracing::info!(control_count, "registered engine management controls");
+        Ok(())
+    }
+
     /// Full graceful-shutdown orchestrator: discovery unregister →
     /// grace period → engine drain → cleanup. Shared by every shutdown path —
     /// pre-serve (mid-start signal) and the serve loop's signal arm.
@@ -609,6 +641,7 @@ impl Worker {
                 )
             })?;
         tracing::debug!("model registered with discovery");
+        self.register_engine_controls(&endpoint).await?;
 
         let served = resolve_served_name(&self.config, engine_config)
             .unwrap_or_else(|| engine_config.model.clone());
@@ -870,6 +903,147 @@ fn grace_period_secs() -> f64 {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EngineControlPolicy {
+    Direct,
+    UnregisterBefore,
+    RegisterAfter,
+}
+
+fn engine_control_policy(control: &str) -> EngineControlPolicy {
+    // This policy only governs discovery (un)registration ordering. Draining
+    // in-flight work before memory is freed is delegated to each backend's
+    // quiesce controller: vLLM and SGLang call the engine-native
+    // pause_generation() before sleep/release_memory_occupation, while TRT-LLM
+    // rejects new requests and waits for inflight requests to finish. The
+    // UnregisterBefore step here is an additional guard (stop new routing), not
+    // the drain itself.
+    match control {
+        // Quiesce controls make the engine unsafe for new requests, so remove
+        // the endpoint before they mutate engine state. Resume controls make
+        // the engine serving-safe again, so advertise it only after success.
+        "sleep" | "release_memory_occupation" => EngineControlPolicy::UnregisterBefore,
+        "wake_up" | "resume_memory_occupation" => EngineControlPolicy::RegisterAfter,
+        _ => EngineControlPolicy::Direct,
+    }
+}
+
+fn control_response_is_error(value: &serde_json::Value) -> bool {
+    value
+        .get("status")
+        .and_then(|v| v.as_str())
+        .is_some_and(|status| status.eq_ignore_ascii_case("error"))
+        || value
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .is_some_and(|success| !success)
+}
+
+fn control_error_response(message: impl Into<String>) -> serde_json::Value {
+    serde_json::json!({"status": "error", "message": message.into()})
+}
+
+fn control_request_body_error(body: &serde_json::Value) -> Option<serde_json::Value> {
+    if body.is_object() {
+        None
+    } else {
+        Some(control_error_response(
+            "engine control request body must be a JSON object",
+        ))
+    }
+}
+
+fn engine_control_callback(
+    control_name: String,
+    engine: Arc<dyn LLMEngine>,
+) -> EngineRouteCallback {
+    Arc::new(move |body| {
+        let engine = engine.clone();
+        let control_name = control_name.clone();
+        Box::pin(async move {
+            engine
+                .engine_control(control_name, body)
+                .await
+                .map_err(|e| anyhow::anyhow!(e.to_string()))
+        })
+    })
+}
+
+fn wrap_engine_control_callback(
+    control_name: String,
+    callback: EngineRouteCallback,
+    endpoint: dynamo_runtime::component::Endpoint,
+    control_lock: Arc<tokio::sync::Mutex<()>>,
+) -> EngineRouteCallback {
+    let policy = engine_control_policy(&control_name);
+    Arc::new(move |body| {
+        let callback = callback.clone();
+        let endpoint = endpoint.clone();
+        let control_name = control_name.clone();
+        let control_lock = control_lock.clone();
+        Box::pin(async move {
+            match policy {
+                EngineControlPolicy::Direct => callback(body).await,
+                EngineControlPolicy::UnregisterBefore => {
+                    if let Some(response) = control_request_body_error(&body) {
+                        return Ok(response);
+                    }
+
+                    // Hold across unregister + callback so a concurrent resume
+                    // cannot re-register between them.
+                    let _guard = control_lock.lock().await;
+
+                    if let Err(e) = endpoint.unregister_endpoint_instance().await {
+                        return Ok(control_error_response(format!(
+                            "failed to unregister endpoint before /engine/{control_name}: {e}"
+                        )));
+                    }
+
+                    match callback(body).await {
+                        Ok(response) => {
+                            if control_response_is_error(&response) {
+                                tracing::warn!(
+                                    control = %control_name,
+                                    "engine control returned an error after endpoint unregister; leaving endpoint unregistered"
+                                );
+                            }
+                            Ok(response)
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                control = %control_name,
+                                error = %e,
+                                "engine control callback failed after endpoint unregister; leaving endpoint unregistered"
+                            );
+                            Err(e)
+                        }
+                    }
+                }
+                EngineControlPolicy::RegisterAfter => {
+                    // Hold across callback + register so a concurrent quiesce
+                    // cannot unregister between them.
+                    let _guard = control_lock.lock().await;
+
+                    let response = callback(body).await?;
+                    if !control_response_is_error(&response)
+                        && let Err(e) = endpoint.register_endpoint_instance().await
+                    {
+                        // The engine is awake but absent from discovery. The
+                        // operation is idempotent: retrying /engine/{control_name}
+                        // re-registers without re-waking the engine (the controller
+                        // short-circuits "already awake"), so surface that it is
+                        // safe to retry.
+                        return Ok(control_error_response(format!(
+                            "engine resumed but re-registration failed after /engine/{control_name}: {e}; retry /engine/{control_name} to rejoin discovery"
+                        )));
+                    }
+                    Ok(response)
+                }
+            }
+        })
+    })
+}
+
 /// Convenience shorthand for `DynamoError::builder().error_type(..).message(..).build()`.
 fn err(error_type: ErrorType, message: impl Into<String>) -> DynamoError {
     DynamoError::builder()
@@ -1106,6 +1280,81 @@ mod tests {
             ErrorType::Backend(BackendError::InvalidArgument)
         );
         assert!(e.to_string().contains("bogus"));
+    }
+
+    #[test]
+    fn engine_control_policy_wraps_discovery_mutating_controls() {
+        assert_eq!(
+            engine_control_policy("start_profile"),
+            EngineControlPolicy::Direct
+        );
+        assert_eq!(
+            engine_control_policy("stop_profile"),
+            EngineControlPolicy::Direct
+        );
+        assert_eq!(
+            engine_control_policy("update_weights_from_disk"),
+            EngineControlPolicy::Direct
+        );
+        assert_eq!(
+            engine_control_policy("sleep"),
+            EngineControlPolicy::UnregisterBefore
+        );
+        assert_eq!(
+            engine_control_policy("release_memory_occupation"),
+            EngineControlPolicy::UnregisterBefore
+        );
+        assert_eq!(
+            engine_control_policy("wake_up"),
+            EngineControlPolicy::RegisterAfter
+        );
+        assert_eq!(
+            engine_control_policy("resume_memory_occupation"),
+            EngineControlPolicy::RegisterAfter
+        );
+    }
+
+    #[test]
+    fn control_request_body_validation_requires_json_object() {
+        assert!(control_request_body_error(&serde_json::json!({})).is_none());
+        assert!(control_request_body_error(&serde_json::json!({"tags": ["kv_cache"]})).is_none());
+
+        for body in [
+            serde_json::json!(null),
+            serde_json::json!(true),
+            serde_json::json!("bad"),
+            serde_json::json!(["kv_cache"]),
+        ] {
+            let response = control_request_body_error(&body).unwrap();
+            assert!(control_response_is_error(&response));
+            assert_eq!(
+                response.get("message").and_then(|value| value.as_str()),
+                Some("engine control request body must be a JSON object")
+            );
+        }
+    }
+
+    #[test]
+    fn control_response_error_detection_matches_backend_conventions() {
+        assert!(control_response_is_error(&serde_json::json!({
+            "status": "error"
+        })));
+        assert!(control_response_is_error(&serde_json::json!({
+            "status": "ERROR"
+        })));
+        assert!(control_response_is_error(&serde_json::json!({
+            "success": false
+        })));
+
+        assert!(!control_response_is_error(&serde_json::json!({
+            "status": "ok"
+        })));
+        assert!(!control_response_is_error(&serde_json::json!({
+            "success": true
+        })));
+        assert!(!control_response_is_error(&serde_json::json!({
+            "message": "ok"
+        })));
     }
 
     #[test]

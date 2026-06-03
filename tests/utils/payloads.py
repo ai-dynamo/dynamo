@@ -405,18 +405,38 @@ class CachedTokensChatPayload(ChatPayload):
         timeout: int = 60,
         min_cached_tokens: int = 1,
         router_nvext_expectation: RouterNvextExpectation | None = None,
+        require_rust_processor_init: bool = False,
+        require_vllm_mm_processor_init: bool = False,
+        min_avg_kv_hit_rate: float = 0.0,
     ):
+        log_patterns: List[str] = list(expected_log or [])
+        if require_rust_processor_init:
+            log_patterns.append(r"MM-aware KV routing enabled")
+        if require_vllm_mm_processor_init:
+            log_patterns.append(r"\[mm-routing\] Transfer mode:")
         super().__init__(
             body=body,
             repeat_count=repeat_count,
             expected_response=expected_response or [],
-            expected_log=expected_log or [],
+            expected_log=log_patterns,
             timeout=timeout,
         )
         self.min_cached_tokens = min_cached_tokens
         self._request_count = 0
         self._cached_tokens_found = False
         self.router_nvext_expectation = router_nvext_expectation
+        # Asserts the post-R1 mean of router_kv_hit_rate >= threshold. Catches
+        # router/worker hash divergence (overlap=0) that cached_tokens alone
+        # can miss via load-balance luck on vLLM's per-worker prefix cache.
+        #
+        # TODO(mm-routing): this field + _metrics_baseline + the kv_hit_rate
+        # delta assertion in final_validation() are router-metric-specific
+        # logic accreting onto a general-purpose Cached*Payload base. If
+        # more strong-gate metrics get added (decode-imbalance, routing-
+        # block-count, etc.), move into a RouterMetricsAssertion
+        # mixin/subclass.
+        self.min_avg_kv_hit_rate = min_avg_kv_hit_rate
+        self._metrics_baseline: Optional[tuple[float, float]] = None
 
     def validate(self, response: Any, content: str) -> None:
         """Validate response and check for cached tokens on repeated requests."""
@@ -457,10 +477,47 @@ class CachedTokensChatPayload(ChatPayload):
                     f"(expected >= {self.min_cached_tokens})"
                 )
 
-    def final_validation(self) -> None:
-        """Called after all requests are processed to ensure we saw cached tokens.
+        # Snapshot after R1 so the delta in final_validation isolates R2+.
+        if (
+            self._metrics_baseline is None
+            and self._request_count == 1
+            and self.min_avg_kv_hit_rate > 0
+        ):
+            self._metrics_baseline = self._scrape_router_kv_hit_rate()
 
-        Raises AssertionError if cached tokens were not found on any repeated request.
+    def _scrape_router_kv_hit_rate(self) -> Optional[tuple[float, float]]:
+        """Return ``(sum, count)`` for ``router_kv_hit_rate`` from the
+        frontend /metrics endpoint, or ``None`` if the endpoint is
+        unreachable. The component MetricsHierarchy auto-prepends
+        ``dynamo_component_`` to the exported name.
+        """
+        url = f"http://localhost:{self.port}/metrics"
+        try:
+            text = requests.get(url, timeout=5).text
+        except requests.RequestException as e:
+            # Narrow to HTTP/network errors per .ai/python-guidelines.md:
+            # we expect transient endpoint flakes here (timeout, connection
+            # refused while the frontend is still binding /metrics) and
+            # the strong gate has its own `is None` guard. Programming
+            # errors propagate so they surface at test-time instead of
+            # being swallowed.
+            logger.warning("Failed to scrape %s: %s", url, e)
+            return None
+        # Compose from canonical constants so a metric rename in
+        # prometheus_names cascades here instead of silently breaking
+        # the kv_hit_rate strong gate.
+        full = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.router.KV_HIT_RATE}"
+        )
+        return (
+            sum_metric_samples(text, f"{full}_sum"),
+            sum_metric_samples(text, f"{full}_count"),
+        )
+
+    def final_validation(self) -> None:
+        """Assert cached_tokens >= min_cached_tokens on at least one repeat,
+        and (if set) router_kv_hit_rate post-R1 mean >= min_avg_kv_hit_rate.
         """
         if self.repeat_count > 1 and not self._cached_tokens_found:
             raise AssertionError(
@@ -471,6 +528,41 @@ class CachedTokensChatPayload(ChatPayload):
             )
         logger.info(
             "✓ Final validation PASSED: cached_tokens found in repeated requests"
+        )
+
+        if self.min_avg_kv_hit_rate <= 0:
+            return
+        if self._metrics_baseline is None:
+            raise AssertionError(
+                "min_avg_kv_hit_rate set but no metrics baseline captured "
+                "(R1 validate() didn't run or /metrics was unreachable)."
+            )
+        after = self._scrape_router_kv_hit_rate()
+        if after is None:
+            raise AssertionError(
+                "router_kv_hit_rate scrape failed at final_validation; "
+                "/metrics endpoint unreachable from test."
+            )
+        bsum, bcount = self._metrics_baseline
+        asum, acount = after
+        d_sum, d_count = asum - bsum, acount - bcount
+        if d_count <= 0:
+            raise AssertionError(
+                f"router_kv_hit_rate: no new observations between R1 and final "
+                f"(baseline_count={bcount}, after_count={acount}); "
+                f"MM-routing likely not engaging on repeat requests."
+            )
+        avg = d_sum / d_count
+        if avg < self.min_avg_kv_hit_rate:
+            raise AssertionError(
+                f"router_kv_hit_rate: mean over R2+ ({avg:.3f}) below required "
+                f"min ({self.min_avg_kv_hit_rate}). delta_n={d_count}, "
+                f"delta_sum={d_sum:.3f}. Router-side block hashes did not "
+                f"match the worker — MM-aware routing degraded silently."
+            )
+        logger.info(
+            f"✓ router_kv_hit_rate: mean over R2+ = {avg:.3f} "
+            f"(>= {self.min_avg_kv_hit_rate})"
         )
 
 

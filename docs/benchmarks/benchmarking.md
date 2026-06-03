@@ -405,6 +405,7 @@ AIPerf has many capabilities beyond basic profiling. Here are some particularly 
 
 | Feature | Description | Docs |
 |---------|-------------|------|
+| Priority Validation | Send per-request `nvext.agent_hints.priority` values and verify router or backend priority behavior under contention | [Priority Scheduling](../agents/priority-scheduling.md#verify-priority-is-working) |
 | Trace Replay | Replay production traces for deterministic benchmarking | [Trace Replay](https://github.com/ai-dynamo/aiperf/blob/main/docs/benchmark-modes/trace-replay.md) |
 | Arrival Patterns | Poisson, constant, gamma traffic distributions | [Arrival Patterns](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorials/arrival-patterns.md) |
 | Gradual Ramping | Smooth ramp-up of concurrency and request rate | [Ramping](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorials/ramping.md) |

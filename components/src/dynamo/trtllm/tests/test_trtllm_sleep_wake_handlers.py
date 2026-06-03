@@ -9,7 +9,7 @@ TRTLLMEngineQuiesceController without requiring a real GPU or TRT-LLM engine.
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 import torch
@@ -19,8 +19,20 @@ if not torch.cuda.is_available():
         "Skipping: CUDA not available (tensorrt_llm import requires GPU).",
         allow_module_level=True,
     )
+pytest.importorskip(
+    "dynamo._core",
+    reason="dynamo Rust Python bindings are required for HandlerBase",
+)
+pytest.importorskip(
+    "dynamo.nixl_connect",
+    reason="NIXL bindings are required to import HandlerBase",
+)
+pytest.importorskip("tensorrt_llm")
 
-from dynamo.trtllm.request_handlers.handler_base import HandlerBase
+from dynamo.trtllm.request_handlers.handler_base import (  # noqa: E402
+    HandlerBase,
+    TRTLLMEngineQuiesceController,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -58,6 +70,7 @@ def _make_handler() -> _ConcreteHandler:
     # tests don't need to manually update state after a release call.
     handler._quiesce_controller = MagicMock()
     handler._quiesce_controller.is_quiesced = False
+    handler._quiesce_controller.needs_resume_recovery = False
 
     async def _quiesce(tags=None):
         handler._quiesce_controller.is_quiesced = True
@@ -67,6 +80,58 @@ def _make_handler() -> _ConcreteHandler:
     handler._quiesce_controller.resume = AsyncMock(return_value=True)
     handler._quiesce_controller.mark_resumed = MagicMock()
     return handler
+
+
+# ---------------------------------------------------------------------------
+# TRTLLMEngineQuiesceController recovery state
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_quiesce_tracks_partial_state_for_resume_recovery():
+    controller = TRTLLMEngineQuiesceController(MagicMock())
+    controller._collective_rpc = MagicMock()
+    controller._release_gms_weights = MagicMock(
+        side_effect=RuntimeError("weights failed")
+    )
+    controller._restore_gms_weights = MagicMock()
+
+    with pytest.raises(RuntimeError, match="weights failed"):
+        await controller.quiesce()
+
+    assert controller.is_quiesced is False
+    assert controller.needs_resume_recovery is True
+
+    resumed = await controller.resume()
+
+    assert resumed is True
+    controller._collective_rpc.assert_has_calls(
+        [call("sleep", ["kv_cache"]), call("wakeup", ["kv_cache"])]
+    )
+    controller._restore_gms_weights.assert_called_once_with()
+    controller.mark_resumed()
+    assert controller.needs_resume_recovery is False
+
+
+@pytest.mark.asyncio
+async def test_resume_restores_completed_quiesce_domains():
+    controller = TRTLLMEngineQuiesceController(MagicMock())
+    controller._collective_rpc = MagicMock()
+    controller._release_gms_weights = MagicMock()
+    controller._restore_gms_weights = MagicMock()
+
+    assert await controller.quiesce(["kv_cache"]) is True
+
+    resumed = await controller.resume(["weights"])
+
+    assert resumed is True
+    controller._collective_rpc.assert_has_calls(
+        [call("sleep", ["kv_cache"]), call("wakeup", ["kv_cache"])]
+    )
+    controller._restore_gms_weights.assert_not_called()
+    controller.mark_resumed()
+    assert controller.is_quiesced is False
+    assert controller.needs_resume_recovery is False
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +212,45 @@ async def test_release_unregisters_endpoint_and_restores_on_error():
     )
     result = await handler.release_memory_occupation({})
     assert result["status"] == "error"
+    handler.generate_endpoint.unregister_endpoint_instance.assert_called_once()
+    handler.generate_endpoint.register_endpoint_instance.assert_called_once()
+    assert not handler._reject_new_requests
+
+
+@pytest.mark.asyncio
+async def test_release_rejected_while_resume_recovery_pending():
+    handler = _make_handler()
+    # A prior release left the controller half-quiesced; quiesce() would no-op.
+    handler._quiesce_controller.needs_resume_recovery = True
+
+    result = await handler.release_memory_occupation({})
+
+    assert result["status"] == "error"
+    assert "resume_memory_occupation required" in result["message"]
+    handler._quiesce_controller.quiesce.assert_not_called()
+    handler.generate_endpoint.unregister_endpoint_instance.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_release_recovers_partial_quiesce_before_restoring_endpoint():
+    handler = _make_handler()
+
+    async def _quiesce_failed(tags=None):
+        handler._quiesce_controller.needs_resume_recovery = True
+        raise RuntimeError("engine error")
+
+    async def _resume(tags=None):
+        handler._quiesce_controller.needs_resume_recovery = False
+        return True
+
+    handler._quiesce_controller.quiesce = AsyncMock(side_effect=_quiesce_failed)
+    handler._quiesce_controller.resume = AsyncMock(side_effect=_resume)
+
+    result = await handler.release_memory_occupation({})
+
+    assert result["status"] == "error"
+    handler._quiesce_controller.resume.assert_awaited_once_with(None)
+    handler._quiesce_controller.mark_resumed.assert_called_once_with()
     handler.generate_endpoint.unregister_endpoint_instance.assert_called_once()
     handler.generate_endpoint.register_endpoint_instance.assert_called_once()
     assert not handler._reject_new_requests

@@ -85,6 +85,8 @@ pub(super) fn create_aic_callback(
     moe_tp_size: Option<usize>,
     moe_ep_size: Option<usize>,
     attention_dp_size: Option<usize>,
+    nextn: Option<usize>,
+    nextn_accept_rates: Option<&str>,
 ) -> PyResult<Arc<dyn AicCallback>> {
     let module = py.import("dynamo._internal.aic")?;
     let session = module.call_method1(
@@ -98,6 +100,8 @@ pub(super) fn create_aic_callback(
             moe_tp_size,
             moe_ep_size,
             attention_dp_size,
+            nextn,
+            nextn_accept_rates,
         ),
     )?;
     Ok(Arc::new(PyAicCallback {
@@ -116,6 +120,8 @@ pub(super) fn create_aic_prefill_load_estimator(
     moe_tp_size: Option<usize>,
     moe_ep_size: Option<usize>,
     attention_dp_size: Option<usize>,
+    nextn: Option<usize>,
+    nextn_accept_rates: Option<&str>,
 ) -> PyResult<Arc<dyn PrefillLoadEstimator>> {
     let module = py.import("dynamo._internal.aic")?;
     let session = module.call_method1(
@@ -129,6 +135,8 @@ pub(super) fn create_aic_prefill_load_estimator(
             moe_tp_size,
             moe_ep_size,
             attention_dp_size,
+            nextn,
+            nextn_accept_rates,
         ),
     )?;
     Ok(Arc::new(PyAicCallback {
@@ -136,6 +144,7 @@ pub(super) fn create_aic_prefill_load_estimator(
     }))
 }
 
+/// Estimate the KV block pool size from AIC's base-model memory model.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn estimate_aic_num_gpu_blocks(
     py: Python<'_>,

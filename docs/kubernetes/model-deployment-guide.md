@@ -233,7 +233,7 @@ spec:
 |---|---|---|
 | `throughput` (default) | Static queue-depth and KV-cache thresholds; scales based on saturation | No |
 | `latency` | Same as throughput with more aggressive thresholds | No |
-| `sla` | Regression-based models targeting specific TTFT/ITL values; uses profiling data and live metrics | Yes |
+| `sla` | Rust engine perf shim targeting specific TTFT/ITL values; uses native AIC when available, optional bootstrap data, and live FPM tuning | Yes |
 
 ### Prometheus Requirement
 

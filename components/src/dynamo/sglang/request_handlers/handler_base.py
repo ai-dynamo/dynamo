@@ -44,56 +44,9 @@ from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
+from dynamo.sglang.quiesce import SGLangEngineQuiesceController
 
 logger = logging.getLogger(__name__)
-
-
-class SGLangEngineQuiesceController:
-    def __init__(self, engine: sgl.Engine):
-        self._engine = engine
-        self._is_quiesced = False
-
-    @property
-    def is_quiesced(self) -> bool:
-        return self._is_quiesced
-
-    async def quiesce(self, tags: Optional[list[str]] = None) -> bool:
-        if self._is_quiesced:
-            return False
-
-        from sglang.srt.managers.io_struct import (
-            PauseGenerationReqInput,
-            ReleaseMemoryOccupationReqInput,
-        )
-
-        await self._engine.tokenizer_manager.pause_generation(PauseGenerationReqInput())
-        await self._engine.tokenizer_manager.release_memory_occupation(
-            ReleaseMemoryOccupationReqInput(tags=tags),
-            None,
-        )
-        self._is_quiesced = True
-        return True
-
-    async def resume(self, tags: Optional[list[str]] = None) -> bool:
-        if not self._is_quiesced:
-            return False
-
-        from sglang.srt.managers.io_struct import (
-            ContinueGenerationReqInput,
-            ResumeMemoryOccupationReqInput,
-        )
-
-        await self._engine.tokenizer_manager.resume_memory_occupation(
-            ResumeMemoryOccupationReqInput(tags=tags),
-            None,
-        )
-        await self._engine.tokenizer_manager.continue_generation(
-            ContinueGenerationReqInput()
-        )
-        return True
-
-    def mark_resumed(self) -> None:
-        self._is_quiesced = False
 
 
 RequestT = TypeVar("RequestT")
@@ -190,9 +143,11 @@ class RLMixin:
         if isinstance(result, list):
             return {
                 "result": [
-                    dataclasses.asdict(item)
-                    if dataclasses.is_dataclass(item) and not isinstance(item, type)
-                    else item
+                    (
+                        dataclasses.asdict(item)
+                        if dataclasses.is_dataclass(item) and not isinstance(item, type)
+                        else item
+                    )
                     for item in result
                 ]
             }
@@ -750,11 +705,18 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
                     "status": "ok",
                     "message": "Memory already released",
                 }
+            if self._quiesce_controller.needs_resume_recovery:
+                return {
+                    "status": "error",
+                    "message": "resume_memory_occupation required before retrying release",
+                }
 
+            unregistered = False
             try:
                 # Stop new requests and drain in-flight work before releasing memory.
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.unregister_endpoint_instance()
+                    unregistered = True
 
                 await self._quiesce_controller.quiesce(tags)
 
@@ -768,6 +730,24 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
                 }
             except Exception as e:
                 logging.error(f"Failed to release memory occupation: {e}")
+                # If quiesce rolled back cleanly the engine is serving-safe again,
+                # but discovery still shows us unregistered and resume will
+                # early-return. Re-register so the worker rejoins the routing pool.
+                if (
+                    unregistered
+                    and not self._quiesce_controller.is_quiesced
+                    and not self._quiesce_controller.needs_resume_recovery
+                    and self.generate_endpoint is not None
+                ):
+                    try:
+                        await self.generate_endpoint.register_endpoint_instance()
+                        logging.info(
+                            "Re-registered endpoint after failed memory release rollback"
+                        )
+                    except Exception as reg_err:
+                        logging.error(
+                            f"Failed to re-register endpoint after release failure: {reg_err}"
+                        )
                 return {"status": "error", "message": str(e)}
 
     async def resume_memory_occupation(self, body: dict) -> dict:
@@ -790,7 +770,8 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         body = body or {}
         tags = body.get("tags")
         async with self._quiesce_lock:
-            if not self._quiesce_controller.is_quiesced:
+            needs_recovery = self._quiesce_controller.needs_resume_recovery
+            if not self._quiesce_controller.is_quiesced and not needs_recovery:
                 return {
                     "status": "ok",
                     "message": "Memory already resumed",
