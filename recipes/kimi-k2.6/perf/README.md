@@ -13,10 +13,10 @@ Edit the `env` block in [perf.yaml](perf.yaml):
 
 | Variant target           | `ENDPOINT`                                      | `TRACE_FILE` (chat / agent)                                             |
 | ------------------------ | ----------------------------------------------- | ----------------------------------------------------------------------- |
-| B200 agg, chat workload  | `turbo-kimi-k26-agg-b200-chat-frontend:8000`    | `/model-cache/traces/nim_turbo_8k_1k_70kv_chat_new_noschedule.jsonl`    |
-| B200 agg, agent workload | `turbo-kimi-k26-agg-b200-agentic-frontend:8000` | `/model-cache/traces/nim_turbo_64k_400_90kv_agent_new_noschedule.jsonl` |
-| H200 agg, chat workload  | `turbo-kimi-k26-agg-h200-chat-frontend:8000`    | `/model-cache/traces/nim_turbo_8k_1k_70kv_chat_new_noschedule.jsonl`    |
-| H200 agg, agent workload | `turbo-kimi-k26-agg-h200-agentic-frontend:8000` | `/model-cache/traces/nim_turbo_64k_400_90kv_agent_new_noschedule.jsonl` |
+| B200 agg, chat workload  | `kimi-k26-agg-b200-chat-frontend:8000`    | `/model-cache/traces/8k_1k_70kv_chat_new_noschedule.jsonl`    |
+| B200 agg, agent workload | `kimi-k26-agg-b200-agentic-frontend:8000` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule.jsonl` |
+| H200 agg, chat workload  | `kimi-k26-agg-h200-chat-frontend:8000`    | `/model-cache/traces/8k_1k_70kv_chat_new_noschedule.jsonl`    |
+| H200 agg, agent workload | `kimi-k26-agg-h200-agentic-frontend:8000` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule.jsonl` |
 
 
 The chat- and agent-tuned DGDs both serve `moonshotai/Kimi-K2.6`, so either trace can be replayed against either DGD by swapping `TRACE_FILE`.
@@ -29,8 +29,8 @@ The benchmark replays a [Mooncake-format](https://github.com/kvcache-ai/Mooncake
 
 Trace flavours expected on the PVC:
 
-- **Chat** — `/model-cache/traces/nim_turbo_8k_1k_70kv_chat_new_noschedule.jsonl`
-- **Agent** — `/model-cache/traces/nim_turbo_64k_400_90kv_agent_new_noschedule.jsonl`
+- **Chat** — `/model-cache/traces/8k_1k_70kv_chat_new_noschedule.jsonl`
+- **Agent** — `/model-cache/traces/64k_400_90kv_agent_new_noschedule.jsonl`
 
 For shorter runs (smoke tests, faster iteration), point `TRACE_FILE` at a smaller variant of the same trace rather than capping run time. We typically stage 15% and 30% subsets alongside the full dataset, e.g.:
 
@@ -78,24 +78,24 @@ Keep `pvc-helper` around for fetching artifacts later, or `kubectl delete pod pv
 kubectl apply -f perf.yaml -n ${NAMESPACE}
 
 # Stream logs
-kubectl logs -n ${NAMESPACE} -l job-name=turbo-kimi-k26-bench -f
+kubectl logs -n ${NAMESPACE} -l job-name=kimi-k26-bench -f
 
 # Wait for completion (2h hard cap on the Job)
 kubectl wait --for=condition=Complete \
-  job/turbo-kimi-k26-bench \
+  job/kimi-k26-bench \
   -n ${NAMESPACE} --timeout=7200s
 ```
 
 ### 4. Fetch artifacts
 
 ```bash
-kubectl cp ${NAMESPACE}/pvc-helper:/model-cache/perf/<epoch>_turbo-kimi-k26-bench ./results
+kubectl cp ${NAMESPACE}/pvc-helper:/model-cache/perf/<epoch>_kimi-k26-bench ./results
 ```
 
 ### 5. Cleanup
 
 ```bash
-kubectl delete job turbo-kimi-k26-bench -n ${NAMESPACE}
+kubectl delete job kimi-k26-bench -n ${NAMESPACE}
 kubectl delete pod pvc-helper -n ${NAMESPACE}   # if you kept it around
 ```
 
@@ -107,13 +107,13 @@ For each concurrency value you want to measure:
 
 ```bash
 # 1. Delete the previous bench job
-kubectl delete job turbo-kimi-k26-bench -n ${NAMESPACE} --ignore-not-found
+kubectl delete job kimi-k26-bench -n ${NAMESPACE} --ignore-not-found
 
 # 2. Delete the DGD worker pods to drop KV / prefix-cache state.
 #    DGDs are Grove-managed (DGD → PodCliqueSet → PodClique → Pod), not Deployments,
 #    so `kubectl rollout restart deployment` won't match anything — delete the pods
 #    directly and let Grove recreate them.
-DGD=turbo-kimi-k26-agg-b200-chat
+DGD=kimi-k26-agg-b200-chat
 kubectl delete pods -n ${NAMESPACE} \
   -l nvidia.com/dynamo-graph-deployment-name=${DGD},nvidia.com/dynamo-component-type=worker
 kubectl wait --for=condition=Ready pod -n ${NAMESPACE} \
@@ -123,7 +123,7 @@ kubectl wait --for=condition=Ready pod -n ${NAMESPACE} \
 # 3. Bump CONCURRENCY in perf.yaml (or use kubectl create -f perf.yaml \
 #    with `--dry-run=client -o yaml | yq '.spec.template.spec.containers[0].env[] |= ...'`)
 kubectl apply -f perf.yaml -n ${NAMESPACE}
-kubectl wait --for=condition=Complete job/turbo-kimi-k26-bench -n ${NAMESPACE} --timeout=7200s
+kubectl wait --for=condition=Complete job/kimi-k26-bench -n ${NAMESPACE} --timeout=7200s
 ```
 
 (The bench Job's `wait_for_model_ready` loop handles the worker restart window — it re-polls `/v1/models` until the frontend reports ready again.)
@@ -135,8 +135,8 @@ Edit the `env` block on the `Job` to adjust:
 
 | Variable       | Default                                             | Notes                                                                           |
 | -------------- | --------------------------------------------------- | ------------------------------------------------------------------------------- |
-| `ENDPOINT`     | `turbo-kimi-k26-agg-b200-chat-frontend:8000`        | DGD frontend service:port — change per variant                                  |
-| `TRACE_FILE`   | `/model-cache/traces/nim_turbo_8k_1k_70kv_chat_new_noschedule.jsonl` | Swap to agent or to a smaller subset (`...short_15perc.jsonl`) for shorter runs |
+| `ENDPOINT`     | `kimi-k26-agg-b200-chat-frontend:8000`        | DGD frontend service:port — change per variant                                  |
+| `TRACE_FILE`   | `/model-cache/traces/8k_1k_70kv_chat_new_noschedule.jsonl` | Swap to agent or to a smaller subset (`...short_15perc.jsonl`) for shorter runs |
 | `CONCURRENCY`  | `24`                                                | Single value — see [Running a concurrency sweep](#running-a-concurrency-sweep)  |
 | `TARGET_MODEL` | `moonshotai/Kimi-K2.6`                              | Must match `--served-model-name` on the DGD frontend                            |
 

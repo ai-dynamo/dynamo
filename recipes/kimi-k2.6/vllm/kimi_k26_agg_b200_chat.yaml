@@ -4,10 +4,10 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: turbo-kimi-k26-agg-b200-agentic-specdec-config
+  name: kimi-k26-agg-b200-chat-specdec-config
   labels:
-    app.kubernetes.io/name: turbo-kimi-k26-agg-b200-agentic
-    app.kubernetes.io/part-of: nim-turbo-dynamo
+    app.kubernetes.io/name: kimi-k26-agg-b200-chat
+    app.kubernetes.io/part-of: dynamo
 data:
   attention-config: |-
     {
@@ -55,10 +55,10 @@ data:
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: turbo-kimi-k26-agg-b200-agentic
+  name: kimi-k26-agg-b200-chat
   labels:
-    app.kubernetes.io/name: turbo-kimi-k26-agg-b200-agentic
-    app.kubernetes.io/part-of: nim-turbo-dynamo
+    app.kubernetes.io/name: kimi-k26-agg-b200-chat
+    app.kubernetes.io/part-of: dynamo
 spec:
   backendFramework: vllm
   components:
@@ -146,22 +146,22 @@ spec:
                 - name: ATTENTION_CONFIG
                   valueFrom:
                     configMapKeyRef:
-                      name: turbo-kimi-k26-agg-b200-agentic-specdec-config
+                      name: kimi-k26-agg-b200-chat-specdec-config
                       key: attention-config
                 - name: SPECULATIVE_CONFIG
                   valueFrom:
                     configMapKeyRef:
-                      name: turbo-kimi-k26-agg-b200-agentic-specdec-config
+                      name: kimi-k26-agg-b200-chat-specdec-config
                       key: speculative-config # speculative-config-synthetic for benchmarking
                 - name: KV_TRANSFER_CONFIG
                   valueFrom:
                     configMapKeyRef:
-                      name: turbo-kimi-k26-agg-b200-agentic-specdec-config
+                      name: kimi-k26-agg-b200-chat-specdec-config
                       key: kv-transfer-config
                 - name: COMPILATION_CONFIG
                   valueFrom:
                     configMapKeyRef:
-                      name: turbo-kimi-k26-agg-b200-agentic-specdec-config
+                      name: kimi-k26-agg-b200-chat-specdec-config
                       key: compilation-config
                 - name: NCCL_IB_DISABLE
                   value: "1"

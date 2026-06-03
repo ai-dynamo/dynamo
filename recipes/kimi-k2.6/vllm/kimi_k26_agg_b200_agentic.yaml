@@ -4,13 +4,16 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: turbo-kimi-k26-agg-h200-agentic-specdec-config
+  name: kimi-k26-agg-b200-agentic-specdec-config
   labels:
-    app.kubernetes.io/name: turbo-kimi-k26-agg-h200-agentic
-    app.kubernetes.io/part-of: nim-turbo-dynamo
+    app.kubernetes.io/name: kimi-k26-agg-b200-agentic
+    app.kubernetes.io/part-of: dynamo
 data:
   attention-config: |-
     {
+      "backend": "TOKENSPEED_MLA",
+      "mla_prefill_backend": "TOKENSPEED_MLA",
+      "use_prefill_query_quantization": true
     }
   speculative-config-synthetic: |-
     {
@@ -52,10 +55,10 @@ data:
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: turbo-kimi-k26-agg-h200-agentic
+  name: kimi-k26-agg-b200-agentic
   labels:
-    app.kubernetes.io/name: turbo-kimi-k26-agg-h200-agentic
-    app.kubernetes.io/part-of: nim-turbo-dynamo
+    app.kubernetes.io/name: kimi-k26-agg-b200-agentic
+    app.kubernetes.io/part-of: dynamo
 spec:
   backendFramework: vllm
   components:
@@ -94,17 +97,23 @@ spec:
                       - key: nvidia.com/gpu.product
                         operator: In
                         values:
-                          - NVIDIA-H200
+                          - NVIDIA-B200
           containers:
             - name: main
               args:
-                - --model=moonshotai/Kimi-K2.6
+                - --model=nvidia/Kimi-K2.6-NVFP4
                 - --served-model-name=moonshotai/Kimi-K2.6
                 - --trust-remote-code
                 - --max-model-len=262144
-                - --gpu-memory-utilization=0.85
+                - --kv-cache-dtype=fp8
+                - --gpu-memory-utilization=0.95
+                - --enable-flashinfer-autotune
+                - --moe-backend=flashinfer_trtllm
                 - --mm-encoder-tp-mode=data
-                - --tensor-parallel-size=8
+                - --tensor-parallel-size=4
+                  # - --enable-expert-parallel
+                  # - --all2all-backend deepep_low_latency
+                  # - --all2all-backend flashinfer_all2allv
                 - --attention-config=$(ATTENTION_CONFIG)
                 - --compilation-config=$(COMPILATION_CONFIG)
                 - --speculative-config=$(SPECULATIVE_CONFIG)
@@ -137,37 +146,45 @@ spec:
                 - name: ATTENTION_CONFIG
                   valueFrom:
                     configMapKeyRef:
-                      name: turbo-kimi-k26-agg-h200-agentic-specdec-config
+                      name: kimi-k26-agg-b200-agentic-specdec-config
                       key: attention-config
                 - name: SPECULATIVE_CONFIG
                   valueFrom:
                     configMapKeyRef:
-                      name: turbo-kimi-k26-agg-h200-agentic-specdec-config
+                      name: kimi-k26-agg-b200-agentic-specdec-config
                       key: speculative-config # speculative-config-synthetic for benchmarking
                 - name: KV_TRANSFER_CONFIG
                   valueFrom:
                     configMapKeyRef:
-                      name: turbo-kimi-k26-agg-h200-agentic-specdec-config
+                      name: kimi-k26-agg-b200-agentic-specdec-config
                       key: kv-transfer-config
                 - name: COMPILATION_CONFIG
                   valueFrom:
                     configMapKeyRef:
-                      name: turbo-kimi-k26-agg-h200-agentic-specdec-config
+                      name: kimi-k26-agg-b200-agentic-specdec-config
                       key: compilation-config
                 - name: NCCL_IB_DISABLE
                   value: "1"
+                # consistent LMCache hashes across ranks
                 - name: PYTHONHASHSEED
                   value: "42"
+                # NCCL symmetric AR backend with SHARP
+                - name: VLLM_USE_NCCL_SYMM_MEM
+                  value: "1"
+                - name: NCCL_CUMEM_ENABLE
+                  value: "1"
+                - name: NCCL_NVLS_ENABLE
+                  value: "1"
               envFrom:
                 - secretRef:
                     name: hf-token-secret
               image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.3.0-kimi-k2.6-dev.1-rc.0-cuda13
               resources:
                 requests:
-                  nvidia.com/gpu: "8"
+                  nvidia.com/gpu: "4"
                   memory: "750Gi"
                 limits:
-                  nvidia.com/gpu: "8"
+                  nvidia.com/gpu: "4"
               securityContext:
                 runAsUser: 0
               startupProbe:

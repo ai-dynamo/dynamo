@@ -1,6 +1,6 @@
-# Kimi-K2.6 Turbo Recipes
+# Kimi-K2.6 Recipes
 
-Turbo recipes for **moonshotai/Kimi-K2.6**.
+Recipes for **moonshotai/Kimi-K2.6**.
 
 ## Configurations
 
@@ -75,7 +75,7 @@ Deploy the target DGD:
 SKU=b200 # or h200
 USECASE=chat # or agentic
 
-kubectl apply -f vllm/turbo_kimi_k26_agg_${SKU}_${USECASE}.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/kimi_k26_agg_${SKU}_${USECASE}.yaml -n ${NAMESPACE}
 ```
 
 

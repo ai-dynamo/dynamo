@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# AIPerf trace-replay benchmark for Kimi-K2.6 NIM Turbo DGDs.
+# AIPerf trace-replay benchmark for Kimi-K2.6 DGDs.
 #
 # One Job covers every variant (B200/H200 × chat/agent traces) — the
 # benchmark itself is identical regardless of GPU SKU. To target a specific
@@ -20,7 +20,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: turbo-kimi-k26-bench
+  name: kimi-k26-bench
 spec:
   backoffLimit: 1
   activeDeadlineSeconds: 7200 # 2h hard cap on the Job
@@ -29,7 +29,7 @@ spec:
   template:
     metadata:
       labels:
-        app: turbo-kimi-k26-bench
+        app: kimi-k26-bench
     spec:
       # Co-locate the bench pod with the DGD frontend to minimise client/server
       # network overhead. Update `values:` to the DGD you are benchmarking.
@@ -45,10 +45,10 @@ spec:
               - key: nvidia.com/dynamo-graph-deployment-name
                 operator: In
                 values:
-                - turbo-kimi-k26-agg-b200-chat
-                - turbo-kimi-k26-agg-b200-agentic
-                - turbo-kimi-k26-agg-h200-chat
-                - turbo-kimi-k26-agg-h200-agentic
+                - kimi-k26-agg-b200-chat
+                - kimi-k26-agg-b200-agentic
+                - kimi-k26-agg-h200-chat
+                - kimi-k26-agg-h200-agentic
             topologyKey: kubernetes.io/hostname
       # tolerations: # uncomment to populate any tolerations for the gpu nodes
       containers:
@@ -146,9 +146,9 @@ spec:
         env:
         # --- Edit these to target the DGD + trace you want to benchmark ---
         - name: ENDPOINT
-          value: turbo-kimi-k26-agg-b200-chat-frontend:8000
+          value: kimi-k26-agg-b200-chat-frontend:8000
         - name: TRACE_FILE
-          value: /model-cache/traces/nim_turbo_8k_1k_70kv_chat_new_noschedule.jsonl  # use /model-cache/traces/nim_turbo_64k_400_90kv_agent_new_noschedule.jsonl for agent
+          value: /model-cache/traces/8k_1k_70kv_chat_new_noschedule.jsonl  # use /model-cache/traces/64k_400_90kv_agent_new_noschedule.jsonl for agent
         - name: CONCURRENCY
           value: "24"
         # --- The remainder is shared across all variants ---
