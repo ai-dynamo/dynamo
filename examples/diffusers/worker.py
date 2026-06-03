@@ -38,6 +38,7 @@ from fastvideo.api import (
 )
 from pydantic import BaseModel, Field
 
+from dynamo.common.configuration import add_negatable_bool_argument
 from dynamo.llm import (  # type: ignore[attr-defined]
     ModelInput,
     ModelType,
@@ -60,21 +61,6 @@ def _default_output_dir() -> str:
 
     uid = os.getuid() if hasattr(os, "getuid") else "unknown"
     return str(Path("/tmp") / f"dynamo-fastvideo-{uid}" / "outputs")
-
-
-def _ensure_private_directory(path: Path) -> None:
-    missing_dirs = []
-    current = path
-    while not current.exists():
-        missing_dirs.append(current)
-        if current.parent == current:
-            break
-        current = current.parent
-
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    for directory in missing_dirs:
-        if directory.is_dir():
-            directory.chmod(0o700)
 
 
 DEFAULT_MODEL = "FastVideo/FastWan2.1-T2V-1.3B-Diffusers"
@@ -240,29 +226,6 @@ def _supports_fp4_quantization() -> bool:
         return False
 
     return True
-
-
-def _add_negatable_bool_argument(
-    parser: argparse.ArgumentParser,
-    flag_name: str,
-    *,
-    dest: str,
-    default: bool,
-    help_text: str,
-) -> None:
-    parser.add_argument(
-        flag_name,
-        dest=dest,
-        action="store_true",
-        default=default,
-        help=help_text,
-    )
-    parser.add_argument(
-        f"--no-{flag_name.removeprefix('--')}",
-        dest=dest,
-        action="store_false",
-        help=argparse.SUPPRESS,
-    )
 
 
 class FastVideoBackend:
@@ -454,7 +417,7 @@ class FastVideoBackend:
         if self.generator is None:
             raise RuntimeError("Generator is not initialized")
 
-        _ensure_private_directory(self.output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         output_path = self.output_dir / f"{video_id}.mp4"
         generation_request = self._build_generation_request(
             prompt=prompt,
@@ -764,19 +727,21 @@ def _parse_args() -> argparse.Namespace:
         default=DEFAULT_TORCH_COMPILE_MODE,
         help="torch.compile mode when --torch-compile is enabled.",
     )
-    _add_negatable_bool_argument(
+    add_negatable_bool_argument(
         parser,
-        "--torch-compile-fullgraph",
+        flag_name="--torch-compile-fullgraph",
+        env_var="DYN_FASTVIDEO_TORCH_COMPILE_FULLGRAPH",
         dest="torch_compile_fullgraph",
         default=True,
-        help_text="Enable torch.compile fullgraph mode.",
+        help="Enable torch.compile fullgraph mode.",
     )
-    _add_negatable_bool_argument(
+    add_negatable_bool_argument(
         parser,
-        "--torch-compile-dynamic",
+        flag_name="--torch-compile-dynamic",
+        env_var="DYN_FASTVIDEO_TORCH_COMPILE_DYNAMIC",
         dest="torch_compile_dynamic",
         default=False,
-        help_text="Enable dynamic shapes for torch.compile.",
+        help="Enable dynamic shapes for torch.compile.",
     )
     parser.add_argument(
         "--fp4-quantization",
@@ -784,61 +749,69 @@ def _parse_args() -> argparse.Namespace:
         dest="fp4_quantization",
         help="Request NVFP4 transformer quantization through QuantizationConfig.",
     )
-    _add_negatable_bool_argument(
+    add_negatable_bool_argument(
         parser,
-        "--use-fsdp-inference",
+        flag_name="--use-fsdp-inference",
+        env_var="DYN_FASTVIDEO_USE_FSDP_INFERENCE",
         dest="use_fsdp_inference",
         default=False,
-        help_text="Enable FastVideo FSDP inference.",
+        help="Enable FastVideo FSDP inference.",
     )
-    _add_negatable_bool_argument(
+    add_negatable_bool_argument(
         parser,
-        "--dit-cpu-offload",
+        flag_name="--dit-cpu-offload",
+        env_var="DYN_FASTVIDEO_DIT_CPU_OFFLOAD",
         dest="dit_cpu_offload",
         default=True,
-        help_text="Enable DiT CPU offload.",
+        help="Enable DiT CPU offload.",
     )
-    _add_negatable_bool_argument(
+    add_negatable_bool_argument(
         parser,
-        "--dit-layerwise-offload",
+        flag_name="--dit-layerwise-offload",
+        env_var="DYN_FASTVIDEO_DIT_LAYERWISE_OFFLOAD",
         dest="dit_layerwise_offload",
         default=True,
-        help_text="Enable DiT layerwise CPU offload.",
+        help="Enable DiT layerwise CPU offload.",
     )
-    _add_negatable_bool_argument(
+    add_negatable_bool_argument(
         parser,
-        "--vae-cpu-offload",
+        flag_name="--vae-cpu-offload",
+        env_var="DYN_FASTVIDEO_VAE_CPU_OFFLOAD",
         dest="vae_cpu_offload",
         default=True,
-        help_text="Enable VAE CPU offload.",
+        help="Enable VAE CPU offload.",
     )
-    _add_negatable_bool_argument(
+    add_negatable_bool_argument(
         parser,
-        "--image-encoder-cpu-offload",
+        flag_name="--image-encoder-cpu-offload",
+        env_var="DYN_FASTVIDEO_IMAGE_ENCODER_CPU_OFFLOAD",
         dest="image_encoder_cpu_offload",
         default=True,
-        help_text="Enable image encoder CPU offload.",
+        help="Enable image encoder CPU offload.",
     )
-    _add_negatable_bool_argument(
+    add_negatable_bool_argument(
         parser,
-        "--text-encoder-cpu-offload",
+        flag_name="--text-encoder-cpu-offload",
+        env_var="DYN_FASTVIDEO_TEXT_ENCODER_CPU_OFFLOAD",
         dest="text_encoder_cpu_offload",
         default=True,
-        help_text="Enable text encoder CPU offload.",
+        help="Enable text encoder CPU offload.",
     )
-    _add_negatable_bool_argument(
+    add_negatable_bool_argument(
         parser,
-        "--pin-cpu-memory",
+        flag_name="--pin-cpu-memory",
+        env_var="DYN_FASTVIDEO_PIN_CPU_MEMORY",
         dest="pin_cpu_memory",
         default=True,
-        help_text="Pin host memory for CPU offload transfers.",
+        help="Pin host memory for CPU offload transfers.",
     )
-    _add_negatable_bool_argument(
+    add_negatable_bool_argument(
         parser,
-        "--disable-autocast",
+        flag_name="--disable-autocast",
+        env_var="DYN_FASTVIDEO_DISABLE_AUTOCAST",
         dest="disable_autocast",
         default=False,
-        help_text="Disable autocast in FastVideo denoising/decoding paths.",
+        help="Disable autocast in FastVideo denoising/decoding paths.",
     )
     parser.add_argument("--default-size", default=DEFAULT_SIZE)
     parser.add_argument("--default-seconds", type=int, default=DEFAULT_SECONDS)
