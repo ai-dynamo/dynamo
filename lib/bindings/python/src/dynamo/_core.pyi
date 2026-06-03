@@ -108,6 +108,10 @@ def run_kv_indexer(args: List[str]) -> None:
     """Run the KV indexer with the given arguments."""
     ...
 
+def run_slot_tracker(args: List[str]) -> None:
+    """Run the KV router slot tracker with the given arguments."""
+    ...
+
 # Any Python object that can be serialized to JSON (dict, list, str, int, etc.)
 JsonLike = Any
 
