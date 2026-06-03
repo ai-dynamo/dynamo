@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Lightseek-powered exact MM-aware routing for SGLang.
+# MM-aware KV routing for SGLang.
 #
-# Requires the dynamo dev container with `cargo build --features lightseek-mm`
-# and our sglang fork (upstream PR sgl-project/sglang#25300). Without the
-# upstream mm_hashes kwarg the dynamo glue silently falls back to
-# text-prefix routing.
+# Requires dynamo built with `--features lightseek-mm` (default in the
+# dynamo sglang container image) and sglang carrying the
+# sgl-project/sglang#25300 mm_hashes patch. Without the mm_hashes kwarg
+# the dynamo glue silently falls back to text-prefix routing.
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,7 +19,7 @@ source "${SCRIPT_DIR}/../../../common/gpu_utils.sh"
 source "${SCRIPT_DIR}/../../../common/launch_utils.sh"
 
 MODEL="${MODEL:-Qwen/Qwen3-VL-2B-Instruct}"
-NAMESPACE="${NAMESPACE:-lightseek-poc-sgl}"
+NAMESPACE="${NAMESPACE:-sglang-mm-router}"
 # Honor DYN_HTTP_PORT (set by tests/serve harness for dynamic port allocation)
 HTTP_PORT="${HTTP_PORT:-${DYN_HTTP_PORT:-8000}}"
 BLOCK_SIZE="${BLOCK_SIZE:-16}"
@@ -133,7 +133,7 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
     wait_ready "http://127.0.0.1:${WORKER_PORTS[i-1]}/health" "SGLang backend $i"
 done
 
-echo "=== Starting frontend (KV router, lightseek MM exact routing) ==="
+echo "=== Starting frontend (KV router, MM-aware routing) ==="
 env "${COMMON_ENV[@]}" \
     "DYN_LOG=${DYN_LOG_VAL}" \
 python -m dynamo.frontend \
@@ -169,7 +169,7 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
     echo "Worker $i kv-events: tcp://*:${KV_EVENTS_PORTS[i-1]}"
 done
 echo
-echo "Architecture: Rust frontend + lightseek -> ${NUM_WORKERS}x SGLang workers"
+echo "Architecture: Rust frontend (MM-aware KV router) -> ${NUM_WORKERS}x SGLang workers"
 echo "  - mm_hashes forwarded to SGLang GenerateReqInput.mm_hashes -> matching pad_value"
 echo "  - Image dims via header-only HTTP fetch (Range: bytes=0-65535)"
 echo "  - No PyO3, no GIL, no Python deps in the routing path"

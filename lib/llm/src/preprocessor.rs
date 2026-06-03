@@ -336,7 +336,7 @@ pub struct OpenAIPreprocessor {
     image_token_counter: Option<lightseek_mm::LightseekMmCounter>,
     /// Image-placeholder token id the routing-side sequence fills per image.
     /// Resolved from `config.json`'s `image_token_id` field when present,
-    /// otherwise falls back to lightseek's `ModelProcessorSpec` value. This
+    /// otherwise falls back to the `ModelProcessorSpec` registry value. This
     /// is the id the backend's HF processor emits in the expanded sequence
     /// (per-patch token for Qwen-VL families, the single placeholder for
     /// LLaVA/Phi-3), so block hashes align bit-for-bit with the worker.
@@ -1390,17 +1390,8 @@ impl OpenAIPreprocessor {
             .collect();
         let n_total: usize = n_tokens.iter().sum();
 
-        // Per-protocol image-position fill: sglang substitutes
-        // pad_value(mm_hash) so RadixAttention's prefix-cache key matches
-        // the worker; vLLM keeps find_token_id (the id the backend's HF
-        // processor emits in the expanded sequence — Qwen2-VL /
-        // Qwen2.5-VL previously got stuck at effective_cached_blocks=1
-        // when filled with lightseek-mm's per-spec value because their
-        // per-patch id never appears in stored block hashes). The
-        // sglang per-image pad_value formula and its contract with
-        // upstream live at module scope (`pad_value_for_sglang`,
-        // `MmRoutingProtocol::image_fill_token`) and is pinned by a
-        // unit test.
+        // Per-protocol image-position fill (see `MmRoutingProtocol::image_fill_token`).
+        // sglang's pad_value formula is pinned by `mm_pad_value_matches_sglang_protocol`.
         //
         // BOS ownership: when the Phi-3 splice helper produced
         // `normalized_token_ids` (Cow::Owned), it has already emitted the
