@@ -336,6 +336,7 @@ class TrtllmLLMEngine(LLMEngine):
         # Resolve the engine-declared spec now the engine (and its tokenizer)
         # is initialized; see `logits_processor_spec()`.
         self._logits_processor_spec = await self.logits_processor_spec()
+        self._engine.start_health_monitor()
 
         from tensorrt_llm.metrics import MetricsCollector
 
