@@ -11,47 +11,11 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
-
-func buildCheckpointWorkerDefaultEnv(
-	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
-	podTemplate *corev1.PodTemplateSpec,
-) []corev1.EnvVar {
-	componentType := consts.ComponentTypeWorker
-	dynamoNamespace := consts.GlobalDynamoNamespace
-	parentGraphDeploymentName := podTemplate.Labels[consts.KubeLabelDynamoGraphDeploymentName]
-	workerHashSuffix := podTemplate.Labels[consts.KubeLabelDynamoWorkerHash]
-	discoveryBackend := configv1alpha1.DiscoveryBackendKubernetes
-
-	if podTemplate.Labels[consts.KubeLabelDynamoNamespace] != "" {
-		dynamoNamespace = podTemplate.Labels[consts.KubeLabelDynamoNamespace]
-	}
-	if podTemplate.Labels[consts.KubeLabelDynamoComponentType] != "" &&
-		dynamo.IsWorkerComponent(podTemplate.Labels[consts.KubeLabelDynamoComponentType]) {
-		componentType = podTemplate.Labels[consts.KubeLabelDynamoComponentType]
-	}
-
-	defaultContainer, _ := dynamo.NewWorkerDefaults().GetBaseContainer(dynamo.ComponentContext{
-		ComponentType:                  componentType,
-		DynamoNamespace:                dynamoNamespace,
-		ParentGraphDeploymentName:      parentGraphDeploymentName,
-		ParentGraphDeploymentNamespace: ckpt.Namespace,
-		Discovery: dynamo.DiscoveryContext{
-			Backend: discoveryBackend,
-			Mode:    configv1alpha1.KubeDiscoveryModePod,
-		},
-		WorkerHashSuffix: workerHashSuffix,
-	})
-	return defaultContainer.Env
-}
 
 //nolint:gocyclo
 func buildCheckpointJob(
@@ -82,9 +46,6 @@ func buildCheckpointJob(
 		targetContainerName = consts.MainContainerName
 	}
 	podTemplate.Annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers([]string{targetContainerName})
-	if podTemplate.Spec.ServiceAccountName == "" {
-		podTemplate.Spec.ServiceAccountName = discovery.GetK8sDiscoveryServiceAccountName(ckpt.Name)
-	}
 
 	checkpoint.EnsurePodInfoVolume(&podTemplate.Spec)
 
@@ -101,14 +62,9 @@ func buildCheckpointJob(
 	if targetContainer == nil {
 		return nil, fmt.Errorf("checkpoint job pod template: pod spec has no container named %q", targetContainerName)
 	}
-	targetContainer.Env = dynamo.MergeEnvs(
-		buildCheckpointWorkerDefaultEnv(ckpt, podTemplate),
-		targetContainer.Env,
-	)
-	dynamo.AddStandardEnvVars(targetContainer, config)
 
 	checkpoint.EnsurePodInfoMount(targetContainer)
-	dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, targetContainer, dynamo.ToBetaSharedMemorySize(ckpt.Spec.Job.SharedMemory))
+	checkpoint.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, targetContainer, ckpt.Spec.Job.SharedMemory)
 	// NewCheckpointJob handles control volume + readiness probe from the
 	// snapshot contract.
 
@@ -124,63 +80,6 @@ func buildCheckpointJob(
 			podTemplate.Annotations = map[string]string{}
 		}
 		snapshotprotocol.ApplyCheckpointStorageMetadata(podTemplate.Annotations, storage)
-	}
-
-	if ckpt.Spec.GPUMemoryService != nil && ckpt.Spec.GPUMemoryService.Enabled {
-		switch ckpt.Spec.GPUMemoryService.Mode {
-		case "", nvidiacomv1alpha1.GMSModeIntraPod:
-			claimTemplateName := dra.ResourceClaimTemplateName("checkpoint-"+hash, "worker")
-			foundToleration := false
-			for i := range podTemplate.Spec.Tolerations {
-				toleration := podTemplate.Spec.Tolerations[i]
-				if toleration.Key == consts.KubeResourceGPUNvidia && toleration.Effect == corev1.TaintEffectNoSchedule {
-					foundToleration = true
-					break
-				}
-			}
-			if !foundToleration {
-				podTemplate.Spec.Tolerations = append(podTemplate.Spec.Tolerations, corev1.Toleration{
-					Key:      consts.KubeResourceGPUNvidia,
-					Operator: corev1.TolerationOpExists,
-					Effect:   corev1.TaintEffectNoSchedule,
-				})
-			}
-
-			podClaim := corev1.PodResourceClaim{
-				Name:                      dra.ClaimName,
-				ResourceClaimTemplateName: &claimTemplateName,
-			}
-			foundPodClaim := false
-			for i := range podTemplate.Spec.ResourceClaims {
-				if podTemplate.Spec.ResourceClaims[i].Name == dra.ClaimName {
-					podTemplate.Spec.ResourceClaims[i] = podClaim
-					foundPodClaim = true
-					break
-				}
-			}
-			if !foundPodClaim {
-				podTemplate.Spec.ResourceClaims = append(podTemplate.Spec.ResourceClaims, podClaim)
-			}
-
-			gms.EnsureServerSidecar(&podTemplate.Spec, targetContainer)
-			for _, name := range ckpt.Spec.GPUMemoryService.ExtraClientContainers {
-				var container *corev1.Container
-				for i := range podTemplate.Spec.Containers {
-					if podTemplate.Spec.Containers[i].Name == name {
-						container = &podTemplate.Spec.Containers[i]
-						break
-					}
-				}
-				if container == nil {
-					continue
-				}
-				gms.EnsureClient(&podTemplate.Spec, container)
-			}
-		case nvidiacomv1alpha1.GMSModeInterPod:
-			return nil, fmt.Errorf("gpuMemoryService checkpoint jobs for mode %q are not implemented", ckpt.Spec.GPUMemoryService.Mode)
-		default:
-			return nil, fmt.Errorf("gpuMemoryService checkpoint job has unsupported mode %q", ckpt.Spec.GPUMemoryService.Mode)
-		}
 	}
 
 	activeDeadlineSeconds := ckpt.Spec.Job.ActiveDeadlineSeconds

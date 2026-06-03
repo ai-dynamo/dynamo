@@ -323,6 +323,27 @@ pub trait LLMEngine: Send + Sync + 'static {
     async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
         Ok(None)
     }
+
+    /// Semantic engine controls this engine supports. Empty by default.
+    ///
+    /// Engines advertise control keys and implement them via
+    /// [`LLMEngine::engine_control`]. Mapping those keys onto runtime routes is
+    /// owned by the unified backend layer.
+    async fn supported_controls(&self) -> Result<Vec<String>, DynamoError> {
+        Ok(Vec::new())
+    }
+
+    /// Handle one semantic engine-control request.
+    async fn engine_control(
+        &self,
+        control: String,
+        _body: serde_json::Value,
+    ) -> Result<serde_json::Value, DynamoError> {
+        Ok(serde_json::json!({
+            "status": "error",
+            "message": format!("unsupported engine control: {control}"),
+        }))
+    }
 }
 
 /// Marker key stamped on canary payloads. Handlers may inspect it to branch

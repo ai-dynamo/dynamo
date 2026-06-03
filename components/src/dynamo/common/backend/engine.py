@@ -285,6 +285,24 @@ class LLMEngine(ABC):
         on top."""
         return None
 
+    def supported_controls(self) -> set[str]:
+        """Engine-control capability keys this engine supports.
+
+        The unified backend maps these keys to runtime endpoints. Engines only
+        advertise and implement semantic controls; they do not own transport or
+        route registration details.
+        """
+        return set()
+
+    async def engine_control(
+        self, control: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Handle one advertised engine-control request."""
+        return {
+            "status": "error",
+            "message": f"unsupported engine control: {control}",
+        }
+
 
 # ---------------------------------------------------------------------------
 # Custom logits processors: backend-neutral spec + per-backend realization

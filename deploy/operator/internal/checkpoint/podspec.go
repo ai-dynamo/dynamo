@@ -209,23 +209,7 @@ func injectCheckpointIntoPodSpec(
 	if info.Ready && info.GPUMemoryService != nil && info.GPUMemoryService.Enabled {
 		switch info.GPUMemoryService.Mode {
 		case "", nvidiacomv1alpha1.GMSModeIntraPod:
-			gms.EnsureServerSidecar(podSpec, targetContainers[0])
-			for _, container := range targetContainers {
-				gms.EnsureClient(podSpec, container)
-			}
-			for _, name := range info.GPUMemoryService.ExtraClientContainers {
-				var container *corev1.Container
-				for i := range podSpec.Containers {
-					if podSpec.Containers[i].Name == name {
-						container = &podSpec.Containers[i]
-						break
-					}
-				}
-				if container == nil {
-					continue
-				}
-				gms.EnsureClient(podSpec, container)
-			}
+			EnsureIntraPodGPUMemoryService(podSpec, targetContainers, info.GPUMemoryService.ExtraClientContainers)
 		case nvidiacomv1alpha1.GMSModeInterPod:
 			return fmt.Errorf("gpuMemoryService checkpoint restore for mode %q is not implemented", info.GPUMemoryService.Mode)
 		default:
@@ -234,4 +218,33 @@ func injectCheckpointIntoPodSpec(
 	}
 
 	return nil
+}
+
+// EnsureIntraPodGPUMemoryService wires the in-pod GMS server sidecar and
+// socket clients for checkpoint create/restore pod specs.
+func EnsureIntraPodGPUMemoryService(
+	podSpec *corev1.PodSpec,
+	targetContainers []*corev1.Container,
+	extraClientContainerNames []string,
+) {
+	if len(targetContainers) == 0 {
+		return
+	}
+	gms.EnsureServerSidecar(podSpec, targetContainers[0])
+	for _, container := range targetContainers {
+		gms.EnsureClient(podSpec, container)
+	}
+	for _, name := range extraClientContainerNames {
+		var container *corev1.Container
+		for i := range podSpec.Containers {
+			if podSpec.Containers[i].Name == name {
+				container = &podSpec.Containers[i]
+				break
+			}
+		}
+		if container == nil {
+			continue
+		}
+		gms.EnsureClient(podSpec, container)
+	}
 }

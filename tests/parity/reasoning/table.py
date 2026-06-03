@@ -110,6 +110,19 @@ PARSER_TO_REASONING_FAMILY = {
     "qwen3_coder": "qwen3",
 }
 
+# Row label / placement overrides keyed by tool calling family; ‡ is explained
+# by the legend note (see `_legend_html`).
+_REASONING_LABEL_OVERRIDES = {"nemotron_nano": "Nemotron V3‡"}
+_REASONING_TOP_N_APPEND = ["nemotron_nano"]
+# nemotron_deci: for older nemotron v2 models, hide to avoid confusion with nemotron v3 models
+_REASONING_HIDDEN_TOOL_FAMILIES = {"nemotron_deci"}
+
+
+def _model_label_html(model: str) -> str:
+    """Escape a model label, styling any ‡ marker like the †/§ suffixes."""
+    return html_lib.escape(model).replace("‡", '<span class="parser-suffix">‡</span>')
+
+
 _FAMILY_METADATA = {
     "basic": {
         "models": ["Generic CoT models"],
@@ -640,7 +653,9 @@ def _build_display_groups(
 
     def make_row(tool_family: str) -> dict[str, str | None]:
         return {
-            "model_label": parser_labels.get(tool_family, tool_family),
+            "model_label": _REASONING_LABEL_OVERRIDES.get(
+                tool_family, parser_labels.get(tool_family, tool_family)
+            ),
             "tool_family": tool_family,
             "reasoning_family": PARSER_TO_REASONING_FAMILY.get(tool_family),
         }
@@ -649,15 +664,32 @@ def _build_display_groups(
         reasoning_family = PARSER_TO_REASONING_FAMILY.get(tool_family)
         return reasoning_family in rows
 
-    top_n = [
-        make_row(tool_family)
-        for tool_family in TOP_N_FAMILIES
-        if tool_family in parser_families and has_reasoning_fixture(tool_family)
+    def displayable(tool_family: str) -> bool:
+        return (
+            tool_family in parser_families
+            and has_reasoning_fixture(tool_family)
+            and tool_family not in _REASONING_HIDDEN_TOOL_FAMILIES
+        )
+
+    top_n_families = [
+        tool_family for tool_family in TOP_N_FAMILIES if displayable(tool_family)
     ]
+    top_n_families += [
+        tool_family
+        for tool_family in _REASONING_TOP_N_APPEND
+        if displayable(tool_family) and tool_family not in top_n_families
+    ]
+    top_n = [make_row(tool_family) for tool_family in top_n_families]
+
+    excluded = (
+        set(TOP_N_FAMILIES)
+        | set(_REASONING_TOP_N_APPEND)
+        | _REASONING_HIDDEN_TOOL_FAMILIES
+    )
     other_tool_families = sorted(
         (
             tool_family
-            for tool_family in parser_families - set(TOP_N_FAMILIES)
+            for tool_family in parser_families - excluded
             if has_reasoning_fixture(tool_family)
         ),
         key=lambda family: parser_labels.get(family, family).lower(),
@@ -1951,7 +1983,7 @@ def _render_row_html(
     reasoning_family = row["reasoning_family"]
     cells = [
         f'<tr><td class="model" data-col-hide-group="model">'
-        f"{html_lib.escape(str(row['model_label']))}</td>",
+        f"{_model_label_html(str(row['model_label']))}</td>",
         _column_placeholder_html("model"),
         _parser_cell_html(tool_family, reasoning_family, no_vllm, no_sglang),
         _column_placeholder_html("parser"),
@@ -2085,6 +2117,11 @@ def _legend_html(rows: dict[str, dict[str, Any]], columns: list[str]) -> str:
         "for this family · "
         '<span class="parser-suffix">§</span> = no SGLang peer reasoning parser '
         "for this family."
+        "<br>"
+        '<span class="parser-suffix">‡</span> Nemotron V3 (Ultra) reuses the '
+        "qwen3_coder tool calling parser; Nemotron V1 / V2 (DeciLM) is removed "
+        "from the chart for being an older generation, but the nemotron_deci "
+        "parser is still supported."
         "<br><br>"
         "<strong>Tooltip fields:</strong> "
         "<code>input_text</code>=raw model output or stream chunks fed into "

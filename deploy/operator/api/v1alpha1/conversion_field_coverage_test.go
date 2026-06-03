@@ -125,6 +125,7 @@ DynamoGraphDeploymentSpec.experimental.kvTransferPolicy.enforcement
 DynamoGraphDeploymentSpec.experimental.kvTransferPolicy.labelKey
 DynamoGraphDeploymentSpec.experimental.kvTransferPolicy.preferredWeight
 DynamoGraphDeploymentSpec.labels
+DynamoGraphDeploymentSpec.priorityClassName
 DynamoGraphDeploymentSpec.restart.id
 DynamoGraphDeploymentSpec.restart.strategy.order
 DynamoGraphDeploymentSpec.restart.strategy.type

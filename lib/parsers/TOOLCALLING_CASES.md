@@ -227,7 +227,12 @@ or the model emitted EOS mid-generation.
 
 ### Sub-cases
 
-Five distinct truncation shapes with different recovery contracts:
+Seven distinct truncation / orphan-recovery shapes with different
+recovery contracts. `5.a`-`5.e` apply to every parser with paired
+start/end fences. `5.f`-`5.g` apply only to families that admit a
+bare (unwrapped) call body — deepseek_v4, gemma4, glm47, kimi_k2,
+minimax_m2, qwen3_coder — and are n/a for harmony, whose envelope
+grammar has no bare-body form.
 
 - **`TOOLCALLING.batch.5.a`** Missing closing tag. Open fence present,
   matching close absent. The most common shape (model hit `max_tokens`
@@ -247,6 +252,16 @@ Five distinct truncation shapes with different recovery contracts:
   truncated inside an argument value. Tests that completed earlier
   calls remain recoverable while the partial trailing call is dropped,
   preserved as text, or surfaced as an impl-defined error.
+- **`TOOLCALLING.batch.5.f`** Bare valid call before a complete wrapped
+  call. A bare (unwrapped) call body precedes a properly-wrapped call.
+  Tests that the parser recovers the leading bare call as the first
+  structured call rather than dropping it or leaking it as text.
+- **`TOOLCALLING.batch.5.g`** Orphan close marker after prefix prose.
+  Prefix prose, then a bare call body terminated by a close marker with
+  no matching open. Tests that the parser preserves the prose as
+  content, recovers the bare call, and strips the orphan close marker.
+  vLLM/SGLang leak the whole tail as content (qwen3_coder vLLM is the
+  exception — it recovers the call like Dynamo).
 
 ## `TOOLCALLING.batch.6` — Empty args, no-arg happy path
 
