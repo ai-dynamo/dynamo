@@ -776,10 +776,10 @@ impl OpenAIPreprocessor {
                     "Failed to encode tool-call end token {end_token:?} for parser {tool_call_parser:?}"
                 )
             })?;
-            if let [token_id] = encoded.token_ids() {
-                if !visible_stop_token_ids.contains(token_id) {
-                    visible_stop_token_ids.push(*token_id);
-                }
+            if let [token_id] = encoded.token_ids()
+                && !visible_stop_token_ids.contains(token_id)
+            {
+                visible_stop_token_ids.push(*token_id);
             }
             if !Self::remove_single_token_marker(hidden_stop_token_ids, encoded.token_ids()) {
                 tracing::debug!(
