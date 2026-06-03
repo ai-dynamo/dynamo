@@ -168,24 +168,18 @@ navigation:
         path: components/router/router-guide.md
       - page: KV Cache Offloading
         path: components/kvbm/kvbm-guide.md
-      - page: Parser Configuration
+      - section: Tool Call and Reasoning Parsing
+        slug: parsing
         path: parser-configuration.md
-      - page: Parser Engine Fallback
-        path: engine-fallback.md
-      - section: Tool Calling
-        slug: tool-calling
-        path: tool-calling/README.md
         contents:
           - page: Tool Call Parsing (Dynamo)
-            path: tool-calling/dynamo.md
+            path: tool-calling/README.md
+          - page: Reasoning Parsing (Dynamo)
+            path: reasoning/README.md
+          - page: Parser Engine Fallback
+            path: engine-fallback.md
           - page: Troubleshooting Tool Calls
             path: tool-calling/troubleshooting.md
-      - section: Reasoning
-        slug: reasoning
-        path: reasoning/README.md
-        contents:
-          - page: Reasoning Parsing (Dynamo)
-            path: reasoning/dynamo.md
       - section: Agents
         slug: agents
         path: agents/README.md
