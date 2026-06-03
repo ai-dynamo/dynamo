@@ -30,7 +30,9 @@ Without MM-aware routing, the standard router treats image token blocks as opaqu
 | **vLLM** | Rust frontend (default) | ✅ | Uses `llm-multimodal` crate for image-token counting + placeholder expansion. Supported models tracked below. |
 | **vLLM** | Python chat-processor (`--dyn-chat-processor vllm --router-mode kv`) | ✅ | Uses vLLM's own multimodal processor — supports any VLM that vLLM supports. |
 | **TRT-LLM** | — | ✅ | Uses dedicated MM Router Worker. Requires `--publish-events-and-metrics` on TRT-LLM workers. |
-| **SGLang** | Rust frontend (default) | ✅ | Uses `llm-multimodal` crate for image-token counting; substitutes per-image `pad_value` tokens in the routing-side view so SGLang's RadixAttention prefix cache key (`MM_PAD_SHIFT_VALUE + mm_hash % 2^30`) matches byte-for-byte. The frontend selects the SGLang protocol when the worker's `ModelDeploymentCard` reports `backend_framework="sglang"` — no env var needed. Requires the sglang fork with the `mm_hashes` field on `GenerateReqInput` ([sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300)). |
+| **SGLang** | Rust frontend (default) | ✅ (\*) | Uses `llm-multimodal` crate for image-token counting; engaged automatically when the worker reports `backend_framework="sglang"`. |
+
+(\*) The SGLang Rust-frontend path substitutes per-image `pad_value` tokens in the routing-side view so SGLang's RadixAttention prefix cache key (`MM_PAD_SHIFT_VALUE + mm_hash % 2^30`) matches byte-for-byte. Requires the sglang fork with the `mm_hashes` field on `GenerateReqInput` ([sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300)).
 
 ## Supported Model Families (Rust frontend path)
 
@@ -228,10 +230,12 @@ Key environment variables:
 | `DYN_LOG` | `info,mm_routing=debug,…` | Frontend log filter |
 | `SGLANG_EXTRA_ARGS` | (unset) | Pass-through args to `python -m dynamo.sglang` |
 
-Requirements:
+Both prerequisites are enabled by default in the dynamo sglang image; the list below is only for users building dynamo from source:
 
-- Dynamo built with `--features lightseek-mm` (Rust frontend's image-token counter + the SGLang glue).
-- SGLang with `GenerateReqInput.mm_hashes` ([upstream PR sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300)). Apply the PR to the installed sglang in place (in the container or on the host):
+- Dynamo built with `--features lightseek-mm` (Rust frontend's image-token counter + the SGLang glue). The container build always passes this; the cargo feature is opt-in only for source builds.
+- SGLang with the `GenerateReqInput.mm_hashes` field — added by [sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300) and vendored into the dynamo sglang image via `container/deps/sglang/patches/<ver>/`.
+
+  If you're running against your own sglang install (outside the dynamo image), apply it manually:
 
   ```bash
   SITE_PACKAGES_ROOT="$(python3 -c 'import pathlib, sglang; print(pathlib.Path(sglang.__file__).resolve().parent.parent)')"
@@ -246,10 +250,6 @@ Requirements:
   patch -p2 < /tmp/sglang_pr25300_python_only.diff
   cd -
   ```
-
-  The `-p2` strip drops the leading `a/python/` so the diff paths match
-  `sglang/srt/...` at site-packages root. The PR's `test/...` hunk is
-  filtered out because it lives outside the installed package.
 
   Without the patch, the worker's `_resolve_mm_hashes_supported` probe
   falls through to text-prefix-only routing (no crash, but no MM-aware

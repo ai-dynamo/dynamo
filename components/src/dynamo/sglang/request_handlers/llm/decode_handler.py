@@ -190,8 +190,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         if self._enable_frontend_decoding:
             # Lazy-inits a NIXL connector internally for Decoded variants.
             self._image_loader = ImageLoader(enable_frontend_decoding=True)
-        # Probe once: forwarding mm_hashes requires sgl-project/sglang#25300.
-        # Older builds drop the kwarg and degrade to text-prefix MM routing.
         self._mm_hashes_supported: bool = self._resolve_mm_hashes_supported(self.engine)
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
@@ -235,14 +233,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     def _extract_mm_hashes(request: Dict[str, Any]) -> Optional[List[str]]:
         """Pull the per-image hashes the Rust frontend forwards via extra_args.
 
-        The frontend (``lib/llm/src/preprocessor.rs``) emits one 16-char hex
-        string per image for the SGLang protocol — sglang feeds it into
-        ``int(hex, 16)`` to derive ``pad_value``, so vLLM's 64-char
-        zero-padded format would mask the bottom 30 bits to zero and
-        collapse pad_value to a constant for every image. We accept a
-        list of strings (the canonical shape) or pass-through ``None``
-        so the SGLang worker recomputes the hash via its own
-        ``hash_feature()``.
+        Returns ``None`` when the field is absent or malformed; SGLang then
+        recomputes the hash internally via ``hash_feature()``.
         """
         extra_args = request.get("extra_args")
         if not isinstance(extra_args, dict):
