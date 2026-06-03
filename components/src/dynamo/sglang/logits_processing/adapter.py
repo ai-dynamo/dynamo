@@ -31,10 +31,10 @@ pass the per-request generated-token position, and ``custom_param_list`` is
 static across decode steps. So this adapter only supports
 ``ForcedTokenSequenceSpec``, whose realized
 ``ForcedSequenceLogitsProcessor`` advances a purely internal counter and
-ignores ``input_ids`` — exactly the narrow, spec-backed case the DIS-2048
-design scoped for SGLang. Arbitrary ``BaseLogitsProcessor`` instances that
-need the real token history are deliberately out of scope until SGLang
-exposes that state at this callback.
+ignores ``input_ids`` — the narrow, spec-backed case the design scoped for
+SGLang. Arbitrary ``BaseLogitsProcessor`` instances that need the real token
+history are deliberately out of scope until SGLang exposes that state at this
+callback.
 
 To make the internal counter advance correctly, per-request processor state
 is kept in a dict keyed by a request UID we inject into ``custom_params``.
@@ -159,6 +159,11 @@ def activate_logits_processors(
     per-request state on it; a ``None``/empty or reused uid would collide
     that state across requests and corrupt the forced sequence, so a falsy
     uid is rejected loudly here rather than silently mis-tracked.
+
+    ``n`` is forced to 1: SGLang expands ``n > 1`` into multiple batch rows
+    sharing this request's ``custom_params`` (and uid), which would all hit
+    the same stateful processor and corrupt each other. A forced sequence has
+    no meaningful ``n > 1`` anyway, so the env-gated hook pins it to 1.
     """
     if not entries:
         return {}
@@ -168,6 +173,14 @@ def activate_logits_processors(
             "(e.g. context.id()); got "
             f"{request_uid!r}"
         )
+    requested_n = sampling_params.get("n")
+    if requested_n not in (None, 1):
+        logger.warning(
+            "forcing n=1 for the logits-processor hook (requested n=%s); "
+            "parallel completions share per-request processor state",
+            requested_n,
+        )
+    sampling_params["n"] = 1
     sampling_params["custom_params"] = {
         _ENTRIES_KEY: serialize_logits_processor_entries(entries),
         _UID_KEY: request_uid,
