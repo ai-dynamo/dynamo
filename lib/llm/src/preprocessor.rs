@@ -278,6 +278,51 @@ impl MmRoutingProtocol {
             }
         }
     }
+
+    /// Hex-encode a per-image `mm_hash` for the backend's `mm_hashes`
+    /// wire field. Length is protocol-load-bearing:
+    /// - sglang: 16 chars. Sglang derives per-block pad_value from
+    ///   `int(hex, 16)`; trailing zeros would collapse pad_value to
+    ///   `MM_PAD_SHIFT_VALUE` for every image.
+    /// - vLLM: 64 chars (16 hex + 48 trailing zeros). Required by
+    ///   `parse_mm_hash_from_extra_key` in
+    ///   `lib/kv-router/src/zmq_wire/extra_keys.rs`, which uses the
+    ///   64-char length to discriminate MM hashes from other
+    ///   `extra_keys` (LoRA salts, cache salts, prompt-embed metadata)
+    ///   in vLLM `BlockStored` events.
+    fn format_mm_hash_hex(&self, mm_hash: u64) -> String {
+        const HEX_PAD: &str = "000000000000000000000000000000000000000000000000";
+        match self {
+            Self::Sglang => format!("{mm_hash:016x}"),
+            Self::Vllm => format!("{mm_hash:016x}{HEX_PAD}"),
+        }
+    }
+
+    /// Token id to write at an image-placeholder position in the
+    /// routing-side `token_ids`. SGLang substitutes
+    /// `pad_value(mm_hash)` so its RadixAttention prefix-cache key
+    /// matches the worker; vLLM leaves the family's `find_token_id`
+    /// in place (the backend's HF processor emits that id in the
+    /// expanded sequence, so block hashes align).
+    fn image_fill_token(
+        &self,
+        mm_hash: u64,
+        find_token_id: crate::protocols::TokenIdType,
+    ) -> crate::protocols::TokenIdType {
+        match self {
+            Self::Sglang => pad_value_for_sglang(mm_hash),
+            Self::Vllm => find_token_id,
+        }
+    }
+
+    /// Whether the routing layer should emit per-block MM-info
+    /// alongside the request. vLLM consumes these to align its
+    /// `BlockStored` events; sglang's pad_value already encodes the
+    /// `mm_hash` in the bytes the router hashes, so block-level info
+    /// is redundant there.
+    fn emits_block_mm_infos(&self) -> bool {
+        matches!(self, Self::Vllm)
+    }
 }
 
 pub struct OpenAIPreprocessor {
@@ -1202,20 +1247,10 @@ impl OpenAIPreprocessor {
                 extra_args_obj.extend(backend_extra_args);
             }
 
-            // Forward routing-side mm_hashes as `multi_modal_uuids` (vLLM)
-            // or `mm_hashes` (sglang) so the backend publishes KV events
-            // with the same key the router computes.
-            //
-            // Format depends on the backend:
-            // - vLLM: 64-char hex (16 hex of the u64 + 48 trailing zeros).
-            //   Required by parse_mm_hash_from_extra_key
-            //   (kv-router/src/zmq_wire/extra_keys.rs) which filters MM
-            //   identifiers from other extra_keys (LoRA salts, cache
-            //   salts, prompt-embed metadata) via the 64-char length.
-            // - sglang: 16-char hex of the u64. Sglang derives its
-            //   per-block pad_value from int(hex, 16); the 48-zero
-            //   padding would push the bottom 30 bits to zero and
-            //   collapse pad_value to MM_PAD_SHIFT_VALUE for every image.
+            // Forward routing-side mm_hashes in `extra_args["mm_hashes"]` so the
+            // backend's KV events publish under the same key the router computes.
+            // Each backend's hex format is owned by `MmRoutingProtocol::format_mm_hash_hex`
+            // (sglang 16-char, vLLM 64-char — both are protocol-load-bearing).
             //
             // Skip forwarding entirely if any image failed dim resolution —
             // a shorter `mm_hashes` list would misalign with the image
@@ -1226,18 +1261,9 @@ impl OpenAIPreprocessor {
                 && !mm_image_entries.is_empty()
                 && mm_image_entries.len() == total_image_count
             {
-                let sglang_mode = protocol == MmRoutingProtocol::Sglang;
-                const HEX_PAD: &str = "000000000000000000000000000000000000000000000000";
                 let hexes: Vec<serde_json::Value> = mm_image_entries
                     .iter()
-                    .map(|e| {
-                        let s = if sglang_mode {
-                            format!("{:016x}", e.mm_hash)
-                        } else {
-                            format!("{:016x}{}", e.mm_hash, HEX_PAD)
-                        };
-                        serde_json::Value::String(s)
-                    })
+                    .map(|e| serde_json::Value::String(protocol.format_mm_hash_hex(e.mm_hash)))
                     .collect();
                 extra_args["mm_hashes"] = serde_json::Value::Array(hexes);
             } else if !mm_image_entries.is_empty() && self.mm_routing_protocol.is_some() {
@@ -1360,16 +1386,17 @@ impl OpenAIPreprocessor {
             .collect();
         let n_total: usize = n_tokens.iter().sum();
 
-        // For sglang-backed models, substitute per-image pad_value at image
-        // positions and emit no block_mm_infos to match sglang's BlockStored
-        // event bytes. vLLM (or unreported, with prior startup warn) fills
-        // each placeholder with `find_token_id` — what the backend's HF
-        // processor emits in the expanded sequence (Qwen2-VL / Qwen2.5-VL
-        // previously got stuck at effective_cached_blocks=1 when filled
-        // with lightseek-mm's per-spec value because their per-patch id
-        // never appears in stored block hashes). sglang per-image
-        // pad_value formula lives at module scope (`pad_value_for_sglang`)
-        // so the contract with sglang upstream is pinned by a unit test.
+        // Per-protocol image-position fill: sglang substitutes
+        // pad_value(mm_hash) so RadixAttention's prefix-cache key matches
+        // the worker; vLLM keeps find_token_id (the id the backend's HF
+        // processor emits in the expanded sequence — Qwen2-VL /
+        // Qwen2.5-VL previously got stuck at effective_cached_blocks=1
+        // when filled with lightseek-mm's per-spec value because their
+        // per-patch id never appears in stored block hashes). The
+        // sglang per-image pad_value formula and its contract with
+        // upstream live at module scope (`pad_value_for_sglang`,
+        // `MmRoutingProtocol::image_fill_token`) and is pinned by a
+        // unit test.
         //
         // BOS ownership: when the Phi-3 splice helper produced
         // `normalized_token_ids` (Cow::Owned), it has already emitted the
@@ -1377,7 +1404,6 @@ impl OpenAIPreprocessor {
         // path (Cow::Borrowed = raw tokenized prompt) needs the caller to
         // prepend BOS here. Avoids the prior split-brain where the leading
         // push was here and the mid-segment pushes lived inside the helper.
-        let sglang_pad_value_mode = protocol == MmRoutingProtocol::Sglang;
         let splice_owns_bos = matches!(normalized_token_ids, std::borrow::Cow::Owned(_));
         let bos_extra = (!splice_owns_bos && self.routing_prepend_bos.is_some()) as usize;
         let mut expanded: Vec<crate::protocols::TokenIdType> =
@@ -1390,11 +1416,8 @@ impl OpenAIPreprocessor {
         for &t in normalized_token_ids.iter() {
             if t == find_token_id && i < mm_image_entries.len() {
                 let start = expanded.len();
-                let fill_token: crate::protocols::TokenIdType = if sglang_pad_value_mode {
-                    pad_value_for_sglang(mm_image_entries[i].mm_hash)
-                } else {
-                    find_token_id
-                };
+                let fill_token =
+                    protocol.image_fill_token(mm_image_entries[i].mm_hash, find_token_id);
                 expanded.extend(std::iter::repeat_n(fill_token, n_tokens[i]));
                 img_ranges.push((start, start + n_tokens[i]));
                 i += 1;
@@ -1417,7 +1440,7 @@ impl OpenAIPreprocessor {
         // Build request-level MM info, then derive per-block info. In sglang
         // mode skip block_mm_infos: pad_value already encodes mm_hash in the
         // bytes the router hashes; sglang's events carry no extra_keys.
-        let block_mm_infos = if sglang_pad_value_mode {
+        let block_mm_infos = if !protocol.emits_block_mm_infos() {
             Vec::new()
         } else {
             let mm_objects: Vec<RequestMmObjectInfo> = mm_image_entries
