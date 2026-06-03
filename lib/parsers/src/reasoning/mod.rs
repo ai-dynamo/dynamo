@@ -83,23 +83,6 @@ pub fn get_available_reasoning_parsers() -> Vec<&'static str> {
     get_reasoning_parser_map().keys().copied().collect()
 }
 
-/// Whether this parser should be bypassed for forced/named guided JSON when
-/// the chat template has already injected the reasoning start token.
-///
-/// DeepSeek V4 and GLM use the same `<think>` parser mechanics as Qwen, but
-/// their chat formatters can seed `<think>` before generation. If guided
-/// decoding then returns a bare JSON tool-call payload without first closing
-/// `</think>`, the reasoning parser would consume that payload before the
-/// immediate tool-call jail can parse it.
-pub fn skips_guided_json_when_prompt_injected(parser_name: Option<&str>) -> bool {
-    parser_name.is_some_and(|parser_name| {
-        let normalized_name = parser_name.to_lowercase();
-        matches!(normalized_name.as_str(), "glm45")
-            || ReasoningParserType::from_name(&normalized_name)
-                .is_some_and(ReasoningParserType::skips_guided_json_when_prompt_injected)
-    })
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct ParserResult {
     /// The normal text outside of reasoning blocks.
@@ -218,16 +201,6 @@ impl ReasoningParser for ReasoningParserWrapper {
 }
 
 impl ReasoningParserType {
-    pub fn from_name(name: &str) -> Option<Self> {
-        let parser_map = get_reasoning_parser_map();
-        let normalized_name = name.to_lowercase();
-        parser_map.get(normalized_name.as_str()).copied()
-    }
-
-    pub fn skips_guided_json_when_prompt_injected(self) -> bool {
-        matches!(self, Self::DeepSeekV4)
-    }
-
     pub fn get_reasoning_parser(self) -> ReasoningParserWrapper {
         let basic_parser =
             BasicReasoningParser::new("<think>".into(), "</think>".into(), false, true);
@@ -310,7 +283,10 @@ impl ReasoningParserType {
     pub fn get_reasoning_parser_from_name(name: &str) -> ReasoningParserWrapper {
         tracing::debug!("Selected reasoning parser: {}", name);
 
-        match Self::from_name(name) {
+        let parser_map = get_reasoning_parser_map();
+        let normalized_name = name.to_lowercase();
+
+        match parser_map.get(normalized_name.as_str()) {
             Some(parser_type) => parser_type.get_reasoning_parser(),
             None => {
                 tracing::warn!(
@@ -378,28 +354,6 @@ mod tests {
         let result = parser.detect_and_parse_reasoning("answer only", &[]);
         assert_eq!(result.reasoning_text, "");
         assert_eq!(result.normal_text, "answer only");
-    }
-
-    #[test]
-    fn test_skips_guided_json_when_prompt_injected() {
-        for parser_name in ["deepseek_v4", "deepseek-v4", "deepseekv4"] {
-            assert!(
-                skips_guided_json_when_prompt_injected(Some(parser_name)),
-                "{parser_name} should declare prompt-injected guided JSON as unsafe for reasoning parsing"
-            );
-        }
-
-        assert!(
-            skips_guided_json_when_prompt_injected(Some("glm45")),
-            "glm45 should skip prompt-injected guided JSON without changing the shared nemotron_deci parser type"
-        );
-
-        for parser_name in ["qwen3", "nemotron_deci", "basic"] {
-            assert!(
-                !skips_guided_json_when_prompt_injected(Some(parser_name)),
-                "{parser_name} should keep the generic non-force parser behavior"
-            );
-        }
     }
 
     #[test] // REASONING.stream.2.a, REASONING.batch.2.c

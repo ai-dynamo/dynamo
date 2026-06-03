@@ -52,9 +52,7 @@ use crate::protocols::common::preprocessor::{
 use crate::protocols::common::timing::RequestTracker;
 use crate::tokenizers::Encoding;
 
-use dynamo_parsers::{
-    ReasoningParser, ReasoningParserType, skips_guided_json_when_prompt_injected,
-};
+use dynamo_parsers::{ReasoningParser, ReasoningParserType};
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
 use dynamo_runtime::pipeline::{
     AsyncEngineContext, Error, ManyOut, Operator, SingleIn, async_trait,
@@ -165,6 +163,8 @@ impl LLMMetricAnnotation {
 struct ReasoningState {
     stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
     reasoning_parser: Option<Box<dyn ReasoningParser>>,
+    bypass_bare_guided_json: bool,
+    guided_json_bypass_decision: Option<bool>,
 }
 
 /// Per-image routing payload accumulated by `gather_multi_modal_data` and
@@ -1726,22 +1726,24 @@ impl OpenAIPreprocessor {
                 Some("kimi_k25")
             );
 
-        // Under guided-decoding (tool_choice=required/named), some reasoning
+        // Under guided-decoding (tool_choice=required/named), force-reasoning
         // parsers must skip because the backend emits bare JSON and the jail
-        // needs to see that JSON as content. Force-reasoning parsers always
-        // need this. Some non-force parsers also declare this unsafe when the
-        // prompt already injected the reasoning start token.
+        // needs to see that JSON as content. Some non-force parsers can also
+        // hit that shape after prompt-injected reasoning, but they need a
+        // stream-content check so `reasoning</think>JSON` still gets parsed.
         let is_guided_tool_choice = matches!(
             request.inner.tool_choice,
             Some(ChatCompletionToolChoiceOption::Required)
                 | Some(ChatCompletionToolChoiceOption::Named(_))
         );
         let skip_reasoning_for_guided_json = is_guided_tool_choice
-            && (Self::is_force_reasoning_parser(self.runtime_config.reasoning_parser.as_deref())
-                || (prompt_injected_reasoning
-                    && skips_guided_json_when_prompt_injected(
-                        self.runtime_config.reasoning_parser.as_deref(),
-                    )));
+            && Self::is_force_reasoning_parser(self.runtime_config.reasoning_parser.as_deref());
+        let bypass_reasoning_for_bare_guided_json = is_guided_tool_choice
+            && prompt_injected_reasoning
+            && !uses_tool_call_structural_tag
+            && Self::skips_guided_json_when_prompt_injected(
+                self.runtime_config.reasoning_parser.as_deref(),
+            );
 
         let reasoning_disabled_by_request = Self::is_reasoning_disabled_by_request(
             self.runtime_config.reasoning_parser.as_deref(),
@@ -1766,10 +1768,11 @@ impl OpenAIPreprocessor {
         // To address the limitation if needed in future: move this step before transform_postprocessor_stream and add new field of reasoning_content to the backend output
         // Use backend_output.reasoning_content field to fill out the deltas.
         let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
-            Box::pin(Self::parse_reasoning_content_from_stream(
+            Box::pin(Self::parse_reasoning_content_from_stream_inner(
                 stream,
                 self.runtime_config.reasoning_parser.clone().unwrap(), // Safety: We already checked that parser is some, so gtg
                 prompt_injected_reasoning,
+                bypass_reasoning_for_bare_guided_json,
             ))
         } else if should_strip_disabled_reasoning_start {
             Box::pin(Self::strip_leading_reasoning_start_from_stream(
@@ -2315,6 +2318,13 @@ impl OpenAIPreprocessor {
         )
     }
 
+    fn skips_guided_json_when_prompt_injected(reasoning_parser: Option<&str>) -> bool {
+        matches!(
+            reasoning_parser,
+            Some("deepseek_v4" | "deepseek-v4" | "deepseekv4" | "glm45")
+        )
+    }
+
     /// Check if reasoning parsing should be disabled based on per-request parameters.
     /// For kimi_k25: disabled when chat_template_args contains "thinking": false.
     /// For Nemotron force-reasoning aliases: disabled when chat_template_args
@@ -2397,6 +2407,23 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
+        Self::parse_reasoning_content_from_stream_inner(
+            stream,
+            parser_name,
+            prompt_injected_reasoning,
+            false,
+        )
+    }
+
+    fn parse_reasoning_content_from_stream_inner<S>(
+        stream: S,
+        parser_name: String,
+        prompt_injected_reasoning: bool,
+        bypass_bare_guided_json: bool,
+    ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
         // Initialize reasoning parser from parser_name
         let mut reasoning_parser = Box::new(ReasoningParserType::get_reasoning_parser_from_name(
             parser_name.as_ref(),
@@ -2409,27 +2436,58 @@ impl OpenAIPreprocessor {
         let state = ReasoningState {
             stream: Box::pin(stream),
             reasoning_parser: Some(reasoning_parser),
+            bypass_bare_guided_json,
+            guided_json_bypass_decision: None,
         };
 
         stream::unfold(state, |mut state| async move {
             if let Some(response) = state.stream.next().await {
+                let should_bypass_reasoning = if state.bypass_bare_guided_json {
+                    match state.guided_json_bypass_decision {
+                        Some(decision) => decision,
+                        None => {
+                            let decision = response.data.as_ref().and_then(|data| {
+                                data.inner.choices.iter().find_map(|choice| {
+                                    if let Some(ChatCompletionMessageContent::Text(text)) =
+                                        choice.delta.content.as_ref()
+                                    {
+                                        let text = text.trim_start();
+                                        if text.is_empty() {
+                                            return None;
+                                        }
+                                        return Some(matches!(text.as_bytes()[0], b'[' | b'{'));
+                                    }
+                                    None
+                                })
+                            });
+                            if let Some(decision) = decision {
+                                state.guided_json_bypass_decision = Some(decision);
+                            }
+                            decision.unwrap_or(false)
+                        }
+                    }
+                } else {
+                    false
+                };
+
                 // Process the response through reasoning parser if available
-                let processed_response = if let Some(ref mut parser) = state.reasoning_parser {
+                let processed_response = if should_bypass_reasoning {
+                    response
+                } else if let Some(ref mut parser) = state.reasoning_parser {
                     response.map_data(|mut data| {
                         // Process all choices, not just the first one
                         for choice in data.inner.choices.iter_mut() {
                             // Reasoning parsing only applies to text content
-                            if let Some(
-                                dynamo_protocols::types::ChatCompletionMessageContent::Text(text),
-                            ) = choice.delta.content.as_ref()
+                            if let Some(ChatCompletionMessageContent::Text(text)) =
+                                choice.delta.content.as_ref()
                             {
                                 let parser_result =
                                     parser.parse_reasoning_streaming_incremental(text, &[]);
 
                                 // Update this specific choice with parsed content
-                                choice.delta.content = parser_result.get_some_normal_text().map(
-                                    dynamo_protocols::types::ChatCompletionMessageContent::Text,
-                                );
+                                choice.delta.content = parser_result
+                                    .get_some_normal_text()
+                                    .map(ChatCompletionMessageContent::Text);
                                 choice.delta.reasoning_content = parser_result.get_some_reasoning();
                             }
                             // For multimodal content, pass through unchanged
