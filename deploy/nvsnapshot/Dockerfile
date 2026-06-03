@@ -4,7 +4,7 @@
 # Multi-stage Dockerfile for the snapshot-agent container image.
 #
 # Build:
-#   docker build --platform linux/amd64 --target agent -f agent/Dockerfile -t ghcr.io/run-ai/snapshot/agent:dev .
+#   docker build --platform linux/amd64 --target agent -t nvcr.io/nvidian/dynamo-dev/nvsnapshot-agent:dev .
 #
 # NGC auth note:
 #   AGENT_BASE_IMAGE defaults to nvcr.io/nvidia/cuda-dl-base, which requires

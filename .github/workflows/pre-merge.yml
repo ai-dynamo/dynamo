@@ -144,7 +144,6 @@ jobs:
       with:
         component: nvsnapshot
         platform: linux/amd64
-        dockerfile: agent/Dockerfile
 
   rust-tests:
     needs: changed-files

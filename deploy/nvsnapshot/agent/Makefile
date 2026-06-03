@@ -40,7 +40,7 @@ clean: ## Remove agent binaries from bin/.
 docker-build: ## Build the snapshot-agent container image.
 	$(CONTAINER_TOOL) build --platform $(RUNTIME_IMAGE_PLATFORM) --target agent \
 		$(CRIU_BUILD_ARGS) \
-		-f $(MODULE_ROOT)/Dockerfile \
+		-f $(REPO_ROOT)/Dockerfile \
 		-t $(IMG) $(REPO_ROOT)
 
 .PHONY: docker-push

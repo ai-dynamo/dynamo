@@ -6,15 +6,11 @@ description: 'Run validation checks for a deploy component'
 
 inputs:
   component:
-    description: 'Component to check: operator, snapshot, or nvsnapshot'
+    description: 'Component to check: operator or snapshot'
     required: true
   platform:
     description: 'Docker platform used for linter and tester targets'
     required: true
-  dockerfile:
-    description: 'Dockerfile path relative to the component directory (default: Dockerfile).'
-    required: false
-    default: 'Dockerfile'
 
 runs:
   using: composite
@@ -28,7 +24,6 @@ runs:
           --target linter \
           --progress=plain \
           --build-context snapshot=../snapshot \
-          -f ${{ inputs.dockerfile }} \
           .
 
     - name: Tester
@@ -40,7 +35,6 @@ runs:
           --target tester \
           --progress=plain \
           --build-context snapshot=../snapshot \
-          -f ${{ inputs.dockerfile }} \
           .
 
     - name: Set up Go
