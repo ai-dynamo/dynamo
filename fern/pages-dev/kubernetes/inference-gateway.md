@@ -18,7 +18,7 @@ Integrate Dynamo with the Gateway API Inference Extension, also known as Inferen
 
 - If you want to use LoRA deploy Dynamo without the Inference Gateway.
 
-- These setups use [agentgateway](https://agentgateway.dev/) as the Inference Gateway implementation.
+- These setups use [agentgateway](https://agentgateway.dev/) as the Inference Gateway implementation. For the Istio Inference Gateway, check out [`recipes/qwen3-0.6b/vllm/agg/gaie`](../../recipes/qwen3-0.6b/vllm/agg/gaie).
 
 ## Prerequisites
 
@@ -43,7 +43,7 @@ export NAMESPACE=my-model # You can put the inference gateway into another names
 ```
 This script installs the Gateway API CRDs, the GAIE CRDs, agentgateway into `agentgateway-system`, and a `Gateway` named `inference-gateway` into `${NAMESPACE}`.
 
-#### f. Verify the Gateway is running
+#### Verify the Gateway is running
 
 ```bash
 kubectl get gateway inference-gateway -n ${NAMESPACE}
@@ -53,6 +53,37 @@ kubectl get gateway inference-gateway -n ${NAMESPACE}
 # inference-gateway   agentgateway   <none>   True         1m
 ```
 
+
+### 2b. Istio Gateway (Alternative) ###
+
+If you are using Istio as your gateway implementation,
+the EPP uses secure serving (TLS) by default. The gateway proxy needs an
+Istio `DestinationRule` to talk to the EPP service; without it the Istio
+`ext_proc` filter fails with `connection termination` errors.
+
+The Dynamo operator can create this `DestinationRule` for you. Install or
+upgrade the platform Helm chart with `dynamo.serviceMesh.enabled=true`
+(see [Service Mesh Integration (Istio)](#service-mesh-integration-istio)
+below). When that is set, you can skip the rest of this section.
+
+If you are not using the operator's Helm chart, or have left
+`dynamo.serviceMesh.enabled=false`, apply a `DestinationRule` manually for
+each EPP service:
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: <dgd-name>-epp
+spec:
+  host: <dgd-name>-epp.<namespace>.svc.cluster.local
+  trafficPolicy:
+    tls:
+      insecureSkipVerify: true
+      mode: SIMPLE
+```
+
+Replace `<dgd-name>` with your DynamoGraphDeployment name and `<namespace>` with the namespace where the EPP is deployed. See [`recipes/qwen3-0.6b/vllm/agg/gaie/dr.yaml`](../../recipes/qwen3-0.6b/vllm/agg/gaie/dr.yaml) for an example.
 
 ### 3. Setup secrets ###
 
