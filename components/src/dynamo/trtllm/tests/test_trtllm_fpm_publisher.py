@@ -346,6 +346,45 @@ async def test_kv_event_polling_loop_records_drained_batch_size():
     assert drained_batches == [3]
 
 
+@pytest.mark.asyncio
+async def test_polling_loop_reraises_unexpected_handler_error():
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub._stop_event = threading.Event()
+
+    async def fetch_events():
+        yield {"event_id": 0}
+
+    def handle_event(_event):
+        raise RuntimeError("handler failed")
+
+    with pytest.raises(RuntimeError, match="handler failed"):
+        await pub._polling_loop(
+            fetch_events,
+            handle_event,
+            min_sleep=0.001,
+            max_sleep=0.001,
+            backoff_factor=1.0,
+        )
+
+
+def test_managed_thread_stops_after_task_error():
+    errors = queue.Queue()
+    calls = 0
+
+    async def failing_task():
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("task failed")
+
+    thread = publisher_mod.ManagedThread(failing_task, error_queue=errors)
+    thread.start()
+    thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert calls == 1
+    assert str(errors.get_nowait()) == "task failed"
+
+
 def test_kv_event_id_gap_records_missing_event_count():
     pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
     pub.additional_metrics = MagicMock()
@@ -370,6 +409,25 @@ def test_filtered_kv_events_do_not_create_false_event_id_gaps():
     pub._handle_kv_event({"event_id": 12, "data": {"type": "created"}})
 
     pub.additional_metrics.record_kv_event_id_gap.assert_not_called()
+
+
+def test_partial_only_removed_event_does_not_publish_empty_batch():
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    kv_event_publisher = MagicMock()
+    pub.additional_metrics = None
+    pub._last_engine_event_id_by_rank = {}
+    pub.should_drop_event = MagicMock(return_value=False)
+    pub.processing_initial_created_events = True
+    pub.partial_block_hashes = {123}
+    pub.zmq_kv_event_publisher = None
+    pub.kv_event_publishers = {0: kv_event_publisher}
+
+    pub._handle_kv_event(
+        {"event_id": 1, "data": {"type": "removed", "block_hashes": [123]}}
+    )
+
+    assert pub.partial_block_hashes == set()
+    kv_event_publisher.publish_removed.assert_not_called()
 
 
 def test_interleaved_attention_dp_ranks_do_not_create_false_event_id_gaps():

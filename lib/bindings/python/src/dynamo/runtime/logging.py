@@ -195,7 +195,8 @@ def log_level_mapping(level: str) -> int:
 
 def python_log_level_mapping(filters: str) -> int:
     """Return the lowest Python level enabled by a Rust-style DYN_LOG filter."""
-    if os.getenv("DYN_LOGGING_CONFIG_PATH") or os.path.isfile(
+    config_path = os.getenv("DYN_LOGGING_CONFIG_PATH")
+    if (config_path is not None and os.path.isfile(config_path)) or os.path.isfile(
         _DEFAULT_DYNAMO_LOGGING_CONFIG_PATH
     ):
         # Rust merges TOML log filters after DYN_LOG. Preserve DEBUG records so

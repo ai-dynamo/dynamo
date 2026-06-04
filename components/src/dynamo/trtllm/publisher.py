@@ -321,6 +321,7 @@ class ManagedThread(threading.Thread):
                     )
                     if self.error_queue is not None:
                         self.error_queue.put(e)
+                    break
         finally:
             try:
                 loop.run_until_complete(loop.shutdown_asyncgens())
@@ -590,6 +591,7 @@ class Publisher:
                 pass
             except Exception as e:
                 logging.warning(f"Publisher polling loop error: {e}", exc_info=True)
+                raise
 
             if batch_size and batch_size_handler_fn is not None:
                 batch_size_handler_fn(batch_size)
@@ -946,6 +948,9 @@ class Publisher:
                 len(removed_block_hashes),
                 skipped_partial_blocks,
             )
+            if not removed_block_hashes:
+                return
+
             # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
             # Note: event_id is managed internally by the publisher (monotonic counter per dp_rank)
             if self.zmq_kv_event_publisher:

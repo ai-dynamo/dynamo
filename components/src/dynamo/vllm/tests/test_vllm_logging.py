@@ -27,6 +27,7 @@ import os
 
 import pytest
 
+import dynamo.runtime.logging as dynamo_logging
 from dynamo.runtime.logging import (
     VllmColorFormatter,
     configure_dynamo_logging,
@@ -43,7 +44,7 @@ pytestmark = [
 
 
 @pytest.fixture(autouse=True)
-def _clean_env(monkeypatch):
+def _clean_env(monkeypatch, tmp_path):
     """Remove logging-related env vars before each test."""
     for var in [
         "DYN_LOG",
@@ -55,6 +56,11 @@ def _clean_env(monkeypatch):
         "SGLANG_LOGGING_CONFIG_PATH",
     ]:
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(
+        dynamo_logging,
+        "_DEFAULT_DYNAMO_LOGGING_CONFIG_PATH",
+        str(tmp_path / "default-dynamo-logging.toml"),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -160,14 +166,32 @@ def test_python_log_level_mapping(filters, expected):
     assert python_log_level_mapping(filters) == expected
 
 
-def test_toml_logging_config_keeps_python_debug_available(monkeypatch):
-    monkeypatch.setenv("DYN_LOGGING_CONFIG_PATH", "/tmp/dynamo-logging.toml")
+def test_toml_logging_config_keeps_python_debug_available(monkeypatch, tmp_path):
+    config_path = tmp_path / "dynamo-logging.toml"
+    config_path.touch()
+    monkeypatch.setenv("DYN_LOGGING_CONFIG_PATH", str(config_path))
 
     configure_dynamo_logging()
 
     root_logger = logging.getLogger()
     assert root_logger.level == logging.DEBUG
     assert root_logger.handlers[0].level == logging.DEBUG
+
+
+def test_missing_toml_logging_config_does_not_keep_python_debug(monkeypatch, tmp_path):
+    monkeypatch.setenv("DYN_LOGGING_CONFIG_PATH", str(tmp_path / "missing.toml"))
+
+    assert python_log_level_mapping("info") == logging.INFO
+
+
+def test_default_toml_logging_config_keeps_python_debug(monkeypatch, tmp_path):
+    config_path = tmp_path / "default-dynamo-logging.toml"
+    config_path.touch()
+    monkeypatch.setattr(
+        dynamo_logging, "_DEFAULT_DYNAMO_LOGGING_CONFIG_PATH", str(config_path)
+    )
+
+    assert python_log_level_mapping("info") == logging.DEBUG
 
 
 def test_no_config_file_written():
