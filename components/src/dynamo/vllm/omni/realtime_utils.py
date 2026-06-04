@@ -112,8 +112,16 @@ def _build_streaming_input_factory(config: OmniConfig, engine_client):
     ``vllm.engine.protocol``). We build the serving object around the AsyncOmni
     engine and hand its bound method to the handler.
 
-    Import locations differ across vLLM versions, so several are tried. This
-    serving wiring is exercised by the gpu-gated real-model e2e
+    Import locations differ across vLLM versions, so several are tried in
+    order. Upstream relocated the realtime API out of ``entrypoints/openai/``
+    into a dedicated ``entrypoints/speech_to_text/`` subtree in a newer release:
+      - vLLM 0.21.x (the pinned base today): ``vllm.entrypoints.openai.realtime``
+        / ``...openai.models`` (verified present).
+      - newer vLLM (what current vLLM-Omni targets):
+        ``vllm.entrypoints.speech_to_text.realtime`` (fallback, not yet verified
+        here — revisit when the vLLM base is bumped).
+
+    This serving wiring is exercised by the gpu-gated real-model e2e
     (``DYN_TEST_OMNI_REALTIME_MODEL``); the hermetic mock e2e injects a fake
     factory instead.
     """
