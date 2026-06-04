@@ -28,10 +28,7 @@ reviews:
       enabled: false
   path_instructions:
     - path: "**/*.py"
-      instructions: |
-        Review against .ai/python-guidelines.md.
-        Always flag eagerly formatted log messages, including f-strings passed
-        to logging.* or logger.* calls. Require lazy %s placeholder arguments.
+      instructions: "Review against .ai/python-guidelines.md"
     - path: "**/tests/**/*.py"
       instructions: "Review against .ai/pytest-guidelines.md"
     - path: "**/tests/**/*.py"
