@@ -31,9 +31,18 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func checkpointIdentityHash(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (string, error) {
+func CheckpointID(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (string, error) {
+	if ckpt == nil {
+		return "", fmt.Errorf("checkpoint is nil")
+	}
+	if ckpt.Status.CheckpointID != "" {
+		return ckpt.Status.CheckpointID, nil
+	}
 	if ckpt.Status.IdentityHash != "" {
 		return ckpt.Status.IdentityHash, nil
+	}
+	if ckpt.Labels != nil && ckpt.Labels[snapshotprotocol.CheckpointIDLabel] != "" {
+		return ckpt.Labels[snapshotprotocol.CheckpointIDLabel], nil
 	}
 
 	hash, err := ComputeIdentityHash(ckpt.Spec.Identity)
@@ -44,11 +53,11 @@ func checkpointIdentityHash(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (string, e
 	return hash, nil
 }
 
-func FindCheckpointByIdentityHash(
+func FindCheckpointByCheckpointID(
 	ctx context.Context,
 	c client.Client,
 	namespace string,
-	hash string,
+	checkpointID string,
 	excludeName string,
 ) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
 	checkpoints := &nvidiacomv1alpha1.DynamoCheckpointList{}
@@ -56,20 +65,28 @@ func FindCheckpointByIdentityHash(
 		ctx,
 		checkpoints,
 		client.InNamespace(namespace),
-		client.MatchingLabels{snapshotprotocol.CheckpointIDLabel: hash},
+		client.MatchingLabels{snapshotprotocol.CheckpointIDLabel: checkpointID},
 	); err != nil {
-		return nil, fmt.Errorf("failed to list checkpoints by hash label: %w", err)
+		return nil, fmt.Errorf("failed to list checkpoints by checkpoint ID label: %w", err)
 	}
 
 	var existing *nvidiacomv1alpha1.DynamoCheckpoint
 	for i := range checkpoints.Items {
-		if checkpoints.Items[i].Name == excludeName {
+		ckpt := &checkpoints.Items[i]
+		if ckpt.Name == excludeName {
+			continue
+		}
+		existingCheckpointID, err := CheckpointID(ckpt)
+		if err != nil {
+			return nil, err
+		}
+		if existingCheckpointID != checkpointID {
 			continue
 		}
 		if existing != nil {
-			return nil, fmt.Errorf("multiple checkpoints found for identity hash %s", hash)
+			return nil, fmt.Errorf("multiple checkpoints found for checkpoint ID %s", checkpointID)
 		}
-		existing = checkpoints.Items[i].DeepCopy()
+		existing = ckpt.DeepCopy()
 	}
 	if existing != nil {
 		return existing, nil
@@ -86,15 +103,15 @@ func FindCheckpointByIdentityHash(
 		if ckpt.Name == excludeName {
 			continue
 		}
-		existingHash, err := checkpointIdentityHash(ckpt)
+		existingCheckpointID, err := CheckpointID(ckpt)
 		if err != nil {
 			return nil, err
 		}
-		if existingHash != hash {
+		if existingCheckpointID != checkpointID {
 			continue
 		}
 		if existing != nil {
-			return nil, fmt.Errorf("multiple checkpoints found for identity hash %s", hash)
+			return nil, fmt.Errorf("multiple checkpoints found for checkpoint ID %s", checkpointID)
 		}
 		existing = ckpt.DeepCopy()
 	}
@@ -102,10 +119,21 @@ func FindCheckpointByIdentityHash(
 	return existing, nil
 }
 
+func FindCheckpointByIdentityHash(
+	ctx context.Context,
+	c client.Client,
+	namespace string,
+	hash string,
+	excludeName string,
+) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
+	return FindCheckpointByCheckpointID(ctx, c, namespace, hash, excludeName)
+}
+
 func CreateOrGetAutoCheckpoint(
 	ctx context.Context,
 	c client.Client,
 	namespace string,
+	checkpointID string,
 	identity nvidiacomv1alpha1.DynamoCheckpointIdentity,
 	podTemplate corev1.PodTemplateSpec,
 	targetContainerName string,
@@ -118,20 +146,35 @@ func CreateOrGetAutoCheckpoint(
 		targetContainerName = commonconsts.MainContainerName
 	}
 
-	hash, err := ComputeIdentityHash(identity)
-	if err != nil {
-		return nil, fmt.Errorf("failed to compute identity hash: %w", err)
+	if checkpointID == "" {
+		var err error
+		checkpointID, err = NewCheckpointID()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	labels := map[string]string{
+		snapshotprotocol.CheckpointIDLabel: checkpointID,
+	}
+	for _, key := range []string{
+		commonconsts.KubeLabelDynamoGraphDeploymentName,
+		commonconsts.KubeLabelDynamoComponent,
+		commonconsts.KubeLabelDynamoWorkerHash,
+	} {
+		if value := podTemplate.Labels[key]; value != "" {
+			labels[key] = value
+		}
 	}
 
 	ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("checkpoint-%s", hash),
+			Name:      fmt.Sprintf("checkpoint-%s", checkpointID),
 			Namespace: namespace,
-			Labels: map[string]string{
-				snapshotprotocol.CheckpointIDLabel: hash,
-			},
+			Labels:    labels,
 			Annotations: map[string]string{
 				snapshotprotocol.CheckpointArtifactVersionAnnotation: snapshotprotocol.DefaultCheckpointArtifactVersion,
+				commonconsts.CheckpointAutoAnnotation:                commonconsts.KubeLabelValueTrue,
 			},
 		},
 		Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
@@ -143,7 +186,6 @@ func CreateOrGetAutoCheckpoint(
 			},
 		},
 	}
-
 	if err := c.Create(ctx, ckpt); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
 			return nil, fmt.Errorf("failed to create checkpoint %s: %w", ckpt.Name, err)
@@ -154,27 +196,12 @@ func CreateOrGetAutoCheckpoint(
 			return nil, fmt.Errorf("failed to get checkpoint %s after already exists: %w", ckpt.Name, err)
 		}
 
-		existingHash, err := checkpointIdentityHash(existing)
+		existingCheckpointID, err := CheckpointID(existing)
 		if err != nil {
 			return nil, err
 		}
-		if existingHash != hash {
-			return nil, fmt.Errorf("checkpoint %s already exists with identity hash %s", ckpt.Name, existingHash)
-		}
-
-		return existing, nil
-	}
-
-	existing, err := FindCheckpointByIdentityHash(ctx, c, namespace, hash, ckpt.Name)
-	if err != nil {
-		if deleteErr := c.Delete(ctx, ckpt); deleteErr != nil && !apierrors.IsNotFound(deleteErr) {
-			return nil, fmt.Errorf("failed to clean up checkpoint %s after dedupe error: %v (lookup error: %w)", ckpt.Name, deleteErr, err)
-		}
-		return nil, err
-	}
-	if existing != nil {
-		if err := c.Delete(ctx, ckpt); err != nil && !apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("failed to delete duplicate checkpoint %s: %w", ckpt.Name, err)
+		if existingCheckpointID != checkpointID {
+			return nil, fmt.Errorf("checkpoint %s already exists with checkpoint ID %s", ckpt.Name, existingCheckpointID)
 		}
 		return existing, nil
 	}

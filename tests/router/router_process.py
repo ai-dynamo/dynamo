@@ -7,6 +7,29 @@ import sys
 from tests.utils.managed_process import ManagedProcess
 
 
+class SlotTrackerProcess(ManagedProcess):
+    """Manages a standalone dynamo.slot_tracker process."""
+
+    def __init__(self, request, port: int):
+        super().__init__(
+            command=[
+                sys.executable,
+                "-m",
+                "dynamo.slot_tracker",
+                "--port",
+                str(port),
+            ],
+            timeout=10,
+            display_output=False,
+            health_check_ports=[port],
+            health_check_urls=[f"http://localhost:{port}/health"],
+            log_dir=request.node.name,
+            terminate_all_matching_process_names=False,
+            display_name="dynamo-slot-tracker",
+        )
+        self.port = port
+
+
 class FrontendRouterProcess(ManagedProcess):
     """Manages a dynamo.frontend process with configurable --router-mode.
 

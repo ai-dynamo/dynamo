@@ -38,7 +38,7 @@ use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
 
 use crate::preprocessor::media::MediaDecoder;
-use crate::preprocessor::prompt::{OAIChatLikeRequest, TextInput};
+use dynamo_renderer::{OAIChatLikeRequest, TextInput};
 
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use crate::protocols::openai::common_ext::{CommonExt, CommonExtProvider};
@@ -495,12 +495,14 @@ impl OAIChatLikeRequest for UnifiedRequest {
         self.inner.chat_template_args.as_ref()
     }
 
-    fn media_io_kwargs(&self) -> Option<&MediaDecoder> {
-        self.inner.media_io_kwargs.as_ref()
-    }
-
     fn mm_processor_kwargs(&self) -> Option<&serde_json::Value> {
         self.inner.inner.mm_processor_kwargs.as_ref()
+    }
+}
+
+impl crate::preprocessor::prompt::MediaRequestExt for UnifiedRequest {
+    fn media_io_kwargs(&self) -> Option<&MediaDecoder> {
+        self.inner.media_io_kwargs.as_ref()
     }
 }
 
@@ -546,6 +548,7 @@ mod tests {
             common: CommonExt::default(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),

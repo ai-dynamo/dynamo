@@ -60,7 +60,7 @@ pub trait WorkQueueConsumer {
     async fn dequeue(&self) -> Result<Bytes, String>;
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamType {
     Request,
@@ -362,9 +362,9 @@ pub struct StreamOptions {
     pub context: Arc<dyn AsyncEngineContext>,
 
     /// Register with the server that this connection will have a server-side Sender
-    /// that can be picked up by the Request/Forward pipeline
-    ///
-    /// TODO - note, this option is currently not implemented and will cause a panic
+    /// that can be picked up by the Request/Forward pipeline. The downstream side
+    /// dials in via [`crate::pipeline::network::tcp::client::TcpClient::create_request_stream`]
+    /// to receive the frames the server pushes.
     pub enable_request_stream: bool,
 
     /// Register with the server that this connection will have a server-side Receiver

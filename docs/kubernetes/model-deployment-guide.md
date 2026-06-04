@@ -61,9 +61,9 @@ you need.
 searchStrategy: rapid
 ```
 
-Uses the **AI Configurator (AIC)** to simulate GPU performance without
-running real inference. Completes in ~30 seconds with no GPU resources consumed
-during profiling.
+Uses AIC-backed DynoSim-style performance modeling to search deployment
+configurations without running real inference. Completes in ~30 seconds with no
+GPU resources consumed during profiling.
 
 **Use rapid when:**
 - Getting started or iterating quickly
@@ -233,7 +233,7 @@ spec:
 |---|---|---|
 | `throughput` (default) | Static queue-depth and KV-cache thresholds; scales based on saturation | No |
 | `latency` | Same as throughput with more aggressive thresholds | No |
-| `sla` | Regression-based models targeting specific TTFT/ITL values; uses profiling data and live metrics | Yes |
+| `sla` | Rust engine perf shim targeting specific TTFT/ITL values; uses native AIC when available, optional bootstrap data, and live FPM tuning | Yes |
 
 ### Prometheus Requirement
 

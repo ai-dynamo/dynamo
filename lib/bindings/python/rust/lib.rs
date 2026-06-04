@@ -162,6 +162,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(unregister_model, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_model, m)?)?;
     m.add_function(wrap_pyfunction!(run_kv_indexer, m)?)?;
+    m.add_function(wrap_pyfunction!(run_slot_tracker, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::replay::run_mocker_trace_replay, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -183,7 +184,18 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::entrypoint::KvRouterConfig>()?;
     m.add_class::<llm::replay::ReasoningConfig>()?;
     m.add_class::<llm::replay::SglangArgs>()?;
+    m.add_class::<llm::replay::TrtllmArgs>()?;
     m.add_class::<llm::replay::MockEngineArgs>()?;
+    #[cfg(feature = "aic-forward-pass")]
+    {
+        m.add_class::<llm::engine_perf::AicEngineConfig>()?;
+        m.add_class::<llm::engine_perf::EngineCapacity>()?;
+        m.add_class::<llm::engine_perf::EngineCapacityRequest>()?;
+        m.add_class::<llm::engine_perf::EnginePerfLimits>()?;
+        m.add_class::<llm::engine_perf::OptimizationTarget>()?;
+        m.add_class::<llm::engine_perf::RustEnginePerfModel>()?;
+        m.add_class::<llm::engine_perf::RustEnginePerfOptions>()?;
+    }
     m.add_class::<llm::replay::PlannerReplayBridge>()?;
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
     m.add_class::<llm::model_card::ModelDeploymentCard>()?; // Internal: only in _internal, not public API
@@ -232,8 +244,8 @@ where
     PyException::new_err(format!("{}", err))
 }
 
-fn kv_indexer_to_pyerr(err: anyhow::Error) -> PyErr {
-    #[cfg(feature = "kv-indexer")]
+fn standalone_to_pyerr(err: anyhow::Error) -> PyErr {
+    #[cfg(any(feature = "kv-indexer", feature = "slot-tracker"))]
     if let Some(clap_error) = err.downcast_ref::<clap::Error>() {
         let _ = clap_error.print();
         return pyo3::exceptions::PySystemExit::new_err(clap_error.exit_code());
@@ -261,7 +273,15 @@ fn resolve_event_transport_kind(
 fn run_kv_indexer(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let argv = argv.unwrap_or_default();
     py.allow_threads(move || llm::kv::run_kv_indexer_cli(argv))
-        .map_err(kv_indexer_to_pyerr)
+        .map_err(standalone_to_pyerr)
+}
+
+#[pyfunction(name = "run_slot_tracker")]
+#[pyo3(signature = (argv=None))]
+fn run_slot_tracker(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
+    let argv = argv.unwrap_or_default();
+    py.allow_threads(move || llm::kv::run_slot_tracker_cli(argv))
+        .map_err(standalone_to_pyerr)
 }
 
 /// Log a message from Python with file and line info
@@ -425,11 +445,17 @@ fn register_model<'p>(
             return Ok(());
         }
 
-        // For non-TensorBased models, resolve the model path (local or fetch from HuggingFace)
+        // For non-TensorBased models, resolve the model path (local or fetch from HuggingFace).
+        // Pass ignore_weights=true: register_model only consumes metadata (config.json,
+        // tokenizer*, generation_config.json, chat template) when building the MDC, so any
+        // weight files would be downloaded and discarded. Engines load weights independently
+        // before register_model runs — SGLang and vLLM via an explicit fetch_model pre-flight,
+        // TRT-LLM via a pre-staged local path (which takes the fs::exists branch above) or
+        // via its own runtime resolving the HF repo.
         let model_path = if fs::exists(&source_path)? {
             PathBuf::from(&source_path)
         } else {
-            LocalModel::fetch(&source_path, false)
+            LocalModel::fetch(&source_path, true)
                 .await
                 .map_err(to_pyerr)?
         };

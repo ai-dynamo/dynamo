@@ -24,8 +24,8 @@ use dynamo_protocols::types::{
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
     ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType,
     CreateChatCompletionRequest, FunctionName, FunctionObject, FunctionType,
-    ImageDetail as ChatImageDetail, ImageUrl, ReasoningContent, ResponseFormat,
-    ServiceTier as ChatServiceTier,
+    ImageDetail as ChatImageDetail, ImageUrl, ReasoningContent,
+    ReasoningEffort as ChatReasoningEffort, ResponseFormat, ServiceTier as ChatServiceTier,
 };
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
@@ -720,8 +720,15 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
         // Determine stream setting: respect caller's preference, default to true for aggregation
         let stream = resp.inner.stream.or(Some(true));
 
-        // Map reasoning.effort to reasoning_effort
-        let reasoning_effort = resp.inner.reasoning.as_ref().and_then(|r| r.effort.clone());
+        // Map reasoning.effort to reasoning_effort. The upstream responses
+        // `effort` is the same `async_openai` enum the Chat field is built on,
+        // so the local `From` impl converts it directly and exhaustively.
+        let reasoning_effort = resp
+            .inner
+            .reasoning
+            .as_ref()
+            .and_then(|r| r.effort.clone())
+            .map(ChatReasoningEffort::from);
 
         // Map text.format to response_format
         let response_format = resp.inner.text.as_ref().and_then(convert_text_format);
@@ -754,6 +761,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             common: Default::default(),
             nvext: resp.nvext,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -2445,17 +2453,19 @@ thinking
 
     #[test]
     fn test_reasoning_effort_mapped_to_chat_completion() {
-        use dynamo_protocols::types::ReasoningEffort;
         use dynamo_protocols::types::responses::Reasoning;
 
         let mut req = make_response_with_input("think hard");
         req.inner.reasoning = Some(Reasoning {
-            effort: Some(ReasoningEffort::Medium),
+            effort: Some(serde_json::from_value(serde_json::json!("medium")).unwrap()),
             ..Default::default()
         });
 
         let chat: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        assert_eq!(chat.inner.reasoning_effort, Some(ReasoningEffort::Medium));
+        assert_eq!(
+            chat.inner.reasoning_effort,
+            Some(ChatReasoningEffort::Medium)
+        );
     }
 
     #[test]
@@ -2549,12 +2559,11 @@ thinking
 
     #[test]
     fn test_response_echoes_reasoning() {
-        use dynamo_protocols::types::ReasoningEffort;
         use dynamo_protocols::types::responses::Reasoning;
 
         let params = ResponseParams {
             reasoning: Some(Reasoning {
-                effort: Some(ReasoningEffort::High),
+                effort: Some(serde_json::from_value(serde_json::json!("high")).unwrap()),
                 ..Default::default()
             }),
             ..Default::default()
@@ -2576,7 +2585,10 @@ thinking
 
         let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
         let reasoning = resp.inner.reasoning.unwrap();
-        assert_eq!(reasoning.effort, Some(ReasoningEffort::High));
+        assert_eq!(
+            serde_json::to_value(reasoning.effort).unwrap(),
+            serde_json::json!("high")
+        );
     }
 
     #[test]

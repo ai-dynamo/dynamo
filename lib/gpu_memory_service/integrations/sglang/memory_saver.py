@@ -71,6 +71,7 @@ class GMSMemorySaverImpl:
     ):
         self._device = torch.device("cuda", device_index)
         self.imported_weights_bytes = 0
+        self.preloaded_weights_bytes = 0
         self.ro_connect_timeout_ms = ro_connect_timeout_ms
         requested_mode = mode or RequestedLockType.RW_OR_RO
         self.allocators = {
@@ -188,6 +189,6 @@ class GMSMemorySaverImpl:
             # Read-only import mode never republishes weights.
             return
 
-        self.imported_weights_bytes = finalize_gms_write(
-            self.allocators["weights"], model
-        )
+        stats = finalize_gms_write(self.allocators["weights"], model)
+        self.imported_weights_bytes = stats.committed_bytes
+        self.preloaded_weights_bytes = 0

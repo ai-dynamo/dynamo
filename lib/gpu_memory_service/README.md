@@ -579,14 +579,14 @@ The integration patches `torch_memory_saver` to route both weight and KV-cache o
 - Other tags are not supported in GMS mode
 - The `--enable-memory-saver` flag is required to activate the memory saver pathway
 
-### Shadow Engine Failover (Sleep / Wake)
+### Shadow Engine Failover (Pause / Resume)
 
 Both integrations support releasing and reclaiming GPU memory for shadow engine patterns. The API names differ by framework:
 
 - **vLLM**: `sleep` / `wake_up` (via `/engine/sleep` and `/engine/wake_up` HTTP endpoints)
 - **SGLang**: `release_memory_occupation` / `resume_memory_occupation` (via the corresponding HTTP endpoints)
 
-Under the hood, sleeping calls `unmap_all_vas()` + `abort()` to release GPU memory while preserving VA reservations. Waking is tag-specific:
+Under the hood, pausing calls `unmap_all_vas()` + `abort()` to release GPU memory while preserving VA reservations. Resuming is tag-specific:
 
 - **weights**: `connect(RO)` + `remap_all_vas()`
 - **kv_cache**: `connect(RW)` + `reallocate_all_handles("kv_cache")` + `remap_all_vas()`
