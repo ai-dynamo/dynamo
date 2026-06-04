@@ -666,9 +666,8 @@ class TrtllmLLMEngine(LLMEngine):
         async with self._pause_lock:
             if controller.is_paused:
                 return {"status": "ok", "message": "Memory already released"}
-            if (
-                self._resume_recovery_required
-                or self._controller_needs_resume_recovery(controller)
+            if self._resume_recovery_required or self._controller_needs_resume_recovery(
+                controller
             ):
                 return {
                     "status": "error",
@@ -914,9 +913,7 @@ class TrtllmLLMEngine(LLMEngine):
                                 res
                             )
                             if prompt_payload is not None:
-                                out["engine_data"] = {
-                                    "prompt_logprobs": prompt_payload
-                                }
+                                out["engine_data"] = {"prompt_logprobs": prompt_payload}
                         prompt_tokens = len(token_ids)
                         total_completion_tokens = sum(
                             len(o.token_ids) for o in res.outputs

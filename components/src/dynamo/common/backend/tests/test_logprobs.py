@@ -236,9 +236,7 @@ def test_prompt_logprobs_completion_falls_back_to_tokenizer():
         def decode(self, ids):
             return f"<{ids[0]}>"
 
-    output = SimpleNamespace(
-        prompt_logprobs=[None, {9: _logprob(-0.7, decoded=None)}]
-    )
+    output = SimpleNamespace(prompt_logprobs=[None, {9: _logprob(-0.7, decoded=None)}])
     payload = extract_prompt_logprobs_from_completion_output(
         output, tokenizer=FakeTok()
     )
@@ -252,9 +250,9 @@ def test_prompt_logprobs_completion_falls_back_to_tokenizer():
 
 def test_prompt_logprobs_sglang_returns_none_when_absent():
     assert extract_prompt_logprobs_from_sglang_meta({}) is None
-    assert extract_prompt_logprobs_from_sglang_meta(
-        {"input_token_logprobs": []}
-    ) is None
+    assert (
+        extract_prompt_logprobs_from_sglang_meta({"input_token_logprobs": []}) is None
+    )
 
 
 def test_prompt_logprobs_sglang_prepends_none_for_bos():

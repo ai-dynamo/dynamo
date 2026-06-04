@@ -441,9 +441,7 @@ class SglangLLMEngine(LLMEngine):
                 # which ``build_sglang_logprob_kwargs`` does whenever
                 # ``prompt_logprobs`` is requested.
                 prompt_payload = (
-                    _shared_logprobs.extract_prompt_logprobs_from_sglang_meta(
-                        meta_info
-                    )
+                    _shared_logprobs.extract_prompt_logprobs_from_sglang_meta(meta_info)
                 )
                 if prompt_payload is not None:
                     out["engine_data"] = {"prompt_logprobs": prompt_payload}

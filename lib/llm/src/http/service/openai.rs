@@ -152,6 +152,34 @@ fn find_dynamo_error_in_chain<'a>(
     None
 }
 
+/// Match an InvalidArgument error anywhere in the chain — at either the
+/// top-level (`ErrorType::InvalidArgument`, raised by the
+/// frontend/preprocessing layers) or under the `Backend()` wrapper
+/// (`ErrorType::Backend(BackendError::InvalidArgument)`, raised when a
+/// Python `ValueError`/`TypeError` propagates out of an engine's
+/// `generate()` via `py_err_to_dynamo`). Both classes are 400-worthy:
+/// the request was malformed; whether the validation tripped at the
+/// frontend or inside the engine is an implementation detail the client
+/// shouldn't care about.
+fn find_invalid_argument_in_chain<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a dynamo_runtime::error::DynamoError> {
+    use dynamo_runtime::error::{BackendError, ErrorType};
+    let mut current = Some(err);
+    while let Some(e) = current {
+        if let Some(dynamo_err) = e.downcast_ref::<dynamo_runtime::error::DynamoError>()
+            && matches!(
+                dynamo_err.error_type(),
+                ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
+            )
+        {
+            return Some(dynamo_err);
+        }
+        current = e.source();
+    }
+    None
+}
+
 impl ErrorMessage {
     /// Not Found Error
     pub fn model_not_found() -> ErrorResponse {
@@ -278,14 +306,12 @@ impl ErrorMessage {
         }
 
         // Check for DynamoError with InvalidArgument anywhere in the chain → HTTP 400.
-        // This matches *any* nested InvalidArgument DynamoError, not only the NATS
-        // oversized-payload case, so previously-opaque nested InvalidArgument errors
-        // now surface as 400 instead of 500. Intentional: 400 is the correct class
-        // for a malformed/invalid request.
-        if let Some(dynamo_err) = find_dynamo_error_in_chain(
-            err.as_ref(),
-            dynamo_runtime::error::ErrorType::InvalidArgument,
-        ) {
+        // This matches *any* nested InvalidArgument DynamoError, including the
+        // `Backend(InvalidArgument)` variant that `py_err_to_dynamo` raises for
+        // engine-side `ValueError`/`TypeError`. Intentional: 400 is the correct
+        // class for a malformed/invalid request whether the validation tripped
+        // at the frontend or inside the engine.
+        if let Some(dynamo_err) = find_invalid_argument_in_chain(err.as_ref()) {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorMessage {
@@ -3026,6 +3052,33 @@ mod tests {
         assert!(response.1.message.contains("Request payload is too large"));
         assert!(!response.1.message.contains("NATS"));
         assert!(!response.1.message.contains("payload_bytes"));
+    }
+
+    #[test]
+    fn test_backend_invalid_argument_surfaces_as_400() {
+        // A Python `ValueError` (or `TypeError`) from inside an engine's
+        // `generate()` is wrapped by `py_err_to_dynamo` (lib/bindings/
+        // python/rust/backend.rs) as
+        // `ErrorType::Backend(BackendError::InvalidArgument)`. The HTTP
+        // layer must surface that as 400, not 500 — the request was
+        // malformed and the frontend-vs-engine boundary is an
+        // implementation detail. Regression coverage for the SGLang
+        // gate path, where `build_sglang_logprob_kwargs` raises
+        // `ValueError` from inside the engine's `generate()` when
+        // `logprobs >= 1` and the override env-var isn't set.
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+
+        let err: anyhow::Error = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("Dynamo's SGLang backend does not currently support logprobs >= 1")
+            .build()
+            .into();
+
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.code, StatusCode::BAD_REQUEST.as_u16());
+        assert!(response.1.message.contains("does not currently support"));
     }
 
     #[test]
