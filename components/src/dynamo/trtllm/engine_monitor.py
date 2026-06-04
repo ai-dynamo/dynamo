@@ -12,36 +12,13 @@ import os
 import signal
 from typing import TYPE_CHECKING, Optional
 
+from dynamo.engine_monitor import EngineHealthMonitorConfig
+
 if TYPE_CHECKING:
     from dynamo.runtime import DistributedRuntime
     from dynamo.trtllm.engine import TensorRTLLMEngine
 
 logger = logging.getLogger(__name__)
-
-HEALTH_CHECK_INTERVAL = 2.0
-HEALTH_CHECK_TIMEOUT = 30.0
-HEALTH_SHUTDOWN_TIMEOUT = 60.0
-HEALTH_CHECK_INTERVAL_ENV = "DYN_TRTLLM_HEALTH_CHECK_INTERVAL"
-HEALTH_CHECK_TIMEOUT_ENV = "DYN_TRTLLM_HEALTH_CHECK_TIMEOUT"
-HEALTH_SHUTDOWN_TIMEOUT_ENV = "DYN_TRTLLM_HEALTH_SHUTDOWN_TIMEOUT"
-
-
-def _env_float(name: str, default: float) -> float:
-    value = os.environ.get(name)
-    if value is None or value == "":
-        return default
-    try:
-        parsed = float(value)
-    except ValueError:
-        logger.warning("Invalid %s=%r; using default %.1f", name, value, default)
-        return default
-    if not math.isfinite(parsed):
-        logger.warning("Non-finite %s=%r; using default %.1f", name, value, default)
-        return default
-    if parsed < 0:
-        logger.warning("Negative %s=%r; using 0", name, value)
-        return 0.0
-    return parsed
 
 
 class TrtllmEngineMonitor:
@@ -60,21 +37,14 @@ class TrtllmEngineMonitor:
         self.engine = engine
         self.runtime = runtime
         self.shutdown_event = shutdown_event
-        self.interval = (
-            _env_float(HEALTH_CHECK_INTERVAL_ENV, HEALTH_CHECK_INTERVAL)
-            if interval is None
-            else interval
+        health_config = EngineHealthMonitorConfig.from_env(
+            interval=interval,
+            check_timeout=check_timeout,
+            shutdown_timeout=shutdown_timeout,
         )
-        self.check_timeout = (
-            _env_float(HEALTH_CHECK_TIMEOUT_ENV, HEALTH_CHECK_TIMEOUT)
-            if check_timeout is None
-            else check_timeout
-        )
-        self.shutdown_timeout = (
-            _env_float(HEALTH_SHUTDOWN_TIMEOUT_ENV, HEALTH_SHUTDOWN_TIMEOUT)
-            if shutdown_timeout is None
-            else shutdown_timeout
-        )
+        self.interval = health_config.interval
+        self.check_timeout = health_config.check_timeout
+        self.shutdown_timeout = health_config.shutdown_timeout
         self._monitor_task: Optional[asyncio.Task[None]] = None
 
         if not engine.supports_health_check():

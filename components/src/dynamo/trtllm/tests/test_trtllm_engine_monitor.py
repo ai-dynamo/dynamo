@@ -8,13 +8,15 @@ import threading
 
 import pytest
 
+from dynamo.engine_monitor import (
+    ENGINE_HEALTH_CHECK_INTERVAL,
+    ENGINE_HEALTH_CHECK_INTERVAL_ENV,
+    ENGINE_HEALTH_CHECK_TIMEOUT,
+    ENGINE_HEALTH_CHECK_TIMEOUT_ENV,
+    ENGINE_HEALTH_SHUTDOWN_TIMEOUT,
+    ENGINE_HEALTH_SHUTDOWN_TIMEOUT_ENV,
+)
 from dynamo.trtllm.engine_monitor import (
-    HEALTH_CHECK_INTERVAL,
-    HEALTH_CHECK_INTERVAL_ENV,
-    HEALTH_CHECK_TIMEOUT,
-    HEALTH_CHECK_TIMEOUT_ENV,
-    HEALTH_SHUTDOWN_TIMEOUT,
-    HEALTH_SHUTDOWN_TIMEOUT_ENV,
     TrtllmEngineMonitor,
 )
 
@@ -123,16 +125,29 @@ async def test_monitor_disables_without_health_api():
 
 
 def test_monitor_env_non_finite_values_fall_back_to_defaults(monkeypatch):
-    monkeypatch.setenv(HEALTH_CHECK_INTERVAL_ENV, "nan")
-    monkeypatch.setenv(HEALTH_CHECK_TIMEOUT_ENV, "inf")
-    monkeypatch.setenv(HEALTH_SHUTDOWN_TIMEOUT_ENV, "-inf")
+    monkeypatch.setenv(ENGINE_HEALTH_CHECK_INTERVAL_ENV, "nan")
+    monkeypatch.setenv(ENGINE_HEALTH_CHECK_TIMEOUT_ENV, "inf")
+    monkeypatch.setenv(ENGINE_HEALTH_SHUTDOWN_TIMEOUT_ENV, "-inf")
     engine = _FakeEngine(supports_health_check=False)
 
     monitor = TrtllmEngineMonitor(engine)
 
-    assert monitor.interval == HEALTH_CHECK_INTERVAL
-    assert monitor.check_timeout == HEALTH_CHECK_TIMEOUT
-    assert monitor.shutdown_timeout == HEALTH_SHUTDOWN_TIMEOUT
+    assert monitor.interval == ENGINE_HEALTH_CHECK_INTERVAL
+    assert monitor.check_timeout == ENGINE_HEALTH_CHECK_TIMEOUT
+    assert monitor.shutdown_timeout == ENGINE_HEALTH_SHUTDOWN_TIMEOUT
+
+
+def test_monitor_reads_engine_health_env_overrides(monkeypatch):
+    monkeypatch.setenv(ENGINE_HEALTH_CHECK_INTERVAL_ENV, "0.25")
+    monkeypatch.setenv(ENGINE_HEALTH_CHECK_TIMEOUT_ENV, "7.5")
+    monkeypatch.setenv(ENGINE_HEALTH_SHUTDOWN_TIMEOUT_ENV, "12.5")
+    engine = _FakeEngine(supports_health_check=False)
+
+    monitor = TrtllmEngineMonitor(engine)
+
+    assert monitor.interval == 0.25
+    assert monitor.check_timeout == 7.5
+    assert monitor.shutdown_timeout == 12.5
 
 
 @pytest.mark.asyncio
