@@ -102,6 +102,21 @@ def type_aware_merge(
                 else:
                     kept.append(t)
             targets = kept
+        # Baseline passthrough: keys present only in ``baseline`` that the
+        # winning final plugin did not mention still appear in the output,
+        # matching the bucket-merge path and the documented contract
+        # ("downstream stages see a complete proposal"). Without this, a
+        # final plugin emitting only ``SET prefill=N`` would drop ``decode``
+        # from the proposal a RECONCILE plugin reads via ``ctx.proposal``.
+        mentioned = {t.sub_component_type for t in targets}
+        for key in baseline:
+            if key.sub_component_type not in mentioned:
+                targets.append(
+                    ComponentTarget(
+                        sub_component_type=key.sub_component_type,
+                        replicas=baseline[key],
+                    )
+                )
         return MergeOutcome(
             proposal=ScalingProposal(targets=targets, source=winner.plugin_id),
             short_circuited=False,

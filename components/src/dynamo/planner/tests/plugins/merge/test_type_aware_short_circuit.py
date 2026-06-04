@@ -199,8 +199,11 @@ def test_final_with_at_least_only_preserves_type():
 
 def test_final_in_constrain_drops_set_but_final_still_applied():
     # CONSTRAIN + final containing SET + AT_MOST:
-    # - SET prefill dropped and recorded
+    # - SET prefill dropped and recorded in set_dropped
     # - AT_MOST decode preserved
+    # - prefill is NOT lost: it passes through at the baseline value (3),
+    #   matching the non-final bucket path's baseline-passthrough contract so
+    #   the constrained proposal stays complete
     # - used_final_from set (final still authoritative for non-SET entries)
     out = type_aware_merge(
         [
@@ -225,5 +228,10 @@ def test_final_in_constrain_drops_set_but_final_still_applied():
         (t.sub_component_type, t.type, t.replicas) for t in out.proposal.targets
     ]
     assert ("decode", OverrideType.AT_MOST, 4) in remaining
-    # prefill SET was the dropped one; nothing else for prefill in final path
-    assert all(t.sub_component_type != "prefill" for t in out.proposal.targets)
+    # The dropped SET prefill does not erase prefill from the proposal: it
+    # reappears via baseline passthrough at the current value (3).
+    prefill_targets = [
+        t for t in out.proposal.targets if t.sub_component_type == "prefill"
+    ]
+    assert len(prefill_targets) == 1
+    assert prefill_targets[0].replicas == 3

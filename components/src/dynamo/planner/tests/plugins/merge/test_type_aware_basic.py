@@ -230,6 +230,18 @@ def test_baseline_only_key_appears_in_output():
     assert _replicas_by_key(out) == {PREFILL: 8, DECODE: 3}
 
 
+def test_final_path_passes_baseline_only_keys_through():
+    # A final plugin that mentions only prefill must NOT drop decode from
+    # the proposal: baseline-only keys pass through (same contract as the
+    # non-final bucket path) so downstream stages see a complete proposal.
+    out = type_aware_merge(
+        [_pr("p1", 100, [_ct("prefill", OverrideType.SET, 8)], final=True)],
+        {PREFILL: 5, DECODE: 3},
+    )
+    assert out.used_final_from == "p1"
+    assert _replicas_by_key(out) == {PREFILL: 8, DECODE: 3}
+
+
 def test_empty_plugins_and_empty_baseline_emits_empty_proposal():
     out = type_aware_merge([], {})
     assert out.short_circuited is False
