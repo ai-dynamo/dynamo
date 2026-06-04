@@ -481,13 +481,24 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                         Some(processing_request::Request::RequestTrailers(_)) => {}
                         Some(processing_request::Request::ResponseHeaders(ref hdr)) => {
                             ExtProcServer::<P>::handle_response_headers(&mut ctx, hdr);
-
-                            if ctx.is_disaggregated && !ctx.prefill_complete_signaled {
+                        }
+                        Some(processing_request::Request::ResponseBody(ref body)) => {
+                            // Signal prefill completion on the first non-empty
+                            // response body chunk (the first generated token).
+                            // In streaming mode the upstream flushes HTTP
+                            // response headers before producing any token, so
+                            // signaling on ResponseHeaders would release prefill
+                            // bookkeeping before decode actually starts. The
+                            // first non-empty body chunk is the earliest signal
+                            // that prefill produced output and decode is underway.
+                            if ctx.is_disaggregated
+                                && !ctx.prefill_complete_signaled
+                                && !body.body.is_empty()
+                            {
                                 ctx.prefill_complete_signaled = true;
                                 picker.on_prefill_complete(&ctx.request_id).await;
                             }
-                        }
-                        Some(processing_request::Request::ResponseBody(ref body)) => {
+
                             if ctx.model_server_streaming {
                                 ExtProcServer::<P>::handle_response_body(&mut ctx, body);
                             } else {
@@ -870,7 +881,8 @@ mod tests {
         assert_eq!(t.add.load(Ordering::SeqCst), 1);
     }
 
-    /// mark_prefill_complete: on_prefill_complete() fires on ResponseHeaders in disagg mode.
+    /// mark_prefill_complete: on_prefill_complete() fires on the first non-empty
+    /// ResponseBody chunk (the first generated token) in disagg mode.
     #[tokio::test]
     async fn test_mark_prefill_complete_called() {
         let t = Arc::new(Tracker::disagg());

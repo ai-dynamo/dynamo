@@ -24,6 +24,13 @@ const HEALTH_SERVICE_NAME: &str = "inference-extension";
 /// connection flood from exhausting fds / memory. Tuned for an inference EPP
 /// where a single Envoy upstream typically holds <100 concurrent streams.
 const MAX_CONCURRENT_CONNECTIONS: usize = 1024;
+/// Max time to wait for the TLS handshake to complete before dropping the
+/// connection. Without this, a client that finishes the TCP connect but
+/// stalls the TLS handshake holds a connection-limit permit indefinitely;
+/// enough such stalls exhaust all permits and starve legitimate ext_proc
+/// traffic (slowloris-style). Only the handshake is bounded — established
+/// connections may stay open for the lifetime of their bidi stream.
+const TLS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 struct Config {
     namespace: String,
@@ -86,7 +93,15 @@ fn create_tls_acceptor() -> Result<TlsAcceptor> {
     let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())?
         .ok_or_else(|| anyhow::anyhow!("No private key found in PEM"))?;
 
-    let mut tls_config = ServerConfig::builder()
+    // Build with an explicit crypto provider. This crate compiles in BOTH
+    // rustls providers via feature unification (our direct `ring` feature plus
+    // `aws-lc-rs` pulled in transitively by `kube`), so the parameterless
+    // `ServerConfig::builder()` cannot auto-select a process-default provider
+    // and would panic. Pin to `ring`, matching the rustls feature we enable
+    // for our own serving path.
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut tls_config = ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
     tls_config.alpn_protocols = vec![b"h2".to_vec()];
@@ -196,11 +211,24 @@ async fn main() -> Result<()> {
             let svc = svc.clone();
 
             tokio::spawn(async move {
-                let _permit = permit; // released when this task exits
-                let tls_stream = match tls_acceptor.accept(tcp_stream).await {
-                    Ok(s) => s,
-                    Err(e) => {
+                let _permit = permit; // released when this task exits (incl. handshake timeout)
+                let tls_stream = match tokio::time::timeout(
+                    TLS_HANDSHAKE_TIMEOUT,
+                    tls_acceptor.accept(tcp_stream),
+                )
+                .await
+                {
+                    Ok(Ok(s)) => s,
+                    Ok(Err(e)) => {
                         tracing::debug!(%remote_addr, error = %e, "TLS handshake failed");
+                        return;
+                    }
+                    Err(_) => {
+                        tracing::debug!(
+                            %remote_addr,
+                            timeout_secs = TLS_HANDSHAKE_TIMEOUT.as_secs(),
+                            "TLS handshake timed out; dropping connection"
+                        );
                         return;
                     }
                 };

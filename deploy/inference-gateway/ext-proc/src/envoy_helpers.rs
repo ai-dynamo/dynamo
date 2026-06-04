@@ -46,6 +46,26 @@ pub fn is_system_owned_header(key: &str) -> bool {
     SYSTEM_OWNED_HEADERS.iter().any(|h| *h == lower)
 }
 
+/// Gateway-control headers that must be stripped from the *client* request
+/// before it reaches the backend, so a client can't spoof routing / model
+/// rewriting by setting them itself. Removing an absent header is a no-op in
+/// Envoy, so these are listed unconditionally.
+///
+/// Deliberately excludes two members of `SYSTEM_OWNED_HEADERS`:
+///   - `x-gateway-destination-endpoint`: the EPP sets this authoritatively via
+///     `OverwriteIfExistsOrAdd`, which already replaces any client value.
+///     Listing it here too would make the result depend on Envoy's set-vs-remove
+///     ordering and risk wiping the routing target we just set.
+///   - `content-length`: managed by Envoy in `FULL_DUPLEX_STREAMED` mode (the
+///     EPP rewrites the body), so we leave length handling to Envoy.
+const STRIPPED_REQUEST_HEADERS: &[&str] = &[
+    "x-gateway-inference-fairness-id",
+    "x-gateway-inference-objective",
+    "x-gateway-model-name-rewrite",
+    "x-gateway-destination-endpoint-subset",
+    "x-gateway-destination-endpoint-served",
+];
+
 /// Build a `HeaderValueOption` that **replaces** any existing value for the key.
 fn header_overwrite(key: &str, raw_value: &[u8]) -> HeaderValueOption {
     HeaderValueOption {
@@ -154,6 +174,14 @@ pub fn build_request_header_response(
         }
     }
 
+    // Strip client-supplied gateway-control headers so they can't reach the
+    // backend and spoof routing / model rewriting. The EPP-owned destination
+    // endpoint is set above and intentionally not in this list.
+    let remove_headers: Vec<String> = STRIPPED_REQUEST_HEADERS
+        .iter()
+        .map(|h| h.to_string())
+        .collect();
+
     let dynamic_metadata = build_endpoint_metadata(target_endpoint);
 
     ProcessingResponse {
@@ -164,7 +192,7 @@ pub fn build_request_header_response(
                         clear_route_cache: true,
                         header_mutation: Some(HeaderMutation {
                             set_headers,
-                            remove_headers: vec![],
+                            remove_headers,
                         }),
                         ..Default::default()
                     }),

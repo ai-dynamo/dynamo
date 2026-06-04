@@ -199,6 +199,49 @@ impl Router {
             .find_map(|pod| pod_endpoint_address(pod))
     }
 
+    /// Resolve any reflected worker whose worker_id is in `allowed`.
+    /// Used for body-less requests that still carry an Envoy subset hint, so
+    /// we never resolve a backend outside the requested subset.
+    fn resolve_any_worker_endpoint_in_subset(&self, allowed: &HashSet<u64>) -> Option<String> {
+        for pod in self.pod_store.state() {
+            let Some(pod_name) = pod.metadata.name.as_deref() else {
+                continue;
+            };
+            if allowed.contains(&hash_pod_name(pod_name))
+                && let Some(addr) = pod_endpoint_address(&pod)
+            {
+                return Some(addr);
+            }
+        }
+        None
+    }
+
+    /// Map an Envoy `candidate_subset` (endpoint addresses, "ip:port" or bare
+    /// "ip") onto the worker IDs of the reflected pods that match it.
+    ///
+    /// This is how the InferencePool subset hint is honored on the hot path:
+    /// the ext_proc server always calls `pick()` with an empty external
+    /// endpoint list, so the subset must be intersected against the in-memory
+    /// pod reflector rather than a caller-supplied slice. An empty result for
+    /// a non-empty subset means no reflected pod matched the hint.
+    fn subset_to_worker_ids(&self, candidate_subset: &[String]) -> HashSet<u64> {
+        let candidates: HashSet<&str> = candidate_subset.iter().map(|s| s.as_str()).collect();
+        let mut ids = HashSet::new();
+        for pod in self.pod_store.state() {
+            let Some(pod_name) = pod.metadata.name.as_deref() else {
+                continue;
+            };
+            let Some(addr_port) = pod_endpoint_address(&pod) else {
+                continue;
+            };
+            let ip = addr_port.split(':').next().unwrap_or("");
+            if candidates.contains(addr_port.as_str()) || candidates.contains(ip) {
+                ids.insert(hash_pod_name(pod_name));
+            }
+        }
+        ids
+    }
+
     /// Route a prefill request. Returns (worker_id, dp_rank).
     ///
     /// `priority_jump` is forwarded to the prefill scheduler queue so that
@@ -808,32 +851,49 @@ impl EndpointPicker for Router {
             ));
         }
 
-        // When the endpoint list is populated (e.g. from a K8s datastore),
-        // use it to constrain which workers the router may select. When empty,
-        // fall back to the router's own discovery-based worker set.
+        // Constrain which workers the router may select.
+        //
+        // The ext_proc server always calls `pick()` with an empty external
+        // endpoint list, so the Envoy InferencePool subset hint
+        // (`req.candidate_subset`) must be intersected against the in-memory
+        // pod reflector. When an external endpoint list is provided (e.g. a
+        // future K8s-datastore caller), the subset is intersected against it
+        // instead. In both cases a non-empty subset that matches nothing is a
+        // hard NoEndpoints error — we never route outside the requested
+        // subset.
         let (allowed_worker_ids, worker_map) = if endpoints.is_empty() {
-            (None, Vec::new())
+            if req.candidate_subset.is_empty() {
+                (None, Vec::new())
+            } else {
+                let ids = self.subset_to_worker_ids(&req.candidate_subset);
+                if ids.is_empty() {
+                    tracing::warn!(
+                        subset = ?req.candidate_subset,
+                        "No reflected pod matches the subset hint; refusing to route outside the subset"
+                    );
+                    return Err(PickError::NoEndpoints);
+                }
+                (Some(ids), Vec::new())
+            }
         } else {
             let subset_filtered = apply_subset_filter(endpoints, &req.candidate_subset);
-            let effective = if subset_filtered.is_empty() && !req.candidate_subset.is_empty() {
+            if subset_filtered.is_empty() && !req.candidate_subset.is_empty() {
                 tracing::warn!(
                     subset = ?req.candidate_subset,
                     total_endpoints = endpoints.len(),
-                    "No endpoints match subset hint, falling back to full list"
+                    "No endpoints match the subset hint; refusing to route outside the subset"
                 );
-                endpoints.iter().collect::<Vec<_>>()
-            } else {
-                subset_filtered
-            };
+                return Err(PickError::NoEndpoints);
+            }
 
             if req.body.is_empty() {
                 return Ok(PickResult {
-                    endpoint: effective[0].address_port(),
+                    endpoint: subset_filtered[0].address_port(),
                     ..Default::default()
                 });
             }
 
-            let wm: Vec<(u64, &Endpoint)> = effective
+            let wm: Vec<(u64, &Endpoint)> = subset_filtered
                 .iter()
                 .map(|ep| (hash_pod_name(&ep.pod_name), *ep))
                 .collect();
@@ -842,11 +902,13 @@ impl EndpointPicker for Router {
         };
 
         if req.body.is_empty() {
-            // No body (GET request) and no external endpoint list —
-            // resolve any worker via discovery and forward to it.
-            let endpoint = self
-                .resolve_any_worker_endpoint()
-                .ok_or(PickError::NoEndpoints)?;
+            // No body (GET request) and no external endpoint list — resolve any
+            // worker via discovery. If a subset hint is present, stay within it.
+            let endpoint = match &allowed_worker_ids {
+                Some(ids) => self.resolve_any_worker_endpoint_in_subset(ids),
+                None => self.resolve_any_worker_endpoint(),
+            }
+            .ok_or(PickError::NoEndpoints)?;
             return Ok(PickResult {
                 endpoint,
                 ..Default::default()

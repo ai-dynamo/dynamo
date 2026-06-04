@@ -35,7 +35,9 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
-tokio-stream = { workspace = true }
+# `net` for TcpListenerStream (serve_with_incoming), `sync` for ReceiverStream.
+# Declared explicitly rather than relying on workspace feature unification.
+tokio-stream = { workspace = true, features = ["net", "sync"] }
 tonic = { workspace = true }
 tonic-health = { workspace = true }
 tracing = { workspace = true }
