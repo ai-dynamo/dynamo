@@ -322,22 +322,9 @@ def test_component_target_optional_replicas():
     ct1 = pyd.ComponentTarget(sub_component_type="prefill")  # replicas unset
     pb1 = pydantic_to_proto(ct1)
     assert not pb1.HasField("replicas")
-    assert not pb1.HasField("component_name")
 
     ct1_back = proto_to_pydantic(pb1)
     assert ct1_back.replicas is None
-    assert ct1_back.component_name is None
-
-
-def test_component_target_with_pool_name():
-    """Hierarchical pool naming (e.g. 'prefill-pool-A')."""
-    ct = pyd.ComponentTarget(
-        sub_component_type="prefill",
-        component_name="pool-A",
-        replicas=8,
-        type=pyd.OverrideType.SET,
-    )
-    _round_trip_pyd(ct)
 
 
 def test_override_result_multi_target_mixed_types():

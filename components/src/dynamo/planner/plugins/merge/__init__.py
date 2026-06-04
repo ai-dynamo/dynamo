@@ -7,8 +7,9 @@ Two algorithms (both **pure functions** — no I/O, no Clock dependency,
 deterministic):
 
 - ``type_aware_merge``: PROPOSE / RECONCILE / CONSTRAIN. Collects
-  per-plugin ``OverrideResult``, groups by
-  ``(sub_component_type, component_name)``, computes floor (max AT_LEAST) /
+  per-plugin ``OverrideResult``, groups by ``sub_component_type``
+  (one bucket per type in this PR — see ``ComponentKey`` for the
+  forward-compat note on multi-pool), computes floor (max AT_LEAST) /
   ceiling (min AT_MOST) / recommendation (priority-smallest SET), clamps.
   REJECT > final priority.
 - ``chain_augment``: PREDICT. Sequential layered prediction with

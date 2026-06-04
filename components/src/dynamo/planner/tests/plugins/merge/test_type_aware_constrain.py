@@ -45,10 +45,9 @@ def _pr(plugin_id, priority, targets, final=False):
     )
 
 
-def _ct(sub_component_type, type_, replicas, component_name=None):
+def _ct(sub_component_type, type_, replicas):
     return ComponentTarget(
         sub_component_type=sub_component_type,
-        component_name=component_name,
         type=type_,
         replicas=replicas,
     )
@@ -58,10 +57,7 @@ def _replicas_by_key(outcome: MergeOutcome) -> dict[ComponentKey, int]:
     assert outcome.proposal is not None
     out: dict[ComponentKey, int] = {}
     for t in outcome.proposal.targets:
-        key = ComponentKey(
-            sub_component_type=t.sub_component_type,
-            component_name=t.component_name,
-        )
+        key = ComponentKey(sub_component_type=t.sub_component_type)
         assert t.replicas is not None
         out[key] = t.replicas
     return out

@@ -339,24 +339,20 @@ def test_default_registry_construction_succeeds():
 def test_reconcile_clamped_total_increments(metrics):
     metrics.reconcile_clamped_total.labels(
         sub_component_type="prefill",
-        component_name="worker",
         source="budget_constrain",
     ).inc()
     metrics.reconcile_clamped_total.labels(
         sub_component_type="prefill",
-        component_name="worker",
         source="budget_constrain",
     ).inc()
     metrics.reconcile_clamped_total.labels(
         sub_component_type="decode",
-        component_name="",
         source="user_plugin",
     ).inc()
     assert (
         _sample_value(
             metrics.reconcile_clamped_total,
             sub_component_type="prefill",
-            component_name="worker",
             source="budget_constrain",
         )
         == 2
@@ -365,7 +361,6 @@ def test_reconcile_clamped_total_increments(metrics):
         _sample_value(
             metrics.reconcile_clamped_total,
             sub_component_type="decode",
-            component_name="",
             source="user_plugin",
         )
         == 1
@@ -375,14 +370,12 @@ def test_reconcile_clamped_total_increments(metrics):
 def test_constrain_capped_total_increments(metrics):
     metrics.constrain_capped_total.labels(
         sub_component_type="prefill",
-        component_name="",
         source="budget_constrain",
     ).inc()
     assert (
         _sample_value(
             metrics.constrain_capped_total,
             sub_component_type="prefill",
-            component_name="",
             source="budget_constrain",
         )
         == 1

@@ -220,9 +220,10 @@ message PipelineContext
 
   optional ObservationData observations = 3;  // filled by OBSERVE
   optional PredictionData predictions = 4;    // filled by PREDICT (or built-in fallback)
-  // proposal/constrained are multi-component (one ComponentTarget per
-  // (sub_component_type, component_name)) to align with ScaleRequest and
-  // support the hierarchical planner.
+  // proposal/constrained carry one ComponentTarget per sub_component_type
+  // (prefill / decode / agg). Single-pool by construction in this PR;
+  // multi-pool addressing is hierarchical-planner territory and will be
+  // re-introduced when that lands.
   optional ScalingProposal proposal = 5;     // filled by PROPOSE -> RECONCILE
   optional ScalingProposal constrained = 6;  // filled by CONSTRAIN
 }
@@ -318,17 +319,24 @@ message ScalingProposal
 // One scaling target per component instance.
 // `sub_component_type` uses string (NOT proto enum) for parity with the
 // existing ScaleRequest wire format and to allow new engine kinds (e.g.
-// hierarchical pools, AFD) without bumping the proto version.
+// agg, AFD) without bumping the proto version.
 //
 // Allowed sub_component_type values evolve with Dynamo; current set:
 //   "prefill"  -- prefill engine
 //   "decode"   -- decode engine (also used in agg mode)
-// `component_name` distinguishes multiple pools of the same kind
-// (e.g. "prefill-pool-A" vs "prefill-pool-B" in the hierarchical planner).
+//
+// Tag 2 was previously a per-pool ``component_name`` (forward-compat
+// surface for the hierarchical planner). Dropped because the
+// single-planner runtime in this PR has a single configured WorkerInfo
+// per sub_component_type and can never address an alternate pool —
+// shipping the field without a runtime consumer was the
+// "API advertises capability the runtime silently drops" mismatch
+// flagged in review. Re-add at the same or new tag when the
+// hierarchical planner PR lands.
 message ComponentTarget
 {
   string sub_component_type = 1;
-  optional string component_name = 2;
+  reserved 2;                   // was: optional string component_name
   optional int32 replicas = 3;  // unset => "no opinion on this component"
   OverrideType type = 4;        // only meaningful inside OverrideResult; ignored in ScalingProposal
 }

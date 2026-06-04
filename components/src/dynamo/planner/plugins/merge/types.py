@@ -67,14 +67,14 @@ class ComponentKey:
     """Group key used to bucket per-plugin ``ComponentTarget`` entries in
     ``type_aware_merge``.
 
-    Two targets belong in the same bucket iff they name the same
-    ``(sub_component_type, component_name)`` pair; ``component_name=None``
-    denotes the default (single-pool) instance of its type. ``frozen=True``
+    Single-pool by construction in this PR: one bucket per
+    ``sub_component_type``.  Kept as a dataclass (rather than collapsing
+    to a bare ``str``) so the hierarchical-planner PR can re-add the
+    per-pool key axis without touching every call site.  ``frozen=True``
     makes instances hashable for use as ``dict`` / ``set`` keys.
     """
 
     sub_component_type: str
-    component_name: Optional[str] = None
 
 
 # ----------------------------------------------------------------------------

@@ -156,18 +156,6 @@ def _ctx_with_unicode_reason() -> pb.PipelineContext:
     return c
 
 
-def _ctx_multi_pool() -> pb.PipelineContext:
-    c = pb.PipelineContext(request_id="req-multi-pool")
-    c.proposal.targets.add(
-        sub_component_type="prefill", component_name="pool-A", replicas=8
-    )
-    c.proposal.targets.add(
-        sub_component_type="prefill", component_name="pool-B", replicas=4
-    )
-    c.proposal.targets.add(sub_component_type="decode", replicas=10)
-    return c
-
-
 def _ctx_with_constrained() -> pb.PipelineContext:
     c = pb.PipelineContext(request_id="req-constrained", decision_id="d-2")
     c.observations.traffic.num_req = 500
@@ -195,7 +183,6 @@ _INPUTS = [
     ("full_observations", _ctx_with_full_observations),
     ("predictions_proposal", _ctx_with_predictions_proposal),
     ("unicode_reason", _ctx_with_unicode_reason),
-    ("multi_pool", _ctx_multi_pool),
     ("constrained", _ctx_with_constrained),
     ("zero_replicas_explicit", _ctx_zero_replicas_explicit),
 ]

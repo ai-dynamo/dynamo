@@ -276,7 +276,7 @@ class PluginFrameworkMetrics:
             "RECONCILE stage clamped the recommendation by a floor/ceiling "
             "override (the final replica count differs from the lowest-priority "
             "SET because an AT_LEAST raised it or an AT_MOST lowered it).",
-            labelnames=["sub_component_type", "component_name", "source"],
+            labelnames=["sub_component_type", "source"],
             **kw,
         )
         """``source`` is the plugin_id of whichever AT_LEAST (for floor)
@@ -289,7 +289,7 @@ class PluginFrameworkMetrics:
             "CONSTRAIN stage capped the final replica count (same meaning "
             "as reconcile_clamped_total but fired by the CONSTRAIN pass; "
             "expected contributor: builtin-budget-constrain).",
-            labelnames=["sub_component_type", "component_name", "source"],
+            labelnames=["sub_component_type", "source"],
             **kw,
         )
 

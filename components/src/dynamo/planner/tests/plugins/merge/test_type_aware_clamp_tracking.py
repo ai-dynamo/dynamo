@@ -23,7 +23,7 @@ pytestmark = [
 ]
 
 
-PREFILL = ComponentKey(sub_component_type="prefill", component_name="worker_a")
+PREFILL = ComponentKey(sub_component_type="prefill")
 
 
 def _override(plugin_id, priority, override_type, replicas):
@@ -34,7 +34,6 @@ def _override(plugin_id, priority, override_type, replicas):
             targets=[
                 ComponentTarget(
                     sub_component_type="prefill",
-                    component_name="worker_a",
                     replicas=replicas,
                     type=override_type,
                 )
@@ -191,7 +190,7 @@ def test_clamped_records_only_winning_direction_when_floor_exceeds_ceiling():
 # ---------------------------------------------------------------------------
 
 
-DECODE = ComponentKey(sub_component_type="decode", component_name="worker_b")
+DECODE = ComponentKey(sub_component_type="decode")
 
 
 def test_clamped_reports_per_component_independently():
@@ -203,7 +202,6 @@ def test_clamped_reports_per_component_independently():
                 targets=[
                     ComponentTarget(
                         sub_component_type=key.sub_component_type,
-                        component_name=key.component_name,
                         replicas=replicas,
                         type=ot,
                     )

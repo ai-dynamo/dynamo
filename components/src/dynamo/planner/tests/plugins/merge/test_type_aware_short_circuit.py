@@ -58,10 +58,9 @@ def _override(plugin_id, priority, targets, final=False):
     )
 
 
-def _ct(sub_component_type, type_, replicas, component_name=None):
+def _ct(sub_component_type, type_, replicas):
     return ComponentTarget(
         sub_component_type=sub_component_type,
-        component_name=component_name,
         type=type_,
         replicas=replicas,
     )

@@ -41,7 +41,7 @@ pytestmark = [
 ]
 
 
-PREFILL = ComponentKey(sub_component_type="prefill", component_name="worker")
+PREFILL = ComponentKey(sub_component_type="prefill")
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +132,6 @@ async def test_set_override_emits_set_result_label_and_override_gauge(
                 targets=[
                     ComponentTarget(
                         sub_component_type="prefill",
-                        component_name="worker",
                         replicas=5,
                         type=OverrideType.SET,
                     )
@@ -299,7 +298,6 @@ async def test_held_over_plugin_emits_held_over_counter(ctx_factory, metrics):
                 targets=[
                     ComponentTarget(
                         sub_component_type="prefill",
-                        component_name="worker",
                         replicas=4,
                         type=OverrideType.SET,
                     )
@@ -357,7 +355,6 @@ async def test_reconcile_clamp_emits_reconcile_clamped_total(ctx_factory, metric
                 targets=[
                     ComponentTarget(
                         sub_component_type="prefill",
-                        component_name="worker",
                         replicas=10,
                         type=OverrideType.SET,
                     )
@@ -372,7 +369,6 @@ async def test_reconcile_clamp_emits_reconcile_clamped_total(ctx_factory, metric
                 targets=[
                     ComponentTarget(
                         sub_component_type="prefill",
-                        component_name="worker",
                         replicas=4,
                         type=OverrideType.AT_MOST,
                     )
@@ -403,7 +399,6 @@ async def test_reconcile_clamp_emits_reconcile_clamped_total(ctx_factory, metric
     v = _counter_value(
         metrics.reconcile_clamped_total,
         sub_component_type="prefill",
-        component_name="worker",
         source="cap",
     )
     assert v == 1
@@ -425,7 +420,6 @@ async def test_constrain_clamp_emits_constrain_capped_total(ctx_factory, metrics
                 targets=[
                     ComponentTarget(
                         sub_component_type="prefill",
-                        component_name="worker",
                         replicas=4,
                         type=OverrideType.AT_MOST,
                     )
@@ -448,7 +442,6 @@ async def test_constrain_clamp_emits_constrain_capped_total(ctx_factory, metrics
     v = _counter_value(
         metrics.constrain_capped_total,
         sub_component_type="prefill",
-        component_name="worker",
         source="budget",
     )
     assert v == 1
@@ -528,7 +521,6 @@ async def test_tick_skipped_total_fires_when_plugin_not_due(ctx_factory, metrics
                 targets=[
                     ComponentTarget(
                         sub_component_type="prefill",
-                        component_name="worker",
                         replicas=4,
                         type=OverrideType.SET,
                     )
@@ -582,7 +574,6 @@ async def test_tick_lag_seconds_set_when_plugin_evaluated(ctx_factory, metrics):
                 targets=[
                     ComponentTarget(
                         sub_component_type="prefill",
-                        component_name="worker",
                         replicas=4,
                         type=OverrideType.SET,
                     )
@@ -627,7 +618,6 @@ async def test_no_clamp_when_recommendation_within_bounds(ctx_factory, metrics):
                 targets=[
                     ComponentTarget(
                         sub_component_type="prefill",
-                        component_name="worker",
                         replicas=5,
                         type=OverrideType.SET,
                     )
@@ -642,7 +632,6 @@ async def test_no_clamp_when_recommendation_within_bounds(ctx_factory, metrics):
                 targets=[
                     ComponentTarget(
                         sub_component_type="prefill",
-                        component_name="worker",
                         replicas=8,  # larger than SET=5, no clamp
                         type=OverrideType.AT_MOST,
                     )

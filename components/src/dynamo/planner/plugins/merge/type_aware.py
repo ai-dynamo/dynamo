@@ -12,8 +12,9 @@ Algorithm outline
    ``short_circuited=True``; out-ranks ``final``.
 2. **final priority** — if any ``OverrideResult`` carries ``final=True``,
    the priority-smallest final's targets become the proposal outright.
-3. **Bucket by ``(sub_component_type, component_name)``**; inside each
-   bucket:
+3. **Bucket by ``sub_component_type``** (one bucket per type — see
+   ``ComponentKey`` for the forward-compat note on multi-pool); inside
+   each bucket:
    - ``floor = max(AT_LEAST replicas)`` (defaults to ``0``)
    - ``ceiling = min(AT_MOST replicas)`` (defaults to ``+inf``)
    - ``recommendation = priority-smallest SET replicas`` else baseline
@@ -96,10 +97,7 @@ def type_aware_merge(
             for t in targets:
                 if t.type == OverrideType.SET:
                     set_dropped_final.append(
-                        ComponentKey(
-                            sub_component_type=t.sub_component_type,
-                            component_name=t.component_name,
-                        )
+                        ComponentKey(sub_component_type=t.sub_component_type)
                     )
                 else:
                     kept.append(t)
@@ -119,10 +117,7 @@ def type_aware_merge(
         for t in r.result.targets:
             if t.replicas is None:  # v9 line 1078: unset = no opinion
                 continue
-            key = ComponentKey(
-                sub_component_type=t.sub_component_type,
-                component_name=t.component_name,
-            )
+            key = ComponentKey(sub_component_type=t.sub_component_type)
             if t.type == OverrideType.SET and not set_allowed:
                 set_dropped.append(key)
                 continue
@@ -180,7 +175,6 @@ def type_aware_merge(
         final_targets.append(
             ComponentTarget(
                 sub_component_type=key.sub_component_type,
-                component_name=key.component_name,
                 replicas=int(result_replicas),
             )
         )
@@ -220,7 +214,6 @@ def _target_source(
                 return pr.plugin_id
             if (
                 t.sub_component_type == target.sub_component_type
-                and t.component_name == target.component_name
                 and t.type == target.type
                 and t.replicas == target.replicas
             ):

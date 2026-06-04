@@ -45,32 +45,16 @@ def OR(targets):
     return OverrideResult(targets=list(targets))
 
 
-def CT(sub_component_type, *args):
-    """``CT("prefill", SET, 5)`` or ``CT("prefill", "pool-A", SET, 5)``."""
-    if len(args) == 2:
-        type_, replicas = args
-        return ComponentTarget(
-            sub_component_type=sub_component_type,
-            type=type_,
-            replicas=replicas,
-        )
-    if len(args) == 3:
-        component_name, type_, replicas = args
-        return ComponentTarget(
-            sub_component_type=sub_component_type,
-            component_name=component_name,
-            type=type_,
-            replicas=replicas,
-        )
-    raise TypeError(
-        f"CT expected 2 or 3 positional args after sub_component_type, got {len(args)}"
+def CT(sub_component_type, type_, replicas):
+    return ComponentTarget(
+        sub_component_type=sub_component_type,
+        type=type_,
+        replicas=replicas,
     )
 
 
-def key(sub_component_type, component_name=None):
-    return ComponentKey(
-        sub_component_type=sub_component_type, component_name=component_name
-    )
+def key(sub_component_type):
+    return ComponentKey(sub_component_type=sub_component_type)
 
 
 WORKED_EXAMPLES = [
@@ -145,24 +129,6 @@ WORKED_EXAMPLES = [
         # decode SET=10 clamped down to AT_MOST=6.
         {key("prefill"): 8, key("decode"): 6},
     ),
-    # -- Hierarchical pools (component_name disambiguates buckets) --
-    (
-        "hierarchical_pools",
-        [
-            PR(
-                "p1",
-                100,
-                OR(
-                    [
-                        CT("prefill", "pool-A", SET, 8),
-                        CT("prefill", "pool-B", SET, 4),
-                    ]
-                ),
-            )
-        ],
-        {key("prefill", "pool-A"): 5, key("prefill", "pool-B"): 3},
-        {key("prefill", "pool-A"): 8, key("prefill", "pool-B"): 4},
-    ),
     # -- final verbatim override --
     (
         "final_override_completely",
@@ -189,17 +155,16 @@ def test_worked_example(case_name, plugin_results, baseline, expected):
         out.proposal is not None
     ), f"case={case_name}: proposal unexpectedly None (short_circuited={out.short_circuited})"
     actual = {
-        ComponentKey(
-            sub_component_type=t.sub_component_type,
-            component_name=t.component_name,
-        ): t.replicas
+        ComponentKey(sub_component_type=t.sub_component_type): t.replicas
         for t in out.proposal.targets
     }
     assert actual == expected, f"case={case_name}: expected={expected}, got={actual}"
 
 
 def test_worked_examples_count_matches_main_doc():
-    # Tripwire: the design doc's PROPOSE worked-example table has
-    # exactly 9 cases. If this count drifts, the doc and test are no
-    # longer in lock-step.
-    assert len(WORKED_EXAMPLES) == 9
+    # Tripwire: PROPOSE worked-example table currently covers 8 cases.
+    # The hierarchical-pools case is removed in this PR alongside the
+    # ``component_name`` strip — re-add when the hierarchical planner
+    # PR lands.  Bump the assertion intentionally on each table change
+    # so a doc/test drift is impossible to slip by.
+    assert len(WORKED_EXAMPLES) == 8

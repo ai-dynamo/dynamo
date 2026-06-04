@@ -238,10 +238,7 @@ def _proposal_to_baseline(
     for t in proposal.targets:
         if t.replicas is None:
             continue
-        key = ComponentKey(
-            sub_component_type=t.sub_component_type,
-            component_name=t.component_name,
-        )
+        key = ComponentKey(sub_component_type=t.sub_component_type)
         out[key] = t.replicas
     return out
 
@@ -700,7 +697,6 @@ def _emit_clamps_and_rejects(
         for key, _direction, source in outcome.clamped:
             clamp_counter.labels(
                 sub_component_type=key.sub_component_type,
-                component_name=key.component_name or "",
                 source=source,
             ).inc()
 

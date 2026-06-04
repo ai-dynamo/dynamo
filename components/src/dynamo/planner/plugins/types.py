@@ -220,12 +220,15 @@ class ComponentTarget(_ProtoMirror):
     """One scaling target per component instance.
 
     ``replicas=None`` means "no opinion on this component" (v9 semantics).
-    ``component_name=None`` means "the default pool of this sub_component_type".
     ``type`` is meaningful inside OverrideResult; ignored in ScalingProposal.
+
+    Single-pool by construction in this PR: one target per
+    ``sub_component_type``.  Per-pool addressing (the ``component_name``
+    surface previously here at proto tag 2) is hierarchical-planner
+    territory and is re-introduced when that PR lands.
     """
 
     sub_component_type: str
-    component_name: Optional[str] = None
     replicas: Optional[int] = None
     type: OverrideType = OverrideType.SET
 
