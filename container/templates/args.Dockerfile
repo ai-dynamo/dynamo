@@ -120,10 +120,10 @@ ARG AWS_SDK_CPP_VERSION={{ context.vllm.aws_sdk_cpp_version }}
 
 {% if framework == "sglang" and device == "xpu" -%}
 # SGLang XPU build: clone and build from source (no pre-built runtime image)
-ARG SGLANG_GIT_URL=https://github.com/sgl-project/sglang.git
+ARG SGLANG_GIT_URL={{ context.sglang.xpu.sglang_git_url }}
 ARG SGLANG_REF={{ context.sglang.xpu.sglang_ref }}
-ARG SGLANG_KERNEL_GIT_URL=https://github.com/sgl-project/sgl-kernel-xpu.git
-ARG SGLANG_KERNEL_REF=3fbd4d33721ce3cf818b1cec3978043951406f10
+ARG SGLANG_KERNEL_GIT_URL={{ context.sglang.xpu.sglang_kernel_git_url }}
+ARG SGLANG_KERNEL_REF={{ context.sglang.xpu.sglang_kernel_ref }}
 {%- endif -%}
 
 {% if make_efa == true %}
