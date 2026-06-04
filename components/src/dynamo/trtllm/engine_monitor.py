@@ -35,6 +35,9 @@ def _env_float(name: str, default: float) -> float:
     except ValueError:
         logger.warning("Invalid %s=%r; using default %.1f", name, value, default)
         return default
+    if not math.isfinite(parsed):
+        logger.warning("Non-finite %s=%r; using default %.1f", name, value, default)
+        return default
     if parsed < 0:
         logger.warning("Negative %s=%r; using 0", name, value)
         return 0.0
@@ -169,7 +172,9 @@ class TrtllmEngineMonitor:
         def timeout_handler(signum, frame):
             raise TimeoutError("TRT-LLM engine shutdown timed out")
 
+        previous_handler = None
         if self.shutdown_timeout > 0:
+            previous_handler = signal.getsignal(signal.SIGALRM)
             signal.signal(signal.SIGALRM, timeout_handler)
             signal.alarm(math.ceil(self.shutdown_timeout))
 
@@ -178,4 +183,6 @@ class TrtllmEngineMonitor:
         except Exception as exc:
             logger.warning("TRT-LLM engine shutdown failed: %r", exc, exc_info=True)
         finally:
-            signal.alarm(0)
+            if self.shutdown_timeout > 0:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, previous_handler)

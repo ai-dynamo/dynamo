@@ -3,11 +3,20 @@
 
 import asyncio
 import os
+import signal
 import threading
 
 import pytest
 
-from dynamo.trtllm.engine_monitor import TrtllmEngineMonitor
+from dynamo.trtllm.engine_monitor import (
+    HEALTH_CHECK_INTERVAL,
+    HEALTH_CHECK_INTERVAL_ENV,
+    HEALTH_CHECK_TIMEOUT,
+    HEALTH_CHECK_TIMEOUT_ENV,
+    HEALTH_SHUTDOWN_TIMEOUT,
+    HEALTH_SHUTDOWN_TIMEOUT_ENV,
+    TrtllmEngineMonitor,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -83,6 +92,18 @@ def _record_exit(monkeypatch):
     return exit_calls
 
 
+async def _wait_for_check_count(engine, expected=1, timeout=1.0):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while engine.check_count < expected:
+        if loop.time() >= deadline:
+            raise AssertionError(
+                f"timed out waiting for check_count >= {expected}; "
+                f"got {engine.check_count}"
+            )
+        await asyncio.sleep(0)
+
+
 @pytest.mark.asyncio
 async def test_monitor_disables_without_health_api():
     engine = _FakeEngine(supports_health_check=False)
@@ -101,6 +122,19 @@ async def test_monitor_disables_without_health_api():
     await monitor.stop()
 
 
+def test_monitor_env_non_finite_values_fall_back_to_defaults(monkeypatch):
+    monkeypatch.setenv(HEALTH_CHECK_INTERVAL_ENV, "nan")
+    monkeypatch.setenv(HEALTH_CHECK_TIMEOUT_ENV, "inf")
+    monkeypatch.setenv(HEALTH_SHUTDOWN_TIMEOUT_ENV, "-inf")
+    engine = _FakeEngine(supports_health_check=False)
+
+    monitor = TrtllmEngineMonitor(engine)
+
+    assert monitor.interval == HEALTH_CHECK_INTERVAL
+    assert monitor.check_timeout == HEALTH_CHECK_TIMEOUT
+    assert monitor.shutdown_timeout == HEALTH_SHUTDOWN_TIMEOUT
+
+
 @pytest.mark.asyncio
 async def test_monitor_stops_cleanly_on_shutdown_event():
     shutdown_event = asyncio.Event()
@@ -114,7 +148,7 @@ async def test_monitor_stops_cleanly_on_shutdown_event():
         shutdown_timeout=0.01,
     )
 
-    await asyncio.sleep(0.02)
+    await _wait_for_check_count(engine)
     shutdown_event.set()
     assert monitor._monitor_task is not None
     await asyncio.wait_for(monitor._monitor_task, timeout=1.0)
@@ -234,6 +268,29 @@ async def test_monitor_shutdown_works_without_runtime(monkeypatch):
     assert exit_calls == [1]
 
 
+def test_monitor_shutdown_engine_restores_sigalrm_handler():
+    engine = _FakeEngine(supports_health_check=False)
+    monitor = TrtllmEngineMonitor(
+        engine,
+        interval=0.01,
+        shutdown_timeout=1.0,
+    )
+
+    original_handler = signal.getsignal(signal.SIGALRM)
+
+    def previous_handler(signum, frame):
+        return None
+
+    try:
+        signal.signal(signal.SIGALRM, previous_handler)
+        monitor._shutdown_engine()
+        assert signal.getsignal(signal.SIGALRM) is previous_handler
+        assert engine.shutdown_count == 1
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, original_handler)
+
+
 @pytest.mark.asyncio
 async def test_monitor_stop_cancels_poll_task():
     engine = _FakeEngine([True])
@@ -245,7 +302,7 @@ async def test_monitor_stop_cancels_poll_task():
         shutdown_timeout=0.01,
     )
 
-    await asyncio.sleep(0.02)
+    await _wait_for_check_count(engine)
     await monitor.stop()
 
     assert monitor._monitor_task is None
