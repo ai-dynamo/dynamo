@@ -40,13 +40,10 @@ def _sample_value(metric, **labels):
     `_sum`/`_count`/actual-value depending on metric type. Tests use
     ``.labels(...)._value.get()`` on counters/gauges; for histograms
     we read `_count` via iteration."""
-    collected = list(metric.collect())[0]
-    for s in collected.samples:
-        if labels.items() <= s.labels.items() and s.name.endswith(
-            ("_total", "_count", "_bucket")
-        ):
-            pass
-    # Simpler: for Counter/Gauge, use the internal _value
+    # For Counter / Gauge, read the labelled child's internal value
+    # directly. (A previous version iterated ``metric.collect()`` samples
+    # but its match branch was a no-op ``pass`` — dead code — so it was
+    # removed.)
     labelled = metric.labels(**labels)
     return labelled._value.get()
 

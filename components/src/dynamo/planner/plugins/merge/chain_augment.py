@@ -82,7 +82,12 @@ from dynamo.planner.plugins.types import PipelineContext, PredictionData
 
 log = logging.getLogger(__name__)
 
-_PREDICTION_FIELDS = ("predicted_num_req", "predicted_isl", "predicted_osl")
+_PREDICTION_FIELDS = (
+    "predicted_num_req",
+    "predicted_isl",
+    "predicted_osl",
+    "predicted_kv_hit_rate",
+)
 
 
 def _partial_merge(

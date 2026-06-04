@@ -418,7 +418,6 @@ async def _run_fanout_stage(
     # Pair plugins with their raw results via zip — do NOT assume the
     # result carries a back-reference to the plugin.
     plugin_results: list[PluginResult] = []
-    contributing_plugin_ids: set[str] = set()
     for idx, (plugin, raw) in enumerate(zip(plugins, raw_results)):
         # ``asyncio.gather(return_exceptions=True)`` captures any
         # ``BaseException`` subclass raised by the awaitable, so we widen
@@ -471,7 +470,6 @@ async def _run_fanout_stage(
         # Cache OverrideResult for HOLD_LAST plugins on the scheduler.
         if isinstance(pr.result, OverrideResult):
             scheduler.record_result(plugin.plugin_id, stage, pr.result, tick_now)
-            contributing_plugin_ids.add(plugin.plugin_id)
 
     # Inherited HOLD_LAST entries participate in the merge as non-final
     # PluginResults (cache replay cannot re-assert final=True).
@@ -492,7 +490,6 @@ async def _run_fanout_stage(
                 max(0.0, tick_now - inh.cached_at)
             )
             _record_eval(metrics, inh.plugin_id, stage, "held_over")
-            contributing_plugin_ids.add(inh.plugin_id)
 
     outcome = type_aware_merge(plugin_results, baseline, set_allowed=set_allowed)
 

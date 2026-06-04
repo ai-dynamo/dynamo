@@ -59,11 +59,12 @@ class _StubPlugin:
         return self._responses.pop(0)
 
 
-def _pd(num_req=None, isl=None, osl=None, source=""):
+def _pd(num_req=None, isl=None, osl=None, kv=None, source=""):
     return PredictionData(
         predicted_num_req=num_req,
         predicted_isl=isl,
         predicted_osl=osl,
+        predicted_kv_hit_rate=kv,
         source=source,
     )
 
@@ -88,6 +89,42 @@ async def test_replace_single_plugin_complete_prediction():
     assert out.final_from == ""
     assert out.degraded == []
     assert out.chain_break_warnings == []
+
+
+@pytest.mark.asyncio
+async def test_predicted_kv_hit_rate_merges_across_chain():
+    # predicted_kv_hit_rate must participate in first-writer-wins partial
+    # merge like the other three predicted_* fields. Regression guard: it
+    # was missing from _PREDICTION_FIELDS, so any 2+ plugin chain dropped it.
+    high = _StubPlugin(
+        "high",
+        10,
+        [PredictStageResponse(predictions=_pd(num_req=1200, kv=0.42))],
+    )
+    low = _StubPlugin(
+        "low",
+        100,
+        [PredictStageResponse(predictions=_pd(isl=3000, osl=150, kv=0.99))],
+    )
+    out = await chain_augment([high, low], PipelineContext())
+    assert out.prediction is not None
+    # high (smaller priority) wrote kv=0.42 first → first-writer-wins
+    assert out.prediction.predicted_kv_hit_rate == 0.42
+    # and the disjoint fields from low still fill in
+    assert out.prediction.predicted_isl == 3000
+    assert out.prediction.predicted_osl == 150
+
+
+@pytest.mark.asyncio
+async def test_predicted_kv_hit_rate_fills_from_later_plugin_when_unset():
+    # high leaves kv unset (None) → low's kv fills the gap.
+    high = _StubPlugin(
+        "high", 10, [PredictStageResponse(predictions=_pd(num_req=1200))]
+    )
+    low = _StubPlugin("low", 100, [PredictStageResponse(predictions=_pd(kv=0.7))])
+    out = await chain_augment([high, low], PipelineContext())
+    assert out.prediction is not None
+    assert out.prediction.predicted_kv_hit_rate == 0.7
 
 
 @pytest.mark.asyncio

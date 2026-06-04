@@ -109,7 +109,7 @@ async def _start_grpc_server(listen: str) -> tuple[grpc.aio.Server, str]:
 
 
 # ----------------------------------------------------------------------------
-# Test data — 8 representative PipelineContext payloads
+# Test data — 7 representative PipelineContext payloads
 # ----------------------------------------------------------------------------
 
 
@@ -234,7 +234,7 @@ _TRANSPORT_KINDS = ["in_process", "grpc"]
 
 
 # ----------------------------------------------------------------------------
-# Contract test: 8 inputs × 2 transports = 16 cases of byte-equality
+# Contract test: 7 inputs × 2 transports = 14 cases of byte-equality
 # ----------------------------------------------------------------------------
 
 

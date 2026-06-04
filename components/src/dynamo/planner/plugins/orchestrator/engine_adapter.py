@@ -65,6 +65,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, Optional, Sequence
 
+from dynamo.common.forward_pass_metrics import encode as _encode_fpm_record
+
 if TYPE_CHECKING:
     import grpc.aio
 
@@ -270,7 +272,6 @@ class OrchestratorEngineAdapter:
         # load/throughput/reconcile/budget plugins, OR external plugins
         # fill the chain via either registration path.
         self._builtins: dict = {}
-        self._plugin_ids: dict = {}
 
     # ------------------------------------------------------------------
     # Bootstrap API (delegates to orchestrator)
@@ -631,6 +632,7 @@ class OrchestratorEngineAdapter:
         data"."""
         priority = [
             "scale_up",
+            "scale_down_capped_by_throughput",
             "scale_down",
             "no_change",
             "insufficient_data",
@@ -691,11 +693,6 @@ class OrchestratorEngineAdapter:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    def _set_enabled(self, slot: str, enabled: bool) -> None:
-        reg = self._orchestrator._registry.get_plugin(self._plugin_ids[slot])
-        if reg is not None:
-            reg.enabled = enabled
 
     def _compute_next_scheduled_tick(self) -> ScheduledTick:
         """Next pipeline tick under the scale_interval cadence model.
@@ -855,8 +852,10 @@ class OrchestratorEngineAdapter:
         - per-engine map key = ``f"{worker_id}/{dp_rank}"`` (flat str
           since proto3 ``map<string, bytes>`` can't carry a tuple key)
         - per-engine map value = msgpack-encoded ``ForwardPassMetrics``
-          via ``msgspec.msgpack.encode`` so cross-language plugins
-          decode with any standard msgpack library
+          via the canonical ``dynamo.common.forward_pass_metrics.encode``
+          helper (shared module-level encoder) so cross-language plugins
+          decode with any standard msgpack library and the wire format
+          stays in lock-step with the rest of dynamo's FPM serialization.
 
         Returns None when ``obs`` is None (no FPM this tick) or when
         both prefill+decode submaps are empty.
@@ -865,21 +864,14 @@ class OrchestratorEngineAdapter:
             return None
         if not obs.prefill and not obs.decode:
             return None
-        # Local import to keep the module-top import surface minimal —
-        # msgspec is already a planner runtime dep but it's only used
-        # here on the orchestrator hot path so the local import keeps
-        # the dependency explicit at point of use.
-        import msgspec
-
-        encoder = msgspec.msgpack.Encoder()
         prefill_engines: dict[str, bytes] = {}
         decode_engines: dict[str, bytes] = {}
         if obs.prefill:
             for (worker_id, dp_rank), fpm_obs in obs.prefill.items():
-                prefill_engines[f"{worker_id}/{dp_rank}"] = encoder.encode(fpm_obs)
+                prefill_engines[f"{worker_id}/{dp_rank}"] = _encode_fpm_record(fpm_obs)
         if obs.decode:
             for (worker_id, dp_rank), fpm_obs in obs.decode.items():
-                decode_engines[f"{worker_id}/{dp_rank}"] = encoder.encode(fpm_obs)
+                decode_engines[f"{worker_id}/{dp_rank}"] = _encode_fpm_record(fpm_obs)
         return FpmData(
             prefill_engines=prefill_engines,
             decode_engines=decode_engines,

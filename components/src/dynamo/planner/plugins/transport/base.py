@@ -49,7 +49,11 @@ class PluginTransport(abc.ABC):
     rejects other schemes."""
 
     timeout_seconds: float
-    """Per-RPC timeout (orchestrator wraps each ``call()`` in ``asyncio.wait_for``)."""
+    """Per-RPC timeout. The **transport** enforces this internally — each
+    ``call()`` wraps its own dispatch in ``asyncio.wait_for(...,
+    timeout_seconds)`` (see ``in_process.py`` / ``_grpc_base.py``). The
+    pipeline driver deliberately does NOT wrap calls (it uses a bare
+    ``asyncio.gather``) so the per-plugin deadline isn't double-counted."""
 
     @abc.abstractmethod
     async def call(self, method: str, request: Any) -> Any:

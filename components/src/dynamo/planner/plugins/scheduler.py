@@ -30,7 +30,10 @@ Row-by-row, the scheduler clears a plugin's HOLD_LAST cache when:
 1. ``registry.unregister(plugin_id)`` is called → subscribed via
    ``registry.on_unregister``.
 2. Heartbeat monitor evicts a plugin → same code path as row 1
-   (heartbeat monitor calls ``registry.unregister``).
+   (the monitor would call ``registry.unregister``). NOTE: the monitor
+   itself is not wired in this PR — ``last_heartbeat_at`` is recorded but
+   nothing reads it yet; the eviction monitor lands in a follow-up PR.
+   This row documents the code path the cache relies on once it exists.
 3. ``CircuitBreaker`` transitions any plugin to OPEN → subscribed via
    ``circuit_breaker.on_open``.
 4. Client-driven version upgrade (Unregister old + Register new) →
