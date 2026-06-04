@@ -163,6 +163,8 @@ spec:
         env:
         - name: TARGET_MODEL
           value: Qwen/Qwen3-VL-32B-Instruct-FP8
+        - name: TOKENIZER_PATH
+          value: /root/.cache/huggingface/Qwen/Qwen3-VL-32B-Instruct-FP8
         - name: ENDPOINT
           value: qwen3-vl-32b-fp8-vllm-agg-frontend:8000
         - name: AIPERF_HTTP_CONNECTION_LIMIT
