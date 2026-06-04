@@ -54,6 +54,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsfilters "sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -378,9 +379,16 @@ func main() {
 		runtimeConfig.ExcludedNamespaces = leaseWatcher
 	}
 
-	// Start resource counter background goroutine (after ExcludedNamespaces is set)
-	setupLog.Info("Starting resource counter")
-	go observability.StartResourceCounter(mainCtx, mgr.GetClient(), runtimeConfig.ExcludedNamespaces)
+	// Register resource counter background runnable (after ExcludedNamespaces is set).
+	// The manager starts non-leader-election runnables after the cache has synced.
+	setupLog.Info("Registering resource counter")
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		observability.StartResourceCounter(ctx, mgr.GetClient(), runtimeConfig.ExcludedNamespaces)
+		return nil
+	})); err != nil {
+		setupLog.Error(err, "unable to register resource counter")
+		os.Exit(1)
+	}
 
 	// Detect orchestrators availability using discovery client.
 	// Config overrides (*bool) take precedence over auto-detection:
