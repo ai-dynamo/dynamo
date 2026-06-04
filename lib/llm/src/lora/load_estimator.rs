@@ -274,10 +274,53 @@ impl LoadEstimator {
     }
 
     /// Replace the full estimator config at runtime (rate window, bucket granularity,
-    /// predictor type/alpha). Applies to counters/predictors created after this call;
-    /// existing per-LoRA counters keep their original bucketing.
+    /// predictor type/alpha).
+    ///
+    /// Rebuilds EXISTING per-LoRA counters under the new bucket geometry when `rate_window` or
+    /// `buckets_per_second` changes, and clears predictors when the geometry or the predictor
+    /// type/alpha changes. The load-feed path can create counters BEFORE the controller applies
+    /// its config (e.g. a KV active-sequence event arriving before `start_lora_controller` runs),
+    /// so without this rebuild those early counters would keep the default bucketing forever.
+    /// `active_count` (in-flight requests) is preserved; the windowed arrival history is restarted
+    /// because it was measured against the old window. (Mirrors `set_rate_window`, but covers the
+    /// full config.)
     pub fn set_config(&self, config: LoadEstimatorConfig) {
-        *self.config.write() = config;
+        let mut cfg = self.config.write();
+        let old = cfg.clone();
+        let geometry_changed = old.rate_window != config.rate_window
+            || old.buckets_per_second != config.buckets_per_second;
+        let predictor_changed = old.predictor_type != config.predictor_type
+            || (old.ema_alpha - config.ema_alpha).abs() > f64::EPSILON;
+        *cfg = config;
+        let num_buckets = cfg.num_buckets();
+        let bucket_duration = cfg.bucket_duration();
+        drop(cfg);
+
+        if geometry_changed {
+            let now = Instant::now();
+            for mut entry in self.data.iter_mut() {
+                let old_active = entry.value().active_count.load(Ordering::Relaxed);
+                *entry.value_mut() = LoraLoadData {
+                    active_count: AtomicUsize::new(old_active),
+                    rate_counter: BucketedRateCounter::new(num_buckets, bucket_duration, now),
+                };
+            }
+        }
+        // Predictors built under the old window/params are meaningless once the geometry or the
+        // predictor type/alpha changes; clear them so smoothing restarts from scratch.
+        if geometry_changed || predictor_changed {
+            self.predictors
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+        }
+
+        tracing::info!(
+            num_buckets,
+            geometry_changed,
+            predictor_changed,
+            "LoadEstimator config updated"
+        );
     }
 
     /// Prune tracking data (and predictors) for any LoRA not in `known`. Bounds memory
@@ -650,6 +693,40 @@ impl Default for LoadEstimator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_config_rebuilds_existing_counter_geometry() {
+        // The load-feed path can create a counter before the controller applies its config, so
+        // set_config must rebuild EXISTING counters under the new bucket geometry (preserving the
+        // in-flight active_count), not only counters created afterward.
+        let est = LoadEstimator::with_config(LoadEstimatorConfig {
+            rate_window: Duration::from_secs(10),
+            buckets_per_second: 1,
+            ..Default::default()
+        });
+        // Counter for "lora-a" created under the OLD geometry (10s @ 1/s = 10 buckets), with one
+        // in-flight request.
+        est.increment_load("lora-a");
+        assert_eq!(est.data.get("lora-a").unwrap().rate_counter.num_buckets, 10);
+
+        // Apply a finer bucket geometry at runtime.
+        est.set_config(LoadEstimatorConfig {
+            rate_window: Duration::from_secs(10),
+            buckets_per_second: 4,
+            ..Default::default()
+        });
+
+        let entry = est.data.get("lora-a").unwrap();
+        assert_eq!(
+            entry.rate_counter.num_buckets, 40,
+            "existing counter must adopt the new geometry (10s @ 4/s = 40 buckets)"
+        );
+        assert_eq!(
+            entry.active_count.load(Ordering::Relaxed),
+            1,
+            "in-flight active_count must survive the rebuild"
+        );
+    }
 
     #[test]
     fn test_bucketed_rate_counter_basic() {
