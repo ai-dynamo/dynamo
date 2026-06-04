@@ -242,7 +242,7 @@ where
             let endpoint_instance_id = inst.endpoint_instance_id();
             if !self
                 .resp_transport
-                .associate_instance(subject, &endpoint_instance_id)
+                .associate_instance(subject, None, &endpoint_instance_id)
                 .await
             {
                 return Err(anyhow::anyhow!(

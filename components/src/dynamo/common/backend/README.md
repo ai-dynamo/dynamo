@@ -6,16 +6,16 @@ KV-aware (DP-rank) routing, health-check canaries, OpenTelemetry
 tracing, and request-side guided decoding / structural tag.
 
 > **Work in progress.** Logprob response wire, multimodal, diffusion
-> (image/video/DLLM), LoRA, engine routes (sleep/wake, profiling,
+> (image/video/DLLM), LoRA, engine routes (pause/resume, profiling,
 > weight updates), text-in-text-out, and snapshot/CRIU are still on
 > the non-unified path. See [Feature Gaps](#feature-gaps) for the
 > per-engine matrix.
 
 > **Looking for a walkthrough?** Start with the
-> [Writing a Python Unified Backend](../../../../../docs/development/python-backend-guide.md)
-> guide. This README is the in-tree reference: file layout, per-engine
-> cancellation cookbook, disaggregation contract, error-handling table,
-> and the feature-gap matrix.
+> [Writing Unified Backends](../../../../../docs/development/unified-backends.md)
+> guide and choose the Python tab. This README is the in-tree reference:
+> file layout, per-engine cancellation cookbook, disaggregation contract,
+> error-handling table, and the feature-gap matrix.
 
 A two-class abstraction that separates **runtime integration** (common across
 all backends) from **engine logic** (vLLM, SGLang, TensorRT-LLM, etc.).
@@ -437,6 +437,7 @@ Lifecycle and runtime:
 - `drain()` hook for pre-cleanup work
 - `DynamoException` error chain wrapping
 - Finish reason normalization handled by the Rust layer
+- Engine control plumbing, with per-backend profiling, pause/resume, and supported weight-update controls
 - **Disaggregated serving** (`agg`/`prefill`/`decode`) — KV transfer
   uses NIXL across all three engines; SGLang exchanges a Dynamo-level
   bootstrap address, vLLM and TRT-LLM use an engine-internal handshake.
@@ -491,14 +492,13 @@ Request handling:
 | Multimodal | Images / video / embeddings, NIXL embedding transfer, encode workers. `worker.py:_to_rust_disaggregation_mode` rejects the `ENCODE` role. |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path. |
 | LoRA adapters | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization locks, per-request adapter threading on prefill. |
-| Engine routes | Profile start/stop, sleep / wake / quiesce, weight updates (disk / tensor / distributed / IPC), KV block clearing, prefix cache reset. |
 | Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload. |
 
 ### vLLM-specific gaps
 
 | Feature | Description |
 |---------|-------------|
-| Sleep/wake/quiesce | 3-level engine lifecycle control (`VllmEngineQuiesceController`) with shutdown-delay tags |
+| Sleep/wake | 3-level vLLM engine lifecycle control (`VllmEnginePauseController`) with shutdown-delay tags |
 | Elastic EP scaling | `scale_elastic_ep` endpoint with Ray node management |
 | GMS shadow mode | GPU Memory Service integration with failover lock (`--gms-shadow-mode`, `configure_gms_lock_mode`) |
 | ModelExpress P2P | Distributed model loading via P2P (`--model-express-url`, `register_modelexpress_loaders`, `mx-source` / `mx-target` load formats) |
@@ -523,7 +523,7 @@ Request handling:
 | Multimodal encode worker | Front-facing `MMEncoder`, embedding LRU cache, NIXL transfer (`MultimodalEncodeWorkerHandler`) |
 | Multimodal worker | Aggregated and disaggregated-prefill multimodal inference with `EmbeddingsProcessor` |
 | Deferred signal handling | `install_graceful_shutdown` captures SGLang's internal `loop.add_signal_handler` registrations for coordinated teardown |
-| Snapshot quiesce | Legacy `prepare_snapshot_engine` wires `SGLangEngineQuiesceController` to the shared `EngineSnapshotController` (CRIU + identity reload); unified path doesn't invoke it |
+| Snapshot pause | Legacy `prepare_snapshot_engine` wires `SGLangEnginePauseController` to the shared `EngineSnapshotController` (CRIU + identity reload); unified path doesn't invoke it |
 | Image/video health-check payloads | `ImageDiffusionHealthCheckPayload`, `VideoGenerationHealthCheckPayload` |
 | `register_model_with_readiness_gate` + image/video fast paths | `register.py` skips HF `config.json` download for `ModelType.Images` / `ModelType.Videos` |
 | Output modalities override | Required for diffusion workers (default `["text"]` -> `["image"]` / `["video"]`) |
@@ -536,7 +536,6 @@ Request handling:
 
 | Feature | Description |
 |---------|-------------|
-| Custom logits processors | `TrtllmDynamoLogitsAdapter` with CUDA stream support; legacy wraps user processors via `create_trtllm_adapters` |
 | Multimodal processing | `MultimodalRequestProcessor` with image URL fetching (`load_tensor_from_path_or_url`, httpx) and embedding injection |
 | Image / video diffusion | `DiffusionEngine`, auto-detect pipeline from `model_index.json`, MP4 encoding, `MediaOutput`, full `DiffusionConfig` flag family |
 | Encode helper (EPD) | Remote encode via `encode_client`, NIXL tensor reading; full `_encode_and_pack_disaggregated_params` flow |

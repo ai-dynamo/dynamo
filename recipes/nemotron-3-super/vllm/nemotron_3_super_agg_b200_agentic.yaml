@@ -1,0 +1,221 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated NVFP4 deployment of NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 on
+# B200x4 (TP=4) tuned for the agentic-coding workload: DeepEP low-latency
+# all-to-all and FP8 KV cache (fp8_e4m3) to minimise ITL/TTFT spikes
+# during short-burst tool/code edits.
+#
+# Cluster requirements: see nemotron_3_super_agg_b200_chat.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nemotron-3-super-b200-agentic-config
+  labels:
+    app.kubernetes.io/name: nemotron-3-super-b200-agentic
+    app.kubernetes.io/part-of: dynamo
+data:
+  # Stripped compilation passes for the spec-dec path (no inductor graph
+  # partitioning, no fuse passes — they don't compose with the MTP draft
+  # model's compile graph yet). This is what worker env COMPILATION_CONFIG
+  # points at by default.
+  compilation-config: |-
+    {
+      "max_cudagraph_capture_size": 512
+    }
+  # Fused compilation passes — for non-spec-dec runs only. Point
+  # COMPILATION_CONFIG at this key (configMapKeyRef.key) when running
+  # without --speculative-config.
+  compilation-config-fused: |-
+    {
+      "use_inductor_graph_partition": true,
+      "pass_config": {
+        "fuse_allreduce_rms": true,
+        "fuse_attn_quant": true
+      },
+      "max_cudagraph_capture_size": 512
+    }
+  # MTP speculative decoding. moe_backend=triton on B200 because the
+  # default FlashInfer-TRTLLM MoE path isn't supported in the spec-dec
+  # draft model loop yet.
+  speculative-config: |-
+    {
+      "method": "mtp",
+      "num_speculative_tokens": 3,
+      "moe_backend": "triton"
+    }
+  # Benchmarking-only: synthetic rejection sampling with a fixed AL.
+  # Switch SPECULATIVE_CONFIG env to this key to bench MTP at a known
+  # acceptance length without running the actual draft head.
+  speculative-config-synthetic: |-
+    {
+      "method": "mtp",
+      "num_speculative_tokens": 3,
+      "moe_backend": "triton",
+      "rejection_sample_method": "synthetic",
+      "synthetic_acceptance_length": 2.82
+    }
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: nemotron-3-super-b200-agentic
+  labels:
+    app.kubernetes.io/name: nemotron-3-super-b200-agentic
+    app.kubernetes.io/part-of: dynamo
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-super-dev.1
+              command:
+                - python3
+              args:
+                - -m
+                - dynamo.frontend
+                - --trust-remote-code
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: DYN_ROUTER_MODE
+                  value: kv
+              resources: {}
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                periodSeconds: 10
+                timeoutSeconds: 60
+                failureThreshold: 60
+
+    - name: agg
+      type: worker
+      replicas: 2
+      podTemplate:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-B200
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 16Gi
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-super-dev.1
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+                - --served-model-name
+                - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+                - --trust-remote-code
+                - --tensor-parallel-size
+                - "4"
+                - --enable-expert-parallel
+                - --moe-backend
+                - flashinfer_trtllm
+                - --enable-flashinfer-autotune
+                - --enable-prefix-caching
+                - --enable-chunked-prefill
+                - --max-model-len
+                - "131072"
+                - --max-num-batched-tokens=$(MAX_NUM_BATCHED_TOKENS)
+                - --all2all-backend
+                - deepep_low_latency
+                - --kv-cache-dtype
+                - fp8_e4m3
+                - --mamba-ssm-cache-dtype
+                - float16
+                - --compilation-config=$(COMPILATION_CONFIG)
+                - --speculative-config=$(SPECULATIVE_CONFIG)
+                - --dyn-tool-call-parser
+                - nemotron_nano
+                - --dyn-reasoning-parser
+                - nemotron_nano
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: HF_HOME
+                  value: /model-cache
+                - name: HF_MODULES_CACHE
+                  value: /tmp/hf_modules
+                - name: TRITON_CACHE_DIR
+                  value: /tmp/.triton-cache
+                - name: VLLM_CONFIG_ROOT
+                  value: /tmp/vllm-config
+                - name: VLLM_CACHE_ROOT
+                  value: /tmp/vllm-cache
+                - name: COMPILATION_CONFIG
+                  valueFrom:
+                    configMapKeyRef:
+                      name: nemotron-3-super-b200-agentic-config
+                      key: compilation-config
+                - name: SPECULATIVE_CONFIG
+                  valueFrom:
+                    configMapKeyRef:
+                      name: nemotron-3-super-b200-agentic-config
+                      key: speculative-config
+                # Tracks the spec-dec mode: 65536 when --speculative-config is
+                # active, 131072 when running without spec-dec. Update this
+                # value (and remove --speculative-config from args) to disable.
+                - name: MAX_NUM_BATCHED_TOKENS
+                  value: "65536"
+                - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
+                  value: "trtllm"
+                - name: NCCL_IB_DISABLE
+                  value: "1"
+                - name: PYTHONHASHSEED
+                  value: "42"
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              resources:
+                requests:
+                  nvidia.com/gpu: "4"
+                  memory: "256Gi"
+                limits:
+                  nvidia.com/gpu: "4"
+              securityContext:
+                runAsUser: 0
+              startupProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 30
+                timeoutSeconds: 20
+                failureThreshold: 60
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+                - name: dshm
+                  mountPath: /dev/shm
+              workingDir: /workspace/
