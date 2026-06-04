@@ -5,7 +5,9 @@
 
 Streams an audio file to a launched ``dynamo.frontend`` over a WebSocket using
 OpenAI Realtime client events, prints every server event as it arrives, and
-saves the synthesized audio.
+writes the synthesized audio into an output folder: each returned
+``response.output_audio.delta`` as ``chunk_NNNN.wav`` plus the concatenated
+``response.wav``.
 
 The wire contract is the Dynamo/OpenAI-spec realtime envelope emitted by
 ``RealtimeOmniHandler`` (``response.output_audio.delta`` etc.) — not vLLM-Omni's
@@ -23,7 +25,7 @@ Usage (omit --input-audio to fetch the sample clip from GitHub):
   python realtime_omni_client.py \
       --url ws://localhost:8000/v1/realtime \
       --model Qwen/Qwen3-Omni-30B-A3B-Instruct \
-      --output-wav response.wav
+      --output-dir realtime_output
 
   # or point at your own audio file:
   python realtime_omni_client.py --model Qwen/Qwen3-Omni-30B-A3B-Instruct \
@@ -132,8 +134,11 @@ async def run(args: argparse.Namespace) -> int:
     pcm16 = _load_pcm16_16k(args.input_audio, args.input_audio_url)
     chunk_bytes = max(INPUT_SAMPLE_RATE * 2 // 1000 * args.chunk_ms, 2)
 
-    # All response.output_audio.delta chunks are concatenated into this single
-    # buffer and written out as one WAV file.
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # Each response.output_audio.delta is written to its own chunk_NNNN.wav in
+    # the output folder as it arrives, and also appended to this buffer so the
+    # whole response can be written as a single concatenated response.wav.
     audio_out = bytearray()
     audio_delta_count = 0
     transcript = []
@@ -182,9 +187,17 @@ async def run(args: argparse.Namespace) -> int:
 
                 if etype == "response.output_audio.delta":
                     delta = base64.b64decode(event.get("delta", ""))
-                    audio_out.extend(delta)
-                    audio_delta_count += 1
-                    print(f"<- response.output_audio.delta ({len(delta)} bytes)")
+                    if delta:
+                        audio_delta_count += 1
+                        audio_out.extend(delta)
+                        chunk_path = os.path.join(
+                            args.output_dir, f"chunk_{audio_delta_count:04d}.wav"
+                        )
+                        _write_wav(chunk_path, delta, args.output_sample_rate)
+                        print(
+                            f"<- response.output_audio.delta ({len(delta)} bytes) "
+                            f"-> {os.path.basename(chunk_path)}"
+                        )
                 elif etype == "response.output_audio_transcript.delta":
                     transcript.append(event.get("delta", ""))
                     print(f"<- transcript.delta: {event.get('delta')!r}")
@@ -210,11 +223,13 @@ async def run(args: argparse.Namespace) -> int:
         f"{len(audio_out)} bytes ({len(audio_out) // 2} samples)"
     )
     if audio_out:
-        # Concatenate every audio delta into one WAV file.
-        _write_wav(args.output_wav, bytes(audio_out), args.output_sample_rate)
+        # Concatenate every audio delta into one WAV alongside the chunk files.
+        concat_path = os.path.join(args.output_dir, "response.wav")
+        _write_wav(concat_path, bytes(audio_out), args.output_sample_rate)
         print(
-            f"  saved audio : {args.output_wav} @ {args.output_sample_rate} Hz "
-            "(single file)"
+            f"  saved audio : {audio_delta_count} chunk file(s) + "
+            f"{os.path.basename(concat_path)} in {args.output_dir}/ "
+            f"@ {args.output_sample_rate} Hz"
         )
     else:
         print("  saved audio : none (no audio modality / no audio returned)")
@@ -242,7 +257,12 @@ def main() -> None:
         "('audio' drives the Omni talker). Pass --output-modalities text "
         "for transcript only, or 'text audio' for both.",
     )
-    parser.add_argument("--output-wav", default="realtime_response.wav")
+    parser.add_argument(
+        "--output-dir",
+        default="realtime_output",
+        help="folder to write per-delta chunk_NNNN.wav files and the "
+        "concatenated response.wav into",
+    )
     parser.add_argument(
         "--output-sample-rate",
         type=int,

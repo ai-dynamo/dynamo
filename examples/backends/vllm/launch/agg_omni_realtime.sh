@@ -35,7 +35,7 @@ print_curl_footer <<TEST
   python ${SCRIPT_DIR}/realtime_omni_client.py \\
     --url ws://localhost:${HTTP_PORT}/v1/realtime \\
     --model "${MODEL}" \\
-    --output-wav dynamo-realtime.wav
+    --output-dir dynamo-realtime
 TEST
 
 
