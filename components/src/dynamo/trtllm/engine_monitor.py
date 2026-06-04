@@ -12,7 +12,7 @@ import os
 import signal
 from typing import TYPE_CHECKING, Optional
 
-from dynamo.engine_monitor import EngineHealthMonitorConfig
+from dynamo.common.engine_monitor import EngineHealthMonitorConfig
 
 if TYPE_CHECKING:
     from dynamo.runtime import DistributedRuntime

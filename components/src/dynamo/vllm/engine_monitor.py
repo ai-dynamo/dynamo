@@ -11,7 +11,7 @@ import traceback
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineDeadError
 
-from dynamo.engine_monitor import EngineHealthMonitorConfig
+from dynamo.common.engine_monitor import EngineHealthMonitorConfig
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
