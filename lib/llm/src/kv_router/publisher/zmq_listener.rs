@@ -15,7 +15,7 @@ use crate::kv_router::metrics::kv_publisher_metrics;
 use crate::utils::zmq::{connect_sub_socket, multipart_message};
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn start_zmq_listener(
+pub(crate) async fn start_zmq_listener(
     zmq_endpoint: String,
     zmq_topic: String,
     worker_id: WorkerId,

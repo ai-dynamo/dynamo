@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
 use dynamo_kv_router::protocols::{
-    ExternalSequenceBlockHash, KvCacheRemoveData, KvCacheStoreData, StorageTier,
+    ExternalSequenceBlockHash, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
+    PlacementEvent, RouterEvent, StorageTier,
 };
 
 /// Reference-counting filter that deduplicates KV cache events.
@@ -88,5 +89,49 @@ impl EventDedupFilter {
     /// must reset all refcounts to stay consistent.
     pub(super) fn clear(&mut self) {
         self.per_rank_tier.clear();
+    }
+}
+
+/// Per-worker dedup for the direct (non-NATS) per-pod ZMQ KV-event path.
+///
+/// vLLM can emit duplicate store/remove events; applying them straight to the
+/// indexer corrupts block refcounts (a remove could fire before the worker
+/// actually evicts the block). This wraps [`EventDedupFilter`] so the per-pod
+/// path (`KvRouter::register_worker_kv_events`) gets the same refcount-correct
+/// dedup the batched NATS path already applies.
+pub(crate) struct PerWorkerDedup {
+    filter: EventDedupFilter,
+}
+
+impl PerWorkerDedup {
+    pub(crate) fn new() -> Self {
+        Self {
+            filter: EventDedupFilter::new(),
+        }
+    }
+
+    /// Apply dedup to a decoded placement event and return the `RouterEvent`
+    /// to index, or `None` when the event is fully filtered (duplicate remove)
+    /// or carries no local-worker placement.
+    pub(crate) fn process(&mut self, mut event: PlacementEvent) -> Option<RouterEvent> {
+        let dp_rank = event.event.dp_rank;
+        let tier = event.placement.tier;
+        // Take the data out to dedup (`filter_remove` consumes it), then restore.
+        let data = std::mem::replace(&mut event.event.data, KvCacheEventData::Cleared);
+        let new_data = match data {
+            KvCacheEventData::Stored(store) => {
+                self.filter.track_store(dp_rank, tier, &store);
+                KvCacheEventData::Stored(store)
+            }
+            KvCacheEventData::Removed(remove) => {
+                KvCacheEventData::Removed(self.filter.filter_remove(dp_rank, tier, remove)?)
+            }
+            KvCacheEventData::Cleared => {
+                self.filter.clear();
+                KvCacheEventData::Cleared
+            }
+        };
+        event.event.data = new_data;
+        event.into_router_event()
     }
 }

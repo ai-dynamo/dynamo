@@ -726,6 +726,83 @@ where
         self.block_size
     }
 
+    /// Subscribe directly to a worker's native ZMQ KV-cache event stream (e.g. a
+    /// vanilla vLLM started with `--kv-events-config`) and feed decoded events
+    /// into this router's indexer, stamped with `worker_id`.
+    ///
+    /// Dynamo workers normally bridge their vLLM KV events onto the event plane
+    /// and the router subscribes there; the external (GIE) EPP has no such
+    /// bridge, so it connects to each pod's ZMQ PUB socket directly. Events are
+    /// re-hashed from their `token_ids` by the normalizer, so a worker's actual
+    /// cached prefixes match the query-side block hashes and yield precise
+    /// overlap — complementing (not replacing) predict-on-route bookkeeping.
+    ///
+    /// The listener reconnects with backoff until the returned token is
+    /// cancelled (e.g. when the pod is removed). Returns that cancellation token.
+    pub fn register_worker_kv_events(
+        &self,
+        worker_id: protocols::WorkerId,
+        zmq_endpoint: String,
+        zmq_topic: String,
+    ) -> tokio_util::sync::CancellationToken {
+        let token = self.cancellation_token.child_token();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<protocols::PlacementEvent>();
+        let block_size = self.block_size;
+
+        // Pump decoded placement events into this router's indexer. Run them
+        // through the same refcount-correct dedup the batched NATS path uses,
+        // so duplicate vLLM store/remove events don't evict blocks from the
+        // routing index before the worker actually evicts them.
+        let indexer = self.indexer.clone();
+        let pump_token = token.clone();
+        tokio::spawn(async move {
+            let mut dedup = publisher::PerWorkerDedup::new();
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = pump_token.cancelled() => break,
+                    maybe = rx.recv() => match maybe {
+                        Some(event) => {
+                            if let Some(router_event) = dedup.process(event) {
+                                indexer.apply_event(router_event).await;
+                            }
+                        }
+                        None => break,
+                    },
+                }
+            }
+        });
+
+        // Connect (and reconnect with backoff) to the worker's ZMQ PUB socket.
+        let listen_token = token.clone();
+        tokio::spawn(async move {
+            let next_event_id = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            while !listen_token.is_cancelled() {
+                publisher::start_zmq_listener(
+                    zmq_endpoint.clone(),
+                    zmq_topic.clone(),
+                    worker_id,
+                    tx.clone(),
+                    listen_token.clone(),
+                    block_size,
+                    next_event_id.clone(),
+                    None, // image_token_id: not applicable for the per-pod path
+                )
+                .await;
+                if listen_token.is_cancelled() {
+                    break;
+                }
+                // Listener returned (connect failure or stream end) — back off.
+                tokio::select! {
+                    _ = listen_token.cancelled() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                }
+            }
+        });
+
+        token
+    }
+
     /// Compute the overlap blocks for a given token sequence and worker.
     /// This queries the indexer to find the effective weighted cache hit.
     pub async fn get_overlap_blocks(
