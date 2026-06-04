@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 
 from dynamo._core import log_message
 
+_DEFAULT_DYNAMO_LOGGING_CONFIG_PATH = "/opt/dynamo/etc/logging.toml"
+
 
 class LogHandler(logging.Handler):
     """
@@ -193,6 +195,13 @@ def log_level_mapping(level: str) -> int:
 
 def python_log_level_mapping(filters: str) -> int:
     """Return the lowest Python level enabled by a Rust-style DYN_LOG filter."""
+    if os.getenv("DYN_LOGGING_CONFIG_PATH") or os.path.isfile(
+        _DEFAULT_DYNAMO_LOGGING_CONFIG_PATH
+    ):
+        # Rust merges TOML log filters after DYN_LOG. Preserve DEBUG records so
+        # Python does not discard messages enabled only by file configuration.
+        return logging.DEBUG
+
     levels = []
     for directive in filters.split(","):
         level = directive.rsplit("=", 1)[-1].strip().lower()

@@ -255,7 +255,7 @@ def _build_publisher_stub(monkeypatch, *, attention_dp_size: int, fpm_enabled: b
     pub.partial_block_hashes = set()
     pub.error_queue = queue.Queue()
     pub._stop_event = threading.Event()
-    pub._last_engine_event_id = None
+    pub._last_engine_event_id_by_rank = {}
 
     fake_fpm_cls = MagicMock()
     monkeypatch.setattr(publisher_mod, "FpmDirectPublisher", fake_fpm_cls)
@@ -358,7 +358,7 @@ def test_kv_event_id_gap_records_missing_event_count():
     pub.additional_metrics = MagicMock()
     pub.processing_initial_created_events = True
     pub.max_window_size = None
-    pub._last_engine_event_id = 10
+    pub._last_engine_event_id_by_rank = {0: 10}
 
     pub._handle_kv_event({"event_id": 14, "data": {"type": "created"}})
 
@@ -370,13 +370,32 @@ def test_filtered_kv_events_do_not_create_false_event_id_gaps():
 
     pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
     pub.additional_metrics = MagicMock()
-    pub._last_engine_event_id = 10
+    pub._last_engine_event_id_by_rank = {0: 10}
     pub.should_drop_event = MagicMock(side_effect=[True, False])
     pub.processing_initial_created_events = True
     pub.max_window_size = None
 
     pub._handle_kv_event({"event_id": 11, "data": {"type": "stored"}})
     pub._handle_kv_event({"event_id": 12, "data": {"type": "created"}})
+
+    pub.additional_metrics.record_kv_event_id_gap.assert_not_called()
+
+
+def test_interleaved_attention_dp_ranks_do_not_create_false_event_id_gaps():
+    from dynamo.trtllm import publisher as publisher_mod
+
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub.additional_metrics = MagicMock()
+    pub._last_engine_event_id_by_rank = {}
+    pub.should_drop_event = MagicMock(return_value=True)
+
+    for event in [
+        {"event_id": 10, "attention_dp_rank": 0},
+        {"event_id": 3, "attention_dp_rank": 1},
+        {"event_id": 11, "attention_dp_rank": 0},
+        {"event_id": 4, "attention_dp_rank": 1},
+    ]:
+        pub._handle_kv_event(event)
 
     pub.additional_metrics.record_kv_event_id_gap.assert_not_called()
 

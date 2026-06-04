@@ -438,8 +438,9 @@ class Publisher:
         self.partial_block_hashes: set[int] = set()
         self.error_queue: Queue = Queue()
         self._stop_event = threading.Event()
-        # Track the last engine event_id to assert consecutive event IDs from the engine
-        self._last_engine_event_id: Optional[int] = None
+        # Track the last engine event_id per attention-DP rank. TRT-LLM emits
+        # independent rank-local sequences before gathering them on rank 0.
+        self._last_engine_event_id_by_rank: dict[int, int] = {}
 
         # Initialize ZMQ publisher if endpoint is provided (consolidator enabled)
         if zmq_endpoint:
@@ -797,20 +798,23 @@ class Publisher:
 
     def _handle_kv_event(self, event):
         event_id = event["event_id"]
+        attention_dp_rank = event.get("attention_dp_rank", 0)
 
         # Check the raw engine stream before filtering non-global-attention
         # events so expected filtering does not look like queue loss.
-        if self._last_engine_event_id is not None:
-            expected_id = self._last_engine_event_id + 1
+        last_event_id = self._last_engine_event_id_by_rank.get(attention_dp_rank)
+        if last_event_id is not None:
+            expected_id = last_event_id + 1
             if event_id != expected_id:
                 logging.warning(
-                    f"Non-consecutive engine event_id: expected {expected_id}, got {event_id}"
+                    f"Non-consecutive engine event_id on rank={attention_dp_rank}: "
+                    f"expected {expected_id}, got {event_id}"
                 )
                 if self.additional_metrics is not None:
                     self.additional_metrics.record_kv_event_id_gap(
                         max(0, event_id - expected_id)
                     )
-        self._last_engine_event_id = event_id
+        self._last_engine_event_id_by_rank[attention_dp_rank] = event_id
 
         # drop the events that is not emitted from the global attention layer.
         if self.should_drop_event(event):
@@ -878,10 +882,6 @@ class Publisher:
 
             lora_name = data.get("lora_name")
 
-            # Get attention_dp_rank from event (TRT-LLM includes this in KVCacheEvent)
-            # Default to 0 for backwards compatibility with older TRT-LLM versions
-            attention_dp_rank = event.get("attention_dp_rank", 0)
-
             logger.debug(
                 "Publishing stored KV event: engine_event_id=%s "
                 "attention_dp_rank=%s blocks=%s tokens=%s lora_name=%s "
@@ -937,9 +937,6 @@ class Publisher:
                     skipped_partial_blocks += 1
                     continue
                 removed_block_hashes.append(block_hash)
-
-            # Get attention_dp_rank from event (TRT-LLM includes this in KVCacheEvent)
-            attention_dp_rank = event.get("attention_dp_rank", 0)
 
             logger.debug(
                 "Publishing removed KV event: engine_event_id=%s "

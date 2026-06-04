@@ -47,6 +47,7 @@ def _clean_env(monkeypatch):
     """Remove logging-related env vars before each test."""
     for var in [
         "DYN_LOG",
+        "DYN_LOGGING_CONFIG_PATH",
         "VLLM_LOGGING_LEVEL",
         "VLLM_CONFIGURE_LOGGING",
         "VLLM_LOGGING_CONFIG_PATH",
@@ -157,6 +158,16 @@ def test_scoped_dyn_log_debug_keeps_python_debug_available(monkeypatch):
 )
 def test_python_log_level_mapping(filters, expected):
     assert python_log_level_mapping(filters) == expected
+
+
+def test_toml_logging_config_keeps_python_debug_available(monkeypatch):
+    monkeypatch.setenv("DYN_LOGGING_CONFIG_PATH", "/tmp/dynamo-logging.toml")
+
+    configure_dynamo_logging()
+
+    root_logger = logging.getLogger()
+    assert root_logger.level == logging.DEBUG
+    assert root_logger.handlers[0].level == logging.DEBUG
 
 
 def test_no_config_file_written():
