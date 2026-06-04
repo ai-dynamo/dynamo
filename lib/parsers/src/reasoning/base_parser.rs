@@ -157,8 +157,7 @@ impl ReasoningParser for BasicReasoningParser {
         //     normal_text. Without `&& !has_think_tag`, the implicit-reasoning
         //     span would absorb the literal <think> token into reasoning_text
         //     as a markup leak (parser-owned syntax surfacing to consumers).
-        let mut currently_reasoning =
-            (self._in_reasoning && !has_think_tag) || has_dangling_end;
+        let mut currently_reasoning = (self._in_reasoning && !has_think_tag) || has_dangling_end;
 
         while cursor < text.len() {
             if currently_reasoning {
@@ -706,8 +705,7 @@ mod tests {
         // into reasoning_text as a markup leak.
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), true, true);
-        let result = parser
-            .detect_and_parse_reasoning("before <think>thinking</think> after", &[]);
+        let result = parser.detect_and_parse_reasoning("before <think>thinking</think> after", &[]);
         assert_eq!(result.reasoning_text, "thinking");
         assert_eq!(result.normal_text, "before  after");
         assert!(
