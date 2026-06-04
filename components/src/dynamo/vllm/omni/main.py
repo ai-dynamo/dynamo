@@ -142,7 +142,7 @@ async def worker():
         await init_omni_stage_router(runtime, config, shutdown_endpoints)
         logger.debug("init_omni_stage_router completed")
     elif config.realtime:
-        from dynamo.vllm.omni.realtime_main import init_omni_realtime
+        from dynamo.vllm.omni.realtime_utils import init_omni_realtime
 
         await init_omni_realtime(runtime, config, shutdown_endpoints, shutdown_event)
         logger.debug("init_omni_realtime completed, exiting...")
