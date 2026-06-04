@@ -181,8 +181,10 @@ def activate_logits_processors(
             requested_n,
         )
     sampling_params["n"] = 1
-    sampling_params["custom_params"] = {
-        _ENTRIES_KEY: serialize_logits_processor_entries(entries),
-        _UID_KEY: request_uid,
-    }
+    # Merge into any existing custom_params rather than replacing, so a
+    # caller-supplied entry isn't silently dropped (mirrors the vLLM adapter's
+    # extra_args handling).
+    custom_params = sampling_params.setdefault("custom_params", {})
+    custom_params[_ENTRIES_KEY] = serialize_logits_processor_entries(entries)
+    custom_params[_UID_KEY] = request_uid
     return {"custom_logit_processor": _serialized_processor()}

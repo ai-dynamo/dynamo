@@ -332,15 +332,12 @@ class SglangLLMEngine(LLMEngine):
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
 
-        # Shared gating returns [] for PREFILL / hook-off (a no-op). Key state
-        # on context.id(), not trace_id: trace_id is optional and trace-scoped,
-        # so it can be None or shared across requests and collide the state map.
+        # No-op for PREFILL / hook-off (gating returns []). Resolve the uid
+        # only when there's something to activate.
         logits_entries = logits_processors_for_request(
             self._logits_processor_spec,
             disaggregation_mode=self.serving_mode,
         )
-        # Resolve the uid only when there's something to activate, so the
-        # no-activation path never calls context.id().
         logits_kwargs = (
             activate_logits_processors(
                 sampling_params, logits_entries, request_uid=context.id()

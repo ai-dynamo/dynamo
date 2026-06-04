@@ -75,6 +75,18 @@ def test_activate_sets_custom_params_and_returns_processor_kwarg():
     assert custom["dynamo_logits"] == serialize_logits_processor_entries(entries)
 
 
+def test_activate_preserves_existing_custom_params():
+    """A caller-set custom_params entry must survive activation (merge, not
+    replace), so the hook doesn't silently drop other request params."""
+    sampling_params: dict = {"custom_params": {"other": 1}}
+    entries = [ForcedTokenSequenceSpec(token_ids=(5,), eos_token_id=2)]
+    activate_logits_processors(sampling_params, entries, request_uid="r1")
+    custom = sampling_params["custom_params"]
+    assert custom["other"] == 1
+    assert custom["dynamo_uid"] == "r1"
+    assert custom["dynamo_logits"] == serialize_logits_processor_entries(entries)
+
+
 @pytest.mark.parametrize("requested_n", [None, 1, 3])
 def test_activate_forces_n_to_one(requested_n):
     """SGLang expands n>1 into batch rows sharing the request's custom_params,
