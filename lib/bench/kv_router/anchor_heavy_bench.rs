@@ -83,6 +83,9 @@ impl Args {
         if self.suffix_blocks == 0 {
             anyhow::bail!("--suffix-blocks must be at least 1");
         }
+        if self.block_size == 0 {
+            anyhow::bail!("--block-size must be at least 1");
+        }
         Ok(())
     }
 
