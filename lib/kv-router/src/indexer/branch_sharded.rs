@@ -117,8 +117,6 @@ pub struct BranchShardedIndexer<S: AsyncShardHandle> {
     /// Sole source of truth for installed anchors for each worker.
     worker_anchor_index:
         DashMap<WorkerWithDpRank, DashSet<(usize, u64), FxBuildHasher>, FxBuildHasher>,
-    /// Worker ID lookup index: worker_id → set of active `WorkerWithDpRank` values.
-    worker_id_index: DashMap<WorkerId, DashSet<WorkerWithDpRank, FxBuildHasher>, FxBuildHasher>,
     #[cfg(feature = "bench")]
     metrics: ShardedIndexerMetrics,
 }
@@ -179,7 +177,6 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
             root: Arc::new(RoutingNode::root()),
             worker_block_index: DashMap::with_hasher(FxBuildHasher),
             worker_anchor_index: DashMap::with_hasher(FxBuildHasher),
-            worker_id_index: DashMap::with_hasher(FxBuildHasher),
             #[cfg(feature = "bench")]
             metrics: ShardedIndexerMetrics::new(),
         }
@@ -257,11 +254,9 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
         &self,
         worker: WorkerWithDpRank,
     ) -> dashmap::mapref::one::RefMut<'_, WorkerWithDpRank, WorkerRoutingLookup> {
-        self.worker_block_index.entry(worker).or_insert_with(|| {
-            // Register in worker_id_index only on first appearance.
-            self.register_worker_in_id_index(worker);
-            DashMap::with_hasher(FxBuildHasher)
-        })
+        self.worker_block_index
+            .entry(worker)
+            .or_insert_with(|| DashMap::with_hasher(FxBuildHasher))
     }
 
     fn route_stored(
@@ -469,34 +464,20 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
         self.worker_anchor_index.remove(&worker);
     }
 
-    /// Register a worker in `worker_id_index` when it first appears in
-    /// `worker_block_index`.  Called from the Stored-event path.
-    fn register_worker_in_id_index(&self, worker: WorkerWithDpRank) {
-        self.worker_id_index
-            .entry(worker.worker_id)
-            .or_insert_with(|| DashSet::with_hasher(FxBuildHasher))
-            .insert(worker);
-    }
-
-    fn deregister_worker_from_id_index(&self, worker: WorkerWithDpRank) {
-        let worker_id = worker.worker_id;
-        let Some(set) = self.worker_id_index.get(&worker_id) else {
-            return;
-        };
-        set.remove(&worker);
-        let is_empty = set.is_empty();
-        drop(set);
-        if is_empty {
-            self.worker_id_index
-                .remove_if(&worker_id, |_, set| set.is_empty());
-        }
-    }
-
     fn tracked_workers_for_worker_id(&self, worker_id: WorkerId) -> FxHashSet<WorkerWithDpRank> {
-        self.worker_id_index
-            .get(&worker_id)
-            .map(|set| set.iter().map(|r| *r).collect())
-            .unwrap_or_default()
+        let mut workers: FxHashSet<_> = self
+            .worker_block_index
+            .iter()
+            .filter_map(|entry| {
+                let worker = *entry.key();
+                (worker.worker_id == worker_id).then_some(worker)
+            })
+            .collect();
+        workers.extend(self.worker_anchor_index.iter().filter_map(|entry| {
+            let worker = *entry.key();
+            (worker.worker_id == worker_id).then_some(worker)
+        }));
+        workers
     }
 
     fn rewritten_store_event(
@@ -523,7 +504,6 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
     fn remove_worker_entries(&self, worker: WorkerWithDpRank) {
         self.remove_worker_anchor_entries(worker);
         let Some((_, lookup)) = self.worker_block_index.remove(&worker) else {
-            self.deregister_worker_from_id_index(worker);
             return;
         };
         let mut seen_nodes = FxHashSet::default();
@@ -535,7 +515,6 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
                 }
             }
         }
-        self.deregister_worker_from_id_index(worker);
     }
 
     fn dump_router_events(&self) -> (Vec<RouterEvent>, DumpedBlockSet) {
@@ -1593,29 +1572,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleanup_removes_empty_worker_id_index_entries() {
-        let index = make_indexer(2, 4);
+    async fn worker_wide_cleanup_scans_block_and_anchor_worker_keys() {
+        let index = make_indexer(2, 3);
         let dp0 = WorkerWithDpRank::new(7, 0);
         let dp1 = WorkerWithDpRank::new(7, 1);
 
         index
-            .apply_event(store_event_with_dp_rank(7, 0, &[1, 2, 3]))
+            .apply_event(store_event_with_dp_rank(7, 0, &[1, 2, 3, 4]))
             .await;
         index
-            .apply_event(store_event_with_dp_rank(7, 1, &[1, 2, 4]))
+            .apply_event(store_event_with_dp_rank(7, 1, &[1, 2, 5, 6]))
             .await;
+        index.flush().await;
 
-        assert!(index.worker_id_index.contains_key(&7));
+        let before = index.tracked_workers_for_worker_id(7);
+        assert!(before.contains(&dp0));
+        assert!(before.contains(&dp1));
+        assert!(has_anchor_for_worker(&index, dp0));
+        assert!(has_anchor_for_worker(&index, dp1));
 
-        index.remove_worker_dp_rank(7, 0).await;
-        let remaining = index.tracked_workers_for_worker_id(7);
-        assert!(!remaining.contains(&dp0));
-        assert!(remaining.contains(&dp1));
-        assert!(index.worker_id_index.contains_key(&7));
-
-        index.remove_worker_dp_rank(7, 1).await;
+        index.apply_event(clear_event(7)).await;
         assert!(index.tracked_workers_for_worker_id(7).is_empty());
-        assert!(!index.worker_id_index.contains_key(&7));
+        assert!(!has_anchor_for_worker(&index, dp0));
+        assert!(!has_anchor_for_worker(&index, dp1));
     }
 
     #[tokio::test]
