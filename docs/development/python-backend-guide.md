@@ -233,6 +233,7 @@ from dynamo.common.backend import (
     GenerateChunk,
     GenerateRequest,
     LLMEngine,
+    LlmRegistration,
     WorkerConfig,
 )
 
@@ -320,11 +321,15 @@ async def start(self, worker_id: int) -> EngineConfig:
     return EngineConfig(
         model=self.model_name,
         served_model_name=self.model_name,
-        context_length=8192,
-        kv_cache_block_size=16,    # None if no block-structured KV
-        total_kv_blocks=1024,
-        max_num_seqs=64,
-        max_num_batched_tokens=8192,
+        # Token-pipeline metadata goes in the `llm` sub-record (RawEngines
+        # leave it None).
+        llm=LlmRegistration(
+            context_length=8192,
+            kv_cache_block_size=16,    # None if no block-structured KV
+            total_kv_blocks=1024,
+            max_num_seqs=64,
+            max_num_batched_tokens=8192,
+        ),
     )
 ```
 

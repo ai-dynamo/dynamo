@@ -96,9 +96,9 @@ Python engine authors keep the split API.)
   exception → `BackendError` mapping are handled by the bridge.
 
 - **`start()` returns `EngineConfig`.** The model class needs registration
-  metadata (`context_length`, `block_size`, `total_kv_blocks`) but must not
-  reach into engine internals. `start()` returns this metadata so the boundary
-  stays clean.
+  metadata (token-pipeline KV/DP fields live in the `llm=LlmRegistration(...)`
+  sub-record; `RawEngine`s leave `llm=None`) but must not reach into engine
+  internals. `start()` returns this metadata so the boundary stays clean.
 
 - **No hooks.** If behavior needs to be shared across engines, put it in
   `Worker` or a shared utility, not in a hook system.
