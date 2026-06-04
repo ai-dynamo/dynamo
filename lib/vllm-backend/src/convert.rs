@@ -6,8 +6,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use dynamo_backend_common::{
-    DynamoError, GuidedDecodingOptions, LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest,
-    StopReason as DynamoStopReason, TopLogprob, usage,
+    DisaggregationMode, DynamoError, GuidedDecodingOptions, LLMEngineOutput, LLMEngineOutputExt,
+    PrefillResult, PreprocessedRequest, StopReason as DynamoStopReason, TopLogprob, usage,
 };
 use vllm_engine_core_client::protocol::{
     EngineCoreSamplingParams, StopReason as VllmStopReason, StructuredOutputsParams,
@@ -27,6 +27,7 @@ pub(crate) fn lower_request(
     request_id: String,
     request: PreprocessedRequest,
     max_model_len: u32,
+    disaggregation_mode: DisaggregationMode,
 ) -> Result<GenerateRequest, DynamoError> {
     validate_request(&request)?;
 
@@ -54,7 +55,7 @@ pub(crate) fn lower_request(
     }
 
     let sampling = request.sampling_options;
-    let sampling_params = EngineCoreSamplingParams {
+    let mut sampling_params = EngineCoreSamplingParams {
         temperature: sampling.temperature.unwrap_or(1.0),
         top_p: sampling.top_p.unwrap_or(1.0),
         top_k: normalize_top_k(sampling.top_k)?,
@@ -89,6 +90,11 @@ pub(crate) fn lower_request(
         skip_reading_prefix_cache: None,
         extra_args: extra_args_as_object(request.extra_args)?,
     };
+    apply_disaggregation_mode(
+        disaggregation_mode,
+        request.prefill_result.as_ref(),
+        &mut sampling_params,
+    )?;
 
     let priority = request
         .routing
@@ -101,7 +107,7 @@ pub(crate) fn lower_request(
         request_id,
         prompt_token_ids: request.token_ids,
         sampling_params,
-        // TODO: multimodal data is unhandled by this backend for now
+        // Multimodal execution payloads are rejected during validation.
         mm_features: None,
         arrival_time: request.request_timestamp_ms.map(|ms| ms / 1000.0),
         cache_salt: request.mdc_sum,
@@ -117,6 +123,66 @@ fn trace_headers() -> Option<BTreeMap<String, String>> {
     let mut headers = HashMap::new();
     dynamo_runtime::logging::inject_trace_headers_into_map(&mut headers);
     (!headers.is_empty()).then(|| headers.into_iter().collect())
+}
+
+fn apply_disaggregation_mode(
+    mode: DisaggregationMode,
+    prefill_result: Option<&PrefillResult>,
+    sampling_params: &mut EngineCoreSamplingParams,
+) -> Result<(), DynamoError> {
+    match mode {
+        DisaggregationMode::Prefill => {
+            let extra_args = sampling_params.extra_args.get_or_insert_with(HashMap::new);
+            let caller_kv = extra_args.remove("kv_transfer_params");
+            let mut kv_transfer_params = serde_json::Map::new();
+            kv_transfer_params.insert(
+                "do_remote_prefill".to_string(),
+                serde_json::Value::Bool(false),
+            );
+            kv_transfer_params.insert("remote_engine_id".to_string(), serde_json::Value::Null);
+            kv_transfer_params.insert("remote_block_ids".to_string(), serde_json::Value::Null);
+            kv_transfer_params.insert("remote_host".to_string(), serde_json::Value::Null);
+            kv_transfer_params.insert("remote_port".to_string(), serde_json::Value::Null);
+
+            if let Some(caller_kv) = caller_kv {
+                let serde_json::Value::Object(caller_kv) = caller_kv else {
+                    return Err(invalid_arg(
+                        "extra_args.kv_transfer_params must be a JSON object for vLLM prefill",
+                    ));
+                };
+                kv_transfer_params.extend(caller_kv);
+            }
+            kv_transfer_params.insert(
+                "do_remote_decode".to_string(),
+                serde_json::Value::Bool(true),
+            );
+
+            extra_args.insert(
+                "kv_transfer_params".to_string(),
+                serde_json::Value::Object(kv_transfer_params),
+            );
+            sampling_params.max_tokens = 1;
+            sampling_params.min_tokens = 1;
+        }
+        DisaggregationMode::Decode => {
+            let kv_transfer_params = prefill_result
+                .and_then(|result| result.disaggregated_params.get("kv_transfer_params"))
+                .cloned()
+                .ok_or_else(|| {
+                    invalid_arg(
+                        "decode worker received prefill_result without kv_transfer_params; \
+                        the prefill peer must populate this for vLLM's NixlConnector to pull KV blocks",
+                    )
+                })?;
+            sampling_params
+                .extra_args
+                .get_or_insert_with(HashMap::new)
+                .insert("kv_transfer_params".to_string(), kv_transfer_params);
+        }
+        DisaggregationMode::Aggregated => {} // do nothing
+    }
+
+    Ok(())
 }
 
 fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
@@ -289,8 +355,9 @@ mod tests {
     use std::collections::HashMap;
 
     use dynamo_backend_common::{
-        BackendError, ErrorType, FinishReason, GuidedDecodingOptions, OutputOptions,
-        PreprocessedRequest, SamplingOptions, StopConditions, StopReason as DynamoStopReason,
+        BackendError, DisaggregationMode, ErrorType, FinishReason, GuidedDecodingOptions,
+        OutputOptions, PrefillResult, PreprocessedRequest, SamplingOptions, StopConditions,
+        StopReason as DynamoStopReason,
     };
     use serde_json::json;
     use vllm_engine_core_client::protocol::StopReason as VllmStopReason;
@@ -338,7 +405,13 @@ mod tests {
         request.mdc_sum = Some("cache-salt".to_string());
         request.extra_args = Some(json!({"custom": true}));
 
-        let generate = lower_request("req-1".to_string(), request, 1024).unwrap();
+        let generate = lower_request(
+            "req-1".to_string(),
+            request,
+            1024,
+            DisaggregationMode::Aggregated,
+        )
+        .unwrap();
 
         assert_eq!(generate.request_id, "req-1");
         assert_eq!(generate.prompt_token_ids, vec![11, 22, 33]);
@@ -371,9 +444,96 @@ mod tests {
     fn lower_request_defaults_max_tokens_from_context_length() {
         let request = sample_request();
 
-        let generate = lower_request("req-1".to_string(), request, 10).unwrap();
+        let generate = lower_request(
+            "req-1".to_string(),
+            request,
+            10,
+            DisaggregationMode::Aggregated,
+        )
+        .unwrap();
 
         assert_eq!(generate.sampling_params.max_tokens, 7);
+    }
+
+    #[test]
+    fn lower_request_prefill_sets_remote_decode_hints_and_clamps_tokens() {
+        let mut request = sample_request();
+        request.stop_conditions.max_tokens = Some(9);
+        request.stop_conditions.min_tokens = Some(3);
+        request.extra_args = Some(json!({
+            "custom": true,
+            "kv_transfer_params": {
+                "remote_host": "prefill-host",
+                "do_remote_decode": false
+            }
+        }));
+
+        let generate = lower_request(
+            "req-1".to_string(),
+            request,
+            1024,
+            DisaggregationMode::Prefill,
+        )
+        .unwrap();
+
+        assert_eq!(generate.sampling_params.max_tokens, 1);
+        assert_eq!(generate.sampling_params.min_tokens, 1);
+        let extra_args = generate.sampling_params.extra_args.unwrap();
+        assert_eq!(extra_args.get("custom"), Some(&json!(true)));
+        assert_eq!(
+            extra_args.get("kv_transfer_params"),
+            Some(&json!({
+                "do_remote_prefill": false,
+                "remote_engine_id": null,
+                "remote_block_ids": null,
+                "remote_host": "prefill-host",
+                "remote_port": null,
+                "do_remote_decode": true
+            }))
+        );
+    }
+
+    #[test]
+    fn lower_request_decode_forwards_prefill_kv_transfer_params() {
+        let mut request = sample_request();
+        request.prefill_result = Some(PrefillResult {
+            disaggregated_params: json!({
+                "kv_transfer_params": {
+                    "remote_engine_id": 7,
+                    "remote_block_ids": [1, 2, 3]
+                }
+            }),
+            prompt_tokens_details: None,
+        });
+
+        let generate = lower_request(
+            "req-1".to_string(),
+            request,
+            1024,
+            DisaggregationMode::Decode,
+        )
+        .unwrap();
+
+        assert_eq!(
+            generate
+                .sampling_params
+                .extra_args
+                .unwrap()
+                .get("kv_transfer_params"),
+            Some(&json!({"remote_engine_id": 7, "remote_block_ids": [1, 2, 3]}))
+        );
+    }
+
+    #[test]
+    fn lower_request_decode_requires_prefill_kv_transfer_params() {
+        let request = sample_request();
+
+        assert_invalid(lower_request(
+            "req-1".to_string(),
+            request,
+            1024,
+            DisaggregationMode::Decode,
+        ));
     }
 
     #[test]
@@ -383,7 +543,13 @@ mod tests {
         request.stop_conditions.stop_token_ids_hidden = Some(vec![99]);
         request.eos_token_ids = vec![2, 3];
 
-        let generate = lower_request("req-1".to_string(), request, 10).unwrap();
+        let generate = lower_request(
+            "req-1".to_string(),
+            request,
+            10,
+            DisaggregationMode::Aggregated,
+        )
+        .unwrap();
 
         assert_eq!(generate.sampling_params.stop_token_ids, vec![99]);
         assert_eq!(generate.sampling_params.eos_token_id, None);
@@ -394,45 +560,90 @@ mod tests {
     fn lower_request_rejects_currently_unsupported_payloads() {
         let mut request = sample_request();
         request.prompt_embeds = Some("base64".to_string());
-        assert_invalid(lower_request("req-1".to_string(), request, 10));
+        assert_invalid(lower_request(
+            "req-1".to_string(),
+            request,
+            10,
+            DisaggregationMode::Aggregated,
+        ));
 
         let mut request = sample_request();
         request.multi_modal_data = Some(HashMap::new());
-        assert_invalid(lower_request("req-1".to_string(), request, 10));
+        assert_invalid(lower_request(
+            "req-1".to_string(),
+            request,
+            10,
+            DisaggregationMode::Aggregated,
+        ));
 
         let mut request = sample_request();
         request.mm_processor_kwargs = Some(json!({"use_audio_in_video": true}));
-        assert_invalid(lower_request("req-1".to_string(), request, 10));
+        assert_invalid(lower_request(
+            "req-1".to_string(),
+            request,
+            10,
+            DisaggregationMode::Aggregated,
+        ));
     }
 
     #[test]
     fn lower_request_rejects_multi_choice_and_beam_fields() {
         let mut request = sample_request();
         request.sampling_options.n = Some(2);
-        assert_invalid(lower_request("req-1".to_string(), request, 10));
+        assert_invalid(lower_request(
+            "req-1".to_string(),
+            request,
+            10,
+            DisaggregationMode::Aggregated,
+        ));
 
         let mut request = sample_request();
         request.sampling_options.best_of = Some(2);
-        assert_invalid(lower_request("req-1".to_string(), request, 10));
+        assert_invalid(lower_request(
+            "req-1".to_string(),
+            request,
+            10,
+            DisaggregationMode::Aggregated,
+        ));
 
         let mut request = sample_request();
         request.sampling_options.use_beam_search = Some(true);
-        assert_invalid(lower_request("req-1".to_string(), request, 10));
+        assert_invalid(lower_request(
+            "req-1".to_string(),
+            request,
+            10,
+            DisaggregationMode::Aggregated,
+        ));
 
         let mut request = sample_request();
         request.sampling_options.length_penalty = Some(0.7);
-        assert_invalid(lower_request("req-1".to_string(), request, 10));
+        assert_invalid(lower_request(
+            "req-1".to_string(),
+            request,
+            10,
+            DisaggregationMode::Aggregated,
+        ));
     }
 
     #[test]
     fn lower_request_rejects_oversized_logprobs() {
         let mut request = sample_request();
         request.output_options.logprobs = Some(i32::MAX as u32 + 1);
-        assert_invalid(lower_request("req-1".to_string(), request, 10));
+        assert_invalid(lower_request(
+            "req-1".to_string(),
+            request,
+            10,
+            DisaggregationMode::Aggregated,
+        ));
 
         let mut request = sample_request();
         request.output_options.prompt_logprobs = Some(i32::MAX as u32 + 1);
-        assert_invalid(lower_request("req-1".to_string(), request, 10));
+        assert_invalid(lower_request(
+            "req-1".to_string(),
+            request,
+            10,
+            DisaggregationMode::Aggregated,
+        ));
     }
 
     #[test]

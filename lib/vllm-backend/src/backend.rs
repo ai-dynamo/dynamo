@@ -296,15 +296,14 @@ impl LLMEngine for VllmBackend {
         let request_id = ctx.id().to_string();
         let prompt_tokens = request.token_ids.len() as u32;
 
-        // TODO: mirror Python vLLM's prefill/decode kv_transfer_params
-        // handling once this native backend advertises disaggregated serving.
         let mut output_stream = {
             let inner = self.inner.read().await;
             let inner = inner
                 .as_ref()
                 .ok_or_else(|| engine_shutdown("vLLM backend has not been started"))?;
             let max_model_len = inner.llm.engine_core_client().max_model_len();
-            let generate_request = lower_request(request_id, request, max_model_len)?;
+            let generate_request =
+                lower_request(request_id, request, max_model_len, self.disaggregation_mode)?;
 
             inner
                 .llm
@@ -440,8 +439,8 @@ impl LLMEngine for VllmBackend {
 
     async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
         if self.disaggregation_mode.is_decode() {
-            // TODO: add a decode canary once native vLLM wires
-            // prefill_result/kv_transfer_params like the Python integration.
+            // Decode probes need a real prefill handoff payload, which the
+            // runtime health canary cannot synthesize locally.
             return Ok(None);
         }
 
