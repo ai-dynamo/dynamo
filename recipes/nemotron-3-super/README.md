@@ -48,16 +48,6 @@ We ship Dynamo + vLLM deployment profiles across two GPU SKUs and two serving mo
      --from-literal=HF_TOKEN="$HF_TOKEN" \
      -n ${NAMESPACE}
    ```
-4. **`nvcr.io` pull access on the namespace's default ServiceAccount.** The recipes no longer specify `imagePullSecrets` inline, so the cluster's default SA in your namespace must already carry a docker-registry secret for `nvcr.io/nvstaging` (typically provisioned by cluster ops). If your namespace doesn't have one, create one and patch it onto the default SA, e.g.:
-   ```bash
-   kubectl create secret docker-registry nvcr-imagepullsecret \
-     --docker-server=nvcr.io \
-     --docker-username='$oauthtoken' \
-     --docker-password="$NGC_API_KEY" \
-     -n ${NAMESPACE}
-   kubectl patch serviceaccount default -n ${NAMESPACE} \
-     -p '{"imagePullSecrets":[{"name":"nvcr-imagepullsecret"}]}'
-   ```
 
 ## Quick Start
 
