@@ -289,4 +289,7 @@ def test_router_decisions_vllm_multiple_workers_xpu(
         num_workers=2,
         single_gpu=False,
         test_dp_rank=False,
+        # XPU workers have longer startup latency; 1.0s base avoids
+        # spurious retries during the first request after registration.
+        initial_wait=1.0,
     )

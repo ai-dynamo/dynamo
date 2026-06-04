@@ -2719,6 +2719,7 @@ def _test_router_decisions(
     standalone_indexer_url: Optional[str] = None,
     router_aic_config: Optional[dict[str, Any]] = None,
     router_predicted_ttl_secs: Optional[float] = None,
+    initial_wait: float = 0.25,
 ):
     """Validate cross-worker routing decisions based on longest prefix match.
 
@@ -2883,9 +2884,9 @@ def _test_router_decisions(
                 kv_python_router=kv_router,
                 model_name=model_name,
                 token_ids=token_ids,
-                # XPU workers have longer startup latency; 1.0s base avoids
-                # spurious retries during the first request after registration.
-                initial_wait=1.0,
+                # XPU workers have longer startup latency; pass as parameter
+                # to avoid affecting CUDA tests.
+                initial_wait=initial_wait,
                 stop_conditions={
                     "ignore_eos": True,
                     "max_tokens": 2,
