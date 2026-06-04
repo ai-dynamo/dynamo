@@ -224,6 +224,45 @@ class ReplayPlannerAdapter:
         assert self._loop is not None, "sync bridge only available on orchestrator path"
         return self._loop.run_until_complete(coro)
 
+    def install_benchmark_fpms(
+        self,
+        *,
+        prefill_fpms: Optional[list[ForwardPassMetrics]] = None,
+        decode_fpms: Optional[list[ForwardPassMetrics]] = None,
+        agg_fpms: Optional[list[ForwardPassMetrics]] = None,
+    ) -> None:
+        """Install AIC benchmark FPMs into the regression model(s),
+        path-agnostically.
+
+        - PSM path: ``PlannerStateMachine.load_benchmark_fpms``.
+        - Orchestrator path: ``OrchestratorEngineAdapter
+          .install_regressions_from_fpms`` (builds + installs on the
+          shared store; synchronous, does NOT re-bootstrap plugins —
+          plugins were already bootstrapped at adapter construction).
+
+        Without this on the orchestrator path the regressions were never
+        installed (``replay/main.py`` previously only fed ``adapter._sm``,
+        which is None under ``use_orchestrator``), so the throughput
+        regression stayed empty and orchestrator-replay scaling decisions
+        diverged from PSM."""
+        if self._use_orchestrator:
+            self._engine.install_regressions_from_fpms(  # type: ignore[union-attr]
+                prefill_fpms=prefill_fpms,
+                decode_fpms=decode_fpms,
+                agg_fpms=agg_fpms,
+            )
+            return
+        assert self._sm is not None
+        kwargs: dict[str, list[ForwardPassMetrics]] = {}
+        if prefill_fpms is not None:
+            kwargs["prefill_fpms"] = prefill_fpms
+        if decode_fpms is not None:
+            kwargs["decode_fpms"] = decode_fpms
+        if agg_fpms is not None:
+            kwargs["agg_fpms"] = agg_fpms
+        if kwargs:
+            self._sm.load_benchmark_fpms(**kwargs)
+
     def run(self) -> ReplayPlannerReport:
         """Run the full replay with planner-in-the-loop."""
         next_tick = self._engine.initial_tick(0.0)
@@ -469,7 +508,9 @@ class ReplayPlannerAdapter:
 
         PSM path: read directly from ``self._sm.{_agg,_prefill,_decode}_regression``.
         Orchestrator path: read from the orchestrator's shared store
-        (populated by ``bootstrap_from_fpms`` → ``install_regressions``).
+        (populated by ``install_benchmark_fpms`` →
+        ``OrchestratorEngineAdapter.install_regressions_from_fpms`` →
+        ``install_regressions``, driven from ``replay/main.py``).
         """
         if self._use_orchestrator:
             # The adapter hides the orchestrator; access via its public

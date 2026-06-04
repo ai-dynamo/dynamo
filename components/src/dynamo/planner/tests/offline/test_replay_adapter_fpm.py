@@ -23,7 +23,11 @@ import pytest
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.state_machine import PlannerStateMachine
 from dynamo.planner.core.types import EngineCapabilities, WorkerCapabilities
-from dynamo.planner.offline.replay_adapter import ReplayPlannerAdapter
+from dynamo.planner.offline.replay_adapter import (
+    ReplayPlannerAdapter,
+    _build_fpm_from_dict,
+)
+from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -103,3 +107,32 @@ def test_feed_extra_fpm_to_regression_does_not_crash_psm_sla():
     #   AttributeError: 'PlannerEnginePerfModel' object has no attribute
     #   'add_observation'
     adapter._feed_extra_fpm_to_regression(decode_snaps=decode_snaps, prefill_snaps=[])
+
+
+def _orch_agg_config_sla() -> PlannerConfig:
+    cfg = _agg_config_sla()
+    cfg.scheduling.use_orchestrator = True
+    return cfg
+
+
+def test_install_benchmark_fpms_installs_regression_on_orchestrator_path():
+    """Review #3: the orchestrator replay path must actually install
+    regressions. ``ReplayPlannerAdapter.install_benchmark_fpms`` routes to
+    ``OrchestratorEngineAdapter.install_regressions_from_fpms`` so
+    ``get_regression`` is non-None afterwards. Pre-fix, replay/main.py only
+    fed ``adapter._sm`` (None under use_orchestrator), so the orchestrator
+    regression stayed empty and replay diverged from PSM."""
+    cfg = _orch_agg_config_sla()
+    adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
+    adapter._config = cfg
+    adapter._use_orchestrator = True
+    adapter._sm = None
+    adapter._engine = OrchestratorEngineAdapter(cfg, _agg_caps())
+
+    # Before: no regression installed on the orchestrator path.
+    assert adapter._engine._orchestrator.get_regression("agg") is None
+
+    adapter.install_benchmark_fpms(agg_fpms=[_build_fpm_from_dict(_snap("w1", 1.0))])
+
+    # After: the agg regression is installed (non-None).
+    assert adapter._engine._orchestrator.get_regression("agg") is not None

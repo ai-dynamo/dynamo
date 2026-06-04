@@ -374,36 +374,54 @@ class OrchestratorEngineAdapter:
         Mirrors PSM's ``load_benchmark_fpms`` + ``warm_load_predictors``
         but through the plugin chain:
 
-        1. In SLA mode, spin up a throwaway ``PlannerStateMachine`` that
-           builds the regression model instances from benchmark FPMs the
-           same way PSM does internally. Hand those instances to the
-           orchestrator's shared store via ``install_regressions``.
-           (Easy mode skips this — no regression models are used.)
-        2. Call ``bootstrap_plugins`` to warm ``BuiltinLoadPredictor``
-           from ``historical_traffic`` and fan out Bootstrap RPC.
+        1. ``install_regressions_from_fpms`` — in SLA mode, build the
+           regression models from benchmark FPMs and install them on the
+           orchestrator's shared store (easy mode skips — no regressions).
+        2. ``bootstrap_plugins`` — warm ``BuiltinLoadPredictor`` from
+           ``historical_traffic`` and fan out Bootstrap RPC.
 
-        Using PSM as the regression factory is a shortcut — a future
-        cleanup can extract regression-construction from PSM into a
-        standalone helper so this can drop the throwaway instance.
+        Replay uses these two steps separately (regressions are installed
+        once benchmark FPMs are generated; plugins are bootstrapped at
+        adapter construction), so the regression-install half lives in its
+        own synchronous method.
         """
+        self.install_regressions_from_fpms(
+            prefill_fpms=prefill_fpms, decode_fpms=decode_fpms, agg_fpms=agg_fpms
+        )
+        await self.bootstrap_plugins(historical_traffic=historical_traffic)
+
+    def install_regressions_from_fpms(
+        self,
+        *,
+        prefill_fpms: Optional[Sequence[Any]] = None,
+        decode_fpms: Optional[Sequence[Any]] = None,
+        agg_fpms: Optional[Sequence[Any]] = None,
+    ) -> None:
+        """Build regression models from benchmark FPMs and install them on
+        the orchestrator's shared store. Synchronous; does NOT bootstrap
+        plugins. No-op in easy mode (no regression models are used).
+
+        Spins up a throwaway ``PlannerStateMachine`` as the regression
+        factory — it builds the model instances from benchmark FPMs the
+        same way PSM does internally (a future cleanup can extract that
+        construction into a standalone helper to drop the throwaway)."""
+        if self._config.optimization_target != "sla":
+            return
         # Import locally to avoid pulling PSM into module-level imports
         # (the adapter's own tick path shouldn't know about PSM).
         from dynamo.planner.core.state_machine import PlannerStateMachine
 
-        if self._config.optimization_target == "sla":
-            throwaway = PlannerStateMachine(self._config, self._capabilities)
-            throwaway.load_benchmark_fpms(
-                prefill_fpms=list(prefill_fpms) if prefill_fpms else None,
-                decode_fpms=list(decode_fpms) if decode_fpms else None,
-                agg_fpms=list(agg_fpms) if agg_fpms else None,
-            )
-            self.install_regressions(
-                prefill=getattr(throwaway, "_prefill_regression", None),
-                decode=getattr(throwaway, "_decode_regression", None),
-                agg=getattr(throwaway, "_agg_regression", None),
-            )
-
-        await self.bootstrap_plugins(historical_traffic=historical_traffic)
+        throwaway = PlannerStateMachine(self._config, self._capabilities)
+        throwaway.load_benchmark_fpms(
+            prefill_fpms=list(prefill_fpms) if prefill_fpms else None,
+            decode_fpms=list(decode_fpms) if decode_fpms else None,
+            agg_fpms=list(agg_fpms) if agg_fpms else None,
+        )
+        self.install_regressions(
+            prefill=getattr(throwaway, "_prefill_regression", None),
+            decode=getattr(throwaway, "_decode_regression", None),
+            agg=getattr(throwaway, "_agg_regression", None),
+        )
 
     # ------------------------------------------------------------------
     # EngineProtocol
