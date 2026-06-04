@@ -130,6 +130,7 @@ async fn cd_loopback_decode_prefill_session() -> Result<()> {
         role: DisaggregationRole::Decode,
         max_inflight_remote_prefill_tokens: usize::MAX,
         min_remote_prefill_tokens: 0,
+        cd_local_fallback_on_overload: true,
     };
     let d_wrapper = DecodeDisaggLeader::from_parts(
         d_inner.clone(),

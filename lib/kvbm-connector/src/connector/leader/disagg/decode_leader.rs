@@ -371,6 +371,19 @@ pub struct DecodeDisaggLeader {
     tokio_handle: tokio::runtime::Handle,
 
     inflight_budget: InflightBudget,
+
+    /// Approach B-GNMT: when a Remote decision cannot reserve from the
+    /// inflight budget (the decode-side proxy for hub prefill-router
+    /// pressure), downgrade the request to a LOCAL prefill on the decode
+    /// worker instead of returning `(None, false)` to vLLM (which DEFERS,
+    /// re-queuing the request and pinning the saturated prefill at the
+    /// TTFT tail). `true` (default) narrows disaggregation under overload;
+    /// `false` preserves the prior defer-on-exhaustion behavior. Sourced
+    /// from `DisaggConfig::cd_local_fallback_on_overload`. Inert unless
+    /// `max_inflight_remote_prefill_tokens` is finite (the default
+    /// `usize::MAX` short-circuits `try_reserve` so the branch is
+    /// unreachable).
+    cd_local_fallback_on_overload: bool,
     cd_request_state: DashMap<String, Arc<CdRequestState>>,
 
     client: Option<Arc<ConditionalDisaggClient>>,
@@ -426,6 +439,7 @@ impl DecodeDisaggLeader {
             worker_hook,
             tokio_handle,
             inflight_budget,
+            cd_local_fallback_on_overload: config.cd_local_fallback_on_overload,
             cd_request_state: DashMap::new(),
             client,
             hub,
@@ -744,6 +758,46 @@ impl DecodeDisaggLeader {
                 }
 
                 if !self.inflight_budget.try_reserve(full_block_external_tokens) {
+                    // Approach B-GNMT: the inflight budget — the decode-side
+                    // proxy for hub prefill-router pressure (few prefill
+                    // workers saturated by many decodes' disagg load) — is
+                    // exhausted. Default behavior DOWNGRADES this Remote
+                    // decision to a LOCAL prefill: take the inner passthrough
+                    // (mirroring the zero-block downgrade above), so the
+                    // request prefills on the decode worker with low latency
+                    // and the saturated prefill stops being the TTFT-tail
+                    // bottleneck.
+                    //
+                    // SAFETY: `try_reserve` FAILED, so nothing was reserved and
+                    // `commit_gnmt_remote` was never called — no
+                    // `cd_request_state` was inserted, no session was opened,
+                    // no budget is held. Returning `inner_result` is therefore
+                    // behaviorally IDENTICAL to a policy-`Local` decision: zero
+                    // CD state to unwind, no new failure path, and no contact
+                    // with the recompute / release / mark_failed / onboarding
+                    // lifecycles. It only ever NARROWS disaggregation (more
+                    // Local, never more Remote).
+                    if self.cd_local_fallback_on_overload {
+                        tracing::warn!(
+                            full_block_external_tokens,
+                            available = self.inflight_available(),
+                            "decode_gnmt: inflight budget exhausted — downgrading remote prefill to LOCAL (overload fallback)"
+                        );
+                        crate::audit!(
+                            "policy_remote_downgraded_overload",
+                            role = "decode",
+                            request_id,
+                            full_block_external_tokens,
+                            available = self.inflight_available()
+                        );
+                        if let Some(cd) = &cd {
+                            cd.record_decision("remote_downgraded_overload");
+                            cd.record_remote_declined("budget_exhausted");
+                            cd.record_local_prefill_tokens(inputs.num_prefill_tokens() as u64);
+                        }
+                        return Ok(inner_result);
+                    }
+
                     tracing::warn!(
                         full_block_external_tokens,
                         available = self.inflight_available(),

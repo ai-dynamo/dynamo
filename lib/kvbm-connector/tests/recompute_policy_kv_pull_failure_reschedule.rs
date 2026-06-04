@@ -168,6 +168,7 @@ async fn recompute_policy_pull_failure_evicts_coordinator_state() -> Result<()> 
         role: DisaggregationRole::Decode,
         max_inflight_remote_prefill_tokens: usize::MAX,
         min_remote_prefill_tokens: 0,
+        cd_local_fallback_on_overload: true,
     };
     let wrapper = DecodeDisaggLeader::from_parts(
         inner.clone(),

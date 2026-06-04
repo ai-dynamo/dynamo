@@ -83,6 +83,18 @@ struct TestHarness {
 }
 
 fn build_harness() -> TestHarness {
+    // Default: unlimited budget, overload-fallback enabled (matches the
+    // production decode default). Tests that exercise the budget-exhaustion
+    // downgrade use `build_harness_with`.
+    build_harness_with(usize::MAX, true)
+}
+
+/// Parameterized harness builder for the Approach B-GNMT overload-fallback
+/// tests. `max_inflight` sets the inflight token budget (set it `< 96` — the
+/// `full_block_external_tokens` for this layout, `(LOCAL+REMOTE)=6` blocks ×
+/// `BLOCK_SIZE` 16 — to trip the exhaustion branch at the first request).
+/// `local_fallback` sets `DisaggConfig::cd_local_fallback_on_overload`.
+fn build_harness_with(max_inflight: usize, local_fallback: bool) -> TestHarness {
     let g2_manager = build_g2_manager(32);
 
     let token_sequence = create_token_sequence(TOTAL_BLOCKS, BLOCK_SIZE, 100);
@@ -142,8 +154,9 @@ fn build_harness() -> TestHarness {
 
     let cfg = DisaggConfig {
         role: DisaggregationRole::Decode,
-        max_inflight_remote_prefill_tokens: usize::MAX,
+        max_inflight_remote_prefill_tokens: max_inflight,
         min_remote_prefill_tokens: 0,
+        cd_local_fallback_on_overload: local_fallback,
     };
     let wrapper = DecodeDisaggLeader::from_parts(
         inner.clone(),
@@ -318,6 +331,124 @@ async fn cd_decode_happy_path() -> Result<()> {
     assert!(
         session.closed_reason().is_none(),
         "decode must NOT call session.close() on the happy path"
+    );
+
+    Ok(())
+}
+
+// ============================================================================
+// Approach B-GNMT: decode-side prefill downgrade under hub prefill-router
+// overload (proxied by inflight-budget exhaustion).
+//
+// Layout: full_block_external_tokens = (LOCAL + REMOTE) = 6 blocks × 16 = 96.
+// A budget of 64 (< 96) makes `try_reserve(96)` fail on the FIRST request,
+// hitting the exhaustion branch in `decode_gnmt`.
+// ============================================================================
+
+/// Overload + fallback ENABLED ⇒ the Remote decision is DOWNGRADED to a local
+/// prefill: GNMT returns the inner passthrough `(Some(LOCAL*BS), true)` — i.e.
+/// vLLM gets a definite answer (NOT `(None, false)` defer) — AND no CD state is
+/// installed (no queued request, no `cd_request_state`, no budget held). This
+/// is behaviorally identical to a policy-`Local` decision: nothing to unwind,
+/// no new failure path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_overload_fallback_downgrades_remote_to_local() -> Result<()> {
+    let h = build_harness_with(64, true);
+
+    h.wrapper.create_slot(make_request())?;
+
+    // Inner local-match GNMT result is (Some(LOCAL*BS), true); the wrapper
+    // passes that THROUGH on the downgrade (mirroring the zero-block downgrade).
+    let (count, async_flag) = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    assert_eq!(
+        count,
+        Some(LOCAL_BLOCKS * BLOCK_SIZE),
+        "downgrade returns the inner local-match passthrough, not the remote window"
+    );
+    assert!(
+        async_flag,
+        "passthrough preserves the inner async flag (here true) — NOT the (None,false) defer"
+    );
+
+    // No CD state was installed: no remote-prefill was queued, no per-request
+    // state, and the budget was never charged.
+    assert_eq!(
+        h.queue.snapshot().len(),
+        0,
+        "downgrade must NOT enqueue a remote prefill"
+    );
+    assert!(
+        !h.wrapper.has_active_cd_request("req-1"),
+        "downgrade must NOT install cd_request_state"
+    );
+    assert_eq!(
+        h.wrapper.inflight_available(),
+        64,
+        "downgrade reserves nothing — budget is untouched"
+    );
+    assert!(
+        h.factory.last_opened().is_none(),
+        "downgrade must NOT open a CD session"
+    );
+
+    Ok(())
+}
+
+/// Overload + fallback DISABLED ⇒ the prior behavior is preserved: GNMT returns
+/// `(None, false)` (vLLM defers/spins), nothing is queued, no CD state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_overload_no_fallback_defers_as_before() -> Result<()> {
+    let h = build_harness_with(64, false);
+
+    h.wrapper.create_slot(make_request())?;
+
+    let (count, async_flag) = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    assert_eq!(count, None, "fallback disabled ⇒ defer (None)");
+    assert!(!async_flag, "defer is (None, false)");
+
+    assert_eq!(h.queue.snapshot().len(), 0);
+    assert!(!h.wrapper.has_active_cd_request("req-1"));
+    assert_eq!(h.wrapper.inflight_available(), 64);
+    assert!(h.factory.last_opened().is_none());
+
+    Ok(())
+}
+
+/// Sufficient budget (no overload) ⇒ the Remote decision is UNCHANGED whether
+/// or not the fallback is enabled: GNMT queues the remote prefill and returns
+/// the full external window. Confirms the fallback only narrows under overload
+/// and never alters the normal-load Remote path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_no_overload_remote_unchanged_with_fallback_enabled() -> Result<()> {
+    // 96 == full_block_external_tokens for this layout; reservation succeeds.
+    let h = build_harness_with(96, true);
+
+    h.wrapper.create_slot(make_request())?;
+
+    let (count, async_flag) = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    assert_eq!(
+        count,
+        Some((LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE),
+        "with budget, Remote returns the full external window (disaggregates)"
+    );
+    assert!(async_flag);
+
+    wait_until(|| h.queue.snapshot().len() == 1).await;
+    assert_eq!(h.queue.snapshot()[0].request_id, "req-1");
+    assert!(
+        h.wrapper.has_active_cd_request("req-1"),
+        "Remote path installs cd_request_state"
+    );
+    assert_eq!(
+        h.wrapper.inflight_available(),
+        0,
+        "Remote reserved the full 96-token window"
     );
 
     Ok(())

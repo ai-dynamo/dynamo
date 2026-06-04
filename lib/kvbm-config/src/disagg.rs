@@ -58,10 +58,31 @@ pub struct DisaggConfig {
     /// preserving prior behavior. Only consulted for the decode role.
     #[serde(default)]
     pub min_remote_prefill_tokens: usize,
+
+    /// Decode-side prefill-overload local fallback (Approach B-GNMT). When a
+    /// Remote (disaggregate) decision cannot reserve from the inflight budget
+    /// (`max_inflight_remote_prefill_tokens` exhausted — the decode-side proxy
+    /// for hub prefill-router pressure), `true` (default) DOWNGRADES the
+    /// request to a local prefill on the decode worker (a no-CD-state
+    /// passthrough, behaviorally identical to a policy-`Local` decision)
+    /// instead of returning `(None, false)` to vLLM (which DEFERS/spins,
+    /// re-queuing the request until budget frees — making the saturated
+    /// prefill the TTFT-tail bottleneck). `false` preserves the prior
+    /// defer-on-exhaustion behavior. Only consulted for the decode role, and
+    /// only reachable when `max_inflight_remote_prefill_tokens` is FINITE (the
+    /// default `usize::MAX` short-circuits the reservation, so this is inert
+    /// until a budget is set). Narrows disaggregation only — never produces
+    /// more Remote.
+    #[serde(default = "default_cd_local_fallback_on_overload")]
+    pub cd_local_fallback_on_overload: bool,
 }
 
 fn default_max_inflight_remote_prefill_tokens() -> usize {
     usize::MAX
+}
+
+fn default_cd_local_fallback_on_overload() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -89,6 +110,7 @@ mod tests {
             role: DisaggregationRole::Decode,
             max_inflight_remote_prefill_tokens: 4096,
             min_remote_prefill_tokens: 0,
+            cd_local_fallback_on_overload: true,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(json.contains(r#""role":"decode""#));
@@ -108,6 +130,7 @@ mod tests {
             role: DisaggregationRole::Prefill,
             max_inflight_remote_prefill_tokens: default_max_inflight_remote_prefill_tokens(),
             min_remote_prefill_tokens: 0,
+            cd_local_fallback_on_overload: default_cd_local_fallback_on_overload(),
         };
         assert!(cfg.validate().is_ok());
     }
@@ -122,6 +145,34 @@ mod tests {
         let cfg: DisaggConfig =
             serde_json::from_str(r#"{"role": "decode", "min_remote_prefill_tokens": 256}"#).unwrap();
         assert_eq!(cfg.min_remote_prefill_tokens, 256);
+    }
+
+    #[test]
+    fn test_cd_local_fallback_on_overload_defaults_true_and_parses() {
+        // Absent ⇒ defaults to true (downgrade Remote→Local on budget
+        // exhaustion rather than defer to vLLM).
+        let cfg: DisaggConfig = serde_json::from_str(r#"{"role": "decode"}"#).unwrap();
+        assert!(cfg.cd_local_fallback_on_overload);
+
+        // Present ⇒ parsed; `false` restores the prior defer-on-exhaustion
+        // behavior.
+        let cfg: DisaggConfig = serde_json::from_str(
+            r#"{"role": "decode", "cd_local_fallback_on_overload": false}"#,
+        )
+        .unwrap();
+        assert!(!cfg.cd_local_fallback_on_overload);
+
+        // Roundtrips through serialize without dropping the field.
+        let cfg = DisaggConfig {
+            role: DisaggregationRole::Decode,
+            max_inflight_remote_prefill_tokens: 4096,
+            min_remote_prefill_tokens: 0,
+            cd_local_fallback_on_overload: false,
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains(r#""cd_local_fallback_on_overload":false"#));
+        let roundtrip: DisaggConfig = serde_json::from_str(&json).unwrap();
+        assert!(!roundtrip.cd_local_fallback_on_overload);
     }
 
     #[test]

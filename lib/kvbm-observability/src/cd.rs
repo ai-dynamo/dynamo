@@ -36,8 +36,11 @@ fn token_buckets() -> Vec<f64> {
 pub struct CdMetrics {
     // --- decode side (Q1/Q2/Q3/Q4) ---
     /// CD prefill routing decisions, by outcome. label `decision` ∈
-    /// {local, remote, remote_downgraded_zero_block, remote_rejected_budget}.
-    /// Q1 = decision="local"; Q2 = decision="remote".
+    /// {local, remote, remote_downgraded_zero_block, remote_downgraded_overload,
+    /// remote_rejected_budget}. Q1 = decision="local"; Q2 = decision="remote";
+    /// `remote_downgraded_overload` = a Remote decision the decode downgraded to
+    /// a local prefill because the inflight budget (hub-prefill-pressure proxy)
+    /// was exhausted (Approach B-GNMT).
     pub prefill_decisions_total: IntCounterVec,
     /// Q3: tokens the decode will itself prefill on a Local decision
     /// (= num_prefill_tokens() = total − num_computed − local_match).
@@ -79,7 +82,7 @@ impl CdMetrics {
             prefill_decisions_total: IntCounterVec::new(
                 Opts::new(
                     "kvbm_cd_prefill_decisions_total",
-                    "CD prefill routing decisions by outcome (local|remote|remote_downgraded_zero_block|remote_rejected_budget)",
+                    "CD prefill routing decisions by outcome (local|remote|remote_downgraded_zero_block|remote_downgraded_overload|remote_rejected_budget)",
                 ),
                 &["decision"],
             )
@@ -170,7 +173,8 @@ impl CdMetrics {
     // --- decode-side recorders ------------------------------------------------
 
     /// Record one CD decision. `decision` ∈ {local, remote,
-    /// remote_downgraded_zero_block, remote_rejected_budget}.
+    /// remote_downgraded_zero_block, remote_downgraded_overload,
+    /// remote_rejected_budget}.
     pub fn record_decision(&self, decision: &'static str) {
         self.prefill_decisions_total
             .with_label_values(&[decision])
@@ -277,8 +281,15 @@ mod tests {
         cd.record_decision("local");
         cd.record_decision("remote");
         cd.record_decision("remote");
+        cd.record_decision("remote_downgraded_overload");
         assert_eq!(cd.prefill_decisions_total.with_label_values(&["local"]).get(), 1);
         assert_eq!(cd.prefill_decisions_total.with_label_values(&["remote"]).get(), 2);
+        assert_eq!(
+            cd.prefill_decisions_total
+                .with_label_values(&["remote_downgraded_overload"])
+                .get(),
+            1
+        );
     }
 
     #[test]
