@@ -69,11 +69,10 @@ ARG SCCACHE_REGION=""
 
 # NIXL configuration
 ARG NIXL_UCX_REF={{ context.dynamo.nixl_ucx_ref }}
-{% if "nixl_ref" in context[framework] -%}
+{% if "nixl_ref" in context[framework].get(device_key, {}) -%}
+ARG NIXL_REF={{ context[framework][device_key].nixl_ref }}
+{% elif "nixl_ref" in context[framework] -%}
 ARG NIXL_REF={{ context[framework].nixl_ref }}
-{% elif device == "xpu" -%}
-{# XPU SGLang needs NIXL built from source; inherit ref from dynamo section #}
-ARG NIXL_REF={{ context.dynamo.nixl_ref }}
 {% endif -%}
 {% if device == "cuda" %}
 ARG NIXL_GDRCOPY_REF={{ context.dynamo.nixl_gdrcopy_ref }}
