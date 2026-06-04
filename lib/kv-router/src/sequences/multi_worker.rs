@@ -1885,15 +1885,18 @@ mod tests {
     }
 
     #[test]
-    fn strict_add_racing_worker_removal_cannot_recreate_worker() {
+    fn strict_add_after_worker_removal_cannot_recreate_worker() {
         let sequences = Arc::new(make_sequences());
         let worker = WorkerWithDpRank::new(1, 0);
-        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let ready = Arc::new(std::sync::Barrier::new(2));
+        let proceed = Arc::new(std::sync::Barrier::new(2));
         let add_sequences = Arc::clone(&sequences);
-        let add_barrier = Arc::clone(&barrier);
+        let add_ready = Arc::clone(&ready);
+        let add_proceed = Arc::clone(&proceed);
 
         let add = std::thread::spawn(move || {
-            add_barrier.wait();
+            add_ready.wait();
+            add_proceed.wait();
             add_sequences.add_request_if_registered(
                 SequenceRequest {
                     request_id: "req-1".to_string(),
@@ -1908,10 +1911,14 @@ mod tests {
             )
         });
 
-        barrier.wait();
+        ready.wait();
         sequences.update_workers(&HashMap::new());
-        let _ = add.join().unwrap();
+        proceed.wait();
+        let result = add.join().unwrap();
 
+        assert!(
+            matches!(result, Err(SequenceError::WorkerNotFound { worker: missing }) if missing == worker)
+        );
         assert_eq!(sequences.num_workers(), 0);
         assert!(sequences.request_index.is_empty());
         assert!(sequences.prompt_registry.is_block_index_empty());

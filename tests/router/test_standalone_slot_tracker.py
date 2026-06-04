@@ -18,6 +18,7 @@ pytestmark = [
     pytest.mark.e2e,
     pytest.mark.router,
     pytest.mark.parallel,
+    pytest.mark.timeout(30),
 ]
 
 SLOT_TRACKER_BASE_PORT = 8091

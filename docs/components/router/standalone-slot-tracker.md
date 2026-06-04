@@ -13,7 +13,7 @@ register workers manually, submit request lifecycle events, and read advisory lo
 snapshots for their own routing decisions.
 
 The service accepts ordered final chained sequence hashes, one hash per prompt block.
-Hashes are JSON signed 64-bit integers and are reinterpreted bit-for-bit as internal
+Hashes are serialized as signed 64-bit JSON integers and reinterpreted bit-for-bit as internal
 unsigned hashes. Send hashes rather than prompt tokens.
 
 This first version intentionally excludes metrics, discovery-based registration, output
@@ -38,6 +38,9 @@ The default port is `8091`. `GET /health` returns `200 OK` with an empty body as
 the HTTP listener is ready. This endpoint is liveness-only. After a restart the registry
 is empty; consumers must re-register workers and replay active requests if they need
 restored accounting.
+
+The service binds to `0.0.0.0` and does not provide authentication. Run it on a trusted
+internal network or place it behind an appropriate network policy.
 
 ## Common Responses
 

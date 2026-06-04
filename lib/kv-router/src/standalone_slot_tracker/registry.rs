@@ -1,13 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::{self, Future};
 use std::sync::Arc;
 
 use dashmap::DashMap;
 use dynamo_tokens::SequenceHash;
 use parking_lot::Mutex;
+use rustc_hash::FxHashSet;
 use serde::Serialize;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -343,7 +344,7 @@ impl SlotTrackerRegistry {
                 .value()
                 .tracker
                 .potential_blocks_and_tokens(None, &PrefillTokenDeltas::none());
-            let mut workers: HashSet<_> = decode_blocks.keys().copied().collect();
+            let mut workers: FxHashSet<_> = decode_blocks.keys().copied().collect();
             workers.extend(prefill_tokens.keys().copied());
             for worker in workers {
                 loads.push(ActiveLoadInfo {
@@ -378,7 +379,7 @@ impl SlotTrackerRegistry {
             Some(sequence_hashes),
             &PrefillTokenDeltas::uniform(new_isl_tokens),
         );
-        let mut workers: HashSet<_> = decode_blocks.keys().copied().collect();
+        let mut workers: FxHashSet<_> = decode_blocks.keys().copied().collect();
         workers.extend(prefill_tokens.keys().copied());
         Ok(workers
             .into_iter()
