@@ -18,11 +18,11 @@ Logits processors let you modify the next-token logits at every decoding step (e
 
 ### Quick test: HelloWorld processor
 
-`DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1` is a built-in test hook (not a production processor loader) that forces the model to respond with "Hello world!". It verifies the callback path without modifying your model or engine code:
+`DYN_ENABLE_TEST_LOGITS_PROCESSOR=1` is a built-in test hook (not a production processor loader) that forces the model to respond with "Hello world!". It verifies the callback path without modifying your model or engine code:
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/sglang
-export DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1
+export DYN_ENABLE_TEST_LOGITS_PROCESSOR=1
 
 # unified aggregated
 ./launch/agg.sh

@@ -1115,8 +1115,8 @@ class HandlerBase(BaseGenerativeHandler):
 
         request_id = request.get("id") or request.get("request_id", "unknown-id")
 
-        # Optional test-only logits processing (enable with DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1)
-        if os.getenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
+        # Optional test-only logits processing (enable with DYN_ENABLE_TEST_LOGITS_PROCESSOR=1)
+        if os.getenv("DYN_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
             processors = [HelloWorldLogitsProcessor(self.engine.llm.tokenizer)]
             adapters = create_trtllm_adapters(processors)
             sampling_params.logits_processor = adapters

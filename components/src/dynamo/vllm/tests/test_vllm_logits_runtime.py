@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the vLLM slice of the DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR
+"""Unit tests for the vLLM slice of the DYN_ENABLE_TEST_LOGITS_PROCESSOR
 hook: the engine-loaded `DynamoVllmLogitsProcessor`, the per-request
 activation that stashes serialized spec entries onto `SamplingParams`, and
 the startup registration helper.

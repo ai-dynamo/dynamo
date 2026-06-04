@@ -36,7 +36,7 @@ from dynamo._core import Context
 from dynamo.common.backend import telemetry
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
-    TEST_LOGITS_PROCESSOR_ENV,
+    DYN_ENABLE_TEST_LOGITS_PROCESSOR,
     EngineConfig,
     GenerateChunk,
     GenerateRequest,
@@ -155,7 +155,7 @@ class SglangLLMEngine(LLMEngine):
         # Enable SGLang's custom-processor path and force tokenizer init (to
         # resolve the forced token IDs at startup). After parse_args so a user
         # skip_tokenizer_init can't starve the hook.
-        if os.getenv(TEST_LOGITS_PROCESSOR_ENV) == "1" and is_generation_stage(
+        if os.getenv(DYN_ENABLE_TEST_LOGITS_PROCESSOR) == "1" and is_generation_stage(
             config.serving_mode
         ):
             server_args.enable_custom_logit_processor = True
@@ -253,7 +253,7 @@ class SglangLLMEngine(LLMEngine):
         if tokenizer is None:
             raise RuntimeError(
                 "SGLang engine exposes no tokenizer; "
-                f"{TEST_LOGITS_PROCESSOR_ENV} requires tokenizer init"
+                f"{DYN_ENABLE_TEST_LOGITS_PROCESSOR} requires tokenizer init"
             )
         return tokenizer
 

@@ -24,7 +24,7 @@ pytest.importorskip(
 )
 
 from dynamo.common.backend.engine import (  # noqa: E402
-    TEST_LOGITS_PROCESSOR_ENV,
+    DYN_ENABLE_TEST_LOGITS_PROCESSOR,
     EngineConfig,
     ForcedTokenSequenceSpec,
     GenerateChunk,
@@ -119,9 +119,9 @@ async def test_default_logits_processor_spec_is_none():
 
 def _logits_processor_set_env(monkeypatch, value):
     if value is None:
-        monkeypatch.delenv(TEST_LOGITS_PROCESSOR_ENV, raising=False)
+        monkeypatch.delenv(DYN_ENABLE_TEST_LOGITS_PROCESSOR, raising=False)
     else:
-        monkeypatch.setenv(TEST_LOGITS_PROCESSOR_ENV, value)
+        monkeypatch.setenv(DYN_ENABLE_TEST_LOGITS_PROCESSOR, value)
 
 
 def test_is_generation_stage():
@@ -335,7 +335,7 @@ def test_engine_usage_pattern(monkeypatch):
     # backend (TRT-LLM dict, SGLang ServerArgs attribute, vLLM
     # EngineArgs) writes this differently; the env-var name is the
     # only thing that's shared.
-    if _os.getenv(TEST_LOGITS_PROCESSOR_ENV) == "1":
+    if _os.getenv(DYN_ENABLE_TEST_LOGITS_PROCESSOR) == "1":
         engine_args["skip_tokenizer_init"] = False
     assert engine_args["skip_tokenizer_init"] is False
 

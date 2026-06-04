@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the SGLang slice of the DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR
+"""Unit tests for the SGLang slice of the DYN_ENABLE_TEST_LOGITS_PROCESSOR
 hook: the scheduler-side `DynamoSglangLogitProcessor` (batch-row application
 + per-request state keyed by UID) and the per-request `activate` helper that
 wires entries into `custom_params` / the `custom_logit_processor` kwarg.

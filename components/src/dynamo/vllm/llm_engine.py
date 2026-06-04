@@ -29,7 +29,7 @@ from dynamo.common.backend import telemetry
 from dynamo.common.backend.disagg import require_prefill_result
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
-    TEST_LOGITS_PROCESSOR_ENV,
+    DYN_ENABLE_TEST_LOGITS_PROCESSOR,
     EngineConfig,
     GenerateChunk,
     GenerateRequest,
@@ -218,7 +218,7 @@ class VllmLLMEngine(LLMEngine):
         # Register the engine-loaded adapter before the engine config is built
         # so vLLM instantiates it. vLLM defaults to tokenizer init, so there is
         # no skip_tokenizer_init flag to flip here (unlike TRT-LLM/SGLang).
-        if os.getenv(TEST_LOGITS_PROCESSOR_ENV) == "1" and is_generation_stage(
+        if os.getenv(DYN_ENABLE_TEST_LOGITS_PROCESSOR) == "1" and is_generation_stage(
             self.disaggregation_mode
         ):
             register_dynamo_logits_processor(self.engine_args)
@@ -423,7 +423,7 @@ class VllmLLMEngine(LLMEngine):
         if tokenizer is None:
             raise RuntimeError(
                 "vLLM engine exposes no tokenizer; "
-                f"{TEST_LOGITS_PROCESSOR_ENV} requires tokenizer init"
+                f"{DYN_ENABLE_TEST_LOGITS_PROCESSOR} requires tokenizer init"
             )
         return tokenizer
 

@@ -18,11 +18,11 @@ Logits processors let you modify the next-token logits at every decoding step (e
 
 ### Quick test: HelloWorld processor
 
-`DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1` is a built-in test hook (not a production processor loader) that forces the model to respond with "Hello world!". It is useful to verify the callback path without modifying your model or engine code. It works on both the legacy and the unified TRT-LLM aggregated launchers:
+`DYN_ENABLE_TEST_LOGITS_PROCESSOR=1` is a built-in test hook (not a production processor loader) that forces the model to respond with "Hello world!". It is useful to verify the callback path without modifying your model or engine code. It works on both the legacy and the unified TRT-LLM aggregated launchers:
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/trtllm
-export DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1
+export DYN_ENABLE_TEST_LOGITS_PROCESSOR=1
 
 # legacy aggregated
 ./launch/agg.sh

@@ -236,7 +236,7 @@ class LLMEngine(ABC):
 
         Overrides typically delegate to
         :func:`resolve_test_logits_processor_spec` to honour
-        ``DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1``; the future public
+        ``DYN_ENABLE_TEST_LOGITS_PROCESSOR=1``; the future public
         CLI/config loader will resolve from that source instead."""
         return None
 
@@ -318,7 +318,7 @@ class LLMEngine(ABC):
 
 
 #: Env var that activates the built-in smoke hook on any unified backend.
-TEST_LOGITS_PROCESSOR_ENV = "DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR"
+DYN_ENABLE_TEST_LOGITS_PROCESSOR = "DYN_ENABLE_TEST_LOGITS_PROCESSOR"
 
 
 @dataclass(frozen=True)
@@ -397,7 +397,7 @@ def logits_processors_for_request(
 def resolve_test_logits_processor_spec(
     get_tokenizer: Callable[[], Any],
 ) -> LogitsProcessorSpec | None:
-    """Resolve the `DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1` smoke hook into a
+    """Resolve the `DYN_ENABLE_TEST_LOGITS_PROCESSOR=1` smoke hook into a
     `LogitsProcessorSpec`, or ``None`` when the env var is unset.
 
     ``get_tokenizer`` is called lazily, only after the env check passes, so
@@ -405,14 +405,13 @@ def resolve_test_logits_processor_spec(
     does not crash. The fixed ``"Hello world!"`` token IDs are resolved here
     once (not per request) into a single :class:`ForcedTokenSequenceSpec`.
     """
-    if os.getenv(TEST_LOGITS_PROCESSOR_ENV) != "1":
+    if os.getenv(DYN_ENABLE_TEST_LOGITS_PROCESSOR) != "1":
         return None
     tokenizer = get_tokenizer()
     eos = tokenizer.eos_token_id
     if eos is None:
         raise ValueError(
-            "DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR requires a tokenizer "
-            "with eos_token_id"
+            "DYN_ENABLE_TEST_LOGITS_PROCESSOR requires a tokenizer with eos_token_id"
         )
     token_ids = tuple(tokenizer.encode("Hello world!", add_special_tokens=False))
     return LogitsProcessorSpec(
