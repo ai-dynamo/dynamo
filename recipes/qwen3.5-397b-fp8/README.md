@@ -45,7 +45,7 @@ which is what we're measuring.
 6. **HuggingFace token: not required.** `Qwen/Qwen3.5-397B-A17B-FP8`
    is public, so neither the download Job nor the model server needs
    one. To swap in a gated model, uncomment the `hf-token-secret`
-   blocks in `model-download.yaml` + `<config>/deploy.yaml` and create:
+   blocks in `model-download.yaml` + `deploy-<config>.yaml` and create:
    ```bash
    kubectl -n "$NAMESPACE" create secret generic hf-token-secret \
      --from-literal=HF_TOKEN="$HF_TOKEN"
@@ -59,7 +59,7 @@ export NAMESPACE=<your-namespace>
 # Run both configs sequentially (prep + deploy + bench + retrieve + clean
 # per config). Artifacts land under
 # ~/workspace/dynamo-tmp/logs/<MM-DD>/qwen35-fp8-h100/{vllm-serve,dynamo-fd}/.
-./run-all-benchmarks.sh -n ${NAMESPACE}
+./benchmark/run-all-benchmarks.sh -n ${NAMESPACE}
 ```
 
 Each config's `profile_export_aiperf.json` is the contract output;
@@ -69,37 +69,38 @@ extract numbers or run analysis tooling over them separately
 Or step-by-step for a single config:
 
 ```bash
-./run-benchmark.sh -n ${NAMESPACE} --hw h100 --config vllm-serve
-./run-benchmark.sh -n ${NAMESPACE} --hw h100 --config dynamo-fd
+./benchmark/run-benchmark.sh -n ${NAMESPACE} --hw h100 --config vllm-serve
+./benchmark/run-benchmark.sh -n ${NAMESPACE} --hw h100 --config dynamo-fd
 ```
 
-`run-benchmark.sh` accepts `--step {pvc|download|dataset|deploy|bench|retrieve|clean}` for granular control. `pvc`, `download`, and `dataset` are config-agnostic (any `--config` works to run them once).
+`benchmark/run-benchmark.sh` accepts `--step {pvc|download|dataset|deploy|bench|retrieve|clean}` for granular control. `pvc`, `download`, and `dataset` are config-agnostic (any `--config` works to run them once).
 
 ## Directory layout
 
 ```text
 qwen3.5-397b-fp8/
 ├── README.md
-├── run-benchmark.sh            # Unified driver — branches on --config/--hw
-├── run-all-benchmarks.sh       # Sequential 2-config orchestrator
-├── perf.yaml                   # ONE shared aiperf bench Pod template
+├── model-download.yaml         # Job: hf download into shared HF cache
+├── deploy-vllm-serve.yaml      # Deployment + Service (vanilla vLLM)
+├── deploy-dynamo-fd.yaml       # DynamoGraphDeployment (Dynamo + FD)
 ├── hw/
 │   └── h100.env                # Hardware axis (8×H100, shared across both configs)
-├── model-cache/
-│   └── model-download.yaml
-├── data-gen/
-│   └── generate-datasets-job.yaml
-├── vllm-serve/
-│   └── deploy.yaml             # Templated (image, nodeSelector, tolerations)
-└── dynamo-fd/
-    └── deploy.yaml             # DynamoGraphDeployment, frontend-decoding ON
+└── benchmark/
+    ├── run-all-benchmarks.sh   # Sequential 2-config orchestrator
+    ├── run-benchmark.sh        # Per-config driver (branches on --config/--hw)
+    ├── perf.yaml               # Shared aiperf bench Pod template
+    └── data-gen-job.yaml       # Job: sliding-window jsonl generator
 ```
 
-The shared `perf.yaml` is parameterized via envsubst on three
-per-config vars exported by `run-benchmark.sh`'s case statement:
+Recipe root holds "what gets deployed" — model server templates, HF
+cache prep, hardware config. `benchmark/` holds "how we measure it" —
+the aiperf bench Pod, the dataset generator, and the driver scripts.
+
+The shared `benchmark/perf.yaml` is parameterized via envsubst on three
+per-config vars exported by `benchmark/run-benchmark.sh`'s case statement:
 `$BENCH_POD`, `$BENCH_FRONTEND` (Service the bench Pod hits), and
 `$BENCH_RUN_LABEL` (sub-dir under `/perf-cache/artifacts/qwen35_fp8/`).
-Only `deploy.yaml` legitimately differs per config.
+Only `deploy-<config>.yaml` legitimately differs per config.
 
 ## Hardware target
 
@@ -166,7 +167,7 @@ spec:
 ## aiperf install
 
 The bench pod installs aiperf from a pinned PyPI release
-(`AIPERF_VERSION` env var in `perf.yaml`, default `0.9.0`). 0.8.0+
+(`AIPERF_VERSION` env var in `benchmark/perf.yaml`, default `0.9.0`). 0.8.0+
 includes [PR 824](https://github.com/ai-dynamo/aiperf/pull/824)
 (`feat(dataset): add session_id to single-turn for causal ordering`),
 which is what makes aiperf's `single_turn` mode honor the
@@ -174,7 +175,7 @@ which is what makes aiperf's `single_turn` mode honor the
 `(user, turn)` row — without it the 8 turns of a user can interleave
 across requests and prefix-cache hits across turns disappear.
 
-Bump `AIPERF_VERSION` in `perf.yaml` when you want newer aiperf
+Bump `AIPERF_VERSION` in `benchmark/perf.yaml` when you want newer aiperf
 fixes.
 
 ## Naming & ownership
@@ -203,7 +204,7 @@ kubectl -n "$NAMESPACE" get pvc,deploy,job,pod \
 - Each jsonl row carries `session_id=user_<N>`. With aiperf PR 824, the
   `single_turn` dataset type honors session ordering so the 8 turns of
   any one user are sent in causal order, letting prefix-cache hits land.
-- The vllm command in `deploy.yaml` uses `--tensor-parallel-size 8
+- The vllm command in `deploy-<config>.yaml` uses `--tensor-parallel-size 8
   --enable-expert-parallel --mm-encoder-tp-mode data
   --mm-processor-cache-gb 30 --max-model-len 32768
   --gpu-memory-utilization 0.85` to fit Qwen3.5-397B-A17B-FP8

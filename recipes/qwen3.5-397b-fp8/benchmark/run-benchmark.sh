@@ -48,8 +48,14 @@ if [[ -z "$NAMESPACE" ]]; then
   echo "ERROR: -n <namespace> required" >&2; exit 2
 fi
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# The driver lives under recipe-root/benchmark/. Some files (hw/,
+# model-download.yaml, deploy-<config>.yaml) live one level up — at the
+# recipe root — because they're "what gets deployed" rather than
+# "how we measure it". Compute the recipe root once.
+RECIPE_ROOT="$(cd "$HERE/.." && pwd)"
 
-# Per-config metadata. Keep this list in sync with the sibling config dirs.
+# Per-config metadata. Add a new arm here AND ship a sibling
+# ../deploy-<config>.yaml at the recipe root when adding a config.
 #   DEPLOY_KIND branches deploy() + clean():
 #     deployment → kubectl rollout status + delete Deployment+Service
 #     dgd        → kubectl wait on operator-stamped DGD pod labels + delete DGD
@@ -84,13 +90,17 @@ esac
 # shared root-level perf.yaml at apply time.
 export BENCH_POD BENCH_FRONTEND BENCH_RUN_LABEL
 
-HW_ENV="$HERE/hw/${HW}.env"
+HW_ENV="$RECIPE_ROOT/hw/${HW}.env"
 if [[ ! -f "$HW_ENV" ]]; then
   echo "ERROR: hardware env file not found: $HW_ENV" >&2
-  echo "Available: $(ls "$HERE/hw/" 2>/dev/null | tr '\n' ' ')" >&2
+  echo "Available: $(ls "$RECIPE_ROOT/hw/" 2>/dev/null | tr '\n' ' ')" >&2
   exit 2
 fi
-CONFIG_DIR="$HERE/${CONFIG}"
+DEPLOY_FILE="$RECIPE_ROOT/deploy-${CONFIG}.yaml"
+if [[ ! -f "$DEPLOY_FILE" ]]; then
+  echo "ERROR: deploy template not found: $DEPLOY_FILE" >&2
+  exit 2
+fi
 
 if ! command -v envsubst >/dev/null 2>&1; then
   echo "ERROR: envsubst missing. Install gettext-base (apt) or gettext (brew)." >&2
@@ -139,7 +149,7 @@ download() {
     echo "[download] previous job present but not Complete — deleting and re-applying"
     $K delete job qwen35-model-download
   fi
-  $K apply -f "$HERE/model-cache/model-download.yaml"
+  $K apply -f "$RECIPE_ROOT/model-download.yaml"
   $K wait --for=condition=Complete job/qwen35-model-download --timeout=3600s
 }
 
@@ -151,7 +161,7 @@ dataset() {
     fi
     $K delete job qwen35-generate-datasets
   fi
-  $K apply -f "$HERE/data-gen/generate-datasets-job.yaml"
+  $K apply -f "$HERE/data-gen-job.yaml"
   $K wait --for=condition=Complete job/qwen35-generate-datasets --timeout=1800s
   $K logs job/qwen35-generate-datasets | tail -20
 }
@@ -159,7 +169,7 @@ dataset() {
 # ---------------- config-specific lifecycle ----------------
 
 deploy() {
-  APPLY_TPL "$CONFIG_DIR/deploy.yaml"
+  APPLY_TPL "$DEPLOY_FILE"
   case "$DEPLOY_KIND" in
     deployment)
       # 397B FP8 cold boot from FSx: image pull + 400 GiB weight load +
@@ -191,10 +201,10 @@ deploy() {
 
 bench() {
   $K delete pod "$BENCH_POD" --ignore-not-found
-  # Shared root-level perf.yaml — not $CONFIG_DIR/perf.yaml. The
-  # per-config knobs (pod name, frontend service, run sub-dir) come
-  # from envsubst on $BENCH_POD / $BENCH_FRONTEND / $BENCH_RUN_LABEL,
-  # which run-benchmark.sh's case statement exports.
+  # Shared bench template at benchmark/perf.yaml. Per-config knobs
+  # (pod name, frontend service, run sub-dir) come from envsubst on
+  # $BENCH_POD / $BENCH_FRONTEND / $BENCH_RUN_LABEL, exported by the
+  # case statement near the top of this script.
   APPLY_TPL "$HERE/perf.yaml"
   $K wait --for=condition=Ready "pod/$BENCH_POD" --timeout=300s
   # Clear any stale .aiperf-done sentinel from a prior run BEFORE we
