@@ -77,6 +77,8 @@ class GatewayError(Exception):
 
 
 def log_event(level: int, event: str, **fields: Any) -> None:
+    if not LOGGER.isEnabledFor(level):
+        return
     details = " ".join(
         f"{key}={json.dumps(value, sort_keys=True)}" for key, value in fields.items()
     )
