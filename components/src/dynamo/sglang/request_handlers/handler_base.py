@@ -666,6 +666,7 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         self.enable_session_radix_cache = getattr(
             config.server_args, "enable_session_radix_cache", False
         )
+        self._benchmark_results: Optional[dict[str, Any]] = None
 
         if engine is not None:
             self.input_param_manager = InputParamManager(
@@ -899,6 +900,15 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             "message": f"Weight version updated to {req.new_version}",
             "new_version": req.new_version,
         }
+
+    async def get_perf_metrics(self, request: Optional[Dict[str, Any]] = None):
+        """Return startup self-benchmark results, or an error if unavailable."""
+
+        del request
+        if self._benchmark_results is None:
+            yield {"status": "error", "message": "no benchmark data"}
+        else:
+            yield self._benchmark_results
 
     def register_engine_routes(self, runtime: DistributedRuntime) -> None:
         """Register all engine routes for this handler.

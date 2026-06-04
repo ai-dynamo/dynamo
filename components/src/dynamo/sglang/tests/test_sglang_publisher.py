@@ -59,6 +59,19 @@ def test_set_forward_pass_metrics_worker_id_uses_endpoint_identity():
     assert server_args.forward_pass_metrics_ipc_name.startswith("ipc://")
 
 
+def test_set_forward_pass_metrics_worker_id_sets_benchmark_output_path():
+    server_args = SimpleNamespace(
+        enable_forward_pass_metrics=True,
+        benchmark_mode="decode",
+        benchmark_output_path="/tmp/benchmark_results.json",
+    )
+    endpoint = SimpleNamespace(connection_id=lambda: "worker-9")
+
+    set_forward_pass_metrics_worker_id(server_args, endpoint)
+
+    assert server_args.benchmark_output_path == "/tmp/benchmark_results_worker-9.json"
+
+
 def test_set_forward_pass_metrics_worker_id_is_noop_when_disabled():
     server_args = SimpleNamespace(enable_forward_pass_metrics=False)
     endpoint = SimpleNamespace(connection_id=lambda: "endpoint-9")

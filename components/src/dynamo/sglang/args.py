@@ -30,6 +30,7 @@ from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang._compat import enable_disjoint_streaming_output
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
+from dynamo.sglang.benchmark import apply_benchmark_env
 
 configure_dynamo_logging()
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
@@ -334,6 +335,7 @@ async def parse_args(args: list[str]) -> Config:
     dynamo_config.validate_multimodal_topology()
 
     parsed_args = sglang_only_parser.parse_args(unknown)
+    apply_benchmark_env(parsed_args, unknown)
 
     # Clean up temp file if created
     if temp_config_file and os.path.exists(temp_config_file):
