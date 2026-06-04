@@ -34,6 +34,17 @@ _TOP_LOGPROBS_UNSUPPORTED_MSG = (
     "Track the upstream fix at https://github.com/sgl-project/sglang/pull/24447."
 )
 
+_SAMPLING_OPTION_FIELDS = (
+    "presence_penalty",
+    "frequency_penalty",
+    "repetition_penalty",
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "seed",
+)
+
 
 def _top_logprobs_allowed() -> bool:
     """Return True if the DYN_SGL_ALLOW_TOP_LOGPROBS escape hatch is enabled."""
@@ -69,6 +80,11 @@ def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
     if not isinstance(extra_fields, list):
         return False
     return field in extra_fields
+
+
+def _sampling_option_params(values: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract sampling options that SGLang accepts as sampling params."""
+    return {field: values.get(field) for field in _SAMPLING_OPTION_FIELDS}
 
 
 def _user_stop_token_ids(request: Dict[str, Any]) -> set[int]:
@@ -240,13 +256,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             stop_token_ids = _merged if _merged else None
 
             param_mapping = {
-                "temperature": sampling_opts.get("temperature"),
-                "top_p": sampling_opts.get("top_p"),
-                "top_k": sampling_opts.get("top_k"),
                 "n": sampling_opts.get("n"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
                 "ignore_eos": stop_conditions.get("ignore_eos"),
                 "stop_token_ids": stop_token_ids,
+                **_sampling_option_params(sampling_opts),
                 **self._get_guided_decoding_params(
                     sampling_opts.get("guided_decoding")
                 ),
@@ -254,11 +268,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         else:
             # OpenAI request format
             param_mapping = {
-                "temperature": request.get("temperature"),
-                "top_p": request.get("top_p"),
-                "top_k": request.get("top_k"),
                 "n": request.get("n"),
                 "max_new_tokens": request.get("max_tokens"),
+                **_sampling_option_params(request),
                 **_openai_stop_sampling_params(request),
                 **self._get_guided_decoding_params(request.get("guided_decoding")),
             }
