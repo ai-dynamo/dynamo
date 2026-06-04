@@ -40,7 +40,15 @@ Default — DRIFT CHECK (read-only):
   Also writes the raw per-case parser outputs to PATH as JSON. Useful for
   ad-hoc analysis; not part of the populate-or-check workflows.
 
-Run inside a container where the target impl is installed.
+The target impl must be importable where the parse runs. Two ways:
+  - run this script inside a container where the impl is installed (the original
+    flow), or
+  - run it on the host and pass `--container NAME` to run the engine parse inside
+    that container via `docker exec` (orchestration stays on the host; only the
+    per-case parse is shipped in, batched through capture_worker.py). Works for
+    devcontainers and bare engine images; the host needs no vLLM/SGLang.
+
+    python3 -m tests.parity.toolcalling.capture_toolcalling_outputs --impl vllm --container my_vllm_ctr --merge
 """
 
 from __future__ import annotations
@@ -48,6 +56,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -107,8 +116,20 @@ _ap.add_argument(
         "Independent of --merge."
     ),
 )
+_ap.add_argument(
+    "--container",
+    metavar="NAME",
+    help=(
+        "Optional: run the engine parse inside Docker container NAME via "
+        "`docker exec`, instead of in-process. Lets you target a specific "
+        "vLLM/SGLang install without that engine on the host. A minimal worker "
+        "bundle is copied into the container, so it works for devcontainers and "
+        "bare engine images alike."
+    ),
+)
 _args = _ap.parse_args()
 IMPL = _args.impl
+CONTAINER = _args.container
 MERGE_MODE = _args.merge
 OVERWRITE = _args.overwrite_if_exists
 FAMILY_FILTER = set(_args.family or [])
@@ -136,9 +157,13 @@ if FAMILY_FILTER:
             f"Known families: {', '.join(sorted(known_families))}"
         )
 
-wrapper = importlib.import_module(
-    f"tests.parity.toolcalling.{IMPL}"
-)  # noqa: E402 — needs sys.path tweak above
+# In container mode the engine runs inside `--container`, so the host need not
+# have the impl installed — skip the in-process import.
+wrapper = (
+    None
+    if CONTAINER
+    else importlib.import_module(f"tests.parity.toolcalling.{IMPL}")  # noqa: E402
+)
 
 
 # ----------------------------------------------------------------------
@@ -415,6 +440,126 @@ def merge_into_fixtures(
 
 
 # ----------------------------------------------------------------------
+# Container mode: run the engine parse inside a Docker container
+
+
+def _collect_requests() -> list[dict]:
+    """Enumerate every parseable case as a worker request (mirrors main's loop)."""
+    reqs: list[dict] = []
+    for fp in sorted(FIXTURES.glob("*/TOOLCALLING.*.yaml")):
+        doc = yaml.safe_load(fp.read_text())
+        family = doc["family"]
+        if FAMILY_FILTER and family not in FAMILY_FILTER:
+            continue
+        if MODE_FILTER and doc.get("mode") != MODE_FILTER:
+            continue
+        mode = doc["mode"]
+        for case_id, case in doc["cases"].items():
+            if is_na_stub(case):
+                continue
+            req = {
+                "key": f"{family}/{case_id}",
+                "family": family,
+                "mode": mode,
+                "tools": case.get("tools"),
+            }
+            if mode == "stream":
+                req["chunks"] = case.get("chunks")
+            else:
+                req["model_text"] = case.get("model_text")
+            reqs.append(req)
+    return reqs
+
+
+# Minimal worker bundle copied into the container. The adapters only import
+# `tests.parity.common`, so this is all that's needed — no fixtures, no other
+# harness code.
+_BUNDLE = [
+    "tests/__init__.py",
+    "tests/parity/__init__.py",
+    "tests/parity/common.py",
+    "tests/parity/toolcalling/__init__.py",
+    "tests/parity/toolcalling/capture_worker.py",
+]
+
+
+def _run_all_in_container(
+    container: str, impl: str, requests: list[dict]
+) -> dict[str, dict]:
+    """Copy the worker bundle into `container` and run every request there once.
+
+    Returns {key: {calls, normal_text, error}}. The engine import happens a
+    single time inside the worker, so the whole batch shares one heavy startup.
+    Works for devcontainers and bare engine images alike (nothing is assumed
+    about a mounted repo — the bundle is copied in).
+    """
+    dest = "/tmp/parity_worker"
+    files = _BUNDLE + [f"tests/parity/toolcalling/{impl}.py"]
+    subprocess.run(
+        [
+            "docker",
+            "exec",
+            container,
+            "bash",
+            "-lc",
+            f"rm -rf {dest} && mkdir -p {dest}/tests/parity/toolcalling",
+        ],
+        check=True,
+    )
+    for rel in files:
+        subprocess.run(
+            ["docker", "cp", str(REPO_ROOT / rel), f"{container}:{dest}/{rel}"],
+            check=True,
+        )
+    out_path = f"{dest}/out.jsonl"
+    payload = "\n".join(json.dumps(r) for r in requests)
+    proc = subprocess.run(
+        [
+            "docker",
+            "exec",
+            "-i",
+            container,
+            "env",
+            f"PYTHONPATH={dest}",
+            "python3",
+            "-m",
+            "tests.parity.toolcalling.capture_worker",
+            "--impl",
+            impl,
+            "--out",
+            out_path,
+        ],
+        input=payload,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"worker failed in container {container!r} (rc={proc.returncode}):\n"
+            f"{proc.stderr[-3000:]}"
+        )
+    # Results were written to a file in the container (engine imports can spew to
+    # stdout), so read them back rather than parsing the exec's stdout.
+    cat = subprocess.run(
+        ["docker", "exec", container, "cat", out_path],
+        capture_output=True,
+        text=True,
+    )
+    if cat.returncode != 0:
+        raise RuntimeError(
+            f"could not read worker output from {container!r}: {cat.stderr[-1000:]}"
+        )
+    results: dict[str, dict] = {}
+    for line in cat.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        d = json.loads(line)
+        results[d.pop("key")] = d
+    return results
+
+
+# ----------------------------------------------------------------------
 # Main loop
 
 
@@ -422,6 +567,12 @@ def main() -> int:
     all_outputs: dict[str, dict] = {}
     n_total = n_clean = n_err = n_python_exc = n_skipped_na = 0
     drift: list[tuple[str, str]] = []
+
+    # Container mode: run every case inside the container up front, in one
+    # worker process (one heavy engine import for the whole batch).
+    precomputed = (
+        _run_all_in_container(CONTAINER, IMPL, _collect_requests()) if CONTAINER else {}
+    )
 
     for fp in sorted(FIXTURES.glob("*/TOOLCALLING.*.yaml")):
         doc = yaml.safe_load(fp.read_text())
@@ -436,7 +587,14 @@ def main() -> int:
                 n_skipped_na += 1
                 continue
             n_total += 1
-            got = run_parser(family, doc["mode"], case)
+            if CONTAINER:
+                got = precomputed.get(key) or {
+                    "calls": None,
+                    "normal_text": None,
+                    "error": "PYTHON_EXC: no worker result for case",
+                }
+            else:
+                got = run_parser(family, doc["mode"], case)
             all_outputs[key] = got
             if got["error"]:
                 if got["error"].startswith("PYTHON_EXC:"):
