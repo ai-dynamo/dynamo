@@ -211,15 +211,11 @@ enum LifecycleState {
     Stopped,
 }
 
-/// The engine a [`Worker`] drives, tagged by request modality.
-///
-/// Both variants share the same lifecycle — `Worker` calls `start`,
-/// `setup_metrics`, `drain`, and `cleanup` on either through the forwarders
-/// below. They differ only in the request/response adapter the serve loop
-/// builds: `Llm` runs the token pipeline ([`EngineAdapter`], `token_ids` in /
-/// out), `Raw` runs the JSON passthrough pipeline ([`RawEngineAdapter`]) for
-/// media generation (image/video/audio). A new media modality is a new `Raw`
-/// engine, not a new `EngineKind` — the JSON contract is modality-neutral.
+/// The engine a [`Worker`] drives, tagged by request modality. Both variants
+/// share the lifecycle (driven via the forwarders below); they differ only in
+/// the serve-loop adapter: `Llm` → token pipeline ([`EngineAdapter`]), `Raw` →
+/// JSON passthrough ([`RawEngineAdapter`]) for media. A new media modality is
+/// a new `Raw` engine, not a new variant.
 pub(crate) enum EngineKind {
     Llm(Arc<dyn LLMEngine>),
     Raw(Arc<dyn RawEngine>),
@@ -561,9 +557,7 @@ impl Worker {
             return Ok(());
         }
         let enable_local_indexer = self.config.effective_enable_local_indexer();
-        // KV events require a block-structured cache; only LLM engines have one
-        // (raw engines reach here only if they declared dp_ranks, which they
-        // don't). `llm` is None for raw → kv_cache_block_size None.
+        // None for raw engines (no block-structured KV cache).
         let kv_cache_block_size = engine_config
             .llm
             .as_ref()
@@ -1060,11 +1054,8 @@ fn parse_endpoint_types(s: &str) -> Result<ModelType, DynamoError> {
     Ok(out)
 }
 
-/// Check that the configured `model_input` matches the engine modality. The
-/// token pipeline ([`LLMEngine`]) consumes pre-tokenized input
-/// (`ModelInput::Tokens`); the raw media pipeline ([`RawEngine`]) consumes the
-/// forwarded request verbatim (`ModelInput::Text` / `Tensor`) and has no
-/// tokenizer/detokenizer stages, so `Tokens` would be a misconfiguration.
+/// Check `model_input` matches the engine modality: [`LLMEngine`] needs
+/// `Tokens`; [`RawEngine`] needs `Text`/`Tensor` (no tokenizer stage).
 fn validate_model_input(model_input: ModelInput, engine: &EngineKind) -> Result<(), DynamoError> {
     match engine {
         EngineKind::Llm(_) => {
@@ -1110,9 +1101,7 @@ async fn build_local_model(
     // Mirrors the legacy non-unified vLLM path (worker_factory.py).
     let enable_local_indexer = config.effective_enable_local_indexer();
 
-    // Token-pipeline registration metadata. Raw media engines leave
-    // `engine_config.llm = None`; defaulting yields all-`None` fields so the
-    // model registers with no KV/DP/bootstrap hints (correct for media).
+    // None for raw engines → all-`None` fields → no KV/DP/bootstrap hints.
     let llm = engine_config.llm.clone().unwrap_or_default();
 
     // Publish the disaggregated bootstrap endpoint when the engine
@@ -1163,11 +1152,10 @@ async fn build_local_model(
         .custom_template_path(config.custom_jinja_template.clone())
         .runtime_config(rt_cfg);
 
-    // Resolve WorkerConfig.model_name into a local path. Empty string OR a
-    // raw media engine (`name_only`) means name-only mode (no tokenizer /
-    // chat template on the card): raw media models carry no LLM artifacts to
-    // fetch, and the engine loads the model itself — mirrors the legacy
-    // diffusion registration's `ModelDeploymentCard::with_name_only()`.
+    // Resolve model_name to a local path. Empty string or a raw media engine
+    // (`name_only`) → name-only card (no tokenizer/template): raw models carry
+    // no LLM artifacts to fetch and load themselves (cf. the legacy
+    // diffusion path's `ModelDeploymentCard::with_name_only()`).
     if !config.model_name.is_empty() && !name_only {
         let source = config.model_name.clone();
         let local_path = if std::fs::exists(&source).map_err(|e| {

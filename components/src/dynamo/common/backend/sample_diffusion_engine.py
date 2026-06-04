@@ -26,16 +26,11 @@ _TINY_PNG_B64 = (
 
 
 class SampleDiffusionEngine(DiffusionEngine):
-    """Reference DiffusionEngine implementation (CPU-only, no model).
-
-    Serves ``/v1/images/generations`` by returning a fixed tiny PNG after a
-    configurable delay. Useful for exercising the raw media pipeline
-    (RawEngineAdapter + PyRawEngine) end-to-end without a GPU, and as a
-    template for real image/video/audio engines.
-
-    The contract mirrors the legacy diffusion handlers: ``generate`` takes
-    the raw OpenAI image-request dict and yields one ``NvImagesResponse``-
-    shaped dict.
+    """Reference CPU-only DiffusionEngine (no model). Serves ``/v1/images`` by
+    returning a fixed tiny PNG after a delay — exercises the raw media pipeline
+    (RawEngineAdapter + PyRawEngine) end-to-end without a GPU, and is a template
+    for real engines. ``generate`` takes the OpenAI image-request dict and
+    yields one ``NvImagesResponse``-shaped dict.
     """
 
     def __init__(

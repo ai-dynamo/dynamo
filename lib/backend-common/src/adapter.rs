@@ -477,19 +477,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     }
 }
 
-/// Bridges a [`RawEngine`] to the [`AsyncEngine`] that `Ingress::for_engine`
-/// consumes — the non-token sibling of [`EngineAdapter`].
-///
-/// The request and response are passed through as [`serde_json::Value`]: the
-/// frontend forwards the OpenAI-shaped media request verbatim and the engine
-/// yields the response object(s) directly. There is no `PreprocessedRequest`
-/// deserialization, no token-count telemetry (TTFT/ITL), and no
-/// disaggregation first-token logic — media generation is aggregated-only.
-///
-/// Because the wire shape is already `serde_json::Value`, this adapter doubles
-/// as its own health-check probe (the runtime's `HealthCheckManager` fires
-/// canaries as `SingleIn<serde_json::Value>`), so no `JsonProbeAdapter`
-/// wrapper is needed for the raw path.
+/// Bridges a [`RawEngine`] to [`AsyncEngine`] — the non-token sibling of
+/// [`EngineAdapter`]. Request/response pass through as [`serde_json::Value`]:
+/// no `PreprocessedRequest`, no token telemetry (TTFT/ITL), no disagg
+/// first-token logic (media generation is aggregated-only). Since the wire
+/// shape is already JSON, this doubles as its own health-check probe — no
+/// `JsonProbeAdapter` wrapper needed.
 pub(crate) struct RawEngineAdapter {
     engine: Arc<dyn RawEngine>,
 }
@@ -511,9 +504,8 @@ impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Valu
         let (request, handle) = input.into_parts();
         let ctx: Arc<dyn AsyncEngineContext> = handle.context();
 
-        // Per-request worker-side span, nesting under the runtime's
-        // `handle_payload` parent. Media generation has no token-level
-        // attributes, so the span carries just the request id.
+        // Per-request span (nests under the runtime's `handle_payload`). No
+        // token-level attributes here — just the request id.
         let span = tracing::info_span!(
             target: "request_span",
             "engine.generate",
@@ -536,9 +528,8 @@ impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Valu
                 Error::from(e)
             })?;
 
-        // Cancellation monitor: call engine.abort() on stop/kill. Simpler
-        // than the token path — no first-token deferral to protect a NIXL
-        // transfer, because there is no disaggregated decode peer.
+        // Cancellation monitor: call engine.abort() on stop/kill. No
+        // first-token deferral (no disagg decode peer to protect).
         let drop_token = CancellationToken::new();
         let monitor_token = drop_token.clone();
         let abort_engine = self.engine.clone();

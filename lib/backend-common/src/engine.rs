@@ -102,14 +102,10 @@ impl Deref for GenerateContext {
     }
 }
 
-/// Token-pipeline registration metadata: KV cache, data-parallel layout, and
-/// disaggregation bootstrap. Populated only by token engines ([`LLMEngine`]);
-/// raw media engines ([`RawEngine`]) leave [`EngineConfig::llm`] as `None`
-/// rather than returning a struct full of inapplicable `None`s.
-///
-/// `None` on a field means "don't advertise": the router sees no value and
-/// falls back to round-robin (for scheduling hints) or its configured
-/// defaults.
+/// Token-pipeline registration metadata (KV cache, data-parallel layout,
+/// disaggregation bootstrap). Set by [`LLMEngine`]s; [`RawEngine`]s leave
+/// [`EngineConfig::llm`] `None`. A `None` field isn't advertised — the router
+/// falls back to round-robin / its configured defaults.
 #[derive(Clone, Debug, Default)]
 pub struct LlmRegistration {
     /// Maximum context length the engine supports, in tokens.
@@ -126,28 +122,17 @@ pub struct LlmRegistration {
     pub max_num_seqs: Option<u64>,
     /// Maximum tokens the engine will process in a single batched step.
     pub max_num_batched_tokens: Option<u64>,
-    /// Number of data-parallel ranks this worker hosts. Defaults to 1.
-    /// The router uses this to enumerate per-rank load when scoring.
+    /// DP ranks this worker hosts (default 1); the router enumerates per-rank
+    /// load from it.
     pub data_parallel_size: Option<u32>,
-    /// Global index of the first DP rank this worker hosts. Defaults to 0.
-    /// Non-zero only under multi-worker DP layouts where each worker owns a
-    /// sub-range (e.g. vLLM hybrid/external LB, SGLang DP-attention across
-    /// multiple nodes). The router enumerates ranks
-    /// `[data_parallel_start_rank, data_parallel_start_rank + data_parallel_size)`.
+    /// First DP rank this worker hosts (default 0). Non-zero only when a worker
+    /// owns a sub-range (vLLM hybrid/external LB, multi-node SGLang
+    /// DP-attention); the router enumerates `[start, start + data_parallel_size)`.
     pub data_parallel_start_rank: Option<u32>,
-    /// Bootstrap host this prefill worker advertises to decode peers.
-    ///
-    /// Only meaningful for backends with a Dynamo-level host/port
-    /// handshake (today: SGLang). Backends whose KV transport is
-    /// internal — TRT-LLM uses TRT-LLM's transceiver, vLLM uses vLLM's
-    /// `NixlConnector` — should leave this `None`.
-    ///
-    /// When both `bootstrap_host` and `bootstrap_port` are `Some`,
-    /// `Worker` publishes them via
-    /// `ModelRuntimeConfig::disaggregated_endpoint` so the frontend's
-    /// `PrefillRouter` can take its optimised "Bootstrap path" (route
-    /// decode concurrent with prefill instead of waiting for prefill
-    /// to drain).
+    /// Bootstrap host advertised to decode peers — only for Dynamo-handshake
+    /// backends (SGLang); internal-KV-transport backends (TRT-LLM, vLLM
+    /// `NixlConnector`) leave it `None`. When host+port are set, `Worker`
+    /// publishes them for the frontend's `PrefillRouter` Bootstrap path.
     pub bootstrap_host: Option<String>,
     /// Bootstrap port for disaggregated KV transfer. See `bootstrap_host`.
     pub bootstrap_port: Option<u16>,
@@ -340,22 +325,14 @@ pub trait LLMEngine: Send + Sync + 'static {
 /// Raw media-generation engine trait — the non-token sibling of [`LLMEngine`].
 ///
 /// Where [`LLMEngine`] sits behind the tokenizer/detokenizer pipeline
-/// (`PreprocessedRequest` in, `LLMEngineOutput` out), `RawEngine` serves
-/// modalities the frontend forwards verbatim: the OpenAI-shaped request JSON
-/// arrives untouched and the engine yields the response JSON directly. This
-/// is the path for image, video, and audio generation
-/// (`/v1/images/generations`, `/v1/videos/generations`, `/v1/audio/speech`).
+/// (`PreprocessedRequest` → `LLMEngineOutput`), `RawEngine` serves modalities
+/// the frontend forwards verbatim (image/video/audio): request and response
+/// are plain [`serde_json::Value`]s. The contract is modality-neutral, so a
+/// new media modality is a new engine, not a new framework path.
 ///
-/// The contract is deliberately modality-neutral so a new media modality is a
-/// new engine, not a new framework path: `request` and the yielded items are
-/// plain [`serde_json::Value`]s whose schema is the corresponding endpoint's
-/// request/response body.
-///
-/// The lifecycle (`start`/`abort`/`drain`/`cleanup`/`setup_metrics`/
-/// `health_check_payload`) is identical to [`LLMEngine`] — `Worker` drives
-/// both through the same orchestrator. The only differences are the
-/// `generate` request/response shape and the absence of
-/// `kv_event_sources` (raw media engines have no KV cache to route on).
+/// Lifecycle is identical to [`LLMEngine`] (same `Worker` orchestrator); the
+/// only differences are `generate`'s request/response shape and the absence of
+/// `kv_event_sources` (no KV cache to route on).
 #[async_trait]
 pub trait RawEngine: Send + Sync + 'static {
     /// Start the engine and return registration metadata. See

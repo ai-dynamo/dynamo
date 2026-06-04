@@ -1,17 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""SGLang DiffusionEngine for the unified backend (raw media pipeline).
+"""SGLang DiffusionEngine — the raw-media sibling of sglang/llm_engine.py.
 
-The non-token sibling of ``sglang/llm_engine.py``. Serves media generation
-(image/video; audio reserved) by reusing SGLang's ``DiffGenerator`` and the
-existing per-modality handlers (``request_handlers/{image_diffusion,
-video_generation}``) — their ``generate(request: dict, context)`` signature
-already matches the ``DiffusionEngine`` ABC, so this class is thin glue.
-
-Proves the unified abstraction generalizes across engines: the same
-``DiffusionEngine`` ABC + raw adapter serves both TRT-LLM (VisualGen) and
-SGLang (DiffGenerator).
+Thin glue: reuses SGLang's ``DiffGenerator`` and the existing per-modality
+handlers (request_handlers/{image_diffusion,video_generation}), whose
+``generate(request: dict, context)`` already matches the ``DiffusionEngine``
+ABC. Same ABC + raw adapter as TRT-LLM — the abstraction generalizes across
+engines.
 """
 
 from __future__ import annotations
@@ -31,9 +27,9 @@ from dynamo.sglang.args import parse_args
 
 logger = logging.getLogger(__name__)
 
-# Internal modality tags (SGLang selects diffusion mode via boolean CLI
-# flags rather than an enum). Adding audio is a new tag here plus a handler
-# in `_make_handler` and a flag in args — no framework changes.
+# Internal modality tags (SGLang selects diffusion mode via boolean CLI flags,
+# not an enum). Adding audio = a tag here + a handler in `_make_handler` + a
+# flag in args; no framework changes.
 _IMAGE = "image"
 _VIDEO = "video"
 
@@ -44,12 +40,9 @@ _ENDPOINT_TYPE_BY_MODALITY: dict[str, str] = {
 
 
 def _make_handler(modality: str, generator: Any, config: Any, fs: Any) -> Any:
-    """Build the handler for ``modality``. Imported lazily because the
-    handlers pull in torch / SGLang internals.
-
-    The ``output_kind -> encoder`` dispatch: each modality maps to a handler
-    that encodes the matching DiffGenerator output (image->PNG, video->MP4;
-    audio reserved)."""
+    """Build the handler for ``modality`` (the output_kind->encoder dispatch:
+    image->PNG, video->MP4; audio reserved). Imported lazily — the handlers
+    pull in torch / SGLang internals."""
     if modality == _IMAGE:
         from dynamo.sglang.request_handlers import ImageDiffusionWorkerHandler
 

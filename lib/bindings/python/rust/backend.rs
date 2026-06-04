@@ -597,19 +597,16 @@ impl PyLLMEngine {
         py_future.await
     }
 
-    /// Shared request dispatch for both the token and raw `generate` paths.
+    /// Shared dispatch for the token and raw `generate` paths: records
+    /// per-request trace/metadata state, pythonizes the request (any
+    /// `Serialize` — `PreprocessedRequest` or `serde_json::Value`), calls
+    /// Python `generate(request, context=ctx)`, and returns the resulting
+    /// stream of Python chunk objects + the state guard. The caller maps each
+    /// `PyObject` to its output type.
     ///
-    /// Records per-request trace/metadata state, pythonizes the request
-    /// (any `Serialize` type — `PreprocessedRequest` for the token path,
-    /// `serde_json::Value` for the raw path), calls Python
-    /// `generate(request, context=ctx)`, and returns the resulting
-    /// async-generator-backed stream of Python chunk objects plus the
-    /// per-request state guard. The caller maps each `PyObject` chunk to
-    /// its own output type (`LLMEngineOutput` vs `serde_json::Value`).
-    ///
-    /// Invariant: must be awaited from within the `engine.generate` span
-    /// (both adapters `.instrument()` the engine's `generate` future), so
-    /// the span capture below sees the correct parent.
+    /// Invariant: must be awaited within the `engine.generate` span (both
+    /// adapters `.instrument()` it) so the span capture below sees the right
+    /// parent.
     async fn dispatch_generate<T: serde::Serialize + Send + 'static>(
         &self,
         request: T,

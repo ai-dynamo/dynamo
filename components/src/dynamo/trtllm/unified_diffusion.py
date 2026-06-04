@@ -1,17 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""TensorRT-LLM DiffusionEngine for the unified backend (raw media pipeline).
+"""TensorRT-LLM DiffusionEngine — the raw-media sibling of trtllm/llm_engine.py.
 
-The non-token sibling of ``trtllm/llm_engine.py``. Where ``TrtllmLLMEngine``
-runs the token pipeline, ``TrtllmDiffusionEngine`` serves media generation
-(image/video; audio reserved) by reusing the existing VisualGen wrapper
-(``engines/diffusion_engine.py``) and the existing per-modality handlers
-(``request_handlers/diffusion``) — their ``generate(request: dict, context)``
-signature already matches the ``DiffusionEngine`` ABC, so this class is thin
-glue: pick the handler for the modality, delegate ``generate`` to it.
-
-See dynamo/common/backend/README.md for the unified-backend architecture.
+Thin glue: reuses the VisualGen wrapper (engines/diffusion_engine.py) and the
+existing per-modality handlers (request_handlers/diffusion), whose
+``generate(request: dict, context)`` already matches the ``DiffusionEngine``
+ABC — pick the handler for the modality and delegate.
 """
 
 from __future__ import annotations
@@ -32,9 +27,8 @@ from dynamo.trtllm.constants import Modality
 
 logger = logging.getLogger(__name__)
 
-# Modality -> the endpoint type the worker registers (parsed by the Rust
-# Worker into ModelType::{Images,Videos,Audios}). Adding audio is a new
-# entry here plus a handler in `_make_handler` — no framework changes.
+# Modality -> registered endpoint type (Rust parses it into ModelType). Adding
+# audio = one entry here + a handler in `_make_handler`; no framework changes.
 _ENDPOINT_TYPE_BY_MODALITY: dict[Modality, str] = {
     Modality.IMAGE_DIFFUSION: "images",
     Modality.VIDEO_DIFFUSION: "videos",
@@ -43,12 +37,9 @@ _ENDPOINT_TYPE_BY_MODALITY: dict[Modality, str] = {
 
 
 def _make_handler(modality: Modality, engine: Any, config: DiffusionConfig) -> Any:
-    """Build the handler for ``modality``. Imported lazily because the
-    handlers pull in torch / VisualGen, which must not load at module import.
-
-    This is the ``output_kind -> encoder`` dispatch the design calls for:
-    each modality maps to a handler that encodes the matching
-    ``VisualGenOutput`` field (image->PNG, video->MP4, audio->future)."""
+    """Build the handler for ``modality`` (the output_kind->encoder dispatch:
+    image->PNG, video->MP4, audio->future). Imported lazily — the handlers pull
+    in torch / VisualGen, which must not load at module import."""
     if modality == Modality.IMAGE_DIFFUSION:
         from dynamo.trtllm.request_handlers.diffusion import ImageGenerationHandler
 

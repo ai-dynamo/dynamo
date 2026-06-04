@@ -66,41 +66,27 @@ class GenerateChunk(TypedDict, total=False):
 
 @dataclass
 class LlmRegistration:
-    """Token-pipeline registration metadata: KV cache, data-parallel layout,
-    and disaggregation bootstrap.
-
-    Populated only by token engines (:class:`LLMEngine`); raw media engines
-    (:class:`RawEngine`) leave :attr:`EngineConfig.llm` as ``None`` rather than
-    returning a struct full of inapplicable ``None``s. ``None`` on a field
-    means "don't advertise" — the router falls back to its defaults.
-    """
+    """Token-pipeline registration metadata (KV cache, data-parallel layout,
+    disaggregation bootstrap). Set by :class:`LLMEngine`s; :class:`RawEngine`s
+    leave :attr:`EngineConfig.llm` ``None``. A ``None`` field isn't advertised
+    (the router falls back to its defaults)."""
 
     context_length: Optional[int] = None
     kv_cache_block_size: Optional[int] = None
     total_kv_blocks: Optional[int] = None
     max_num_seqs: Optional[int] = None
     max_num_batched_tokens: Optional[int] = None
-    # Number of data-parallel ranks this worker hosts (defaults to 1).
-    # Engines with attention-DP set this from their engine-side count
-    # (e.g. TRT-LLM's `get_attention_dp_size()`).
+    # DP ranks this worker hosts (default 1); attention-DP engines set it from
+    # the engine count (e.g. TRT-LLM's get_attention_dp_size()).
     data_parallel_size: Optional[int] = None
-    # Global index of the first DP rank this worker hosts (defaults to 0).
-    # Non-zero only under multi-worker DP layouts where each worker owns a
-    # sub-range — vLLM hybrid/external LB, SGLang DP-attention across
-    # multiple nodes. The router enumerates ranks
-    # `[data_parallel_start_rank, data_parallel_start_rank + data_parallel_size)`.
+    # First DP rank this worker hosts (default 0). Non-zero only when a worker
+    # owns a sub-range (vLLM hybrid/external LB, multi-node SGLang DP-attention);
+    # the router enumerates [start, start + data_parallel_size).
     data_parallel_start_rank: Optional[int] = None
-    # Bootstrap address advertised to decode peers. Only meaningful for
-    # backends with a Dynamo-level host/port handshake (today: SGLang).
-    # Backends whose KV transport is internal — TRT-LLM, vLLM
-    # NixlConnector — leave these None.
-    #
-    # Engines that do use it populate these from `start()` after the
-    # engine has resolved its KV-transport listening address. When both
-    # are set, the Rust Worker publishes them via
-    # `ModelRuntimeConfig.disaggregated_endpoint` so the frontend's
-    # `PrefillRouter` can take its optimised Bootstrap path (route
-    # decode concurrent with prefill).
+    # Bootstrap address advertised to decode peers. Only for backends with a
+    # Dynamo-level handshake (SGLang); internal-KV-transport backends (TRT-LLM,
+    # vLLM NixlConnector) leave it None. When both are set, Worker publishes
+    # them so the frontend's PrefillRouter can take its Bootstrap path.
     bootstrap_host: Optional[str] = None
     bootstrap_port: Optional[int] = None
 
@@ -303,50 +289,27 @@ class LLMEngine(BaseEngine):
         return []
 
 
-# ---------------------------------------------------------------------------
-# Raw (non-token) request/response contract for RawEngine.generate
-#
-# The PyO3 bridge delivers the request as a plain JSON object (a ``dict``) and
-# serializes each yielded object straight back — there is no Rust-side typed
-# request struct on this path (that is the deliberate modality-neutral
-# trade-off; see RawEngine). These aliases name that contract; the canonical
-# field schemas live in the OpenAI-shaped protocol models that the concrete
-# handlers validate against:
-#   * images: ``dynamo.common.protocols.image_protocol`` (NvCreateImageRequest
-#     / NvImagesResponse)
-#   * videos: ``dynamo.common.protocols.video_protocol`` (NvCreateVideoRequest
-#     / NvVideosResponse)
-# A new media modality publishes its schema there and references it here,
-# rather than adding a Rust request type.
-# ---------------------------------------------------------------------------
-
-# Inbound request body, exactly as the frontend forwarded it (no preprocessing).
+# Raw (non-token) request/response for RawEngine.generate. The PyO3 bridge
+# passes the request through as a JSON ``dict`` and serializes each yielded
+# object back — no Rust request type (the modality-neutral trade-off).
+# Canonical field schemas: NvCreateImageRequest/NvImagesResponse in
+# dynamo.common.protocols.image_protocol (videos: video_protocol).
 RawRequest = dict[str, Any]
-# A single yielded response object (the endpoint's response body).
 RawResponseChunk = dict[str, Any]
 
 
 class RawEngine(BaseEngine):
-    """Abstract base for raw, non-token generation engines (image, video,
-    audio — any modality the frontend forwards verbatim).
+    """Engines for raw, non-token generation (image, video, audio).
 
     Named for the *contract*, not a use case: unlike :class:`LLMEngine` there
-    is no token pipeline. The frontend forwards the OpenAI-shaped request
-    (e.g. ``/v1/images``, ``/v1/videos``, ``/v1/audio/speech``) straight
-    through as a JSON object, and :meth:`generate` yields the response
-    object(s) directly. Registered with ``ModelInput.Text`` and served through
-    the raw request adapter — no tokenization, detokenization, or KV cache.
-
-    The ``dict`` contract is deliberately modality-neutral so a new media
-    modality is a new engine, not a new framework path. The request/response
-    *schemas* are documented on :data:`RawRequest` / :data:`RawResponseChunk`.
-    A single engine may serve multiple modalities by dispatching on the
-    request/output shape. Single-shot generations yield one (terminal) object;
-    streaming generations (e.g. video progress) yield intermediate objects
-    followed by a terminal one.
-
-    Domain-specific subclasses (e.g. :class:`DiffusionEngine`) add no contract
-    — they exist only to name an engine family.
+    is no token pipeline — the frontend forwards the OpenAI-shaped request as a
+    JSON object and :meth:`generate` yields the response object(s) directly.
+    Registered with ``ModelInput.Text`` and served through the raw request
+    adapter (no tokenization or KV cache). The ``dict`` contract is
+    modality-neutral, so a new media modality is a new engine, not a new
+    framework path; one engine may serve several modalities. Yield one
+    (terminal) object, or intermediate progress objects ending with a terminal
+    one. Subclasses like :class:`DiffusionEngine` add no contract.
     """
 
     @abstractmethod
@@ -366,12 +329,8 @@ class RawEngine(BaseEngine):
 
 
 class DiffusionEngine(RawEngine):
-    """A :class:`RawEngine` for diffusion-family media generation (image /
-    video via VisualGen, DiffGenerator, etc.).
-
-    Adds no contract over :class:`RawEngine`; it names the engine family so
-    diffusion backends read as ``DiffusionEngine`` while non-diffusion raw
-    modalities (e.g. a TTS audio engine) can subclass :class:`RawEngine`
-    directly. Routing keys off :class:`RawEngine`, so any subclass is served
-    through the raw request adapter.
+    """A :class:`RawEngine` for diffusion-family generation (image/video via
+    VisualGen, DiffGenerator). Names the family only — non-diffusion raw
+    modalities (e.g. TTS audio) subclass :class:`RawEngine` directly. Routing
+    keys off :class:`RawEngine`, so any subclass uses the raw adapter.
     """
