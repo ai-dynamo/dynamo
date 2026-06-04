@@ -1,3 +1,7 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
 # Shared environment for the Dynamo frontend benchmark harness.
 # Source from the other scripts: `source "$(dirname "$0")/env.sh"`
 #

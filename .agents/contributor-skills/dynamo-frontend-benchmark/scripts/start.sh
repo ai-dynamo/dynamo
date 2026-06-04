@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
 # Start the benchmark topology:
 #   - 4 mock workers (one process, --num-workers 4) on cores 4-23
 #   - 1 frontend (HTTP + KV router + tokenizer) on cores 0-3
@@ -51,6 +54,25 @@ taskset -c "$OTHER_CORES" "$DYN_PY" -m dynamo.mocker \
 WORKERS_PID=$!
 echo "$WORKERS_PID" > "$LOG_DIR/workers.pid"
 echo "[workers] pid $WORKERS_PID, logging to $LOG_DIR/workers.log"
+
+STARTUP_OK=0
+terminate_process_tree() {
+    local pid="$1"
+    local child
+    [[ -n "$pid" ]] || return
+    for child in $(pgrep -P "$pid" 2>/dev/null || true); do
+        terminate_process_tree "$child"
+    done
+    kill "$pid" 2>/dev/null || true
+}
+
+cleanup_startup_failure() {
+    [[ "$STARTUP_OK" == "1" ]] && return
+    echo "[cleanup] startup failed; stopping launched worker/frontend processes ..."
+    terminate_process_tree "${FRONTEND_PID:-}"
+    terminate_process_tree "${WORKERS_PID:-}"
+}
+trap cleanup_startup_failure EXIT
 
 # Wait for EXACTLY NUM_WORKERS fresh instances to register.
 echo "[workers] waiting for ${NUM_WORKERS} instances to register in etcd ..."
@@ -125,8 +147,10 @@ for i in $(seq 1 60); do
         tail -25 "$LOG_DIR/frontend.log"
         exit 1
     fi
-    if curl -sf "http://localhost:${HTTP_PORT}/v1/models" 2>/dev/null | grep -q "Qwen3-0.6B"; then
+    if curl -sf "http://localhost:${HTTP_PORT}/v1/models" 2>/dev/null | grep -Fq "$MODEL"; then
         echo "[ready] frontend (pid $FRONTEND_PID) serving model after ${i}s; ${NUM_WORKERS} workers live."
+        STARTUP_OK=1
+        trap - EXIT
         exit 0
     fi
     sleep 1

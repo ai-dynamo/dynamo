@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
 # On-CPU profile of a target process (frontend or mocker) under load.
 # Non-root (needs perf_event_paranoid <= 1; -1 is ideal). Topology must be up.
 # Also samples the target's cores so you can see if it saturates.
@@ -20,6 +23,28 @@ while [[ $# -gt 0 ]]; do case $1 in
 esac; done
 [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null || { echo "ERROR: target PID '$PID' not running."; exit 1; }
 
+expand_cpu_list() {
+  local spec="$1"
+  local part start end cpu
+  local out=()
+  IFS=',' read -ra parts <<< "$spec"
+  for part in "${parts[@]}"; do
+    if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+      start="${BASH_REMATCH[1]}"
+      end="${BASH_REMATCH[2]}"
+      if (( start <= end )); then
+        for ((cpu=start; cpu<=end; cpu++)); do out+=("$cpu"); done
+      else
+        for ((cpu=start; cpu>=end; cpu--)); do out+=("$cpu"); done
+      fi
+    else
+      out+=("$part")
+    fi
+  done
+  local IFS=,
+  echo "${out[*]}"
+}
+
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="$RESULTS_DIR/../profiling/oncpu-$TAG-$STAMP"; mkdir -p "$OUT"
 echo "[oncpu] target=$TAG PID=$PID cores=$CORES conc=$CONC out=$OUT"
@@ -36,7 +61,10 @@ trap 'kill "$LOAD_PID" 2>/dev/null; pkill -f "aiperf profile" 2>/dev/null' EXIT
 echo "[load] settling ${SETTLE}s ..."; sleep "$SETTLE"
 
 # per-core utilization of the target's cores + per-process CPU
-[[ -n "$CORES" ]] && mpstat -P "${CORES//-/,}" "$CAP_SECS" 1 > "$OUT/mpstat.txt" 2>/dev/null &
+if [[ -n "$CORES" ]]; then
+  MPSTAT_CORES="$(expand_cpu_list "$CORES")"
+  mpstat -P "$MPSTAT_CORES" "$CAP_SECS" 1 > "$OUT/mpstat.txt" 2>/dev/null &
+fi
 pidstat -p "$PID" 2 > "$OUT/pidstat.txt" 2>/dev/null & PS1=$!
 
 echo "[perf] on-CPU record ${CAP_SECS}s ..."

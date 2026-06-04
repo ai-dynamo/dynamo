@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
 # Full benchmark run. NOT executed during setup — trigger this yourself.
 #   bench/run_aiperf.sh
 # Requires bench/start.sh to have been run first (frontend + workers up).

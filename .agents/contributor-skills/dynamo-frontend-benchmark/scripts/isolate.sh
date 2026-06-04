@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
 # Reserve cores 0-3 for the frontend by moving other userspace to cores 4-23
 # (systemd cgroup cpuset). Reversible (--runtime), no reboot.
 #

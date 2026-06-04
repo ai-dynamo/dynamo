@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
 # Off-CPU profile of a target process (frontend or mocker) under load.
 # Shows what blocked threads are WAITING on (futex/lock, epoll/network, park).
 #
@@ -25,12 +28,21 @@ esac; done
 
 [[ $EUID -eq 0 ]] || { echo "ERROR: run with sudo (sched tracepoints + BPF need root)."; exit 1; }
 [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null || { echo "ERROR: target PID '$PID' not running."; exit 1; }
+command -v setsid >/dev/null 2>&1 || { echo "ERROR: setsid is required to isolate the aiperf load process group."; exit 1; }
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="$RESULTS_DIR/../profiling/offcpu-$TAG-$STAMP"; mkdir -p "$OUT"
 echo "[offcpu] target=$TAG PID=$PID conc=$CONC out=$OUT"
 
+cleanup_load() {
+  if [[ -n "${LOAD_PGID:-}" ]]; then
+    kill -- "-$LOAD_PGID" 2>/dev/null || true
+  elif [[ -n "${LOAD_PID:-}" ]]; then
+    kill "$LOAD_PID" 2>/dev/null || true
+  fi
+}
+
 # Drive load (time-based; small dataset = fast client-side gen).
-taskset -c "$OTHER_CORES" "$AIPERF" profile --model "$MODEL" --tokenizer "$MODEL" \
+setsid taskset -c "$OTHER_CORES" "$AIPERF" profile --model "$MODEL" --tokenizer "$MODEL" \
   --url "http://localhost:${HTTP_PORT}" --endpoint-type chat --streaming \
   --shared-system-prompt-length 48000 --user-context-prompt-length 12000 \
   --num-dataset-entries 1024 --output-tokens-mean 500 --conversation-turn-mean 4 \
@@ -38,7 +50,9 @@ taskset -c "$OTHER_CORES" "$AIPERF" profile --model "$MODEL" --tokenizer "$MODEL
   --extra-inputs "ignore_eos:true" --artifact-dir "$OUT/load_artifacts" \
   > "$OUT/load_aiperf.log" 2>&1 &
 LOAD_PID=$!
-trap 'kill "$LOAD_PID" 2>/dev/null; pkill -f "aiperf profile" 2>/dev/null' EXIT
+LOAD_PGID="$(ps -o pgid= -p "$LOAD_PID" 2>/dev/null | tr -d '[:space:]')"
+LOAD_PGID="${LOAD_PGID:-$LOAD_PID}"
+trap cleanup_load EXIT
 echo "[load] settling ${SETTLE}s ..."; sleep "$SETTLE"
 
 # 1) bcc offcputime: duration-weighted, user+kernel, folded directly.
@@ -58,7 +72,7 @@ if [[ -s "$OUT/offcpu_bcc.folded" && -x "$FLAMEGRAPH_DIR/flamegraph.pl" ]]; then
     "$OUT/offcpu_bcc.folded" > "$OUT/offcpu_bcc.svg" 2>/dev/null || true
 fi
 
-kill "$LOAD_PID" 2>/dev/null; pkill -f "aiperf profile" 2>/dev/null; trap - EXIT
+cleanup_load; trap - EXIT
 # Hand artifacts back to the invoking (non-root) user so analysis can read them.
 chown -R "$(stat -c %U "$RESULTS_DIR")":"$(stat -c %G "$RESULTS_DIR")" "$OUT" 2>/dev/null || true
 echo "[done] $OUT  (offcpu_bcc.folded / .svg ; sched.data for perf-DWARF)"

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
 # Stop the benchmark topology (frontend + workers). Leaves etcd/nats running.
 # Waits until processes are gone, :8000 is free, and worker instances have
 # drained from etcd, so a subsequent ./start.sh sees a clean slate.
