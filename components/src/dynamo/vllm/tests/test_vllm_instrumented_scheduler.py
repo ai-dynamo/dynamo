@@ -553,6 +553,39 @@ def test_bench_inject_fake_decode_pads_prompt_for_async_placeholder():
     )
 
 
+def test_bench_inject_fake_decode_sets_prefill_token_ids():
+    """vLLM 0.22's v2 GPU model runner requires ``prefill_token_ids`` for
+    every ``NewRequestData``. The synthetic decode path constructs that
+    object directly, so it must mirror the normal scheduler's v2 payload.
+    """
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_seq = 0
+    stub._bench_active_req_ids = set()
+    stub.requests = {}
+    stub.running = []
+    stub.finished_req_ids = set()
+    stub._bench_block_hasher = None
+    stub.kv_cache_manager = MagicMock()
+    stub.kv_cache_manager.num_kv_cache_groups = 1
+    stub.kv_cache_manager.take_new_block_ids = MagicMock(return_value=None)
+    stub.needs_kv_cache_zeroing = False
+    stub.connector = None
+    stub.ec_connector = None
+
+    new_blocks = MagicMock()
+    new_blocks.get_block_ids.return_value = ([1, 2],)
+    stub.kv_cache_manager.allocate_slots = MagicMock(return_value=new_blocks)
+
+    output = InstrumentedScheduler._bench_inject_fake_decode(
+        stub, ctx_len=16, batch_size=1
+    )
+
+    new_req = output.scheduled_new_reqs[0]
+    assert len(new_req.prompt_token_ids) == 17
+    assert new_req.prefill_token_ids == new_req.prompt_token_ids
+    assert new_req.num_computed_tokens == 16
+
+
 # ---------------------------------------------------------------------------
 # Decode-grid sizing must account for the +1-padded allocation
 # ---------------------------------------------------------------------------

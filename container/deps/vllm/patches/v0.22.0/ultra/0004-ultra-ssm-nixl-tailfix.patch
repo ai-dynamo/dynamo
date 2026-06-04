@@ -1,0 +1,28 @@
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/worker.py b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/worker.py
+index 55081a603..67a348c6a 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/worker.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/worker.py
+@@ -2337,11 +2337,18 @@ class NixlConnectorWorker:
+                     _is_ssm_spec(self._group_spec_types[i])
+                     and num_local_blocks < num_remote_blocks
+                 ):
+-                    # NOTE (NickLucche): With prefix caching on SSM, (remote) blocks
+-                    # prior to the last one are placeholders (null blocks). Mind that
+-                    # this doesn't really impact transfer, as we only still care about
+-                    # the last "block", the full in-place state.
+-                    assert num_local_blocks == 1, "SSM can only have one local block"
++                    # NEMOTRON_ULTRA_SSM_NIXL_TAILFIX: SSM state groups may
++                    # allocate multiple local blocks after long-context
++                    # prefix-cache transfer. Tail-align remote SSM blocks to
++                    # the local suffix instead of asserting a single local
++                    # block.
++                    assert num_local_blocks > 0, (
++                        "SSM group has no local blocks to receive"
++                    )
++                    assert num_local_blocks <= num_remote_blocks, (
++                        f"SSM group {i}: local blocks {num_local_blocks} "
++                        f"> remote blocks {num_remote_blocks}"
++                    )
+                     remote_block_ids[i] = remote_group[-num_local_blocks:]
+                 elif (
+                     self._physical_blocks_per_logical_kv_block
