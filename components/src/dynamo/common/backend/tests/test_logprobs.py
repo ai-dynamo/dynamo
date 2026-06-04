@@ -674,7 +674,11 @@ def test_parity_sglang_kwargs_rejects_top_logprobs_consistently():
 
 @pytest.mark.vllm
 def test_parity_vllm_legacy_wrapper_matches_shared():
-    pytest.importorskip("vllm", reason="vLLM not installed")
+    # `exc_type=ImportError` skips when the package is importable but
+    # its native deps (e.g. libcuda.so.1) are missing — happens on the
+    # CPU-only test lanes where the engine wheel is installed for
+    # import-path resolution but no GPU runtime is present.
+    pytest.importorskip("vllm", reason="vLLM not installed", exc_type=ImportError)
     from dynamo.vllm.handlers import BaseWorkerHandler
 
     output = SimpleNamespace(
@@ -695,7 +699,9 @@ def test_parity_vllm_legacy_wrapper_matches_shared():
 
 @pytest.mark.trtllm
 def test_parity_trtllm_legacy_wrapper_matches_shared():
-    pytest.importorskip("tensorrt_llm", reason="TRT-LLM not installed")
+    pytest.importorskip(
+        "tensorrt_llm", reason="TRT-LLM not installed", exc_type=ImportError
+    )
     from dynamo.trtllm.request_handlers.handler_base import HandlerBase
 
     output = SimpleNamespace(
@@ -717,7 +723,7 @@ def test_parity_trtllm_legacy_wrapper_matches_shared():
 
 @pytest.mark.sglang
 def test_parity_sglang_legacy_extract_wrapper_matches_shared():
-    pytest.importorskip("sglang", reason="SGLang not installed")
+    pytest.importorskip("sglang", reason="SGLang not installed", exc_type=ImportError)
     from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 
     meta = {
@@ -735,7 +741,7 @@ def test_parity_sglang_legacy_extract_wrapper_matches_shared():
 
 @pytest.mark.sglang
 def test_parity_sglang_legacy_kwargs_wrapper_matches_shared(monkeypatch):
-    pytest.importorskip("sglang", reason="SGLang not installed")
+    pytest.importorskip("sglang", reason="SGLang not installed", exc_type=ImportError)
     from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 
     # Gate off — both must reject logprobs >= 1 identically.
