@@ -8,7 +8,7 @@ import threading
 
 import pytest
 
-from dynamo.engine_monitor import (
+from dynamo.common.engine_monitor import (
     ENGINE_HEALTH_CHECK_INTERVAL,
     ENGINE_HEALTH_CHECK_INTERVAL_ENV,
     ENGINE_HEALTH_CHECK_TIMEOUT,

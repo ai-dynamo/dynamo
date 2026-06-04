@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 from dataclasses import dataclass
 from typing import Optional
+
+from dynamo.common.configuration.utils import env_or_default
 
 logger = logging.getLogger(__name__)
 
@@ -22,19 +23,16 @@ ENGINE_HEALTH_SHUTDOWN_TIMEOUT_ENV = "DYN_ENGINE_HEALTH_SHUTDOWN_TIMEOUT"
 
 
 def _env_float(name: str, default: float) -> float:
-    value = os.environ.get(name)
-    if value is None or value == "":
-        return default
     try:
-        parsed = float(value)
+        parsed = env_or_default(name, default, value_type=float)
     except ValueError:
-        logger.warning("Invalid %s=%r; using default %.1f", name, value, default)
+        logger.warning("Invalid %s; using default %.1f", name, default)
         return default
     if not math.isfinite(parsed):
-        logger.warning("Non-finite %s=%r; using default %.1f", name, value, default)
+        logger.warning("Non-finite %s=%r; using default %.1f", name, parsed, default)
         return default
     if parsed < 0:
-        logger.warning("Negative %s=%r; using 0", name, value)
+        logger.warning("Negative %s=%r; using 0", name, parsed)
         return 0.0
     return parsed
 
