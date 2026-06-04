@@ -16,6 +16,8 @@ from dynamo import prometheus_names
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.vllm.main import setup_metrics_collection
+from dynamo.vllm.omni.base_handler import BaseOmniHandler
+from dynamo.vllm.omni.realtime_handler import RealtimeOmniHandler
 
 from .args import OmniConfig
 
@@ -29,9 +31,6 @@ async def init_omni_realtime(
     shutdown_event: asyncio.Event,
 ) -> None:
     """Initialize and serve the realtime bidirectional Omni worker."""
-    from dynamo.vllm.omni.base_handler import BaseOmniHandler
-    from dynamo.vllm.omni.realtime_handler import RealtimeOmniHandler
-
     generate_endpoint = runtime.endpoint(
         f"{config.namespace}.{config.component}.{config.endpoint}"
     )
