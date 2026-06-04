@@ -16,9 +16,7 @@ from dynamo.engine_monitor import (
     ENGINE_HEALTH_SHUTDOWN_TIMEOUT,
     ENGINE_HEALTH_SHUTDOWN_TIMEOUT_ENV,
 )
-from dynamo.trtllm.engine_monitor import (
-    TrtllmEngineMonitor,
-)
+from dynamo.trtllm.engine_monitor import TrtllmEngineMonitor
 
 pytestmark = [
     pytest.mark.unit,
