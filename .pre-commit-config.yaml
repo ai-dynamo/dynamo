@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+default_install_hook_types: [pre-commit, commit-msg]
 exclude: ^(src/grpc_generated|.*\.patch$|.*/connect/.*\.py)
 repos:
 - repo: https://github.com/timothycrosley/isort
@@ -92,3 +93,8 @@ repos:
         - pyyaml
         - prometheus_client>=0.23.1
         - openai
+    - id: DCO check
+      name: Checks the commit message for a developer certificate of origin signature
+      entry: ./scripts/dco_check.py
+      language: script
+      stages: [commit-msg]
