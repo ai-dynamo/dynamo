@@ -26,9 +26,14 @@ in ``test_invoke_handler_matches_publisher_keyword_set``.
 
 from __future__ import annotations
 
+import asyncio
+import queue
+import threading
 from unittest.mock import MagicMock
 
 import pytest
+
+from dynamo.trtllm import publisher as publisher_mod
 
 pytestmark = [
     pytest.mark.unit,
@@ -224,12 +229,6 @@ def _build_publisher_stub(monkeypatch, *, attention_dp_size: int, fpm_enabled: b
     via ``monkeypatch`` so initialize() reaches the FPM gate cleanly without
     needing a blanket try/except to swallow upstream failures.
     """
-    import asyncio
-    import queue
-    import threading
-
-    from dynamo.trtllm import publisher as publisher_mod
-
     engine = MagicMock()
     engine.get_attention_dp_size.return_value = attention_dp_size
 
@@ -323,10 +322,6 @@ def test_publisher_does_not_init_fpm_publisher_under_attention_dp(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_kv_event_polling_loop_records_drained_batch_size():
-    import threading
-
-    from dynamo.trtllm import publisher as publisher_mod
-
     pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
     pub._stop_event = threading.Event()
     drained_batches = []
@@ -352,8 +347,6 @@ async def test_kv_event_polling_loop_records_drained_batch_size():
 
 
 def test_kv_event_id_gap_records_missing_event_count():
-    from dynamo.trtllm import publisher as publisher_mod
-
     pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
     pub.additional_metrics = MagicMock()
     pub.processing_initial_created_events = True
@@ -366,8 +359,6 @@ def test_kv_event_id_gap_records_missing_event_count():
 
 
 def test_filtered_kv_events_do_not_create_false_event_id_gaps():
-    from dynamo.trtllm import publisher as publisher_mod
-
     pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
     pub.additional_metrics = MagicMock()
     pub._last_engine_event_id_by_rank = {0: 10}
@@ -382,8 +373,6 @@ def test_filtered_kv_events_do_not_create_false_event_id_gaps():
 
 
 def test_interleaved_attention_dp_ranks_do_not_create_false_event_id_gaps():
-    from dynamo.trtllm import publisher as publisher_mod
-
     pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
     pub.additional_metrics = MagicMock()
     pub._last_engine_event_id_by_rank = {}
@@ -411,8 +400,6 @@ def _build_schema_probe_publisher(fpm_publisher_mock=None):
     Bypasses __init__ (heavy deps) and seeds only the attributes the probe
     method reads or writes: fpm_publisher and _fpm_schema_checked.
     """
-    from dynamo.trtllm import publisher as publisher_mod
-
     pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
     pub.fpm_publisher = (
         fpm_publisher_mock if fpm_publisher_mock is not None else MagicMock()
@@ -527,8 +514,6 @@ def test_schema_probe_field_list_matches_default_ibs_set():
     """Guardrail: the required-fields tuple must stay in sync with the IBS
     default fixture. If someone adds an IBS field to the production reader
     but forgets the probe constant (or vice versa), this test catches it."""
-    from dynamo.trtllm import publisher as publisher_mod
-
     assert set(publisher_mod._FPM_REQUIRED_IBS_FIELDS) == set(_DEFAULT_IBS.keys())
 
 

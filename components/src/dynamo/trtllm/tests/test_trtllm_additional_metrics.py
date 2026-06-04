@@ -12,7 +12,11 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from prometheus_client import CollectorRegistry, generate_latest
+from prometheus_client import CollectorRegistry
+from prometheus_client import Counter as RealCounter
+from prometheus_client import Gauge as RealGauge
+from prometheus_client import Histogram as RealHistogram
+from prometheus_client import generate_latest
 
 from dynamo.trtllm.metrics import AdditionalMetricsCollector
 
@@ -42,10 +46,9 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         with patch("dynamo.trtllm.metrics.Counter") as MockCounter, patch(
             "dynamo.trtllm.metrics.Histogram"
         ) as MockHistogram, patch("dynamo.trtllm.metrics.Gauge") as MockGauge:
-            from prometheus_client import Counter, Gauge, Histogram
 
             def make_counter(name, documentation, labelnames=None, **_kw):
-                return Counter(
+                return RealCounter(
                     name,
                     documentation,
                     labelnames=labelnames or [],
@@ -58,12 +61,12 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
                 kwargs = {"registry": self.registry}
                 if buckets is not None:
                     kwargs["buckets"] = buckets
-                return Histogram(
+                return RealHistogram(
                     name, documentation, labelnames=labelnames or [], **kwargs
                 )
 
             def make_gauge(name, documentation, labelnames=None, **_kw):
-                return Gauge(
+                return RealGauge(
                     name,
                     documentation,
                     labelnames=labelnames or [],

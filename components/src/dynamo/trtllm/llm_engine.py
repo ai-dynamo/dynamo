@@ -150,11 +150,16 @@ class TrtllmLLMEngine(LLMEngine):
         self._component = component
         self._additional_metrics: Optional["AdditionalMetricsCollector"] = None
         kv_cache_config = self.engine_args.get("kv_cache_config", {})
-        self._kv_event_buffer_max_size = (
-            int(kv_cache_config.get("event_buffer_max_size", 0))
-            if isinstance(kv_cache_config, dict)
-            else int(getattr(kv_cache_config, "event_buffer_max_size", 0) or 0)
-        )
+        if isinstance(kv_cache_config, dict):
+            event_buffer_max_size = kv_cache_config.get("event_buffer_max_size", 0)
+        elif isinstance(kv_cache_config, KvCacheConfig):
+            event_buffer_max_size = kv_cache_config.event_buffer_max_size
+        else:
+            raise TypeError(
+                "kv_cache_config must be a dict or KvCacheConfig, "
+                f"got {type(kv_cache_config).__name__}"
+            )
+        self._kv_event_buffer_max_size = int(event_buffer_max_size or 0)
         self._trtllm_metrics_collector: Optional["MetricsCollector"] = None
         # Resolved once at construction so the hot poll loop doesn't run
         # `hasattr` per iteration; same for the per-request log method
