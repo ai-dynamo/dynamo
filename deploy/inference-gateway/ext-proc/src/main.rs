@@ -17,6 +17,8 @@ use dynamo_ext_proc::{ExtProcServer, Router};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
+mod tokenizer_server;
+
 const GRPC_PORT: u16 = 9002;
 const HEALTH_PORT: u16 = 9003;
 const HEALTH_SERVICE_NAME: &str = "inference-extension";
@@ -120,6 +122,17 @@ async fn main() -> Result<()> {
         .init();
 
     let config = Config::from_env();
+
+    // Tokenizer-only mode: run as a Dynamo tokenizer HTTP sidecar (POST
+    // /tokenize using Dynamo's own OpenAIPreprocessor) instead of the ext_proc
+    // EPP. The external EPP points DYN_EPP_TOKENIZE_URL at this loopback sidecar
+    // to get exact Dynamo-native token IDs for KV-prefix routing.
+    if parse_env("DYN_TOKENIZER_ONLY", false) {
+        tracing::info!(
+            "DYN_TOKENIZER_ONLY=true: running Dynamo tokenizer HTTP server (no ext_proc)"
+        );
+        return tokenizer_server::run().await;
+    }
 
     tracing::info!(
         port = GRPC_PORT,

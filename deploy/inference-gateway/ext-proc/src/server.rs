@@ -251,7 +251,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
 
         ctx.target_endpoint = result.endpoint.clone();
         ctx.req_header_resp = Some(envoy_helpers::build_request_header_response(
-            &result.endpoint,
+            &join_endpoints(&result.endpoint, &result.fallbacks),
             None,
             &result.headers,
         ));
@@ -307,7 +307,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         // they already exist on the request and Envoy rejects mutations that
         // try to set restricted headers (x-envoy-*, x-forwarded-*, pseudo-headers).
         ctx.req_header_resp = Some(envoy_helpers::build_request_header_response(
-            &result.endpoint,
+            &join_endpoints(&result.endpoint, &result.fallbacks),
             Some(ctx.request_size),
             &result.headers,
         ));
@@ -597,6 +597,22 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 // it without rewriting the return path. The function is called once per
 // stream, so the size of the `Err` variant is not a hot-path concern.
 #[allow(clippy::result_large_err)]
+/// Join the primary endpoint and its fallbacks into the GAIE
+/// `x-gateway-destination-endpoint` value: `ip:port[,ip:port...]`. The proxy
+/// treats the first as primary and retries down the list on failure.
+fn join_endpoints(primary: &str, fallbacks: &[String]) -> String {
+    if fallbacks.is_empty() {
+        return primary.to_string();
+    }
+    let mut s = String::with_capacity(primary.len() + fallbacks.len() * 24);
+    s.push_str(primary);
+    for fb in fallbacks {
+        s.push(',');
+        s.push_str(fb);
+    }
+    s
+}
+
 fn validate_protocol_config(
     pc: &crate::proto::envoy::service::ext_proc::v3::ProtocolConfiguration,
 ) -> Result<(), Status> {

@@ -21,6 +21,7 @@ dynamo-llm = { workspace = true }
 dynamo-runtime = { workspace = true }
 
 anyhow = { workspace = true }
+axum = { workspace = true }
 futures = { workspace = true }
 hyper-util = { workspace = true, features = ["tokio", "http2", "server-auto"] }
 k8s-openapi = { workspace = true }
@@ -28,6 +29,7 @@ kube = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 rcgen = { workspace = true }
+reqwest = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 serde = { workspace = true }
@@ -38,6 +40,7 @@ tokio-rustls = { workspace = true }
 # `net` for TcpListenerStream (serve_with_incoming), `sync` for ReceiverStream.
 # Declared explicitly rather than relying on workspace feature unification.
 tokio-stream = { workspace = true, features = ["net", "sync"] }
+tokio-util = { workspace = true }
 tonic = { workspace = true }
 tonic-health = { workspace = true }
 tracing = { workspace = true }

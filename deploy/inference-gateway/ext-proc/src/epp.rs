@@ -44,8 +44,24 @@ const DYNAMO_CONTAINER_PORT_NAME: &str = "http";
 pub struct Router {
     prefill_router: Arc<PrefillRouter>,
     decode_router: Arc<KvRouter>,
-    preprocessor: Arc<OpenAIPreprocessor>,
+    /// `None` in external (vanilla-vLLM) mode: the worker tokenizes and the EPP
+    /// routes load-aware without replicating the worker's tokenizer config.
+    preprocessor: Option<Arc<OpenAIPreprocessor>>,
+    /// Shared HTTP client (bounded timeout) for the tokenizer sidecar, so each
+    /// pick reuses connections and a stalled sidecar can't pile up stuck
+    /// routing tasks.
+    http_client: reqwest::Client,
     runtime: Runtime,
+    /// Port to route to on each pod, from the InferencePool's `targetPorts`
+    /// (or `DYN_EPP_TARGET_PORT`). `None` falls back to the container port named
+    /// `http` (the Dynamo worker convention).
+    target_port: Option<i32>,
+    /// When set (external "precise" mode), tokenize each query by POSTing the
+    /// request to this URL — a co-located tokenizer **sidecar** over loopback
+    /// (`DYN_EPP_TOKENIZE_URL`). This keeps tokenization a single local hop
+    /// rather than a second round-trip to a worker, and yields exact token IDs
+    /// for token-level KV-prefix routing. `None` = load-aware (no tokenizer).
+    tokenize_url: Option<String>,
     pod_store: kube::runtime::reflector::Store<k8s_openapi::api::core::v1::Pod>,
     pod_store_ready: Arc<AtomicBool>,
 }
@@ -60,22 +76,65 @@ impl Router {
         component: &str,
         enforce_disagg: bool,
     ) -> Result<Self> {
+        let external_mode = std::env::var("DYN_EPP_EXTERNAL")
+            .ok()
+            .map(|v| {
+                matches!(
+                    v.trim().to_lowercase().as_str(),
+                    "true" | "1" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false);
+
         let runtime = Runtime::from_settings()?;
         let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
 
-        // Wait for workers
-        wait_for_discovery_sync(&drt).await;
+        // Bootstrap model identity + tokenizer. In the default (dynamo-worker)
+        // mode this comes from the worker-published ModelDeploymentCard via
+        // discovery, which guarantees the EPP tokenizer matches the worker. In
+        // external mode (vanilla `vllm serve`) no Dynamo worker registers a
+        // card, so model name + block size come from env and the EPP runs
+        // WITHOUT a tokenizer: the worker tokenizes and routing is load-aware,
+        // sidestepping the tokenizer-consistency problem.
+        let (block_size, model_name, enable_eagle, actual_namespace, preprocessor): (
+            u32,
+            String,
+            bool,
+            String,
+            Option<Arc<OpenAIPreprocessor>>,
+        ) = if external_mode {
+            let block_size = std::env::var("DYN_KV_CACHE_BLOCK_SIZE")
+                .ok()
+                .and_then(|v| v.trim().parse::<u32>().ok())
+                .unwrap_or(16);
+            let model_name = std::env::var("DYN_MODEL_NAME").unwrap_or_else(|_| "vllm".to_string());
+            tracing::info!(
+                block_size,
+                model_name = %model_name,
+                "External mode: skipping Dynamo discovery / model card; worker tokenizes, routing is load-aware"
+            );
+            (block_size, model_name, false, namespace.to_string(), None)
+        } else {
+            // Wait for workers
+            wait_for_discovery_sync(&drt).await;
 
-        let bootstrap = init_preprocessor(&drt, namespace).await?;
-        let block_size = bootstrap.card.kv_cache_block_size;
-        let model_name = bootstrap.card.display_name.clone();
-        let enable_eagle = bootstrap.card.runtime_config.enable_eagle;
-        let actual_namespace = &bootstrap.actual_namespace;
+            let bootstrap = init_preprocessor(&drt, namespace).await?;
+            let block_size = bootstrap.card.kv_cache_block_size;
+            let model_name = bootstrap.card.display_name.clone();
+            let enable_eagle = bootstrap.card.runtime_config.enable_eagle;
+            (
+                block_size,
+                model_name,
+                enable_eagle,
+                bootstrap.actual_namespace,
+                Some(bootstrap.preprocessor),
+            )
+        };
 
         let mut kv_router_config = kv_router_config_from_env();
         kv_router_config.skip_initial_worker_wait = true;
 
-        let component_handle = drt.namespace(actual_namespace)?.component(component)?;
+        let component_handle = drt.namespace(&actual_namespace)?.component(component)?;
         let endpoint = component_handle.endpoint("generate");
 
         let model_manager = Arc::new(ModelManager::new());
@@ -92,8 +151,10 @@ impl Router {
             )
             .await?;
 
-        // Wait for runtime config watch to populate
-        {
+        // Wait for runtime config watch to populate. Skipped in external mode:
+        // vanilla vLLM pods never register a Dynamo ModelRuntimeConfig, so this
+        // would otherwise block forever.
+        if !external_mode {
             let mut config_watch = model_manager
                 .get_or_create_runtime_config_watcher(&endpoint)
                 .await?;
@@ -124,30 +185,79 @@ impl Router {
             None,
             enforce_disagg,
             model_name.clone(),
-            actual_namespace.to_string(),
+            actual_namespace.clone(),
             enable_eagle,
         );
 
-        spawn_prefill_discovery_watcher(drt.clone(), actual_namespace.to_string(), prefill_tx);
+        spawn_prefill_discovery_watcher(drt.clone(), actual_namespace.clone(), prefill_tx);
 
-        // Use the BASE namespace (without rolling-update suffix) for the pod
-        // selector. Workers register in discovery under the suffixed namespace
-        // (e.g. "atchernych-qwen-9f792849"), but the K8s pod label
-        // `nvidia.com/dynamo-namespace` is always set to the base
-        // ("atchernych-qwen") by the operator. Using the suffixed name here
-        // would silently match zero pods during/after a DGD rolling update.
-        let (pod_store, pod_store_ready) = spawn_pod_reflector(namespace).await?;
+        // Endpoint discovery. External (GIE) mode scans the referenced
+        // InferencePool for its selector + targetPort; dynamo-worker mode uses
+        // the worker label convention. (Pods are labeled with the BASE
+        // namespace `nvidia.com/dynamo-namespace`, not the rolling-update
+        // -suffixed registration namespace, so the worker selector uses it.)
+        let (selector, target_port) = resolve_pod_discovery(namespace).await?;
+        let (pod_store, pod_store_ready) = spawn_pod_reflector(selector).await?;
+
+        // Precise KV-aware routing: when enabled, subscribe directly to each
+        // worker pod's native vLLM KV-cache event stream (ZMQ) and feed it into
+        // the decode router's indexer, keyed by hash_pod_name(pod). This adds
+        // ground-truth prefix overlap (what each worker has actually cached) on
+        // top of predict-on-route bookkeeping, giving precise prefix-cache
+        // routing. Requires the vLLM pods to run with `--kv-events-config` (PUB
+        // bound on DYN_EPP_KV_EVENT_PORT).
+        if external_mode
+            && std::env::var("DYN_EPP_KV_EVENTS")
+                .map(|v| v.trim().eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+        {
+            let kv_port: i32 = std::env::var("DYN_EPP_KV_EVENT_PORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5557);
+            let kv_topic = std::env::var("DYN_EPP_KV_EVENT_TOPIC").unwrap_or_default();
+            tracing::info!(
+                kv_port,
+                kv_topic = %kv_topic,
+                "Precise KV-event consumption enabled: spawning per-pod ZMQ listeners"
+            );
+            spawn_kv_event_reconciler(decode_router.clone(), pod_store.clone(), kv_port, kv_topic);
+        }
 
         // `model_manager` and `drt` are intentionally not stored on the
         // Router. The KV chooser, prefill router, prefill discovery watcher,
         // and pod reflector all clone whatever they need from these
         // constructor-locals before this scope ends, so dropping them here
         // does not tear down any background work.
+        // Precise external mode tokenizes each query via a sidecar endpoint
+        // (DYN_EPP_TOKENIZE_URL, default a loopback tokenizer sidecar) so
+        // token-level KV-prefix matching works without an in-EPP tokenizer.
+        let tokenize_url = if external_mode
+            && std::env::var("DYN_EPP_PREFIX_MODE")
+                .map(|m| m.trim().eq_ignore_ascii_case("precise"))
+                .unwrap_or(false)
+        {
+            let url = std::env::var("DYN_EPP_TOKENIZE_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:8788/tokenize".to_string());
+            tracing::info!(%url, "Precise prefix mode: tokenizing via sidecar endpoint");
+            Some(url)
+        } else {
+            None
+        };
+
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .expect("failed to build tokenizer HTTP client");
+
         Ok(Self {
             prefill_router,
             decode_router,
-            preprocessor: bootstrap.preprocessor,
+            preprocessor,
+            http_client,
             runtime,
+            target_port,
+            tokenize_url,
             pod_store,
             pod_store_ready,
         })
@@ -161,17 +271,34 @@ impl Router {
     /// `lib/llm/src/preprocessor.rs` so this gateway path produces the same
     /// queue ordering as a non-GAIE deployment.
     pub fn tokenize(&self, request_json: &str) -> Result<(Vec<u32>, f64)> {
+        // External (no-tokenizer) mode. Two strategies:
+        //   * "precise" (DYN_EPP_PREFIX_MODE=precise): exact query tokens come
+        //     from a tokenizer sidecar (DYN_EPP_TOKENIZE_URL) — handled
+        //     asynchronously in `pick`, so this sync path is not reached.
+        //   * "load" (default): no tokenizer; return placeholder tokens sized
+        //     to the request (the scheduler asserts isl > 0). Pair with
+        //     DYN_OVERLAP_SCORE_WEIGHT=0 for pure load-aware routing.
+        let Some(preprocessor) = self.preprocessor.as_ref() else {
+            const AVG_CHARS_PER_TOKEN: usize = 4;
+            // No tokenizer, but still honor nvext.agent_hints.priority so a
+            // vanilla-vLLM request keeps its scheduler priority.
+            let priority_jump = serde_json::from_str::<serde_json::Value>(request_json)
+                .map(|v| extract_priority_jump_from_json(&v))
+                .unwrap_or(0.0);
+            return Ok((
+                vec![0u32; (request_json.len() / AVG_CHARS_PER_TOKEN).max(1)],
+                priority_jump,
+            ));
+        };
+
         let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
             serde_json::from_str(request_json)?;
 
         let priority_jump = extract_priority_jump(&request);
 
-        let formatted_prompt = self
-            .preprocessor
-            .apply_template(&request)?
-            .unwrap_or_default();
+        let formatted_prompt = preprocessor.apply_template(&request)?.unwrap_or_default();
 
-        let encoding = self.preprocessor.tokenize(&formatted_prompt)?;
+        let encoding = preprocessor.tokenize(&formatted_prompt)?;
         Ok((encoding.token_ids().to_vec(), priority_jump))
     }
 
@@ -183,8 +310,11 @@ impl Router {
             let Some(pod_name) = pod.metadata.name.as_deref() else {
                 continue;
             };
+            if !pod_is_ready(&pod) {
+                continue;
+            }
             if hash_pod_name(pod_name) == worker_id {
-                return pod_endpoint_address(&pod);
+                return pod_endpoint_address(&pod, self.target_port);
             }
         }
         None
@@ -196,7 +326,8 @@ impl Router {
         self.pod_store
             .state()
             .iter()
-            .find_map(|pod| pod_endpoint_address(pod))
+            .filter(|pod| pod_is_ready(pod))
+            .find_map(|pod| pod_endpoint_address(pod, self.target_port))
     }
 
     /// Resolve any reflected worker whose worker_id is in `allowed`.
@@ -208,7 +339,7 @@ impl Router {
                 continue;
             };
             if allowed.contains(&hash_pod_name(pod_name))
-                && let Some(addr) = pod_endpoint_address(&pod)
+                && let Some(addr) = pod_endpoint_address(&pod, self.target_port)
             {
                 return Some(addr);
             }
@@ -231,11 +362,35 @@ impl Router {
             let Some(pod_name) = pod.metadata.name.as_deref() else {
                 continue;
             };
-            let Some(addr_port) = pod_endpoint_address(&pod) else {
+            let Some(addr_port) = pod_endpoint_address(&pod, self.target_port) else {
                 continue;
             };
             let ip = addr_port.split(':').next().unwrap_or("");
             if candidates.contains(addr_port.as_str()) || candidates.contains(ip) {
+                ids.insert(hash_pod_name(pod_name));
+            }
+        }
+        ids
+    }
+
+    /// All ready reflected pods as worker IDs.
+    ///
+    /// Used when the ext_proc caller provides no endpoints *and* no Envoy
+    /// subset hint (e.g. the shared agentgateway data plane, which does not
+    /// emit `candidate_subset`). Without this fallback `pick()` would leave the
+    /// scheduler with an empty candidate set and every request would 503. This
+    /// makes the InferencePool reflector the authoritative worker source for
+    /// vanilla workers that never register with Dynamo discovery.
+    fn all_ready_worker_ids(&self) -> HashSet<u64> {
+        let mut ids = HashSet::new();
+        for pod in self.pod_store.state() {
+            let Some(pod_name) = pod.metadata.name.as_deref() else {
+                continue;
+            };
+            if !pod_is_ready(&pod) {
+                continue;
+            }
+            if pod_endpoint_address(&pod, self.target_port).is_some() {
                 ids.insert(hash_pod_name(pod_name));
             }
         }
@@ -344,14 +499,35 @@ impl Router {
         let decode_router = self.decode_router.clone();
         let request_id = request_id.to_owned();
         let tokens = tokens.to_vec();
+        // Predict-on-route (approximate) crediting of the chosen worker. Can be
+        // turned off (DYN_EPP_PREDICT_ON_ROUTE=false) to isolate ground-truth
+        // KV-event overlap — proving precise routing works without the
+        // approximate signal.
+        let predict_on_route = std::env::var("DYN_EPP_PREDICT_ON_ROUTE")
+            .map(|v| !v.trim().eq_ignore_ascii_case("false"))
+            .unwrap_or(true);
+        let precise = self.tokenize_url.is_some() && predict_on_route;
 
         tokio::time::timeout(BOOKKEEPING_TIMEOUT, async {
             let worker = WorkerWithDpRank::new(worker_id, dp_rank);
-            let router_config_override = RouterConfigOverride {
-                overlap_score_credit: Some(0.0),
-                assume_kv_reuse: Some(false),
-                track_prefill_tokens: Some(false),
-                ..Default::default()
+            // Precise mode (real tokens from the sidecar): predict-on-route
+            // affinity — credit the chosen worker for the prompt it just
+            // received so subsequent same-prefix requests see overlap and stick
+            // to it. Load-only mode (placeholder tokens) suppresses predicted
+            // caching, since those tokens carry no real prefix information.
+            let router_config_override = if precise {
+                RouterConfigOverride {
+                    assume_kv_reuse: Some(true),
+                    track_prefill_tokens: Some(true),
+                    ..Default::default()
+                }
+            } else {
+                RouterConfigOverride {
+                    overlap_score_credit: Some(0.0),
+                    assume_kv_reuse: Some(false),
+                    track_prefill_tokens: Some(false),
+                    ..Default::default()
+                }
             };
 
             let overlap_blocks = decode_router
@@ -435,6 +611,21 @@ impl Router {
 /// in `lib/llm/src/preprocessor.rs`). Falls back to the deprecated
 /// `latency_sensitivity` alias for callers still on the old field name.
 /// Returns `0.0` when `nvext` is absent.
+/// Extract `priority_jump` directly from a raw request body `Value`, for the
+/// external (no-`OpenAIPreprocessor`) paths that never deserialize into
+/// `NvCreateChatCompletionRequest`. Mirrors [`extract_priority_jump`].
+fn extract_priority_jump_from_json(body: &serde_json::Value) -> f64 {
+    body.get("nvext")
+        .and_then(|n| n.get("agent_hints"))
+        .and_then(|h| {
+            h.get("priority")
+                .and_then(|p| p.as_i64())
+                .map(|p| p.max(0) as f64)
+                .or_else(|| h.get("latency_sensitivity").and_then(|l| l.as_f64()))
+        })
+        .unwrap_or(0.0)
+}
+
 fn extract_priority_jump(
     request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
 ) -> f64 {
@@ -595,8 +786,25 @@ async fn fetch_preprocessor_from_discovery(
 ///
 /// Returns `None` if the pod has no IP or no container exposes a port named
 /// `http` — we never silently route to a guessed port.
-fn pod_endpoint_address(pod: &k8s_openapi::api::core::v1::Pod) -> Option<String> {
+fn pod_endpoint_address(
+    pod: &k8s_openapi::api::core::v1::Pod,
+    target_port: Option<i32>,
+) -> Option<String> {
     let ip = pod.status.as_ref()?.pod_ip.as_ref()?;
+
+    // A numeric target port (from the InferencePool's `targetPorts`, or
+    // `DYN_EPP_TARGET_PORT`) routes straight to `ip:port` — stock `vllm serve`
+    // pods typically expose a single, unnamed OpenAI port (e.g. 8000). With no
+    // numeric port we fall back to a named container port
+    // (`DYN_EPP_TARGET_PORT_NAME`, default `http` — the Dynamo worker
+    // convention), so existing dynamo-worker deployments are unaffected.
+    if let Some(n) = target_port {
+        return Some(format!("{ip}:{n}"));
+    }
+    let port_name = std::env::var("DYN_EPP_TARGET_PORT_NAME")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DYNAMO_CONTAINER_PORT_NAME.to_string());
     let port = pod
         .spec
         .as_ref()?
@@ -604,16 +812,178 @@ fn pod_endpoint_address(pod: &k8s_openapi::api::core::v1::Pod) -> Option<String>
         .iter()
         .filter_map(|c| c.ports.as_ref())
         .flatten()
-        .find(|p| p.name.as_deref() == Some(DYNAMO_CONTAINER_PORT_NAME))
+        .find(|p| p.name.as_deref() == Some(port_name.as_str()))
         .map(|p| p.container_port)?;
     Some(format!("{ip}:{port}"))
 }
 
-/// Start a background pod reflector that watches worker pods matching the
-/// InferencePool selector. The returned `Store` provides lock-free reads
-/// of the current pod state — no K8s API calls on the hot path.
+/// True only if the pod is actively serving: has a `Ready` condition `True` and
+/// is not Terminating. Routing and discovery must skip pods that are starting
+/// up or shutting down — otherwise the EPP hands the gateway a dead endpoint
+/// (e.g. a pod stuck Terminating still in the reflector store).
+/// Whether to emit GAIE primary+fallback endpoints (comma-joined
+/// `x-gateway-destination-endpoint`). Off by default: the multi-endpoint value
+/// is correct per the GAIE endpoint-picker protocol and lets a GAIE-compliant
+/// proxy (Envoy/kgateway) retry the next ready pod on worker loss, but some
+/// data planes (e.g. agentgateway) reject it. Opt in with
+/// `DYN_EPP_EMIT_FALLBACKS=1`.
+fn emit_fallbacks() -> bool {
+    static EMIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *EMIT.get_or_init(|| {
+        std::env::var("DYN_EPP_EMIT_FALLBACKS")
+            .ok()
+            .map(|v| matches!(v.as_str(), "true" | "1" | "yes" | "on"))
+            .unwrap_or(false)
+    })
+}
+
+fn pod_is_ready(pod: &k8s_openapi::api::core::v1::Pod) -> bool {
+    if pod.metadata.deletion_timestamp.is_some() {
+        return false;
+    }
+    pod.status
+        .as_ref()
+        .and_then(|s| s.conditions.as_ref())
+        .map(|cs| cs.iter().any(|c| c.type_ == "Ready" && c.status == "True"))
+        .unwrap_or(false)
+}
+
+/// Tokenize a request by POSTing it to a vLLM-style `/tokenize` endpoint (the
+/// "precise" prefix strategy). `url` points at a co-located tokenizer
+/// **sidecar** over loopback (`DYN_EPP_TOKENIZE_URL`), so this is one local hop,
+/// not a second round-trip to a worker. The returned exact token IDs drive
+/// token-level KV-prefix matching in the router (vs. load-aware placeholders).
+///
+/// The sidecar applies the model's chat template + tokenizer, matching what the
+/// worker caches; the request forwards `model` plus `messages` or `prompt`. The
+/// response is expected to contain a `tokens` array of integer IDs (vLLM's
+/// `/tokenize` shape: `{"count": N, "tokens": [...]}`).
+async fn remote_tokenize(
+    client: &reqwest::Client,
+    url: &str,
+    request_json: &str,
+) -> Result<Vec<u32>> {
+    let v: serde_json::Value = serde_json::from_str(request_json)?;
+    if v["messages"].is_null() && v["prompt"].is_null() {
+        return Err(anyhow::anyhow!(
+            "tokenize request has neither 'messages' nor 'prompt'"
+        ));
+    }
+
+    // Forward the original body so template-affecting fields (tools,
+    // tool_choice, chat_template_args, …) reach the sidecar and the returned
+    // tokens match what the worker actually caches.
+    let resp = client
+        .post(url)
+        .json(&v)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("tokenize request to {url} failed: {e}"))?;
+    let status = resp.status();
+    let val: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("tokenize response from {url} parse failed: {e}"))?;
+    if !status.is_success() {
+        return Err(anyhow::anyhow!(
+            "tokenize endpoint {url} returned {status}: {val}"
+        ));
+    }
+
+    let tokens: Vec<u32> = val["tokens"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("tokenize response missing 'tokens' array: {val}"))?
+        .iter()
+        .filter_map(|t| t.as_u64().map(|n| n as u32))
+        .collect();
+    if tokens.is_empty() {
+        return Err(anyhow::anyhow!(
+            "tokenize endpoint {url} returned no tokens"
+        ));
+    }
+    Ok(tokens)
+}
+
+/// Resolve the pod label selector + target port for endpoint discovery.
+///
+/// External (GIE) mode reads them from the referenced `InferencePool`
+/// (`DYN_EPP_INFERENCE_POOL`): the pool's `spec.selector` and
+/// `spec.targetPorts`. Falls back to an explicit `DYN_EPP_POD_SELECTOR` /
+/// `DYN_EPP_TARGET_PORT`, or the Dynamo worker convention.
+async fn resolve_pod_discovery(dynamo_namespace: &str) -> Result<(String, Option<i32>)> {
+    if let Ok(pool_name) = std::env::var("DYN_EPP_INFERENCE_POOL") {
+        let pool_name = pool_name.trim();
+        if !pool_name.is_empty() {
+            let ns = std::env::var("POD_NAMESPACE").map_err(|_| {
+                anyhow::anyhow!("POD_NAMESPACE not set (required to read the InferencePool)")
+            })?;
+            return discover_from_inference_pool(&ns, pool_name).await;
+        }
+    }
+    let selector = std::env::var("DYN_EPP_POD_SELECTOR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| {
+            format!(
+                "nvidia.com/dynamo-namespace={dynamo_namespace},nvidia.com/dynamo-component-class=worker"
+            )
+        });
+    let target_port = std::env::var("DYN_EPP_TARGET_PORT")
+        .ok()
+        .and_then(|p| p.trim().parse::<i32>().ok());
+    Ok((selector, target_port))
+}
+
+/// Read endpoint discovery from a GIE `InferencePool`: its `spec.selector`
+/// becomes the pod label selector and `spec.targetPorts[0].number` the port to
+/// route to. This is the standard GAIE mechanism — the pool is the source of
+/// truth for pool membership, rather than a hand-passed label.
+async fn discover_from_inference_pool(
+    namespace: &str,
+    pool_name: &str,
+) -> Result<(String, Option<i32>)> {
+    use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
+    use kube::{Api, Client};
+
+    let client = Client::try_default().await?;
+    let gvk = GroupVersionKind::gvk("inference.networking.k8s.io", "v1", "InferencePool");
+    let ar = ApiResource::from_gvk(&gvk);
+    let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &ar);
+    let pool = api.get(pool_name).await.map_err(|e| {
+        anyhow::anyhow!("failed to read InferencePool {namespace}/{pool_name}: {e}")
+    })?;
+
+    let match_labels = pool.data["spec"]["selector"]["matchLabels"]
+        .as_object()
+        .ok_or_else(|| {
+            anyhow::anyhow!("InferencePool {pool_name} has no spec.selector.matchLabels")
+        })?;
+    let selector = match_labels
+        .iter()
+        .filter_map(|(k, v)| v.as_str().map(|val| format!("{k}={val}")))
+        .collect::<Vec<_>>()
+        .join(",");
+    let target_port = pool.data["spec"]["targetPorts"]
+        .as_array()
+        .and_then(|ports| ports.first())
+        .and_then(|p| p["number"].as_i64())
+        .map(|n| n as i32);
+
+    tracing::info!(
+        pool = pool_name,
+        namespace,
+        selector = %selector,
+        ?target_port,
+        "Endpoint discovery resolved from InferencePool"
+    );
+    Ok((selector, target_port))
+}
+
+/// Start a background pod reflector that watches the worker pods matching the
+/// InferencePool selector. The returned `Store` provides lock-free reads of the
+/// current pod state — no K8s API calls on the hot path.
 async fn spawn_pod_reflector(
-    dynamo_namespace: &str,
+    selector: String,
 ) -> Result<(
     kube::runtime::reflector::Store<k8s_openapi::api::core::v1::Pod>,
     Arc<AtomicBool>,
@@ -633,11 +1003,6 @@ async fn spawn_pod_reflector(
     })?;
 
     let pods: Api<Pod> = Api::namespaced(client, &k8s_namespace);
-
-    let selector = format!(
-        "nvidia.com/dynamo-namespace={},nvidia.com/dynamo-component-class=worker",
-        dynamo_namespace
-    );
 
     let writer = reflector::store::Writer::default();
     let store = writer.as_reader();
@@ -698,6 +1063,65 @@ async fn spawn_pod_reflector(
     }
 
     Ok((store, ready))
+}
+
+/// Background reconciler that keeps exactly one native vLLM KV-event ZMQ
+/// listener alive per worker pod. Each pod's events feed the decode router's
+/// indexer stamped with `hash_pod_name(pod)` — the same worker_id `pick()` uses
+/// — so the scheduler scores precise prefix overlap against each worker's real
+/// KV cache. Reconciles every 5s: registers listeners for new Ready pods and
+/// cancels them when pods disappear.
+fn spawn_kv_event_reconciler(
+    decode_router: Arc<KvRouter>,
+    pod_store: kube::runtime::reflector::Store<k8s_openapi::api::core::v1::Pod>,
+    kv_event_port: i32,
+    kv_event_topic: String,
+) {
+    tokio::spawn(async move {
+        let mut registered: std::collections::HashMap<u64, tokio_util::sync::CancellationToken> =
+            std::collections::HashMap::new();
+        loop {
+            let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+            for pod in pod_store.state() {
+                let Some(name) = pod.metadata.name.as_deref() else {
+                    continue;
+                };
+                let Some(ip) = pod.status.as_ref().and_then(|s| s.pod_ip.as_deref()) else {
+                    continue;
+                };
+                if !pod_is_ready(&pod) {
+                    continue;
+                }
+                let worker_id = hash_pod_name(name);
+                seen.insert(worker_id);
+                if let std::collections::hash_map::Entry::Vacant(slot) =
+                    registered.entry(worker_id)
+                {
+                    let endpoint = format!("tcp://{ip}:{kv_event_port}");
+                    let token = decode_router.register_worker_kv_events(
+                        worker_id,
+                        endpoint.clone(),
+                        kv_event_topic.clone(),
+                    );
+                    slot.insert(token);
+                    tracing::info!(%endpoint, worker_id, pod = %name, "Registered worker KV-event listener");
+                }
+            }
+            registered.retain(|worker_id, token| {
+                if seen.contains(worker_id) {
+                    true
+                } else {
+                    tracing::info!(
+                        worker_id = *worker_id,
+                        "Worker pod gone; cancelling KV-event listener"
+                    );
+                    token.cancel();
+                    false
+                }
+            });
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    });
 }
 
 fn spawn_prefill_discovery_watcher(
@@ -863,7 +1287,16 @@ impl EndpointPicker for Router {
         // subset.
         let (allowed_worker_ids, worker_map) = if endpoints.is_empty() {
             if req.candidate_subset.is_empty() {
-                (None, Vec::new())
+                // No Envoy subset hint (e.g. the shared agentgateway data
+                // plane): fall back to all ready pods from the InferencePool
+                // reflector so the scheduler has a candidate set. Registering
+                // these worker_ids downstream is what makes vanilla vLLM pods
+                // (which never join Dynamo discovery) schedulable.
+                let ids = self.all_ready_worker_ids();
+                if ids.is_empty() {
+                    return Err(PickError::NoEndpoints);
+                }
+                (Some(ids), Vec::new())
             } else {
                 let ids = self.subset_to_worker_ids(&req.candidate_subset);
                 if ids.is_empty() {
@@ -918,9 +1351,23 @@ impl EndpointPicker for Router {
         let body_str = std::str::from_utf8(&req.body)
             .map_err(|e| PickError::TokenizationFailed(format!("Invalid UTF-8: {e}")))?;
 
-        let (tokens, priority_jump) = self
-            .tokenize(body_str)
-            .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
+        // Precise external mode: tokenize via the sidecar (one local hop, not a
+        // second round-trip to a worker). Otherwise tokenize locally (the
+        // dynamo-worker preprocessor) or use the load-aware placeholder.
+        let (tokens, priority_jump) = if let Some(url) = self.tokenize_url.as_deref() {
+            let toks = remote_tokenize(&self.http_client, url, body_str)
+                .await
+                .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
+            // The sidecar returns only tokens; recover the priority hint here so
+            // precise-mode requests keep their scheduler priority.
+            let priority_jump = serde_json::from_str::<serde_json::Value>(body_str)
+                .map(|v| extract_priority_jump_from_json(&v))
+                .unwrap_or(0.0);
+            (toks, priority_jump)
+        } else {
+            self.tokenize(body_str)
+                .map_err(|e| PickError::TokenizationFailed(e.to_string()))?
+        };
 
         // Try prefill routing first (disaggregated mode).
         //
@@ -1052,11 +1499,35 @@ impl EndpointPicker for Router {
             tracing::debug!(key = %k, value = %v, "Routing header set in PickResult");
         }
 
+        // Fallback endpoints for the data plane to retry on (GAIE endpoint-
+        // picker protocol: a primary plus comma-separated fallbacks,
+        // "ip:port,ip:port,..."). On worker loss a GAIE-compliant proxy
+        // (Envoy/kgateway) retries the next ready pod instead of failing the
+        // client; the primary stays the KV/load-aware pick. Gated by
+        // DYN_EPP_EMIT_FALLBACKS (default off): the multi-endpoint value is
+        // protocol-correct but some data planes (e.g. agentgateway) reject it.
+        let fallbacks: Vec<String> = if emit_fallbacks() {
+            self.all_ready_worker_ids()
+                .into_iter()
+                .filter(|wid| *wid != decode_worker.worker_id)
+                .filter_map(|wid| self.resolve_worker_endpoint(wid))
+                .filter(|ep| *ep != endpoint)
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         Ok(PickResult {
             endpoint,
-            fallbacks: vec![],
+            fallbacks,
             headers,
-            token_ids: Some(tokens),
+            // External mode (vanilla vLLM) tokenizes itself; don't inject
+            // nvext.token_data. Tokens above are used only for routing/booking.
+            token_ids: if self.preprocessor.is_some() {
+                Some(tokens)
+            } else {
+                None
+            },
         })
     }
 
