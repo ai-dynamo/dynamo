@@ -434,6 +434,19 @@ class SglangLLMEngine(LLMEngine):
                     "completion_tokens": completion_tokens,
                     "total_tokens": prompt_tokens + completion_tokens,
                 }
+                # Prompt logprobs ride on the final chunk. SGLang
+                # populates ``meta_info["input_token_logprobs"]`` (and
+                # optionally ``input_top_logprobs``) when the request
+                # set ``return_logprob=True, logprob_start_len=0`` —
+                # which ``build_sglang_logprob_kwargs`` does whenever
+                # ``prompt_logprobs`` is requested.
+                prompt_payload = (
+                    _shared_logprobs.extract_prompt_logprobs_from_sglang_meta(
+                        meta_info
+                    )
+                )
+                if prompt_payload is not None:
+                    out["engine_data"] = {"prompt_logprobs": prompt_payload}
 
             if context.is_stopped():
                 # Mutate `out` instead of building a fresh dict so any

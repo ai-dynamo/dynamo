@@ -20,6 +20,8 @@ from dynamo.common.backend.logprobs import (
     build_sglang_logprob_kwargs,
     extract_from_completion_output,
     extract_from_sglang_meta,
+    extract_prompt_logprobs_from_completion_output,
+    extract_prompt_logprobs_from_sglang_meta,
     parse_logprob_options,
     sglang_top_logprobs_allowed,
 )
@@ -185,6 +187,110 @@ def test_extract_completion_uses_tokenizer_when_decoded_missing():
     )
     _, top_logprobs = extract_from_completion_output(output, 0, tokenizer=FakeTok())
     assert top_logprobs[0][0]["token"] == "<7>"
+
+
+# ---------------------------------------------------------------------------
+# extract_prompt_logprobs_from_completion_output (vLLM/TRT-LLM shape)
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_logprobs_completion_returns_none_when_absent():
+    output = SimpleNamespace(prompt_logprobs=None)
+    assert extract_prompt_logprobs_from_completion_output(output) is None
+
+
+def test_prompt_logprobs_completion_preserves_none_bos_position():
+    # vLLM emits `None` at index 0 (no logprob for the very first token).
+    output = SimpleNamespace(
+        prompt_logprobs=[
+            None,
+            {7: _logprob(-0.5, decoded="a")},
+        ]
+    )
+    payload = extract_prompt_logprobs_from_completion_output(output)
+    assert payload == [
+        None,
+        {"7": {"logprob": -0.5, "rank": 1, "decoded_token": "a"}},
+    ]
+
+
+def test_prompt_logprobs_completion_includes_top_k_alternatives():
+    output = SimpleNamespace(
+        prompt_logprobs=[
+            None,
+            {
+                7: _logprob(-0.5, rank=1, decoded="a"),
+                70: _logprob(-1.5, rank=2, decoded="A"),
+            },
+        ]
+    )
+    payload = extract_prompt_logprobs_from_completion_output(output)
+    assert payload[1] == {
+        "7": {"logprob": -0.5, "rank": 1, "decoded_token": "a"},
+        "70": {"logprob": -1.5, "rank": 2, "decoded_token": "A"},
+    }
+
+
+def test_prompt_logprobs_completion_falls_back_to_tokenizer():
+    class FakeTok:
+        def decode(self, ids):
+            return f"<{ids[0]}>"
+
+    output = SimpleNamespace(
+        prompt_logprobs=[None, {9: _logprob(-0.7, decoded=None)}]
+    )
+    payload = extract_prompt_logprobs_from_completion_output(
+        output, tokenizer=FakeTok()
+    )
+    assert payload[1]["9"]["decoded_token"] == "<9>"
+
+
+# ---------------------------------------------------------------------------
+# extract_prompt_logprobs_from_sglang_meta
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_logprobs_sglang_returns_none_when_absent():
+    assert extract_prompt_logprobs_from_sglang_meta({}) is None
+    assert extract_prompt_logprobs_from_sglang_meta(
+        {"input_token_logprobs": []}
+    ) is None
+
+
+def test_prompt_logprobs_sglang_prepends_none_for_bos():
+    # SGLang's `input_token_logprobs` starts at prompt position 1; we
+    # add `None` at index 0 to align with the Rust PromptLogprobs
+    # invariant (BOS has no logprob).
+    meta = {
+        "input_token_logprobs": [
+            (-0.5, 7, "a"),
+            (-0.6, 8, "b"),
+        ]
+    }
+    payload = extract_prompt_logprobs_from_sglang_meta(meta)
+    assert payload == [
+        None,
+        {"7": {"logprob": -0.5, "decoded_token": "a"}},
+        {"8": {"logprob": -0.6, "decoded_token": "b"}},
+    ]
+
+
+def test_prompt_logprobs_sglang_merges_input_top_logprobs():
+    meta = {
+        "input_token_logprobs": [(-0.5, 7, "a")],
+        "input_top_logprobs": [[(-0.5, 7, "a"), (-1.5, 70, "A")]],
+    }
+    payload = extract_prompt_logprobs_from_sglang_meta(meta)
+    assert payload[1] == {
+        "7": {"logprob": -0.5, "decoded_token": "a"},
+        "70": {"logprob": -1.5, "decoded_token": "A"},
+    }
+
+
+def test_prompt_logprobs_sglang_handles_missing_decoded_token():
+    meta = {"input_token_logprobs": [(-0.7, 9, None)]}
+    payload = extract_prompt_logprobs_from_sglang_meta(meta)
+    assert payload[1] == {"9": {"logprob": -0.7}}
 
 
 # ---------------------------------------------------------------------------

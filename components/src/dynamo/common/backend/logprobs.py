@@ -142,6 +142,99 @@ def extract_from_completion_output(
     )
 
 
+def extract_prompt_logprobs_from_completion_output(
+    output: Any,
+    tokenizer: Any = None,
+) -> Optional[list[Optional[dict[str, dict[str, Any]]]]]:
+    """Extract prompt logprobs from a vLLM/TRT-LLM-shaped output.
+
+    Reads ``output.prompt_logprobs`` (``list[Optional[dict[int, Logprob]]]``;
+    position 0 is ``None`` because there is no logprob for the very first
+    prompt token / BOS). Returns the Dynamo wire shape: a list aligned
+    with the prompt where each present entry is a ``token_id -> entry``
+    map. ``token_id`` keys are stringified so the JSON round-trip into
+    Rust's ``HashMap<u32, PromptLogprobEntry>`` succeeds. Returns
+    ``None`` when the engine didn't compute prompt logprobs.
+    """
+    prompt_logprobs = getattr(output, "prompt_logprobs", None)
+    if prompt_logprobs is None:
+        return None
+
+    payload: list[Optional[dict[str, dict[str, Any]]]] = []
+    for pos in prompt_logprobs:
+        if pos is None:
+            payload.append(None)
+            continue
+        position_map: dict[str, dict[str, Any]] = {}
+        for tok_id, info in pos.items():
+            decoded_token = getattr(info, "decoded_token", None)
+            if not decoded_token and tokenizer is not None:
+                try:
+                    decoded_token = tokenizer.decode([tok_id])
+                except Exception:
+                    logger.debug(
+                        "tokenizer.decode failed for prompt token_id=%s",
+                        tok_id,
+                        exc_info=True,
+                    )
+                    decoded_token = None
+            entry: dict[str, Any] = {"logprob": float(info.logprob)}
+            rank = getattr(info, "rank", None)
+            if rank is not None:
+                entry["rank"] = int(rank)
+            if decoded_token is not None:
+                entry["decoded_token"] = decoded_token
+            position_map[str(tok_id)] = entry
+        payload.append(position_map)
+    return payload
+
+
+def extract_prompt_logprobs_from_sglang_meta(
+    meta: dict[str, Any],
+) -> Optional[list[Optional[dict[str, dict[str, Any]]]]]:
+    """Extract prompt logprobs from an SGLang meta_info dict.
+
+    Reads ``meta["input_token_logprobs"]`` — a list of
+    ``(logprob, token_id, decoded_token_or_None)`` tuples that SGLang
+    emits when ``return_logprob=True`` and ``logprob_start_len=0`` (one
+    entry per prompt token from position 1 onwards; SGLang doesn't emit
+    a logprob for the very first prompt / BOS token). Returns the
+    Dynamo wire shape with ``None`` at index 0 to mark the missing BOS
+    position, matching the Rust ``PromptLogprobs`` invariant.
+
+    When ``meta["input_top_logprobs"]`` is present (top-k requested and
+    available), each position's map includes those alternatives too.
+    """
+    input_logprobs = meta.get("input_token_logprobs")
+    if not input_logprobs:
+        return None
+
+    input_top_logprobs = meta.get("input_top_logprobs") or []
+
+    payload: list[Optional[dict[str, dict[str, Any]]]] = [None]
+    for idx, item in enumerate(input_logprobs):
+        logprob, tok_id, decoded_token = item
+        position_map: dict[str, dict[str, Any]] = {}
+        selected_entry: dict[str, Any] = {"logprob": float(logprob)}
+        if decoded_token is not None:
+            selected_entry["decoded_token"] = decoded_token
+        position_map[str(tok_id)] = selected_entry
+
+        if idx < len(input_top_logprobs):
+            top_at_pos = input_top_logprobs[idx]
+            if top_at_pos:
+                for top_lp, top_tok_id, top_decoded in top_at_pos:
+                    key = str(top_tok_id)
+                    if key in position_map:
+                        continue
+                    alt_entry: dict[str, Any] = {"logprob": float(top_lp)}
+                    if top_decoded is not None:
+                        alt_entry["decoded_token"] = top_decoded
+                    position_map[key] = alt_entry
+        payload.append(position_map)
+    return payload
+
+
 _SGLANG_TOP_LOGPROBS_UNSUPPORTED_MSG = (
     "Dynamo's SGLang backend does not currently support logprobs >= 1 due to "
     "an O(N) per-position detokenization in the upstream sglang tokenizer "

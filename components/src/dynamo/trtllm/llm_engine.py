@@ -905,6 +905,18 @@ class TrtllmLLMEngine(LLMEngine):
                     if out.get("finish_reason") or res.finished:
                         if not out.get("finish_reason"):
                             out["finish_reason"] = "unknown"
+                        # Prompt logprobs ride on the final chunk. TRT-LLM
+                        # exposes them on `res.prompt_logprobs` in the same
+                        # ``list[Optional[dict[int, Logprob]]]`` shape that
+                        # vLLM uses, so the shared helper covers both.
+                        if prompt_logprobs_count is not None:
+                            prompt_payload = _shared_logprobs.extract_prompt_logprobs_from_completion_output(
+                                res
+                            )
+                            if prompt_payload is not None:
+                                out["engine_data"] = {
+                                    "prompt_logprobs": prompt_payload
+                                }
                         prompt_tokens = len(token_ids)
                         total_completion_tokens = sum(
                             len(o.token_ids) for o in res.outputs

@@ -334,7 +334,10 @@ class VllmLLMEngine(LLMEngine):
         # engine, so a `logprobs=0` (chosen-token only) request still
         # makes vLLM emit its selected-token logprob dict — we must
         # suppress the top-k slice here, not at the engine.
-        requested_logprobs_count, _ = _shared_logprobs.parse_logprob_options(
+        (
+            requested_logprobs_count,
+            requested_prompt_logprobs_count,
+        ) = _shared_logprobs.parse_logprob_options(
             request.get("output_options", {}) or {}
         )
 
@@ -396,6 +399,16 @@ class VllmLLMEngine(LLMEngine):
 
                 if finish_reason:
                     out["finish_reason"] = str(finish_reason)
+                    # Prompt logprobs ride on the final chunk (Rust
+                    # nvext.rs suppresses them on intermediate chunks
+                    # anyway). vLLM hangs them off `RequestOutput`, not
+                    # `CompletionOutput`, so we read from `res`.
+                    if requested_prompt_logprobs_count is not None:
+                        prompt_payload = _shared_logprobs.extract_prompt_logprobs_from_completion_output(
+                            res, tokenizer=tokenizer
+                        )
+                        if prompt_payload is not None:
+                            out["engine_data"] = {"prompt_logprobs": prompt_payload}
                     prompt_tokens = (
                         len(res.prompt_token_ids) if res.prompt_token_ids else 0
                     )

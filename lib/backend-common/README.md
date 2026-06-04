@@ -9,11 +9,10 @@ SPDX-License-Identifier: Apache-2.0
 > disaggregated (prefill/decode) inference, metrics + Prometheus
 > bridging, KV event publishing, KV-aware (DP-rank) routing,
 > health-check canaries, OpenTelemetry tracing, request-side
-> guided decoding, and completion-side logprobs. Prompt logprobs
-> response wire, multimodal, diffusion (image/video/DLLM), LoRA,
-> engine routes (pause/resume, profiling, weight updates),
-> text-in-text-out, and snapshot/CRIU are still on the non-unified
-> path. See the
+> guided decoding, and both completion-side and prompt-side
+> logprobs. Multimodal, diffusion (image/video/DLLM), LoRA, engine
+> routes (pause/resume, profiling, weight updates), text-in-text-out,
+> and snapshot/CRIU are still on the non-unified path. See the
 > [Python package README](../../components/src/dynamo/common/backend/README.md#feature-gaps)
 > for the per-engine matrix. The Python `Worker`
 > ([`dynamo.common.backend`](../../components/src/dynamo/common/backend/))
