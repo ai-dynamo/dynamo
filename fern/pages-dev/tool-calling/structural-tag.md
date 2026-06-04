@@ -150,6 +150,6 @@ python -m dynamo.sglang \
 
 ## See Also
 
-- [Tool Call Parsing (Dynamo)](dynamo.md) — parser names and basic tool calling setup
+- [Tool Call Parsing (Dynamo)](README.md) — parser names and basic tool calling setup
 - [Parser Engine Fallback](../engine-fallback.md) — upstream engine parsers
 - [xgrammar Structural Tag Documentation](https://xgrammar.mlc.ai/docs/structural_tag/structural_tag_api.html) — xgrammar format specification
