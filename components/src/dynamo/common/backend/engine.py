@@ -105,8 +105,8 @@ class BaseEngine(ABC):
     ``Worker`` drives every engine through the same lifecycle regardless of
     modality; only the request/response shape of :meth:`generate` differs.
     That method is therefore declared on the modality-specific subclasses
-    (:class:`LLMEngine` for token-based inference, :class:`DiffusionEngine`
-    for raw media generation), not here.
+    (:class:`LLMEngine` for token-based inference, :class:`RawEngine` for
+    raw non-token media generation), not here.
 
     Lifecycle:
         1. from_args(argv) -- parse CLI args, return (engine, WorkerConfig)
@@ -280,37 +280,75 @@ class LLMEngine(BaseEngine):
         return []
 
 
-class DiffusionEngine(BaseEngine):
-    """Abstract base for raw media-generation engines (image, video, audio).
+# ---------------------------------------------------------------------------
+# Raw (non-token) request/response contract for RawEngine.generate
+#
+# The PyO3 bridge delivers the request as a plain JSON object (a ``dict``) and
+# serializes each yielded object straight back — there is no Rust-side typed
+# request struct on this path (that is the deliberate modality-neutral
+# trade-off; see RawEngine). These aliases name that contract; the canonical
+# field schemas live in the OpenAI-shaped protocol models that the concrete
+# handlers validate against:
+#   * images: ``dynamo.common.protocols.image_protocol`` (NvCreateImageRequest
+#     / NvImagesResponse)
+#   * videos: ``dynamo.common.protocols.video_protocol`` (NvCreateVideoRequest
+#     / NvVideosResponse)
+# A new media modality publishes its schema there and references it here,
+# rather than adding a Rust request type.
+# ---------------------------------------------------------------------------
 
-    Unlike :class:`LLMEngine`, there is no token pipeline: the frontend
-    forwards the OpenAI-shaped request (e.g. ``/v1/images/generations``,
-    ``/v1/videos/generations``, ``/v1/audio/speech``) straight through as a
-    JSON object, and :meth:`generate` yields the response object(s) directly.
-    Registered with ``ModelInput.Text`` and served through the raw request
-    adapter — no tokenization, no detokenization, no KV cache.
+# Inbound request body, exactly as the frontend forwarded it (no preprocessing).
+RawRequest = dict[str, Any]
+# A single yielded response object (the endpoint's response body).
+RawResponseChunk = dict[str, Any]
 
-    The contract is deliberately modality-neutral: ``request`` and the
-    yielded chunks are plain dicts whose schema is the corresponding OpenAI
-    endpoint's request/response body. A single engine may handle multiple
-    modalities (TRT-LLM's VisualGen returns image, video, or audio) by
-    dispatching on the request/output shape. Single-shot generations yield
-    one final chunk; streaming generations (e.g. video progress) yield
-    intermediate chunks followed by a terminal one.
+
+class RawEngine(BaseEngine):
+    """Abstract base for raw, non-token generation engines (image, video,
+    audio — any modality the frontend forwards verbatim).
+
+    Named for the *contract*, not a use case: unlike :class:`LLMEngine` there
+    is no token pipeline. The frontend forwards the OpenAI-shaped request
+    (e.g. ``/v1/images``, ``/v1/videos``, ``/v1/audio/speech``) straight
+    through as a JSON object, and :meth:`generate` yields the response
+    object(s) directly. Registered with ``ModelInput.Text`` and served through
+    the raw request adapter — no tokenization, detokenization, or KV cache.
+
+    The ``dict`` contract is deliberately modality-neutral so a new media
+    modality is a new engine, not a new framework path. The request/response
+    *schemas* are documented on :data:`RawRequest` / :data:`RawResponseChunk`.
+    A single engine may serve multiple modalities by dispatching on the
+    request/output shape. Single-shot generations yield one (terminal) object;
+    streaming generations (e.g. video progress) yield intermediate objects
+    followed by a terminal one.
+
+    Domain-specific subclasses (e.g. :class:`DiffusionEngine`) add no contract
+    — they exist only to name an engine family.
     """
 
     @abstractmethod
     async def generate(
-        self, request: dict[str, Any], context: Context
-    ) -> AsyncGenerator[dict[str, Any], None]:
-        """Yield response object(s) for a single media-generation request.
+        self, request: RawRequest, context: Context
+    ) -> AsyncGenerator[RawResponseChunk, None]:
+        """Yield response object(s) for a single raw-media request.
 
-        ``request`` is the raw OpenAI-shaped request body (e.g.
-        ``NvCreateImageRequest``/``NvCreateVideoRequest`` fields). Yield the
-        response body dict (e.g. ``NvImagesResponse``/``NvVideosResponse``).
-        For non-streaming modalities yield exactly one (terminal) object; for
-        streaming modalities yield intermediate progress objects ending with
-        the terminal one.
+        ``request`` is the raw OpenAI-shaped request body (see
+        :data:`RawRequest`); yield the response body object(s) (see
+        :data:`RawResponseChunk`). For non-streaming modalities yield exactly
+        one (terminal) object; for streaming modalities yield intermediate
+        progress objects ending with the terminal one.
         """
         ...
         yield  # type: ignore[misc]
+
+
+class DiffusionEngine(RawEngine):
+    """A :class:`RawEngine` for diffusion-family media generation (image /
+    video via VisualGen, DiffGenerator, etc.).
+
+    Adds no contract over :class:`RawEngine`; it names the engine family so
+    diffusion backends read as ``DiffusionEngine`` while non-diffusion raw
+    modalities (e.g. a TTS audio engine) can subclass :class:`RawEngine`
+    directly. Routing keys off :class:`RawEngine`, so any subclass is served
+    through the raw request adapter.
+    """

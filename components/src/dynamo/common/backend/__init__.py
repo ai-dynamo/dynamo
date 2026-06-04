@@ -9,6 +9,9 @@ from .engine import (
     GenerateChunk,
     GenerateRequest,
     LLMEngine,
+    RawEngine,
+    RawRequest,
+    RawResponseChunk,
 )
 from .worker import Worker, WorkerConfig
 
@@ -19,6 +22,9 @@ __all__ = [
     "GenerateChunk",
     "GenerateRequest",
     "LLMEngine",
+    "RawEngine",
+    "RawRequest",
+    "RawResponseChunk",
     "Worker",
     "WorkerConfig",
     "telemetry",

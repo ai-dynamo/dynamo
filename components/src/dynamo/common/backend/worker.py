@@ -29,7 +29,7 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import ModelInput
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .engine import BaseEngine, DiffusionEngine
+from .engine import BaseEngine, RawEngine
 from .health_check import parse_health_check_payload_cli
 
 logger = logging.getLogger(__name__)
@@ -237,9 +237,9 @@ class Worker:
         )
 
         loop = asyncio.get_running_loop()
-        # A DiffusionEngine drives the raw media pipeline (JSON request
-        # adapter); everything else is a token-pipeline LLMEngine. The Rust
-        # Worker validates model_input against the chosen kind.
-        is_raw = isinstance(self.engine, DiffusionEngine)
+        # A RawEngine (e.g. DiffusionEngine) drives the raw media pipeline
+        # (JSON request adapter); everything else is a token-pipeline
+        # LLMEngine. The Rust Worker validates model_input against the kind.
+        is_raw = isinstance(self.engine, RawEngine)
         worker = _backend.Worker(self.engine, worker_cfg, loop, raw=is_raw)
         await worker.run()
