@@ -357,6 +357,31 @@ def test_metadata_upload_requires_enable_rl():
 
 
 @pytest.mark.asyncio
+async def test_metadata_upload_normalizes_tensor_values(tmp_path):
+    torch = pytest.importorskip("torch")
+    uploader = MetadataUploader(url=(tmp_path / "metadata/tensors").as_uri())
+    tensor = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
+
+    await uploader.upload_choice(0, {"router_tensor": tensor})
+
+    payload = _read_zstd_payload(tmp_path / "metadata/tensors/choice_0.msgpack.zst")
+    uploaded_tensor = payload["metadata"]["router_tensor"]
+    assert uploaded_tensor["type"] == "tensor"
+    assert uploaded_tensor["dtype"] == "int32"
+    assert uploaded_tensor["shape"] == [2, 2]
+    assert uploaded_tensor["data"] == tensor.numpy().tobytes()
+
+    bfloat_tensor = torch.tensor([1, 2], dtype=torch.bfloat16)
+    await uploader.upload_choice(1, {"router_tensor": bfloat_tensor})
+
+    payload = _read_zstd_payload(tmp_path / "metadata/tensors/choice_1.msgpack.zst")
+    uploaded_tensor = payload["metadata"]["router_tensor"]
+    assert uploaded_tensor["dtype"] == "bfloat16"
+    assert uploaded_tensor["shape"] == [2]
+    assert uploaded_tensor["data"] == bfloat_tensor.view(torch.uint8).numpy().tobytes()
+
+
+@pytest.mark.asyncio
 async def test_process_token_stream_tracks_logprobs_per_choice_index():
     handler = _new_decode_handler()
 
@@ -408,14 +433,7 @@ async def test_process_token_stream_tracks_logprobs_per_choice_index():
 @pytest.mark.asyncio
 async def test_process_token_stream_uploads_large_metadata(tmp_path):
     handler = _new_decode_handler()
-    recorded = {}
-
-    class RecordingUploader(MetadataUploader):
-        async def upload_choice(self, choice):
-            recorded["choice"] = choice
-            return await super().upload_choice(choice)
-
-    uploader = RecordingUploader(
+    uploader = MetadataUploader(
         url=(tmp_path / "metadata/rollout-7").as_uri(),
     )
     meta_info = {
@@ -424,6 +442,7 @@ async def test_process_token_stream_uploads_large_metadata(tmp_path):
         "output_token_logprobs": [(-0.1, 101, "a")],
         "output_top_logprobs": [[(-0.1, 101, "a"), (-0.2, 102, "b")]],
         "routed_experts": b"expert-bytes",
+        "custom_router_state": {"step": 1, "scores": [0.25, 0.75]},
         "prompt_tokens": 2,
         "completion_tokens": 1,
         "cached_tokens": 0,
@@ -454,16 +473,65 @@ async def test_process_token_stream_uploads_large_metadata(tmp_path):
     uploaded_path = tmp_path / "metadata/rollout-7/choice_0.msgpack.zst"
 
     payload = _read_zstd_payload(uploaded_path)
-    assert payload["metadata"]["log_probs"] == [-0.1]
-    assert payload["metadata"]["top_logprobs"][0][1]["token_id"] == 102
+    assert payload["metadata"]["id"] == "sglang-1"
+    assert payload["metadata"]["finish_reason"] == {"type": "stop"}
+    assert payload["metadata"]["output_token_logprobs"] == [[-0.1, 101, "a"]]
+    assert payload["metadata"]["output_top_logprobs"][0][1][1] == 102
     assert payload["metadata"]["routed_experts"] == b"expert-bytes"
-    assert "output_token_logprobs" not in meta_info
-    assert "output_top_logprobs" not in meta_info
-    assert "routed_experts" not in meta_info
+    assert payload["metadata"]["custom_router_state"] == {
+        "step": 1,
+        "scores": [0.25, 0.75],
+    }
+    assert payload["metadata"]["prompt_tokens"] == 2
+    assert meta_info == {}
 
-    assert recorded["choice"].log_probs == []
-    assert recorded["choice"].top_logprobs == []
-    assert recorded["choice"].routed_experts is None
+
+@pytest.mark.asyncio
+async def test_process_token_stream_uploads_only_final_meta_info(tmp_path):
+    handler = _new_decode_handler()
+    uploader = MetadataUploader(url=(tmp_path / "metadata/rollout-final").as_uri())
+    first_meta_info = {
+        "id": "sglang-1",
+        "finish_reason": None,
+        "output_token_logprobs": [(-0.1, 101, "a")],
+        "custom_router_state": {"step": 1},
+    }
+    final_meta_info = {
+        "id": "sglang-1",
+        "finish_reason": {"type": "stop"},
+        "output_token_logprobs": [(-0.1, 101, "a"), (-0.2, 102, "b")],
+        "custom_router_state": {"step": 2},
+        "prompt_tokens": 2,
+        "completion_tokens": 2,
+        "cached_tokens": 0,
+    }
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {"index": 0, "output_ids": [101], "meta_info": first_meta_info},
+                    {"index": 0, "output_ids": [102], "meta_info": final_meta_info},
+                ]
+            ),
+            _Context(),
+            metadata_uploader=uploader,
+        )
+    )
+
+    assert len(chunks) == 2
+    assert "log_probs" not in chunks[0]
+    assert "log_probs" not in chunks[1]
+    payload = _read_zstd_payload(
+        tmp_path / "metadata/rollout-final/choice_0.msgpack.zst"
+    )
+    assert payload["metadata"]["output_token_logprobs"] == [
+        [-0.1, 101, "a"],
+        [-0.2, 102, "b"],
+    ]
+    assert payload["metadata"]["custom_router_state"] == {"step": 2}
+    assert first_meta_info == {}
+    assert final_meta_info == {}
 
 
 @pytest.mark.asyncio
@@ -471,7 +539,7 @@ async def test_process_token_stream_upload_failure_blocks_final_chunk(tmp_path):
     handler = _new_decode_handler()
 
     class FailingUploader(MetadataUploader):
-        async def upload_choice(self, choice):
+        async def upload_choice(self, choice_index, metadata):
             raise RuntimeError("metadata upload failed")
 
     with pytest.raises(RuntimeError, match="metadata upload failed"):
@@ -631,8 +699,10 @@ async def test_process_text_stream_uploads_routed_experts(tmp_path):
     payload = _read_zstd_payload(
         tmp_path / "metadata/rollout-8/choice_0.json.zst", payload_format="json"
     )
+    assert payload["metadata"]["id"] == "sglang-2"
+    assert payload["metadata"]["finish_reason"] == {"type": "stop"}
     assert payload["metadata"]["routed_experts"] == "base64-experts"
-    assert "routed_experts" not in meta_info
+    assert meta_info == {}
 
 
 @pytest.mark.asyncio

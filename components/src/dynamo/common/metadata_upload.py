@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from functools import cache
 from typing import Any
 
 _DEFAULT_FORMAT = "msgpack"
@@ -64,46 +65,60 @@ def _serialize_payload(payload: dict[str, Any], payload_format: str) -> bytes:
         del raw
 
 
-@dataclass
-class ChoiceMetadata:
-    choice_index: int
-    log_probs: list[float] = field(default_factory=list)
-    top_logprobs: list[list[dict[str, Any]]] = field(default_factory=list)
-    routed_experts: Any = None
+@cache
+def _torch_tensor_type() -> type | None:
+    try:
+        import torch
+    except ImportError:
+        return None
 
-    def add_logprobs(
-        self,
-        log_probs: list[float] | None,
-        top_logprobs: list[list[dict[str, Any]]] | None,
-    ) -> None:
-        if log_probs:
-            self.log_probs.extend(log_probs)
-        if top_logprobs:
-            self.top_logprobs.extend(top_logprobs)
+    return torch.Tensor
 
-    def has_payload(self) -> bool:
-        return bool(
-            self.log_probs or self.top_logprobs or self.routed_experts is not None
-        )
 
-    def release_payload(self) -> None:
-        self.log_probs.clear()
-        self.top_logprobs.clear()
-        self.routed_experts = None
+def _torch_tensor_to_payload(value: Any) -> dict[str, Any] | None:
+    tensor_type = _torch_tensor_type()
+    if tensor_type is None or not isinstance(value, tensor_type):
+        return None
 
-    def to_payload(self) -> dict[str, Any]:
-        metadata: dict[str, Any] = {}
-        if self.log_probs:
-            metadata["log_probs"] = self.log_probs
-        if self.top_logprobs:
-            metadata["top_logprobs"] = self.top_logprobs
-        if self.routed_experts is not None:
-            metadata["routed_experts"] = self.routed_experts
+    import torch
 
-        return {
+    tensor = value.detach().cpu().contiguous()
+    try:
+        data = tensor.numpy().tobytes()
+    except TypeError:
+        data = tensor.view(torch.uint8).numpy().tobytes()
+
+    return {
+        "type": "tensor",
+        "dtype": str(tensor.dtype).removeprefix("torch."),
+        "shape": list(tensor.shape),
+        "data": data,
+    }
+
+
+def _normalize_for_upload(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool, bytes)):
+        return value
+    if isinstance(value, dict):
+        return {key: _normalize_for_upload(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_for_upload(item) for item in value]
+
+    tensor_payload = _torch_tensor_to_payload(value)
+    if tensor_payload is not None:
+        return tensor_payload
+
+    return value
+
+
+def _serialize_metadata(metadata: dict[str, Any], payload_format: str) -> bytes:
+    return _serialize_payload(
+        {
             "schema_version": 1,
-            "metadata": metadata,
-        }
+            "metadata": _normalize_for_upload(metadata),
+        },
+        payload_format,
+    )
 
 
 @dataclass(frozen=True)
@@ -135,15 +150,15 @@ class MetadataUploader:
     def from_backend_request(cls, request: dict[str, Any]) -> MetadataUploader | None:
         return cls.from_settings(_backend_metadata_upload_settings(request))
 
-    async def upload_choice(self, choice: ChoiceMetadata) -> None:
-        if not choice.has_payload():
-            return None
+    async def upload_choice(self, choice_index: int, metadata: dict[str, Any]) -> None:
+        if not metadata:
+            return
 
-        storage_path = f"choice_{choice.choice_index}.{self.payload_format}.zst"
-        payload = choice.to_payload()
-        data = await asyncio.to_thread(_serialize_payload, payload, self.payload_format)
+        storage_path = f"choice_{choice_index}.{self.payload_format}.zst"
+        data = await asyncio.to_thread(
+            _serialize_metadata, metadata, self.payload_format
+        )
         try:
             await _upload_bytes(self.url, storage_path, data)
         finally:
             del data
-            del payload

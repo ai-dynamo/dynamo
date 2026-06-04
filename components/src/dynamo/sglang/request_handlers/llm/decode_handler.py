@@ -12,7 +12,7 @@ from PIL.Image import Image as PILImage
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.constants import DisaggregationMode
-from dynamo.common.metadata_upload import ChoiceMetadata, MetadataUploader
+from dynamo.common.metadata_upload import MetadataUploader
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.sglang._compat import filter_supported_async_generate_kwargs
@@ -64,12 +64,6 @@ def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
         if isinstance(extra_fields, list) and field in extra_fields:
             return True
     return False
-
-
-def _release_large_meta_info_refs(meta_info: dict[str, Any]) -> None:
-    meta_info.pop("output_token_logprobs", None)
-    meta_info.pop("output_top_logprobs", None)
-    meta_info.pop("routed_experts", None)
 
 
 def _sampling_option_params(values: Dict[str, Any]) -> Dict[str, Any]:
@@ -526,9 +520,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # With n>1, chunks for different choices are interleaved, so track the
         # cumulative-logprob cursor per choice index instead of globally.
         output_logprobs_per_choice: dict[int, int] = {}
-        metadata_per_choice: dict[int, ChoiceMetadata] | None = (
-            {} if metadata_uploader is not None else None
-        )
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
                 meta_info = res.get("meta_info", {})
@@ -546,11 +537,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # SGLang omits index for non-n/legacy chunks; treat those as
                 # choice 0 while preserving explicit indices for n>1.
                 output_idx = res.get("index") or 0
-                choice_metadata = None
-                if metadata_per_choice is not None:
-                    choice_metadata = metadata_per_choice.setdefault(
-                        output_idx, ChoiceMetadata(choice_index=output_idx)
-                    )
 
                 out: dict[str, Any] = {"index": output_idx}
                 finish_reason = meta_info["finish_reason"]
@@ -576,33 +562,29 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # Pass through disjoint token segments directly
                 out["token_ids"] = output_ids
 
-                # Extract logprobs for new tokens if available
-                (
-                    log_probs,
-                    top_logprobs,
-                    next_logprobs_total,
-                ) = self._extract_logprobs(
-                    meta_info,
-                    output_logprobs_per_choice.get(output_idx, 0),
-                    return_tokens_as_token_ids=return_tokens_as_token_ids,
-                )
-                output_logprobs_per_choice[output_idx] = next_logprobs_total
-                if choice_metadata is not None:
-                    choice_metadata.add_logprobs(log_probs, top_logprobs)
-                elif log_probs is not None:
-                    out["log_probs"] = log_probs
-                if choice_metadata is None and top_logprobs is not None:
-                    out["top_logprobs"] = top_logprobs
+                if metadata_uploader is None:
+                    # Extract logprobs for new tokens if available
+                    (
+                        log_probs,
+                        top_logprobs,
+                        next_logprobs_total,
+                    ) = self._extract_logprobs(
+                        meta_info,
+                        output_logprobs_per_choice.get(output_idx, 0),
+                        return_tokens_as_token_ids=return_tokens_as_token_ids,
+                    )
+                    output_logprobs_per_choice[output_idx] = next_logprobs_total
+                    if log_probs is not None:
+                        out["log_probs"] = log_probs
+                    if top_logprobs is not None:
+                        out["top_logprobs"] = top_logprobs
 
                 routed_experts = meta_info.get("routed_experts")
-                if routed_experts is not None:
-                    if choice_metadata is not None:
-                        choice_metadata.routed_experts = routed_experts
-                    else:
-                        # sglang >= 0.5.11 base64-encodes routed_experts upstream. It
-                        # rides the engine's opaque engine_data passthrough (surfaced
-                        # by the frontend as nvext.routed_experts).
-                        out["engine_data"] = {"routed_experts": routed_experts}
+                if routed_experts is not None and metadata_uploader is None:
+                    # sglang >= 0.5.11 base64-encodes routed_experts upstream. It
+                    # rides the engine's opaque engine_data passthrough (surfaced
+                    # by the frontend as nvext.routed_experts).
+                    out["engine_data"] = {"routed_experts": routed_experts}
                 if finish_reason:
                     input_tokens = meta_info["prompt_tokens"]
                     completion_tokens = meta_info["completion_tokens"]
@@ -616,26 +598,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         "total_tokens": input_tokens + completion_tokens,
                         "prompt_tokens_details": prefill_prompt_tokens_details,
                     }
-                    if (
-                        metadata_uploader is not None
-                        and metadata_per_choice is not None
-                        and choice_metadata is not None
-                    ):
+                    if metadata_uploader is not None:
                         try:
-                            await metadata_uploader.upload_choice(choice_metadata)
+                            await metadata_uploader.upload_choice(output_idx, meta_info)
                         finally:
-                            choice_metadata.release_payload()
-                            metadata_per_choice.pop(output_idx, None)
-                            output_logprobs_per_choice.pop(output_idx, None)
-                            _release_large_meta_info_refs(meta_info)
-                            log_probs = None
-                            top_logprobs = None
-                            routed_experts = None
-                if metadata_uploader is not None:
-                    _release_large_meta_info_refs(meta_info)
-                    log_probs = None
-                    top_logprobs = None
-                    routed_experts = None
+                            meta_info.clear()
+                elif metadata_uploader is not None:
+                    meta_info.clear()
                 if not context.is_stopped():
                     yield out
 
@@ -664,9 +633,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future: asyncio.Future[str] = asyncio.Future()
-        metadata_per_choice: dict[int, ChoiceMetadata] | None = (
-            {} if metadata_uploader is not None else None
-        )
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
                 meta_info = res.get("meta_info", {})
@@ -684,11 +650,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 # Same defaulting as token mode: non-n chunks are choice 0.
                 index = res.get("index") or 0
-                choice_metadata = None
-                if metadata_per_choice is not None:
-                    choice_metadata = metadata_per_choice.setdefault(
-                        index, ChoiceMetadata(choice_index=index)
-                    )
 
                 text = res.get("text", "")
 
@@ -724,28 +685,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 ):
                     response_nvext["stop_reason"] = stop_reason
                 routed_experts = meta_info.get("routed_experts")
-                if routed_experts is not None:
-                    if choice_metadata is not None:
-                        choice_metadata.routed_experts = routed_experts
-                    else:
-                        # sglang >= 0.5.11 base64-encodes routed_experts upstream.
-                        response_nvext["routed_experts"] = routed_experts
-                if (
-                    finish_reason
-                    and metadata_uploader is not None
-                    and metadata_per_choice is not None
-                    and choice_metadata is not None
-                ):
+                if routed_experts is not None and metadata_uploader is None:
+                    # sglang >= 0.5.11 base64-encodes routed_experts upstream.
+                    response_nvext["routed_experts"] = routed_experts
+                if finish_reason and metadata_uploader is not None:
                     try:
-                        await metadata_uploader.upload_choice(choice_metadata)
+                        await metadata_uploader.upload_choice(index, meta_info)
                     finally:
-                        choice_metadata.release_payload()
-                        metadata_per_choice.pop(index, None)
-                        _release_large_meta_info_refs(meta_info)
-                        routed_experts = None
-                if metadata_uploader is not None:
-                    _release_large_meta_info_refs(meta_info)
-                    routed_experts = None
+                        meta_info.clear()
+                elif metadata_uploader is not None:
+                    meta_info.clear()
                 if response_nvext:
                     response["nvext"] = response_nvext
                 if not context.is_stopped():
