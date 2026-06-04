@@ -165,6 +165,7 @@ async def start_gateway_server(
     *,
     listen: str,
     server_credentials: Optional[grpc.ServerCredentials] = None,
+    allow_insecure: bool = False,
 ) -> tuple[grpc.aio.Server, str]:
     """Build and start a gRPC server hosting :class:`PluginRegistryGatewayServicer`.
 
@@ -203,6 +204,27 @@ async def start_gateway_server(
     if server_credentials is not None:
         port = grpc_server.add_secure_port(listen, server_credentials)
     else:
+        # Plaintext bind. The gateway receives plugins' shared-secret
+        # ``auth_token``, so an insecure TCP listen would leak it on the
+        # wire. Fail closed on TCP unless the operator explicitly opts in
+        # via ``allow_insecure`` — mirroring the outbound transport's
+        # ``allow_insecure_grpc`` gate. ``unix:`` (Pod-local) listens are
+        # always allowed: the Pod boundary is the trust boundary.
+        is_unix = listen.startswith("unix:")
+        if not is_unix and not allow_insecure:
+            raise RuntimeError(
+                f"refusing to bind plaintext (no-TLS) gRPC gateway on TCP "
+                f"listen {listen!r}: it would expose plugin auth tokens on "
+                f"the wire. Use a ``unix:`` listen, supply TLS credentials, "
+                f"or set ``gateway.allow_insecure=true`` to accept the risk."
+            )
+        if not is_unix:
+            log.warning(
+                "plugin registry gateway binding PLAINTEXT (no TLS) on TCP "
+                "%r — plugin auth tokens cross the wire unencrypted; "
+                "allow_insecure=true was set. Prefer a unix: socket or mTLS.",
+                listen,
+            )
         port = grpc_server.add_insecure_port(listen)
     # ``add_*_port`` returns 0 when the bind fails (port in use, bad
     # address, permission denied on a unix socket path, etc). Catch this

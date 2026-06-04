@@ -266,6 +266,20 @@ class GatewayConfig(BaseModel):
             "pair TCP with K8s NetworkPolicy / Pod-to-Pod identity."
         ),
     )
+    allow_insecure: bool = Field(
+        default=False,
+        description=(
+            "Permit binding a plaintext (no-TLS) gRPC gateway on a TCP "
+            "``host:port`` listen. Default False fails closed: a TCP "
+            "listen with no server credentials is rejected, because the "
+            "gateway receives plugins' shared-secret ``auth_token`` and a "
+            "plaintext TCP bind would expose it on the wire. Mirrors the "
+            "outbound ``transport.allow_insecure_grpc`` gate. ``unix:`` "
+            "(Pod-local) listens are always allowed — the Pod boundary is "
+            "the trust boundary. Set True only when TCP plaintext is "
+            "acceptable (e.g. a trusted mesh / NetworkPolicy-isolated net)."
+        ),
+    )
 
 
 class SchedulingConfig(BaseModel):

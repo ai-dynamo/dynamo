@@ -272,3 +272,62 @@ async def test_start_gateway_server_raises_when_port_zero():
         "start_gateway_server must fail fast BEFORE calling grpc_server.start() "
         "when add_*_port() reports a bind failure"
     )
+
+
+# ---------------------------------------------------------------------------
+# Plaintext-TCP fail-closed gate (review #6).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_start_gateway_server_refuses_plaintext_tcp_without_allow_insecure():
+    """A TCP listen with no TLS creds and allow_insecure=False must fail
+    closed — the gateway receives plugins' shared-secret auth tokens, so a
+    plaintext TCP bind would leak them. Mirrors the outbound
+    allow_insecure_grpc gate. The check raises BEFORE any bind."""
+    from dynamo.planner.plugins.registry.gateway import start_gateway_server
+
+    server, _ = _make_servicer()
+    with pytest.raises(RuntimeError, match="refusing to bind plaintext"):
+        await start_gateway_server(server, listen="0.0.0.0:9099", allow_insecure=False)
+
+
+@pytest.mark.asyncio
+async def test_start_gateway_server_allows_plaintext_tcp_when_opted_in():
+    """allow_insecure=True permits the plaintext TCP bind (operator accepted
+    the risk); it must not hit the fail-closed guard."""
+    from dynamo.planner.plugins.registry import gateway as gw_mod
+    from dynamo.planner.plugins.registry.gateway import start_gateway_server
+
+    server, _ = _make_servicer()
+
+    class _StubAioServer:
+        def __init__(self) -> None:
+            self.started = False
+
+        def add_generic_rpc_handlers(self, _handlers: Any) -> None:
+            pass
+
+        def add_registered_method_handlers(self, _s: str, _m: Any) -> None:
+            pass
+
+        def add_insecure_port(self, _listen: str) -> int:
+            return 9099  # simulate a successful bind
+
+        async def start(self) -> None:
+            self.started = True
+
+        async def stop(self, *_a: Any, **_k: Any) -> None:
+            pass
+
+    stub = _StubAioServer()
+    real_factory = gw_mod.grpc.aio.server
+    gw_mod.grpc.aio.server = lambda: stub  # type: ignore[assignment]
+    try:
+        srv, listen = await start_gateway_server(
+            server, listen="0.0.0.0:9099", allow_insecure=True
+        )
+    finally:
+        gw_mod.grpc.aio.server = real_factory  # type: ignore[assignment]
+    assert stub.started is True
+    assert listen == "0.0.0.0:9099"

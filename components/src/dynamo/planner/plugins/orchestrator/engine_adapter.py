@@ -354,7 +354,9 @@ class OrchestratorEngineAdapter:
         from dynamo.planner.plugins.registry.gateway import start_gateway_server
 
         grpc_server, actual_listen = await start_gateway_server(
-            self._orchestrator.registry, listen=gw_cfg.listen
+            self._orchestrator.registry,
+            listen=gw_cfg.listen,
+            allow_insecure=gw_cfg.allow_insecure,
         )
         self._gateway_server = grpc_server
         log.info("plugin registration gateway listening at %s", actual_listen)
