@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Third-party Python dependencies for the vllm runtime image. Installed
+# with --reinstall-package imageio-ffmpeg --no-deps to replace the upstream
+# vllm/vllm-openai base image's imageio-ffmpeg wheel (which ships a
+# GPL-encumbered prebuilt ffmpeg binary) with a source build that leaves
+# no binary on disk. IMAGEIO_FFMPEG_EXE points imageio at the LGPL ffmpeg
+# CLI copied from wheel_builder, so any media path encodes through that
+# instead of a bundled GPL binary.
+
+--no-binary imageio-ffmpeg
+
+imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive at top of file
