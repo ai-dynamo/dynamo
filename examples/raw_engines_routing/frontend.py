@@ -484,8 +484,12 @@ def create_app(config: Config) -> FastAPI:
                 raise GatewayError(400, f"model must be {config.model}")
 
             messages = normalize_messages(body)
-            token_ids = tokenize(request.app.state.tokenizer, messages)
-            sequence_hashes = slot_hashes(token_ids, config.block_size)
+            token_ids = await asyncio.to_thread(
+                tokenize, request.app.state.tokenizer, messages
+            )
+            sequence_hashes = await asyncio.to_thread(
+                slot_hashes, token_ids, config.block_size
+            )
             request_id = str(uuid.uuid4())
             log_event(
                 logging.DEBUG,
