@@ -203,11 +203,12 @@ impl<P: EndpointPicker> ExtProcServer<P> {
     /// Handle request headers phase.
     /// Mirrors Go LW-EPP `handleRequestHeaders` in `server.go`.
     fn handle_request_headers(ctx: &mut RequestContext, hdr: &ext_proc::HttpHeaders) {
-        if hdr.end_of_stream {
-            // Body-less request (e.g. GET) — will be picked in header-only path
-            return;
-        }
-
+        // Collect headers and resolve the request ID for every request,
+        // including header-only (end_of_stream) requests such as GET /v1/models.
+        // The body-less case is routed later via `handle_header_only_request`,
+        // but it still relies on `ctx.request_headers` / `ctx.request_id` being
+        // populated here — both for the `RequestInfo` contract passed to the
+        // picker and for the stream-end bookkeeping keyed on the request ID.
         if let Some(header_map) = &hdr.headers {
             ctx.request_headers = envoy_helpers::collect_headers(header_map);
 

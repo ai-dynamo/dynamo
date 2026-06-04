@@ -133,10 +133,39 @@ async fn main() -> Result<()> {
     let router =
         Router::from_discovery(&config.namespace, &config.component, config.enforce_disagg).await?;
 
-    health_reporter
-        .set_service_status(HEALTH_SERVICE_NAME, tonic_health::ServingStatus::Serving)
-        .await;
-    tracing::info!("Router initialized, health status set to SERVING");
+    // Gate SERVING on pod-reflector readiness. `from_discovery` returns once
+    // worker discovery and the model card are ready, but the K8s pod reflector's
+    // initial LIST may still be in flight (it has a bounded startup timeout and
+    // then finishes in the background). `pick()` returns 503 until the reflector
+    // is ready, so reporting SERVING here unconditionally would advertise a
+    // healthy pod that rejects every request. Flip to SERVING only once the
+    // reflector cache is usable; in the common path this is already true and the
+    // transition is immediate.
+    let pod_store_ready = router.pod_store_ready();
+    if pod_store_ready.load(std::sync::atomic::Ordering::Acquire) {
+        health_reporter
+            .set_service_status(HEALTH_SERVICE_NAME, tonic_health::ServingStatus::Serving)
+            .await;
+        tracing::info!("Router initialized, health status set to SERVING");
+    } else {
+        tracing::warn!(
+            "Router initialized but pod reflector cache not ready yet; \
+             keeping health NOT_SERVING until the initial LIST completes"
+        );
+        let health_reporter = health_reporter.clone();
+        tokio::spawn(async move {
+            // Poll the readiness flag; the background reflector task flips it
+            // once the initial LIST lands. Cheap and bounded — the flag is set
+            // exactly once and the loop exits immediately after.
+            while !pod_store_ready.load(std::sync::atomic::Ordering::Acquire) {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            health_reporter
+                .set_service_status(HEALTH_SERVICE_NAME, tonic_health::ServingStatus::Serving)
+                .await;
+            tracing::info!("Pod reflector now ready, health status set to SERVING");
+        });
+    }
 
     let picker = Arc::new(router);
     let server = ExtProcServer::new(picker);

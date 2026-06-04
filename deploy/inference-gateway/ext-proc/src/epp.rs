@@ -370,6 +370,18 @@ impl Router {
     pub fn runtime(&self) -> &Runtime {
         &self.runtime
     }
+
+    /// Shared handle to the pod reflector readiness flag.
+    ///
+    /// `from_discovery` returns as soon as worker discovery and the model card
+    /// are ready, but the K8s pod reflector's initial LIST may still be in
+    /// flight if it exceeded the startup timeout (see `spawn_pod_reflector`).
+    /// `pick()` returns 503 until this flag flips to `true`, so callers (e.g.
+    /// the gRPC health reporter) can gate their SERVING status on it to avoid
+    /// advertising readiness while routing would still 503.
+    pub fn pod_store_ready(&self) -> Arc<AtomicBool> {
+        self.pod_store_ready.clone()
+    }
 }
 
 /// Extract the router queue `priority_jump` from a chat completion request's
