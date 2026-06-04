@@ -61,6 +61,12 @@ enum class TensorDataType : int {
   BF16 = 1,
   F32 = 2,
   F64 = 3,
+  // FP8 is handled as a dtype-agnostic 1-byte byte-mover (uint8_t below).
+  // The permute/transpose kernels are pure element-wise gather/scatter, so a
+  // raw byte copy is exact for any 1-byte format (E4M3 / E5M2) — no arithmetic.
+  // This value MUST equal the Rust `TensorDataType::FP8 = 4` (FFI passes the
+  // enum as i32 and C++ does static_cast<TensorDataType>(value)).
+  FP8 = 4,
 };
 
 enum class BlockLayout : int {
@@ -90,6 +96,15 @@ struct DTypeTraits<TensorDataType::F32> {
 template <>
 struct DTypeTraits<TensorDataType::F64> {
   using type = double;
+};
+
+// FP8 maps to a plain 1-byte POD. Layout transform is byte-permutation only
+// (no arithmetic), so a raw uint8_t move is exact and dtype-agnostic. We
+// deliberately do NOT use __nv_fp8_e4m3/e5m2 here — those carry FP8 numeric
+// semantics we neither want nor need for a gather/scatter byte copy.
+template <>
+struct DTypeTraits<TensorDataType::FP8> {
+  using type = uint8_t;
 };
 
 template <typename T>
@@ -350,6 +365,9 @@ kvbm_kernels_launch_universal_from_block(
     case TensorDataType::F64:
       return kvbm_kernels_launch_block_to_universal_impl<typename DTypeTraits<TensorDataType::F64>::type>(
           universal_ptrs, block_ptrs, num_blocks, nh, nl, no, nt, hd, nl_full, nl_offset, layout, stream);
+    case TensorDataType::FP8:
+      return kvbm_kernels_launch_block_to_universal_impl<typename DTypeTraits<TensorDataType::FP8>::type>(
+          universal_ptrs, block_ptrs, num_blocks, nh, nl, no, nt, hd, nl_full, nl_offset, layout, stream);
     default:
       return cudaErrorInvalidValue;
   }
@@ -375,6 +393,9 @@ kvbm_kernels_launch_block_from_universal(
           universal_ptrs, block_ptrs, num_blocks, nh, nl, no, nt, hd, nl_full, nl_offset, layout, stream);
     case TensorDataType::F64:
       return kvbm_kernels_launch_block_from_universal_impl<typename DTypeTraits<TensorDataType::F64>::type>(
+          universal_ptrs, block_ptrs, num_blocks, nh, nl, no, nt, hd, nl_full, nl_offset, layout, stream);
+    case TensorDataType::FP8:
+      return kvbm_kernels_launch_block_from_universal_impl<typename DTypeTraits<TensorDataType::FP8>::type>(
           universal_ptrs, block_ptrs, num_blocks, nh, nl, no, nt, hd, nl_full, nl_offset, layout, stream);
     default:
       return cudaErrorInvalidValue;
@@ -498,6 +519,9 @@ kvbm_kernels_launch_nhd_hnd_transpose(
           src_ptrs, dst_ptrs, num_blocks, nl, no, nt, nh, hd, src_layout, stream);
     case TensorDataType::F64:
       return kvbm_kernels_launch_nhd_hnd_transpose_impl<typename DTypeTraits<TensorDataType::F64>::type>(
+          src_ptrs, dst_ptrs, num_blocks, nl, no, nt, nh, hd, src_layout, stream);
+    case TensorDataType::FP8:
+      return kvbm_kernels_launch_nhd_hnd_transpose_impl<typename DTypeTraits<TensorDataType::FP8>::type>(
           src_ptrs, dst_ptrs, num_blocks, nl, no, nt, nh, hd, src_layout, stream);
     default:
       return cudaErrorInvalidValue;

@@ -23,16 +23,18 @@ use cudarc::runtime::sys::{cudaError_t, cudaStream_t};
 
 /// Numeric tags passed across the FFI boundary to select the CUDA template.
 ///
-/// `FP8` is a 1-byte forward-looking marker. The kernel C++ side has no
-/// FP8 template specialization today; the planner's kernel catalog
-/// returns `None` for FP8, so the launcher is never called with this
-/// value. The C++ enum's `default` arm would return
-/// `cudaErrorInvalidValue` if it ever were. The marker exists so
-/// `derive_tensor_dtype_from_width` can produce a stable mapping for
-/// 1-byte layouts (FP8 E4M3 / E5M2) and projection code can route
-/// pre-transform paths through the catalog cleanly even on FP8
-/// configs; transform dispatch on FP8 stays rejected at the catalog
-/// until kernel work lands.
+/// `FP8` is a 1-byte type handled by a dtype-agnostic byte-mover. The CUDA
+/// side maps `FP8` to a `uint8_t` `DTypeTraits` specialization: the
+/// permute/transpose kernels are pure element-wise gather/scatter, so a raw
+/// 1-byte move is exact for any FP8 format (E4M3 / E5M2) — there is no FP8
+/// arithmetic. The planner's kernel catalog now returns a kernel for FP8 on
+/// exactly the same layout pairs as every other dtype, and each launcher
+/// switch has an `FP8` arm, so the launcher is dispatched normally on FP8.
+/// `derive_tensor_dtype_from_width` maps 1-byte layouts to this marker.
+///
+/// The C++ enum value MUST stay in sync: `FP8 = 4` here equals
+/// `TensorDataType::FP8 = 4` in `cuda/tensor_kernels.cu` (the FFI passes the
+/// enum as `i32` and C++ does `static_cast<TensorDataType>(value)`).
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TensorDataType {
