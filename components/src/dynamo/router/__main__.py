@@ -14,11 +14,13 @@ routing decisions.
 
 import asyncio
 import logging
+import os
 from typing import Optional
 
 import uvloop
 
 from dynamo.llm import AicPerfConfig, KvRouter, KvRouterConfig
+from dynamo.llm.exceptions import ConnectionTimeout
 from dynamo.router.args import (
     DynamoRouterConfig,
     build_aic_perf_config,
@@ -42,6 +44,7 @@ class StandaloneRouterHandler:
         block_size: int,
         kv_router_config: KvRouterConfig,
         aic_perf_config: Optional[AicPerfConfig],
+        worker_timeout_secs: float = 0.0,
     ):
         self.runtime = runtime
         self.worker_endpoint_path = worker_endpoint_path
@@ -50,6 +53,31 @@ class StandaloneRouterHandler:
         self.aic_perf_config = aic_perf_config
         self.kv_router: Optional[KvRouter] = None
         self.worker_client: Optional[Client] = None
+        # When > 0, bound the wait on each worker call. For streaming this
+        # bounds the gap *between* chunks (not total generation time), so a
+        # hung worker raises ConnectionTimeout instead of stalling forever
+        # while legitimately long generations are unaffected. 0 = disabled.
+        self.worker_timeout_secs = worker_timeout_secs
+
+    async def _await_worker(self, awaitable):
+        """Await a worker call, optionally bounding the wait (see __init__).
+
+        Raises ConnectionTimeout (a typed DynamoException) on stall so the
+        serving layer can classify it. StopAsyncIteration passes through
+        untouched so streaming callers can detect end-of-stream normally.
+        """
+        if not self.worker_timeout_secs or self.worker_timeout_secs <= 0:
+            return await awaitable
+        try:
+            return await asyncio.wait_for(awaitable, self.worker_timeout_secs)
+        except asyncio.TimeoutError as exc:
+            logger.error(
+                "Worker call exceeded %.1fs timeout; aborting",
+                self.worker_timeout_secs,
+            )
+            raise ConnectionTimeout(
+                f"worker call exceeded {self.worker_timeout_secs}s timeout"
+            ) from exc
 
     async def initialize(self):
         """Initialize the KV router for workers."""
@@ -116,9 +144,19 @@ class StandaloneRouterHandler:
             "mm_processor_kwargs": request.get("mm_processor_kwargs"),
         }
 
-        async for worker_output in await self.kv_router.generate_from_request(
-            preprocessed_request  # type: ignore[arg-type]
-        ):
+        # Iterate manually so each chunk's wait can be bounded by
+        # _await_worker (a hung worker mid-stream must not stall forever).
+        stream = await self._await_worker(
+            self.kv_router.generate_from_request(
+                preprocessed_request  # type: ignore[arg-type]
+            )
+        )
+        stream_iter = stream.__aiter__()
+        while True:
+            try:
+                worker_output = await self._await_worker(stream_iter.__anext__())
+            except StopAsyncIteration:
+                break
             # Wrap worker output into LLMEngineOutput format
             # Worker should return dict with at minimum kv_transfer_params in extra_args
             llm_engine_output = {
@@ -149,8 +187,8 @@ class StandaloneRouterHandler:
             logger.error("KvRouter not initialized - cannot get best worker")
             raise RuntimeError("Router not initialized")
 
-        (worker_id, _dp_rank, _overlap_blocks) = await self.kv_router.best_worker(
-            token_ids, router_config_override
+        (worker_id, _dp_rank, _overlap_blocks) = await self._await_worker(
+            self.kv_router.best_worker(token_ids, router_config_override)
         )
 
         yield worker_id
@@ -167,12 +205,14 @@ class StandaloneRouterHandler:
             logger.error("KvRouter not initialized - cannot get overlap scores")
             raise RuntimeError("Router not initialized")
 
-        scores = await self.kv_router.get_overlap_scores(
-            request["token_ids"],
-            request.get("router_config_override"),
-            request.get("block_mm_infos"),
-            request.get("lora_name"),
-            request.get("include_shared", True),
+        scores = await self._await_worker(
+            self.kv_router.get_overlap_scores(
+                request["token_ids"],
+                request.get("router_config_override"),
+                request.get("block_mm_infos"),
+                request.get("lora_name"),
+                request.get("include_shared", True),
+            )
         )
 
         yield scores
@@ -209,6 +249,17 @@ async def worker(runtime: DistributedRuntime):
     kv_router_config = build_kv_router_config(config)
     aic_perf_config = build_aic_perf_config(config)
 
+    # Optional per-call worker timeout (seconds). Default 0 = disabled, so
+    # behavior is unchanged unless an operator opts in.
+    try:
+        worker_timeout_secs = float(os.getenv("DYN_ROUTER_WORKER_TIMEOUT_SECS", "0"))
+    except ValueError:
+        logger.warning(
+            "Invalid DYN_ROUTER_WORKER_TIMEOUT_SECS=%r; disabling worker timeout",
+            os.getenv("DYN_ROUTER_WORKER_TIMEOUT_SECS"),
+        )
+        worker_timeout_secs = 0.0
+
     # Create handler
     handler = StandaloneRouterHandler(
         runtime,
@@ -216,6 +267,7 @@ async def worker(runtime: DistributedRuntime):
         config.router_block_size,
         kv_router_config,
         aic_perf_config,
+        worker_timeout_secs=worker_timeout_secs,
     )
     await handler.initialize()
 
@@ -228,9 +280,15 @@ async def worker(runtime: DistributedRuntime):
 
     logger.debug("Starting to serve endpoints...")
 
-    # Serve both endpoints concurrently
-    try:
-        await asyncio.gather(
+    # Serve all endpoints concurrently with fail-fast semantics: if any one
+    # exits or raises, cancel the siblings instead of leaving orphaned servers
+    # holding sockets. Plain asyncio.gather() does NOT cancel its peers when one
+    # task raises. asyncio.TaskGroup gives this for free but is 3.11+; the
+    # minimum supported runtime is 3.10 (see pyproject requires-python), so we
+    # build the structured-concurrency scope manually.
+    serve_tasks = [
+        asyncio.ensure_future(coro)
+        for coro in (
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
@@ -247,10 +305,26 @@ async def worker(runtime: DistributedRuntime):
                 metrics_labels=[("service", "router")],
             ),
         )
-    except Exception as e:
-        logger.error(f"Failed to serve endpoint: {e}")
-        raise
+    ]
+    try:
+        done, _pending = await asyncio.wait(
+            serve_tasks, return_when=asyncio.FIRST_EXCEPTION
+        )
+        # Surface the first real failure (skip tasks cancelled out from under us).
+        for task in done:
+            if task.cancelled():
+                continue
+            exc = task.exception()
+            if exc is not None:
+                logger.error(f"Failed to serve endpoint: {exc}")
+                raise exc
     finally:
+        # Cancel any still-running siblings — whether we got here from a peer
+        # failure, a normal endpoint exit, or the worker itself being cancelled
+        # during graceful shutdown — and let the cancellations settle.
+        for task in serve_tasks:
+            task.cancel()
+        await asyncio.gather(*serve_tasks, return_exceptions=True)
         logger.info("Standalone Router Service shutting down")
 
 

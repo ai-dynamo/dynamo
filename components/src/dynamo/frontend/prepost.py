@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import weakref
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -41,16 +42,34 @@ class PreprocessResult:
     prompt_token_ids: list[int]
 
 
-_ASYNC_TOKENIZER_POOL: dict[int, AsyncMicrobatchTokenizer] = {}
-SKIP_REQUEST_VALIDATION = os.getenv("DYN_VLLM_SKIP_REQUEST_VALIDATION", "1") == "1"
+# Cache async tokenizers keyed on the tokenizer object itself via weak keys, so
+# an entry is dropped automatically when its tokenizer is garbage-collected.
+# Keying on id() was unsafe: CPython reuses an id() after the object dies, which
+# could alias two distinct tokenizers onto one (stale) wrapper, and the dict
+# never evicted.
+_ASYNC_TOKENIZER_POOL: "weakref.WeakKeyDictionary[Any, AsyncMicrobatchTokenizer]" = (
+    weakref.WeakKeyDictionary()
+)
+
+# Validate incoming requests at the boundary by default (fail closed). The
+# trusted fast path below (model_construct, no validation) is opt-in for callers
+# that have already validated upstream: set DYN_VLLM_SKIP_REQUEST_VALIDATION=1.
+SKIP_REQUEST_VALIDATION = os.getenv("DYN_VLLM_SKIP_REQUEST_VALIDATION", "0") == "1"
 
 
 def _get_async_tokenizer(tokenizer: TokenizerLike) -> AsyncMicrobatchTokenizer:
-    key = id(tokenizer)
-    async_tokenizer = _ASYNC_TOKENIZER_POOL.get(key)
+    # Some tokenizer types may not be weak-referenceable; fall back to an
+    # uncached wrapper rather than failing the request.
+    try:
+        async_tokenizer = _ASYNC_TOKENIZER_POOL.get(tokenizer)
+    except TypeError:
+        return AsyncMicrobatchTokenizer(tokenizer)
     if async_tokenizer is None:
         async_tokenizer = AsyncMicrobatchTokenizer(tokenizer)
-        _ASYNC_TOKENIZER_POOL[key] = async_tokenizer
+        try:
+            _ASYNC_TOKENIZER_POOL[tokenizer] = async_tokenizer
+        except TypeError:
+            pass
     return async_tokenizer
 
 

@@ -51,6 +51,11 @@ logger = logging.getLogger(__name__)
 
 MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
 
+# Strong references to fire-and-forget tasks. The event loop only holds weak
+# references to tasks, so a task that isn't retained can be garbage-collected
+# mid-execution — worst case, the shutdown task vanishes during shutdown.
+_background_tasks: set["asyncio.Task[Any]"] = set()
+
 
 def setup_engine_factory(
     config: FrontendConfig,
@@ -212,7 +217,9 @@ async def async_main():
     runtime = DistributedRuntime(loop, config.discovery_backend, config.request_plane)
 
     def signal_handler():
-        asyncio.create_task(graceful_shutdown(runtime))
+        task = asyncio.create_task(graceful_shutdown(runtime))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)

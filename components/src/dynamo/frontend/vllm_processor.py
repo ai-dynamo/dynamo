@@ -35,6 +35,7 @@ from dynamo.common.multimodal.routing_utils import build_mm_routing_info_from_fe
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine, fetch_model
+from dynamo.llm.exceptions import DynamoException
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .utils import (
@@ -692,6 +693,12 @@ class VllmProcessor:
 
                     yield dynamo_out
             _nvtx.end_range(rng_stream)
+        except DynamoException:
+            # Preserve typed Dynamo errors (ConnectionTimeout, Disconnected,
+            # EngineShutdown, ...) so the serving layer can classify them instead
+            # of flattening every failure into a generic internal_error chunk.
+            # The finally below still runs to abort registered requests.
+            raise
         except Exception as e:
             logger.exception("Error generating response for request %s", request_id)
             yield make_internal_error(request_id, str(e))

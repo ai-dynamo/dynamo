@@ -6,6 +6,7 @@
 #
 
 import asyncio
+import atexit
 import logging
 import os
 import time
@@ -20,7 +21,7 @@ from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 from dynamo._internal import ModelDeploymentCard
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine, fetch_model
-from dynamo.llm.exceptions import InvalidArgument, Unknown
+from dynamo.llm.exceptions import DynamoException, InvalidArgument, Unknown
 
 from .sglang_prepost import (
     SglangStreamingPostProcessor,
@@ -290,11 +291,27 @@ class SglangProcessor:
         self.stream_interval = stream_interval
         self.preprocess_pool = preprocess_pool
         if preprocess_pool is not None:
+            # asyncio.wrap_future cancellation cannot interrupt an already
+            # running pool job — the worker runs to completion. The +2 buffer
+            # absorbs cancelled-but-still-running jobs (whose semaphore slot is
+            # released the moment the awaiting frame is cancelled) so they don't
+            # oversubscribe the pool. See _generator_inner_pool.
             self._worker_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
                 preprocess_workers + 2
             )
         else:
             self._worker_semaphore = None
+
+    def shutdown(self) -> None:
+        """Tear down the preprocess worker pool, if any. Idempotent.
+
+        The pool spawns child processes that must be reaped on exit; relying on
+        GC leaves them dangling. Registered with atexit by the factory and safe
+        to call directly from a runtime teardown hook.
+        """
+        if self.preprocess_pool is not None:
+            self.preprocess_pool.shutdown(wait=False, cancel_futures=True)
+            self.preprocess_pool = None
 
     async def generator(
         self, request: dict[str, Any], context: Any | None = None
@@ -369,11 +386,14 @@ class SglangProcessor:
                 pre.guided_decoding,
                 pre.tool_call_parser,
             )
-        except InvalidArgument:
+        except DynamoException:
+            # Preserve typed Dynamo errors (InvalidArgument, ConnectionTimeout,
+            # Disconnected, EngineShutdown, ...) instead of masking them as
+            # Unknown — callers classify on the concrete type.
             raise
         except Exception as exc:
             logger.exception("SGLang preprocessing failed for request %s", request_id)
-            raise Unknown(f"Preprocessing error: {exc}") from exc
+            raise Unknown(f"Preprocessing error ({type(exc).__name__}): {exc}") from exc
 
         post = SglangStreamingPostProcessor(
             tokenizer=self.tokenizer,
@@ -408,16 +428,22 @@ class SglangProcessor:
                     request["model"],
                     self.eos_token_id,
                 )
+                # If this await is cancelled (client disconnect), the submitted
+                # job keeps running to completion — a process-pool task is not
+                # interruptible. The semaphore slot is freed here on cancel; the
+                # +2 buffer (see __init__) keeps such orphans from oversubscribing.
                 preproc_result: SglangPreprocessWorkerResult = (
                     await asyncio.wrap_future(future)
                 )
         except PreprocessError as exc:
             raise InvalidArgument(str(exc)) from exc
+        except DynamoException:
+            raise
         except Exception as exc:
             logger.exception(
                 "SGLang worker preprocessing failed for request %s", request_id
             )
-            raise Unknown(f"Worker error: {exc}") from exc
+            raise Unknown(f"Worker error ({type(exc).__name__}): {exc}") from exc
 
         # --- Phase 2: Recreate parsers in main process (not picklable) ---
         # The worker already decided effective_reasoning_parser_name based on
@@ -554,12 +580,13 @@ class SglangProcessor:
                     pending_token_ids = []
                     pending_usage = None
                     first_chunk = False
-        except Unknown:
+        except DynamoException:
             raise
         except Exception as e:
             logger.exception("Error generating response for request %s", request_id)
             raise Unknown(
-                f"Error generating response for request {request_id}: {e}"
+                f"Error generating response for request {request_id} "
+                f"({type(e).__name__}): {e}"
             ) from e
         finally:
             if self.debug_perf and token_count > 0:
@@ -703,5 +730,10 @@ class SglangEngineFactory:
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none
         )
+
+        # Guarantee the worker pool is reaped on interpreter exit. gen.shutdown
+        # is idempotent, so an explicit runtime teardown hook can also call it.
+        if preprocess_pool is not None:
+            atexit.register(gen.shutdown)
 
         return PythonAsyncEngine(gen.generator, loop)
