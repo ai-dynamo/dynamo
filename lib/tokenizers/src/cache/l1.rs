@@ -153,10 +153,7 @@ impl L1Cache {
     /// extends the cached tokens with a fresh encode of `input[byte_offset..]`;
     /// `deepest_boundary` is the deepest special-token boundary in `input` (end-exclusive),
     /// handed back so [`extend_after_match`] need not rescan the input for it.
-    pub fn longest_prefix_match(
-        &self,
-        input: &str,
-    ) -> Option<(Arc<[TokenIdType]>, usize, usize)> {
+    pub fn longest_prefix_match(&self, input: &str) -> Option<(Arc<[TokenIdType]>, usize, usize)> {
         let boundaries = self.boundaries(input);
 
         if boundaries.is_empty() {
@@ -327,8 +324,7 @@ impl L1Cache {
             // once and merge, identical to the non-extend hit path. Reserve exact capacity
             // so the prefix isn't re-copied by a Vec grow-realloc.
             let suffix_enc = tokenizer.encode(&input[prefix_len..])?;
-            let mut merged =
-                Vec::with_capacity(prefix_tokens.len() + suffix_enc.token_ids().len());
+            let mut merged = Vec::with_capacity(prefix_tokens.len() + suffix_enc.token_ids().len());
             merged.extend_from_slice(&prefix_tokens);
             merged.extend_from_slice(suffix_enc.token_ids());
             return Ok(merged);

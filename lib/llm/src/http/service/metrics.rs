@@ -1552,9 +1552,12 @@ impl ResponseMetricCollector {
                     .decode_worker_type
                     .as_deref()
                     .unwrap_or(WORKER_TYPE_DECODE);
-                self.decode_itl_gauge = Some(WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.with_label_values(
-                    &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type],
-                ));
+                self.decode_itl_gauge =
+                    Some(WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.with_label_values(&[
+                        worker_id_str.as_str(),
+                        dp_rank_str.as_str(),
+                        worker_type,
+                    ]));
             }
             if let Some(gauge) = &self.decode_itl_gauge {
                 gauge.set(itl);
@@ -2056,7 +2059,11 @@ mod tests {
         assert_eq!(isl.get_sample_sum(), 42.0);
 
         let itl = metrics.inter_token_latency.with_label_values(&[model]);
-        assert_eq!(itl.get_sample_count(), 4, "ITL observed once per token of 2nd chunk");
+        assert_eq!(
+            itl.get_sample_count(),
+            4,
+            "ITL observed once per token of 2nd chunk"
+        );
 
         let out = metrics
             .output_tokens_counter
