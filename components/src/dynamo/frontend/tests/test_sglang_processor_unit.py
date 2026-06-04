@@ -250,10 +250,12 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         )
         assert result["output_options"]["logprobs"] is None
 
-    def test_metadata_upload_nvext_is_forwarded_to_backend(self):
+    @pytest.mark.parametrize("stream", [True, False])
+    def test_metadata_upload_nvext_is_forwarded_to_backend(self, stream):
         result = _build_dynamo_preproc(
             {
                 "model": "test",
+                "stream": stream,
                 "nvext": {
                     "metadata_upload": {
                         "url": "s3://bucket/root/rollouts",
