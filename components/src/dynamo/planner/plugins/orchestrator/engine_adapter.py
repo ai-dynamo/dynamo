@@ -513,6 +513,17 @@ class OrchestratorEngineAdapter:
             diagnostics.predicted_osl = p.predicted_osl
             diagnostics.predicted_kv_hit_rate = p.predicted_kv_hit_rate
 
+        # Surface pipeline execute_action / short_circuit_reason /
+        # audit_events.  Same data is emitted as Prometheus
+        # ``tick_skip_reasons_total`` etc., but exposing it on
+        # ``TickDiagnostics`` lets in-process consumers (replay
+        # adapter, diagnostics recorder) distinguish ``apply`` from
+        # ``skip_short_circuit`` / ``skip_no_targets`` /
+        # ``skip_tick_timeout`` without scraping metrics.
+        diagnostics.execute_action = outcome.execute_action
+        diagnostics.short_circuit_reason = outcome.short_circuit_reason
+        diagnostics.audit_events = list(outcome.audit_events)
+
         # Surface builtin_load_propose's per-tick reason + estimates
         # onto ``TickDiagnostics`` so orchestrator-path logs + Prometheus
         # enum match the semantic detail PSM path has carried since v0.

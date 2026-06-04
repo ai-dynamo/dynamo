@@ -116,6 +116,48 @@ def test_orchestrator_path_honours_configured_protocol_version_range():
 
 
 @pytest.mark.asyncio
+async def test_tick_propagates_pipeline_execute_action_to_diagnostics():
+    """``PipelineOutcome.execute_action`` / ``short_circuit_reason`` /
+    ``audit_events`` must surface on ``PlannerEffects.diagnostics`` so
+    in-process consumers (replay adapter, diagnostics recorder) can
+    tell ``apply`` from ``skip_short_circuit`` / ``skip_no_targets`` /
+    ``skip_tick_timeout`` without scraping Prometheus.
+
+    Pre-fix the adapter created a fresh ``TickDiagnostics()`` and only
+    populated prediction / load / throughput fields — the three
+    execute-action fields were silently dropped.
+    """
+    from dynamo.planner.plugins.orchestrator.pipeline import PipelineOutcome
+
+    adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps())
+
+    canned_outcome = PipelineOutcome(
+        execute_action="skip_short_circuit",
+        final_proposal=None,
+        short_circuit_reason="propose: my-plugin: over-capacity",
+        audit_events=[
+            "chain_break_warning: predict-A set final=true at non-lowest priority"
+        ],
+    )
+
+    async def fake_tick(ctx, baseline):
+        return canned_outcome
+
+    adapter._orchestrator.tick = fake_tick  # type: ignore[method-assign]
+
+    initial_tick = adapter.initial_tick(start_s=0.0)
+    effects = await adapter.tick(initial_tick, TickInput(now_s=initial_tick.at_s))
+
+    assert effects.diagnostics.execute_action == "skip_short_circuit"
+    assert (
+        effects.diagnostics.short_circuit_reason == "propose: my-plugin: over-capacity"
+    )
+    assert effects.diagnostics.audit_events == [
+        "chain_break_warning: predict-A set final=true at non-lowest priority"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_bootstrap_registers_static_externals_before_bootstrap_fanout():
     """Static external plugins (``scheduling.external_plugins``) must be
     registered **before** the orchestrator-side Bootstrap fan-out so

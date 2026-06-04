@@ -156,6 +156,27 @@ class TickDiagnostics:
     # previous output is being reused).
     held_over_plugins: list[str] = field(default_factory=list)
 
+    # Pipeline execute_action — one of ``"apply"``,
+    # ``"skip_short_circuit"``, ``"skip_no_targets"``,
+    # ``"skip_tick_timeout"``.  Mirrors
+    # ``PipelineOutcome.execute_action``.  ``None`` on the PSM path
+    # (no pipeline).  Same information is also emitted as Prometheus
+    # ``tick_skip_reasons_total`` etc., but exposing it on
+    # ``PlannerEffects.diagnostics`` lets in-process consumers (replay
+    # adapter, diagnostics recorder) see the action without scraping
+    # metrics.
+    execute_action: Optional[str] = None
+
+    # Why a tick short-circuited (e.g. ``"propose: my-plugin: ..."``).
+    # Populated when ``execute_action == "skip_short_circuit"``; empty
+    # otherwise.  Mirrors ``PipelineOutcome.short_circuit_reason``.
+    short_circuit_reason: str = ""
+
+    # Audit-quality breadcrumbs emitted by the pipeline (chain-augment
+    # warnings, CONSTRAIN SET drops, etc.).  Mirrors
+    # ``PipelineOutcome.audit_events``.  Empty list on the PSM path.
+    audit_events: list[str] = field(default_factory=list)
+
 
 @dataclass
 class PlannerEffects:
