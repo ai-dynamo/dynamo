@@ -371,6 +371,10 @@ class SglangProcessor:
             )
         except InvalidArgument:
             raise
+        except PreprocessError as exc:
+            # User-facing preprocessing error (e.g. malformed response_format):
+            # surface as a client error, mirroring the pool path.
+            raise InvalidArgument(str(exc)) from exc
         except Exception as exc:
             logger.exception("SGLang preprocessing failed for request %s", request_id)
             raise Unknown(f"Preprocessing error: {exc}") from exc

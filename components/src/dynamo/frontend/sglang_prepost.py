@@ -24,7 +24,7 @@ from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.function_call.utils import get_json_schema_constraint
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 
-from .utils import random_call_id
+from .utils import PreprocessError, random_call_id
 
 logger = logging.getLogger(__name__)
 
@@ -244,14 +244,26 @@ def create_parsers(
     :class:`JsonArrayParser` (matching native SGLang) since guided decoding
     constrains the output to a JSON array.  Otherwise uses the model-specific
     :class:`FunctionCallParser`.
+
+    When a ``response_format`` JSON constraint is active (and no explicit
+    tool constraint takes precedence), both parsers are skipped: the
+    grammar forces the output to the client's JSON shape, so model-native
+    tool-call markers cannot appear, and reasoning text would either
+    violate the grammar or swallow the constrained JSON into
+    ``reasoning_content`` (mirrors the tool_choice guided-decoding gate).
     """
     if sglang_tools is None:
         sglang_tools = convert_tools(request.get("tools"))
     tool_choice = request.get("tool_choice", "auto")
 
+    tool_constraint_forced = _tool_constraint_forced(tool_choice)
+    response_format_active = (
+        not tool_constraint_forced and _response_format_constraint_requested(request)
+    )
+
     tool_call_parser: ToolCallParserType | None = None
-    if sglang_tools and tool_choice != "none":
-        if tool_choice == "required" or _is_named_tool_choice(tool_choice):
+    if sglang_tools and tool_choice != "none" and not response_format_active:
+        if tool_constraint_forced:
             tool_call_parser = JsonArrayParser()
         elif tool_call_parser_name:
             tool_call_parser = FunctionCallParser(
@@ -260,9 +272,7 @@ def create_parsers(
             )
 
     reasoning_parser = None
-    guided_decoding_active = tool_choice == "required" or _is_named_tool_choice(
-        tool_choice
-    )
+    guided_decoding_active = tool_constraint_forced or response_format_active
     if reasoning_parser_name and not guided_decoding_active:
         reasoning_parser = ReasoningParser(
             model_type=reasoning_parser_name,
@@ -279,6 +289,95 @@ def _is_named_tool_choice(tool_choice: Any) -> bool:
         and tool_choice.get("type") == "function"
         and isinstance(tool_choice.get("function"), dict)
         and bool(tool_choice["function"].get("name"))
+    )
+
+
+def _tool_constraint_forced(tool_choice: Any) -> bool:
+    """True when tool_choice itself forces a guided-decoding constraint.
+
+    Single source of truth for the precedence rule shared by
+    :func:`create_parsers` and :func:`preprocess_chat_request` -- if this
+    drifts between call sites, parser suppression and the installed grammar
+    can disagree (suppressed parsing with unconstrained output).
+    """
+    return tool_choice == "required" or _is_named_tool_choice(tool_choice)
+
+
+def _response_format_constraint_requested(request: dict[str, Any]) -> bool:
+    """True when ``response_format`` asks for grammar-constrained output."""
+    response_format = request.get("response_format")
+    return isinstance(response_format, dict) and response_format.get("type") in (
+        "json_object",
+        "json_schema",
+    )
+
+
+def build_response_format_guided_decoding(
+    request: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Map OpenAI ``response_format`` to a guided-decoding constraint.
+
+    Mirrors native SGLang's ``serving_chat`` handling:
+
+      * ``json_object``  -> generic JSON-object grammar (``{"type": "object"}``)
+      * ``json_schema``  -> the client-provided schema, grammar-enforced
+      * ``text`` / absent -> no constraint
+
+    Returns the same ``{"json": <schema dict>}`` shape that
+    :func:`build_tool_call_guided_decoding` produces, so the backend mapping
+    (``guided_decoding["json"]`` -> ``sampling_params["json_schema"]``) is
+    shared with the proven tool_choice path.  The schema must stay a dict:
+    the backend handler ``json.dumps``-es the value, so passing a
+    pre-serialized string here would double-encode it.
+
+    Like native SGLang, the json_schema schema is also accepted as the
+    top-level ``response_format.schema`` shorthand (native's
+    ``set_json_schema`` validator promotes it) and as a pre-serialized JSON
+    string (some SDKs serialize the schema).
+
+    SGLang's non-OpenAI ``structural_tag`` response_format extension is NOT
+    supported here and gets an explicit error rather than a silent drop.
+    Malformed ``response_format`` values raise :class:`PreprocessError` so
+    both the inline and pool paths surface a client error
+    (``InvalidArgument``) instead of a silent no-op or an opaque 500.
+    """
+    response_format = request.get("response_format")
+    if response_format is None:
+        return None
+    if not isinstance(response_format, dict):
+        raise PreprocessError("response_format must be an object")
+    rf_type = response_format.get("type")
+    if rf_type in (None, "text"):
+        return None
+    if rf_type == "json_object":
+        return {"json": {"type": "object"}}
+    if rf_type == "json_schema":
+        json_schema = response_format.get("json_schema")
+        if json_schema is None and "schema" in response_format:
+            # Native-SGLang shorthand: {"type": "json_schema", "schema": {...}}
+            # (protocol.py set_json_schema promotes the top-level key).
+            json_schema = {"schema": response_format.get("schema")}
+        if not isinstance(json_schema, dict):
+            raise PreprocessError(
+                "response_format.json_schema must be an object with a " "'schema' field"
+            )
+        schema = json_schema.get("schema")
+        if isinstance(schema, str):
+            try:
+                schema = json.loads(schema)
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise PreprocessError(
+                    f"response_format.json_schema.schema is not valid JSON: {exc}"
+                ) from exc
+        if not isinstance(schema, dict):
+            raise PreprocessError(
+                "response_format.json_schema.schema is required and must be "
+                "a JSON Schema object"
+            )
+        return {"json": schema}
+    raise PreprocessError(
+        f"Unsupported response_format type: {rf_type!r} "
+        "(supported: 'text', 'json_object', 'json_schema')"
     )
 
 
@@ -643,6 +742,38 @@ def preprocess_chat_request(
         tool_call_parser_name=tool_call_parser_name,
         sglang_tools=sglang_tools,
     )
+    # OpenAI ``response_format`` (json_object / json_schema).  Precedence:
+    # an explicit tool constraint (tool_choice="required"/named function)
+    # wins over response_format; response_format wins over the implicit
+    # tool-format constraint (structural tag) used for tool_choice="auto".
+    # The grammars cannot compose, so exactly one is installed.
+    #
+    # NOTE: the required/named case deliberately DIVERGES from native
+    # SGLang, which installs the response_format grammar first and then
+    # drops the tool constraint with a warning
+    # (protocol.py to_sampling_params "Constrained decoding is not
+    # compatible with tool calls.").  tool_choice="required"/named is the
+    # stronger, more explicit client contract ("the model MUST call a
+    # tool"); honoring response_format instead would silently break it.
+    # We keep the tool constraint and warn, the mirror image of native's
+    # warning.
+    if not _tool_constraint_forced(tool_choice):
+        response_format_guided = build_response_format_guided_decoding(request)
+        if response_format_guided is not None:
+            if guided_decoding is not None:
+                logger.debug(
+                    "response_format constraint replaces tool_choice=%r "
+                    "structure constraint",
+                    tool_choice,
+                )
+            guided_decoding = response_format_guided
+    elif _response_format_constraint_requested(request):
+        logger.warning(
+            "response_format ignored: tool_choice=%r forces a tool-call "
+            "constraint, which takes precedence (the two grammars cannot "
+            "compose)",
+            tool_choice,
+        )
 
     return SglangPreprocessResult(
         prompt_token_ids=prompt_token_ids,
