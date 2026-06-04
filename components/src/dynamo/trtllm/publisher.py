@@ -38,7 +38,7 @@ from prometheus_client import CollectorRegistry
 from dynamo.common.utils.prometheus import LLMBackendMetrics
 from dynamo.llm import FpmDirectPublisher, KvEventPublisher, WorkerMetricsPublisher
 
-logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 # Create a dedicated registry for dynamo_component metrics
 # This ensures these metrics are isolated and can be exposed via their own callback
@@ -780,7 +780,6 @@ class Publisher:
         return True
 
     def _handle_kv_event(self, event):
-        logging.debug(f"KV cache event received: {event}")
         # drop the events that is not emitted from the global attention layer.
         if self.should_drop_event(event):
             return
@@ -862,8 +861,16 @@ class Publisher:
             # Default to 0 for backwards compatibility with older TRT-LLM versions
             attention_dp_rank = event.get("attention_dp_rank", 0)
 
-            logging.debug(
-                f"publish stored event: engine_event_id: {event_id}, attention_dp_rank: {attention_dp_rank}, token_ids: {token_ids}, num_block_tokens: {num_block_tokens}, block_hashes: {block_hashes}, lora_name: {lora_name}, parent_hash: {parent_hash}"
+            logger.debug(
+                "Publishing stored KV event: engine_event_id=%s "
+                "attention_dp_rank=%s blocks=%s tokens=%s lora_name=%s "
+                "has_parent=%s",
+                event_id,
+                attention_dp_rank,
+                len(block_hashes),
+                len(token_ids),
+                lora_name,
+                parent_hash is not None,
             )
             # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
             # Note: event_id is managed internally by the publisher (monotonic counter per dp_rank)
@@ -899,23 +906,27 @@ class Publisher:
         elif data["type"] == "removed":
             self.processing_initial_created_events = False
             removed_block_hashes: list[int] = []
+            skipped_partial_blocks = 0
             for block_hash in data["block_hashes"]:
                 block_hash = _to_signed_i64(block_hash)
                 if block_hash is None:
                     continue
                 if block_hash in self.partial_block_hashes:
-                    logging.debug(
-                        f"Skipping removing block hash {block_hash} since it is a partial block"
-                    )
                     self.partial_block_hashes.remove(block_hash)
+                    skipped_partial_blocks += 1
                     continue
                 removed_block_hashes.append(block_hash)
 
             # Get attention_dp_rank from event (TRT-LLM includes this in KVCacheEvent)
             attention_dp_rank = event.get("attention_dp_rank", 0)
 
-            logging.debug(
-                f"publish removed event: engine_event_id: {event_id}, attention_dp_rank: {attention_dp_rank}, block_hashes: {removed_block_hashes}"
+            logger.debug(
+                "Publishing removed KV event: engine_event_id=%s "
+                "attention_dp_rank=%s blocks=%s skipped_partial_blocks=%s",
+                event_id,
+                attention_dp_rank,
+                len(removed_block_hashes),
+                skipped_partial_blocks,
             )
             # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
             # Note: event_id is managed internally by the publisher (monotonic counter per dp_rank)
