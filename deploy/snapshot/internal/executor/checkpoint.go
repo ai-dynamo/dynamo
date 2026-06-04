@@ -70,17 +70,39 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	if err := os.Mkdir(tmpDir, 0700); err != nil {
 		return fmt.Errorf("failed to create checkpoint staging directory: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	removeTmpDir := true
+	defer func() {
+		if !removeTmpDir {
+			return
+		}
+		if err := os.RemoveAll(tmpDir); err != nil {
+			log.Error(err, "Failed to remove checkpoint staging directory", "tmp_dir", tmpDir)
+		}
+	}()
 
 	// Phase 1: Inspect container state
 	state, err := inspectContainer(ctx, rt, log, req)
 	if err != nil {
+		if checkpointKeepFailedStagingEnabled() {
+			removeTmpDir = false
+			log.Info("Preserving failed checkpoint staging directory",
+				"tmp_dir", tmpDir,
+				"error", err.Error(),
+			)
+		}
 		return err
 	}
 
 	// Phase 2: Configure CRIU options and build checkpoint manifest
 	criuOpts, data, err := configureCheckpoint(log, state, req, cfg, tmpDir)
 	if err != nil {
+		if checkpointKeepFailedStagingEnabled() {
+			removeTmpDir = false
+			log.Info("Preserving failed checkpoint staging directory",
+				"tmp_dir", tmpDir,
+				"error", err.Error(),
+			)
+		}
 		return err
 	}
 	phaseTimings.PrepareDuration = time.Since(prepareStart)
@@ -88,6 +110,13 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	// Phase 3: Capture — CRIU dump, rootfs diff
 	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, log)
 	if err != nil {
+		if checkpointKeepFailedStagingEnabled() {
+			removeTmpDir = false
+			log.Info("Preserving failed checkpoint staging directory",
+				"tmp_dir", tmpDir,
+				"error", err.Error(),
+			)
+		}
 		return err
 	}
 	phaseTimings.CUDADuration = captureTimings.CUDADuration
@@ -101,8 +130,16 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		return fmt.Errorf("failed to remove previous checkpoint directory: %w", err)
 	}
 	if err := os.Rename(tmpDir, finalDir); err != nil {
+		if checkpointKeepFailedStagingEnabled() {
+			removeTmpDir = false
+			log.Info("Preserving failed checkpoint staging directory",
+				"tmp_dir", tmpDir,
+				"error", err.Error(),
+			)
+		}
 		return fmt.Errorf("failed to finalize checkpoint directory: %w", err)
 	}
+	removeTmpDir = false
 	phaseTimings.FinalizeDuration = time.Since(finalizeStart)
 
 	totalDuration := time.Since(checkpointStart)
@@ -252,17 +289,31 @@ func configureCheckpoint(
 func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir string, log logr.Logger) (*checkpointPhaseTimings, error) {
 	timings := &checkpointPhaseTimings{}
 
+	if checkpointDiagnosticsEnabled() {
+		writeCheckpointProcessDiagnostics(ctx, checkpointDir, "before-cuda-checkpoint", state, log)
+	}
+
 	// CUDA lock+checkpoint must happen before CRIU dump
 	if len(state.CUDAHostPIDs) > 0 {
 		cudaTimings, err := cuda.LockAndCheckpointProcessTree(ctx, state.CUDAHostPIDs, log)
 		if err != nil {
+			if checkpointDiagnosticsEnabled() {
+				writeCheckpointProcessDiagnostics(ctx, checkpointDir, "after-cuda-checkpoint-failure", state, log)
+			}
 			return nil, fmt.Errorf("CUDA checkpoint failed: %w", err)
 		}
 		timings.CUDADuration = cudaTimings.TotalDuration
 	}
 
+	if checkpointDiagnosticsEnabled() {
+		writeCheckpointProcessDiagnostics(ctx, checkpointDir, "after-cuda-checkpoint", state, log)
+	}
+
 	criuDumpDuration, err := criu.ExecuteDump(criuOpts, checkpointDir, criuSettings, log)
 	if err != nil {
+		if checkpointDiagnosticsEnabled() {
+			writeCheckpointProcessDiagnostics(ctx, checkpointDir, "after-criu-dump-failure", state, log)
+		}
 		return nil, err
 	}
 	timings.CRIUDumpDuration = criuDumpDuration
