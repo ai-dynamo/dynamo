@@ -73,11 +73,7 @@ class TestIsPrefillCard:
 
 
 def _card(worker_type: str = "decode", **runtime_config_overrides) -> dict:
-    """Build a minimal realistic card_json payload.
-
-    The worker role is carried by the card's ``worker_type`` field
-    (defaults to "decode" here).
-    """
+    """Build a minimal realistic card_json payload."""
     return {
         "display_name": "meta-llama/Llama-3.1-8B",
         "model_type": 2,  # Completions
