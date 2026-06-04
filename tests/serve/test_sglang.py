@@ -424,9 +424,7 @@ sglang_configs = {
             # post_merge: NIXL stubs outside docker can lack the Decoded
             # transport path. Same gating as vLLM's FD case
             # (tests/serve/multimodal_profiles/vllm.py:67-70).
-            # TEMP(revert-before-merge): pre_merge to validate the cuda13
-            # nixl_cu13 fix in this PR's CI; restore to post_merge before merge.
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
         ],
         model="Qwen/Qwen3.5-0.8B",
         script_args=[
