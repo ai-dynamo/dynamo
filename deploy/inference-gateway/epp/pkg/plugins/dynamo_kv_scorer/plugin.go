@@ -267,6 +267,7 @@ func SerializeEndpointsToJSON(endpoints []schedtypes.Endpoint) (string, error) {
 				UpdateTime:              m.UpdateTime,
 			}
 		}
+
 		out = append(out, entry)
 	}
 
