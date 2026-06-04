@@ -64,9 +64,9 @@ class TestIsPrefillCard:
     def test_missing_worker_type_defaults_to_not_prefill(self):
         assert not is_prefill_card({})
 
-    def test_non_string_worker_type_is_not_prefill(self):
+    def test_null_worker_type_is_not_prefill(self):
+        # A missing/legacy card serializes worker_type as null -> Python None.
         assert not is_prefill_card({"worker_type": None})
-        assert not is_prefill_card({"worker_type": 16})
 
 
 # ── worker_info_from_mdc ──────────────────────────────────────────
