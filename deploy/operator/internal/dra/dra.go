@@ -11,7 +11,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
@@ -35,41 +34,57 @@ const (
 
 // ApplyClaim replaces the first container's scalar GPU resources with a shared
 // DRA ResourceClaim. Every container that references this claim name will share
-// the same physical GPUs. The function is idempotent — calling it on a pod that
-// already has the claim is a no-op.
+// the same physical GPUs.
 func ApplyClaim(podSpec *corev1.PodSpec, claimTemplateName string) error {
 	if len(podSpec.Containers) == 0 {
 		return fmt.Errorf("pod spec must have at least one container for DRA claim")
 	}
 
-	// Skip if the pod-level claim already exists (idempotent).
-	for i := range podSpec.ResourceClaims {
-		if podSpec.ResourceClaims[i].Name == ClaimName {
-			return nil
-		}
-	}
-
 	// Replace GPU resources with the shared DRA claim. The resource name can be
 	// nvidia.com/gpu or a MIG shape such as nvidia.com/mig-3g.20gb.
-	RemoveGPUResources(podSpec.Containers[0].Resources.Limits)
-	RemoveGPUResources(podSpec.Containers[0].Resources.Requests)
-	podSpec.Containers[0].Resources.Claims = append(podSpec.Containers[0].Resources.Claims, corev1.ResourceClaim{
-		Name: ClaimName,
-	})
+	container := &podSpec.Containers[0]
+	RemoveGPUResources(container.Resources.Limits)
+	RemoveGPUResources(container.Resources.Requests)
+	hasClaim := false
+	for i := range container.Resources.Claims {
+		if container.Resources.Claims[i].Name == ClaimName {
+			hasClaim = true
+			break
+		}
+	}
+	if !hasClaim {
+		container.Resources.Claims = append(container.Resources.Claims, corev1.ResourceClaim{Name: ClaimName})
+	}
 
 	// GPU nodes are typically tainted with nvidia.com/gpu=NoSchedule. DRA
 	// bypasses the device-plugin toleration injection, so add it explicitly.
-	podSpec.Tolerations = append(podSpec.Tolerations, corev1.Toleration{
-		Key:      commonconsts.KubeResourceGPUNvidia,
-		Operator: corev1.TolerationOpExists,
-		Effect:   corev1.TaintEffectNoSchedule,
-	})
+	hasToleration := false
+	for i := range podSpec.Tolerations {
+		toleration := podSpec.Tolerations[i]
+		if toleration.Key == commonconsts.KubeResourceGPUNvidia && toleration.Effect == corev1.TaintEffectNoSchedule {
+			hasToleration = true
+			break
+		}
+	}
+	if !hasToleration {
+		podSpec.Tolerations = append(podSpec.Tolerations, corev1.Toleration{
+			Key:      commonconsts.KubeResourceGPUNvidia,
+			Operator: corev1.TolerationOpExists,
+			Effect:   corev1.TaintEffectNoSchedule,
+		})
+	}
 
-	podSpec.ResourceClaims = append(podSpec.ResourceClaims, corev1.PodResourceClaim{
+	claim := corev1.PodResourceClaim{
 		Name:                      ClaimName,
 		ResourceClaimTemplateName: &claimTemplateName,
-	})
-
+	}
+	for i := range podSpec.ResourceClaims {
+		if podSpec.ResourceClaims[i].Name == ClaimName {
+			podSpec.ResourceClaims[i] = claim
+			return nil
+		}
+	}
+	podSpec.ResourceClaims = append(podSpec.ResourceClaims, claim)
 	return nil
 }
 
@@ -77,15 +92,6 @@ func ApplyClaim(podSpec *corev1.PodSpec, claimTemplateName string) error {
 // ResourceClaimTemplate associated with a component.
 func ResourceClaimTemplateName(parentName, componentName string) string {
 	return fmt.Sprintf("%s-%s-gpu", parentName, strings.ToLower(componentName))
-}
-
-func ExtractGPUParamsFromResourceRequirements(gmsSpec *v1beta1.GPUMemoryServiceSpec, resources corev1.ResourceRequirements) (gpuCount int, deviceClassName string, err error) {
-	if gmsSpec == nil {
-		return 0, "", nil
-	}
-	deviceClassName = gmsSpec.DeviceClassName
-	gpuCount, err = ExtractGPUCountFromResourceRequirements(resources)
-	return gpuCount, deviceClassName, err
 }
 
 func ExtractGPUCountFromResourceRequirements(resources corev1.ResourceRequirements) (int, error) {

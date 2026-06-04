@@ -68,12 +68,14 @@ pub fn parse_server_info(json_info: &str) -> SglangServerInfo {
                 .map(|(h, _)| h.to_string())
                 .unwrap_or(addr)
         }),
-        disaggregation_mode: v.get("disaggregation_mode").and_then(|v| match v.as_str()? {
-            "prefill" => Some(DisaggregationMode::Prefill),
-            "decode" => Some(DisaggregationMode::Decode),
-            "null" | "" => Some(DisaggregationMode::Aggregated),
-            _ => None,
-        }),
+        disaggregation_mode: v
+            .get("disaggregation_mode")
+            .and_then(|v| match v.as_str()? {
+                "prefill" => Some(DisaggregationMode::Prefill),
+                "decode" => Some(DisaggregationMode::Decode),
+                "null" | "" => Some(DisaggregationMode::Aggregated),
+                _ => None,
+            }),
         kv_events: v
             .get("kv_events_config")
             .and_then(|v| v.as_str())
@@ -148,7 +150,10 @@ mod tests {
         assert_eq!(info.max_total_num_tokens, Some(1048576));
         assert_eq!(info.bootstrap_port, Some(8998));
         assert_eq!(info.bootstrap_host.as_deref(), Some("10.0.0.1"));
-        assert!(matches!(info.disaggregation_mode, Some(DisaggregationMode::Prefill)));
+        assert!(matches!(
+            info.disaggregation_mode,
+            Some(DisaggregationMode::Prefill)
+        ));
 
         // Empty string served name → None.
         let info = parse_server_info(r#"{"model_path": "X", "served_model_name": ""}"#);
@@ -157,7 +162,10 @@ mod tests {
 
         // "null" mode (SGLang default) → Aggregated.
         let info = parse_server_info(r#"{"disaggregation_mode": "null"}"#);
-        assert!(matches!(info.disaggregation_mode, Some(DisaggregationMode::Aggregated)));
+        assert!(matches!(
+            info.disaggregation_mode,
+            Some(DisaggregationMode::Aggregated)
+        ));
 
         // Out-of-range u32 silently drops (rather than wrapping).
         let info = parse_server_info(r#"{"page_size": 4294967296}"#);
@@ -204,9 +212,18 @@ mod tests {
 
     #[test]
     fn offset_endpoint_port_matches_sglang() {
-        assert_eq!(offset_endpoint_port("tcp://*:5557", 0).as_deref(), Some("tcp://*:5557"));
-        assert_eq!(offset_endpoint_port("tcp://*:5557", 1).as_deref(), Some("tcp://*:5558"));
-        assert_eq!(offset_endpoint_port("tcp://*:5557", 4).as_deref(), Some("tcp://*:5561"));
+        assert_eq!(
+            offset_endpoint_port("tcp://*:5557", 0).as_deref(),
+            Some("tcp://*:5557")
+        );
+        assert_eq!(
+            offset_endpoint_port("tcp://*:5557", 1).as_deref(),
+            Some("tcp://*:5558")
+        );
+        assert_eq!(
+            offset_endpoint_port("tcp://*:5557", 4).as_deref(),
+            Some("tcp://*:5561")
+        );
         assert!(offset_endpoint_port("udp://x:5557", 1).is_none());
         assert!(offset_endpoint_port("tcp://*:notaport", 1).is_none());
     }

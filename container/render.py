@@ -78,9 +78,9 @@ def parse_args():
     parser.add_argument(
         "--cuda-version",
         type=str,
-        default="12.9",
-        choices=["12.9", "13.0", "13.1"],
-        help="CUDA version to use. [12.9 or 13.0 for vllm and sglang, 13.1 for trtllm].  Not required for non-cuda devices.",
+        default="13.0",
+        choices=["13.0", "13.1"],
+        help="CUDA version to use. [13.0 for vllm and sglang, 13.1 for trtllm].  Not required for non-cuda devices.",
     )
     parser.add_argument("--make-efa", action="store_true", help="Enable AWS EFA")
     parser.add_argument(
@@ -108,7 +108,7 @@ def validate_args(args):
                 "wheel_builder",
                 "base",
             ],
-            "cuda_version": ["12.9", "13.0"],
+            "cuda_version": ["13.0"],
         },
         "trtllm": {
             "device": ["cuda"],
@@ -116,7 +116,6 @@ def validate_args(args):
                 "runtime",
                 "dev",
                 "local-dev",
-                "framework",
                 "wheel_builder",
                 "base",
             ],
@@ -131,7 +130,7 @@ def validate_args(args):
                 "wheel_builder",
                 "base",
             ],
-            "cuda_version": ["12.9", "13.0"],
+            "cuda_version": ["13.0"],
         },
         "dynamo": {
             "device": ["cuda"],
@@ -144,7 +143,7 @@ def validate_args(args):
                 "wheel_builder",
                 "base",
             ],
-            "cuda_version": ["12.9", "13.0"],
+            "cuda_version": ["13.0"],
         },
     }
 

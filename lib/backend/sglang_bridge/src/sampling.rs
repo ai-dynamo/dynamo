@@ -7,10 +7,7 @@ use dynamo_backend_common::{FinishReason, SamplingOptions, StopConditions};
 
 use crate::proto::v1::SamplingParams;
 
-pub fn build_sampling_params(
-    sampling: &SamplingOptions,
-    stop: &StopConditions,
-) -> SamplingParams {
+pub fn build_sampling_params(sampling: &SamplingOptions, stop: &StopConditions) -> SamplingParams {
     let (json_schema, regex) = build_structured_constraint(sampling);
     SamplingParams {
         temperature: sampling.temperature,
@@ -102,8 +99,14 @@ mod tests {
     #[test]
     fn parses_known_finish_reasons() {
         assert!(matches!(parse_finish_reason("stop"), FinishReason::Stop));
-        assert!(matches!(parse_finish_reason("length"), FinishReason::Length));
-        assert!(matches!(parse_finish_reason("abort"), FinishReason::Cancelled));
+        assert!(matches!(
+            parse_finish_reason("length"),
+            FinishReason::Length
+        ));
+        assert!(matches!(
+            parse_finish_reason("abort"),
+            FinishReason::Cancelled
+        ));
         assert!(matches!(parse_finish_reason(""), FinishReason::Error(_)));
         match parse_finish_reason("???") {
             FinishReason::Error(msg) => assert!(msg.contains("???")),

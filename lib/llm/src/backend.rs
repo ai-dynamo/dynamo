@@ -388,7 +388,9 @@ impl
                     index: data.index,
                     completion_usage: data.completion_usage,
                     disaggregated_params: data.disaggregated_params,
+                    worker_trace_link: data.worker_trace_link,
                     engine_data: data.engine_data,
+                    routing_data: data.routing_data,
                 })
             })
         });

@@ -7,9 +7,7 @@ const PROTO_PATH: &str = "proto/sglang/runtime/v1/sglang.proto";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !Path::new(PROTO_PATH).exists() {
-        println!(
-            "cargo:warning=Proto missing at {PROTO_PATH}; running scripts/sync-proto.sh"
-        );
+        println!("cargo:warning=Proto missing at {PROTO_PATH}; running scripts/sync-proto.sh");
         let status = std::process::Command::new("bash")
             .arg("scripts/sync-proto.sh")
             .status()?;

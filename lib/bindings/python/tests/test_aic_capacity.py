@@ -3,7 +3,13 @@
 
 import pytest
 
-from dynamo._internal.aic import AicSession, resolve_backend_version
+from dynamo._internal.aic import (
+    _DEFAULT_NEXTN_ACCEPT_RATES,
+    _NEXTN_ACCEPT_RATES_LEN,
+    AicSession,
+    _pad_nextn_accept_rates,
+    resolve_backend_version,
+)
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -87,9 +93,17 @@ def test_estimate_num_gpu_blocks_uses_sglang_static_memory_fraction():
     assert blocks == 37
 
 
-def test_trtllm_version_resolution_still_supports_latency_configs():
+def test_trtllm_version_resolution():
     assert resolve_backend_version("trtllm", "0.20.0") == "0.20.0"
 
+
+def test_estimate_num_gpu_blocks_uses_trtllm_free_memory_fraction():
+    # TRT-LLM now supports KV capacity estimation (it previously raised). It
+    # applies free_gpu_memory_fraction to the memory left *after* the model
+    # footprint, unlike vLLM's gpu_memory_utilization (a fraction of total):
+    #   non_kv = total - kvcache       = 400 - 50   = 350 GiB
+    #   free   = capacity - non_kv     = 1000 - 350  = 650 GiB
+    #   blocks = floor(free * fraction / block_bytes)
     session = make_session(
         "trtllm",
         {
@@ -102,9 +116,45 @@ def test_trtllm_version_resolution_still_supports_latency_configs():
         },
     )
 
-    with pytest.raises(ValueError, match="KV cache capacity estimation"):
+    # Default free_gpu_memory_fraction (0.9): floor(650 * 0.9 / 10) = 58.
+    # gpu_memory_utilization is accepted for signature parity but ignored here.
+    assert (
         session.estimate_num_gpu_blocks(
             block_size=10,
             max_num_batched_tokens=128,
             gpu_memory_utilization=0.8,
         )
+        == 58
+    )
+
+    # Explicit free_gpu_memory_fraction drives the budget: floor(650 * 0.8 / 10) = 52.
+    assert (
+        session.estimate_num_gpu_blocks(
+            block_size=10,
+            max_num_batched_tokens=128,
+            free_gpu_memory_fraction=0.8,
+        )
+        == 52
+    )
+
+
+def test_pad_nextn_accept_rates_defaults_when_omitted():
+    # Omitted/empty input falls back to AIC's CLI default, not all zeros.
+    assert _pad_nextn_accept_rates(None) == _DEFAULT_NEXTN_ACCEPT_RATES
+    assert _pad_nextn_accept_rates("") == _DEFAULT_NEXTN_ACCEPT_RATES
+    assert _pad_nextn_accept_rates([]) == _DEFAULT_NEXTN_ACCEPT_RATES
+
+
+def test_pad_nextn_accept_rates_pads_and_truncates():
+    assert _pad_nextn_accept_rates([0.9, 0.4]) == [0.9, 0.4, 0.0, 0.0, 0.0]
+    assert _pad_nextn_accept_rates("0.9,0.4") == [0.9, 0.4, 0.0, 0.0, 0.0]
+    assert _pad_nextn_accept_rates([0.1] * 7) == [0.1] * _NEXTN_ACCEPT_RATES_LEN
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["0.85,abc,0", [1.5, 0.0], [-0.1, 0.0], [float("nan")], [float("inf")]],
+)
+def test_pad_nextn_accept_rates_rejects_invalid(bad):
+    with pytest.raises(ValueError):
+        _pad_nextn_accept_rates(bad)

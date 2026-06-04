@@ -32,6 +32,10 @@ logger = logging.getLogger(__name__)
 _ENDPOINT_DISCOVERY_TIMEOUT_S = 10.0
 
 
+class PreDeploymentMetricsUnavailableError(RuntimeError):
+    """Raised when no pre-deployment FPM source produced usable data."""
+
+
 async def fetch_pre_deployment_metrics(
     runtime: "object",  # DistributedRuntime; typed loosely to avoid hard import
     namespace: str,
@@ -98,7 +102,7 @@ async def fetch_pre_deployment_metrics(
                 f"Failed to load profiling data from {profile_results_dir}: {e}"
             )
 
-    raise RuntimeError(
+    raise PreDeploymentMetricsUnavailableError(
         "Failed to obtain pre-deployment performance data. Either enable the "
         "get_perf_metrics endpoint on the worker, provide an aic_interpolation "
         "spec (rapid mode), or supply profiling results via profile_results_dir."

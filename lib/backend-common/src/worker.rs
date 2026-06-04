@@ -14,8 +14,13 @@ use std::time::Duration;
 
 use dynamo_llm::local_model::LocalModel;
 use dynamo_llm::local_model::LocalModelBuilder;
-use dynamo_llm::local_model::runtime_config::{DisaggregatedEndpoint, ModelRuntimeConfig};
+use dynamo_llm::local_model::runtime_config::{
+    DisaggregatedEndpoint, ModelRuntimeConfig, StructuralTagMode, StructuralTagSchemaMode,
+    StructuralTagScope,
+};
 use dynamo_llm::model_type::{ModelInput, ModelType};
+use dynamo_llm::worker_type::WorkerType;
+use dynamo_runtime::engine_routes::EngineRouteCallback;
 use dynamo_runtime::pipeline::network::Ingress;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{DistributedRuntime, Runtime};
@@ -34,6 +39,10 @@ const DEFAULT_GRACE_PERIOD_SECS: f64 = 5.0;
 /// Environment variable name for overriding the grace-period.
 /// Shared with the Python helper so a single env var controls both.
 const GRACE_PERIOD_ENV: &str = "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS";
+
+/// Operator override for the health-check canary, mirrors the Python helper
+/// in `lib/bindings/python/src/dynamo/health_check.py`.
+const HEALTH_CHECK_PAYLOAD_ENV: &str = "DYN_HEALTH_CHECK_PAYLOAD";
 
 /// Runtime / transport configuration applied to the process before the
 /// distributed runtime is constructed.
@@ -133,6 +142,17 @@ pub struct WorkerConfig {
     /// but force-disables the local KV indexer because decode workers do not
     /// host the indexer endpoint.
     pub disaggregation_mode: DisaggregationMode,
+    /// Operator override. `Worker` resolves precedence: this field >
+    /// `DYN_HEALTH_CHECK_PAYLOAD` env > `engine.health_check_payload()`.
+    /// Python sets this via `--health-check-payload` / env; Rust-only
+    /// engines leave it `None` and let `Worker` read the env directly.
+    pub health_check_payload: Option<serde_json::Value>,
+    /// Structural tag guided decoding mode.
+    pub structural_tag_mode: StructuralTagMode,
+    /// Structural tag activation scope.
+    pub structural_tag_scope: StructuralTagScope,
+    /// Structural tag schema strictness.
+    pub structural_tag_schema: StructuralTagSchemaMode,
     /// Runtime / transport overrides applied via env vars before the
     /// `DistributedRuntime` is constructed.
     pub runtime: RuntimeConfig,
@@ -141,7 +161,9 @@ pub struct WorkerConfig {
 /// Engine-reported mode (from `start()`) wins; else operator's
 /// `WorkerConfig.disaggregation_mode`.
 fn resolve_disagg_mode(worker: &WorkerConfig, engine: &EngineConfig) -> DisaggregationMode {
-    engine.engine_disaggregation_mode.unwrap_or(worker.disaggregation_mode)
+    engine
+        .engine_disaggregation_mode
+        .unwrap_or(worker.disaggregation_mode)
 }
 
 impl Default for WorkerConfig {
@@ -162,6 +184,10 @@ impl Default for WorkerConfig {
             enable_kv_routing: true,
             metrics_labels: Vec::new(),
             disaggregation_mode: DisaggregationMode::Aggregated,
+            health_check_payload: None,
+            structural_tag_mode: StructuralTagMode::Off,
+            structural_tag_scope: StructuralTagScope::Auto,
+            structural_tag_schema: StructuralTagSchemaMode::Auto,
             runtime: RuntimeConfig::default(),
         }
     }
@@ -194,6 +220,11 @@ pub struct Worker {
     state: LifecycleState,
     /// KV-aware-routing publisher handles. Drained in `cleanup_once` while NATS is alive.
     publishers: Option<PublisherHandles>,
+    /// Framework-owned lifecycle gauges. Set in `setup_publishing` after
+    /// `engine.start()` succeeds; observed in `cleanup_once` and the drain
+    /// step. Always present once `start()` returns Ok, independent of
+    /// whether the engine returned a component publisher.
+    lifecycle: Option<crate::metrics::LifecycleGauges>,
 }
 
 impl Worker {
@@ -203,6 +234,7 @@ impl Worker {
             config,
             state: LifecycleState::Init,
             publishers: None,
+            lifecycle: None,
         }
     }
 
@@ -370,15 +402,36 @@ impl Worker {
         // unique-per-replica by construction; engines see only an opaque
         // `worker_id`.
         let worker_id = drt.connection_id();
+        let engine_start = std::time::Instant::now();
         let engine_config = self.start_engine(worker_id).await?;
+        let model_load_time_seconds = engine_start.elapsed().as_secs_f64();
         tracing::debug!(
             model = %engine_config.model,
             worker_id,
+            model_load_time_seconds,
             "engine.start() complete"
         );
 
-        self.setup_kv_aware_publishers(&component, &engine_config)
-            .await?;
+        // Engine builds its EngineMetrics once. `setup_metrics` is the
+        // single hook for both foreign-registry expfmt callbacks (side-
+        // effect on engine_metrics) and the structured component publisher
+        // (returned in MetricsBindings).
+        let engine_metrics =
+            crate::metrics::EngineMetrics::with_engine_config(endpoint.clone(), &engine_config);
+
+        // Framework-owned lifecycle gauges (cleanup_time, drain_time,
+        // model_load_time) — always emitted, regardless of engine opt-in.
+        let lifecycle =
+            crate::metrics::LifecycleGauges::new(&engine_metrics, model_load_time_seconds)?;
+
+        self.setup_publishing(
+            &component,
+            &engine_config,
+            &engine_metrics,
+            model_load_time_seconds,
+            lifecycle,
+        )
+        .await?;
 
         // Mid-start signal: engine.start() ran to completion but a signal
         // arrived during it. Skip the serve loop and run the orchestrator
@@ -394,44 +447,92 @@ impl Worker {
             .await
     }
 
-    /// Build KV-event and worker-metric publishers from the engine's source
-    /// declarations. No-op if `enable_kv_routing` is off, the engine declares
-    /// no sources, or `engine_config.kv_cache_block_size` is unset.
-    async fn setup_kv_aware_publishers(
+    /// Build KV-event publishers and the `SnapshotPublisher` from the
+    /// engine's declarations. KV events flow on the engine's own threads
+    /// (via Push or ZMQ); snapshot writes flow through the publisher
+    /// inline (no polling, no GIL on the framework side). No-op if
+    /// `enable_kv_routing` is off, the engine returned no sources +
+    /// no dp_ranks, or `engine_config.kv_cache_block_size` is unset for
+    /// KV events.
+    async fn setup_publishing(
         &mut self,
         component: &dynamo_runtime::component::Component,
         engine_config: &EngineConfig,
+        engine_metrics: &crate::metrics::EngineMetrics,
+        model_load_time_seconds: f64,
+        lifecycle: crate::metrics::LifecycleGauges,
     ) -> Result<(), DynamoError> {
+        let ctx = crate::engine::MetricsCtx {
+            model: &engine_config.model,
+            component: &self.config.component,
+            model_load_time_seconds,
+            metrics: engine_metrics,
+        };
+        let bindings = self.engine.setup_metrics(ctx).await?;
+
         if !self.config.enable_kv_routing {
-            tracing::debug!("enable_kv_routing=false; skipping kv_event_sources / metrics_sources");
+            tracing::debug!("enable_kv_routing=false; skipping kv/snapshot publishers");
+            self.lifecycle = Some(lifecycle);
             return Ok(());
         }
         let kv_sources = self.engine.kv_event_sources().await?;
-        let metrics_snapshots = self.engine.metrics_sources().await?;
-        if kv_sources.is_empty() && metrics_snapshots.is_empty() {
-            tracing::debug!(
-                "engine returned no KV/metrics sources; KV-aware routing disabled for this worker"
-            );
+        if kv_sources.is_empty() && bindings.dp_ranks.is_empty() {
+            tracing::debug!("engine returned no KV sources / dp_ranks; KV-aware routing disabled");
+            self.lifecycle = Some(lifecycle);
             return Ok(());
         }
         let mode = resolve_disagg_mode(&self.config, engine_config);
         let enable_local_indexer = self.config.enable_local_indexer && !mode.is_decode();
         tracing::debug!(
             kv_sources = kv_sources.len(),
-            metrics_sources = metrics_snapshots.len(),
+            snapshot_dp_ranks = bindings.dp_ranks.len(),
             enable_local_indexer,
             kv_cache_block_size = ?engine_config.kv_cache_block_size,
             "Starting KV-aware-routing publishers"
         );
         let handles = setup_publishers(
             component,
+            engine_metrics,
             kv_sources,
-            metrics_snapshots,
+            bindings.dp_ranks,
+            bindings.on_publisher_ready,
             engine_config.kv_cache_block_size,
             enable_local_indexer,
         )
         .await?;
         self.publishers = Some(handles);
+        self.lifecycle = Some(lifecycle);
+        Ok(())
+    }
+
+    /// Register advertised engine controls on the runtime system server.
+    async fn register_engine_controls(
+        &self,
+        endpoint: &dynamo_runtime::component::Endpoint,
+    ) -> Result<(), DynamoError> {
+        let controls = self.engine.supported_controls().await?;
+        if controls.is_empty() {
+            tracing::debug!("engine returned no management controls");
+            return Ok(());
+        }
+
+        let registry = endpoint.drt().engine_routes();
+        let control_count = controls.len();
+        // Serialize discovery-mutating controls so a concurrent resume cannot
+        // re-register the endpoint between a pause control's unregister and
+        // its engine-state mutation (and vice versa).
+        let control_lock = Arc::new(tokio::sync::Mutex::new(()));
+        for control_name in controls {
+            let callback = engine_control_callback(control_name.clone(), self.engine.clone());
+            let callback = wrap_engine_control_callback(
+                control_name.clone(),
+                callback,
+                endpoint.clone(),
+                control_lock.clone(),
+            );
+            registry.register(&control_name, callback);
+        }
+        tracing::info!(control_count, "registered engine management controls");
         Ok(())
     }
 
@@ -487,16 +588,23 @@ impl Worker {
             }
             LifecycleState::Running | LifecycleState::StartFailed => {}
         }
+        let cleanup_start = std::time::Instant::now();
         match self.engine.cleanup().await {
             Ok(()) => tracing::info!("Engine cleanup complete"),
             Err(e) => tracing::error!(error = %e, "engine cleanup failed"),
         }
-        // Stop publisher metric loops AFTER engine.cleanup so the engine's
-        // last metric snapshots get published. Then drop the handles so the
-        // publishers' own tokio tasks drain while NATS is still alive.
-        if let Some(mut handles) = self.publishers.take() {
-            handles.shutdown().await;
+        let cleanup_elapsed = cleanup_start.elapsed().as_secs_f64();
+        // Record cleanup latency on dynamo_component_cleanup_time_seconds.
+        // The gauge is operator-useful when scraped in the brief window
+        // between cleanup-complete and pod-terminate.
+        if let Some(lifecycle) = self.lifecycle.as_ref() {
+            lifecycle.observe_cleanup_time(cleanup_elapsed);
         }
+        // Drop publisher handles AFTER engine.cleanup so the engine's
+        // last snapshot writes complete. There is no background task to
+        // join — snapshot writes are event-driven (engine pushes
+        // synchronously); KV-event publishers own their own threads.
+        self.publishers = None;
         // Mark stopped even on failure so a follow-up call no-ops; engines
         // like vLLM/TRT-LLM tear down NCCL groups in cleanup() and a second
         // attempt can hang or raise.
@@ -513,11 +621,19 @@ impl Worker {
     ) -> Result<(), DynamoError> {
         let mode = resolve_disagg_mode(&self.config, engine_config);
         let model_type = resolve_model_type(mode, &self.config.endpoint_types)?;
+        let (worker_type, needs) = resolve_worker_type_and_needs(mode);
 
         let mut local_model = build_local_model(&self.config, engine_config, mode).await?;
         tracing::debug!("local model built");
         local_model
-            .attach(&endpoint, model_type, self.config.model_input, None)
+            .attach(
+                &endpoint,
+                model_type,
+                self.config.model_input,
+                None,
+                Some(worker_type),
+                needs,
+            )
             .await
             .map_err(|e| {
                 err(
@@ -526,6 +642,7 @@ impl Worker {
                 )
             })?;
         tracing::debug!("model registered with discovery");
+        self.register_engine_controls(&endpoint).await?;
 
         let served = resolve_served_name(&self.config, engine_config)
             .unwrap_or_else(|| engine_config.model.clone());
@@ -537,11 +654,8 @@ impl Worker {
             self.config.endpoint
         );
 
-        let ingress = Ingress::for_engine(Arc::new(EngineAdapter::new(
-            self.engine.clone(),
-            mode,
-        )))
-        .map_err(|e| {
+        let engine_adapter = Arc::new(EngineAdapter::new(self.engine.clone(), mode));
+        let ingress = Ingress::for_engine(engine_adapter.clone()).map_err(|e| {
             err(
                 ErrorType::Backend(BackendError::Unknown),
                 format!("ingress: {e}"),
@@ -562,13 +676,50 @@ impl Worker {
         // — discovery unregister, grace period, drain, cleanup — finishes.
         let _orchestrator_registration = endpoint.drt().register_graceful_task();
 
+        // Precedence: WorkerConfig (Python argparse plumbs CLI/env here) >
+        // DYN_HEALTH_CHECK_PAYLOAD env (backstop for Rust-only engines) >
+        // engine default. Every override path stamps the `_HEALTH_CHECK`
+        // marker so engines can branch on `is_probe(request)` regardless of
+        // where the payload came from.
+        let probe = match std::mem::take(&mut self.config.health_check_payload)
+            .or_else(load_health_check_payload_from_env)
+        {
+            Some(p) => stamp_canary_marker(p),
+            None => self
+                .engine
+                .health_check_payload()
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        error = %e,
+                        "engine.health_check_payload() failed; canary disabled for this endpoint",
+                    );
+                    None
+                })
+                .and_then(stamp_canary_marker),
+        };
+
         let mut builder = endpoint
             .endpoint_builder()
             .handler(ingress)
             .metrics_labels(metrics_labels)
             .graceful_shutdown(true);
-        if let Some(payload) = engine_config.health_check_payload.clone() {
+        if let Some(payload) = probe {
             builder = builder.health_check_payload(payload);
+            // The runtime's `HealthCheckManager` fires the canary by looking
+            // up a `LocalAsyncEngine` for this endpoint name. Register a
+            // JSON-shaped wrapper over our `EngineAdapter` so the probe
+            // exercises the same `generate()` path as real traffic.
+            builder = builder
+                .register_local_engine(Arc::new(crate::adapter::JsonProbeAdapter::new(
+                    engine_adapter,
+                )))
+                .map_err(|e| {
+                    err(
+                        ErrorType::Backend(BackendError::Unknown),
+                        format!("register_local_engine: {e}"),
+                    )
+                })?;
         }
         let serve_fut = builder.start();
         tokio::pin!(serve_fut);
@@ -621,8 +772,13 @@ impl Worker {
             tokio::time::sleep(Duration::from_secs_f64(grace)).await;
         }
 
+        let drain_start = std::time::Instant::now();
         if let Err(e) = self.engine.drain().await {
             tracing::warn!(error = %e, "engine drain failed");
+        }
+        let drain_elapsed = drain_start.elapsed().as_secs_f64();
+        if let Some(lifecycle) = self.lifecycle.as_ref() {
+            lifecycle.observe_drain_time(drain_elapsed);
         }
 
         self.cleanup_once().await;
@@ -673,6 +829,57 @@ fn shutdown_deadline(timeout: Duration, grace_secs: f64) -> Duration {
     timeout.saturating_add(grace)
 }
 
+/// Validate that `value` is a JSON object and stamp the canary marker on
+/// it. Returns `None` for non-object payloads (logs a warning) so the
+/// canary stays disabled rather than being registered with an invalid
+/// shape. Operator overrides reach the engine's `generate()` with the
+/// marker set so `is_probe(request)` detects them.
+fn stamp_canary_marker(mut value: serde_json::Value) -> Option<serde_json::Value> {
+    let Some(obj) = value.as_object_mut() else {
+        tracing::warn!(
+            ?value,
+            "health_check_payload override is not a JSON object; canary disabled"
+        );
+        return None;
+    };
+    obj.insert(
+        crate::engine::HEALTH_CHECK_KEY.to_string(),
+        serde_json::Value::Bool(true),
+    );
+    Some(value)
+}
+
+/// Read `DYN_HEALTH_CHECK_PAYLOAD` (JSON object or `@/path/to/file.json`).
+/// Returns `None` when the env is unset or the value is invalid; an invalid
+/// value logs a warning so it can't silently disable the engine default.
+fn load_health_check_payload_from_env() -> Option<serde_json::Value> {
+    let raw = std::env::var(HEALTH_CHECK_PAYLOAD_ENV)
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    let parsed: Result<serde_json::Value, _> = if let Some(path) = raw.strip_prefix('@') {
+        std::fs::read_to_string(path).map_or_else(
+            |e| Err(format!("read {path}: {e}")),
+            |s| serde_json::from_str(&s).map_err(|e| e.to_string()),
+        )
+    } else {
+        serde_json::from_str(&raw).map_err(|e| e.to_string())
+    };
+    match parsed {
+        Ok(v) if v.is_object() => Some(v),
+        Ok(_) => {
+            tracing::warn!(
+                env = HEALTH_CHECK_PAYLOAD_ENV,
+                "value must be a JSON object"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(env = HEALTH_CHECK_PAYLOAD_ENV, error = %e, "parse failed");
+            None
+        }
+    }
+}
+
 /// Read the grace-period seconds from `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS`,
 /// matching the Python helper. Negative values clamp to 0.
 fn grace_period_secs() -> f64 {
@@ -692,6 +899,147 @@ fn grace_period_secs() -> f64 {
         },
         _ => DEFAULT_GRACE_PERIOD_SECS,
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EngineControlPolicy {
+    Direct,
+    UnregisterBefore,
+    RegisterAfter,
+}
+
+fn engine_control_policy(control: &str) -> EngineControlPolicy {
+    // This policy only governs discovery (un)registration ordering. Draining
+    // in-flight work before memory is freed is delegated to each backend's
+    // pause controller: vLLM calls pause_generation() before native sleep(),
+    // SGLang calls pause_generation() before release_memory_occupation(), and
+    // TRT-LLM rejects new requests and waits for inflight requests to finish. The
+    // UnregisterBefore step here is an additional guard (stop new routing), not
+    // the drain itself.
+    match control {
+        // Pause controls make the engine unsafe for new requests, so remove
+        // the endpoint before they mutate engine state. Resume controls make
+        // the engine serving-safe again, so advertise it only after success.
+        "sleep" | "release_memory_occupation" => EngineControlPolicy::UnregisterBefore,
+        "wake_up" | "resume_memory_occupation" => EngineControlPolicy::RegisterAfter,
+        _ => EngineControlPolicy::Direct,
+    }
+}
+
+fn control_response_is_error(value: &serde_json::Value) -> bool {
+    value
+        .get("status")
+        .and_then(|v| v.as_str())
+        .is_some_and(|status| status.eq_ignore_ascii_case("error"))
+        || value
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .is_some_and(|success| !success)
+}
+
+fn control_error_response(message: impl Into<String>) -> serde_json::Value {
+    serde_json::json!({"status": "error", "message": message.into()})
+}
+
+fn control_request_body_error(body: &serde_json::Value) -> Option<serde_json::Value> {
+    if body.is_object() {
+        None
+    } else {
+        Some(control_error_response(
+            "engine control request body must be a JSON object",
+        ))
+    }
+}
+
+fn engine_control_callback(
+    control_name: String,
+    engine: Arc<dyn LLMEngine>,
+) -> EngineRouteCallback {
+    Arc::new(move |body| {
+        let engine = engine.clone();
+        let control_name = control_name.clone();
+        Box::pin(async move {
+            engine
+                .engine_control(control_name, body)
+                .await
+                .map_err(|e| anyhow::anyhow!(e.to_string()))
+        })
+    })
+}
+
+fn wrap_engine_control_callback(
+    control_name: String,
+    callback: EngineRouteCallback,
+    endpoint: dynamo_runtime::component::Endpoint,
+    control_lock: Arc<tokio::sync::Mutex<()>>,
+) -> EngineRouteCallback {
+    let policy = engine_control_policy(&control_name);
+    Arc::new(move |body| {
+        let callback = callback.clone();
+        let endpoint = endpoint.clone();
+        let control_name = control_name.clone();
+        let control_lock = control_lock.clone();
+        Box::pin(async move {
+            match policy {
+                EngineControlPolicy::Direct => callback(body).await,
+                EngineControlPolicy::UnregisterBefore => {
+                    if let Some(response) = control_request_body_error(&body) {
+                        return Ok(response);
+                    }
+
+                    // Hold across unregister + callback so a concurrent resume
+                    // cannot re-register between them.
+                    let _guard = control_lock.lock().await;
+
+                    if let Err(e) = endpoint.unregister_endpoint_instance().await {
+                        return Ok(control_error_response(format!(
+                            "failed to unregister endpoint before /engine/{control_name}: {e}"
+                        )));
+                    }
+
+                    match callback(body).await {
+                        Ok(response) => {
+                            if control_response_is_error(&response) {
+                                tracing::warn!(
+                                    control = %control_name,
+                                    "engine control returned an error after endpoint unregister; leaving endpoint unregistered"
+                                );
+                            }
+                            Ok(response)
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                control = %control_name,
+                                error = %e,
+                                "engine control callback failed after endpoint unregister; leaving endpoint unregistered"
+                            );
+                            Err(e)
+                        }
+                    }
+                }
+                EngineControlPolicy::RegisterAfter => {
+                    // Hold across callback + register so a concurrent pause
+                    // cannot unregister between them.
+                    let _guard = control_lock.lock().await;
+
+                    let response = callback(body).await?;
+                    if !control_response_is_error(&response)
+                        && let Err(e) = endpoint.register_endpoint_instance().await
+                    {
+                        // The engine is serving-safe but absent from discovery. The
+                        // operation is idempotent: retrying /engine/{control_name}
+                        // re-registers without repeating the wake/resume work (the
+                        // controller short-circuits "already awake/resumed"), so surface
+                        // that it is safe to retry.
+                        return Ok(control_error_response(format!(
+                            "engine resumed but re-registration failed after /engine/{control_name}: {e}; retry /engine/{control_name} to rejoin discovery"
+                        )));
+                    }
+                    Ok(response)
+                }
+            }
+        })
+    })
 }
 
 /// Convenience shorthand for `DynamoError::builder().error_type(..).message(..).build()`.
@@ -717,11 +1065,25 @@ fn resolve_served_name(config: &WorkerConfig, engine_config: &EngineConfig) -> O
 
 /// Pick the `ModelType` to register with. `Prefill` short-circuits to
 /// `ModelType::Prefill` regardless of `endpoint_types`.
-fn resolve_model_type(mode: DisaggregationMode, endpoint_types: &str) -> Result<ModelType, DynamoError> {
+fn resolve_model_type(
+    mode: DisaggregationMode,
+    endpoint_types: &str,
+) -> Result<ModelType, DynamoError> {
     if mode.is_prefill() {
         return Ok(ModelType::Prefill);
     }
     parse_endpoint_types(endpoint_types)
+}
+
+/// Derive the topology-readiness fields (`worker_type`, `needs`) for the
+/// worker's disaggregation role. Prefill workers need a Decode peer, Decode
+/// workers need a Prefill peer, and Aggregated workers stand alone.
+fn resolve_worker_type_and_needs(mode: DisaggregationMode) -> (WorkerType, Vec<Vec<WorkerType>>) {
+    match mode {
+        DisaggregationMode::Prefill => (WorkerType::Prefill, vec![vec![WorkerType::Decode]]),
+        DisaggregationMode::Decode => (WorkerType::Decode, vec![vec![WorkerType::Prefill]]),
+        DisaggregationMode::Aggregated => (WorkerType::Aggregated, Vec::new()),
+    }
 }
 
 fn parse_endpoint_types(s: &str) -> Result<ModelType, DynamoError> {
@@ -816,6 +1178,9 @@ async fn build_local_model(
         tool_call_parser: config.tool_call_parser.clone(),
         reasoning_parser: config.reasoning_parser.clone(),
         exclude_tools_when_tool_choice_none: config.exclude_tools_when_tool_choice_none,
+        structural_tag_mode: config.structural_tag_mode,
+        structural_tag_scope: config.structural_tag_scope,
+        structural_tag_schema: config.structural_tag_schema,
         enable_local_indexer,
         disaggregated_endpoint,
         runtime_data: engine_config.runtime_data.clone(),
@@ -920,6 +1285,81 @@ mod tests {
     }
 
     #[test]
+    fn engine_control_policy_wraps_discovery_mutating_controls() {
+        assert_eq!(
+            engine_control_policy("start_profile"),
+            EngineControlPolicy::Direct
+        );
+        assert_eq!(
+            engine_control_policy("stop_profile"),
+            EngineControlPolicy::Direct
+        );
+        assert_eq!(
+            engine_control_policy("update_weights_from_disk"),
+            EngineControlPolicy::Direct
+        );
+        assert_eq!(
+            engine_control_policy("sleep"),
+            EngineControlPolicy::UnregisterBefore
+        );
+        assert_eq!(
+            engine_control_policy("release_memory_occupation"),
+            EngineControlPolicy::UnregisterBefore
+        );
+        assert_eq!(
+            engine_control_policy("wake_up"),
+            EngineControlPolicy::RegisterAfter
+        );
+        assert_eq!(
+            engine_control_policy("resume_memory_occupation"),
+            EngineControlPolicy::RegisterAfter
+        );
+    }
+
+    #[test]
+    fn control_request_body_validation_requires_json_object() {
+        assert!(control_request_body_error(&serde_json::json!({})).is_none());
+        assert!(control_request_body_error(&serde_json::json!({"tags": ["kv_cache"]})).is_none());
+
+        for body in [
+            serde_json::json!(null),
+            serde_json::json!(true),
+            serde_json::json!("bad"),
+            serde_json::json!(["kv_cache"]),
+        ] {
+            let response = control_request_body_error(&body).unwrap();
+            assert!(control_response_is_error(&response));
+            assert_eq!(
+                response.get("message").and_then(|value| value.as_str()),
+                Some("engine control request body must be a JSON object")
+            );
+        }
+    }
+
+    #[test]
+    fn control_response_error_detection_matches_backend_conventions() {
+        assert!(control_response_is_error(&serde_json::json!({
+            "status": "error"
+        })));
+        assert!(control_response_is_error(&serde_json::json!({
+            "status": "ERROR"
+        })));
+        assert!(control_response_is_error(&serde_json::json!({
+            "success": false
+        })));
+
+        assert!(!control_response_is_error(&serde_json::json!({
+            "status": "ok"
+        })));
+        assert!(!control_response_is_error(&serde_json::json!({
+            "success": true
+        })));
+        assert!(!control_response_is_error(&serde_json::json!({
+            "message": "ok"
+        })));
+    }
+
+    #[test]
     fn validate_model_input_accepts_tokens() {
         validate_model_input(ModelInput::Tokens).unwrap();
     }
@@ -957,7 +1397,9 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config, DisaggregationMode::Decode).await.unwrap();
+        let local_model = build_local_model(&config, &engine_config, DisaggregationMode::Decode)
+            .await
+            .unwrap();
         let runtime_config = local_model.runtime_config();
 
         assert_eq!(runtime_config.total_kv_blocks, Some(100));
@@ -1002,17 +1444,28 @@ mod tests {
 
     #[tokio::test]
     async fn build_local_model_decode_disables_local_indexer() {
-        let config = WorkerConfig { enable_local_indexer: true, ..WorkerConfig::default() };
+        let config = WorkerConfig {
+            enable_local_indexer: true,
+            ..WorkerConfig::default()
+        };
         let engine_config = EngineConfig::default();
-        let local_model = build_local_model(&config, &engine_config, DisaggregationMode::Decode).await.unwrap();
+        let local_model = build_local_model(&config, &engine_config, DisaggregationMode::Decode)
+            .await
+            .unwrap();
         assert!(!local_model.runtime_config().enable_local_indexer);
     }
 
     #[tokio::test]
     async fn build_local_model_aggregated_keeps_local_indexer() {
-        let config = WorkerConfig { enable_local_indexer: true, ..WorkerConfig::default() };
+        let config = WorkerConfig {
+            enable_local_indexer: true,
+            ..WorkerConfig::default()
+        };
         let engine_config = EngineConfig::default();
-        let local_model = build_local_model(&config, &engine_config, DisaggregationMode::Aggregated).await.unwrap();
+        let local_model =
+            build_local_model(&config, &engine_config, DisaggregationMode::Aggregated)
+                .await
+                .unwrap();
         assert!(local_model.runtime_config().enable_local_indexer);
     }
 
@@ -1024,8 +1477,13 @@ mod tests {
             bootstrap_port: Some(12345),
             ..EngineConfig::default()
         };
-        let local_model = build_local_model(&config, &engine_config, DisaggregationMode::Prefill).await.unwrap();
-        let endpoint = local_model.runtime_config().disaggregated_endpoint.as_ref()
+        let local_model = build_local_model(&config, &engine_config, DisaggregationMode::Prefill)
+            .await
+            .unwrap();
+        let endpoint = local_model
+            .runtime_config()
+            .disaggregated_endpoint
+            .as_ref()
             .expect("disaggregated_endpoint must be published");
         assert_eq!(endpoint.bootstrap_host.as_deref(), Some("10.0.0.5"));
         assert_eq!(endpoint.bootstrap_port, Some(12345));
@@ -1035,8 +1493,16 @@ mod tests {
     async fn build_local_model_skips_disaggregated_endpoint_when_engine_omits_it() {
         let config = WorkerConfig::default();
         let engine_config = EngineConfig::default();
-        let local_model = build_local_model(&config, &engine_config, DisaggregationMode::Aggregated).await.unwrap();
-        assert!(local_model.runtime_config().disaggregated_endpoint.is_none());
+        let local_model =
+            build_local_model(&config, &engine_config, DisaggregationMode::Aggregated)
+                .await
+                .unwrap();
+        assert!(
+            local_model
+                .runtime_config()
+                .disaggregated_endpoint
+                .is_none()
+        );
     }
 
     use crate::engine::PreprocessedRequest;
@@ -1355,6 +1821,61 @@ mod tests {
         with_env(GRACE_PERIOD_ENV, Some(""), || {
             assert_eq!(grace_period_secs(), DEFAULT_GRACE_PERIOD_SECS);
         });
+    }
+
+    // -------------------------------------------------------------------
+    // load_health_check_payload_from_env
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn health_check_payload_env_returns_object() {
+        with_env(
+            HEALTH_CHECK_PAYLOAD_ENV,
+            Some(r#"{"token_ids":[1]}"#),
+            || {
+                let got = load_health_check_payload_from_env().unwrap();
+                assert_eq!(got["token_ids"], serde_json::json!([1]));
+            },
+        );
+    }
+
+    #[test]
+    fn health_check_payload_env_rejects_non_object() {
+        with_env(HEALTH_CHECK_PAYLOAD_ENV, Some("[1,2,3]"), || {
+            assert!(load_health_check_payload_from_env().is_none());
+        });
+    }
+
+    // -------------------------------------------------------------------
+    // stamp_canary_marker
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn stamp_canary_marker_injects_into_object() {
+        let stamped = stamp_canary_marker(serde_json::json!({"token_ids": [1]})).unwrap();
+        assert_eq!(
+            stamped[crate::engine::HEALTH_CHECK_KEY],
+            serde_json::json!(true)
+        );
+        assert_eq!(stamped["token_ids"], serde_json::json!([1]));
+    }
+
+    #[test]
+    fn stamp_canary_marker_rejects_non_object() {
+        assert!(stamp_canary_marker(serde_json::json!([1, 2, 3])).is_none());
+        assert!(stamp_canary_marker(serde_json::json!(42)).is_none());
+    }
+
+    #[test]
+    fn stamp_canary_marker_overrides_falsy_marker() {
+        // An operator can't disarm the marker by setting it false in their override.
+        let stamped =
+            stamp_canary_marker(serde_json::json!({crate::engine::HEALTH_CHECK_KEY: false}))
+                .unwrap();
+        assert_eq!(
+            stamped[crate::engine::HEALTH_CHECK_KEY],
+            serde_json::json!(true)
+        );
     }
 
     // -------------------------------------------------------------------

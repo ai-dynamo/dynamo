@@ -86,6 +86,8 @@ pub struct AicPerfConfig {
     aic_moe_tp_size: Option<usize>,
     aic_moe_ep_size: Option<usize>,
     aic_attention_dp_size: Option<usize>,
+    aic_nextn: Option<usize>,
+    aic_nextn_accept_rates: Option<String>,
 }
 
 impl AicPerfConfig {
@@ -120,12 +122,20 @@ impl AicPerfConfig {
     pub(crate) fn attention_dp_size(&self) -> Option<usize> {
         self.aic_attention_dp_size
     }
+
+    pub(crate) fn nextn(&self) -> Option<usize> {
+        self.aic_nextn
+    }
+
+    pub(crate) fn nextn_accept_rates(&self) -> Option<&str> {
+        self.aic_nextn_accept_rates.as_deref()
+    }
 }
 
 #[pymethods]
 impl AicPerfConfig {
     #[new]
-    #[pyo3(signature = (aic_backend, aic_system, aic_model_path, aic_tp_size=1, aic_backend_version=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None))]
+    #[pyo3(signature = (aic_backend, aic_system, aic_model_path, aic_tp_size=1, aic_backend_version=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         aic_backend: String,
@@ -136,6 +146,8 @@ impl AicPerfConfig {
         aic_moe_tp_size: Option<usize>,
         aic_moe_ep_size: Option<usize>,
         aic_attention_dp_size: Option<usize>,
+        aic_nextn: Option<usize>,
+        aic_nextn_accept_rates: Option<String>,
     ) -> PyResult<Self> {
         if aic_backend.is_empty() {
             return Err(PyValueError::new_err("aic_backend must be non-empty"));
@@ -158,6 +170,14 @@ impl AicPerfConfig {
                 return Err(PyValueError::new_err(format!("{name} must be >= 1")));
             }
         }
+        // AIC caps MTP draft tokens at 5; >5 would IndexError in calc_expectation.
+        if let Some(nextn) = aic_nextn
+            && !(1..=5).contains(&nextn)
+        {
+            return Err(PyValueError::new_err(
+                "aic_nextn must be 1..=5 when set (omit to disable spec dec)",
+            ));
+        }
 
         Ok(Self {
             aic_backend,
@@ -168,6 +188,8 @@ impl AicPerfConfig {
             aic_moe_tp_size,
             aic_moe_ep_size,
             aic_attention_dp_size,
+            aic_nextn,
+            aic_nextn_accept_rates,
         })
     }
 }
@@ -175,7 +197,7 @@ impl AicPerfConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=Some(16.0), router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, *, overlap_score_credit=1.0, prefill_load_scale=1.0))]
+    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=Some(16.0), router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, *, overlap_score_credit=1.0, prefill_load_scale=1.0, router_queue_by_incoming_missing_isl=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: Option<f64>,
@@ -203,6 +225,7 @@ impl KvRouterConfig {
         router_predicted_ttl_secs: Option<f64>,
         mut overlap_score_credit: f64,
         mut prefill_load_scale: f64,
+        router_queue_by_incoming_missing_isl: Option<Vec<(usize, usize)>>,
     ) -> PyResult<Self> {
         if let Some(value) = overlap_score_weight {
             apply_deprecated_overlap_score_weight(
@@ -232,6 +255,13 @@ impl KvRouterConfig {
             router_reset_states,
             router_ttl_secs,
             router_queue_threshold,
+            router_queue_by_incoming_missing_isl: router_queue_by_incoming_missing_isl
+                .map(dynamo_kv_router::scheduling::config::RouterQueueDepthTiers::try_from)
+                .transpose()
+                .map_err(PyValueError::new_err)?
+                .unwrap_or_else(
+                    dynamo_kv_router::scheduling::config::RouterQueueDepthTiers::unbounded_cap,
+                ),
             router_event_threads,
             skip_initial_worker_wait: false,
             router_queue_policy: router_queue_policy.parse().map_err(PyValueError::new_err)?,
@@ -460,6 +490,9 @@ impl EntrypointArgs {
         aic_perf_config: Option<AicPerfConfig>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
+        if let Some(runtime_config) = &runtime_config {
+            runtime_config.validate_config()?;
+        }
         if (tls_cert_path.is_some() && tls_key_path.is_none())
             || (tls_cert_path.is_none() && tls_key_path.is_some())
         {
@@ -670,6 +703,8 @@ async fn select_engine(
                             config.moe_tp_size(),
                             config.moe_ep_size(),
                             config.attention_dp_size(),
+                            config.nextn(),
+                            config.nextn_accept_rates(),
                         )
                     })
                 })
@@ -711,6 +746,8 @@ async fn select_engine(
                 let moe_tp_size = mocker_args.aic_moe_tp_size;
                 let moe_ep_size = mocker_args.aic_moe_ep_size;
                 let attention_dp_size = mocker_args.aic_attention_dp_size;
+                let nextn = mocker_args.aic_nextn;
+                let nextn_accept_rates = mocker_args.aic_nextn_accept_rates.as_deref();
                 match Python::with_gil(|py| {
                     create_aic_callback(
                         py,
@@ -722,6 +759,8 @@ async fn select_engine(
                         moe_tp_size,
                         moe_ep_size,
                         attention_dp_size,
+                        nextn,
+                        nextn_accept_rates,
                     )
                 }) {
                     Ok(callback) => {

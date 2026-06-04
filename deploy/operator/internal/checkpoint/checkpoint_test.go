@@ -372,7 +372,7 @@ func (c *createHookClient) Create(ctx context.Context, obj client.Object, opts .
 	return c.Client.Create(ctx, obj, opts...)
 }
 
-func TestCreateOrGetAutoCheckpointDeduplicatesConcurrentSameHashCheckpoint(t *testing.T) {
+func TestCreateOrGetAutoCheckpointDoesNotReuseDifferentCheckpointWithSameLegacyHash(t *testing.T) {
 	ctx := context.Background()
 	s := testScheme()
 
@@ -412,14 +412,13 @@ func TestCreateOrGetAutoCheckpointDeduplicatesConcurrentSameHashCheckpoint(t *te
 		},
 	}
 
-	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, identity, corev1.PodTemplateSpec{}, nil)
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testHash, identity, corev1.PodTemplateSpec{}, "", nil)
 	require.NoError(t, err)
-	assert.Equal(t, friendly.Name, ckpt.Name)
+	assert.Equal(t, "checkpoint-"+testHash, ckpt.Name)
 
 	list := &nvidiacomv1alpha1.DynamoCheckpointList{}
 	require.NoError(t, baseClient.List(ctx, list))
-	require.Len(t, list.Items, 1)
-	assert.Equal(t, friendly.Name, list.Items[0].Name)
+	require.Len(t, list.Items, 2)
 }
 
 func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
@@ -427,10 +426,12 @@ func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
 	s := testScheme()
 	c := fake.NewClientBuilder().WithScheme(s).Build()
 
-	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testIdentity(), corev1.PodTemplateSpec{}, nil)
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testHash, testIdentity(), corev1.PodTemplateSpec{}, "", nil)
 	require.NoError(t, err)
 	require.NotNil(t, ckpt.Annotations)
 	assert.Equal(t, snapshotprotocol.DefaultCheckpointArtifactVersion, ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
+	assert.Equal(t, "true", ckpt.Annotations[consts.CheckpointAutoAnnotation])
+	assert.Equal(t, testHash, ckpt.Labels[snapshotprotocol.CheckpointIDLabel])
 }
 
 func TestCreateOrGetAutoCheckpointRejectsGMSSnapshotWhenGateDisabled(t *testing.T) {
@@ -443,8 +444,10 @@ func TestCreateOrGetAutoCheckpointRejectsGMSSnapshotWhenGateDisabled(t *testing.
 		ctx,
 		c,
 		testNamespace,
+		testHash,
 		testIdentity(),
 		corev1.PodTemplateSpec{},
+		"",
 		&nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true},
 	)
 	require.Error(t, err)
@@ -602,18 +605,27 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		assert.Equal(t, "/snapshots", mounts[snapshotprotocol.CheckpointVolumeName])
 	})
 
-	t.Run("ready gms checkpoint injects restore sidecars and loader mount", func(t *testing.T) {
+	t.Run("ready gms checkpoint wires declared restore client", func(t *testing.T) {
 		podSpec := testPodSpec()
 		podSpec.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
-		info := &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash, GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true}}
+		podSpec.Containers = append(podSpec.Containers, corev1.Container{Name: "gms-loader", Image: "loader:latest"})
+		info := &CheckpointInfo{
+			Enabled: true,
+			Ready:   true,
+			Hash:    testHash,
+			GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+				Enabled:               true,
+				ExtraClientContainers: []string{"gms-loader"},
+			},
+		}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 
 		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
 		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
 		gmsServer := findContainer(podSpec, gms.ServerContainerName)
 		require.NotNil(t, gmsServer, "gms-server is a native sidecar (init+restartPolicy=Always)")
-		loader := findContainer(podSpec, GMSLoaderContainer)
-		require.NotNil(t, loader, "gms-loader is a regular sidecar")
+		loader := findContainer(podSpec, "gms-loader")
+		require.NotNil(t, loader, "gms-loader is a regular container")
 		serverInitCount := 0
 		for _, container := range podSpec.InitContainers {
 			if container.Name == gms.ServerContainerName {
@@ -622,7 +634,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		}
 		loaderCount := 0
 		for _, container := range podSpec.Containers {
-			if container.Name == GMSLoaderContainer {
+			if container.Name == "gms-loader" {
 				loaderCount++
 			}
 		}
@@ -631,22 +643,17 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 
 		assert.Equal(t, corev1.ContainerRestartPolicyAlways, *gmsServer.RestartPolicy)
 		assert.Nil(t, gmsServer.StartupProbe, "no StartupProbe — clients drive readiness via connect-retry")
-		assert.Nil(t, loader.RestartPolicy, "loader is a regular sidecar; pod RestartPolicy applies")
+		assert.Nil(t, loader.RestartPolicy, "loader is a regular container; pod RestartPolicy applies")
 
 		mounts := map[string]string{}
 		for _, mount := range loader.VolumeMounts {
 			mounts[mount.Name] = mount.MountPath
 		}
-		assert.Equal(t, "/checkpoints", mounts[snapshotprotocol.CheckpointVolumeName])
+		assert.Empty(t, mounts[snapshotprotocol.CheckpointVolumeName])
 		assert.Equal(t, gms.SharedMountPath, mounts[gms.SharedVolumeName])
 
-		env := map[string]string{}
-		for _, item := range loader.Env {
-			env[item.Name] = item.Value
-		}
-		assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", env["GMS_CHECKPOINT_DIR"])
 		assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.server"}, gmsServer.Command)
-		assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.snapshot.loader"}, loader.Command)
+		assert.Empty(t, loader.Command)
 	})
 
 	t.Run("error cases", func(t *testing.T) {
@@ -683,6 +690,27 @@ func TestResolveCheckpointForService(t *testing.T) {
 			require.NoError(t, err)
 			assert.False(t, info.Enabled)
 		}
+	})
+
+	t.Run("Manual mode without checkpointRef or identity errors", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(s).Build()
+		_, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
+			Enabled: true,
+			Mode:    nvidiacomv1alpha1.CheckpointModeManual,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "Manual mode requires checkpointRef or identity")
+	})
+
+	t.Run("Auto mode without identity resolves enabled without error", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(s).Build()
+		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
+			Enabled: true,
+			Mode:    nvidiacomv1alpha1.CheckpointModeAuto,
+		})
+		require.NoError(t, err)
+		assert.True(t, info.Enabled)
+		assert.False(t, info.Exists)
 	})
 
 	t.Run("checkpointRef resolves ready CR", func(t *testing.T) {
@@ -850,10 +878,13 @@ func TestResolveCheckpointForService(t *testing.T) {
 		assert.Len(t, info.Hash, 16)
 	})
 
-	t.Run("errors when enabled but no ref and no identity", func(t *testing.T) {
+	t.Run("enabled without ref or identity waits for caller-created checkpoint", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).Build()
-		_, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true})
-		assert.ErrorContains(t, err, "no checkpointRef or identity")
+		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true})
+		require.NoError(t, err)
+		assert.True(t, info.Enabled)
+		assert.False(t, info.Exists)
+		assert.False(t, info.Ready)
 	})
 }
 

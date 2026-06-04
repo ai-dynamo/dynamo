@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-renderer"
+version.workspace = true
+edition.workspace = true
+description = "Standalone, runtime-free OpenAI chat-template / prompt formatting (HF chat_template via minijinja)"
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+
+[dependencies]
+# The chat-template engine bridges OpenAI request types (dynamo-protocols) with
+# the HF chat_template jinja engine (minijinja). It does NOT depend on tokenizer
+# internals; `dynamo-tokenizers` is re-exported only as a one-import convenience
+# for consumers that want tokenize + templating together.
+dynamo-protocols = { workspace = true }
+dynamo-tokenizers = { workspace = true }
+
+anyhow = { workspace = true }
+chrono = { workspace = true }
+either = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["preserve_order", "raw_value"] }
+tracing = { workspace = true }
+
+minijinja = { version = "2.20.0", features = ["loader", "loop_controls"] }
+minijinja-contrib = { version = "2.20.0", features = ["pycompat"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -17,7 +17,7 @@ from dynamo.common.utils.output_modalities import (
     get_output_modalities,
     parse_request_type,
 )
-from dynamo.llm import ModelInput, register_model
+from dynamo.llm import ModelInput, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.args import OmniConfig
@@ -208,6 +208,12 @@ async def init_omni_stage_router(
         generate_endpoint,
         config.model,
         config.served_model_name,
+        # OmniStageRouter is the user-visible front for an internal
+        # multi-stage pipeline; the per-stage workers are private. From
+        # the frontend's topology view, the router serves end-to-end as
+        # Aggregated with no peer dependencies.
+        worker_type=WorkerType.Aggregated,
+        needs=[],
     )
     logger.info("OmniStageRouter registered at '%s'", generate_endpoint)
 

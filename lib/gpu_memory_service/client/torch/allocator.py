@@ -266,6 +266,64 @@ def get_gms_client_memory_managers() -> tuple["GMSClientMemoryManager", ...]:
     return tuple(state.manager for state in _tag_states.values())
 
 
+def prune_allocations(
+    manager: "GMSClientMemoryManager",
+    *,
+    referenced_allocation_ids: set[str],
+    synchronize: bool = True,
+) -> None:
+    """Free GMS allocations that are not in an explicit torch keep-set.
+
+    Callers provide the allocation IDs that remain valid; this helper does not
+    infer liveness from Python GC.  Weight loaders call it after registering
+    module tensors, treating other allocations as load-time scratch/cache that
+    PyTorch's caching allocator may leave behind because ``empty_cache()`` is a
+    no-op while live GMS mempool mappings exist.
+
+    Args:
+        manager: GMS manager whose local mappings should be pruned.
+        referenced_allocation_ids: Allocation IDs that must remain mapped and
+            committed.
+        synchronize: Synchronize CUDA before freeing unreferenced mappings.  The
+            default avoids freeing a block while prior GPU work may still be
+            using it.  Callers that have already synchronized can pass
+            ``False``.
+
+    """
+    if manager.granted_lock_type != GrantedLockType.RW or manager.is_unmapped:
+        return
+
+    if not any(mapping.handle != 0 for mapping in manager.mappings.values()):
+        return
+
+    if synchronize:
+        import torch
+
+        torch.cuda.synchronize(manager.device)
+
+    keep = {str(allocation_id) for allocation_id in referenced_allocation_ids}
+
+    pruned_allocations = 0
+    pruned_bytes = 0
+    for va, mapping in list(manager.mappings.items()):
+        if str(mapping.allocation_id) in keep:
+            continue
+        if mapping.handle == 0:
+            continue
+        pruned_allocations += 1
+        pruned_bytes += int(mapping.aligned_size)
+        manager.destroy_mapping(va)
+
+    if pruned_allocations:
+        logger.info(
+            "[GMS] Pruned %d unreferenced allocations (%.2f GiB); "
+            "kept %d registered allocations",
+            pruned_allocations,
+            pruned_bytes / (1 << 30),
+            len(keep),
+        )
+
+
 def evict_gms_client_memory_manager(manager: "GMSClientMemoryManager") -> None:
     for tag, state in list(_tag_states.items()):
         if state.manager is manager:

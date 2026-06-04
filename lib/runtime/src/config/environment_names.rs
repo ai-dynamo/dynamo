@@ -155,6 +155,9 @@ pub mod etcd {
     /// ETCD endpoints (comma-separated list of URLs)
     pub const ETCD_ENDPOINTS: &str = "ETCD_ENDPOINTS";
 
+    /// ETCD lease TTL in seconds (default: 10)
+    pub const ETCD_LEASE_TTL: &str = "ETCD_LEASE_TTL";
+
     /// ETCD authentication environment variables
     pub mod auth {
         /// Username for ETCD authentication
@@ -377,6 +380,11 @@ pub mod llm {
 
     /// Agent trace configuration
     pub mod agent_trace {
+        /// Master switch. Truthy enables tracing with defaults for sinks,
+        /// output path, and the ZMQ tool-event endpoint; other variables below
+        /// override individual knobs.
+        pub const DYN_AGENT_TRACE: &str = "DYN_AGENT_TRACE";
+
         /// Agent trace sink selection. Comma-separated values: stderr,jsonl,jsonl_gz.
         pub const DYN_AGENT_TRACE_SINKS: &str = "DYN_AGENT_TRACE_SINKS";
 
@@ -605,6 +613,7 @@ mod tests {
             nats::stream::DYN_NATS_STREAM_MAX_AGE,
             // ETCD
             etcd::ETCD_ENDPOINTS,
+            etcd::ETCD_LEASE_TTL,
             etcd::auth::ETCD_AUTH_USERNAME,
             etcd::auth::ETCD_AUTH_PASSWORD,
             etcd::auth::ETCD_AUTH_CA,
@@ -650,6 +659,7 @@ mod tests {
             llm::audit::DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS,
             llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_BYTES,
             llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_LINES,
+            llm::agent_trace::DYN_AGENT_TRACE,
             llm::agent_trace::DYN_AGENT_TRACE_SINKS,
             llm::agent_trace::DYN_AGENT_TRACE_OUTPUT_PATH,
             llm::agent_trace::DYN_AGENT_TRACE_CAPACITY,
@@ -721,6 +731,7 @@ mod tests {
 
         // ETCD vars should start with ETCD_
         assert!(etcd::ETCD_ENDPOINTS.starts_with("ETCD_"));
+        assert!(etcd::ETCD_LEASE_TTL.starts_with("ETCD_"));
         assert!(etcd::auth::ETCD_AUTH_USERNAME.starts_with("ETCD_AUTH_"));
 
         // OpenTelemetry vars should start with OTEL_

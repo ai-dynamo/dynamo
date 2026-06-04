@@ -12,13 +12,15 @@ use tokio_stream::StreamExt;
 use super::local_model::RoutingConstraints;
 use super::*;
 use crate::Endpoint;
-#[cfg(feature = "kv-indexer")]
+#[cfg(any(feature = "kv-indexer", feature = "slot-tracker"))]
 use clap::Parser;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
 #[cfg(feature = "kv-indexer")]
 use dynamo_kv_router::standalone_indexer::{self, IndexerConfig};
+#[cfg(feature = "slot-tracker")]
+use dynamo_kv_router::standalone_slot_tracker::{self, SlotTrackerConfig};
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
@@ -107,7 +109,48 @@ where
     }
 }
 
-#[cfg(feature = "kv-indexer")]
+#[cfg(feature = "slot-tracker")]
+#[derive(Parser)]
+#[command(
+    name = "python -m dynamo.slot_tracker",
+    about = "Standalone KV router slot tracker"
+)]
+struct SlotTrackerCli {
+    /// HTTP server port
+    #[arg(long, default_value_t = 8091)]
+    port: u16,
+}
+
+pub fn run_slot_tracker_cli<I, T>(args: I) -> anyhow::Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    #[cfg(feature = "slot-tracker")]
+    {
+        let cli = SlotTrackerCli::try_parse_from(
+            std::iter::once(OsString::from("python -m dynamo.slot_tracker"))
+                .chain(args.into_iter().map(Into::into)),
+        )?;
+
+        init_standalone_logging();
+
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(standalone_slot_tracker::run_server(SlotTrackerConfig {
+            port: cli.port,
+        }))
+    }
+
+    #[cfg(not(feature = "slot-tracker"))]
+    {
+        let _ = args;
+        anyhow::bail!(
+            "dynamo.slot_tracker is not available in this build; reinstall with --features slot-tracker"
+        )
+    }
+}
+
+#[cfg(any(feature = "kv-indexer", feature = "slot-tracker"))]
 fn init_standalone_logging() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -819,6 +862,17 @@ fn inject_worker_id_from_tracker(
     }
 }
 
+/// Attach the request's timing to `routing_data` so it survives the
+/// Rust->Python->Rust router path to the frontend (data survives, annotations don't).
+fn inject_timing_from_tracker(
+    data: &mut llm_rs::protocols::common::llm_backend::LLMEngineOutput,
+    tracker: &RequestTracker,
+) {
+    data.routing_data
+        .get_or_insert_with(Default::default)
+        .timing = Some(tracker.get_timing_info());
+}
+
 // TODO: can this reuse the stream conversion method in Client bindings?
 impl KvRouter {
     /// Helper method to process a request and create a Python async generator
@@ -858,6 +912,14 @@ impl KvRouter {
                             }
                             first_token_gauges_observed = true;
                         }
+                    }
+
+                    // On the terminal chunk, finalize timing and attach it for the frontend.
+                    if let (Some(tracker), Some(data)) = (&tracker, &mut response.data)
+                        && data.finish_reason.is_some()
+                    {
+                        tracker.record_finish();
+                        inject_timing_from_tracker(data, tracker);
                     }
 
                     let py_response = Python::with_gil(|py| {
@@ -921,6 +983,8 @@ impl KvRouter {
                         config.moe_tp_size(),
                         config.moe_ep_size(),
                         config.attention_dp_size(),
+                        config.nextn(),
+                        config.nextn_accept_rates(),
                     )
                 })
             })
@@ -1122,21 +1186,55 @@ impl KvRouter {
         let update_states = request_id.is_some();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let (best_worker, overlap_blocks) = chooser
-                .find_best_match(
+            let outcome = chooser
+                .find_best_match_details(
                     request_id.as_deref(),
                     &token_ids,
                     block_mm_infos.as_deref(),
                     router_config_override.as_ref(),
                     update_states,
+                    false,
                     lora_name.clone(),
                     0.0,
+                    None,
                     None,
                     None, // allowed_worker_ids: pass via RoutingHints in PreprocessedRequest path
                     routing_constraints.map(Into::into).unwrap_or_default(),
                 )
                 .await
                 .map_err(to_pyerr)?;
+            let (best_worker, overlap_blocks) = match outcome {
+                llm_rs::kv_router::FindBestMatchOutcome::Routed {
+                    worker,
+                    overlap_blocks,
+                    ..
+                } => (worker, overlap_blocks),
+                llm_rs::kv_router::FindBestMatchOutcome::Backpressure {
+                    reason,
+                    queued_isl_tokens,
+                    max_queued_isl_tokens,
+                } => {
+                    // Note: Backpressure is currently treated as Unavailable and falls through
+                    // to the error path. Distinguishing backpressure from regular errors in Python
+                    // would require returning a structured result type instead of raising an exception,
+                    // which is a breaking API change. For now, callers should treat any error from
+                    // best_worker as potentially transient and implement retry logic accordingly.
+                    // The backpressure info (reason, queued_isl_tokens, max_queued_isl_tokens) is logged but
+                    // not exposed to Python callers.
+                    tracing::warn!(
+                        reason = ?reason,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens = ?max_queued_isl_tokens,
+                        "Router backpressure - treating as unavailable"
+                    );
+                    return Err(to_pyerr(anyhow::anyhow!(
+                        "router backpressure: {:?} (queued_isl_tokens={}, max_queued_isl_tokens={:?})",
+                        reason,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens
+                    )));
+                }
+            };
 
             if update_indexer {
                 let cfg = chooser.kv_router_config();

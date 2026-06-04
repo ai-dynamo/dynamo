@@ -966,10 +966,7 @@ mod tests_startup_helpers {
             start_zmq_listener(endpoint.to_string(), topic, 1, tx, token, 4, next_event_id)
         });
 
-        // Give time for the connection to establish
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Send synthetic 3-frame message: [topic, seq(8B), payload]
+        // Build synthetic 3-frame message: [topic, seq(8B), payload]
         let seq: u64 = 77;
 
         let events = vec![
@@ -1003,14 +1000,29 @@ mod tests_startup_helpers {
             payload.clone().to_vec(),
         ];
 
-        // Send the multipart message
-        send_multipart(&pub_socket, frames).await.unwrap();
+        // Republish on a 50ms interval until the listener forwards an event
+        // (or the 5s deadline trips). ZMQ PUB drops messages destined for
+        // subscribers whose SUBSCRIBE handshake has not yet completed, so a
+        // one-shot send + fixed sleep is racy on contended runners.
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+            let mut publish_interval =
+                tokio::time::interval(tokio::time::Duration::from_millis(50));
+            loop {
+                tokio::select! {
+                    event = rx.recv() => {
+                        return event.expect("listener channel closed").event;
+                    }
+                    _ = publish_interval.tick() => {
+                        send_multipart(&pub_socket, frames.clone())
+                            .await
+                            .expect("failed to send ZMQ test event");
+                    }
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for listener event");
 
-        // Wait for message to be received
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Check that we received the message
-        let event = rx.try_recv().expect("no message received").event;
         assert_eq!(event.event_id, 0);
 
         let KvCacheEventData::Stored(KvCacheStoreData {

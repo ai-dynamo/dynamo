@@ -61,9 +61,7 @@ impl SglangBridge {
         Self::build(<Args as clap::Parser>::try_parse_from(argv))
     }
 
-    fn build(
-        parsed: Result<Args, clap::Error>,
-    ) -> Result<(Self, WorkerConfig), DynamoError> {
+    fn build(parsed: Result<Args, clap::Error>) -> Result<(Self, WorkerConfig), DynamoError> {
         let args = parsed.map_err(|e| invalid_arg(e.to_string()))?;
         let engine = SglangBridge {
             grpc_endpoint: args.sglang_grpc_endpoint,
@@ -97,14 +95,20 @@ impl SglangBridge {
         let prompt_len = request.token_ids.len() as u32;
         let grpc_req = GenerateRequest {
             input_ids: request.token_ids.iter().map(|&t| t as i32).collect(),
-            sampling_params: Some(build_sampling_params(&request.sampling_options, &request.stop_conditions)),
+            sampling_params: Some(build_sampling_params(
+                &request.sampling_options,
+                &request.stop_conditions,
+            )),
             stream: Some(true),
             rid: Some(ctx.id().to_string()),
-            disaggregated_params: request.bootstrap_info.as_ref().map(|bi| DisaggregatedParams {
-                bootstrap_host: bi.bootstrap_host.clone(),
-                bootstrap_port: bi.bootstrap_port.into(),
-                bootstrap_room: bi.bootstrap_room as i64,
-            }),
+            disaggregated_params: request
+                .bootstrap_info
+                .as_ref()
+                .map(|bi| DisaggregatedParams {
+                    bootstrap_host: bi.bootstrap_host.clone(),
+                    bootstrap_port: bi.bootstrap_port.into(),
+                    bootstrap_room: bi.bootstrap_room as i64,
+                }),
             ..Default::default()
         };
         let mut stream = client
@@ -196,7 +200,10 @@ impl SglangBridge {
 
         let grpc_req = GenerateRequest {
             input_ids: request.token_ids.iter().map(|&t| t as i32).collect(),
-            sampling_params: Some(build_sampling_params(&request.sampling_options, &request.stop_conditions)),
+            sampling_params: Some(build_sampling_params(
+                &request.sampling_options,
+                &request.stop_conditions,
+            )),
             stream: Some(true),
             rid: Some(ctx.id().to_string()),
             disaggregated_params: Some(DisaggregatedParams {
@@ -359,7 +366,9 @@ impl LLMEngine for SglangBridge {
             let port = info.bootstrap_port.ok_or_else(|| {
                 backend_error("GetServerInfo.disaggregation_bootstrap_port missing")
             })?;
-            let host = info.bootstrap_host.unwrap_or_else(|| "127.0.0.1".to_string());
+            let host = info
+                .bootstrap_host
+                .unwrap_or_else(|| "127.0.0.1".to_string());
             let _ = self.bootstrap.set((host, port));
         }
 
@@ -410,9 +419,12 @@ impl LLMEngine for SglangBridge {
             data_parallel_size: info.dp_size,
             bootstrap_host,
             bootstrap_port,
-            health_check_payload: Some(build_health_check_payload()),
             ..Default::default()
         })
+    }
+
+    async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
+        Ok(Some(build_health_check_payload()))
     }
 
     async fn generate(
@@ -429,8 +441,13 @@ impl LLMEngine for SglangBridge {
     }
 
     async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
-        let Some(client) = self.client.get() else { return };
-        let req = AbortRequest { rid: ctx.id().to_string(), abort_all: false };
+        let Some(client) = self.client.get() else {
+            return;
+        };
+        let req = AbortRequest {
+            rid: ctx.id().to_string(),
+            abort_all: false,
+        };
         if let Err(e) = client.clone().abort(req).await {
             tracing::warn!(request_id = ctx.id(), error = %e, "abort RPC failed");
         }
@@ -467,7 +484,6 @@ impl LLMEngine for SglangBridge {
         Ok(sources)
     }
 }
-
 
 /// Canary `PreprocessedRequest` shape sent by the runtime's health-check
 /// manager (when `DYN_HEALTH_CHECK_ENABLED=true`) through the normal

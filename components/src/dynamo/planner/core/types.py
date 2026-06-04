@@ -59,6 +59,8 @@ class WorkerCounts:
     ready_num_decode: Optional[int] = None
     expected_num_prefill: Optional[int] = None
     expected_num_decode: Optional[int] = None
+    prefill_scaling_in_progress: bool = False
+    decode_scaling_in_progress: bool = False
 
 
 @dataclass
@@ -148,6 +150,7 @@ class EngineCapabilities:
     max_num_seqs: Optional[int] = None
     context_length: Optional[int] = None
     max_kv_tokens: Optional[int] = None
+    kv_cache_block_size: Optional[int] = None
 
 
 @dataclass

@@ -26,9 +26,10 @@ use crate::kv_manager::KvManager;
 #[cfg(feature = "kvbm-offload")]
 use crate::kv_manager::kvbm_backend::SwapInRegistrationBlock;
 use crate::replay::TraceCollector;
+use crate::scheduler::trtllm;
 use crate::scheduler::{
     AdmissionEvent, CapturedRouterEventBuffer, EnginePassResult, ForwardPassSnapshot,
-    RouterEventVisibility, build_fpm_snapshot, capture_router_event_sink,
+    MockerMetrics, RouterEventVisibility, build_fpm_snapshot, capture_router_event_sink,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +46,40 @@ pub(crate) struct VllmRequestState {
     pub(crate) num_preemptions: usize,
 }
 
+impl VllmRequestState {
+    fn debug_assert_invariants(&self, _uuid: Uuid) {
+        #[cfg(debug_assertions)]
+        {
+            let uuid = _uuid;
+            let seq_len = self.sequence.len();
+            let allocated = self.sequence.num_allocated_tokens();
+            debug_assert!(
+                self.num_computed_tokens <= seq_len,
+                "request {uuid} computed {} tokens but sequence length is {seq_len}",
+                self.num_computed_tokens
+            );
+            debug_assert!(
+                allocated <= seq_len,
+                "request {uuid} allocated {allocated} tokens but sequence length is {seq_len}"
+            );
+        }
+    }
+
+    fn debug_assert_progress(&self, _uuid: Uuid) {
+        #[cfg(debug_assertions)]
+        {
+            let uuid = _uuid;
+            self.debug_assert_invariants(uuid);
+            let allocated = self.sequence.num_allocated_tokens();
+            debug_assert!(
+                allocated >= self.num_computed_tokens,
+                "request {uuid} allocated {allocated} tokens but computed {}",
+                self.num_computed_tokens
+            );
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct SchedulerState {
     pub(crate) waiting: VecDeque<Uuid>,
@@ -52,9 +87,10 @@ pub(crate) struct SchedulerState {
     pub(crate) running: VecDeque<Uuid>,
     running_members: FxHashSet<Uuid>,
     pub(crate) requests: FxHashMap<Uuid, VllmRequestState>,
+    pub(crate) preemptions_total: u64,
 }
 
-struct PreemptedRequest {
+pub(super) struct PreemptedRequest {
     uuid: Uuid,
     signals: Vec<MoveBlock>,
 }
@@ -84,6 +120,13 @@ enum ScheduleOutcome {
 impl SchedulerState {
     pub(crate) fn is_empty(&self) -> bool {
         self.requests.is_empty()
+    }
+
+    fn request_sequence_len(&self, uuid: Uuid) -> usize {
+        self.requests
+            .get(&uuid)
+            .map(|request| request.sequence.len())
+            .unwrap_or_default()
     }
 
     fn push_waiting(&mut self, uuid: Uuid) {
@@ -171,7 +214,7 @@ impl SchedulerState {
             .map(|request| &mut request.sequence)
     }
 
-    fn preempt(&mut self, mode: PreemptionMode) -> Option<PreemptedRequest> {
+    pub(super) fn preempt(&mut self, mode: PreemptionMode) -> Option<PreemptedRequest> {
         let uuid = loop {
             let candidate = match mode {
                 PreemptionMode::Lifo => self.running.pop_back(),
@@ -192,8 +235,9 @@ impl SchedulerState {
         request.status = RequestStatus::Preempted;
         request.num_computed_tokens = 0;
         request.num_preemptions += 1;
+        self.preemptions_total += 1;
         let signals = request.sequence.reset_with_signal();
-        debug_assert_vllm_request_invariants(uuid, request);
+        request.debug_assert_invariants(uuid);
         #[cfg(debug_assertions)]
         {
             debug_assert_eq!(
@@ -210,6 +254,72 @@ impl SchedulerState {
     pub(super) fn insert_running_for_test(&mut self, uuid: Uuid) {
         self.running_members.insert(uuid);
         self.running.push_back(uuid);
+    }
+
+    fn debug_assert_ready_to_decode(&self, _uuid: Uuid) {
+        #[cfg(debug_assertions)]
+        {
+            let uuid = _uuid;
+            let Some(request) = self.requests.get(&uuid) else {
+                return;
+            };
+            let seq_len = request.sequence.len();
+            if request.num_computed_tokens < seq_len {
+                return;
+            }
+            let allocated = request.sequence.num_allocated_tokens();
+            debug_assert_eq!(
+                allocated, seq_len,
+                "request {uuid} is decode-ready but allocated {allocated} tokens for sequence length {seq_len}"
+            );
+        }
+    }
+
+    fn debug_assert_invariants(&self) {
+        #[cfg(debug_assertions)]
+        {
+            let mut seen = std::collections::HashSet::new();
+            for uuid in &self.waiting_members {
+                debug_assert!(
+                    seen.insert(*uuid),
+                    "request {uuid} appears multiple times across waiting/running queues"
+                );
+                let request = self
+                    .requests
+                    .get(uuid)
+                    .expect("waiting request missing from state map");
+                debug_assert!(
+                    request.status != RequestStatus::Running,
+                    "request {uuid} is queued in waiting but marked Running"
+                );
+                request.debug_assert_invariants(*uuid);
+            }
+            for uuid in &self.running_members {
+                debug_assert!(
+                    seen.insert(*uuid),
+                    "request {uuid} appears multiple times across waiting/running queues"
+                );
+                let request = self
+                    .requests
+                    .get(uuid)
+                    .expect("running request missing from state map");
+                debug_assert_eq!(
+                    request.status,
+                    RequestStatus::Running,
+                    "request {uuid} is queued in running but marked {:?}",
+                    request.status
+                );
+                request.debug_assert_invariants(*uuid);
+            }
+            debug_assert!(
+                self.waiting.len() >= self.waiting_members.len(),
+                "waiting queue dropped live membership entries"
+            );
+            debug_assert!(
+                self.running.len() >= self.running_members.len(),
+                "running queue dropped live membership entries"
+            );
+        }
     }
 }
 
@@ -241,7 +351,8 @@ enum SwapInAdmissionAttempt {
 }
 
 pub(crate) struct VllmCore {
-    args: MockEngineArgs,
+    pub(super) args: MockEngineArgs,
+    dp_rank: u32,
     pub(super) state: SchedulerState,
     pub(super) kv_manager: KvManager,
     kv_event_buffer: Option<CapturedRouterEventBuffer>,
@@ -296,6 +407,7 @@ impl VllmCore {
                 dp_rank,
             ),
             args,
+            dp_rank,
             state: SchedulerState::default(),
             kv_event_buffer,
             #[cfg(feature = "kvbm-offload")]
@@ -324,9 +436,34 @@ impl VllmCore {
 
     pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
+        let mut max_output_tokens = request.max_output_tokens;
+        if trtllm::is_no_evict(self.args.scheduling_policy()) {
+            // TRT-LLM enqueue normalization: clamp the output so prompt + output
+            // fits the KV pool (keeps the request valid and admittable).
+            if let Some(clamped) = trtllm::normalize_max_output_tokens(
+                request.tokens.len(),
+                max_output_tokens,
+                self.args.num_gpu_blocks,
+                self.args.block_size,
+            ) {
+                if clamped != max_output_tokens {
+                    tracing::warn!(%uuid, requested = max_output_tokens, clamped,
+                        "clamped TRT-LLM max_output_tokens to KV-pool capacity");
+                }
+                max_output_tokens = clamped;
+            }
+            // TODO(trtllm-reject-propagation): reject a prompt that leaves no decode
+            // room (prompt_len >= pool capacity — the `None` case above). DISABLED as
+            // a NO-OP: any in-PR handling (silent reject via `return uuid`, or clamping
+            // output to 0) emits no terminal signal, dead-ending aggregated offline
+            // replay (in_flight) and live replay (waiter) — verified to hang. MUST NOT
+            // be enabled until offline + live replay propagate an explicit terminal-
+            // rejection outcome. Until then the request is left unchanged and stalls at
+            // the FIFO head like any oversized request (also deferred).
+        }
         let sequence = ActiveSequence::new(
             request.tokens,
-            request.max_output_tokens,
+            max_output_tokens,
             Some(self.args.block_size),
             self.args.enable_prefix_caching,
             self.args.zmq_kv_events_port.is_some(),
@@ -342,7 +479,7 @@ impl VllmCore {
         );
         self.state.push_waiting(uuid);
         if let Some(request) = self.state.requests.get(&uuid) {
-            debug_assert_vllm_request_progress(uuid, request);
+            request.debug_assert_progress(uuid);
         }
         uuid
     }
@@ -353,6 +490,26 @@ impl VllmCore {
 
     pub(crate) fn num_requests(&self) -> usize {
         self.state.requests.len()
+    }
+
+    /// Read-only view of the scheduler state, for tests in sibling modules
+    /// (e.g. `crate::scheduler::trtllm`) that assert on queue membership.
+    #[cfg(test)]
+    pub(crate) fn state(&self) -> &SchedulerState {
+        &self.state
+    }
+
+    pub(super) fn mocker_metrics(&self) -> MockerMetrics {
+        MockerMetrics::from_parts(
+            self.dp_rank,
+            self.kv_manager.num_active_blocks() as u64,
+            self.args.num_gpu_blocks as u64,
+            self.state.running_members.len() as u64,
+            self.state.waiting_members.len() as u64,
+            self.state.preemptions_total,
+            0,
+            0,
+        )
     }
 
     pub(crate) fn execute_pass(
@@ -644,10 +801,59 @@ impl VllmCore {
         }
 
         let max_num_running = self.args.max_num_seqs.unwrap_or(usize::MAX);
+        let trtllm_no_evict = trtllm::is_no_evict(self.args.scheduling_policy());
         while !preempted_any && self.state.running.len() < max_num_running {
             let Some(uuid) = self.state.next_waiting_uuid() else {
                 break;
             };
+            // TRT-LLM GUARANTEED_NO_EVICT capacity gate: only admit a waiting
+            // request if its prompt + max_output footprint fits after the
+            // to-completion reservations of all running requests. Halt at the
+            // first non-fitting candidate (no skip-ahead) to preserve FIFO
+            // fairness, matching TRT-LLM's `capacityScheduler.cpp`.
+            if trtllm_no_evict {
+                let needed = self
+                    .state
+                    .requests
+                    .get(&uuid)
+                    .map(|request| {
+                        trtllm::blocks_needed_to_finish(
+                            &request.sequence,
+                            self.args.block_size,
+                            &self.kv_manager,
+                        )
+                    })
+                    .unwrap_or(0);
+                let running_seqs = self
+                    .state
+                    .running
+                    .iter()
+                    .filter_map(|running_uuid| self.state.requests.get(running_uuid))
+                    .map(|request| &request.sequence);
+                if needed
+                    > trtllm::available_blocks(
+                        running_seqs,
+                        self.args.num_gpu_blocks,
+                        self.args.block_size,
+                        &self.kv_manager,
+                    )
+                {
+                    // TODO(trtllm-reject-propagation): terminal-reject a request
+                    // whose footprint exceeds the whole pool — it can never be
+                    // admitted, so an oversized FIFO head stalls replay. DISABLED —
+                    // drop_request here removes the request without a terminal
+                    // signal, which dead-ends offline (in_flight) and live (waiter)
+                    // replay the same way a silent enqueue-reject would. MUST NOT be
+                    // enabled until both propagate an explicit terminal-rejection
+                    // outcome. For now, break (FIFO) as before:
+                    //     if needed > self.args.num_gpu_blocks {
+                    //         tracing::warn!(%uuid, "exceeds entire KV pool");
+                    //         self.drop_request(uuid);
+                    //         continue;
+                    //     }
+                    break;
+                }
+            }
             #[cfg(feature = "kvbm-offload")]
             match self.try_park_for_swap_in(uuid, now_ms) {
                 SwapInAdmissionAttempt::Parked => continue,
@@ -712,14 +918,13 @@ impl VllmCore {
         }
 
         let fpm = self.compute_fpm(&scheduled, (end_ms - now_ms) / 1000.0);
-
-        debug_assert_vllm_scheduler_state(&self.state);
+        self.state.debug_assert_invariants();
         EnginePassResult {
             end_ms,
             completed_requests: requests_before.saturating_sub(self.state.requests.len()),
             output_signals,
             admissions,
-            active_decode_blocks: self.kv_manager.num_active_blocks() as u64,
+            mocker_metrics: self.mocker_metrics(),
             router_event_visibility: RouterEventVisibility::PassStart,
             kv_events: self
                 .kv_event_buffer
@@ -738,6 +943,21 @@ impl VllmCore {
             self.kv_manager.process(&signal);
         }
         self.state.complete(&uuid);
+    }
+
+    /// Preempt a running request under the active scheduling policy.
+    ///
+    /// Under vLLM semantics this evicts a running request on KV pressure. Under
+    /// TRT-LLM `GUARANTEED_NO_EVICT` preemption must never happen — the capacity
+    /// gate reserves blocks for every admitted request up front — so reaching
+    /// this path is reported as a hard error (see
+    /// [`trtllm::report_no_evict_violation`]) and nothing is evicted.
+    pub(super) fn policy_preempt(&mut self) -> Option<PreemptedRequest> {
+        if trtllm::is_no_evict(self.args.scheduling_policy()) {
+            trtllm::report_no_evict_violation();
+            return None;
+        }
+        self.state.preempt(self.args.preemption_mode)
     }
 
     /// Compute a forward pass metrics snapshot from the just-completed pass.
@@ -805,7 +1025,7 @@ impl VllmCore {
             .requests
             .get(&uuid)
             .unwrap_or_else(|| panic!("schedule_request: {uuid} missing from state.requests"));
-        debug_assert_vllm_request_invariants(uuid, request);
+        request.debug_assert_invariants(uuid);
         let cached_prefix_tokens = if request.num_computed_tokens == 0 {
             self.kv_manager
                 .get_prefill_cost(&request.sequence)
@@ -890,7 +1110,7 @@ impl VllmCore {
                 break;
             }
 
-            let Some(preempted) = self.state.preempt(self.args.preemption_mode) else {
+            let Some(preempted) = self.policy_preempt() else {
                 actual_computed_after = current_computed_tokens;
                 break;
             };
@@ -913,12 +1133,10 @@ impl VllmCore {
         }
 
         if let Some(request) = self.state.requests.get(&uuid) {
-            debug_assert_vllm_request_invariants(uuid, request);
+            request.debug_assert_invariants(uuid);
         }
         let tokens_used = actual_computed_after.saturating_sub(effective_computed_before);
-        if tokens_used == 0
-            && actual_computed_after < request_sequence_len(&self.state.requests, uuid)
-        {
+        if tokens_used == 0 && actual_computed_after < self.state.request_sequence_len(uuid) {
             return ScheduleOutcome::Blocked;
         }
 
@@ -1013,7 +1231,7 @@ impl VllmCore {
             let mut emitted = false;
             let mut completed = false;
             loop {
-                debug_assert_vllm_ready_to_decode(&self.state.requests, uuid);
+                self.state.debug_assert_ready_to_decode(uuid);
                 let Some(sequence) = self.state.running_sequence_mut(uuid) else {
                     break;
                 };
@@ -1030,7 +1248,7 @@ impl VllmCore {
                 }
                 sequence.pop();
 
-                let Some(preempted) = self.state.preempt(self.args.preemption_mode) else {
+                let Some(preempted) = self.policy_preempt() else {
                     break;
                 };
                 running_changed = true;
@@ -1049,7 +1267,7 @@ impl VllmCore {
                 collector.on_token(uuid, decode_end_ms);
             }
             if let Some(request) = self.state.requests.get(&uuid) {
-                debug_assert_vllm_request_progress(uuid, request);
+                request.debug_assert_progress(uuid);
                 let handoff_delay_ms = compute_prefill_handoff_delay_ms(
                     self.args.worker_type,
                     completed,
@@ -1086,115 +1304,6 @@ impl VllmCore {
             self.state.compact_running();
         }
         (decode_time, output_signals)
-    }
-}
-
-fn request_sequence_len(requests: &FxHashMap<Uuid, VllmRequestState>, uuid: Uuid) -> usize {
-    requests
-        .get(&uuid)
-        .map(|request| request.sequence.len())
-        .unwrap_or_default()
-}
-
-fn debug_assert_vllm_request_invariants(_uuid: Uuid, _request: &VllmRequestState) {
-    #[cfg(debug_assertions)]
-    {
-        let uuid = _uuid;
-        let request = _request;
-        let seq_len = request.sequence.len();
-        let allocated = request.sequence.num_allocated_tokens();
-        debug_assert!(
-            request.num_computed_tokens <= seq_len,
-            "request {uuid} computed {} tokens but sequence length is {seq_len}",
-            request.num_computed_tokens
-        );
-        debug_assert!(
-            allocated <= seq_len,
-            "request {uuid} allocated {allocated} tokens but sequence length is {seq_len}"
-        );
-    }
-}
-
-fn debug_assert_vllm_request_progress(_uuid: Uuid, _request: &VllmRequestState) {
-    #[cfg(debug_assertions)]
-    {
-        let uuid = _uuid;
-        let request = _request;
-        debug_assert_vllm_request_invariants(uuid, request);
-        let allocated = request.sequence.num_allocated_tokens();
-        debug_assert!(
-            allocated >= request.num_computed_tokens,
-            "request {uuid} allocated {allocated} tokens but computed {}",
-            request.num_computed_tokens
-        );
-    }
-}
-
-fn debug_assert_vllm_ready_to_decode(_requests: &FxHashMap<Uuid, VllmRequestState>, _uuid: Uuid) {
-    #[cfg(debug_assertions)]
-    {
-        let requests = _requests;
-        let uuid = _uuid;
-        let Some(request) = requests.get(&uuid) else {
-            return;
-        };
-        let seq_len = request.sequence.len();
-        if request.num_computed_tokens < seq_len {
-            return;
-        }
-        let allocated = request.sequence.num_allocated_tokens();
-        debug_assert_eq!(
-            allocated, seq_len,
-            "request {uuid} is decode-ready but allocated {allocated} tokens for sequence length {seq_len}"
-        );
-    }
-}
-
-fn debug_assert_vllm_scheduler_state(_state: &SchedulerState) {
-    #[cfg(debug_assertions)]
-    {
-        let state = _state;
-        let mut seen = std::collections::HashSet::new();
-        for uuid in &state.waiting_members {
-            debug_assert!(
-                seen.insert(*uuid),
-                "request {uuid} appears multiple times across waiting/running queues"
-            );
-            let request = state
-                .requests
-                .get(uuid)
-                .expect("waiting request missing from state map");
-            debug_assert!(
-                request.status != RequestStatus::Running,
-                "request {uuid} is queued in waiting but marked Running"
-            );
-            debug_assert_vllm_request_invariants(*uuid, request);
-        }
-        for uuid in &state.running_members {
-            debug_assert!(
-                seen.insert(*uuid),
-                "request {uuid} appears multiple times across waiting/running queues"
-            );
-            let request = state
-                .requests
-                .get(uuid)
-                .expect("running request missing from state map");
-            debug_assert_eq!(
-                request.status,
-                RequestStatus::Running,
-                "request {uuid} is queued in running but marked {:?}",
-                request.status
-            );
-            debug_assert_vllm_request_invariants(*uuid, request);
-        }
-        debug_assert!(
-            state.waiting.len() >= state.waiting_members.len(),
-            "waiting queue dropped live membership entries"
-        );
-        debug_assert!(
-            state.running.len() >= state.running_members.len(),
-            "running queue dropped live membership entries"
-        );
     }
 }
 
