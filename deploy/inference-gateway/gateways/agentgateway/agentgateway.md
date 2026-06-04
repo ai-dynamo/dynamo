@@ -33,7 +33,7 @@ inference traffic through agentgateway:
 
 ```bash
 cd deploy/inference-gateway
-export NAMESPACE=default
+export NAMESPACE=default # or wherever DynamoGraphDeployment, HTTPRoute, Gateway should go
 ./gateways/agentgateway/install.sh
 ```
 
@@ -49,7 +49,6 @@ The following environment variables can be overridden:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `NAMESPACE` | `default` | Namespace where the `Gateway` is created. |
 | `AGW_NAMESPACE` | `agentgateway-system` | Namespace where the agentgateway control plane runs. |
 | `GATEWAY_API_VERSION` | `v1.5.1` | Gateway API release to install. |
 | `IGW_LATEST_RELEASE` | `v1.2.1` | Gateway API Inference Extension release to install. |
