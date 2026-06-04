@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""End-to-end tests for MM-aware KV routing with the Rust frontend (lightseek-mm).
+"""End-to-end tests for MM-aware KV routing with the Rust frontend (mm-routing).
 
 Architecture:
-  Frontend (Rust preprocessor + lightseek + KV router)
-       └─ resolves <|image_pad|>, computes per-image N via lightseek,
+  Frontend (Rust preprocessor + KV router)
+       └─ resolves <|image_pad|>, computes per-image N,
           expands placeholders, hashes URL→u64→64-char hex,
           forwards mm_hashes via extra_args["mm_hashes"]
        → vLLM worker (publishes KV events with the forwarded UUID)
@@ -17,7 +17,7 @@ These tests assert that:
   3. Different images on the same prompt produce strictly less overlap
      than identical-image repeats.
 
-The fallback path (model unsupported by lightseek or image-token
+The fallback path (model unsupported by the image-processor registry or image-token
 unresolvable) is unit-tested via `image_token::tests` and the
 graceful-degrade branches in `gather_mm_exact_routing_info`; reproducing
 it e2e would require a model whose loading is heavy and whose worker
@@ -144,7 +144,7 @@ class VLLMWorkerProcess(ManagedProcess):
 
 
 class FrontendProcess(ManagedProcess):
-    """Rust frontend with lightseek-mm. No --dyn-chat-processor flag (default 'dynamo')."""
+    """Rust frontend with mm-routing. No --dyn-chat-processor flag (default 'dynamo')."""
 
     def __init__(self, request, *, frontend_port: int):
         super().__init__(
@@ -463,7 +463,7 @@ def test_router_rust_mm_repeated_http_image_overlap(
     assert overlap_2 > overlap_1 + 1, (
         f"expected warm-request overlap to dominate cold by more than just the "
         f"text-prefix block, got req1={overlap_1}/{total_1}, "
-        f"req2={overlap_2}/{total_2} — if not, header-fetch + lightseek expansion "
+        f"req2={overlap_2}/{total_2} — if not, header-fetch + token expansion "
         f"is misaligned with the worker's KV events"
     )
     cached_2 = (data_2.get("usage", {}).get("prompt_tokens_details") or {}).get(
@@ -516,10 +516,10 @@ def test_router_rust_mm_http_url_distinct_query_strings_dont_collide(
 
 
 @pytest.mark.timeout(300)
-def test_router_rust_mm_logs_lightseek_initialization(
+def test_router_rust_mm_logs_initialization(
     start_router_rust_mm_services, predownload_models
 ):
-    """Smoke test: frontend must emit the lightseek init + image-token-resolved
+    """Smoke test: frontend must emit the MM-routing init + image-token-resolved
     log lines for the served model. Catches regressions where the model dir
     isn't reachable from the MDC or the resolver silently misses a tier."""
     frontend_port, router_proc = start_router_rust_mm_services

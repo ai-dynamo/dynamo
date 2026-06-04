@@ -7,7 +7,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from dynamo.vllm.handlers import BaseWorkerHandler, VllmEngineQuiesceController
+pytest.importorskip("torch")
+pytest.importorskip("vllm.config")
+pytest.importorskip("vllm.v1.engine.exceptions")
+
+from dynamo.vllm.handlers import (  # noqa: E402
+    BaseWorkerHandler,
+    VllmEnginePauseController,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -34,8 +41,8 @@ def _make_handler() -> _TestWorkerHandler:
         unregister_endpoint_instance=AsyncMock(),
         register_endpoint_instance=AsyncMock(),
     )
-    handler._quiesce_controller = VllmEngineQuiesceController(handler.engine_client)
-    handler._quiesce_lock = asyncio.Lock()
+    handler._pause_controller = VllmEnginePauseController(handler.engine_client)
+    handler._pause_lock = asyncio.Lock()
     return handler
 
 
@@ -75,16 +82,16 @@ async def test_sleep_and_wake_are_idempotent():
 
 
 @pytest.mark.asyncio
-async def test_quiesce_without_level_uses_vllm_default_sleep():
+async def test_pause_without_level_uses_vllm_default_sleep():
     engine_client = SimpleNamespace(
         pause_generation=AsyncMock(),
         sleep=AsyncMock(),
         wake_up=AsyncMock(),
         resume_generation=AsyncMock(),
     )
-    controller = VllmEngineQuiesceController(engine_client)
+    controller = VllmEnginePauseController(engine_client)
 
-    changed = await controller.quiesce(None)
+    changed = await controller.pause(None)
 
     assert changed is True
     engine_client.pause_generation.assert_awaited_once()
@@ -94,7 +101,7 @@ async def test_quiesce_without_level_uses_vllm_default_sleep():
 @pytest.mark.asyncio
 async def test_wake_up_passes_explicit_tags_from_request():
     handler = _make_handler()
-    await handler._quiesce_controller.quiesce(1)
+    await handler._pause_controller.pause(1)
 
     result = await handler.wake_up({"tags": ["weights"]})
 
@@ -114,8 +121,8 @@ async def test_wake_up_recovers_generation_pause_after_failed_sleep_rollback():
     sleep_result = await handler.sleep({"level": 1})
 
     assert sleep_result["status"] == "error"
-    assert handler._quiesce_controller.is_quiesced is False
-    assert handler._quiesce_controller.needs_resume_recovery is True
+    assert handler._pause_controller.is_paused is False
+    assert handler._pause_controller.needs_resume_recovery is True
     failed_resume.assert_awaited_once()
     handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
 
@@ -126,11 +133,11 @@ async def test_wake_up_recovers_generation_pause_after_failed_sleep_rollback():
     handler.engine_client.wake_up.assert_not_awaited()
     handler.engine_client.resume_generation.assert_awaited_once()
     handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
-    assert handler._quiesce_controller.needs_resume_recovery is False
+    assert handler._pause_controller.needs_resume_recovery is False
 
 
 @pytest.mark.asyncio
-async def test_sleep_reregisters_after_clean_quiesce_rollback():
+async def test_sleep_reregisters_after_clean_pause_rollback():
     handler = _make_handler()
     handler.engine_client.sleep = AsyncMock(side_effect=RuntimeError("sleep failed"))
 
@@ -138,8 +145,8 @@ async def test_sleep_reregisters_after_clean_quiesce_rollback():
 
     # Rollback resumed generation cleanly, so the engine is serving-safe again.
     assert result["status"] == "error"
-    assert handler._quiesce_controller.is_quiesced is False
-    assert handler._quiesce_controller.needs_resume_recovery is False
+    assert handler._pause_controller.is_paused is False
+    assert handler._pause_controller.needs_resume_recovery is False
     handler.engine_client.resume_generation.assert_awaited_once()
     handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
     # The endpoint must rejoin the routing pool since wake_up will early-return.
@@ -163,7 +170,7 @@ async def test_sleep_returns_error_for_unregister_failure():
 @pytest.mark.asyncio
 async def test_wake_up_returns_error_for_register_failure():
     handler = _make_handler()
-    await handler._quiesce_controller.quiesce(1)
+    await handler._pause_controller.pause(1)
     handler.generate_endpoint.register_endpoint_instance = AsyncMock(
         side_effect=RuntimeError("discovery write timeout")
     )
@@ -173,4 +180,4 @@ async def test_wake_up_returns_error_for_register_failure():
     assert result["status"] == "error"
     handler.engine_client.wake_up.assert_awaited_once_with()
     handler.engine_client.resume_generation.assert_awaited_once()
-    assert handler._quiesce_controller.is_quiesced is True
+    assert handler._pause_controller.is_paused is True

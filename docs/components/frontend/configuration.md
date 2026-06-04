@@ -123,7 +123,7 @@ See the [Frontend Guide](frontend-guide.md) for KServe message formats and integ
 | CLI Argument | Env Var | Default | Description |
 |-------------|---------|---------|-------------|
 | `--enable-anthropic-api` | `DYN_ENABLE_ANTHROPIC_API` | `false` | Enable `/v1/messages` (Anthropic Messages API) |
-| `--dyn-chat-processor` | `DYN_CHAT_PROCESSOR` | `dynamo` | Chat processor: `dynamo` or `vllm` |
+| `--dyn-chat-processor` | `DYN_CHAT_PROCESSOR` | `dynamo` | Chat processor: `dynamo` (default), `vllm`, or `sglang`. See [Parser Configuration](../../parser-configuration.md) for how this combines with the parser flags. |
 | `--dyn-debug-perf` | `DYN_DEBUG_PERF` | `false` | Log per-function timing for preprocessing (vllm processor only) |
 | `--dyn-preprocess-workers` | `DYN_PREPROCESS_WORKERS` | `0` | Worker processes for CPU-bound preprocessing. 0 = main event loop (vllm processor only) |
 | `-i` / `--interactive` | `DYN_INTERACTIVE` | `false` | Interactive text chat mode |

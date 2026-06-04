@@ -128,7 +128,7 @@ the parser configuration, or the parser logic.
 
 - [Tool Call Parsing (Dynamo)](dynamo.md) -- Dynamo-native parser names and
   request examples
-- [Tool Call Parsing (Engine Fallback)](engine-fallback.md) --
+- [Parser Engine Fallback](../engine-fallback.md) --
   `--dyn-chat-processor` fallback path to vLLM and SGLang parsers
 - [Frontend Configuration Reference](../components/frontend/configuration.md)
   -- full CLI flag reference for the frontend and worker

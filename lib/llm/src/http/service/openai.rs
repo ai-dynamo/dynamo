@@ -1437,11 +1437,7 @@ async fn chat_completions(
         &request_id,
     );
 
-    if let Err(err) = request.normalize_reasoning_template_args() {
-        let err_response = ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: VALIDATION_PREFIX.to_string() + &err.to_string(),
-        });
+    if let Err(err_response) = normalize_chat_reasoning_template_args(&mut request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
     }
@@ -1661,6 +1657,18 @@ pub fn validate_chat_completion_unsupported_fields(
     }
 
     Ok(())
+}
+
+/// Normalizes OpenAI-style reasoning controls before chat completion validation.
+fn normalize_chat_reasoning_template_args(
+    request: &mut NvCreateChatCompletionRequest,
+) -> Result<(), ErrorResponse> {
+    request.normalize_reasoning_template_args().map_err(|e| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: VALIDATION_PREFIX.to_string() + &e.to_string(),
+        })
+    })
 }
 
 /// Validates that required fields are present and valid in the chat completion request
@@ -1893,11 +1901,7 @@ async fn responses(
     // that the stream converter needs for faithful response reconstruction.
     let responses_ctx = unified_request.responses_context().cloned();
     let mut chat_request = unified_request.into_inner();
-    if let Err(err) = chat_request.normalize_reasoning_template_args() {
-        let err_response = ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: VALIDATION_PREFIX.to_string() + &err.to_string(),
-        });
+    if let Err(err_response) = normalize_chat_reasoning_template_args(&mut chat_request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
     }
@@ -3201,6 +3205,27 @@ mod tests {
         };
         let result = validate_chat_completion_required_fields(&request);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_normalize_chat_reasoning_template_args_error_response() {
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "thinking": {"type": "auto"}
+            }))
+            .unwrap();
+
+        let result = normalize_chat_reasoning_template_args(&mut request);
+        assert!(result.is_err());
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                error_response.1.message,
+                format!("{VALIDATION_PREFIX}`thinking.type` must be `enabled` or `disabled`")
+            );
+        }
     }
 
     #[test]

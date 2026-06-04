@@ -404,16 +404,34 @@ class CachedTokensChatPayload(ChatPayload):
         expected_log: Optional[List[str]] = None,
         timeout: int = 60,
         min_cached_tokens: int = 1,
+        min_routing_total_blocks: int = 0,
         router_nvext_expectation: RouterNvextExpectation | None = None,
         require_rust_processor_init: bool = False,
         require_vllm_mm_processor_init: bool = False,
         min_avg_kv_hit_rate: float = 0.0,
     ):
+        # MM-aware routing checks: piggyback on engine_process.validate_expected_logs.
         log_patterns: List[str] = list(expected_log or [])
         if require_rust_processor_init:
             log_patterns.append(r"MM-aware KV routing enabled")
         if require_vllm_mm_processor_init:
             log_patterns.append(r"\[mm-routing\] Transfer mode:")
+        if min_routing_total_blocks > 0:
+            # The regex below gates by digit-count, so the threshold must
+            # be a power of 10 (1, 10, 100, ...). Reject any non-conforming
+            # value at construction time — otherwise the assertion would
+            # under-enforce (e.g. min_routing_total_blocks=25 would still
+            # only require 2-digit counts ≥10, not ≥25).
+            n_str = str(min_routing_total_blocks)
+            if n_str[0] != "1" or any(c != "0" for c in n_str[1:]):
+                raise ValueError(
+                    f"min_routing_total_blocks must be a power of 10 "
+                    f"(1, 10, 100, ...); got {min_routing_total_blocks}"
+                )
+            min_digits = len(n_str)
+            log_patterns.append(
+                rf"\[ROUTING\].*with\s+\d+/[1-9]\d{{{min_digits - 1},}}\s+blocks overlap"
+            )
         super().__init__(
             body=body,
             repeat_count=repeat_count,
