@@ -768,15 +768,14 @@ pub enum SchedulingPolicy {
     Unlimited,
     /// Semaphore-based concurrency limiting
     Semaphore(usize),
+    /// Token bucket rate limiting with burst capacity.
+    ///
+    /// Allows `rate` tasks per second in steady state while permitting short
+    /// bursts of up to `burst` tasks. Implemented by [`TokenBucketScheduler`].
+    ///
+    /// Example: `TokenBucket { rate: 10.0, burst: 5 }` = 10 tasks/sec, burst up to 5.
+    TokenBucket { rate: f64, burst: usize },
     // TODO: Future scheduling policies to implement
-    //
-    // /// Token bucket rate limiting with burst capacity
-    // /// Implementation: Use tokio::time::interval for refill, AtomicU64 for tokens.
-    // /// acquire() decrements tokens, schedule() waits for refill if empty.
-    // /// Burst allows temporary spikes above steady rate.
-    // /// struct: { rate: f64, burst: usize, tokens: AtomicU64, last_refill: Mutex<Instant> }
-    // /// Example: TokenBucket { rate: 10.0, burst: 5 } = 10 tasks/sec, burst up to 5
-    // TokenBucket { rate: f64, burst: usize },
     //
     // /// Weighted fair scheduling across multiple priority classes
     // /// Implementation: Maintain separate VecDeque for each priority class.
@@ -2885,6 +2884,7 @@ impl TaskTrackerInner {
 // Blanket implementation for all schedulers
 impl ArcPolicy for UnlimitedScheduler {}
 impl ArcPolicy for SemaphoreScheduler {}
+impl ArcPolicy for TokenBucketScheduler {}
 
 // Blanket implementation for all error policies
 impl ArcPolicy for LogOnlyPolicy {}
@@ -3051,6 +3051,154 @@ impl TaskScheduler for SemaphoreScheduler {
 
         debug!("Acquired semaphore permit");
         SchedulingResult::Execute(Box::new(SemaphoreGuard { _permit: permit }))
+    }
+}
+
+/// Resource guard for token bucket scheduling
+///
+/// Token bucket scheduling is a *rate* limit, not a concurrency limit: a token is
+/// consumed when the slot is acquired and is **not** returned when the task
+/// finishes (the bucket refills over time instead). This guard therefore holds no
+/// resource and is a no-op marker, mirroring [`UnlimitedGuard`].
+#[derive(Debug)]
+pub struct TokenBucketGuard;
+
+impl ResourceGuard for TokenBucketGuard {
+    // Token is consumed on acquisition and refilled over time, not released on drop.
+}
+
+/// Internal token bucket state, guarded by a single mutex.
+#[derive(Debug)]
+struct TokenBucketState {
+    /// Currently available tokens (fractional to allow sub-token refills).
+    tokens: f64,
+    /// Last instant the bucket was refilled.
+    last_refill: tokio::time::Instant,
+}
+
+/// Token bucket rate-limiting task scheduler
+///
+/// Limits the *rate* at which tasks start executing while allowing short bursts up
+/// to a fixed capacity. The bucket holds up to `burst` tokens and refills at `rate`
+/// tokens per second. Each [`acquire_execution_slot`](TaskScheduler::acquire_execution_slot)
+/// consumes one token, waiting for the bucket to refill when it is empty.
+///
+/// Unlike [`SemaphoreScheduler`], this places no bound on the number of tasks
+/// running concurrently - only on how quickly new tasks may start. The bucket
+/// starts full, so an initial burst of up to `burst` tasks is admitted immediately.
+///
+/// ## Cancellation Behavior
+///
+/// - Respects cancellation tokens before and while waiting for a token
+/// - Once a token is acquired (via ResourceGuard), always awaits task completion
+/// - Tasks handle their own cancellation internally (if created with `spawn_cancellable`)
+///
+/// # Example
+/// ```rust
+/// # use dynamo_runtime::utils::tasks::tracker::TokenBucketScheduler;
+/// // 10 tasks/sec steady state, bursts of up to 5
+/// let scheduler = TokenBucketScheduler::new(10.0, 5).unwrap();
+/// ```
+#[derive(Debug)]
+pub struct TokenBucketScheduler {
+    /// Refill rate in tokens per second.
+    rate: f64,
+    /// Maximum number of tokens the bucket can hold (burst capacity).
+    burst: f64,
+    /// Token count and last refill time.
+    state: Mutex<TokenBucketState>,
+}
+
+impl TokenBucketScheduler {
+    /// Create a new token bucket scheduler, returning `Arc`.
+    ///
+    /// The bucket starts full (`burst` tokens) so an initial burst is allowed
+    /// immediately.
+    ///
+    /// # Arguments
+    /// * `rate` - Refill rate in tokens per second; must be finite and greater than 0.
+    /// * `burst` - Maximum burst capacity in tokens; must be greater than 0.
+    ///
+    /// # Errors
+    /// Returns an error if `rate` is not a positive, finite number, or if `burst`
+    /// is zero.
+    pub fn new(rate: f64, burst: usize) -> Result<Arc<Self>> {
+        if !rate.is_finite() || rate <= 0.0 {
+            anyhow::bail!("token bucket rate must be a positive, finite number, got {rate}");
+        }
+        if burst == 0 {
+            anyhow::bail!("token bucket burst must be greater than zero");
+        }
+        Ok(Arc::new(Self {
+            rate,
+            burst: burst as f64,
+            state: Mutex::new(TokenBucketState {
+                tokens: burst as f64,
+                last_refill: tokio::time::Instant::now(),
+            }),
+        }))
+    }
+
+    /// Refill the bucket based on elapsed time, then try to consume one token.
+    ///
+    /// Returns `Ok(())` if a token was consumed, or `Err(wait)` with the duration
+    /// to wait before a token is expected to become available. The mutex is
+    /// released before returning so it is never held across an `.await`.
+    fn try_acquire_token(&self) -> std::result::Result<(), Duration> {
+        let mut state = self.state.lock().unwrap();
+
+        let now = tokio::time::Instant::now();
+        let elapsed = now.duration_since(state.last_refill).as_secs_f64();
+        if elapsed > 0.0 {
+            state.tokens = (state.tokens + elapsed * self.rate).min(self.burst);
+            state.last_refill = now;
+        }
+
+        if state.tokens >= 1.0 {
+            state.tokens -= 1.0;
+            Ok(())
+        } else {
+            let missing = 1.0 - state.tokens;
+            Err(Duration::from_secs_f64(missing / self.rate))
+        }
+    }
+}
+
+#[async_trait]
+impl TaskScheduler for TokenBucketScheduler {
+    async fn acquire_execution_slot(
+        &self,
+        cancel_token: CancellationToken,
+    ) -> SchedulingResult<Box<dyn ResourceGuard>> {
+        debug!("Acquiring token bucket slot");
+
+        // Check for cancellation before consuming or waiting on a token.
+        if cancel_token.is_cancelled() {
+            debug!("Task cancelled before acquiring token");
+            return SchedulingResult::Cancelled;
+        }
+
+        loop {
+            match self.try_acquire_token() {
+                Ok(()) => {
+                    debug!("Acquired token bucket slot");
+                    return SchedulingResult::Execute(Box::new(TokenBucketGuard));
+                }
+                Err(wait) => {
+                    // Bucket is empty: wait for a refill, but allow cancellation
+                    // to interrupt the wait without consuming a token.
+                    tokio::select! {
+                        _ = tokio::time::sleep(wait) => {
+                            // Refilled enough to retry; loop and attempt again.
+                        }
+                        _ = cancel_token.cancelled() => {
+                            debug!("Task cancelled while waiting for token bucket refill");
+                            return SchedulingResult::Cancelled;
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -6540,5 +6688,70 @@ mod tests {
         );
 
         // This should help us understand what's happening
+    }
+
+    #[tokio::test]
+    async fn test_token_bucket_burst_exhaustion() {
+        // Low refill rate so burst capacity dominates over the test window.
+        let scheduler = TokenBucketScheduler::new(1.0, 3).unwrap();
+        let token = CancellationToken::new();
+
+        // Bucket starts full: three slots are admitted immediately.
+        for _ in 0..3 {
+            let result = scheduler.acquire_execution_slot(token.clone()).await;
+            assert!(matches!(result, SchedulingResult::Execute(_)));
+        }
+
+        // Bucket is now empty. At 1 token/sec the next slot needs ~1s to refill,
+        // so it must not resolve within a short window.
+        let pending = tokio::time::timeout(
+            Duration::from_millis(50),
+            scheduler.acquire_execution_slot(token.clone()),
+        )
+        .await;
+        assert!(
+            pending.is_err(),
+            "bucket should be exhausted after the burst"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_token_bucket_cancellation_mid_wait() {
+        // Single-token bucket with a slow refill so the second acquire blocks.
+        let scheduler = TokenBucketScheduler::new(1.0, 1).unwrap();
+        let token = CancellationToken::new();
+
+        // Consume the only available token.
+        let first = scheduler.acquire_execution_slot(token.clone()).await;
+        assert!(matches!(first, SchedulingResult::Execute(_)));
+
+        // The next acquire blocks waiting for a refill; cancel it mid-wait.
+        let waiter = tokio::spawn({
+            let scheduler = scheduler.clone();
+            let token = token.clone();
+            async move { scheduler.acquire_execution_slot(token).await }
+        });
+
+        // Let the waiter reach its wait, then cancel.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        token.cancel();
+
+        let result = waiter.await.unwrap();
+        assert!(matches!(result, SchedulingResult::Cancelled));
+    }
+
+    #[test]
+    fn test_token_bucket_invalid_config() {
+        // Non-positive or non-finite rates are rejected.
+        assert!(TokenBucketScheduler::new(0.0, 5).is_err());
+        assert!(TokenBucketScheduler::new(-1.0, 5).is_err());
+        assert!(TokenBucketScheduler::new(f64::NAN, 5).is_err());
+        assert!(TokenBucketScheduler::new(f64::INFINITY, 5).is_err());
+
+        // Zero burst is rejected.
+        assert!(TokenBucketScheduler::new(10.0, 0).is_err());
+
+        // A valid configuration succeeds.
+        assert!(TokenBucketScheduler::new(10.0, 5).is_ok());
     }
 }
