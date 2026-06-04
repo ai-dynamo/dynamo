@@ -10,14 +10,14 @@ use std::time::Duration;
 use async_trait::async_trait;
 use clap::Parser;
 use dynamo_backend_common::{
-    CommonArgs, DisaggregationMode, DynamoError, EngineConfig, GenerateContext, LLMEngine,
-    LLMEngineOutput, LLMEngineOutputExt, MetricsBindings, MetricsCtx, ModelInput,
+    AsyncEngineContext, CommonArgs, DisaggregationMode, DynamoError, EngineConfig, GenerateContext,
+    LLMEngine, LLMEngineOutput, LLMEngineOutputExt, MetricsBindings, MetricsCtx, ModelInput,
     PreprocessedRequest, SnapshotPublisher, WorkerConfig, usage,
 };
 use futures::{StreamExt, stream::BoxStream};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, TransportMode};
 use vllm_llm::Llm;
 use vllm_managed_engine::ManagedEngineHandle;
@@ -252,7 +252,9 @@ impl LLMEngine for VllmBackend {
             0 => None,
             blocks => Some(blocks),
         };
-        let llm = Llm::new(client).with_log_stats(true);
+        let llm = Llm::new(client)
+            .with_request_id_randomization(false)
+            .with_log_stats(true);
 
         *inner = Some(Inner { engine_handle, llm });
 
@@ -350,6 +352,28 @@ impl LLMEngine for VllmBackend {
                 }
             }
         }))
+    }
+
+    async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
+        let request_id = ctx.id().to_string();
+        let inner = self.inner.read().await;
+        let Some(inner) = inner.as_ref() else {
+            debug!(%request_id, "vLLM backend abort skipped because engine is not started");
+            return;
+        };
+
+        // Since randomized request IDs are disabled, we can directly abort by using the request ID
+        // from the context.
+        if let Err(error) = inner
+            .llm
+            .engine_core_client()
+            .abort(std::slice::from_ref(&request_id))
+            .await
+        {
+            warn!(%request_id, %error, "failed to abort vLLM request");
+        } else {
+            debug!(%request_id, "aborted vLLM request");
+        }
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
