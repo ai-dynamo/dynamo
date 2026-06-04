@@ -333,7 +333,7 @@ type ComponentCheckpointConfig struct {
 	// +kubebuilder:default=Immediate
 	StartupPolicy CheckpointStartupPolicy `json:"startupPolicy,omitempty"`
 
-	// deletionPolicy defines whether a DGD-managed automatic checkpoint CR and
+	// DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and
 	// artifact are deleted or retained when the owning DGD is deleted.
 	// Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
 	// +optional

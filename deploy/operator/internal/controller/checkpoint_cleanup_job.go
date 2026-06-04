@@ -15,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/utils/ptr"
 )
 
 const defaultCheckpointCleanupImage = "busybox:1.36"
@@ -50,6 +51,13 @@ func buildCheckpointCleanupJob(
 			Labels: map[string]string{
 				snapshotprotocol.CheckpointIDLabel: checkpointID,
 			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
+				Kind:       "DynamoCheckpoint",
+				Name:       ckpt.Name,
+				UID:        ckpt.UID,
+				Controller: ptr.To(true),
+			}},
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            &backoffLimit,
