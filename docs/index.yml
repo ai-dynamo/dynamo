@@ -52,6 +52,9 @@ navigation:
     path: digest/index.mdx
     slug: digest
     contents:
+      - page: "NVIDIA Dynamo Snapshot: Fast Startup for Inference Workloads on Kubernetes"
+        path: digest/snapshot/dynamo-snapshot-fast-startup.md
+        slug: dynamo-snapshot-fast-startup
       - page: "DynoSim: Simulating the Pareto Frontier"
         path: digest/dynosim/dynosim-pareto-frontier.md
         slug: dynosim-pareto-frontier
@@ -178,10 +181,20 @@ navigation:
             path: features/disaggregated-serving/aiconfigurator.md
       - page: KV Cache Offloading
         path: components/kvbm/kvbm-guide.md
-      - page: Parser Configuration
-        path: parser-configuration.md
-      - page: Parser Engine Fallback
-        path: engine-fallback.md
+      - section: Tool Call and Reasoning Parsing
+        slug: parsing
+        path: parsing.md
+        contents:
+          - page: Tool Call Parsing (Dynamo)
+            path: tool-calling/README.md
+          - page: Reasoning Parsing (Dynamo)
+            path: reasoning/README.md
+          - page: Parser Engine Fallback
+            path: engine-fallback.md
+          - page: Parser Configuration
+            path: parser-configuration.md
+          - page: Troubleshooting Tool Calls
+            path: tool-calling/troubleshooting.md
       - page: Benchmarking
         path: benchmarks/benchmarking.md
       - section: Fault Tolerance
@@ -228,20 +241,6 @@ navigation:
           - page: Planner Simulation Benchmarking
             path: dynosim/planner-benchmarking.md
             slug: planner-benchmarking
-      - section: Tool Calling
-        slug: tool-calling
-        path: tool-calling/README.md
-        contents:
-          - page: Tool Call Parsing (Dynamo)
-            path: tool-calling/dynamo.md
-          - page: Troubleshooting Tool Calls
-            path: tool-calling/troubleshooting.md
-      - section: Reasoning
-        slug: reasoning
-        path: reasoning/README.md
-        contents:
-          - page: Reasoning Parsing (Dynamo)
-            path: reasoning/dynamo.md
       - section: Agents
         slug: agents
         path: agents/README.md
@@ -361,6 +360,8 @@ navigation:
             path: components/router/router-examples.md
           - page: Standalone Indexer
             path: components/router/standalone-indexer.md
+          - page: Standalone Slot Tracker
+            path: components/router/standalone-slot-tracker.md
           - page: KV Event Replay — Dynamo vs vLLM
             path: components/router/kv-event-replay-comparison.md
       - section: Planner

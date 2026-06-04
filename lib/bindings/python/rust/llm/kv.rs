@@ -12,13 +12,15 @@ use tokio_stream::StreamExt;
 use super::local_model::RoutingConstraints;
 use super::*;
 use crate::Endpoint;
-#[cfg(feature = "kv-indexer")]
+#[cfg(any(feature = "kv-indexer", feature = "slot-tracker"))]
 use clap::Parser;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
 #[cfg(feature = "kv-indexer")]
 use dynamo_kv_router::standalone_indexer::{self, IndexerConfig};
+#[cfg(feature = "slot-tracker")]
+use dynamo_kv_router::standalone_slot_tracker::{self, SlotTrackerConfig};
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
@@ -107,7 +109,48 @@ where
     }
 }
 
-#[cfg(feature = "kv-indexer")]
+#[cfg(feature = "slot-tracker")]
+#[derive(Parser)]
+#[command(
+    name = "python -m dynamo.slot_tracker",
+    about = "Standalone KV router slot tracker"
+)]
+struct SlotTrackerCli {
+    /// HTTP server port
+    #[arg(long, default_value_t = 8091)]
+    port: u16,
+}
+
+pub fn run_slot_tracker_cli<I, T>(args: I) -> anyhow::Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    #[cfg(feature = "slot-tracker")]
+    {
+        let cli = SlotTrackerCli::try_parse_from(
+            std::iter::once(OsString::from("python -m dynamo.slot_tracker"))
+                .chain(args.into_iter().map(Into::into)),
+        )?;
+
+        init_standalone_logging();
+
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(standalone_slot_tracker::run_server(SlotTrackerConfig {
+            port: cli.port,
+        }))
+    }
+
+    #[cfg(not(feature = "slot-tracker"))]
+    {
+        let _ = args;
+        anyhow::bail!(
+            "dynamo.slot_tracker is not available in this build; reinstall with --features slot-tracker"
+        )
+    }
+}
+
+#[cfg(any(feature = "kv-indexer", feature = "slot-tracker"))]
 fn init_standalone_logging() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(

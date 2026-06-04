@@ -249,7 +249,7 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       build_timeout_minutes: 120
@@ -264,7 +264,7 @@ jobs:
     with:
       framework: sglang
       target: runtime
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       build_timeout_minutes: 120
@@ -301,7 +301,7 @@ jobs:
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       enable_coverage: true
       run_cpu_only_tests: true
@@ -326,7 +326,7 @@ jobs:
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       enable_coverage: true
       run_sanity_check: false
@@ -346,7 +346,7 @@ jobs:
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       enable_coverage: true
       run_cpu_only_tests: true
@@ -372,7 +372,7 @@ jobs:
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       enable_coverage: true
       run_sanity_check: false

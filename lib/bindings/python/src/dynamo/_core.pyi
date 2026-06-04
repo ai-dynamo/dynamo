@@ -108,6 +108,10 @@ def run_kv_indexer(args: List[str]) -> None:
     """Run the KV indexer with the given arguments."""
     ...
 
+def run_slot_tracker(args: List[str]) -> None:
+    """Run the KV router slot tracker with the given arguments."""
+    ...
+
 # Any Python object that can be serialized to JSON (dict, list, str, int, etc.)
 JsonLike = Any
 
@@ -674,6 +678,7 @@ class ModelRuntimeConfig:
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
     reasoning_parser: str | None
+    backend_framework: str | None
     exclude_tools_when_tool_choice_none: bool
     data_parallel_start_rank: int
     data_parallel_size: int

@@ -24,7 +24,8 @@ from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
     ScheduledRequestMetrics,
 )
-from dynamo.llm import AicPerfConfig, KvRouterConfig, MockEngineArgs
+from dynamo.llm import AicPerfConfig, KvRouterConfig
+from dynamo.mocker import MockEngineArgs
 from dynamo.mocker.utils.kv_cache import compute_kv_bytes_per_token
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 from dynamo.replay.reporting import format_report_table, write_report_json
@@ -334,7 +335,7 @@ def _run_planner_replay(
     # Fix the polynomial model to incorporate batch_size, or gate disagg
     # SLA mode on having a non-polynomial perf model.
     """
-    from dynamo.llm import PlannerReplayBridge
+    from dynamo.mocker import PlannerReplayBridge
     from dynamo.planner.config.planner_config import PlannerConfig
     from dynamo.planner.core.types import WorkerCapabilities
     from dynamo.planner.offline.replay_adapter import ReplayPlannerAdapter

@@ -92,7 +92,7 @@ _IDLE_SLEEP_S = 0.01
 
 # Mirror the legacy `dynamo.trtllm` worker — required for TRT-LLM to actually
 # publish KV cache events. Without this, `get_kv_cache_events` returns empty.
-_DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
+_DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 100_000
 
 # Note: `metrics_dict` is set per-instance on `GenerationResult` (only
 # when TRT-LLM's perf-stats collection is enabled and the request
@@ -149,6 +149,17 @@ class TrtllmLLMEngine(LLMEngine):
         self.publish_events_and_metrics = publish_events_and_metrics
         self._component = component
         self._additional_metrics: Optional["AdditionalMetricsCollector"] = None
+        kv_cache_config = self.engine_args.get("kv_cache_config", {})
+        if isinstance(kv_cache_config, dict):
+            event_buffer_max_size = kv_cache_config.get("event_buffer_max_size", 0)
+        elif isinstance(kv_cache_config, KvCacheConfig):
+            event_buffer_max_size = kv_cache_config.event_buffer_max_size
+        else:
+            raise TypeError(
+                "kv_cache_config must be a dict or KvCacheConfig, "
+                f"got {type(kv_cache_config).__name__}"
+            )
+        self._kv_event_buffer_max_size = int(event_buffer_max_size or 0)
         self._trtllm_metrics_collector: Optional["MetricsCollector"] = None
         # Resolved once at construction so the hot poll loop doesn't run
         # `hasattr` per iteration; same for the per-request log method
@@ -338,6 +349,9 @@ class TrtllmLLMEngine(LLMEngine):
                 "engine_type": "trtllm",
             },
         )
+        self._additional_metrics.set_kv_event_buffer_capacity(
+            self._kv_event_buffer_max_size
+        )
         self._trtllm_metrics_collector = MetricsCollector(
             {"model_name": gauge_model_name, "engine_type": "trtllm"}
         )
@@ -489,6 +503,8 @@ class TrtllmLLMEngine(LLMEngine):
             if not events:
                 time.sleep(_IDLE_SLEEP_S)
                 continue
+            if self._additional_metrics is not None:
+                self._additional_metrics.record_kv_event_drain_batch(len(events))
             for event in events:
                 try:
                     self._dispatch_kv_event(event)
@@ -515,6 +531,10 @@ class TrtllmLLMEngine(LLMEngine):
                     last + 1,
                     event_id,
                 )
+                if self._additional_metrics is not None:
+                    self._additional_metrics.record_kv_event_id_gap(
+                        max(0, event_id - (last + 1))
+                    )
             self._last_event_id_by_rank[rank] = event_id
         publisher = self._kv_publishers.get(rank)
         if publisher is None:

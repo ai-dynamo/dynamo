@@ -103,6 +103,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.istio.io,resources=destinationrules,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=resourceclaimtemplates,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=deviceclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
@@ -434,7 +435,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 		result, err = r.reconcileGroveResources(ctx, dynamoDeployment, restartState, checkpointInfos)
 	} else {
 		logger.Info("Reconciling Dynamo components deployments", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.LWSEnabled)
-		result, err = r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment, restartState)
+		result, err = r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment, restartState, checkpointInfos)
 	}
 	if err != nil {
 		logger.Error(err, "Failed to reconcile Dynamo components deployments")
@@ -1446,7 +1447,12 @@ func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(resources []Re
 	}
 }
 
-func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment, restartState *dynamo.RestartState) (ReconcileResult, error) {
+func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(
+	ctx context.Context,
+	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	restartState *dynamo.RestartState,
+	checkpointInfos map[string]*checkpoint.CheckpointInfo,
+) (ReconcileResult, error) {
 	resources := []Resource{}
 	logger := log.FromContext(ctx)
 
@@ -1477,6 +1483,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 
 	// Sync all generated DCDs
 	for key, dcd := range dynamoComponentsDeployments {
+		applyDCDResolvedCheckpointRef(dcd, checkpointInfos[key])
 		logger.Info("Reconciling DynamoComponentDeployment", "key", key, "name", dcd.Name)
 		if err := r.preserveExistingDCDBackendFramework(ctx, dcd); err != nil {
 			logger.Error(err, "failed to preserve existing DynamoComponentDeployment backendFramework", "name", dcd.Name)
@@ -1518,6 +1525,25 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 	}
 
 	return result, nil
+}
+
+func applyDCDResolvedCheckpointRef(
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	checkpointInfo *checkpoint.CheckpointInfo,
+) {
+	if dcd == nil || checkpointInfo == nil || !checkpointInfo.Enabled || !checkpointInfo.Exists || checkpointInfo.CheckpointName == "" {
+		return
+	}
+	if dcd.Spec.Experimental == nil {
+		dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{}
+	}
+	if dcd.Spec.Experimental.Checkpoint == nil {
+		dcd.Spec.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{}
+	}
+	checkpointName := checkpointInfo.CheckpointName
+	dcd.Spec.Experimental.Checkpoint.CheckpointRef = &checkpointName
+	dcd.Spec.Experimental.Checkpoint.Identity = nil
+	dcd.Spec.Experimental.Checkpoint.Job = nil
 }
 
 func (r *DynamoGraphDeploymentReconciler) preserveExistingDCDBackendFramework(ctx context.Context, desired *nvidiacomv1beta1.DynamoComponentDeployment) error {
@@ -1698,11 +1724,45 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 			storageEnsured = true
 		}
 
-		// Resolve checkpoint for this component.
-		info, err := checkpoint.ResolveCheckpointForService(ctx, r.Client, dynamoDeployment.Namespace, dynamo.ToAlphaCheckpointConfig(checkpointConfig))
+		alphaCheckpointConfig := dynamo.ToAlphaCheckpointConfig(checkpointConfig)
+
+		var info *checkpoint.CheckpointInfo
+		var err error
+		isAutoCheckpoint := checkpointConfig.Mode == "" || checkpointConfig.Mode == nvidiacomv1beta1.CheckpointModeAuto
+		hasCheckpointRef := checkpointConfig.CheckpointRef != nil && *checkpointConfig.CheckpointRef != ""
+		if isAutoCheckpoint && !hasCheckpointRef {
+			workerHash, err := r.checkpointWorkerHashForComponent(dynamoDeployment, componentName)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to compute checkpoint worker hash for component %s: %w", componentName, err)
+			}
+			checkpointID := checkpoint.DGDCheckpointID(
+				dynamoDeployment.Namespace,
+				dynamoDeployment.Name,
+				string(dynamoDeployment.UID),
+				componentName,
+				workerHash,
+			)
+			checkpointName := fmt.Sprintf("checkpoint-%s", checkpointID)
+			refConfig := *alphaCheckpointConfig.DeepCopy()
+			refConfig.CheckpointRef = &checkpointName
+			info, err = checkpoint.ResolveCheckpointForService(ctx, r.Client, dynamoDeployment.Namespace, &refConfig)
+			if errors.IsNotFound(err) {
+				info = nil
+				err = nil
+			}
+			if err == nil && info == nil {
+				info = &checkpoint.CheckpointInfo{Enabled: true}
+			}
+		} else {
+			// Resolve checkpoint for this component.
+			info, err = checkpoint.ResolveCheckpointForService(ctx, r.Client, dynamoDeployment.Namespace, alphaCheckpointConfig)
+		}
 		if err != nil {
 			logger.Error(err, "Failed to resolve checkpoint for component", "component", componentName)
 			return nil, nil, fmt.Errorf("failed to resolve checkpoint for component %s: %w", componentName, err)
+		}
+		if len(info.RestoreTargetContainers) == 0 && alphaCheckpointConfig.TargetContainerName != "" {
+			info.RestoreTargetContainers = []string{alphaCheckpointConfig.TargetContainerName}
 		}
 		if dynamo.IsIntraPodFailoverEnabled(component) {
 			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
@@ -1714,13 +1774,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 		// Store checkpoint info for later use in pod spec generation
 		checkpointInfos[componentName] = info
 
-		// checkpointRef is authoritative. Auto mode should only create the canonical checkpoint
-		// when the component is using identity-based lookup.
-		if checkpointConfig.Mode == nvidiacomv1beta1.CheckpointModeAuto &&
-			(checkpointConfig.CheckpointRef == nil || *checkpointConfig.CheckpointRef == "") &&
-			!info.Exists &&
-			info.Identity != nil &&
-			!info.Ready {
+		// checkpointRef is authoritative. Auto mode creates a DGD-scoped checkpoint
+		// for this component generation without looking for reusable checkpoints.
+		if isAutoCheckpoint && !hasCheckpointRef && !info.Exists {
 			logger.Info("Creating DynamoCheckpoint CR in Auto mode", "component", componentName)
 
 			ckpt, err := r.createCheckpointCR(ctx, dynamoDeployment, componentName, component)
@@ -1730,14 +1786,16 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 			}
 			info.Exists = true
 			info.CheckpointName = ckpt.Name
-			if info.Hash == "" {
-				info.Hash = ckpt.Status.IdentityHash
+			info.Hash, err = checkpoint.CheckpointID(ckpt)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to resolve checkpoint ID for component %s: %w", componentName, err)
 			}
 			info.Ready = false
 		}
 
 		checkpointStatuses[componentName] = nvidiacomv1beta1.ComponentCheckpointStatus{
 			CheckpointName: info.CheckpointName,
+			CheckpointID:   info.Hash,
 			IdentityHash:   info.Hash,
 			Ready:          info.Ready,
 		}
@@ -1747,6 +1805,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 }
 
 // createCheckpointCR creates a DynamoCheckpoint CR for a component in Auto mode.
+//
+//nolint:gocyclo
 func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 	ctx context.Context,
 	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -1754,36 +1814,43 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
 	checkpointConfig := dynamo.GetCheckpoint(component)
-	if checkpointConfig == nil || checkpointConfig.Identity == nil {
-		return nil, fmt.Errorf("checkpoint identity is required for Auto mode")
+	if checkpointConfig == nil {
+		return nil, fmt.Errorf("checkpoint config is required for Auto mode")
 	}
 
-	checkpointIdentity := *dynamo.ToAlphaCheckpointIdentity(checkpointConfig.Identity)
-	hash, err := checkpoint.ComputeIdentityHash(checkpointIdentity)
+	workerHash, err := r.checkpointWorkerHashForComponent(dynamoDeployment, componentName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to compute identity hash: %w", err)
+		return nil, fmt.Errorf("failed to compute checkpoint worker hash for component %s: %w", componentName, err)
 	}
+	checkpointID := checkpoint.DGDCheckpointID(
+		dynamoDeployment.Namespace,
+		dynamoDeployment.Name,
+		string(dynamoDeployment.UID),
+		componentName,
+		workerHash,
+	)
 
-	// Capture config is not part of the checkpoint identity. Once a checkpoint object exists for a
-	// hash, later reconcilers must reuse it instead of racing to overwrite the capture pod template.
-	existing, err := checkpoint.FindCheckpointByIdentityHash(ctx, r.Client, dynamoDeployment.Namespace, hash, "")
+	backendFramework, err := dynamo.BackendFrameworkForComponent(component, dynamoDeployment)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to determine backend framework for component %s: %w", componentName, err)
 	}
-	if existing != nil {
-		if existing.Spec.GPUMemoryService != nil && existing.Spec.GPUMemoryService.Enabled {
-			if err := r.adoptCheckpointGMSResourceClaimTemplate(ctx, existing, checkpointGMSResourceClaimTemplateName(hash)); err != nil {
-				return nil, err
-			}
+	if (backendFramework == "" || backendFramework == dynamo.BackendFrameworkNoop) &&
+		checkpointConfig.Identity != nil &&
+		checkpointConfig.Identity.BackendFramework != "" {
+		backendFramework, err = dynamo.ParseBackendFramework(checkpointConfig.Identity.BackendFramework)
+		if err != nil {
+			return nil, fmt.Errorf("invalid legacy checkpoint identity backend framework for component %s: %w", componentName, err)
 		}
-		return existing, nil
+	}
+	if backendFramework == "" || backendFramework == dynamo.BackendFrameworkNoop {
+		return nil, fmt.Errorf("checkpoint backend framework for component %s could not be determined; set spec.backendFramework or use a recognizable worker command", componentName)
 	}
 
 	podTemplate, err := r.buildCheckpointJobPodTemplate(
 		dynamoDeployment,
 		component,
 		componentName,
-		checkpointIdentity.BackendFramework,
+		backendFramework,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build checkpoint job pod template: %w", err)
@@ -1792,12 +1859,19 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		podTemplate.Spec.ServiceAccountName == "" {
 		podTemplate.Spec.ServiceAccountName = discovery.GetK8sDiscoveryServiceAccountName(dynamoDeployment.Name)
 	}
+	if podTemplate.Labels == nil {
+		podTemplate.Labels = map[string]string{}
+	}
+	podTemplate.Labels[consts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
+	podTemplate.Labels[consts.KubeLabelDynamoComponent] = componentName
+	if workerHash != "" {
+		podTemplate.Labels[consts.KubeLabelDynamoWorkerHash] = workerHash
+	}
 
 	targetContainerName := consts.MainContainerName
 	if checkpointConfig.TargetContainerName != "" {
 		targetContainerName = checkpointConfig.TargetContainerName
 	}
-
 	targetContainer, err := findPodTemplateContainer(&podTemplate, targetContainerName)
 	if err != nil {
 		return nil, err
@@ -1811,18 +1885,16 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		}
 	}
 	var checkpointGMSClaimTemplateName string
-	var checkpointGMSGPUCount int
-	var checkpointGMSDeviceClassName string
 	if gmsSpec != nil && gmsSpec.Enabled {
 		if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, gmsSpec); err != nil {
 			return nil, err
 		}
-		checkpointGMSClaimTemplateName = checkpointGMSResourceClaimTemplateName(hash)
-		checkpointGMSGPUCount, err = dra.ExtractGPUCountFromResourceRequirements(targetContainer.Resources)
+		checkpointGMSClaimTemplateName = checkpointGMSResourceClaimTemplateName(checkpointID)
+		checkpointGMSGPUCount, err := dra.ExtractGPUCountFromResourceRequirements(targetContainer.Resources)
 		if err != nil {
 			return nil, fmt.Errorf("invalid GPU resource requirements for GMS checkpoint %s/%s: %w", dynamoDeployment.Name, componentName, err)
 		}
-		checkpointGMSDeviceClassName = gmsSpec.DeviceClassName
+		checkpointGMSDeviceClassName := gmsSpec.DeviceClassName
 		if checkpointGMSDeviceClassName == "" {
 			checkpointGMSDeviceClassName = dra.DefaultDeviceClassName
 		}
@@ -1835,15 +1907,25 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		); err != nil {
 			return nil, err
 		}
-		if err := prepareCheckpointGMSPodTemplate(&podTemplate, targetContainerName, hash, gmsSpec); err != nil {
+		if err := prepareCheckpointGMSPodTemplate(&podTemplate, targetContainerName, checkpointID, gmsSpec); err != nil {
 			return nil, err
 		}
 	}
+
 	ckpt, err := checkpoint.CreateOrGetAutoCheckpoint(
 		ctx,
 		r.Client,
 		dynamoDeployment.Namespace,
-		checkpointIdentity,
+		checkpointID,
+		nvidiacomv1alpha1.DynamoCheckpointIdentity{
+			Model:            fmt.Sprintf("%s/%s", dynamoDeployment.Namespace, dynamoDeployment.Name),
+			BackendFramework: string(backendFramework),
+			ExtraParameters: map[string]string{
+				"dgdUID":       string(dynamoDeployment.UID),
+				"component":    componentName,
+				"checkpointID": checkpointID,
+			},
+		},
 		podTemplate,
 		targetContainerName,
 		gmsSpec,
@@ -1859,8 +1941,8 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 	return ckpt, nil
 }
 
-func checkpointGMSResourceClaimTemplateName(hash string) string {
-	return dra.ResourceClaimTemplateName("checkpoint-"+hash, "worker")
+func checkpointGMSResourceClaimTemplateName(checkpointID string) string {
+	return dra.ResourceClaimTemplateName("checkpoint-"+checkpointID, "worker")
 }
 
 func (r *DynamoGraphDeploymentReconciler) syncCheckpointGMSResourceClaimTemplate(
@@ -1917,7 +1999,7 @@ func (r *DynamoGraphDeploymentReconciler) adoptCheckpointGMSResourceClaimTemplat
 func prepareCheckpointGMSPodTemplate(
 	podTemplate *corev1.PodTemplateSpec,
 	targetContainerName string,
-	hash string,
+	checkpointID string,
 	gmsSpec *nvidiacomv1alpha1.GPUMemoryServiceSpec,
 ) error {
 	switch gmsSpec.Mode {
@@ -1932,7 +2014,7 @@ func prepareCheckpointGMSPodTemplate(
 	if err != nil {
 		return err
 	}
-	ensureCheckpointGMSPodClaim(&podTemplate.Spec, checkpointGMSResourceClaimTemplateName(hash))
+	ensureCheckpointGMSPodClaim(&podTemplate.Spec, checkpointGMSResourceClaimTemplateName(checkpointID))
 	checkpoint.EnsureIntraPodGPUMemoryService(
 		&podTemplate.Spec,
 		[]*corev1.Container{targetContainer},
@@ -1971,6 +2053,24 @@ func ensureCheckpointGMSPodClaim(podSpec *corev1.PodSpec, claimTemplateName stri
 	podSpec.ResourceClaims = append(podSpec.ResourceClaims, podClaim)
 }
 
+func (r *DynamoGraphDeploymentReconciler) checkpointWorkerHashForComponent(dgd *nvidiacomv1beta1.DynamoGraphDeployment, componentName string) (string, error) {
+	if dgd == nil {
+		return "", nil
+	}
+	component := dgd.GetComponentByName(componentName)
+	if component == nil || !dynamo.IsWorkerComponent(string(component.ComponentType)) {
+		return "", nil
+	}
+	if r == nil {
+		return "", nil
+	}
+	desired, err := r.desiredWorkerHashes(dgd)
+	if err != nil {
+		return "", err
+	}
+	return r.activeWorkerHashForDCDGeneration(dgd, desired), nil
+}
+
 // buildCheckpointJobPodTemplate builds a checkpoint job template from the same
 // component defaults used for regular DGD pods, then keeps only the target
 // container plus any checkpoint-job sidecars supplied by the user.
@@ -1980,14 +2080,8 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	componentName string,
-	framework string, // From checkpoint identity (e.g., "vllm", "sglang", "trtllm")
+	backendFramework dynamo.BackendFramework,
 ) (corev1.PodTemplateSpec, error) {
-	// Parse framework string to BackendFramework type
-	backendFramework, err := dynamo.ParseBackendFramework(framework)
-	if err != nil {
-		return corev1.PodTemplateSpec{}, err
-	}
-
 	targetContainerName := consts.MainContainerName
 	if checkpointConfig := dynamo.GetCheckpoint(component); checkpointConfig != nil && checkpointConfig.TargetContainerName != "" {
 		targetContainerName = checkpointConfig.TargetContainerName
@@ -2046,11 +2140,29 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 	// Override RestartPolicy for job (must be Never or OnFailure)
 	podSpec.RestartPolicy = corev1.RestartPolicyNever
 
+	// Seed the checkpoint job pod-template metadata from the component's own
+	// PodTemplate.ObjectMeta so workload-level labels/annotations (e.g. Istio
+	// sidecar opt-out or policy annotations) are not silently dropped on the
+	// auto-created checkpoint job. GeneratePodSpecForComponent only returns the
+	// PodSpec, so the template metadata must be carried over explicitly here.
+	// Precedence: component pod-template metadata < controller-managed labels <
+	// explicit checkpoint.job.podTemplate overrides (applied below).
+	podLabels := map[string]string{}
+	podAnnotations := map[string]string{}
+	if component.PodTemplate != nil {
+		for k, v := range component.PodTemplate.Labels {
+			podLabels[k] = v
+		}
+		for k, v := range component.PodTemplate.Annotations {
+			podAnnotations[k] = v
+		}
+	}
+	podLabels[consts.KubeLabelDynamoComponent] = componentName
+
 	podTemplate := corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
-			Labels: map[string]string{
-				consts.KubeLabelDynamoComponent: componentName,
-			},
+			Labels:      podLabels,
+			Annotations: podAnnotations,
 		},
 		Spec: *podSpec,
 	}
@@ -2311,6 +2423,16 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			predicate.GenerationChangedPredicate{},
 		)).
 		Named(consts.ResourceTypeDynamoGraphDeployment).
+		Watches(
+			&nvidiacomv1alpha1.DynamoCheckpoint{},
+			handler.EnqueueRequestsFromMapFunc(r.mapAutoCheckpointToDGDRequests),
+			builder.WithPredicates(predicate.Funcs{
+				CreateFunc:  func(ce event.CreateEvent) bool { return false },
+				DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+				UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
+				GenericFunc: func(ge event.GenericEvent) bool { return true },
+			}),
+		).
 		Owns(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the deployment
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
@@ -2417,6 +2539,24 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 
 func (r *DynamoGraphDeploymentReconciler) GetRecorder() record.EventRecorder {
 	return r.Recorder
+}
+
+func (r *DynamoGraphDeploymentReconciler) mapAutoCheckpointToDGDRequests(ctx context.Context, obj client.Object) []ctrl.Request {
+	ckpt, ok := obj.(*nvidiacomv1alpha1.DynamoCheckpoint)
+	if !ok || ckpt == nil {
+		return nil
+	}
+	if ckpt.Annotations == nil || ckpt.Annotations[consts.CheckpointAutoAnnotation] != consts.KubeLabelValueTrue {
+		return nil
+	}
+	if ckpt.Labels == nil {
+		return nil
+	}
+	dgdName := ckpt.Labels[consts.KubeLabelDynamoGraphDeploymentName]
+	if dgdName == "" {
+		return nil
+	}
+	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: ckpt.Namespace, Name: dgdName}}}
 }
 
 // mapPodCliqueToRequests maps a PodClique to reconcile requests for its owning DGD

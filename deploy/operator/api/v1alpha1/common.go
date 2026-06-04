@@ -279,7 +279,6 @@ const (
 )
 
 // ServiceCheckpointConfig configures checkpointing for a DGD service
-// +kubebuilder:validation:XValidation:rule="!self.enabled || (has(self.checkpointRef) && size(self.checkpointRef) > 0) || (has(self.identity) && has(self.identity.model) && has(self.identity.backendFramework))",message="When enabled, either checkpointRef or both identity.model and identity.backendFramework must be specified"
 // +kubebuilder:validation:XValidation:rule="!has(self.job) || !has(self.checkpointRef) || size(self.checkpointRef) == 0",message="checkpoint.job cannot be set when checkpointRef is specified"
 // +kubebuilder:validation:XValidation:rule="!has(self.job) || !has(self.mode) || self.mode == 'Auto'",message="checkpoint.job can only be set in Auto mode"
 type ServiceCheckpointConfig struct {
@@ -300,9 +299,9 @@ type ServiceCheckpointConfig struct {
 	// +optional
 	CheckpointRef *string `json:"checkpointRef,omitempty"`
 
-	// Identity defines the checkpoint identity for hash computation
-	// Used when Mode is Auto or when looking up existing checkpoints
-	// Required when checkpointRef is not specified
+	// Deprecated: Identity is ignored by DGD-managed automatic checkpoints.
+	// Automatic checkpoints are scoped to the owning DGD/component generation and
+	// are never reused across DGDs.
 	// +optional
 	Identity *DynamoCheckpointIdentity `json:"identity,omitempty"`
 
