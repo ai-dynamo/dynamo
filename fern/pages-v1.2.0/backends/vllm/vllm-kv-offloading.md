@@ -24,11 +24,11 @@ Dynamo supports multiple KV cache offloading backends for vLLM, allowing you to 
 
 | Deployment                 | Launch Script                                                                           |
 | -------------------------- | --------------------------------------------------------------------------------------- |
-| Aggregated                 | [`agg_kvbm.sh`](https://github.com/ai-dynamo/dynamo/blob/v1.2.0/examples/backends/vllm/launch/agg_kvbm.sh)                     |
-| Aggregated + KV routing    | [`agg_kvbm_router.sh`](https://github.com/ai-dynamo/dynamo/blob/v1.2.0/examples/backends/vllm/launch/agg_kvbm_router.sh)       |
-| Disaggregated (1P1D)       | [`disagg_kvbm.sh`](https://github.com/ai-dynamo/dynamo/blob/v1.2.0/examples/backends/vllm/launch/disagg_kvbm.sh)               |
-| Disaggregated (2P2D)       | [`disagg_kvbm_2p2d.sh`](https://github.com/ai-dynamo/dynamo/blob/v1.2.0/examples/backends/vllm/launch/disagg_kvbm_2p2d.sh)     |
-| Disaggregated + KV routing | [`disagg_kvbm_router.sh`](https://github.com/ai-dynamo/dynamo/blob/v1.2.0/examples/backends/vllm/launch/disagg_kvbm_router.sh) |
+| Aggregated                 | [`agg_kvbm.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_kvbm.sh)                     |
+| Aggregated + KV routing    | [`agg_kvbm_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_kvbm_router.sh)       |
+| Disaggregated (1P1D)       | [`disagg_kvbm.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_kvbm.sh)               |
+| Disaggregated (2P2D)       | [`disagg_kvbm_2p2d.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_kvbm_2p2d.sh)     |
+| Disaggregated + KV routing | [`disagg_kvbm_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_kvbm_router.sh) |
 
 
 For configuration details, see the [KVBM Guide](../../components/kvbm/kvbm-guide.md).
@@ -40,10 +40,10 @@ For configuration details, see the [KVBM Guide](../../components/kvbm/kvbm-guide
 
 | Deployment                                | Launch Script                                                                                                                       |
 | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| Aggregated (MP sidecar — recommended)     | [`agg_lmcache_mp.sh`](/examples/backends/vllm/launch/agg_lmcache_mp.sh)                 |
-| Aggregated (legacy, in-process)           | [`agg_lmcache.sh`](/examples/backends/vllm/launch/agg_lmcache.sh)                       |
-| Aggregated (legacy, multiprocess metrics) | [`agg_lmcache_multiproc.sh`](/examples/backends/vllm/launch/agg_lmcache_multiproc.sh)   |
-| Disaggregated                             | [`disagg_lmcache.sh`](/examples/backends/vllm/launch/disagg_lmcache.sh)                 |
+| Aggregated (MP sidecar — recommended)     | [`agg_lmcache_mp.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_lmcache_mp.sh)                 |
+| Aggregated (legacy, in-process)           | [`agg_lmcache.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_lmcache.sh)                       |
+| Aggregated (legacy, multiprocess metrics) | [`agg_lmcache_multiproc.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_lmcache_multiproc.sh)   |
+| Disaggregated                             | [`disagg_lmcache.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_lmcache.sh)                 |
 
 
 For configuration details, see the [LMCache Integration Guide](../../integrations/lmcache-integration.md).
@@ -55,9 +55,9 @@ For configuration details, see the [LMCache Integration Guide](../../integration
 
 | Deployment              | Launch Script                                                                         |
 | ----------------------- | ------------------------------------------------------------------------------------- |
-| Aggregated              | [`agg_flexkv.sh`](https://github.com/ai-dynamo/dynamo/blob/v1.2.0/examples/backends/vllm/launch/agg_flexkv.sh)               |
-| Aggregated + KV routing | [`agg_flexkv_router.sh`](https://github.com/ai-dynamo/dynamo/blob/v1.2.0/examples/backends/vllm/launch/agg_flexkv_router.sh) |
-| Disaggregated           | [`disagg_flexkv.sh`](https://github.com/ai-dynamo/dynamo/blob/v1.2.0/examples/backends/vllm/launch/disagg_flexkv.sh)         |
+| Aggregated              | [`agg_flexkv.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_flexkv.sh)               |
+| Aggregated + KV routing | [`agg_flexkv_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_flexkv_router.sh) |
+| Disaggregated           | [`disagg_flexkv.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_flexkv.sh)         |
 
 
 For configuration details, see the [FlexKV Integration Guide](../../integrations/flexkv-integration.md).

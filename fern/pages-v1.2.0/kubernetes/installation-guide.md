@@ -230,11 +230,11 @@ Run the pre-deployment check script to validate your cluster is ready for deploy
 ./deploy/pre-deployment/pre-deployment-check.sh
 ```
 
-This checks kubectl connectivity, default StorageClass configuration, GPU node availability, and GPU Operator status. See [Pre-Deployment Checks](https://github.com/ai-dynamo/dynamo/tree/v1.2.0/deploy/pre-deployment/README.md) for details.
+This checks kubectl connectivity, default StorageClass configuration, GPU node availability, and GPU Operator status. See [Pre-Deployment Checks](https://github.com/ai-dynamo/dynamo/tree/main/deploy/pre-deployment/README.md) for details.
 
 ## Next Steps
 
-Your cluster is ready. Follow the **[Model Deployment Guide](model-deployment-guide.md)** to deploy a model using DGDR.
+Your cluster is ready. Follow the **[Deployment Overview](model-deployment-guide.md)** to choose between applying a tuned DGD recipe, creating a DGD directly, or using DGDR to generate one.
 
 ## Troubleshooting
 
@@ -321,7 +321,7 @@ helm install dynamo-platform ./platform/ \
 
 ## Reference
 
-- [Helm Chart Configuration](https://github.com/ai-dynamo/dynamo/tree/v1.2.0/deploy/helm/charts/platform/README.md)
+- [Helm Chart Configuration](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/platform/README.md)
 - [Create Custom Deployments](./deployment/create-deployment.md)
 - [Dynamo Operator Details](./dynamo-operator.md)
 - [ModelExpress Server](https://github.com/ai-dynamo/modelexpress)

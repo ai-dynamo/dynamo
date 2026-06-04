@@ -1,18 +1,16 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Inference Gateway (GAIE)
+title: Gateway API Inference Extension (GAIE)
 ---
 
-## Inference Gateway Setup with Dynamo
+## Gateway API Inference Extension Setup with Dynamo
 
-# Inference Gateway (GAIE)
-
-Integrate Dynamo with the Gateway API Inference Extension for intelligent KV-aware request routing at the gateway layer.
+Integrate Dynamo with the Gateway API Inference Extension, also known as Inference Gateway, for intelligent KV-aware request routing at the gateway layer.
 
 ## Features
 
-- EPP's default kv-routing approach is not token-aware because the prompt is not tokenized. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model's tokenizer inline. The EPP plugin configuration is embedded in the recipe-based GAIE deploy YAMLs under [`recipes/llama-3-70b/vllm/agg/gaie/`](https://github.com/ai-dynamo/dynamo/tree/v1.2.0/recipes/llama-3-70b/vllm/agg/gaie) and [`recipes/llama-3-70b/vllm/disagg-single-node/gaie/`](https://github.com/ai-dynamo/dynamo/tree/v1.2.0/recipes/llama-3-70b/vllm/disagg-single-node/gaie), following the GAIE/EPP configuration layout used by this repository.
+- EPP's default kv-routing approach is not token-aware because the prompt is not tokenized. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model's tokenizer inline. The EPP plugin configuration is embedded in the recipe-based GAIE deploy YAMLs under [`recipes/llama-3-70b/vllm/agg/gaie/`](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/agg/gaie) and [`recipes/llama-3-70b/vllm/disagg-single-node/gaie/`](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/disagg-single-node/gaie), following the GAIE/EPP configuration layout used by this repository.
 
 - Dynamo Integration with the Inference Gateway supports Aggregated and Disaggregated Serving. A request only exercises disaggregated routing when the EPP config defines a `prefill` profile and prefill workers are available. The recipe examples provide separate aggregated and disaggregated configs under `recipes/llama-3-70b/vllm/agg/gaie/` and `recipes/llama-3-70b/vllm/disagg-single-node/gaie/`. Unless `DYN_ENFORCE_DISAGG=true`, deployments without a `prefill` profile or prefill workers fall back to aggregated serving.
 
@@ -32,7 +30,7 @@ Integrate Dynamo with the Gateway API Inference Extension for intelligent KV-awa
 ### 1. Install Dynamo Platform ###
 
 [See Quickstart Guide](./README.md) to install Dynamo Kubernetes Platform.
-If you are installing from the source tree rather than a release chart, follow [Path B: Custom Build from Source](./installation-guide.md#path-b-custom-build-from-source) and run `helm dep build ./platform/` before `helm install` so the vendored subcharts match the local chart contents.
+If you are installing from the source tree rather than a release chart, follow [Advanced: Build from Source](./installation-guide.md#advanced-build-from-source) and run `helm dep build ./platform/` before `helm install` so the vendored subcharts match the local chart contents.
 
 ### 2. Deploy Inference Gateway ###
 
@@ -168,7 +166,7 @@ kubectl apply -f recipes/llama-3-70b/vllm/disagg-single-node/gaie/http-route.yam
 
 ```yaml
 frontendSidecar:
-  image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+  image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
   args:
     - --router-mode
     - direct
