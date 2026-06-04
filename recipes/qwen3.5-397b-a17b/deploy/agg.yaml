@@ -1,0 +1,107 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Qwen3.5-397B-A17B-FP8 — AGGREGATED single-node TP8 baseline.
+#
+# One worker holds the full model (TP8 on one 8xH100 node, ~50 GB/GPU
+# FP8 weights). No prefill/decode split, no NIXL KV transfer. This is the
+# correctness + throughput reference the `disagg` config is measured
+# against — see the accuracy canary in README: GDN conv-state corruption
+# over NIXL is silent, so a disagg-vs-agg GSM8K gap is the real signal.
+#
+# Differences from deploy/disagg.yaml: single VllmWorker, no
+# `--disaggregation-mode`, no `--kv-transfer-config`, prefix caching ON
+# (agg can reuse the KV prefix cache; for hybrid GDN this aligns
+# mamba_block_size to --block-size).
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen35-agg
+  labels:
+    app.kubernetes.io/name: qwen3.5-397b-a17b
+    app.kubernetes.io/component: agg
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  backendFramework: vllm
+  pvcs:
+    - create: false
+      name: shared-model-cache
+  services:
+    Frontend:
+      componentType: frontend
+      envs:
+        - name: HF_HOME
+          value: /home/dynamo/.cache/huggingface
+        - name: DYN_REQUEST_PLANE
+          value: tcp
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /home/dynamo/.cache/huggingface
+      extraPodSpec:
+        nodeSelector: ${HW_NODE_SELECTOR}
+        tolerations: ${HW_TOLERATIONS}
+        mainContainer:
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+      replicas: 1
+      resources:
+        requests:
+          cpu: "4"
+          memory: 16Gi
+        limits:
+          cpu: "8"
+          memory: 32Gi
+      subComponentType: null
+
+    VllmWorker:
+      componentType: worker
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /home/dynamo/.cache/huggingface
+      sharedMemory:
+        size: 120Gi
+      extraPodSpec:
+        nodeSelector: ${HW_NODE_SELECTOR}
+        tolerations: ${HW_TOLERATIONS}
+        mainContainer:
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              ulimit -l unlimited
+              python3 -m dynamo.vllm \
+                --model "${MODEL_NAME}" \
+                --tensor-parallel-size 8 \
+                --data-parallel-size 1 \
+                --gpu-memory-utilization 0.90 \
+                --max-model-len 16384 \
+                --enable-prefix-caching \
+                --block-size 128 \
+                --no-enable-log-requests
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MODEL_NAME
+              value: "Qwen/Qwen3.5-397B-A17B-FP8"
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: DYN_REQUEST_PLANE
+              value: tcp
+          workingDir: /workspace
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_RESOURCE
+      replicas: 1
+      resources:
+        requests:
+          gpu: "8"
+        limits:
+          gpu: "8"
+      subComponentType: null

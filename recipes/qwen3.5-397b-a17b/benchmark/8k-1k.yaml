@@ -1,0 +1,133 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# The 8K-ISL / 1K-OSL aiperf benchmark — the single benchmark for this
+# recipe, used for both configs (disagg, agg). Source hw/<hw>.env, export the
+# per-config values, and render with envsubst before kubectl apply (see
+# README -> Usage):
+#
+#   set -a; . hw/h100.env; set +a
+#   export BENCH_POD=qwen35-disagg-bench BENCH_FRONTEND=qwen35-disagg-frontend \
+#          BENCH_RUN_LABEL=disagg
+#   envsubst '$HW_NODE_SELECTOR $HW_TOLERATIONS $BENCH_POD $BENCH_FRONTEND $BENCH_RUN_LABEL' \
+#     < benchmark/8k-1k.yaml | kubectl -n <ns> apply -f -
+#
+# The restricted envsubst allow-list keeps the in-pod ${FRONTEND} /
+# ${RUN_LABEL} / ${MODEL_NAME} shell refs literal (resolved from the pod env
+# at runtime, not at apply time).
+#
+# TEXT workload: synthetic 8K ISL / 1K OSL (no dataset file, no images), so
+# the disagg run exercises the prefill->decode KV + GDN-conv-state transfer
+# over NIXL without a data-gen dependency. Tune ISL_MEAN / OSL_MEAN /
+# CONCURRENCY / REQUEST_COUNT via the env block below.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${BENCH_POD}
+  labels:
+    app.kubernetes.io/name: qwen3.5-397b-a17b
+    app.kubernetes.io/component: benchmark
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  restartPolicy: Never
+  nodeSelector: ${HW_NODE_SELECTOR}
+  tolerations: ${HW_TOLERATIONS}
+  containers:
+    - name: benchmark
+      image: python:3.11
+      command:
+        - /bin/bash
+        - -lc
+        - |
+          set -euo pipefail
+          ulimit -n 1048576 || true
+          ulimit -u 65536 || true
+
+          apt update && apt install -y --no-install-recommends curl jq git
+
+          # Latest released aiperf from PyPI. This is a plain text synthetic
+          # run (no custom dataset / session_id / images), so the synthetic
+          # ISL/OSL flags below are all in the released CLI — no git pin needed.
+          pip install --no-cache-dir aiperf
+          python -c "import aiperf; print('aiperf', getattr(aiperf,'__version__','?'), 'OK')"
+
+          echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000/v1/models ..."
+          until curl -s "http://${FRONTEND}:8000/v1/models" \
+              | jq -e --arg m "${MODEL_NAME}" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do
+            echo "[$(date '+%H:%M:%S')] not ready, sleeping 10s"
+            sleep 10
+          done
+          echo "Model '${MODEL_NAME}' is ready."
+
+          RUN_DIR="${ARTIFACT_BASE_DIR}/${RUN_LABEL}"
+          mkdir -p "${RUN_DIR}"
+          echo "Running benchmark; artifacts -> ${RUN_DIR}"
+
+          # Synthetic text prompts at fixed ISL/OSL. ignore_eos + min==max
+          # tokens make every request produce exactly OSL_MEAN output tokens
+          # so the decode-side cost is uniform across requests.
+          aiperf profile \
+            --model "${MODEL_NAME}" \
+            --tokenizer "${MODEL_NAME}" \
+            --url "http://${FRONTEND}:8000" \
+            --endpoint-type chat \
+            --streaming \
+            --ui-type none \
+            --synthetic-input-tokens-mean "${ISL_MEAN}" \
+            --synthetic-input-tokens-stddev 0 \
+            --output-tokens-mean "${OSL_MEAN}" \
+            --output-tokens-stddev 0 \
+            --request-count "${REQUEST_COUNT}" \
+            --concurrency "${CONCURRENCY}" \
+            --request-rate-mode constant \
+            --warmup-request-count "${WARMUP_REQUEST_COUNT}" \
+            --artifact-dir "${RUN_DIR}" \
+            --extra-inputs "max_tokens:${OSL_MEAN}" \
+            --extra-inputs "min_tokens:${OSL_MEAN}" \
+            --extra-inputs "ignore_eos:true"
+
+          # inputs.json is a regenerable debug artifact; drop by default.
+          if [[ "${KEEP_INPUTS_JSON:-}" != "1" ]]; then
+            rm -fv "${RUN_DIR}/inputs.json" || true
+          fi
+
+          echo "Run complete. Artifacts in ${RUN_DIR}"
+          sleep 3600
+      env:
+        - name: MODEL_NAME
+          value: Qwen/Qwen3.5-397B-A17B-FP8
+        - name: FRONTEND
+          value: ${BENCH_FRONTEND}
+        - name: RUN_LABEL
+          value: ${BENCH_RUN_LABEL}
+        - name: ISL_MEAN
+          value: "8000"
+        - name: OSL_MEAN
+          value: "1024"
+        - name: REQUEST_COUNT
+          value: "200"
+        - name: CONCURRENCY
+          value: "20"
+        - name: WARMUP_REQUEST_COUNT
+          value: "4"
+        - name: ARTIFACT_BASE_DIR
+          value: /perf-cache/artifacts/qwen35_fp8
+        - name: AIPERF_DATASET_CONFIGURATION_TIMEOUT
+          value: "1800"
+        - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT
+          value: "1800"
+      resources:
+        requests:
+          cpu: "8"
+          memory: 16Gi
+        limits:
+          cpu: "16"
+          memory: 32Gi
+      volumeMounts:
+        - name: shared-model-cache
+          mountPath: /perf-cache
+          subPath: qwen35-bench/perf-cache
+  volumes:
+    - name: shared-model-cache
+      persistentVolumeClaim:
+        claimName: shared-model-cache

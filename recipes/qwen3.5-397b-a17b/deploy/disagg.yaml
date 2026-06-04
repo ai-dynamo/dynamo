@@ -1,0 +1,184 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Qwen3.5-397B-A17B-FP8 — prefill/decode (1P1D) DISAGGREGATION.
+#
+# Hybrid Gated-Delta-Net + full-attention MoE. P/D disagg of a GDN model
+# needs the decode worker to receive the GDN conv/recurrent state over the
+# NIXL connector (not just attention-KV). That is vLLM PR #41869, which is
+# in vLLM 0.22.0 (the pin on Dynamo main) but NOT in 0.20.1. Build the
+# image from Dynamo main — see README.
+#
+# Topology: FP8 weights ~397 GB fit TP8 on ONE 8xH100 node (~50 GB/GPU),
+# so each worker is a single-node TP8 pod. 1P1D = prefill pod (node A) +
+# decode pod (node B) = 2 nodes. No `multinode.nodeCount`: two gpu:"8"
+# workers land on separate 8-GPU nodes by scheduler placement.
+#
+# Prefill carries `--disaggregation-mode prefill` + mandatory
+# `--kv-transfer-config`; decode OMITS `--disaggregation-mode` (the
+# NixlConnector makes it the decode peer) — mirrors
+# recipes/llama-3-70b/vllm/disagg-multi-node/deploy.yaml.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen35-disagg
+  labels:
+    app.kubernetes.io/name: qwen3.5-397b-a17b
+    app.kubernetes.io/component: disagg
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  backendFramework: vllm
+  pvcs:
+    - create: false
+      name: shared-model-cache
+  services:
+    Frontend:
+      componentType: frontend
+      envs:
+        - name: HF_HOME
+          value: /home/dynamo/.cache/huggingface
+        - name: DYN_REQUEST_PLANE
+          value: tcp
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /home/dynamo/.cache/huggingface
+      extraPodSpec:
+        nodeSelector: ${HW_NODE_SELECTOR}
+        tolerations: ${HW_TOLERATIONS}
+        mainContainer:
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+      replicas: 1
+      resources:
+        requests:
+          cpu: "4"
+          memory: 16Gi
+        limits:
+          cpu: "8"
+          memory: 32Gi
+      subComponentType: null
+
+    VllmPrefillWorker:
+      componentType: worker
+      subComponentType: prefill
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /home/dynamo/.cache/huggingface
+      sharedMemory:
+        size: 120Gi
+      extraPodSpec:
+        nodeSelector: ${HW_NODE_SELECTOR}
+        tolerations: ${HW_TOLERATIONS}
+        mainContainer:
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              ulimit -l unlimited
+              python3 -m dynamo.vllm \
+                --model "${MODEL_NAME}" \
+                --tensor-parallel-size 8 \
+                --data-parallel-size 1 \
+                --disaggregation-mode prefill \
+                --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+                --gpu-memory-utilization 0.90 \
+                --max-model-len 16384 \
+                --no-enable-prefix-caching \
+                --block-size 128 \
+                --no-enable-log-requests
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MODEL_NAME
+              value: "Qwen/Qwen3.5-397B-A17B-FP8"
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: DYN_REQUEST_PLANE
+              value: tcp
+            # NIXL 3-read conv-state transfer for the hybrid GDN/Mamba layers
+            # requires the "DS" conv-state layout (vLLM PR #37635 / #41869).
+            # Without it the worker crash-loops at engine init with:
+            #   "3-read Mamba conv transfer requires DS conv state layout".
+            - name: VLLM_SSM_CONV_STATE_LAYOUT
+              value: DS
+            # Multi-NIC clusters: if decode hangs with no first token, the
+            # NIXL side-channel host auto-detection picked an unroutable NIC.
+            # Pin it explicitly, e.g.:
+            # - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+            #   value: <pod-IP-or-routable-host>
+          workingDir: /workspace
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_RESOURCE
+      replicas: 1
+      resources:
+        requests:
+          gpu: "8"
+        limits:
+          gpu: "8"
+
+    VllmDecodeWorker:
+      componentType: worker
+      subComponentType: decode
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /home/dynamo/.cache/huggingface
+      sharedMemory:
+        size: 120Gi
+      extraPodSpec:
+        nodeSelector: ${HW_NODE_SELECTOR}
+        tolerations: ${HW_TOLERATIONS}
+        mainContainer:
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              ulimit -l unlimited
+              python3 -m dynamo.vllm \
+                --model "${MODEL_NAME}" \
+                --tensor-parallel-size 8 \
+                --data-parallel-size 1 \
+                --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+                --gpu-memory-utilization 0.90 \
+                --max-model-len 16384 \
+                --no-enable-prefix-caching \
+                --block-size 128 \
+                --no-enable-log-requests
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MODEL_NAME
+              value: "Qwen/Qwen3.5-397B-A17B-FP8"
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: DYN_REQUEST_PLANE
+              value: tcp
+            # NIXL 3-read conv-state transfer for the hybrid GDN/Mamba layers
+            # requires the "DS" conv-state layout (vLLM PR #37635 / #41869).
+            # Without it the worker crash-loops at engine init with:
+            #   "3-read Mamba conv transfer requires DS conv state layout".
+            - name: VLLM_SSM_CONV_STATE_LAYOUT
+              value: DS
+          workingDir: /workspace
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_RESOURCE
+      replicas: 1
+      resources:
+        requests:
+          gpu: "8"
+        limits:
+          gpu: "8"
