@@ -24,6 +24,7 @@ use vllm_managed_engine::ManagedEngineHandle;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_metrics::{EngineLabels, F64Gauge, METRICS as VLLM_METRICS, U64Counter};
 
+use crate::control;
 use crate::convert::{lower_request, map_output};
 use crate::error::{backend_unknown, cannot_connect, clap_error, engine_shutdown, invalid_arg};
 
@@ -449,6 +450,25 @@ impl LLMEngine for VllmBackend {
             "stop_conditions": {"max_tokens": 1, "ignore_eos": true},
             "sampling_options": {"temperature": 0.0},
         })))
+    }
+
+    async fn supported_controls(&self) -> Result<Vec<String>, DynamoError> {
+        Ok(control::supported_controls())
+    }
+
+    async fn engine_control(
+        &self,
+        control: String,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, DynamoError> {
+        if !control::is_supported(&control) {
+            return Ok(control::unsupported_response(control));
+        }
+        let inner = self.inner.read().await;
+        let Some(inner) = inner.as_ref() else {
+            return Ok(control::error_response("engine is not initialized"));
+        };
+        control::engine_control(inner.llm.engine_core_client(), control, body).await
     }
 }
 

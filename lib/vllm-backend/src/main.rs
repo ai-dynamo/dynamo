@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 mod backend;
+mod control;
 mod convert;
 mod error;
 

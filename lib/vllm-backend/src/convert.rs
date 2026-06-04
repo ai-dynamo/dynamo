@@ -3,7 +3,7 @@
 
 //! Request and response conversion between Dynamo backend-common and vLLM LLM types.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use dynamo_backend_common::{
     DynamoError, GuidedDecodingOptions, LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest,
@@ -105,12 +105,18 @@ pub(crate) fn lower_request(
         mm_features: None,
         arrival_time: request.request_timestamp_ms.map(|ms| ms / 1000.0),
         cache_salt: request.mdc_sum,
-        trace_headers: None,
+        trace_headers: trace_headers(),
         priority,
         data_parallel_rank,
         reasoning_ended: None,
         lora_request: None,
     })
+}
+
+fn trace_headers() -> Option<BTreeMap<String, String>> {
+    let mut headers = HashMap::new();
+    dynamo_runtime::logging::inject_trace_headers_into_map(&mut headers);
+    (!headers.is_empty()).then(|| headers.into_iter().collect())
 }
 
 fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
