@@ -363,30 +363,24 @@ impl ModelWatcher {
                         continue;
                     }
 
-                    // Feed LoRA state tracker for every worker registration.
-                    // Done before the spawn below so `card.lora` is read before
-                    // `card` is moved into the spawned task's closure.
-                    if let Some(ref lora_info) = card.lora {
+                    // Feed the LoRA state tracker for every worker registration (before the spawn
+                    // below, so `card` is read before it is moved into the task). An adapter card
+                    // registers the loaded adapter (+capacity); a base card advertising
+                    // runtime_config.max_gpu_lora_count seeds capacity-only so idle LoRA-capable
+                    // workers are visible to the controller before any adapter is loaded there.
+                    {
                         use crate::kv_router::protocols::WorkerWithDpRank;
                         let worker = WorkerWithDpRank::new(mcid.instance_id, 0);
-                        self.manager
-                            .lora_state_tracker()
-                            .handle_mdc_addition(worker, lora_info);
-                        // Record the adapter name keyed by instance path so a later removal whose
-                        // card was never durably saved can still remove exactly this adapter (R4-2).
-                        self.pending_lora_adds
-                            .insert(mcid.to_path(), lora_info.name.clone());
-                    } else if let Some(capacity) = card.runtime_config.max_gpu_lora_count {
-                        // Base worker card advertising LoRA slot capacity (no adapter loaded yet):
-                        // seed capacity-only so the controller sees idle-but-LoRA-capable workers
-                        // before the first adapter load, not just workers that already host an
-                        // adapter. No phantom adapter is registered; handle_worker_removal clears
-                        // this entry when the base card is later removed.
-                        use crate::kv_router::protocols::WorkerWithDpRank;
-                        let worker = WorkerWithDpRank::new(mcid.instance_id, 0);
-                        self.manager
-                            .lora_state_tracker()
-                            .set_worker_capacity(worker, capacity);
+                        if let Some(adapter_name) = seed_lora_state_from_card(
+                            self.manager.lora_state_tracker(),
+                            worker,
+                            &card,
+                        ) {
+                            // Record the adapter name keyed by instance path so a later removal
+                            // whose card was never durably saved can still remove exactly this
+                            // adapter (R4-2).
+                            self.pending_lora_adds.insert(mcid.to_path(), adapter_name);
+                        }
                     }
 
                     // Spawn each handle_put into its own task so that a slow
@@ -1445,9 +1439,106 @@ impl ModelWatcher {
     }
 }
 
+/// Seed the LoRA state tracker from a worker's MDC.
+///
+/// - Adapter card (`card.lora` is `Some`): register the loaded adapter (which also records the
+///   worker's capacity) and return the adapter name so the caller can track it for failed-save
+///   removal reconciliation.
+/// - Base worker card advertising `runtime_config.max_gpu_lora_count`: seed capacity-only (no
+///   phantom adapter) so the controller sees idle-but-LoRA-capable workers before the first
+///   adapter load. Returns `None`.
+/// - Otherwise (non-LoRA worker): no-op, returns `None`.
+///
+/// Split out of the discovery loop so the base-card capacity data flow is unit-testable without
+/// constructing a full `ModelWatcher`.
+fn seed_lora_state_from_card(
+    state_tracker: &crate::lora::LoraStateTracker,
+    worker: crate::kv_router::protocols::WorkerWithDpRank,
+    card: &ModelDeploymentCard,
+) -> Option<String> {
+    if let Some(lora_info) = card.lora.as_ref() {
+        state_tracker.handle_mdc_addition(worker, lora_info);
+        Some(lora_info.name.clone())
+    } else if let Some(capacity) = card.runtime_config.max_gpu_lora_count {
+        state_tracker.set_worker_capacity(worker, capacity);
+        None
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discovery::WorkerSet;
+    use crate::model_card::ModelDeploymentCard;
+
+    #[test]
+    fn base_card_with_capacity_seeds_idle_lora_capable_worker() {
+        // jh-nv (watcher base-card seeding): a base worker card (lora=None) carrying
+        // runtime_config.max_gpu_lora_count must seed capacity-only so the controller sees the
+        // idle LoRA-capable worker before any adapter loads. Pins the base-card -> capacity flow
+        // that the discovery loop relies on.
+        let st = crate::lora::LoraStateTracker::new();
+        let worker = crate::kv_router::protocols::WorkerWithDpRank::new(7, 0);
+        let mut card = ModelDeploymentCard::with_name_only("base-model");
+        card.runtime_config.max_gpu_lora_count = Some(4);
+        assert!(card.lora.is_none());
+
+        let adapter = seed_lora_state_from_card(&st, worker, &card);
+        assert_eq!(adapter, None, "a base card registers no adapter name");
+        assert_eq!(
+            st.list_workers(),
+            vec![worker],
+            "idle LoRA-capable worker must be visible to the controller"
+        );
+        assert_eq!(st.total_lora_slots(), 4);
+    }
+
+    #[test]
+    fn base_card_without_capacity_seeds_nothing() {
+        // A non-LoRA base card must not seed any worker capacity.
+        let st = crate::lora::LoraStateTracker::new();
+        let card = ModelDeploymentCard::with_name_only("base-model");
+        assert!(card.runtime_config.max_gpu_lora_count.is_none());
+
+        let adapter = seed_lora_state_from_card(
+            &st,
+            crate::kv_router::protocols::WorkerWithDpRank::new(1, 0),
+            &card,
+        );
+        assert_eq!(adapter, None);
+        assert!(
+            st.list_workers().is_empty(),
+            "a non-LoRA base card must not seed capacity"
+        );
+    }
+
+    #[test]
+    fn adapter_card_registers_adapter_and_returns_name() {
+        // An adapter card registers the loaded adapter (+capacity) and returns its name so the
+        // caller can track it in pending_lora_adds.
+        let st = crate::lora::LoraStateTracker::new();
+        let worker = crate::kv_router::protocols::WorkerWithDpRank::new(3, 0);
+        let mut card = ModelDeploymentCard::with_name_only("base-model");
+        card.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter-x".to_string(),
+            max_gpu_lora_count: Some(2),
+        });
+
+        let adapter = seed_lora_state_from_card(&st, worker, &card);
+        assert_eq!(adapter.as_deref(), Some("adapter-x"));
+        assert!(st.is_loaded("adapter-x", &worker));
+        assert_eq!(st.total_lora_slots(), 2);
+    }
+
+    fn make_worker_set(namespace: &str) -> WorkerSet {
+        WorkerSet::new(
+            namespace.to_string(),
+            "test-checksum".to_string(),
+            ModelDeploymentCard::default(),
+        )
+    }
 
     #[test]
     fn test_is_model_type_list_empty_on_empty_manager() {
