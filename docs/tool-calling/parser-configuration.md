@@ -70,8 +70,8 @@ python -m dynamo.sglang --model Qwen/Qwen3-0.6B
 
 ## Parser names and per-stage details
 
-- Tool calling: [Tool Call Parsing (Dynamo)](tool-calling/README.md) (native parser names).
-- Reasoning: [Reasoning Parsing (Dynamo)](reasoning/README.md) (native parser names).
+- Tool calling: [Tool Call Parsing (Dynamo)](README.md) (native parser names).
+- Reasoning: [Reasoning Parsing (Dynamo)](../reasoning/README.md) (native parser names).
 - Engine fallback (vLLM / SGLang): [Parser Engine Fallback](engine-fallback.md).
-- Engine processors: [vLLM Chat Processor](backends/vllm/vllm-chat-processor.md) and [SGLang Chat Processor](backends/sglang/sglang-chat-processor.md).
-- Every frontend flag: [Frontend Configuration Reference](components/frontend/configuration.md).
+- Engine processors: [vLLM Chat Processor](../backends/vllm/vllm-chat-processor.md) and [SGLang Chat Processor](../backends/sglang/sglang-chat-processor.md).
+- Every frontend flag: [Frontend Configuration Reference](../components/frontend/configuration.md).
