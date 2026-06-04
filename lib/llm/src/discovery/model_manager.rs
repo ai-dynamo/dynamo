@@ -749,6 +749,18 @@ impl ModelManager {
 
     // -- KV Router creation --
 
+    /// Whether to start the LoRA load-estimator feed for a KV router being built for `worker_type`.
+    ///
+    /// The feed must run for the worker mode that carries the routable request load. In dynamo's
+    /// KV path that is `WORKER_TYPE_DECODE`, which the binding assigns to BOTH aggregated and
+    /// disaggregated-decode endpoints (any non-prefill endpoint that tracks active blocks; see
+    /// `create_kv_router_from_endpoint`). Only disaggregated PREFILL is excluded, so its transient
+    /// load does not double-count the decode component's active sequences. Returns false when LoRA
+    /// serving is disabled.
+    fn should_start_lora_load_feed(lora_enabled: bool, worker_type: &str) -> bool {
+        lora_enabled && worker_type == crate::protocols::common::timing::WORKER_TYPE_DECODE
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn kv_chooser_for(
         &self,
@@ -822,12 +834,18 @@ impl ModelManager {
         )
         .await?;
 
-        // F2: feed the LoRA LoadEstimator in KV mode. Start exactly one decode-scoped
-        // active-sequence subscription per decode component (prefill is a separate
-        // component, so this stays decode-only and avoids double counting). Without this
-        // the estimator is never fed in KV mode and every LoRA stays "inactive" forever.
-        if self.lora_enabled && worker_type == crate::protocols::common::timing::WORKER_TYPE_DECODE
-        {
+        // F2: feed the LoRA LoadEstimator in KV mode. Start exactly one active-sequence
+        // subscription per "decode" component. WORKER_TYPE_DECODE is the routing path for BOTH
+        // aggregated and disaggregated-decode deployments: the binding maps any non-prefill,
+        // active-block-tracking endpoint to WORKER_TYPE_DECODE (see create_kv_router_from_endpoint
+        // in bindings/python/rust/llm/kv.rs), so aggregated KV feeds load here too. Only
+        // disaggregated PREFILL is excluded — its load is transient and would double-count the
+        // decode component's active sequences. Without this feed the estimator is never fed in KV
+        // mode and every LoRA stays "inactive" forever. (When router_track_active_blocks is off the
+        // endpoint is treated as prefill-like and KV routing is not load-aware; dynamic LoRA
+        // allocation then degrades to cold-start pins, while the filter still routes by loaded
+        // worker.)
+        if Self::should_start_lora_load_feed(self.lora_enabled, worker_type) {
             let feed_key = format!("{}/{}", endpoint.id().namespace, endpoint.id().component);
             // Start a feed if none runs for this component yet, or restart it if the previous
             // one exited (so a dead subscription does not permanently disable load tracking).
@@ -1383,6 +1401,30 @@ mod tests {
             .topology_domains
             .insert("zone".to_string(), "us-east-1a".to_string());
         config
+    }
+
+    #[test]
+    fn lora_load_feed_starts_for_aggregated_and_decode_not_prefill() {
+        use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
+        // Aggregated and disaggregated-decode deployments both route via WORKER_TYPE_DECODE
+        // (create_kv_router_from_endpoint maps any non-prefill, active-block-tracking endpoint to
+        // it), so the LoRA load feed must start for that worker type — otherwise the controller
+        // would treat every adapter as inactive and never run dynamic allocation.
+        assert!(
+            ModelManager::should_start_lora_load_feed(true, WORKER_TYPE_DECODE),
+            "decode/aggregated KV must start the LoRA load feed"
+        );
+        // Disaggregated prefill load is fed via the decode component, so prefill must NOT start its
+        // own feed (avoids double-counting active sequences).
+        assert!(
+            !ModelManager::should_start_lora_load_feed(true, WORKER_TYPE_PREFILL),
+            "prefill KV must not start its own LoRA load feed"
+        );
+        // LoRA serving disabled: never start the feed.
+        assert!(
+            !ModelManager::should_start_lora_load_feed(false, WORKER_TYPE_DECODE),
+            "no feed when LoRA serving is disabled"
+        );
     }
 
     #[test]
