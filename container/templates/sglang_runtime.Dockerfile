@@ -86,35 +86,18 @@ ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 {% if device == "xpu" %}
-ARG ENABLE_KVBM
 RUN pip install --no-deps \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-        /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
-    if [ "${ENABLE_KVBM}" = "true" ]; then \
-        KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
-        if [ -n "$KVBM_WHEEL" ]; then pip install "$KVBM_WHEEL"; fi; \
-    fi
+        /opt/dynamo/wheelhouse/nixl/nixl*.whl \
+        "distro==1.9.0"
 {% else %}
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --no-deps \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl
-{% endif %}
 
-{% if device == "xpu" %}
-# accelerate / decord / diffusers / imageio* / opencv-python-headless /
-# cache-dit / trimesh are installed in sglang_xpu_framework.Dockerfile (XPU branch)
-# because pyproject_xpu.toml leaves them out of the default deps.
-
-# Install gpu_memory_service wheel if enabled
-ARG ENABLE_GPU_MEMORY_SERVICE
-RUN if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
-        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
-        if [ -n "$GMS_WHEEL" ]; then pip install --no-cache-dir "$GMS_WHEEL"; fi; \
-    fi
-{% else %}
 # Install accelerate for diffusion/video worker pipelines (diffusers requires it
 # for enable_model_cpu_offload but the upstream SGLang runtime image omits it)
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
