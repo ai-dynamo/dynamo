@@ -226,13 +226,15 @@ struct PreprocessRequestOptions {
     preserve_omitted_max_tokens: bool,
 }
 
-/// Backend-specific MM-routing wire shape. Resolved once from
+/// Backend-specific MM-routing behavior. Resolved once from
 /// `runtime_config.backend_framework`; unknown values disable MM
 /// routing (text-prefix fallback).
 ///
-/// TODO(mm-routing): collapse the 16-vs-64-char split. Blocked on
-/// kv-router's `parse_mm_hash_from_extra_key` using 64-char length as
-/// the MM-hash type tag in vLLM `BlockStored` extra_keys.
+/// The forwarded `mm_hashes` hex is always the canonical 16-char u64;
+/// the per-backend variants differ only in routing-hash construction
+/// (`image_fill_token`, `emits_block_mm_infos`) — i.e. how each backend
+/// folds MM identity into its KV cache key, which is not a wire-format
+/// concern and so cannot move to the backend.
 #[cfg(feature = "mm-routing")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MmRoutingProtocol {
@@ -240,8 +242,8 @@ enum MmRoutingProtocol {
     /// `block_mm_infos` emitted (matches sglang's `BlockStored` event bytes).
     Sglang,
     /// vLLM: image positions filled with `image_token_id`; per-image
-    /// 64-char-hex mm_hashes forwarded via `multi_modal_uuids` in
-    /// `extra_args` (matches vLLM's mm_uuid event format).
+    /// mm_hashes forwarded via `multi_modal_uuids` in `extra_args`, which
+    /// the vLLM worker pads to the 64-char `BlockStored` form.
     Vllm,
 }
 
@@ -285,17 +287,6 @@ impl MmRoutingProtocol {
                 );
                 None
             }
-        }
-    }
-
-    /// Hex-encode `mm_hash` for `extra_args["mm_hashes"]`. Length is
-    /// load-bearing: sglang reads `int(hex, 16)` for pad_value, vLLM's
-    /// `BlockStored` parser uses 64-char as the MM-hash type tag.
-    fn format_mm_hash_hex(&self, mm_hash: u64) -> String {
-        const HEX_PAD: &str = "000000000000000000000000000000000000000000000000";
-        match self {
-            Self::Sglang => format!("{mm_hash:016x}"),
-            Self::Vllm => format!("{mm_hash:016x}{HEX_PAD}"),
         }
     }
 
@@ -1263,21 +1254,22 @@ impl OpenAIPreprocessor {
 
             // Forward routing-side mm_hashes in `extra_args["mm_hashes"]` so the
             // backend's KV events publish under the same key the router computes.
-            // Each backend's hex format is owned by `MmRoutingProtocol::format_mm_hash_hex`
-            // (sglang 16-char, vLLM 64-char — both are protocol-load-bearing).
+            // Always the canonical 16-char hex (u64); each backend adapts it:
+            // sglang reads `int(hex, 16)` as-is, vLLM pads to its 64-char
+            // BlockStored form. No information is lost — both carry the same u64.
             //
             // Skip forwarding entirely if any image failed dim resolution —
             // a shorter `mm_hashes` list would misalign with the image
             // positions the backend derives from `multi_modal_data`, and
             // the wrong UUIDs would get injected onto the wrong images.
             #[cfg(feature = "mm-routing")]
-            if let Some(protocol) = self.mm_routing_protocol
+            if self.mm_routing_protocol.is_some()
                 && !mm_image_entries.is_empty()
                 && mm_image_entries.len() == total_image_count
             {
                 let hexes: Vec<serde_json::Value> = mm_image_entries
                     .iter()
-                    .map(|e| serde_json::Value::String(protocol.format_mm_hash_hex(e.mm_hash)))
+                    .map(|e| serde_json::Value::String(format!("{:016x}", e.mm_hash)))
                     .collect();
                 extra_args["mm_hashes"] = serde_json::Value::Array(hexes);
             } else if !mm_image_entries.is_empty() && self.mm_routing_protocol.is_some() {

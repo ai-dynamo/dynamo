@@ -1219,3 +1219,23 @@ class TestEmbeddingWorkerHandlerCancellation:
         # No tasks were in flight at gather completion, so the finally
         # cancel-and-await pass must not have touched the engine.
         assert aborted == []
+
+
+class TestPadMmHashesTo64:
+    """The frontend forwards canonical 16-char hex mm_hashes; vLLM must pad
+    them to the 64-char BlockStored form the router's
+    parse_mm_hash_from_extra_key keys on."""
+
+    def test_pads_16_char_to_64(self):
+        out = mod._pad_mm_hashes_to_64(["0123456789abcdef"])
+        assert out == ["0123456789abcdef" + "0" * 48]
+        assert len(out[0]) == 64
+
+    def test_already_64_char_unchanged(self):
+        h64 = "0123456789abcdef" + "0" * 48
+        assert mod._pad_mm_hashes_to_64([h64]) == [h64]
+
+    def test_mixed_and_empty(self):
+        h64 = "f" * 64
+        assert mod._pad_mm_hashes_to_64([]) == []
+        assert mod._pad_mm_hashes_to_64(["abc", h64]) == ["abc" + "0" * 61, h64]

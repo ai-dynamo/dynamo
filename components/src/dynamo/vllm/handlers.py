@@ -285,6 +285,17 @@ class VllmEnginePauseController:
         self._generation_paused = False
 
 
+def _pad_mm_hashes_to_64(mm_hashes: list[str]) -> list[str]:
+    """Pad the frontend's canonical 16-char hex hashes to vLLM's 64-char
+    BlockStored form. The router's parse_mm_hash_from_extra_key keys on the
+    64-char length to distinguish MM hashes from other extra_keys, so vLLM
+    must publish 64 chars. Already-64-char values pass through unchanged.
+    """
+    return [
+        h.ljust(64, "0") if isinstance(h, str) and len(h) < 64 else h for h in mm_hashes
+    ]
+
+
 def _compute_mm_uuids(
     multi_modal_data: Dict[str, Any] | None,
 ) -> Dict[str, list[str]] | None:
@@ -1615,6 +1626,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     transport,
                 )
                 return None
+            mm_hashes = _pad_mm_hashes_to_64(mm_hashes)
 
             # Receive pickled kwargs items (NVTX wrap is owned by the receiver).
             results = await receiver.receive(metadata)
@@ -1947,6 +1959,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         forwarded_hashes = extra_args.get("mm_hashes")
         mm_uuids: dict[str, Any] | None = None
         if forwarded_hashes:
+            forwarded_hashes = _pad_mm_hashes_to_64(forwarded_hashes)
             # vLLM binds multi_modal_uuids by modality key string match.
             # For models with use_unified_vision_chunk=True (e.g. Kimi-K2.5)
             # images live under `vision_chunk`, not `image`; hardcoding
