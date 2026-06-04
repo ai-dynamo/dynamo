@@ -174,18 +174,35 @@ class TrafficMetrics(_ProtoMirror):
 class FpmData(_ProtoMirror):
     """Per-engine ForwardPassMetrics; wire format is msgspec/msgpack-encoded.
 
-    Reserved for a follow-up PR that wires FPM into PipelineContext.
-    Currently the orchestrator does not populate this field."""
+    Populated by ``OrchestratorEngineAdapter`` when the adapter receives
+    ``FpmObservations`` from the FPM subscriber.  Map key format is
+    ``"<worker_id>/<dp_rank>"``; map value is the
+    ``msgspec.msgpack.encode``-ed ``ForwardPassMetrics`` payload.
+    Plugins declaring ``needs=["observations.fpm"]`` receive this; when
+    no engines reported FPM this tick the field is absent (not an empty
+    submap), so a plugin should treat ``ctx.observations.fpm is None``
+    as "no FPM data this tick"."""
 
     prefill_engines: dict[str, bytes] = Field(default_factory=dict)
     decode_engines: dict[str, bytes] = Field(default_factory=dict)
 
 
 class WorkerState(_ProtoMirror):
+    """Per-component worker inventory.
+
+    ``ready_*`` / ``expected_*`` are replica counts.
+    ``*_scaling_in_progress`` is true while a previously-issued scale
+    operation has not yet landed (ready != expected); external load-
+    scaling plugins replicating PSM behaviour gate further scale-up on
+    these flags (otherwise the planner can chase a moving target and
+    over-provision).  ``None`` means "not reported this tick"."""
+
     ready_prefill: Optional[int] = None
     ready_decode: Optional[int] = None
     expected_prefill: Optional[int] = None
     expected_decode: Optional[int] = None
+    prefill_scaling_in_progress: Optional[bool] = None
+    decode_scaling_in_progress: Optional[bool] = None
 
 
 class ObservationData(_ProtoMirror):

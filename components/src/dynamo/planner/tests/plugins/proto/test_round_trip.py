@@ -317,6 +317,39 @@ def test_kv_hit_rate_round_trip_traffic_and_prediction():
     assert pd_back.predicted_osl is None
 
 
+def test_worker_state_scaling_in_progress_roundtrip():
+    """WorkerState.{prefill,decode}_scaling_in_progress are ``optional bool``;
+    ``unset`` vs ``False`` is observable via ``HasField`` so plugins can
+    distinguish "connector did not report" from "explicit stable=False".
+    """
+    # Unset: connector hasn't reported scaling state this tick.
+    ws_unset = pyd.WorkerState(ready_prefill=4, ready_decode=8)
+    pb_unset = pydantic_to_proto(ws_unset)
+    assert not pb_unset.HasField("prefill_scaling_in_progress")
+    assert not pb_unset.HasField("decode_scaling_in_progress")
+    back_unset = proto_to_pydantic(pb_unset)
+    assert back_unset.prefill_scaling_in_progress is None
+    assert back_unset.decode_scaling_in_progress is None
+
+    # Explicit False: prefill stable, decode still scaling.
+    ws_mixed = pyd.WorkerState(
+        ready_prefill=4,
+        ready_decode=6,
+        expected_prefill=4,
+        expected_decode=8,
+        prefill_scaling_in_progress=False,
+        decode_scaling_in_progress=True,
+    )
+    pb_mixed = pydantic_to_proto(ws_mixed)
+    assert pb_mixed.HasField("prefill_scaling_in_progress")
+    assert pb_mixed.HasField("decode_scaling_in_progress")
+    assert pb_mixed.prefill_scaling_in_progress is False
+    assert pb_mixed.decode_scaling_in_progress is True
+    back_mixed = proto_to_pydantic(pb_mixed)
+    assert back_mixed.prefill_scaling_in_progress is False
+    assert back_mixed.decode_scaling_in_progress is True
+
+
 def test_component_target_optional_replicas():
     """Unset replicas = 'no opinion' (v9 semantics)."""
     ct1 = pyd.ComponentTarget(sub_component_type="prefill")  # replicas unset

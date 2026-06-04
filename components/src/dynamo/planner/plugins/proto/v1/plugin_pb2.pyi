@@ -205,16 +205,20 @@ class FpmData(_message.Message):
     def __init__(self, prefill_engines: _Optional[_Mapping[str, bytes]] = ..., decode_engines: _Optional[_Mapping[str, bytes]] = ...) -> None: ...
 
 class WorkerState(_message.Message):
-    __slots__ = ("ready_prefill", "ready_decode", "expected_prefill", "expected_decode")
+    __slots__ = ("ready_prefill", "ready_decode", "expected_prefill", "expected_decode", "prefill_scaling_in_progress", "decode_scaling_in_progress")
     READY_PREFILL_FIELD_NUMBER: _ClassVar[int]
     READY_DECODE_FIELD_NUMBER: _ClassVar[int]
     EXPECTED_PREFILL_FIELD_NUMBER: _ClassVar[int]
     EXPECTED_DECODE_FIELD_NUMBER: _ClassVar[int]
+    PREFILL_SCALING_IN_PROGRESS_FIELD_NUMBER: _ClassVar[int]
+    DECODE_SCALING_IN_PROGRESS_FIELD_NUMBER: _ClassVar[int]
     ready_prefill: int
     ready_decode: int
     expected_prefill: int
     expected_decode: int
-    def __init__(self, ready_prefill: _Optional[int] = ..., ready_decode: _Optional[int] = ..., expected_prefill: _Optional[int] = ..., expected_decode: _Optional[int] = ...) -> None: ...
+    prefill_scaling_in_progress: bool
+    decode_scaling_in_progress: bool
+    def __init__(self, ready_prefill: _Optional[int] = ..., ready_decode: _Optional[int] = ..., expected_prefill: _Optional[int] = ..., expected_decode: _Optional[int] = ..., prefill_scaling_in_progress: bool = ..., decode_scaling_in_progress: bool = ...) -> None: ...
 
 class PredictionData(_message.Message):
     __slots__ = ("predicted_num_req", "predicted_isl", "predicted_osl", "source", "predicted_kv_hit_rate")

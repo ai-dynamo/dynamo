@@ -261,9 +261,14 @@ message TrafficMetrics
 // vmihailenco/msgpack, Rust's rmp-serde, JS @msgpack/msgpack, etc.) plus
 // knowledge of the ForwardPassMetrics struct layout.
 //
-// NOTE: ``ObservationData.fpm`` is reserved for a follow-up PR that wires
-// FPM observations into PipelineContext (current PR leaves the field
-// unpopulated). Plugins should treat the field as Optional[absent].
+// Per-engine map key format: ``"<worker_id>/<dp_rank>"`` — flat string
+// since proto3 ``map`` keys can't carry a tuple.  Engines without an
+// observation this tick are simply absent from the map; a plugin
+// declaring ``needs=["observations.fpm"]`` should treat an empty
+// submap as "no FPM data this tick" rather than an error.  When neither
+// prefill nor decode engines report, the orchestrator omits the
+// ``ObservationData.fpm`` field entirely (proto3 absent vs
+// empty-but-set is observable via ``HasField``).
 message FpmData
 {
   map<string, bytes> prefill_engines = 1;
@@ -277,6 +282,17 @@ message WorkerState
   optional int32 ready_decode = 2;
   optional int32 expected_prefill = 3;
   optional int32 expected_decode = 4;
+
+  // Scaling-in-progress flags.  ``true`` when the planner has issued
+  // a scale operation that the connector has not yet observed as
+  // stable (ready == expected).  PSM load-scaling uses these to
+  // suppress further scale-up while a previous request is mid-flight
+  // and to explain "held" decisions in audit logs — external plugins
+  // replicating PSM load-scaling behaviour need parity access.
+  // ``optional`` (proto3 presence) distinguishes "not reported" from
+  // an explicit ``false`` value.
+  optional bool prefill_scaling_in_progress = 5;
+  optional bool decode_scaling_in_progress = 6;
 }
 
 // Prediction data flows through PREDICT chain-augment.

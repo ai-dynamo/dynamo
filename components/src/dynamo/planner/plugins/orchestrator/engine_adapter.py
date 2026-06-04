@@ -35,10 +35,12 @@ Internal responsibilities
    ``next_tick`` field in ``PlannerEffects`` matches PSM's legacy
    path bit-for-bit.
 2. **TickInput → PipelineContext bridge**:
-   Extracts ``traffic`` into ``TrafficMetrics`` and ``worker_counts``
-   into ``WorkerState`` on ``ObservationData``. FPM ingestion to
-   ``ObservationData.fpm`` lands in a follow-up PR (single
-   msgspec/msgpack encoding; see plan).
+   Extracts ``traffic`` into ``TrafficMetrics``, ``worker_counts``
+   (counts + scaling-in-progress flags) into ``WorkerState``, and
+   per-engine FPM observations into ``FpmData`` (msgspec/msgpack-
+   encoded, keyed by ``"<worker_id>/<dp_rank>"``) on ``ObservationData``.
+   External plugins declaring ``needs=["observations.fpm"]`` receive
+   the FPM map; an empty/absent submap means "no FPM this tick".
 3. **FPM regression observation**:
    Before the orchestrator tick, feeds FPM into the orchestrator-owned
    regression models (mirrors PSM's ``_observe_fpm``). This is a
@@ -781,6 +783,8 @@ class OrchestratorEngineAdapter:
                 ready_decode=ti.worker_counts.ready_num_decode,
                 expected_prefill=ti.worker_counts.expected_num_prefill,
                 expected_decode=ti.worker_counts.expected_num_decode,
+                prefill_scaling_in_progress=ti.worker_counts.prefill_scaling_in_progress,
+                decode_scaling_in_progress=ti.worker_counts.decode_scaling_in_progress,
             )
         # FPM observations: encode per-engine ``ForwardPassMetrics`` to
         # msgpack bytes (the wire format the proto README + ``FpmData``
