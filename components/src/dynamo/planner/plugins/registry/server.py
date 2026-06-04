@@ -61,6 +61,50 @@ TransportFactory = Callable[..., PluginTransport]
 UnregisterCallback = Callable[[str, str], None]
 
 
+# Floating-point tolerance for "is this a clean multiple of scale_interval?"
+# Picked to absorb the float arithmetic noise that creeps in when a YAML
+# author writes ``observation_window_seconds: 7.5`` and Pydantic /
+# protobuf round-trip through float32: a 1e-6 tolerance is well below
+# any meaningful scale_interval (defaults to 5.0s) yet large enough to
+# accept ``2.0 * 5.0`` after a couple of float operations.
+_WINDOW_ALIGN_TOLERANCE_S = 1e-6
+
+
+def _check_observation_window(
+    window_s: float, scale_interval_s: float
+) -> Optional[str]:
+    """Return a ``reject_reason`` string if ``window_s`` violates the
+    proto contract, else ``None``.  Contract:
+
+      0.0                                       -> accept (use scale_interval)
+      N where (N > 0 and N is k * scale_interval) -> accept
+      anything else                             -> reject
+
+    ``scale_interval_s == 0.0`` disables the check (PSM path constructs
+    the server without a scale_interval; the proto contract there is
+    implicit and unverifiable).
+    """
+    if scale_interval_s <= 0.0:
+        return None
+    if window_s == 0.0:
+        return None
+    if window_s < 0.0:
+        return (
+            "observation_window_misaligned: "
+            f"observation_window_seconds={window_s} must be >= 0"
+        )
+    ratio = window_s / scale_interval_s
+    rounded = round(ratio)
+    if rounded < 1 or abs(ratio - rounded) > _WINDOW_ALIGN_TOLERANCE_S:
+        return (
+            "observation_window_misaligned: "
+            f"observation_window_seconds={window_s} must be 0 or a positive "
+            f"integer multiple of scale_interval_seconds="
+            f"{scale_interval_s}"
+        )
+    return None
+
+
 class PluginRegistryServer:
     """In-memory plugin registry + transport lifecycle manager."""
 
@@ -154,6 +198,25 @@ class PluginRegistryServer:
             )
             log.info("register rejected plugin_id=%s reason=%s", req.plugin_id, reason)
             return RegisterResponse(accepted=False, reject_reason=reason)
+
+        # 2.5. Observation window alignment.  Proto contract
+        # (plugin.proto:107) requires ``observation_window_seconds`` to
+        # be 0 OR a positive multiple of ``scale_interval_seconds`` so
+        # the resulting Prometheus window aligns to tick boundaries —
+        # otherwise the aggregated value crosses tick boundaries and the
+        # plugin sees a moving target.  Only enforce when the server has
+        # a known scale_interval (PSM path constructs without one, so
+        # the constraint there is implicit / unverifiable).
+        reject_window = _check_observation_window(
+            req.observation_window_seconds, self._scale_interval_seconds
+        )
+        if reject_window is not None:
+            log.info(
+                "register rejected plugin_id=%s reason=%s",
+                req.plugin_id,
+                reject_window,
+            )
+            return RegisterResponse(accepted=False, reject_reason=reject_window)
 
         # 3. Duplicate plugin_id → reject.
         if req.plugin_id in self._plugins:

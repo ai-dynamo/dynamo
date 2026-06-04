@@ -371,6 +371,66 @@ async def test_protocol_version_malformed_rejected_clearly():
     assert "protocol_version_malformed" in resp.reject_reason
 
 
+def _make_server_with_scale_interval(scale_interval_seconds: float):
+    clock = VirtualClock()
+    cb = CircuitBreaker(clock)
+    factory, _ = _stub_factory()
+    return PluginRegistryServer(
+        clock=clock,
+        auth=_AcceptAllAuth(),
+        circuit_breaker=cb,
+        transport_factory=factory,
+        scale_interval_seconds=scale_interval_seconds,
+    )
+
+
+@pytest.mark.asyncio
+async def test_observation_window_zero_accepted():
+    """Default ``observation_window_seconds=0.0`` means
+    "per-tick freshness" — always accepted."""
+    server = _make_server_with_scale_interval(5.0)
+    resp = await server.register(_req(observation_window_seconds=0.0))
+    assert resp.accepted is True, resp.reject_reason
+
+
+@pytest.mark.asyncio
+async def test_observation_window_multiple_of_scale_interval_accepted():
+    """``N * scale_interval`` aligns to tick boundaries — accepted."""
+    server = _make_server_with_scale_interval(5.0)
+    resp = await server.register(_req(plugin_id="p1", observation_window_seconds=5.0))
+    assert resp.accepted is True, resp.reject_reason
+    resp2 = await server.register(_req(plugin_id="p2", observation_window_seconds=15.0))
+    assert resp2.accepted is True, resp2.reject_reason
+
+
+@pytest.mark.asyncio
+async def test_observation_window_non_multiple_rejected():
+    """Non-multiple windows drive Prometheus queries that cross tick
+    boundaries — reject with a clear reason."""
+    server = _make_server_with_scale_interval(5.0)
+    resp = await server.register(_req(observation_window_seconds=7.0))
+    assert resp.accepted is False
+    assert "observation_window_misaligned" in resp.reject_reason
+
+
+@pytest.mark.asyncio
+async def test_observation_window_negative_rejected():
+    server = _make_server_with_scale_interval(5.0)
+    resp = await server.register(_req(observation_window_seconds=-1.0))
+    assert resp.accepted is False
+    assert "observation_window_misaligned" in resp.reject_reason
+
+
+@pytest.mark.asyncio
+async def test_observation_window_unverifiable_without_scale_interval():
+    """When ``scale_interval_seconds == 0.0`` (PSM path constructs the
+    server without one), the alignment constraint can't be verified —
+    accept any value rather than reject erroneously."""
+    server = _make_server_with_scale_interval(0.0)
+    resp = await server.register(_req(observation_window_seconds=7.0))
+    assert resp.accepted is True, resp.reject_reason
+
+
 @pytest.mark.asyncio
 async def test_auth_failure_rejected_with_generic_reason():
     server, _, _, _ = _make_server(auth=StaticSecretAuth({"good": "alice"}))

@@ -89,6 +89,32 @@ def test_initial_tick_with_throughput_scaling_enabled_does_not_attribute_error()
     assert tick.run_load_scaling or tick.run_throughput_scaling
 
 
+def test_orchestrator_path_honours_configured_protocol_version_range():
+    """``planner.plugin_registration.protocol_version_min/max`` must
+    flow into the orchestrator-path registry server (previously dropped
+    on the floor — server defaulted to ``("1.0", "1.0")`` regardless of
+    config, making any non-default range silently ineffective on the
+    gateway).
+    """
+    from dynamo.planner.config.planner_config import PluginRegistrationConfig
+
+    config = PlannerConfig(
+        mode="agg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+        plugin_registration=PluginRegistrationConfig(
+            protocol_version_min="1.0",
+            protocol_version_max="1.5",
+        ),
+    )
+    adapter = OrchestratorEngineAdapter(config, _caps())
+    server = adapter._orchestrator._registry  # type: ignore[attr-defined]
+    assert server._protocol_min == "1.0"
+    assert server._protocol_max == "1.5"
+
+
 def test_pipeline_fires_at_scale_interval_cadence():
     """Replaces the previous ``test_merge_tolerance_matches_psm_500ms_window``.
 

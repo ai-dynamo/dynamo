@@ -223,6 +223,18 @@ class OrchestratorEngineAdapter:
             auth=auth,
             circuit_breaker=cb,
             transport_factory=_factory,
+            # Honour the user-configured protocol-version range on the
+            # orchestrator path.  Without this, ``planner.plugin_registration
+            # .protocol_version_min/max`` was ineffective for plugins
+            # registering through the gateway under the orchestrator path
+            # (server defaulted to ``("1.0", "1.0")``).  Mirrors the
+            # ``protocol_versions=...`` argument that
+            # ``build_registry_from_config`` already passes on the
+            # static-config path.
+            protocol_versions=(
+                config.plugin_registration.protocol_version_min,
+                config.plugin_registration.protocol_version_max,
+            ),
             # Phase-align ``registered_at`` to scale_interval boundary so
             # plugins with identical execution intervals fire on the same
             # pipeline tick irrespective of registration-time skew (see
