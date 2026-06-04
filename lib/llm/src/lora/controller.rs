@@ -1350,4 +1350,41 @@ mod tests {
             "must not place on the full worker w2"
         );
     }
+
+    #[test]
+    fn test_idle_capacity_only_worker_is_placement_target() {
+        // jh-nv (watcher base-card seeding): a LoRA-capable worker with NO adapter loaded yet —
+        // capacity seeded from the base MDC via set_worker_capacity — must be visible to the
+        // controller and eligible for placement, instead of being excluded until some request has
+        // already lazy-loaded an adapter onto it. Without the seeding, list_workers() would be
+        // empty here and recompute would clear/return with no placement at all.
+        let (mut controller, st, le, rt) = setup_controller();
+        let w1 = make_worker(1);
+        // Capacity-only registration: the worker advertises 4 LoRA slots, no adapter loaded.
+        st.set_worker_capacity(w1, 4);
+        assert_eq!(
+            st.list_workers(),
+            vec![w1],
+            "capacity-only worker must be visible to the controller"
+        );
+        assert_eq!(
+            st.total_lora_slots(),
+            4,
+            "its slots must count toward budget"
+        );
+
+        // A request arrives for lora-a (active), but no adapter is loaded anywhere yet.
+        le.increment_load("lora-a");
+        controller.recompute_now();
+
+        let cfg = rt
+            .get_config("lora-a")
+            .expect("active LoRA must be placed on the idle capacity-only worker");
+        assert_eq!(
+            cfg.replica_set,
+            vec![w1],
+            "placement must target the idle-but-capable worker w1"
+        );
+        assert!(cfg.is_active);
+    }
 }

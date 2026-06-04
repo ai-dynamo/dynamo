@@ -376,6 +376,17 @@ impl ModelWatcher {
                         // card was never durably saved can still remove exactly this adapter (R4-2).
                         self.pending_lora_adds
                             .insert(mcid.to_path(), lora_info.name.clone());
+                    } else if let Some(capacity) = card.runtime_config.max_gpu_lora_count {
+                        // Base worker card advertising LoRA slot capacity (no adapter loaded yet):
+                        // seed capacity-only so the controller sees idle-but-LoRA-capable workers
+                        // before the first adapter load, not just workers that already host an
+                        // adapter. No phantom adapter is registered; handle_worker_removal clears
+                        // this entry when the base card is later removed.
+                        use crate::kv_router::protocols::WorkerWithDpRank;
+                        let worker = WorkerWithDpRank::new(mcid.instance_id, 0);
+                        self.manager
+                            .lora_state_tracker()
+                            .set_worker_capacity(worker, capacity);
                     }
 
                     // Spawn each handle_put into its own task so that a slow
