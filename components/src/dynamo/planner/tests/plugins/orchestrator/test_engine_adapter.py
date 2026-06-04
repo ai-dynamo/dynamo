@@ -32,10 +32,14 @@ from dynamo.planner.core.types import (
     FpmObservations,
     ScheduledTick,
     TickInput,
+    TrafficObservation,
     WorkerCapabilities,
+    WorkerCounts,
 )
 from dynamo.planner.plugins.clock import VirtualClock
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
+from dynamo.planner.plugins.orchestrator.pipeline import PipelineOutcome
+from dynamo.planner.plugins.types import ComponentTarget, ScalingProposal
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -169,6 +173,96 @@ def test_observe_fpm_feeds_installed_regression_without_crashing_disagg():
             decode={("d1", 0): _make_fpm("d1")},
         )
     )
+
+
+def _apply_outcome(targets):
+    return PipelineOutcome(
+        execute_action="apply",
+        final_proposal=ScalingProposal(targets=targets),
+    )
+
+
+def test_project_scale_to_both_components_changed():
+    # apply + prefill & decode both differ from current → full decision.
+    wc = WorkerCounts(ready_num_prefill=2, ready_num_decode=4)
+    outcome = _apply_outcome(
+        [
+            ComponentTarget(sub_component_type="prefill", replicas=6),
+            ComponentTarget(sub_component_type="decode", replicas=8),
+        ]
+    )
+    dec = OrchestratorEngineAdapter._project_scale_to(outcome, wc)
+    assert dec is not None
+    assert dec.num_prefill == 6
+    assert dec.num_decode == 8
+
+
+def test_project_scale_to_no_change_returns_none():
+    # apply but both equal current → PSM-equivalent "no change → None".
+    wc = WorkerCounts(ready_num_prefill=6, ready_num_decode=8)
+    outcome = _apply_outcome(
+        [
+            ComponentTarget(sub_component_type="prefill", replicas=6),
+            ComponentTarget(sub_component_type="decode", replicas=8),
+        ]
+    )
+    assert OrchestratorEngineAdapter._project_scale_to(outcome, wc) is None
+
+
+def test_project_scale_to_single_component_proposal():
+    # Proposal mentions only prefill → num_decode stays None (no opinion),
+    # prefill changed → decision emitted.
+    wc = WorkerCounts(ready_num_prefill=2, ready_num_decode=4)
+    outcome = _apply_outcome(
+        [ComponentTarget(sub_component_type="prefill", replicas=6)]
+    )
+    dec = OrchestratorEngineAdapter._project_scale_to(outcome, wc)
+    assert dec is not None
+    assert dec.num_prefill == 6
+    assert dec.num_decode is None
+
+
+def test_project_scale_to_non_apply_action_returns_none():
+    wc = WorkerCounts(ready_num_prefill=2, ready_num_decode=4)
+    for action in ("skip_short_circuit", "skip_no_targets", "skip_tick_timeout"):
+        outcome = PipelineOutcome(execute_action=action, final_proposal=None)
+        assert OrchestratorEngineAdapter._project_scale_to(outcome, wc) is None
+
+
+def test_tick_input_to_context_maps_observations_and_fpm():
+    # The ingress glue: TickInput → PipelineContext.observations, including
+    # the FPM msgpack encoding external plugins decode. Asserts field mapping
+    # (traffic + worker scaling flags) and that the FPM bytes round-trip.
+    from dynamo.common.forward_pass_metrics import decode as _fpm_decode
+
+    adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps())
+    ti = TickInput(
+        now_s=10.0,
+        traffic=TrafficObservation(
+            duration_s=60.0, num_req=100.0, isl=1000.0, osl=150.0, kv_hit_rate=0.4
+        ),
+        worker_counts=WorkerCounts(
+            ready_num_prefill=2,
+            ready_num_decode=4,
+            prefill_scaling_in_progress=True,
+            decode_scaling_in_progress=False,
+        ),
+        fpm_observations=FpmObservations(decode={("w1", 0): _make_fpm("w1")}),
+    )
+    ctx = adapter._tick_input_to_context(ti)
+
+    assert ctx.observations.traffic.num_req == 100.0
+    assert ctx.observations.traffic.kv_hit_rate == 0.4
+    assert ctx.observations.workers.ready_decode == 4
+    assert ctx.observations.workers.prefill_scaling_in_progress is True
+    assert ctx.observations.workers.decode_scaling_in_progress is False
+
+    # FPM key format is "<worker_id>/<dp_rank>" and the value is a
+    # canonical-encoded ForwardPassMetrics the external plugin decodes.
+    raw = ctx.observations.fpm.decode_engines["w1/0"]
+    back = _fpm_decode(raw)
+    assert back is not None
+    assert back.worker_id == "w1"
 
 
 def test_initial_tick_with_throughput_scaling_enabled_does_not_attribute_error():

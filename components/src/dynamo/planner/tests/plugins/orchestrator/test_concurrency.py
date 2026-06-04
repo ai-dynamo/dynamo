@@ -228,3 +228,72 @@ async def test_M1_priority_paired_by_position_not_result_backref(ctx_factory):
     outcome = await ctx["orchestrator"].tick(PipelineContext(), {PREFILL: 1})
     # high_prio (priority-smaller number) wins.
     assert outcome.final_proposal.targets[0].replicas == 50
+
+
+@pytest.mark.asyncio
+async def test_registry_mutation_during_in_flight_tick_uses_pretick_snapshot(
+    ctx_factory,
+):
+    """No-locks invariant guard: a stage snapshots its active set up front
+    (``compute_active_set`` → ``all_plugins()``) with no ``await`` between
+    snapshot and mutation, so registering a plugin while a tick is suspended
+    mid-``gather`` must NOT inject it into the in-flight stage or corrupt the
+    tick. ``test_concurrency`` previously only covered gather parallelism +
+    circuit-breaker accumulation; nothing exercised a registry mutation
+    racing a suspended tick despite the prominent invariant in
+    scheduler.py / server.py."""
+    ctx = ctx_factory()
+    orch = ctx["orchestrator"]
+
+    release = asyncio.Event()
+    slow_seen = {"count": 0}
+
+    async def slow_propose(req):
+        slow_seen["count"] += 1
+        await release.wait()  # suspend the PROPOSE gather here
+        return ProposeStageResponse(result_kind="accept", accept=AcceptResult())
+
+    orch.register_internal(
+        plugin_id="slow",
+        plugin_type="propose",
+        priority=10,
+        instance=StubPlugin(propose=slow_propose),
+    )
+
+    late = StubPlugin(propose=_override(99))
+
+    tick_task = asyncio.create_task(orch.tick(PipelineContext(), {PREFILL: 3}))
+
+    # Let the tick start and suspend inside the slow plugin's await.
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if slow_seen["count"]:
+            break
+    assert slow_seen["count"] == 1, "tick did not reach the slow plugin"
+
+    # Mutate the registry while the PROPOSE gather is suspended.
+    orch.register_internal(
+        plugin_id="late",
+        plugin_type="propose",
+        priority=5,
+        instance=late,
+    )
+
+    release.set()
+    outcome = await tick_task  # must not raise
+
+    # The late plugin registered after PROPOSE snapshotted its active set,
+    # so it must not have been called in this tick.
+    assert late.call_counts["Propose"] == 0
+    assert outcome.execute_action in (
+        "apply",
+        "skip_no_targets",
+        "skip_short_circuit",
+        "skip_tick_timeout",
+    )
+
+    # Sanity: a fresh tick now sees the late plugin (priority 5 wins its SET).
+    outcome2 = await orch.tick(PipelineContext(), {PREFILL: 3})
+    assert late.call_counts["Propose"] == 1
+    assert outcome2.final_proposal is not None
+    assert outcome2.final_proposal.targets[0].replicas == 99

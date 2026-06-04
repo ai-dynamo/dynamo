@@ -10,7 +10,17 @@ The extension adds three plugin-aware fields:
 
 All three default to empty collections so PSM-path callers that never
 touch them still produce a byte-identical ``TickDiagnostics()`` value.
-"""
+
+SCOPE NOTE: no production code path populates these three fields in this
+PR — the orchestrator's diagnostics projection
+(``engine_adapter._outcome_to_effects``) fills ``predicted_*`` /
+``execute_action`` / ``short_circuit_reason`` / ``audit_events`` and the
+load/throughput reason strings, but not these. The fields + their
+default-factory contract are shipped here so the wiring that fills them
+(diagnostics recorder consumption in a follow-up PR) doesn't have to
+re-touch ``core/types.py``. These tests therefore lock the dataclass
+contract (defaults, no shared-mutable aliasing, deep-copy independence),
+NOT live production behavior."""
 
 from __future__ import annotations
 
