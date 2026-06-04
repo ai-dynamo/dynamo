@@ -246,7 +246,7 @@ class ReplayPlannerAdapter:
         regression stayed empty and orchestrator-replay scaling decisions
         diverged from PSM."""
         if self._use_orchestrator:
-            self._engine.install_regressions_from_fpms(  # type: ignore[union-attr]
+            self._engine.install_regressions_from_fpms(  # type: ignore[attr-defined]
                 prefill_fpms=prefill_fpms,
                 decode_fpms=decode_fpms,
                 agg_fpms=agg_fpms,
