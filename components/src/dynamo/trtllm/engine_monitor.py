@@ -12,9 +12,8 @@ import os
 import signal
 from typing import TYPE_CHECKING, Optional
 
-from dynamo.runtime import DistributedRuntime
-
 if TYPE_CHECKING:
+    from dynamo.runtime import DistributedRuntime
     from dynamo.trtllm.engine import TensorRTLLMEngine
 
 logger = logging.getLogger(__name__)
@@ -48,7 +47,7 @@ class TrtllmEngineMonitor:
     def __init__(
         self,
         engine: "TensorRTLLMEngine",
-        runtime: Optional[DistributedRuntime] = None,
+        runtime: Optional["DistributedRuntime"] = None,
         shutdown_event: Optional[asyncio.Event] = None,
         *,
         interval: Optional[float] = None,
@@ -127,11 +126,7 @@ class TrtllmEngineMonitor:
                         logger.error("TRT-LLM engine is unhealthy: %r", fatal_error)
                     else:
                         logger.error("TRT-LLM engine is unhealthy.")
-                    self._shutdown_engine()
-                    if self.runtime is not None:
-                        logger.warning("Initiating Dynamo Runtime shutdown.")
-                        self.runtime.shutdown()
-                    os._exit(1)
+                    self._shutdown_worker()
                     return
 
                 if self.shutdown_event is not None:
@@ -152,6 +147,21 @@ class TrtllmEngineMonitor:
         if self.check_timeout > 0:
             return await asyncio.wait_for(health_check, timeout=self.check_timeout)
         return await health_check
+
+    def _shutdown_worker(self) -> None:
+        self._shutdown_engine()
+        try:
+            if self.runtime is not None:
+                logger.warning("Initiating Dynamo Runtime shutdown.")
+                self.runtime.shutdown()
+        except Exception as exc:
+            logger.warning(
+                "Dynamo Runtime shutdown failed during TRT-LLM fatal health path: %r",
+                exc,
+                exc_info=True,
+            )
+        finally:
+            os._exit(1)
 
     def _shutdown_engine(self) -> None:
         """Shutdown the TRT-LLM engine on crash scenarios to free resources."""

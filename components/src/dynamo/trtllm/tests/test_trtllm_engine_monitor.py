@@ -63,11 +63,14 @@ class _BlockingEngine(_FakeEngine):
 
 
 class _FakeRuntime:
-    def __init__(self):
+    def __init__(self, *, shutdown_exception=None):
         self.shutdown_count = 0
+        self._shutdown_exception = shutdown_exception
 
     def shutdown(self):
         self.shutdown_count += 1
+        if self._shutdown_exception is not None:
+            raise self._shutdown_exception
 
 
 def _record_exit(monkeypatch):
@@ -142,6 +145,27 @@ async def test_monitor_shuts_down_engine_runtime_and_exits_when_unhealthy(monkey
     assert engine.shutdown_count == 1
     assert runtime.shutdown_count == 1
     assert not shutdown_event.is_set()
+    assert exit_calls == [1]
+
+
+@pytest.mark.asyncio
+async def test_monitor_exits_when_runtime_shutdown_raises(monkeypatch):
+    exit_calls = _record_exit(monkeypatch)
+    engine = _FakeEngine([False])
+    runtime = _FakeRuntime(shutdown_exception=RuntimeError("runtime shutdown failed"))
+
+    monitor = TrtllmEngineMonitor(
+        engine,
+        runtime=runtime,
+        interval=0.01,
+        shutdown_timeout=0.01,
+    )
+
+    assert monitor._monitor_task is not None
+    await asyncio.wait_for(monitor._monitor_task, timeout=1.0)
+
+    assert engine.shutdown_count == 1
+    assert runtime.shutdown_count == 1
     assert exit_calls == [1]
 
 
