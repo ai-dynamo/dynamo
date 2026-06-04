@@ -46,6 +46,7 @@ pub struct LoraController {
     mcf_solver: Option<McfPlacementSolver>,
     prev_assignment: HashMap<String, HashSet<WorkerWithDpRank>>,
     prev_workers: HashSet<WorkerWithDpRank>,
+    prev_worker_capacities: HashMap<WorkerWithDpRank, u32>,
     prev_replica_counts: HashMap<String, usize>,
 }
 
@@ -81,6 +82,7 @@ impl LoraController {
             mcf_solver,
             prev_assignment: HashMap::new(),
             prev_workers: HashSet::new(),
+            prev_worker_capacities: HashMap::new(),
             prev_replica_counts: HashMap::new(),
         }
     }
@@ -496,6 +498,31 @@ impl LoraController {
         }
     }
 
+    /// Workers that changed since the previous MCF tick: those added or removed (set difference)
+    /// AND those whose per-worker LoRA capacity changed. The MCF delta solver only reconsiders
+    /// workers it is told changed, so a capacity change (e.g. a base-card `max_gpu_lora_count`
+    /// update, or a worker gaining/losing slots) must be reported here — otherwise its frozen
+    /// placements stay stale in delta mode and the solver never uses new headroom. (Capacity
+    /// shrink past current usage is also caught by the solver's over-commit unfreeze, but increases
+    /// and non-overcommitting shrinks rely on this signal.)
+    fn compute_changed_workers(
+        current_workers: &HashSet<WorkerWithDpRank>,
+        prev_workers: &HashSet<WorkerWithDpRank>,
+        current_caps: &HashMap<WorkerWithDpRank, u32>,
+        prev_caps: &HashMap<WorkerWithDpRank, u32>,
+    ) -> HashSet<WorkerWithDpRank> {
+        let mut changed: HashSet<WorkerWithDpRank> = current_workers
+            .symmetric_difference(prev_workers)
+            .copied()
+            .collect();
+        for w in current_workers {
+            if current_caps.get(w).copied().unwrap_or(0) != prev_caps.get(w).copied().unwrap_or(0) {
+                changed.insert(*w);
+            }
+        }
+        changed
+    }
+
     /// Global MCF allocation path: solves all LoRA placements simultaneously.
     fn recompute_mcf(
         &mut self,
@@ -551,10 +578,14 @@ impl LoraController {
 
         // Detect changes for delta solving
         let current_workers: HashSet<WorkerWithDpRank> = workers.iter().copied().collect();
-        let changed_workers: HashSet<WorkerWithDpRank> = current_workers
-            .symmetric_difference(&self.prev_workers)
-            .copied()
-            .collect();
+        // Worker-set changes (added/removed) AND per-worker capacity changes both count as worker
+        // changes for the MCF delta solver (see compute_changed_workers).
+        let changed_workers = Self::compute_changed_workers(
+            &current_workers,
+            &self.prev_workers,
+            &capacities,
+            &self.prev_worker_capacities,
+        );
 
         let mut changed_loras: HashSet<String> = HashSet::new();
         // New or removed LoRAs
@@ -719,6 +750,7 @@ impl LoraController {
                 // Store state for next tick (pure MCF assignment; no fallback pins injected)
                 self.prev_assignment = result.assignment;
                 self.prev_workers = current_workers;
+                self.prev_worker_capacities = capacities;
                 self.prev_replica_counts = lora_inputs
                     .iter()
                     .map(|li| (li.name.clone(), li.replicas))
@@ -868,6 +900,7 @@ impl LoraController {
         // phantom prior assignment referencing gone workers.
         self.prev_assignment.clear();
         self.prev_workers.clear();
+        self.prev_worker_capacities.clear();
         self.prev_replica_counts.clear();
 
         LORA_REPLICA_FACTOR_GAUGE.reset();
@@ -1386,5 +1419,37 @@ mod tests {
             "placement must target the idle-but-capable worker w1"
         );
         assert!(cfg.is_active);
+    }
+
+    #[test]
+    fn test_mcf_changed_workers_includes_capacity_changes() {
+        // MCF delta mode only reconsiders workers reported as changed. A capacity change on an
+        // existing worker (same id, same LoRA set, same replica counts) must mark that worker
+        // changed — otherwise delta MCF leaves its frozen placements stale and never uses the new
+        // headroom.
+        let w1 = make_worker(1);
+        let w2 = make_worker(2);
+        let workers: HashSet<WorkerWithDpRank> = [w1, w2].into_iter().collect();
+        let prev_caps: HashMap<WorkerWithDpRank, u32> = [(w1, 2), (w2, 2)].into_iter().collect();
+        // Identical worker set; w1 capacity grew 2 -> 4, w2 unchanged.
+        let cur_caps: HashMap<WorkerWithDpRank, u32> = [(w1, 4), (w2, 2)].into_iter().collect();
+
+        let changed =
+            LoraController::compute_changed_workers(&workers, &workers, &cur_caps, &prev_caps);
+        assert!(
+            changed.contains(&w1),
+            "a capacity change must mark the worker changed for delta MCF"
+        );
+        assert!(
+            !changed.contains(&w2),
+            "an unchanged-capacity worker must not be marked changed"
+        );
+
+        // No id or capacity change -> nothing changed.
+        assert!(
+            LoraController::compute_changed_workers(&workers, &workers, &prev_caps, &prev_caps)
+                .is_empty(),
+            "no id/capacity change must yield no changed workers"
+        );
     }
 }
