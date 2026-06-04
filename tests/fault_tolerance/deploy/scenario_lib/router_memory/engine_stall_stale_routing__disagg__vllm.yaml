@@ -116,20 +116,20 @@ events:
 
   # ── Phase 0: baseline (near-idle calibration) ─────────────────────────────
   - { kind: Wait, duration: 600 }
-  - { kind: CaptureMetrics, suffix: ".baseline", include_events: true }  # 0 errors + KV-util ≪ 0.85
+  - { kind: CaptureMetrics, suffix: ".baseline" }  # 0 errors + KV-util ≪ 0.85
 
   # ── Phase 1: single DECODE stall (PERMANENT) → wait for the actual churn ───
   - { kind: StallProcess, services: [VllmDecodeWorker], process_name: "VLLM::EngineCore", pod_indices: [0], rank_index: 1, duration: null }
   - { kind: WaitForRecovery, unready_timeout: 300, timeout: 600 }  # CR unready (died) → ready (restarted); logs pod warning events
   - { kind: Wait, duration: 120 }                 # observe stale-routing tail/decay
-  - { kind: CaptureMetrics, suffix: ".after-decode-stall", include_events: true }
+  - { kind: CaptureMetrics, suffix: ".after-decode-stall" }
 
   # ── Phase 2: single PREFILL stall (PERMANENT) → the OTHER role churns ──────
   # The permanent hold is what churns prefill at near-idle (no SIGCONT-rescue).
   - { kind: StallProcess, services: [VllmPrefillWorker], process_name: "VLLM::EngineCore", pod_indices: [0], rank_index: 1, duration: null }
   - { kind: WaitForRecovery, unready_timeout: 300, timeout: 600 }
   - { kind: Wait, duration: 120 }
-  - { kind: CaptureMetrics, suffix: ".after-prefill-stall", include_events: true }
+  - { kind: CaptureMetrics, suffix: ".after-prefill-stall" }
 
   # ── Phase 3: overlapping burst → the PEAK ──────────────────────────────────
   # Stall 1 decode + 1 prefill (the not-yet-stalled pods) within ~60 s so both
@@ -140,18 +140,18 @@ events:
   - { kind: StallProcess, services: [VllmPrefillWorker], process_name: "VLLM::EngineCore", pod_indices: [1], rank_index: 1, duration: null }
   - { kind: WaitForRecovery, unready_timeout: 300, timeout: 600 }  # both die → both restart
   - { kind: Wait, duration: 120 }
-  - { kind: CaptureMetrics, suffix: ".peak", include_events: true }
+  - { kind: CaptureMetrics, suffix: ".peak" }
 
   # ── Phase 4: recovery — observe self-decay toward ~0 ──────────────────────
   - { kind: Wait, duration: 300 }
-  - { kind: CaptureMetrics, suffix: ".recovery", include_events: true }
+  - { kind: CaptureMetrics, suffix: ".recovery" }
 
   # ── Phase 5: SIGTERM negative control — graceful death deregisters cleanly,
   # so the router drops the id BEFORE churn → expect ~0 new 500s. Targets the
   # main process (not a rank).
   - { kind: TerminateProcess, services: [VllmDecodeWorker], process_name: dynamo.vllm, signal: SIGTERM, pod_indices: [1], name: sigterm-control }
   - { kind: Wait, duration: 300 }
-  - { kind: CaptureMetrics, suffix: ".sigterm-control", include_events: true }
+  - { kind: CaptureMetrics, suffix: ".sigterm-control" }
 
   - { kind: WaitForLoadCompletion, name: steady }
 

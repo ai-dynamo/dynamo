@@ -512,48 +512,45 @@ class Wait(Event):
 
 @dataclass
 class CaptureMetrics(Event):
-    """Scrape ``/metrics`` from every pod and write raw text per pod.
+    """Point-in-time per-pod snapshot: ``/metrics`` + pod manifest + k8s events.
 
-    Thin YAML wrapper around ``ManagedDeployment._capture_metrics``.
-    Output lands at ``<log_dir>/<service>/<pod>.metrics<suffix>.log`` —
-    raw Prometheus text, no parsing. Downstream verifiers / observe
-    tooling pull the metric names they care about.
+    Despite the name (kept for back-compat — many scenarios reference it),
+    this always captures the full point-in-time set per pod:
+      - ``<pod><suffix>.metrics<suffix>.log`` — raw Prometheus /metrics
+      - ``<pod><suffix>.yaml``                — pod object (spec + status)
+      - ``<pod><suffix>.events.yaml``         — k8s Event resources (probe
+        failures, OOMKills, scheduling/BindingErrors, kill/restart reasons)
 
-    The framework also auto-fires this at end-of-test (``__aexit__``,
-    suffix ``.final``) and on pod-kill (``DeletePod`` event, suffix
-    ``.before_delete``). Use this event when a scenario needs a named
-    mid-test snapshot (e.g. just before a load step-up, just after a
-    threshold change).
+    Events + manifest always accompany the metrics because that's the
+    diagnostic context you want whenever a capture matters — and k8s events
+    age out (~1h TTL), so capturing them at each call is the only way to
+    preserve per-phase events. Container **logs are NOT re-dumped here** — they
+    stream continuously to the log-collection PVC (tee wrapper) and are tailed
+    by ``PeriodicSnapshot``; re-dumping per-capture would just bloat the output.
+
+    The framework also auto-fires a capture at end-of-test (``__aexit__``,
+    suffix ``.final``) and on pod-kill (``DeletePod`` event, ``.before_delete``).
+    Use this event for a named mid-test snapshot (e.g. just after a fault).
     """
 
     suffix: str = ".snapshot"
-    # When True, also write per-pod manifest (``<pod><suffix>.yaml``) + the
-    # Kubernetes Event resources (``<pod><suffix>.events.yaml``) alongside the
-    # /metrics scrape. The events.yaml surfaces pod-level issues at this capture
-    # point — probe failures, OOMKills, scheduling/BindingErrors, kill/restart
-    # reasons — which the metrics scrape alone doesn't show.
-    include_events: bool = False
     name: str = ""
     results: dict[str, Any] | None = field(default=None, init=False)
 
     async def execute(self, ctx: "ScenarioContext") -> None:
         ctx.logger.info(
-            f"CaptureMetrics: scraping all pods (suffix={self.suffix!r}, "
-            f"include_events={self.include_events})"
+            f"CaptureMetrics: capturing all pods — /metrics + manifest + "
+            f"k8s events (suffix={self.suffix!r})"
         )
-        if self.include_events:
-            # Full per-pod capture: manifest + k8s events.yaml + /metrics.
-            import asyncio
+        # _get_service_logs writes /metrics + manifest + events.yaml per pod.
+        # It's sync (k8s API + file writes) → off-load from the event loop.
+        import asyncio
 
-            await asyncio.to_thread(
-                ctx.deployment._get_service_logs, suffix=self.suffix
-            )
-        else:
-            await ctx.deployment._capture_metrics(suffix=self.suffix)
+        await asyncio.to_thread(ctx.deployment._get_service_logs, suffix=self.suffix)
 
     @property
     def description(self) -> str:
-        return f"CaptureMetrics(suffix={self.suffix}, events={self.include_events})"
+        return f"CaptureMetrics(suffix={self.suffix})"
 
 
 @dataclass
