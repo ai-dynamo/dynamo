@@ -54,17 +54,22 @@ spec:
           image: ${VLLM_IMAGE}
           imagePullPolicy: IfNotPresent
           workingDir: /workspace
-      # Frontend-decoding does CPU-side base64-decode + image-preprocess,
-      # so give it more CPU than the qwen3.6 recipe's cpu=4 — these
-      # requests are heavier (5 images per turn).
+      # Frontend-decoding does CPU-side base64-decode + image-preprocess
+      # + token decode. On the qwen3.5-397b workload (5 images × ~2400×1080
+      # per turn, base64-inlined) the prior 16-core limit was the prefill
+      # bottleneck — TTFT regressed +45% vs vllm-serve. p5.48xlarge has
+      # 192 vCPU and the VllmWorker has no CPU request (burstable), so
+      # giving the Frontend 64-128 cores leaves ~60 cores for worker /
+      # bench / system pods. Memory bumped proportionally for the image
+      # decode buffers + token-decode arenas.
       replicas: 1
       resources:
         requests:
-          cpu: "8"
-          memory: 32Gi
+          cpu: "64"
+          memory: 256Gi
         limits:
-          cpu: "16"
-          memory: 64Gi
+          cpu: "128"
+          memory: 512Gi
       subComponentType: null
 
     VllmWorker:
