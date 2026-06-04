@@ -109,26 +109,18 @@ class TrtllmEngineMonitor:
                     )
                     break
 
-                threw_exception = False
-                healthy = True
                 try:
                     healthy = await self._run_health_check()
-                except asyncio.TimeoutError:
-                    logger.error(
-                        "TRT-LLM health check timed out after %.1fs.",
-                        self.check_timeout,
-                    )
-                    threw_exception = True
                 except Exception as exc:
                     logger.error("TRT-LLM health check raised: %r", exc, exc_info=True)
-                    threw_exception = True
+                    healthy = False
 
-                if threw_exception or not healthy:
+                if not healthy:
                     fatal_error = self.engine.get_health_check_fatal_error()
-                    if fatal_error is not None:
-                        logger.error("TRT-LLM engine is unhealthy: %r", fatal_error)
-                    else:
-                        logger.error("TRT-LLM engine is unhealthy.")
+                    logger.error(
+                        "TRT-LLM engine is unhealthy: %r",
+                        fatal_error if fatal_error else "unknown",
+                    )
                     self._shutdown_worker()
                     return
 
