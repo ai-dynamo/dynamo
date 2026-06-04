@@ -115,6 +115,53 @@ def test_orchestrator_path_honours_configured_protocol_version_range():
     assert server._protocol_max == "1.5"
 
 
+@pytest.mark.asyncio
+async def test_bootstrap_registers_static_externals_before_bootstrap_fanout():
+    """Static external plugins (``scheduling.external_plugins``) must be
+    registered **before** the orchestrator-side Bootstrap fan-out so
+    they receive the same ``historical_traffic`` warm + Bootstrap RPC
+    pass as in-process / builtin plugins.
+
+    Pre-fix order was bootstrap → register → gateway, which meant
+    config-listed externals registered into an already-bootstrapped
+    registry and silently missed the warm step.  This test pins the
+    correct ordering via monkey-patched call records.
+    """
+    adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps())
+
+    call_order: list[str] = []
+
+    orig_orchestrator_bootstrap = adapter._orchestrator.bootstrap_plugins
+
+    async def record_orchestrator_bootstrap(*args, **kwargs):
+        call_order.append("bootstrap")
+        await orig_orchestrator_bootstrap(*args, **kwargs)
+
+    orig_wire = adapter._wire_external_plugins_from_config
+
+    async def record_wire():
+        call_order.append("wire_externals")
+        await orig_wire()
+
+    orig_gateway = adapter._maybe_start_gateway
+
+    async def record_gateway():
+        call_order.append("gateway")
+        await orig_gateway()
+
+    adapter._orchestrator.bootstrap_plugins = (  # type: ignore[method-assign]
+        record_orchestrator_bootstrap
+    )
+    adapter._wire_external_plugins_from_config = (  # type: ignore[method-assign]
+        record_wire
+    )
+    adapter._maybe_start_gateway = record_gateway  # type: ignore[method-assign]
+
+    await adapter.bootstrap_plugins()
+
+    assert call_order == ["wire_externals", "bootstrap", "gateway"], call_order
+
+
 def test_pipeline_fires_at_scale_interval_cadence():
     """Replaces the previous ``test_merge_tolerance_matches_psm_500ms_window``.
 

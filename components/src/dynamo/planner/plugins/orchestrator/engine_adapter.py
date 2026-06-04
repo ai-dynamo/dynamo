@@ -288,10 +288,25 @@ class OrchestratorEngineAdapter:
     async def bootstrap_plugins(
         self, *, historical_traffic: Optional[Sequence[TrafficObservation]] = None
     ) -> None:
+        # Order matters: register static external plugins from config
+        # **before** dispatching Bootstrap so they receive the same
+        # ``warm_from_observations`` / ``Bootstrap`` RPC fan-out as the
+        # builtin in-process plugins.  The previous order
+        # (bootstrap → register externals) silently denied static
+        # external plugins access to ``historical_traffic`` — they
+        # registered into an already-bootstrapped registry and never
+        # saw the Bootstrap pass.
+        #
+        # Gateway opens last so a plugin trying to register via the
+        # network can't race the bootstrap fan-out (the gateway's
+        # plugins are intentionally a runtime-only path; they
+        # cannot receive ``historical_traffic`` because Bootstrap has
+        # already moved past them — that's a deliberate scope split
+        # and is the documented contract for dynamic registration).
+        await self._wire_external_plugins_from_config()
         await self._orchestrator.bootstrap_plugins(
             historical_traffic=historical_traffic
         )
-        await self._wire_external_plugins_from_config()
         await self._maybe_start_gateway()
 
     async def _wire_external_plugins_from_config(self) -> None:
