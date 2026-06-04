@@ -170,7 +170,7 @@ navigation:
         path: components/kvbm/kvbm-guide.md
       - section: Tool Call and Reasoning Parsing
         slug: parsing
-        path: parser-configuration.md
+        path: parsing.md
         contents:
           - page: Tool Call Parsing (Dynamo)
             path: tool-calling/README.md
@@ -178,6 +178,8 @@ navigation:
             path: reasoning/README.md
           - page: Parser Engine Fallback
             path: engine-fallback.md
+          - page: Parser Configuration
+            path: parser-configuration.md
           - page: Troubleshooting Tool Calls
             path: tool-calling/troubleshooting.md
       - section: Agents

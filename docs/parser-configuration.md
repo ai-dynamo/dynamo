@@ -16,7 +16,7 @@ Dynamo turns a model's raw tool-call and reasoning markup into structured `tool_
 
 **2. Which parser** — the flag name *and where it goes* depend on choice 1:
 
-| Chat processor | Parser flag(s) and where they go | Parses with | Disaggregated serving | Backends |
+| Parser Implementation | Parser flag(s) and where they go | Parses with | Disaggregated serving | Backends |
 |---|---|---|---|---|
 | `dynamo` (default) | `--dyn-tool-call-parser <name>` and/or `--dyn-reasoning-parser <name>` — on the **worker** | Dynamo Rust frontend | Supported | vLLM, SGLang, TRT-LLM |
 | `vllm` | `--tool-call-parser <name>` and/or `--reasoning-parser <name>` — on the **frontend** | vLLM Python | Supported | vLLM |
@@ -67,10 +67,6 @@ python -m dynamo.vllm   --model Qwen/Qwen3-0.6B
 python -m dynamo.frontend --dyn-chat-processor sglang --tool-call-parser qwen25  --reasoning-parser qwen3
 python -m dynamo.sglang --model Qwen/Qwen3-0.6B
 ```
-
-## Why Dynamo parses in the frontend
-
-In `vllm serve`, `sglang serve`, and `trtllm-serve`, tool-call and reasoning parsing happen in each engine's own frontend, with subtle behavioral differences across them. For performance, Dynamo orchestrates routing and tokenization and passes tokens directly to each engine, bypassing the engine's OpenAI server to avoid duplicate work per request. So Dynamo implements parsing in its frontend as a framework-agnostic Rust layer — one tested OpenAI-compatible contract across vLLM, SGLang, and TRT-LLM, on a hot path that stays concurrent without a Python GIL bottleneck. The `vllm`/`sglang` chat processors (engine fallback) opt back into the engine's own parser when Dynamo doesn't ship one for your model.
 
 ## Parser names and per-stage details
 
