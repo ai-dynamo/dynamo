@@ -96,7 +96,7 @@ jobs:
   # aren't reproducible on plain ubuntu-latest runners.
   rust-gpu:
     needs: image
-    runs-on: prod-tester-amd-gpu-v2
+    runs-on: prod-tester-amd-gpu-v3
     container:
       image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ inputs.cuda_version != '' && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || startsWith(inputs.cuda_version, '13.') && '13' || inputs.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
@@ -226,7 +226,7 @@ jobs:
     with:
       test_suite_name: dynamo
       test_type: gpu
-      amd_runner: prod-tester-amd-gpu-v2
+      amd_runner: prod-tester-amd-gpu-v3
       target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
       cuda_version: '["${{ inputs.cuda_version }}"]'
       platform: '["amd64"]'

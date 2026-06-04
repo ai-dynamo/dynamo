@@ -8,6 +8,9 @@ on:
     branches:
       - main
       - 'release/*.*.*'
+      # TEMPORARY: validate the v3 AMD runner migration on this dev branch.
+      # Remove before merging to main.
+      - pvijayakrish/detach-etcd-nats-startup-from-test
   workflow_dispatch:
     inputs:
       framework:
@@ -323,7 +326,7 @@ jobs:
     with:
       test_suite_name: vllm
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+      amd_runner: prod-tester-amd-gpu-v3 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -345,7 +348,7 @@ jobs:
     with:
       test_suite_name: vllm
       test_type: Multi-GPU Test
-      amd_runner: prod-tester-amd-gpu-4-v2
+      amd_runner: prod-tester-amd-gpu-2-v3
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -361,7 +364,7 @@ jobs:
     with:
       test_suite_name: vllm-efa
       test_type: CPU Test
-      amd_runner: prod-tester-amd-gpu-4-v2
+      amd_runner: prod-tester-amd-gpu-2-v3
       target_tag_plain: ${{ needs.vllm-efa-build.outputs.target_tag_plain }}
       cuda_version: '["12.9"]'
       platform: '["amd64", "arm64"]'
@@ -377,7 +380,7 @@ jobs:
     with:
       test_suite_name: sglang
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+      amd_runner: prod-tester-amd-gpu-v3 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -399,7 +402,7 @@ jobs:
     with:
       test_suite_name: sglang
       test_type: Multi-GPU Test
-      amd_runner: prod-tester-amd-gpu-4-v2
+      amd_runner: prod-tester-amd-gpu-2-v3
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -415,7 +418,7 @@ jobs:
     with:
       test_suite_name: trtllm
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+      amd_runner: prod-tester-amd-gpu-v3 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -437,7 +440,7 @@ jobs:
     with:
       test_suite_name: trtllm
       test_type: Multi-GPU Test
-      amd_runner: prod-tester-amd-gpu-4-v2
+      amd_runner: prod-tester-amd-gpu-2-v3
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -453,7 +456,7 @@ jobs:
     with:
       test_suite_name: trtllm-efa
       test_type: CPU Test
-      amd_runner: prod-tester-amd-gpu-4-v2
+      amd_runner: prod-tester-amd-gpu-2-v3
       target_tag_plain: ${{ needs.trtllm-efa-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]'
