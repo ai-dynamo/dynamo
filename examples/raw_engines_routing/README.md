@@ -191,15 +191,68 @@ cost = prefill_load_scale * adjusted_prefill_blocks + potential_decode_blocks
 ```
 
 An `asyncio.Lock` serializes the slot-tracker `/potential_loads`, selection, and `/add`
-admission section. This prevents concurrent requests from selecting against the same
-pre-booking load snapshot. Tokenization, indexer overlap queries, and generation remain
-concurrent; the example does not add the production router's queueing behavior.
+admission section. This prevents a thundering herd where concurrent requests all select
+against the same pre-booking load snapshot; the next request should observe the load
+booked by the previous one. The lock is a gateway policy choice, not a fundamental
+requirement of splitting the frontend from the slot tracker. Tokenization, indexer
+overlap queries, and generation remain concurrent.
 
 Slot-tracker hashes are local opaque accounting identities. The frontend computes one
 ordered chained BLAKE2b hash for each complete prompt block. They intentionally do not
 need to match the engine-compatible block hashes maintained by the indexer.
 
-The simplified gateway omits the production router's host-cache, disk-cache,
+## Request Flow
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Frontend
+    participant Indexer as KV indexer
+    participant Slots as Slot tracker
+    participant Worker as Selected worker
+
+    Client->>Frontend: POST /v1/responses
+    Frontend->>Frontend: validate, tokenize, hash prompt blocks
+    Frontend->>Indexer: query KV overlap
+    Frontend->>Slots: query projected load
+    Frontend->>Frontend: choose lowest-cost worker
+    Frontend->>Slots: book request
+    Frontend->>Worker: forward request with store=false
+    Worker-->>Frontend: stream or response body
+    Frontend->>Slots: mark prefill complete
+    Frontend->>Slots: free request
+    Frontend-->>Client: return response
+```
+
+Logical flow for one request:
+
+```text
+messages = normalize(request)
+token_ids = tokenize(messages)
+sequence_hashes = slot_hashes(token_ids)
+overlap_scores = indexer.query(token_ids)
+
+with admission_lock:
+    potential_loads = slot_tracker.potential_loads(sequence_hashes, len(token_ids))
+    selected = lowest_cost_worker(overlap_scores, potential_loads)
+    slot_tracker.add(selected, request_id, sequence_hashes)
+
+try:
+    upstream = selected.worker.responses({**request, "store": false})
+    if request.stream:
+        for frame in upstream:
+            if first_generated_delta(frame):
+                slot_tracker.prefill_complete(request_id)
+            yield frame
+    else:
+        body = upstream.read()
+        slot_tracker.prefill_complete(request_id)
+        return body
+finally:
+    slot_tracker.free(request_id)
+```
+
+The simplified gateway also omits the production router's host-cache, disk-cache,
 shared-cache, overload, cache-extension, randomized-routing, and output-block policies.
 
 ## Send Requests

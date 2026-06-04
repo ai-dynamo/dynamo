@@ -466,6 +466,7 @@ def create_app(config: Config) -> FastAPI:
         app.state.tokenizer = await asyncio.to_thread(
             AutoTokenizer.from_pretrained, config.model
         )
+        # Serialize probe-and-book admission so each request sees already-booked load.
         app.state.admission_lock = asyncio.Lock()
         yield
         await app.state.session.close()
