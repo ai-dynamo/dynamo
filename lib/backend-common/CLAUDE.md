@@ -178,6 +178,23 @@ aggregates it when present. `usage(prompt, completion)` computes
   modality is a new `RawEngine`, not a new trait or a new `EngineKind`
   variant.
 
+  **Why the two traits repeat the lifecycle signatures (vs. a shared
+  `LifecycleEngine` supertrait, deliberately not done):** the Python ABC
+  layer expresses "shared lifecycle, divergent `generate`" via inheritance
+  (`BaseEngine` → `LLMEngine`/`RawEngine`), because that's idiomatic Python.
+  The Rust side expresses the same idea via two sibling traits + a closed
+  `EngineKind` enum dispatched by `match`, because that's idiomatic Rust for
+  a fixed two-variant set. A `LifecycleEngine` supertrait *would* dedupe the
+  six lifecycle signatures, but at the cost of splitting every engine `impl`
+  (the PyO3 bridge, the mocker, the conformance kit, and every test mock)
+  into two `impl` blocks — and the lifecycle method set is closed and stable,
+  so the "edit two trait defs + the forwarder" cost is paid ~never. The
+  cross-language asymmetry (Python inheritance ↔ Rust enum) is intentional
+  and idiomatic, not an oversight. Map it as: Python `BaseEngine`
+  ≡ the lifecycle methods both Rust traits declare; Python subclass `generate`
+  ≡ the per-trait `generate`; Python `isinstance`-based routing ≡ the
+  `EngineKind` match.
+
 - **Object-safe trait.** `Arc<dyn LLMEngine>` must work. All methods
   take `&self`. Constructors are backend-specific, not on the trait.
 
