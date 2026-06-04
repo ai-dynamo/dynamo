@@ -105,7 +105,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 
 {% if device == "xpu" %}
 # accelerate / decord / diffusers / imageio* / opencv-python-headless /
-# cache-dit / trimesh are installed in sglang_framework.Dockerfile (XPU branch)
+# cache-dit / trimesh are installed in sglang_xpu_framework.Dockerfile (XPU branch)
 # because pyproject_xpu.toml leaves them out of the default deps.
 
 # Install gpu_memory_service wheel if enabled

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #}
-# === BEGIN templates/sglang_framework.Dockerfile ===
+# === BEGIN templates/sglang_xpu_framework.Dockerfile ===
 
 ##################################
 #### SGLang XPU Framework ########
@@ -112,4 +112,4 @@ RUN echo ". ${CONDA_DIR}/bin/activate sglang" >> /etc/bash.bashrc && \
 
 ENV SGLANG_FORCE_SHUTDOWN=1
 
-# === END templates/sglang_framework.Dockerfile ===
+# === END templates/sglang_xpu_framework.Dockerfile ===

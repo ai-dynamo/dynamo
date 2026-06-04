@@ -32,7 +32,7 @@
 # --- SGLang Stages
 {% if framework == "sglang" %}
     {% if device == "xpu" %}
-        {% include "templates/sglang_framework.Dockerfile" %}
+        {% include "templates/sglang_xpu_framework.Dockerfile" %}
     {% endif %}
     # SGLang builds directly from its upstream runtime image.
     {% include "templates/sglang_runtime.Dockerfile" %}
