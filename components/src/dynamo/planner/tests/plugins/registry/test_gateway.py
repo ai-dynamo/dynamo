@@ -267,9 +267,7 @@ async def test_start_gateway_server_raises_when_port_zero():
         # allow_insecure=True so we exercise the port==0 bind-failure path
         # rather than the plaintext-TCP fail-closed guard (a separate test).
         with pytest.raises(RuntimeError, match="failed to bind"):
-            await start_gateway_server(
-                server, listen="0.0.0.0:1", allow_insecure=True
-            )
+            await start_gateway_server(server, listen="0.0.0.0:1", allow_insecure=True)
     finally:
         gw_mod.grpc.aio.server = real_factory  # type: ignore[assignment]
     assert stub.started is False, (
