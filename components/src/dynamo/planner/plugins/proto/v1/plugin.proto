@@ -239,10 +239,16 @@ message ObservationData
 // Mirrors TrafficObservation (types.py)
 message TrafficMetrics
 {
-  float duration_s = 1;  // observation window length (seconds)
-  float num_req = 2;     // request count in window
-  float isl = 3;         // avg input sequence length
-  float osl = 4;         // avg output sequence length
+  // ``double`` (64-bit) — matches the Python float64 source of truth
+  // (TrafficObservation in core/types.py + the Pydantic mirror). A 32-bit
+  // ``float`` here would silently truncate rate-style values over gRPC,
+  // and the in-process transport (no serialization) would disagree with
+  // the gRPC transport bit-for-bit. ``double`` keeps the two transports
+  // numerically identical and honors the round-trip-equality contract.
+  double duration_s = 1;  // observation window length (seconds)
+  double num_req = 2;     // request count in window
+  double isl = 3;         // avg input sequence length
+  double osl = 4;         // avg output sequence length
 
   // KV cache hit rate over the window, derived from prefill prompt-cache
   // hit metrics emitted by the engine.  ``optional`` distinguishes
@@ -250,7 +256,7 @@ message TrafficMetrics
   // "all-cold cache, 0.0 hit rate" (set to 0.0).  PSM throughput
   // scaling consumes this — external throughput-propose plugins
   // replicating PSM behaviour need it for parity.
-  optional float kv_hit_rate = 5;
+  optional double kv_hit_rate = 5;
 }
 
 // Mirrors FpmObservations (types.py).
@@ -306,9 +312,11 @@ message WorkerState
 // in DEP main doc line 1320.
 message PredictionData
 {
-  optional float predicted_num_req = 1;
-  optional float predicted_isl = 2;
-  optional float predicted_osl = 3;
+  // ``double`` (64-bit) — see TrafficMetrics: matches the float64 source
+  // of truth and keeps in-process vs gRPC transports bit-identical.
+  optional double predicted_num_req = 1;
+  optional double predicted_isl = 2;
+  optional double predicted_osl = 3;
   string source = 4;  // plugin_id or "builtin"
 
   // Predicted KV cache hit rate.  ``optional`` follows the same
@@ -318,7 +326,7 @@ message PredictionData
   // PSM ``TickDiagnostics.predicted_kv_hit_rate`` mirrors this; external
   // throughput-propose plugins replicating PSM behaviour need it on the
   // wire schema for parity.
-  optional float predicted_kv_hit_rate = 5;
+  optional double predicted_kv_hit_rate = 5;
 }
 
 // Aligns wire format with existing ScaleRequest.target_replicas

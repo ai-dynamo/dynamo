@@ -317,6 +317,27 @@ def test_kv_hit_rate_round_trip_traffic_and_prediction():
     assert pd_back.predicted_osl is None
 
 
+def test_float64_metrics_survive_round_trip_without_truncation():
+    """TrafficMetrics / PredictionData numeric fields are proto ``double``
+    (64-bit), matching the Python float64 source of truth. Use values that
+    are NOT float32-exact: a 32-bit ``float`` wire type would truncate them
+    over gRPC (and disagree with the in-process transport). Assert EXACT
+    equality (not approx) so a regression back to ``float`` is caught."""
+    v_num = 1234.5678901234567  # > 2^23 mantissa precision; float32-lossy
+    v_kv = 0.123456789012345
+    tm = pyd.TrafficMetrics(
+        duration_s=60.0, num_req=v_num, isl=3000.0, osl=150.0, kv_hit_rate=v_kv
+    )
+    tm_back = proto_to_pydantic(pydantic_to_proto(tm))
+    assert tm_back.num_req == v_num
+    assert tm_back.kv_hit_rate == v_kv
+
+    pd = pyd.PredictionData(predicted_num_req=v_num, predicted_kv_hit_rate=v_kv)
+    pd_back = proto_to_pydantic(pydantic_to_proto(pd))
+    assert pd_back.predicted_num_req == v_num
+    assert pd_back.predicted_kv_hit_rate == v_kv
+
+
 def test_worker_state_scaling_in_progress_roundtrip():
     """WorkerState.{prefill,decode}_scaling_in_progress are ``optional bool``;
     ``unset`` vs ``False`` is observable via ``HasField`` so plugins can
