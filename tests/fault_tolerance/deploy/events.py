@@ -527,16 +527,33 @@ class CaptureMetrics(Event):
     """
 
     suffix: str = ".snapshot"
+    # When True, also write per-pod manifest (``<pod><suffix>.yaml``) + the
+    # Kubernetes Event resources (``<pod><suffix>.events.yaml``) alongside the
+    # /metrics scrape. The events.yaml surfaces pod-level issues at this capture
+    # point — probe failures, OOMKills, scheduling/BindingErrors, kill/restart
+    # reasons — which the metrics scrape alone doesn't show.
+    include_events: bool = False
     name: str = ""
     results: dict[str, Any] | None = field(default=None, init=False)
 
     async def execute(self, ctx: "ScenarioContext") -> None:
-        ctx.logger.info(f"CaptureMetrics: scraping all pods (suffix={self.suffix!r})")
-        await ctx.deployment._capture_metrics(suffix=self.suffix)
+        ctx.logger.info(
+            f"CaptureMetrics: scraping all pods (suffix={self.suffix!r}, "
+            f"include_events={self.include_events})"
+        )
+        if self.include_events:
+            # Full per-pod capture: manifest + k8s events.yaml + /metrics.
+            import asyncio
+
+            await asyncio.to_thread(
+                ctx.deployment._get_service_logs, suffix=self.suffix
+            )
+        else:
+            await ctx.deployment._capture_metrics(suffix=self.suffix)
 
     @property
     def description(self) -> str:
-        return f"CaptureMetrics(suffix={self.suffix})"
+        return f"CaptureMetrics(suffix={self.suffix}, events={self.include_events})"
 
 
 @dataclass
