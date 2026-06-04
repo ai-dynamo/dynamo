@@ -1,14 +1,12 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Inference Gateway (GAIE)
+title: Gateway API Inference Extension (GAIE)
 ---
 
-## Inference Gateway Setup with Dynamo
+## Gateway API Inference Extension Setup with Dynamo
 
-# Inference Gateway (GAIE)
-
-Integrate Dynamo with the Gateway API Inference Extension for intelligent KV-aware request routing at the gateway layer.
+Integrate Dynamo with the Gateway API Inference Extension, also known as Inference Gateway, for intelligent KV-aware request routing at the gateway layer.
 
 ## Features
 
@@ -32,7 +30,7 @@ Integrate Dynamo with the Gateway API Inference Extension for intelligent KV-awa
 ### 1. Install Dynamo Platform ###
 
 [See Quickstart Guide](./README.md) to install Dynamo Kubernetes Platform.
-If you are installing from the source tree rather than a release chart, follow [Path B: Custom Build from Source](./installation-guide.md#path-b-custom-build-from-source) and run `helm dep build ./platform/` before `helm install` so the vendored subcharts match the local chart contents.
+If you are installing from the source tree rather than a release chart, follow [Advanced: Build from Source](./installation-guide.md#advanced-build-from-source) and run `helm dep build ./platform/` before `helm install` so the vendored subcharts match the local chart contents.
 
 ### 2. Deploy Inference Gateway ###
 
