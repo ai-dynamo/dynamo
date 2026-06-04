@@ -292,15 +292,26 @@ The `VllmDecodeWorker` pod should restore from the ready checkpoint instead of c
 `checkpointRef` is the most explicit path. If you set it, the DGD uses that
 existing `DynamoCheckpoint` and does not create a new automatic checkpoint for
 the component. This is the escape hatch for users who intentionally want to
-reuse a pre-existing checkpoint and accept the compatibility risk.
+reuse a retained or pre-warmed checkpoint and accept the compatibility risk.
+Treat the pod template as a compatibility template for the same workload: once
+the checkpoint is ready, restore admission replaces the target container's
+command and args with the restore placeholder, and the restored process resumes
+from the checkpointed state rather than from newly supplied command-line or
+environment settings.
 
 Without `checkpointRef`, `mode: Auto` is the DGD-managed path: for each
-checkpoint-enabled worker generation, the DGD controller creates a DGD-scoped
+checkpoint-enabled worker generation, the DGD controller creates a DGD-owned
 `DynamoCheckpoint` and the checkpoint controller starts a checkpoint Job.
 Automatic DGD checkpoints are not reused across DGDs, even when two manifests
 are identical.
 
 The automatic checkpoint ID is derived from the DGD namespace/name/UID, component name, and active worker hash. The DGD UID prevents cross-DGD reuse; the worker hash keeps a scale down/up on the same worker generation using the same DGD-scoped checkpoint while creating a new checkpoint for a new worker generation.
+
+By default, when the DGD is deleted, the operator deletes DGD-owned automatic
+`DynamoCheckpoint` CRs. The checkpoint finalizer then removes the corresponding
+checkpoint artifact from the checkpoint PVC. Set `deletionPolicy: Retain` to
+keep the automatic checkpoint CR and stored artifact after the DGD is deleted.
+Retained checkpoints can later be used explicitly with `checkpointRef`.
 
 By default, `startupPolicy: Immediate` starts workers cold while the checkpoint job runs in the background. Once the checkpoint becomes `Ready`, only newly-created Pods restore from it. Existing Pods are not mutated or restarted just because the checkpoint became ready.
 
@@ -311,6 +322,7 @@ checkpoint:
   enabled: true
   mode: Auto
   startupPolicy: Immediate # default; optional
+  deletionPolicy: Delete  # default; use Retain to keep CR/artifact after DGD deletion
 ```
 
 Inside a `DynamoGraphDeployment`, it looks like this:
@@ -336,6 +348,7 @@ spec:
         enabled: true
         mode: Auto
         startupPolicy: Immediate
+        deletionPolicy: Delete
       extraPodSpec:
         mainContainer:
           image: registry.example.com/dynamo/vllm-placeholder:1.0.0
@@ -498,6 +511,7 @@ status:
 - **Multi-GPU remains preview**: vLLM tensor-parallel configurations have limited validation and are not yet a broadly supported path across clusters.
 - **GMS restore remains experimental**: GMS + Snapshot is currently disabled.
 - **Admission is create-only**: with DGD `startupPolicy: Immediate`, only Pods created after a checkpoint is `Ready` are restore-shaped. Existing Pods cold-started before checkpoint readiness keep running as-is.
+- **Restore admission must be installed**: DGD restores rely on the snapshot Pod mutating webhook, so upgrade the snapshot chart/webhook configuration along with the operator and CRDs when enabling these features.
 - **Network state is sensitive**: restore is sensitive to live TCP socket state. Loopback bootstrap/control sockets are the most reliable path today.
 - **Privileged DaemonSet required**: `snapshot-agent` must run privileged to execute CRIU and `cuda-checkpoint`. Workload pods do not need to be privileged.
 

@@ -58,6 +58,25 @@ _Appears in:_
 
 
 
+#### CheckpointDeletionPolicy
+
+_Underlying type:_ _string_
+
+CheckpointDeletionPolicy defines what happens to DGD-managed automatic
+checkpoint resources when the owning DGD is deleted.
+
+_Validation:_
+- Enum: [Delete Retain]
+
+_Appears in:_
+- [ServiceCheckpointConfig](#servicecheckpointconfig)
+
+| Field | Description |
+| --- | --- |
+| `Delete` | CheckpointDeletionPolicyDelete deletes DGD-managed automatic checkpoint<br />CRs and artifacts when the owning DGD is deleted.<br /> |
+| `Retain` | CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs<br />and artifacts after the owning DGD is deleted. Users can reference the<br />retained checkpoint with checkpointRef if they accept compatibility risk.<br /> |
+
+
 #### CheckpointMode
 
 _Underlying type:_ _string_
@@ -1328,6 +1347,7 @@ _Appears in:_
 | `enabled` _boolean_ | Enabled indicates whether checkpointing is enabled for this service | false | Optional: \{\} <br /> |
 | `mode` _[CheckpointMode](#checkpointmode)_ | Mode defines how checkpoint creation is handled<br />- Auto: DGD controller creates Checkpoint CR automatically<br />- Manual: User must create Checkpoint CR | Auto | Enum: [Auto Manual] <br />Optional: \{\} <br /> |
 | `startupPolicy` _[CheckpointStartupPolicy](#checkpointstartuppolicy)_ | StartupPolicy defines when normal worker replicas are started relative to<br />automatic checkpoint readiness.<br />- Immediate: start workers cold immediately; later Pods restore from the<br />  checkpoint once it is Ready.<br />- WaitForCheckpoint: keep worker replicas at zero until the checkpoint is<br />  Ready, then start them from the checkpoint. | Immediate | Enum: [Immediate WaitForCheckpoint] <br />Optional: \{\} <br /> |
+| `deletionPolicy` _[CheckpointDeletionPolicy](#checkpointdeletionpolicy)_ | DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and<br />artifact are deleted or retained when the owning DGD is deleted.<br />Explicit checkpointRef checkpoints are never owned or deleted by the DGD. | Delete | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
 | `checkpointRef` _string_ | CheckpointRef references an existing DynamoCheckpoint CR by metadata.name.<br />If specified, this service's Identity is ignored and the referenced checkpoint is used directly. |  | Optional: \{\} <br /> |
 | `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Deprecated: Identity is ignored by DGD-managed automatic checkpoints.<br />Automatic checkpoints are scoped to the owning DGD/component generation and<br />are never reused across DGDs. |  | Optional: \{\} <br /> |
 | `targetContainerName` _string_ | TargetContainerName is the workload container to snapshot and restore. | main | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
@@ -1523,6 +1543,25 @@ _Appears in:_
 | `vllm` |  |
 
 
+#### CheckpointDeletionPolicy
+
+_Underlying type:_ _string_
+
+CheckpointDeletionPolicy defines what happens to DGD-managed automatic
+checkpoint resources when the owning DGD is deleted.
+
+_Validation:_
+- Enum: [Delete Retain]
+
+_Appears in:_
+- [ComponentCheckpointConfig](#componentcheckpointconfig)
+
+| Field | Description |
+| --- | --- |
+| `Delete` | CheckpointDeletionPolicyDelete deletes DGD-managed automatic checkpoint<br />CRs and artifacts when the owning DGD is deleted.<br /> |
+| `Retain` | CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs<br />and artifacts after the owning DGD is deleted. Users can reference the<br />retained checkpoint with checkpointRef if they accept compatibility risk.<br /> |
+
+
 #### CheckpointMode
 
 _Underlying type:_ _string_
@@ -1594,6 +1633,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `mode` _[CheckpointMode](#checkpointmode)_ | mode defines how checkpoint creation is handled.<br />`Auto`: DGD controller creates the DynamoCheckpoint CR automatically.<br />`Manual`: user must create the DynamoCheckpoint CR. | Auto | Enum: [Auto Manual] <br />Optional: \{\} <br /> |
 | `startupPolicy` _[CheckpointStartupPolicy](#checkpointstartuppolicy)_ | startupPolicy defines when normal worker replicas are started relative to<br />automatic checkpoint readiness.<br />`Immediate` (default): start workers cold immediately; later Pods restore<br />from the checkpoint once it is Ready.<br />`WaitForCheckpoint`: keep worker replicas at zero until the checkpoint is<br />Ready, then start them from the checkpoint. | Immediate | Enum: [Immediate WaitForCheckpoint] <br />Optional: \{\} <br /> |
+| `deletionPolicy` _[CheckpointDeletionPolicy](#checkpointdeletionpolicy)_ | DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and<br />artifact are deleted or retained when the owning DGD is deleted.<br />Explicit checkpointRef checkpoints are never owned or deleted by the DGD. | Delete | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
 | `checkpointRef` _string_ | checkpointRef references an existing DynamoCheckpoint CR by `metadata.name`.<br />When set, this component's `identity` is ignored and the referenced<br />checkpoint is used directly. |  | Optional: \{\} <br /> |
 | `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Deprecated: identity is ignored by DGD-managed automatic checkpoints.<br />Automatic checkpoints are scoped to the owning DGD/component generation and<br />are never reused across DGDs. |  | Optional: \{\} <br /> |
 | `targetContainerName` _string_ | targetContainerName is the workload container to snapshot and restore. | main | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
@@ -2846,6 +2886,7 @@ _Appears in:_
 | `enabled` _boolean_ | Enabled indicates if checkpoint functionality is enabled |  |  |
 | `seccomp` _[CheckpointSeccompConfiguration](#checkpointseccompconfiguration)_ | Seccomp controls the localhost seccomp profile applied to checkpoint and<br />restore pods. A nil value means "use the default profile"; set<br />Seccomp.Disabled=true to disable seccomp injection entirely. |  |  |
 | `storage` _[CheckpointStorageConfiguration](#checkpointstorageconfiguration)_ | Storage optionally configures the namespace-local checkpoint PVC that<br />workload pods mount. When omitted, the operator preserves the legacy<br />behavior of discovering storage from a snapshot-agent DaemonSet in the<br />workload namespace. |  |  |
+| `cleanupImage` _string_ | CleanupImage is the image used by best-effort artifact cleanup Jobs for<br />automatically-created checkpoints. It must provide a POSIX shell and `rm`. | busybox:1.36 |  |
 
 
 #### CheckpointOCIConfig
