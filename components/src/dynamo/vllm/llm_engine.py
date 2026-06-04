@@ -174,9 +174,9 @@ class VllmLLMEngine(LLMEngine):
             )
 
         if not config.served_model_name:
-            config.served_model_name = (
-                config.engine_args.served_model_name
-            ) = config.model
+            config.served_model_name = config.engine_args.served_model_name = (
+                config.model
+            )
 
         # _resolve_disaggregation_mode() in DynamoVllmConfig has already
         # promoted the field to a DisaggregationMode enum; the field type
@@ -329,11 +329,8 @@ class VllmLLMEngine(LLMEngine):
 
         is_prefill = self.disaggregation_mode == DisaggregationMode.PREFILL
         tokenizer = getattr(self.engine_client, "tokenizer", None)
-        # Raw requested count drives top_logprobs gating below;
-        # `build_sampling_params` already passed `logprobs` into the
-        # engine, so a `logprobs=0` (chosen-token only) request still
-        # makes vLLM emit its selected-token logprob dict — we must
-        # suppress the top-k slice here, not at the engine.
+        # vLLM emits a selected-token logprob dict even at `logprobs=0`,
+        # so the top-k suppression happens below, not at the engine.
         (
             requested_logprobs_count,
             requested_prompt_logprobs_count,
@@ -355,9 +352,9 @@ class VllmLLMEngine(LLMEngine):
             for output in res.outputs:
                 output_idx = getattr(output, "index", 0) or 0
                 token_ids = list(output.token_ids or [])
-                total_output_tokens_by_index[
-                    output_idx
-                ] = total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
+                total_output_tokens_by_index[output_idx] = (
+                    total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
+                )
                 finish_reason = getattr(output, "finish_reason", None)
                 if not token_ids and not finish_reason:
                     continue
@@ -369,13 +366,9 @@ class VllmLLMEngine(LLMEngine):
                     "token_ids": token_ids,
                 }
 
-                # `build_sampling_params` forces DELTA output, so each
-                # `output.logprobs` slot already aligns to this chunk —
-                # the offset into the cumulative array is 0.
-                # `fallback_to_first_on_missing=True` preserves the
-                # legacy handler's behavior of always emitting a logprob
-                # when vLLM returned a dict, even if the sampled token
-                # isn't keyed in it.
+                # `build_sampling_params` forces DELTA output → offset 0.
+                # `fallback_to_first_on_missing=True` matches legacy
+                # vLLM handler: always emit when vLLM returned a dict.
                 (
                     log_probs,
                     top_logprobs,
@@ -388,8 +381,6 @@ class VllmLLMEngine(LLMEngine):
                 )
                 if log_probs is not None:
                     out["log_probs"] = log_probs
-                # `requested_logprobs_count == 0` means chosen-token
-                # only — suppress the top-k that vLLM still emitted.
                 if (
                     top_logprobs is not None
                     and requested_logprobs_count is not None
@@ -399,10 +390,8 @@ class VllmLLMEngine(LLMEngine):
 
                 if finish_reason:
                     out["finish_reason"] = str(finish_reason)
-                    # Prompt logprobs ride on the final chunk (Rust
-                    # nvext.rs suppresses them on intermediate chunks
-                    # anyway). vLLM hangs them off `RequestOutput`, not
-                    # `CompletionOutput`, so we read from `res`.
+                    # vLLM hangs prompt_logprobs off `RequestOutput`, not
+                    # `CompletionOutput` — read from `res`.
                     if requested_prompt_logprobs_count is not None:
                         prompt_payload = _shared_logprobs.extract_prompt_logprobs_from_completion_output(
                             res, tokenizer=tokenizer

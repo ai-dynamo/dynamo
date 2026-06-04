@@ -29,11 +29,8 @@ logger = logging.getLogger(__name__)
 
 _SAMPLE_BLOCK_SIZE = 16
 
-# Upper bound on synthesised top-k alternatives. Caps the per-chunk
-# ``top_logprobs`` allocation so a client sending an unbounded
-# ``logprobs`` value can't drive arbitrary memory / CPU here. Matches
-# the Rust mocker's ``MAX_LOGPROBS`` so the two reference engines
-# behave identically.
+# Mirrors the Rust mocker's `MAX_LOGPROBS` so unbounded `logprobs`
+# requests can't drive arbitrary memory / CPU here.
 _MAX_SYNTHETIC_TOP_LOGPROBS = 20
 
 

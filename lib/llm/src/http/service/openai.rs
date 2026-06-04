@@ -152,15 +152,9 @@ fn find_dynamo_error_in_chain<'a>(
     None
 }
 
-/// Match an InvalidArgument error anywhere in the chain — at either the
-/// top-level (`ErrorType::InvalidArgument`, raised by the
-/// frontend/preprocessing layers) or under the `Backend()` wrapper
-/// (`ErrorType::Backend(BackendError::InvalidArgument)`, raised when a
-/// Python `ValueError`/`TypeError` propagates out of an engine's
-/// `generate()` via `py_err_to_dynamo`). Both classes are 400-worthy:
-/// the request was malformed; whether the validation tripped at the
-/// frontend or inside the engine is an implementation detail the client
-/// shouldn't care about.
+/// Match `InvalidArgument` at top-level OR under `Backend()`.
+/// `py_err_to_dynamo` wraps Python `ValueError`/`TypeError` as
+/// `Backend(InvalidArgument)`; both variants are 400-worthy.
 fn find_invalid_argument_in_chain<'a>(
     err: &'a (dyn std::error::Error + 'static),
 ) -> Option<&'a dynamo_runtime::error::DynamoError> {
@@ -305,12 +299,7 @@ impl ErrorMessage {
             );
         }
 
-        // Check for DynamoError with InvalidArgument anywhere in the chain → HTTP 400.
-        // This matches *any* nested InvalidArgument DynamoError, including the
-        // `Backend(InvalidArgument)` variant that `py_err_to_dynamo` raises for
-        // engine-side `ValueError`/`TypeError`. Intentional: 400 is the correct
-        // class for a malformed/invalid request whether the validation tripped
-        // at the frontend or inside the engine.
+        // InvalidArgument (top-level OR Backend) → 400.
         if let Some(dynamo_err) = find_invalid_argument_in_chain(err.as_ref()) {
             return (
                 StatusCode::BAD_REQUEST,
@@ -3056,16 +3045,9 @@ mod tests {
 
     #[test]
     fn test_backend_invalid_argument_surfaces_as_400() {
-        // A Python `ValueError` (or `TypeError`) from inside an engine's
-        // `generate()` is wrapped by `py_err_to_dynamo` (lib/bindings/
-        // python/rust/backend.rs) as
-        // `ErrorType::Backend(BackendError::InvalidArgument)`. The HTTP
-        // layer must surface that as 400, not 500 — the request was
-        // malformed and the frontend-vs-engine boundary is an
-        // implementation detail. Regression coverage for the SGLang
-        // gate path, where `build_sglang_logprob_kwargs` raises
-        // `ValueError` from inside the engine's `generate()` when
-        // `logprobs >= 1` and the override env-var isn't set.
+        // `Backend(InvalidArgument)` is what `py_err_to_dynamo` produces
+        // for Python `ValueError` / `TypeError` raised inside an engine's
+        // `generate()` — must map to 400, not 500.
         use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 
         let err: anyhow::Error = DynamoError::builder()

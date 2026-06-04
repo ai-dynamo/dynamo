@@ -70,11 +70,8 @@ class GenerateChunk(TypedDict, total=False):
     disaggregated_params: dict[str, Any]
     log_probs: list[float]
     top_logprobs: list[list[dict[str, Any]]]
-    # Engine-specific payload forwarded verbatim to the Rust LLMEngineOutput
-    # as a JSON object. Today this carries prompt-side logprobs on the
-    # final chunk when the request asked for them (key:
-    # ``prompt_logprobs``, shape: ``list[Optional[dict[str, ...]]]``
-    # matching ``crate::protocols::common::llm_backend::PromptLogprobs``).
+    # Forwarded verbatim to Rust `LLMEngineOutput.engine_data` as a
+    # JSON object. Carries `prompt_logprobs` on the final chunk.
     engine_data: dict[str, Any]
 
 

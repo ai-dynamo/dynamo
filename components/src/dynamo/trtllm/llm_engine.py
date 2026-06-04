@@ -666,9 +666,8 @@ class TrtllmLLMEngine(LLMEngine):
         async with self._pause_lock:
             if controller.is_paused:
                 return {"status": "ok", "message": "Memory already released"}
-            if (
-                self._resume_recovery_required
-                or self._controller_needs_resume_recovery(controller)
+            if self._resume_recovery_required or self._controller_needs_resume_recovery(
+                controller
             ):
                 return {
                     "status": "error",
@@ -773,11 +772,9 @@ class TrtllmLLMEngine(LLMEngine):
             self._default_sampling_params, request
         )
 
-        # TRT-LLM's `logprobs` is the top-k count; 0 disables logprob
-        # computation entirely. Floor at 1 so a caller asking for
-        # `logprobs=0` (chosen-token only) still gets the chosen logprob;
-        # keep the raw requested count to suppress top_logprobs below
-        # when the user did NOT ask for alternatives.
+        # TRT-LLM's `logprobs=0` disables computation entirely. Floor at 1
+        # so a `logprobs=0` request still gets the chosen-token logprob;
+        # the raw requested count gates top_logprobs emission below.
         (
             requested_logprobs_count,
             prompt_logprobs_count,
@@ -889,9 +886,6 @@ class TrtllmLLMEngine(LLMEngine):
                     )
                     if log_probs is not None:
                         out["log_probs"] = log_probs
-                    # `requested_logprobs_count == 0` means chosen-token
-                    # only — suppress the top-k that the engine floor
-                    # forced TRT-LLM to compute.
                     if (
                         top_logprobs is not None
                         and requested_logprobs_count is not None
@@ -905,10 +899,7 @@ class TrtllmLLMEngine(LLMEngine):
                     if out.get("finish_reason") or res.finished:
                         if not out.get("finish_reason"):
                             out["finish_reason"] = "unknown"
-                        # Prompt logprobs ride on the final chunk. TRT-LLM
-                        # exposes them on `res.prompt_logprobs` in the same
-                        # ``list[Optional[dict[int, Logprob]]]`` shape that
-                        # vLLM uses, so the shared helper covers both.
+                        # TRT-LLM shares vLLM's prompt_logprobs shape.
                         if prompt_logprobs_count is not None:
                             prompt_payload = _shared_logprobs.extract_prompt_logprobs_from_completion_output(
                                 res

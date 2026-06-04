@@ -148,13 +148,10 @@ def extract_prompt_logprobs_from_completion_output(
 ) -> Optional[list[Optional[dict[str, dict[str, Any]]]]]:
     """Extract prompt logprobs from a vLLM/TRT-LLM-shaped output.
 
-    Reads ``output.prompt_logprobs`` (``list[Optional[dict[int, Logprob]]]``;
-    position 0 is ``None`` because there is no logprob for the very first
-    prompt token / BOS). Returns the Dynamo wire shape: a list aligned
-    with the prompt where each present entry is a ``token_id -> entry``
-    map. ``token_id`` keys are stringified so the JSON round-trip into
-    Rust's ``HashMap<u32, PromptLogprobEntry>`` succeeds. Returns
-    ``None`` when the engine didn't compute prompt logprobs.
+    Reads ``output.prompt_logprobs``. Position 0 stays ``None`` (no
+    logprob for BOS). Token-id keys are stringified for the JSON
+    round-trip into Rust's ``HashMap<u32, PromptLogprobEntry>``.
+    Returns ``None`` if the engine didn't compute prompt logprobs.
     """
     prompt_logprobs = getattr(output, "prompt_logprobs", None)
     if prompt_logprobs is None:
@@ -192,18 +189,12 @@ def extract_prompt_logprobs_from_completion_output(
 def extract_prompt_logprobs_from_sglang_meta(
     meta: dict[str, Any],
 ) -> Optional[list[Optional[dict[str, dict[str, Any]]]]]:
-    """Extract prompt logprobs from an SGLang meta_info dict.
+    """Extract prompt logprobs from an SGLang ``meta_info`` dict.
 
-    Reads ``meta["input_token_logprobs"]`` — a list of
-    ``(logprob, token_id, decoded_token_or_None)`` tuples that SGLang
-    emits when ``return_logprob=True`` and ``logprob_start_len=0`` (one
-    entry per prompt token from position 1 onwards; SGLang doesn't emit
-    a logprob for the very first prompt / BOS token). Returns the
-    Dynamo wire shape with ``None`` at index 0 to mark the missing BOS
-    position, matching the Rust ``PromptLogprobs`` invariant.
-
-    When ``meta["input_top_logprobs"]`` is present (top-k requested and
-    available), each position's map includes those alternatives too.
+    Reads ``input_token_logprobs`` (tuples ``(logprob, token_id, decoded
+    or None)``, starting at prompt position 1) and merges any
+    ``input_top_logprobs`` alternatives. Prepends ``None`` at index 0
+    so the result aligns with Rust's BOS=None ``PromptLogprobs`` shape.
     """
     input_logprobs = meta.get("input_token_logprobs")
     if not input_logprobs:

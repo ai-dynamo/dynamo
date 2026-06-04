@@ -674,10 +674,8 @@ def test_parity_sglang_kwargs_rejects_top_logprobs_consistently():
 
 @pytest.mark.vllm
 def test_parity_vllm_legacy_wrapper_matches_shared():
-    # `exc_type=ImportError` skips when the package is importable but
-    # its native deps (e.g. libcuda.so.1) are missing — happens on the
-    # CPU-only test lanes where the engine wheel is installed for
-    # import-path resolution but no GPU runtime is present.
+    # `exc_type=ImportError` also skips on missing native deps (libcuda)
+    # on CPU-only lanes where the wheel is installed but no GPU runtime.
     pytest.importorskip("vllm", reason="vLLM not installed", exc_type=ImportError)
     from dynamo.vllm.handlers import BaseWorkerHandler
 
