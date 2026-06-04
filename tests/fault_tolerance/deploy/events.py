@@ -2366,13 +2366,20 @@ class ResourcePoller(Event):
         # closing exec session doesn't SIGHUP/EPIPE it.
         launch = (
             (
-                'set -e; OUTDIR="${DYN_LOG_DIR:-/tmp/service_logs}"; mkdir -p "$OUTDIR"; '
+                "set -e; "
+                # Idempotent per pod: a scenario may declare two pollers (e.g. the
+                # legacy PodMemoryPoller + PodMemoryPoller2, both now aliased to
+                # ResourcePoller) — only the first launch per pod runs; the rest
+                # no-op so they don't truncate the TSV or spawn a second daemon.
+                "if [ -f /tmp/.respoller.started ]; then "
+                'echo "respoller already started on $(hostname), skipping"; exit 0; fi; '
+                'OUTDIR="${DYN_LOG_DIR:-/tmp/service_logs}"; mkdir -p "$OUTDIR"; '
                 "cat > /tmp/respoller.py <<'PYEOF'\n"
             )
             + _load_respoller_source()
             + (
                 "\nPYEOF\n"
-                "rm -f /tmp/.respoller.stop; "
+                "touch /tmp/.respoller.started; rm -f /tmp/.respoller.stop; "
                 f'RESPOLL_OUTDIR="$OUTDIR" RESPOLL_INTERVAL={interval} '
                 f"RESPOLL_INCLUDE={include} RESPOLL_STOP=/tmp/.respoller.stop "
                 "nohup python3 /tmp/respoller.py >/tmp/respoller.out 2>&1 & "
@@ -2398,7 +2405,10 @@ class ResourcePoller(Event):
         )
 
     async def stop(self, ctx: "ScenarioContext") -> None:
-        stop_script = "touch /tmp/.respoller.stop 2>/dev/null || true"
+        stop_script = (
+            "touch /tmp/.respoller.stop 2>/dev/null; "
+            "rm -f /tmp/.respoller.started 2>/dev/null; true"
+        )
         for svc in self.services:
             try:
                 pods_by_svc = await asyncio.to_thread(ctx.deployment.get_pods, [svc])

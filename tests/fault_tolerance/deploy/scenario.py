@@ -356,7 +356,11 @@ async def run_scenario(
         if log_dir:
             pmg = synthesize_pod_memory_growth_tsv(log_dir)
             if pmg:
-                logger.info(f"Synthesized {pmg} from per-pod resource TSVs")
+                with open(pmg) as _f:
+                    n_rows = max(0, sum(1 for _ in _f) - 1)  # minus header
+                logger.info(
+                    f"Synthesized {pmg} from per-pod resource TSVs ({n_rows} rows)"
+                )
     except Exception as e:
         logger.warning(f"pod_memory_growth.tsv synthesis failed: {e}")
 
