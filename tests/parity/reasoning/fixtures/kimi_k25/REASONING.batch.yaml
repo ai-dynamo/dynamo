@@ -164,3 +164,19 @@ cases:
         reasoning_text: choose tool
         normal_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
       sglang: *id004
+  REASONING.batch.6.b:
+    description: Stray end marker after a complete reasoning span(unbalanced-tag)
+    ref: dynamo
+    spec_ref: tests/parity/README.md
+    model_text: '<think>preamble</think>body</think>answer'
+    expected:
+      dynamo:
+        reasoning_text: preamble
+        normal_text: 'bodyanswer'
+        reason: 'Lossless split: when a stray close marker appears outside any reasoning block, it is stripped (parser-owned syntax must not appear in normal_text). Reasoning is captured from the first <open>...<close> pair only; subsequent stray closes are discarded.'
+      vllm:
+        reasoning_text: 'preamble'
+        normal_text: 'body</think>answer'
+      sglang:
+        reasoning_text: 'preamble'
+        normal_text: 'body</think>answer'

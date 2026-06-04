@@ -10,8 +10,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use dynamo_data_gen::{AgenticMooncakeRow, MooncakeRow};
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::protocols::{
-    BlockHashOptions, ExternalSequenceBlockHash, WorkerId, XXH3_SEED, compute_block_hash_for_seq,
-    compute_seq_hash_for_block,
+    ExternalSequenceBlockHash, WorkerId, XXH3_SEED, compute_seq_hash_for_block,
 };
 use dynamo_tokens::compute_hash_v2;
 use rand::rngs::StdRng;
@@ -104,14 +103,7 @@ impl TurnTrace {
         let tokens = self.synthesize_tokens(trace_block_size)?;
         let engine_block_size =
             u32::try_from(engine_block_size).context("engine_block_size does not fit in u32")?;
-        let local_block_hashes =
-            compute_block_hash_for_seq(&tokens, engine_block_size, BlockHashOptions::default());
-        let sequence_hashes = compute_seq_hash_for_block(&local_block_hashes);
-
-        Ok(ReplayRequestHashes {
-            local_block_hashes,
-            sequence_hashes,
-        })
+        Ok(ReplayRequestHashes::from_tokens(&tokens, engine_block_size))
     }
 }
 
@@ -166,14 +158,7 @@ impl AgenticTurnTrace {
         let tokens = self.synthesize_tokens(trace_block_size)?;
         let engine_block_size =
             u32::try_from(engine_block_size).context("engine_block_size does not fit in u32")?;
-        let local_block_hashes =
-            compute_block_hash_for_seq(&tokens, engine_block_size, BlockHashOptions::default());
-        let sequence_hashes = compute_seq_hash_for_block(&local_block_hashes);
-
-        Ok(ReplayRequestHashes {
-            local_block_hashes,
-            sequence_hashes,
-        })
+        Ok(ReplayRequestHashes::from_tokens(&tokens, engine_block_size))
     }
 }
 

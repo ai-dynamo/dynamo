@@ -68,7 +68,7 @@ from dynamo.trtllm.request_handlers.handlers import (
 from dynamo.trtllm.utils.trtllm_utils import deep_update
 
 # Default buffer size for kv cache events.
-DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
+DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 100_000
 
 
 def build_kv_connector_config(config: Config):
@@ -299,6 +299,7 @@ async def init_llm_worker(
 
     _sync_config_from_engine_args(config, arg_map)
 
+    event_buffer_max_size = 0
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
         # Add it to kv_cache_config while preserving all settings from YAML
@@ -309,18 +310,24 @@ async def init_llm_worker(
             current_kv_config = current_kv_config.model_dump(exclude_none=True)
             arg_map["kv_cache_config"] = current_kv_config
 
-        if isinstance(current_kv_config, dict):
-            # Preserve a user-specified event_buffer_max_size from YAML/overrides;
-            # only apply the default when it is unset or zero (TRTLLM's disabled value).
-            existing = current_kv_config.get("event_buffer_max_size")
-            if existing:
-                logging.info(
-                    f"Using existing event_buffer_max_size={existing} from kv_cache_config"
-                )
-            else:
-                current_kv_config[
-                    "event_buffer_max_size"
-                ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+        if not isinstance(current_kv_config, dict):
+            raise TypeError(
+                "kv_cache_config must be a dict or KvCacheConfig, "
+                f"got {type(current_kv_config).__name__}"
+            )
+
+        # Preserve a user-specified event_buffer_max_size from YAML/overrides;
+        # only apply the default when it is unset or zero (TRTLLM's disabled value).
+        existing = current_kv_config.get("event_buffer_max_size")
+        if existing:
+            logging.info(
+                f"Using existing event_buffer_max_size={existing} from kv_cache_config"
+            )
+        else:
+            current_kv_config[
+                "event_buffer_max_size"
+            ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+        event_buffer_max_size = int(current_kv_config["event_buffer_max_size"])
 
         # Only pytorch backend is supported for now to publish events and metrics.
         if "backend" not in arg_map:
@@ -725,6 +732,8 @@ async def init_llm_worker(
                 config.kv_block_size,
                 metrics_labels,
                 component_gauges=component_gauges,
+                additional_metrics=additional_metrics,
+                event_buffer_max_size=event_buffer_max_size,
                 zmq_endpoint=trtllm_zmq_bind_endpoint,
                 enable_local_indexer=config.enable_local_indexer,
                 metrics_collector=metrics_collector,

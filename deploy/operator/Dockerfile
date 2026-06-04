@@ -3,8 +3,8 @@
 
 # Base stage - Common setup for all stages
 ARG DOCKER_PROXY
-ARG BASE_IMAGE="golang"
-ARG BASE_IMAGE_TAG="1.25"
+ARG BASE_IMAGE="library/golang"
+ARG BASE_IMAGE_TAG="1.26.3"
 FROM ${DOCKER_PROXY}${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 
 # Docker buildx automatically provides these

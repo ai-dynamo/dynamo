@@ -61,6 +61,7 @@ from dynamo.trtllm.args import parse_args
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine
 from dynamo.trtllm.logits_processing.adapter import attach_logits_processors
+from dynamo.trtllm.request_handlers.handler_base import TRTLLMEnginePauseController
 from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
@@ -91,7 +92,7 @@ _IDLE_SLEEP_S = 0.01
 
 # Mirror the legacy `dynamo.trtllm` worker — required for TRT-LLM to actually
 # publish KV cache events. Without this, `get_kv_cache_events` returns empty.
-_DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
+_DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 100_000
 
 # Note: `metrics_dict` is set per-instance on `GenerationResult` (only
 # when TRT-LLM's perf-stats collection is enabled and the request
@@ -148,6 +149,17 @@ class TrtllmLLMEngine(LLMEngine):
         self.publish_events_and_metrics = publish_events_and_metrics
         self._component = component
         self._additional_metrics: Optional["AdditionalMetricsCollector"] = None
+        kv_cache_config = self.engine_args.get("kv_cache_config", {})
+        if isinstance(kv_cache_config, dict):
+            event_buffer_max_size = kv_cache_config.get("event_buffer_max_size", 0)
+        elif isinstance(kv_cache_config, KvCacheConfig):
+            event_buffer_max_size = kv_cache_config.event_buffer_max_size
+        else:
+            raise TypeError(
+                "kv_cache_config must be a dict or KvCacheConfig, "
+                f"got {type(kv_cache_config).__name__}"
+            )
+        self._kv_event_buffer_max_size = int(event_buffer_max_size or 0)
         self._trtllm_metrics_collector: Optional["MetricsCollector"] = None
         # Resolved once at construction so the hot poll loop doesn't run
         # `hasattr` per iteration; same for the per-request log method
@@ -188,6 +200,14 @@ class TrtllmLLMEngine(LLMEngine):
         # One-shot guards so a misbehaving engine doesn't flood logs.
         self._warned_dispatch_failed = False
         self._warned_unknown_dp_rank = False
+        self._pause_controller: TRTLLMEnginePauseController | None = None
+        self._pause_lock = asyncio.Lock()
+        self._inflight_lock = asyncio.Lock()
+        self._inflight_requests = 0
+        self._no_inflight_requests = asyncio.Event()
+        self._no_inflight_requests.set()
+        self._reject_new_requests = False
+        self._resume_recovery_required = False
 
     @classmethod
     async def from_args(
@@ -311,6 +331,7 @@ class TrtllmLLMEngine(LLMEngine):
 
         self._engine = TensorRTLLMEngine(self.engine_args, self.disaggregation_mode)
         await self._engine.initialize()
+        self._pause_controller = TRTLLMEnginePauseController(self._engine)
 
         # Resolve the engine-declared spec now the engine (and its tokenizer)
         # is initialized; see `logits_processor_spec()`.
@@ -327,6 +348,9 @@ class TrtllmLLMEngine(LLMEngine):
                 "disaggregation_mode": self.disaggregation_mode.value,
                 "engine_type": "trtllm",
             },
+        )
+        self._additional_metrics.set_kv_event_buffer_capacity(
+            self._kv_event_buffer_max_size
         )
         self._trtllm_metrics_collector = MetricsCollector(
             {"model_name": gauge_model_name, "engine_type": "trtllm"}
@@ -451,9 +475,9 @@ class TrtllmLLMEngine(LLMEngine):
                             kv_used_blocks=int(kv_used),
                             kv_total_blocks=kv_total,
                             gpu_cache_usage=(kv_used / kv_total) if kv_total else 0.0,
-                            kv_cache_hit_rate=float(hit_rate)
-                            if hit_rate is not None
-                            else None,
+                            kv_cache_hit_rate=(
+                                float(hit_rate) if hit_rate is not None else None
+                            ),
                             dp_rank=rank,
                         ),
                     )
@@ -479,6 +503,8 @@ class TrtllmLLMEngine(LLMEngine):
             if not events:
                 time.sleep(_IDLE_SLEEP_S)
                 continue
+            if self._additional_metrics is not None:
+                self._additional_metrics.record_kv_event_drain_batch(len(events))
             for event in events:
                 try:
                     self._dispatch_kv_event(event)
@@ -505,6 +531,10 @@ class TrtllmLLMEngine(LLMEngine):
                     last + 1,
                     event_id,
                 )
+                if self._additional_metrics is not None:
+                    self._additional_metrics.record_kv_event_id_gap(
+                        max(0, event_id - (last + 1))
+                    )
             self._last_event_id_by_rank[rank] = event_id
         publisher = self._kv_publishers.get(rank)
         if publisher is None:
@@ -569,7 +599,145 @@ class TrtllmLLMEngine(LLMEngine):
             if removed:
                 publisher.publish_removed(removed)
 
+    def supported_controls(self) -> set[str]:
+        return {"release_memory_occupation", "resume_memory_occupation"}
+
+    async def engine_control(self, control: str, body: dict) -> dict:
+        handlers = {
+            "release_memory_occupation": self.release_memory_occupation,
+            "resume_memory_occupation": self.resume_memory_occupation,
+        }
+        handler = handlers.get(control)
+        if handler is None:
+            return {
+                "status": "error",
+                "message": f"unsupported engine control: {control}",
+            }
+        return await handler(body or {})
+
+    async def _set_reject_new_requests(self, reject: bool) -> None:
+        async with self._inflight_lock:
+            self._reject_new_requests = reject
+
+    async def _mark_request_started(self) -> bool:
+        async with self._inflight_lock:
+            if self._reject_new_requests:
+                return False
+            self._inflight_requests += 1
+            self._no_inflight_requests.clear()
+            return True
+
+    async def _mark_request_finished(self) -> None:
+        async with self._inflight_lock:
+            if self._inflight_requests == 0:
+                return
+            self._inflight_requests -= 1
+            if self._inflight_requests == 0:
+                self._no_inflight_requests.set()
+
+    async def _wait_for_inflight_requests(self, timeout_s: float) -> None:
+        try:
+            await asyncio.wait_for(self._no_inflight_requests.wait(), timeout_s)
+        except asyncio.TimeoutError as exc:
+            async with self._inflight_lock:
+                inflight = self._inflight_requests
+            raise RuntimeError(
+                f"Timed out waiting for {inflight} in-flight request(s) to finish"
+            ) from exc
+
+    @staticmethod
+    def _controller_needs_resume_recovery(
+        controller: TRTLLMEnginePauseController,
+    ) -> bool:
+        needs_recovery = getattr(controller, "needs_resume_recovery", False)
+        return needs_recovery if isinstance(needs_recovery, bool) else False
+
+    async def release_memory_occupation(self, body: dict) -> dict:
+        controller = self._pause_controller
+        if controller is None:
+            return {"status": "error", "message": "engine is not initialized"}
+
+        body = body or {}
+        tags = body.get("tags")
+        async with self._pause_lock:
+            if controller.is_paused:
+                return {"status": "ok", "message": "Memory already released"}
+            if (
+                self._resume_recovery_required
+                or self._controller_needs_resume_recovery(controller)
+            ):
+                return {
+                    "status": "error",
+                    "message": "resume_memory_occupation required before retrying release",
+                }
+            try:
+                await self._set_reject_new_requests(True)
+                timeout_s = float(body.get("timeout_s", 30.0))
+                await self._wait_for_inflight_requests(timeout_s)
+            except Exception as exc:
+                logger.error("release_memory_occupation failed before pause: %s", exc)
+                await self._set_reject_new_requests(False)
+                return {"status": "error", "message": str(exc)}
+
+            try:
+                await controller.pause(tags)
+                self._resume_recovery_required = False
+                return {"status": "ok", "message": "Memory released"}
+            except Exception as exc:
+                logger.error("release_memory_occupation pause failed: %s", exc)
+                self._resume_recovery_required = True
+                return {"status": "error", "message": str(exc)}
+
+    async def resume_memory_occupation(self, body: dict) -> dict:
+        controller = self._pause_controller
+        if controller is None:
+            return {"status": "error", "message": "engine is not initialized"}
+
+        body = body or {}
+        tags = body.get("tags")
+        async with self._pause_lock:
+            needs_recovery = (
+                self._resume_recovery_required
+                or self._controller_needs_resume_recovery(controller)
+            )
+            if not controller.is_paused and not needs_recovery:
+                return {"status": "ok", "message": "Memory already resumed"}
+            try:
+                if controller.is_paused or self._controller_needs_resume_recovery(
+                    controller
+                ):
+                    await controller.resume(tags)
+                await self._set_reject_new_requests(False)
+                controller.mark_resumed()
+                self._resume_recovery_required = False
+                return {"status": "ok", "message": "Memory resumed"}
+            except Exception as exc:
+                logger.error("resume_memory_occupation failed: %s", exc)
+                self._resume_recovery_required = True
+                return {"status": "error", "message": str(exc)}
+
     async def generate(
+        self, request: GenerateRequest, context: Context
+    ) -> AsyncGenerator[GenerateChunk, None]:
+        if not await self._mark_request_started():
+            yield {
+                "finish_reason": "error",
+                "token_ids": [],
+                "index": 0,
+                "completion_usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+            }
+            return
+        try:
+            async for chunk in self._generate_started(request, context):
+                yield chunk
+        finally:
+            await self._mark_request_finished()
+
+    async def _generate_started(
         self, request: GenerateRequest, context: Context
     ) -> AsyncGenerator[GenerateChunk, None]:
         assert self._engine is not None, "Engine not initialized"
@@ -893,6 +1061,7 @@ class TrtllmLLMEngine(LLMEngine):
         self._kv_events_thread = None
         self._metrics_thread = None
         self._kv_publishers.clear()
+        self._pause_controller = None
         if self._engine is not None:
             await self._engine.cleanup()
             logger.info("TensorRT-LLM engine shutdown")

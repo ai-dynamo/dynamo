@@ -115,24 +115,6 @@ cases:
           York
         reason: SGLang preserves the trailing truncated <tool_call>... block as content; Dynamo and vLLM both drop it
   TOOLCALLING.batch.5.f:
-    description: Closing </tool_call> without matching <tool_call> open after prefix prose
-    ref: dynamo
-    model_text: I will check that. get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>
-    tools:
-    - *id002
-    expected:
-      dynamo:
-        calls:
-        - name: get_weather
-          arguments:
-            location: NYC
-        normal_text: 'I will check that. '
-      vllm: &id005
-        reason: "vLLM and SGLang preserve orphan GLM <arg_key>/<arg_value>/</tool_call> markup as content when opening <tool_call> is missing; Dynamo preserves the prefix prose, recovers the complete bare call body, and strips the orphan close marker."
-        calls: []
-        normal_text: I will check that. get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>
-      sglang: *id005
-  TOOLCALLING.batch.5.g:
     description: Bare valid call before a complete wrapped call
     ref: dynamo
     model_text: get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call><tool_call>get_weather<arg_key>location</arg_key><arg_value>Boston</arg_value></tool_call>
@@ -148,11 +130,29 @@ cases:
           arguments:
             location: Boston
         normal_text: ''
-      vllm: &id006
+      vllm: &id005
         calls:
         - name: get_weather
           arguments:
             location: Boston
         normal_text: get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>
         reason: vLLM and SGLang preserve the bare GLM call before the first <tool_call> as content; Dynamo recovers it as the first structured call before parsing the wrapped call.
+      sglang: *id005
+  TOOLCALLING.batch.5.g:
+    description: Closing </tool_call> without matching <tool_call> open after prefix prose
+    ref: dynamo
+    model_text: I will check that. get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>
+    tools:
+    - *id002
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: 'I will check that. '
+      vllm: &id006
+        reason: "vLLM and SGLang preserve orphan GLM <arg_key>/<arg_value>/</tool_call> markup as content when opening <tool_call> is missing; Dynamo preserves the prefix prose, recovers the complete bare call body, and strips the orphan close marker."
+        calls: []
+        normal_text: I will check that. get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>
       sglang: *id006

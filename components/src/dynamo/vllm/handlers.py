@@ -228,41 +228,61 @@ async def _deferred_abort_guard(
             await guard.close()
 
 
-class VllmEngineQuiesceController:
+class VllmEnginePauseController:
     def __init__(self, engine_client: Any):
         self._engine_client = engine_client
-        self._is_quiesced = False
+        self._is_paused = False
+        self._generation_paused = False
 
     @property
-    def is_quiesced(self) -> bool:
-        return self._is_quiesced
+    def is_paused(self) -> bool:
+        return self._is_paused
 
-    async def quiesce(self, *args: object) -> bool:
-        if self._is_quiesced:
+    @property
+    def needs_resume_recovery(self) -> bool:
+        return self._generation_paused
+
+    async def pause(self, *args: object) -> bool:
+        if self._is_paused or self._generation_paused:
             return False
 
         level = args[0] if args else None
         await self._engine_client.pause_generation()
-        if level is None:
-            await self._engine_client.sleep()
-        else:
-            await self._engine_client.sleep(level)
-        self._is_quiesced = True
+        self._generation_paused = True
+        try:
+            if level is None:
+                await self._engine_client.sleep()
+            else:
+                await self._engine_client.sleep(level)
+        except Exception:
+            try:
+                await self._engine_client.resume_generation()
+                self._generation_paused = False
+            except Exception:
+                logger.exception(
+                    "Failed to resume generation after native vLLM sleep failure"
+                )
+            raise
+        self._is_paused = True
         return True
 
     async def resume(self, tags: list[str] | None = None) -> bool:
-        if not self._is_quiesced:
+        if not self._is_paused and not self._generation_paused:
             return False
 
-        if tags is None:
-            await self._engine_client.wake_up()
-        else:
-            await self._engine_client.wake_up(tags)
-        await self._engine_client.resume_generation()
+        if self._is_paused:
+            if tags is None:
+                await self._engine_client.wake_up()
+            else:
+                await self._engine_client.wake_up(tags)
+        if self._generation_paused:
+            await self._engine_client.resume_generation()
+            self._generation_paused = False
         return True
 
     def mark_resumed(self) -> None:
-        self._is_quiesced = False
+        self._is_paused = False
+        self._generation_paused = False
 
 
 def _compute_mm_uuids(
@@ -581,6 +601,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     # __new__ still have a sane value; __init__ overrides this from
     # hf_config.use_unified_vision_chunk on real instances.
     _use_unified_vision_chunk: bool = False
+    _scale_ep_in_progress: bool = False
 
     def __init__(
         self,
@@ -630,8 +651,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.use_vllm_tokenizer = use_vllm_tokenizer
 
         self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
-        self._quiesce_controller = VllmEngineQuiesceController(self.engine_client)
-        self._quiesce_lock = asyncio.Lock()
+        self._pause_controller = VllmEnginePauseController(self.engine_client)
+        self._pause_lock = asyncio.Lock()
         self._mm_kwargs_receiver: MmKwargsNixlReceiver | None = None
 
         # Some models (Kimi-K2.5) declare their image modality as
@@ -659,6 +680,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # concurrent HTTP callers share this lock and only one scale operation
         # can mutate _coord_store at a time.
         self._scale_ep_lock = asyncio.Lock()
+        self._scale_ep_in_progress = False
 
         # Initialize InputParamManager for text-in-text-out mode
         tokenizer = None
@@ -729,28 +751,35 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         Order of operations:
         1. Unregister from discovery - stop accepting new requests
         2. Abort and drain in-flight requests
-        3. Sleep engine - safe now that GPU is quiesced
+        3. Sleep engine - safe once generation has stopped
         """
         body = body or {}
         level = body.get("level", 1)
-        async with self._quiesce_lock:
-            if self._quiesce_controller.is_quiesced:
+        async with self._pause_lock:
+            if self._pause_controller.is_paused:
                 return {
                     "status": "ok",
                     "message": "Engine already sleeping",
                 }
+            if self._pause_controller.needs_resume_recovery:
+                return {
+                    "status": "error",
+                    "message": "wake_up required before retrying sleep",
+                }
 
+            unregistered = False
             try:
                 # Step 1: Unregister endpoint instance before memory transitions.
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.unregister_endpoint_instance()
+                    unregistered = True
                     logger.info(
                         "[Sleep] Unregistered endpoint from discovery - worker removed from routing pool"
                     )
 
-                # Step 2: Abort in-flight requests and wait for them to drain so the
-                # GPU is fully quiesced before unmapping memory.
-                if not await self._quiesce_controller.quiesce(level):
+                # Step 2: Abort in-flight requests and wait for them to drain so
+                # generation is fully paused before unmapping memory.
+                if not await self._pause_controller.pause(level):
                     return {
                         "status": "ok",
                         "message": "Engine already sleeping",
@@ -762,6 +791,24 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 }
             except Exception as e:
                 logger.error(f"Failed to sleep engine: {e}")
+                # If pause rolled back cleanly the engine is serving-safe again,
+                # but discovery still shows us unregistered and wake_up will
+                # early-return. Re-register so the worker rejoins the routing pool.
+                if (
+                    unregistered
+                    and not self._pause_controller.is_paused
+                    and not self._pause_controller.needs_resume_recovery
+                    and self.generate_endpoint is not None
+                ):
+                    try:
+                        await self.generate_endpoint.register_endpoint_instance()
+                        logger.info(
+                            "[Sleep] Re-registered endpoint after failed sleep rollback"
+                        )
+                    except Exception as reg_err:
+                        logger.error(
+                            f"Failed to re-register endpoint after sleep failure: {reg_err}"
+                        )
                 return {"status": "error", "message": str(e)}
 
     async def scale_elastic_ep(self, body: dict) -> dict:
@@ -805,64 +852,67 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # queuing behind it: a queued caller would garbage-collect the first
         # caller's TCPStore before its Ray actor connects, causing a 300 s
         # timeout on the worker node.
-        # The locked() check followed immediately by async with is safe:
-        # asyncio.Lock.acquire() only suspends (yields to the event loop) when
-        # the lock is already held. When locked() returns False the lock is
-        # free, so acquire() completes synchronously — no other coroutine can
-        # run between the check and the acquisition.
-        if self._scale_ep_lock.locked():
-            msg = (
-                f"A scale_elastic_ep operation is already in progress; "
-                f"rejecting concurrent request for new_data_parallel_size={new_dp_size}"
-            )
-            logger.warning(f"[ElasticEP] {msg}")
-            return {"status": "error", "message": msg}
-
         async with self._scale_ep_lock:
+            if self._scale_ep_in_progress:
+                msg = (
+                    "A scale_elastic_ep operation is already in progress; "
+                    f"rejecting concurrent request for new_data_parallel_size={new_dp_size}"
+                )
+                logger.warning("[ElasticEP] %s", msg)
+                return {"status": "error", "message": msg}
+            self._scale_ep_in_progress = True
+
+        try:
+            # TODO(upstream-vllm): remove this patch once vLLM fixes
+            # add_dp_placement_groups in vllm/v1/engine/utils.py to use ray.nodes()
+            # instead of ray.util.state.list_nodes().
+            #
+            # Patch ray.util.state.list_nodes to use the GCS API instead of the
+            # dashboard HTTP API (127.0.0.1:8265/api/v0/nodes). The dynamo image
+            # installs ray core only (not ray[default]), so the dashboard HTTP server
+            # starts in --minimal mode with the HTTP server disabled. vLLM's
+            # add_dp_placement_groups calls list_nodes() which requires that HTTP
+            # endpoint, causing scale_elastic_ep to fail with "Failed to connect to
+            # API server".
+            #
+            # ray.nodes() uses the GCS gRPC channel directly (no dashboard process
+            # needed) and returns the same information. Imported lazily so ray is not
+            # required at module load time (absent in non-elastic-EP deployments).
+            #
+            # Format mapping:
+            #   list_nodes() -> objects with .node_ip and .node_id
+            #   ray.nodes()  -> dicts with "NodeManagerAddress" and "NodeID"
+            import ray
+            import ray.util.state as _ray_util_state
+
+            class _NodeInfo:
+                __slots__ = ("node_id", "node_ip")
+
+                def __init__(self, d: dict) -> None:
+                    self.node_ip: str = d["NodeManagerAddress"]
+                    self.node_id: str = d["NodeID"]
+
+            original_list_nodes = _ray_util_state.list_nodes
             try:
-                # TODO(upstream-vllm): remove this patch once vLLM fixes
-                # add_dp_placement_groups in vllm/v1/engine/utils.py to use ray.nodes()
-                # instead of ray.util.state.list_nodes().
-                #
-                # Patch ray.util.state.list_nodes to use the GCS API instead of the
-                # dashboard HTTP API (127.0.0.1:8265/api/v0/nodes). The dynamo image
-                # installs ray core only (not ray[default]), so the dashboard HTTP server
-                # starts in --minimal mode with the HTTP server disabled. vLLM's
-                # add_dp_placement_groups calls list_nodes() which requires that HTTP
-                # endpoint, causing scale_elastic_ep to fail with "Failed to connect to
-                # API server".
-                #
-                # ray.nodes() uses the GCS gRPC channel directly (no dashboard process
-                # needed) and returns the same information. Imported lazily so ray is not
-                # required at module load time (absent in non-elastic-EP deployments).
-                #
-                # Format mapping:
-                #   list_nodes() → objects with .node_ip and .node_id
-                #   ray.nodes()  → dicts with "NodeManagerAddress" and "NodeID"
-                import ray
-                import ray.util.state as _ray_util_state
-
-                class _NodeInfo:
-                    __slots__ = ("node_id", "node_ip")
-
-                    def __init__(self, d: dict) -> None:
-                        self.node_ip: str = d["NodeManagerAddress"]
-                        self.node_id: str = d["NodeID"]
-
                 _ray_util_state.list_nodes = lambda **kw: [
                     _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
                 ]
-
                 await self.engine_client.scale_elastic_ep(new_dp_size)
-                logger.info(f"[ElasticEP] Scaling to dp={new_dp_size} complete")
-                return {
-                    "status": "ok",
-                    "message": f"Scaled to data_parallel_size={new_dp_size}",
-                    "new_data_parallel_size": new_dp_size,
-                }
-            except Exception as e:
-                logger.error(f"[ElasticEP] Scaling failed: {e}")
-                return {"status": "error", "message": str(e)}
+            finally:
+                _ray_util_state.list_nodes = original_list_nodes
+
+            logger.info(f"[ElasticEP] Scaling to dp={new_dp_size} complete")
+            return {
+                "status": "ok",
+                "message": f"Scaled to data_parallel_size={new_dp_size}",
+                "new_data_parallel_size": new_dp_size,
+            }
+        except Exception as e:
+            logger.error(f"[ElasticEP] Scaling failed: {e}")
+            return {"status": "error", "message": str(e)}
+        finally:
+            async with self._scale_ep_lock:
+                self._scale_ep_in_progress = False
 
     async def wake_up(self, body: dict) -> dict:
         """Wake the engine to restore GPU memory and re-register to discovery.
@@ -876,19 +926,20 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """
         body = body or {}
         tags = body.get("tags")
-        async with self._quiesce_lock:
-            if not self._quiesce_controller.is_quiesced:
+        async with self._pause_lock:
+            needs_recovery = self._pause_controller.needs_resume_recovery
+            if not self._pause_controller.is_paused and not needs_recovery:
                 return {"status": "ok", "message": "Engine already awake"}
 
             try:
                 # Step 1: Wake engine first - must be ready before accepting requests
-                await self._quiesce_controller.resume(tags)
+                await self._pause_controller.resume(tags)
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.register_endpoint_instance()
                     logger.info(
                         "[Wake] Re-registered endpoint to discovery - worker added back to routing pool"
                     )
-                self._quiesce_controller.mark_resumed()
+                self._pause_controller.mark_resumed()
 
                 return {
                     "status": "ok",
@@ -2923,8 +2974,7 @@ class EmbeddingWorkerHandler:
         dimensions = request.get("dimensions")
         if dimensions is not None and not isinstance(dimensions, int):
             raise TypeError(
-                f"Invalid 'dimensions' type {type(dimensions).__name__}; "
-                "expected int"
+                f"Invalid 'dimensions' type {type(dimensions).__name__}; expected int"
             )
         if dimensions is not None and dimensions < 1:
             raise ValueError(f"dimensions must be >= 1, got {dimensions}")

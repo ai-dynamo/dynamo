@@ -151,7 +151,7 @@ modelExpressURL: ""
 # namespace. In podMount mode, install one shared snapshot-agent DaemonSet and
 # configure storage below so the operator mounts/ensures namespace-local PVCs.
 checkpoint:
-  # Enable checkpoint/restore functionality
+  # -- Enable checkpoint/restore functionality
   enabled: false
   # Localhost seccomp profile applied to checkpoint+restore pods to block
   # io_uring (which CRIU cannot dump). The default profile is applied unless
@@ -204,6 +204,10 @@ webhook:
   # Fail: Reject requests if webhook is unavailable (recommended for production)
   # Ignore: Allow requests if webhook is unavailable
   failurePolicy: Fail
+  # -- Failure policy for the Pod CREATE checkpoint-restore mutating webhook.
+  # Defaults to Ignore so a webhook outage falls back to cold-start instead of
+  # blocking workload Pods.
+  podCheckpointRestoreFailurePolicy: Ignore
 
   # Timeout for webhook calls (in seconds)
   timeoutSeconds: 10

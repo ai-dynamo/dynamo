@@ -13,11 +13,13 @@ For the general mechanics of DynoSim runs (input format, arrival speedup, router
 
 ### Build
 
-Build the Dynamo Python bindings so `python -m dynamo.replay` is available:
+Install the Dynamo Python components and build the Rust runtime bindings. The
+`python -m dynamo.replay` CLI is part of the Python components, and it imports the
+runtime `_core` module from the bindings package:
 
 ```bash
-cd lib/bindings/python
-.venv/bin/maturin develop --release
+.venv/bin/maturin develop --release -m lib/bindings/python/Cargo.toml
+uv pip install -e .
 ```
 
 The `--release` flag is strongly recommended. DynoSim execution is largely single-threaded and CPU-bound on the mocker engine core; a debug build can be 5–10× slower, which compounds across sweep runs.
@@ -35,7 +37,7 @@ Passed as JSON via `--planner-config`. Uses the same schema as the live planner.
 | `enable_load_scaling` | Reactive scaling to short-term traffic spikes. |
 | `throughput_adjustment_interval_seconds` | Seconds between throughput-scaling decisions. |
 | `load_adjustment_interval_seconds` | Seconds between load-scaling decisions. Short intervals mean faster reaction but more flapping. |
-| `pre_deployment_sweeping_mode` | `"rapid"` uses the AIC analytical model; leave unset to fall back to recorded profile data. |
+| `pre_deployment_sweeping_mode` | `"rapid"` uses AIC for optional bootstrap data and native perf-model identity; `"none"` lets planner warm from native AIC or live FPMs. |
 | `prefill_engine_num_gpu` / `decode_engine_num_gpu` | GPUs per engine replica. **Must be set explicitly** — both default to `None`, and the simulation adapter silently treats `None` as `0`, which collapses the cumulative-GPU-hours metric in the report to zero. |
 | `report_filename` | Output HTML filename under `./planner_reports/`. |
 

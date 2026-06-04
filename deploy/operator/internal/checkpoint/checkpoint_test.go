@@ -372,7 +372,7 @@ func (c *createHookClient) Create(ctx context.Context, obj client.Object, opts .
 	return c.Client.Create(ctx, obj, opts...)
 }
 
-func TestCreateOrGetAutoCheckpointDeduplicatesConcurrentSameHashCheckpoint(t *testing.T) {
+func TestCreateOrGetAutoCheckpointDoesNotReuseDifferentCheckpointWithSameLegacyHash(t *testing.T) {
 	ctx := context.Background()
 	s := testScheme()
 
@@ -412,14 +412,13 @@ func TestCreateOrGetAutoCheckpointDeduplicatesConcurrentSameHashCheckpoint(t *te
 		},
 	}
 
-	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, identity, corev1.PodTemplateSpec{}, "", nil)
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testHash, identity, corev1.PodTemplateSpec{}, "", nil)
 	require.NoError(t, err)
-	assert.Equal(t, friendly.Name, ckpt.Name)
+	assert.Equal(t, "checkpoint-"+testHash, ckpt.Name)
 
 	list := &nvidiacomv1alpha1.DynamoCheckpointList{}
 	require.NoError(t, baseClient.List(ctx, list))
-	require.Len(t, list.Items, 1)
-	assert.Equal(t, friendly.Name, list.Items[0].Name)
+	require.Len(t, list.Items, 2)
 }
 
 func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
@@ -427,10 +426,12 @@ func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
 	s := testScheme()
 	c := fake.NewClientBuilder().WithScheme(s).Build()
 
-	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testIdentity(), corev1.PodTemplateSpec{}, "", nil)
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testHash, testIdentity(), corev1.PodTemplateSpec{}, "", nil)
 	require.NoError(t, err)
 	require.NotNil(t, ckpt.Annotations)
 	assert.Equal(t, snapshotprotocol.DefaultCheckpointArtifactVersion, ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
+	assert.Equal(t, "true", ckpt.Annotations[consts.CheckpointAutoAnnotation])
+	assert.Equal(t, testHash, ckpt.Labels[snapshotprotocol.CheckpointIDLabel])
 }
 
 func TestCreateOrGetAutoCheckpointRejectsGMSSnapshotWhenGateDisabled(t *testing.T) {
@@ -443,6 +444,7 @@ func TestCreateOrGetAutoCheckpointRejectsGMSSnapshotWhenGateDisabled(t *testing.
 		ctx,
 		c,
 		testNamespace,
+		testHash,
 		testIdentity(),
 		corev1.PodTemplateSpec{},
 		"",
@@ -483,7 +485,6 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
 		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[0].Command)
 		assert.Nil(t, podSpec.Containers[0].Args)
-		assert.Len(t, info.Hash, 16)
 
 		volumes := map[string]corev1.Volume{}
 		for _, volume := range podSpec.Volumes {
@@ -690,6 +691,27 @@ func TestResolveCheckpointForService(t *testing.T) {
 		}
 	})
 
+	t.Run("Manual mode without checkpointRef or identity errors", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(s).Build()
+		_, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
+			Enabled: true,
+			Mode:    nvidiacomv1alpha1.CheckpointModeManual,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "Manual mode requires checkpointRef or identity")
+	})
+
+	t.Run("Auto mode without identity resolves enabled without error", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(s).Build()
+		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
+			Enabled: true,
+			Mode:    nvidiacomv1alpha1.CheckpointModeAuto,
+		})
+		require.NoError(t, err)
+		assert.True(t, info.Enabled)
+		assert.False(t, info.Exists)
+	})
+
 	t.Run("checkpointRef resolves ready CR", func(t *testing.T) {
 		t.Setenv(consts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
 		hash, err := ComputeIdentityHash(testIdentity())
@@ -855,10 +877,14 @@ func TestResolveCheckpointForService(t *testing.T) {
 		assert.Len(t, info.Hash, 16)
 	})
 
-	t.Run("errors when enabled but no ref and no identity", func(t *testing.T) {
+	t.Run("enabled without ref or identity waits for auto-created checkpoint", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).Build()
-		_, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true})
-		assert.ErrorContains(t, err, "no checkpointRef or identity")
+		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true})
+		require.NoError(t, err)
+		assert.True(t, info.Enabled)
+		assert.False(t, info.Exists)
+		assert.False(t, info.Ready)
+		assert.Equal(t, nvidiacomv1alpha1.CheckpointStartupPolicyImmediate, info.StartupPolicy)
 	})
 }
 
@@ -891,6 +917,56 @@ func TestApplyRestorePodMetadata_DisabledClearsAnnotation(t *testing.T) {
 	ApplyRestorePodMetadata(labels, annotations, &CheckpointInfo{Enabled: false})
 	_, ok := annotations[snapshotprotocol.TargetContainersAnnotation]
 	assert.False(t, ok, "target-containers annotation must be cleared when checkpoint disabled")
+}
+
+func TestApplyRestoreCandidateMetadata(t *testing.T) {
+	t.Run("ready checkpoint stamps candidate metadata without restore labels", func(t *testing.T) {
+		labels := map[string]string{
+			snapshotprotocol.CheckpointIDLabel: "stale",
+		}
+		annotations := map[string]string{
+			snapshotprotocol.CheckpointStatusAnnotation: "stale",
+		}
+
+		err := ApplyRestoreCandidateMetadata(labels, annotations, &CheckpointInfo{
+			Enabled:                 true,
+			Exists:                  true,
+			Ready:                   true,
+			CheckpointName:          "worker-checkpoint",
+			StartupPolicy:           nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+			RestoreTargetContainers: []string{"engine-0", "engine-1"},
+		})
+		require.NoError(t, err)
+
+		assert.Empty(t, labels[snapshotprotocol.CheckpointIDLabel])
+		assert.Empty(t, labels[snapshotprotocol.RestoreTargetLabel])
+		assert.Empty(t, annotations[snapshotprotocol.CheckpointStatusAnnotation])
+		assert.Equal(t, consts.KubeLabelValueTrue, annotations[consts.CheckpointRestoreCandidateAnnotation])
+		assert.Equal(t, "worker-checkpoint", annotations[consts.CheckpointNameAnnotation])
+		assert.Equal(t, string(nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint), annotations[consts.CheckpointStartupPolicyAnnotation])
+		assert.Equal(t, "engine-0,engine-1", annotations[snapshotprotocol.TargetContainersAnnotation])
+	})
+
+	t.Run("disabled clears stale candidate metadata", func(t *testing.T) {
+		labels := map[string]string{
+			snapshotprotocol.CheckpointIDLabel: "stale",
+		}
+		annotations := map[string]string{
+			consts.CheckpointRestoreCandidateAnnotation: consts.KubeLabelValueTrue,
+			consts.CheckpointNameAnnotation:             "stale",
+			consts.CheckpointStartupPolicyAnnotation:    string(nvidiacomv1alpha1.CheckpointStartupPolicyImmediate),
+			snapshotprotocol.TargetContainersAnnotation: consts.MainContainerName,
+		}
+
+		err := ApplyRestoreCandidateMetadata(labels, annotations, &CheckpointInfo{Enabled: false})
+		require.NoError(t, err)
+
+		assert.Empty(t, labels[snapshotprotocol.CheckpointIDLabel])
+		assert.NotContains(t, annotations, consts.CheckpointRestoreCandidateAnnotation)
+		assert.NotContains(t, annotations, consts.CheckpointNameAnnotation)
+		assert.NotContains(t, annotations, consts.CheckpointStartupPolicyAnnotation)
+		assert.NotContains(t, annotations, snapshotprotocol.TargetContainersAnnotation)
+	})
 }
 
 // findContainer is a test helper that locates a container by name across both
