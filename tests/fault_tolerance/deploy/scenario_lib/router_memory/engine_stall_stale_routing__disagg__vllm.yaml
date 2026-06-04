@@ -20,8 +20,11 @@
 # never self-kills (verified: 16 min hung, RESTARTS 0). SIGSTOP'ing the Worker
 # leaves the EngineCore dispatching forwards, so it reaches the guarded
 # `sample_tokens` RPC wait → times out → dies (verified: RESTARTS 0→1, exact
-# EngineDeadError traceback). rank_index:1 → Worker_DP1 (substring "VLLM::Worker"
-# matches both Worker_DP0_EP0 and Worker_DP1_EP1).
+# EngineDeadError traceback). The stalls use the `StallWorker` helper, which
+# resolves the backend's worker process via engine_details (target='worker' →
+# "VLLM::Worker" for vllm), so swapping deployment.backend retargets the repro
+# automatically. rank_index:1 → Worker_DP1 (substring "VLLM::Worker" matches both
+# Worker_DP0_EP0 and Worker_DP1_EP1).
 #
 # Why PERMANENT stall (`duration: null`): hold the freeze until a request lands
 # and the timeout fires. With the Worker target, ANY request routed to the frozen
@@ -131,7 +134,7 @@ events:
   - { kind: CaptureMetrics, suffix: ".baseline" }  # 0 errors + KV-util ≪ 0.85
 
   # ── Phase 1: single DECODE stall (PERMANENT) → wait for the actual churn ───
-  - { kind: StallProcess, services: [VllmDecodeWorker], process_name: "VLLM::Worker", pod_indices: [0], rank_index: 1, duration: null }
+  - { kind: StallWorker, services: [VllmDecodeWorker], pod_indices: [0], rank_index: 1, duration: null }
   - { kind: WaitForRecovery, unready_timeout: 300, timeout: 600 }  # CR unready (died) → ready (restarted); logs pod warning events
   - { kind: Wait, duration: 120 }                 # observe stale-routing tail/decay
   - { kind: CaptureMetrics, suffix: ".after-decode-stall" }
@@ -139,7 +142,7 @@ events:
   # ── Phase 2: single PREFILL stall (PERMANENT) → the OTHER role churns ──────
   # With the Worker target, a single prefill forward to the frozen rank trips the
   # sample_tokens timeout → churn — no mid-forward dependence (cf. EngineCore).
-  - { kind: StallProcess, services: [VllmPrefillWorker], process_name: "VLLM::Worker", pod_indices: [0], rank_index: 1, duration: null }
+  - { kind: StallWorker, services: [VllmPrefillWorker], pod_indices: [0], rank_index: 1, duration: null }
   - { kind: WaitForRecovery, unready_timeout: 300, timeout: 600 }
   - { kind: Wait, duration: 120 }
   - { kind: CaptureMetrics, suffix: ".after-prefill-stall" }
@@ -148,9 +151,9 @@ events:
   # Stall 1 decode + 1 prefill (the not-yet-stalled pods) within ~60 s so both
   # churn at once → overlapping stale-routing windows. decode[0]+prefill[0]
   # (restarted) keep capacity → still capacity-bounded.
-  - { kind: StallProcess, services: [VllmDecodeWorker], process_name: "VLLM::Worker", pod_indices: [1], rank_index: 1, duration: null }
+  - { kind: StallWorker, services: [VllmDecodeWorker], pod_indices: [1], rank_index: 1, duration: null }
   - { kind: Wait, duration: 60 }
-  - { kind: StallProcess, services: [VllmPrefillWorker], process_name: "VLLM::Worker", pod_indices: [1], rank_index: 1, duration: null }
+  - { kind: StallWorker, services: [VllmPrefillWorker], pod_indices: [1], rank_index: 1, duration: null }
   - { kind: WaitForRecovery, unready_timeout: 300, timeout: 600 }  # both die → both restart
   - { kind: Wait, duration: 120 }
   - { kind: CaptureMetrics, suffix: ".peak" }
