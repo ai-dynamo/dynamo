@@ -419,7 +419,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
         if self
             .worker_anchor_index
             .get(&worker)
-            .map_or(false, |set| set.contains(&anchor_key))
+            .is_some_and(|set| set.contains(&anchor_key))
         {
             #[cfg(feature = "bench")]
             self.metrics
@@ -479,8 +479,16 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
     }
 
     fn deregister_worker_from_id_index(&self, worker: WorkerWithDpRank) {
-        if let Some(set) = self.worker_id_index.get(&worker.worker_id) {
-            set.remove(&worker);
+        let worker_id = worker.worker_id;
+        let Some(set) = self.worker_id_index.get(&worker_id) else {
+            return;
+        };
+        set.remove(&worker);
+        let is_empty = set.is_empty();
+        drop(set);
+        if is_empty {
+            self.worker_id_index
+                .remove_if(&worker_id, |_, set| set.is_empty());
         }
     }
 
@@ -1102,7 +1110,7 @@ mod tests {
         index
             .worker_anchor_index
             .get(&worker)
-            .map_or(false, |set| !set.is_empty())
+            .is_some_and(|set| !set.is_empty())
     }
 
     async fn normalized_scores(index: &TestBSI, query: &[u64]) -> Vec<(WorkerWithDpRank, u32)> {
@@ -1582,6 +1590,32 @@ mod tests {
         index.apply_event(clear_event(0)).await;
         let after_clear = index.find_matches(local_hashes(&[1, 2])).await.unwrap();
         assert!(after_clear.scores.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_empty_worker_id_index_entries() {
+        let index = make_indexer(2, 4);
+        let dp0 = WorkerWithDpRank::new(7, 0);
+        let dp1 = WorkerWithDpRank::new(7, 1);
+
+        index
+            .apply_event(store_event_with_dp_rank(7, 0, &[1, 2, 3]))
+            .await;
+        index
+            .apply_event(store_event_with_dp_rank(7, 1, &[1, 2, 4]))
+            .await;
+
+        assert!(index.worker_id_index.contains_key(&7));
+
+        index.remove_worker_dp_rank(7, 0).await;
+        let remaining = index.tracked_workers_for_worker_id(7);
+        assert!(!remaining.contains(&dp0));
+        assert!(remaining.contains(&dp1));
+        assert!(index.worker_id_index.contains_key(&7));
+
+        index.remove_worker_dp_rank(7, 1).await;
+        assert!(index.tracked_workers_for_worker_id(7).is_empty());
+        assert!(!index.worker_id_index.contains_key(&7));
     }
 
     #[tokio::test]
