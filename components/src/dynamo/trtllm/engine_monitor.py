@@ -20,8 +20,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 HEALTH_CHECK_INTERVAL = 2.0
-HEALTH_SHUTDOWN_TIMEOUT = 90.0
+HEALTH_CHECK_TIMEOUT = 30.0
+HEALTH_SHUTDOWN_TIMEOUT = 60.0
 HEALTH_CHECK_INTERVAL_ENV = "DYN_TRTLLM_HEALTH_CHECK_INTERVAL"
+HEALTH_CHECK_TIMEOUT_ENV = "DYN_TRTLLM_HEALTH_CHECK_TIMEOUT"
 HEALTH_SHUTDOWN_TIMEOUT_ENV = "DYN_TRTLLM_HEALTH_SHUTDOWN_TIMEOUT"
 
 
@@ -50,6 +52,7 @@ class TrtllmEngineMonitor:
         shutdown_event: Optional[asyncio.Event] = None,
         *,
         interval: Optional[float] = None,
+        check_timeout: Optional[float] = None,
         shutdown_timeout: Optional[float] = None,
     ) -> None:
         self.engine = engine
@@ -59,6 +62,11 @@ class TrtllmEngineMonitor:
             _env_float(HEALTH_CHECK_INTERVAL_ENV, HEALTH_CHECK_INTERVAL)
             if interval is None
             else interval
+        )
+        self.check_timeout = (
+            _env_float(HEALTH_CHECK_TIMEOUT_ENV, HEALTH_CHECK_TIMEOUT)
+            if check_timeout is None
+            else check_timeout
         )
         self.shutdown_timeout = (
             _env_float(HEALTH_SHUTDOWN_TIMEOUT_ENV, HEALTH_SHUTDOWN_TIMEOUT)
@@ -102,7 +110,13 @@ class TrtllmEngineMonitor:
                 threw_exception = False
                 healthy = True
                 try:
-                    healthy = await asyncio.to_thread(self.engine.check_health)
+                    healthy = await self._run_health_check()
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "TRT-LLM health check timed out after %.1fs.",
+                        self.check_timeout,
+                    )
+                    threw_exception = True
                 except Exception as exc:
                     logger.error("TRT-LLM health check raised: %r", exc, exc_info=True)
                     threw_exception = True
@@ -132,6 +146,12 @@ class TrtllmEngineMonitor:
             except asyncio.CancelledError:
                 logger.debug("TRT-LLM health monitor cancelled.")
                 break
+
+    async def _run_health_check(self) -> bool:
+        health_check = asyncio.to_thread(self.engine.check_health)
+        if self.check_timeout > 0:
+            return await asyncio.wait_for(health_check, timeout=self.check_timeout)
+        return await health_check
 
     def _shutdown_engine(self) -> None:
         """Shutdown the TRT-LLM engine on crash scenarios to free resources."""

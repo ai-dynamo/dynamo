@@ -3,6 +3,7 @@
 
 import asyncio
 import os
+import threading
 
 import pytest
 
@@ -48,6 +49,17 @@ class _FakeEngine:
 
     def shutdown(self):
         self.shutdown_count += 1
+
+
+class _BlockingEngine(_FakeEngine):
+    def __init__(self):
+        super().__init__([True])
+        self.release = threading.Event()
+
+    def check_health(self):
+        self.check_count += 1
+        self.release.wait(timeout=1.0)
+        return True
 
 
 class _FakeRuntime:
@@ -152,6 +164,32 @@ async def test_monitor_treats_health_exception_as_fatal(monkeypatch):
     assert engine.shutdown_count == 1
     assert runtime.shutdown_count == 1
     assert exit_calls == [1]
+
+
+@pytest.mark.asyncio
+async def test_monitor_treats_health_timeout_as_fatal(monkeypatch):
+    exit_calls = _record_exit(monkeypatch)
+    engine = _BlockingEngine()
+    runtime = _FakeRuntime()
+
+    try:
+        monitor = TrtllmEngineMonitor(
+            engine,
+            runtime=runtime,
+            interval=0.01,
+            check_timeout=0.01,
+            shutdown_timeout=0.01,
+        )
+
+        assert monitor._monitor_task is not None
+        await asyncio.wait_for(monitor._monitor_task, timeout=1.0)
+
+        assert engine.check_count == 1
+        assert engine.shutdown_count == 1
+        assert runtime.shutdown_count == 1
+        assert exit_calls == [1]
+    finally:
+        engine.release.set()
 
 
 @pytest.mark.asyncio
