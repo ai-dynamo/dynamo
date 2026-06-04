@@ -30,7 +30,7 @@ use crate::error::{backend_unknown, cannot_connect, clap_error, engine_shutdown,
 #[derive(Parser, Debug)]
 #[command(
     name = env!("CARGO_BIN_NAME"),
-    about = "Dynamo vLLM backend based on Rust frontend and engine-core client."
+    about = "Dynamo vLLM backend based on Rust vLLM engine-core client."
 )]
 struct Args {
     #[command(flatten)]
@@ -182,6 +182,7 @@ impl LLMEngine for VllmBackend {
             return Err(engine_shutdown("vLLM backend has already been started"));
         }
 
+        // TODO: currently vLLM's Rust engine-core client only supports local data-parallel engines
         if !self.managed_engine.frontend_local_only() {
             return Err(invalid_arg(
                 "remote or partially local data-parallel managed engines are not supported yet",
@@ -276,6 +277,7 @@ impl LLMEngine for VllmBackend {
             max_num_seqs: self.extra.max_num_seqs,
             max_num_batched_tokens: self.extra.max_num_batched_tokens,
             data_parallel_size: Some(data_parallel_size),
+            // TODO: currently vLLM's Rust engine-core client only supports local data-parallel engines
             data_parallel_start_rank: Some(0),
             bootstrap_host: None,
             bootstrap_port: None,
@@ -291,7 +293,7 @@ impl LLMEngine for VllmBackend {
         let request_id = ctx.id().to_string();
         let prompt_tokens = request.token_ids.len() as u32;
 
-        // TODO(PD): mirror Python vLLM's prefill/decode kv_transfer_params
+        // TODO: mirror Python vLLM's prefill/decode kv_transfer_params
         // handling once this native backend advertises disaggregated serving.
         let mut output_stream = {
             let inner = self.inner.read().await;
@@ -413,7 +415,7 @@ impl LLMEngine for VllmBackend {
 
     async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
         if self.disaggregation_mode.is_decode() {
-            // TODO(PD): add a decode canary once native vLLM wires
+            // TODO: add a decode canary once native vLLM wires
             // prefill_result/kv_transfer_params like the Python integration.
             return Ok(None);
         }
@@ -443,7 +445,7 @@ impl MetricsRank {
             engine: engine_index as u32,
         };
         Self {
-            // TODO: currently vLLM's Rust frontend only supports local data-parallel engines,
+            // TODO: currently vLLM's Rust engine-core client only supports local data-parallel engines,
             // so we use the engine index as the DP rank here.
             dp_rank: engine_index as u32,
             total_kv_blocks,
