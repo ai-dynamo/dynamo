@@ -38,12 +38,12 @@ RustEnginePerfModel: Any = None
 RustEnginePerfOptions: Any = None
 
 try:  # pragma: no cover - availability depends on the optional Rust feature.
-    from dynamo.llm import AicEngineConfig as _AicEngineConfig
-    from dynamo.llm import EngineCapacityRequest as _EngineCapacityRequest
-    from dynamo.llm import EnginePerfLimits as _EnginePerfLimits
-    from dynamo.llm import OptimizationTarget as _OptimizationTarget
-    from dynamo.llm import RustEnginePerfModel as _RustEnginePerfModel
-    from dynamo.llm import RustEnginePerfOptions as _RustEnginePerfOptions
+    from dynamo.mocker import AicEngineConfig as _AicEngineConfig
+    from dynamo.mocker import EngineCapacityRequest as _EngineCapacityRequest
+    from dynamo.mocker import EnginePerfLimits as _EnginePerfLimits
+    from dynamo.mocker import OptimizationTarget as _OptimizationTarget
+    from dynamo.mocker import RustEnginePerfModel as _RustEnginePerfModel
+    from dynamo.mocker import RustEnginePerfOptions as _RustEnginePerfOptions
 
     AicEngineConfig = _AicEngineConfig
     EngineCapacityRequest = _EngineCapacityRequest

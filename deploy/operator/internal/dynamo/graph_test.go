@@ -8102,7 +8102,7 @@ func TestIsWorkerComponent(t *testing.T) {
 func TestRollingUpdateContext_InProgress(t *testing.T) {
 	assert.False(t, RollingUpdateContext{}.InProgress())
 	assert.False(t, RollingUpdateContext{NewWorkerHash: "abc"}.InProgress())
-	assert.True(t, RollingUpdateContext{OldWorkerReplicas: map[string]int32{"w": 1}}.InProgress())
+	assert.True(t, RollingUpdateContext{OldWorkerReplicaTargetsByComponent: map[string]int32{"w": 1}}.InProgress())
 }
 
 func TestGetDCDResourceName(t *testing.T) {
@@ -8204,9 +8204,9 @@ func TestGenerateSingleDCD_RollingUpdateContext(t *testing.T) {
 	}
 
 	ruCtx := RollingUpdateContext{
-		NewWorkerHash:     "aabb1122",
-		OldWorkerReplicas: map[string]int32{"prefill": 2},
-		NewWorkerReplicas: map[string]int32{"prefill": 2},
+		NewWorkerHash:                      "aabb1122",
+		OldWorkerReplicaTargetsByComponent: map[string]int32{"prefill": 2},
+		NewWorkerReplicaTargetsByComponent: map[string]int32{"prefill": 2},
 	}
 
 	dcds, err := GenerateDynamoComponentsDeployments(betaDGD(t, dgd), &RestartState{}, nil, ruCtx)
@@ -8267,9 +8267,9 @@ func TestGenerateDynamoComponentsDeploymentsDoesNotMutateParentDGD(t *testing.T)
 		&RestartState{},
 		map[string]string{"prefill": "2026-05-12T13:00:00Z"},
 		RollingUpdateContext{
-			NewWorkerHash:     "aabb1122",
-			OldWorkerReplicas: map[string]int32{"prefill": 1},
-			NewWorkerReplicas: map[string]int32{"prefill": 2},
+			NewWorkerHash:                      "aabb1122",
+			OldWorkerReplicaTargetsByComponent: map[string]int32{"prefill": 1},
+			NewWorkerReplicaTargetsByComponent: map[string]int32{"prefill": 2},
 		},
 	)
 	require.NoError(t, err)
@@ -8367,9 +8367,9 @@ func TestGenerateSingleDCD_RollingUpdateZeroReplicas(t *testing.T) {
 	}
 
 	ruCtx := RollingUpdateContext{
-		NewWorkerHash:     "aabb1122",
-		OldWorkerReplicas: map[string]int32{"decode": 3},
-		NewWorkerReplicas: map[string]int32{"decode": 0},
+		NewWorkerHash:                      "aabb1122",
+		OldWorkerReplicaTargetsByComponent: map[string]int32{"decode": 3},
+		NewWorkerReplicaTargetsByComponent: map[string]int32{"decode": 0},
 	}
 
 	dcds, err := GenerateDynamoComponentsDeployments(betaDGD(t, dgd), &RestartState{}, nil, ruCtx)

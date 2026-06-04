@@ -383,7 +383,7 @@ async def test_default_engine_controls_are_empty():
     """Engines opt into management controls explicitly."""
     engine = _Complete()
     assert engine.supported_controls() == set()
-    assert await engine.engine_control("sleep", {}) == {
+    assert await engine.engine_control("pause", {}) == {
         "status": "error",
-        "message": "unsupported engine control: sleep",
+        "message": "unsupported engine control: pause",
     }

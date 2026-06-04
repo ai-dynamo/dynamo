@@ -722,6 +722,7 @@ func ConvertToRestartStatus(src *v1beta1.RestartStatus, dst *RestartStatus) {
 func ConvertFromServiceCheckpointStatus(src *ServiceCheckpointStatus, dst *v1beta1.ComponentCheckpointStatus) {
 	*dst = v1beta1.ComponentCheckpointStatus{
 		CheckpointName: src.CheckpointName,
+		CheckpointID:   src.CheckpointID,
 		IdentityHash:   src.IdentityHash,
 		Ready:          src.Ready,
 	}
@@ -732,6 +733,7 @@ func ConvertFromServiceCheckpointStatus(src *ServiceCheckpointStatus, dst *v1bet
 func ConvertToServiceCheckpointStatus(src *v1beta1.ComponentCheckpointStatus, dst *ServiceCheckpointStatus) {
 	*dst = ServiceCheckpointStatus{
 		CheckpointName: src.CheckpointName,
+		CheckpointID:   src.CheckpointID,
 		IdentityHash:   src.IdentityHash,
 		Ready:          src.Ready,
 	}
