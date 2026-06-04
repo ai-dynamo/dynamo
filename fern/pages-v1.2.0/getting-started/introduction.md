@@ -10,7 +10,14 @@ sidebar-title: Introduction
 
 # Introduction to Dynamo
 
-Dynamo is an open-source, high-throughput, low-latency inference framework, designed to serve generative AI workloads in distributed environments and optimized for production deployments on Kubernetes. This page gives an overview of Dynamo's design principles, performance benefits, and production-grade features.
+Dynamo is an open-source, high-throughput, low-latency inference framework,
+designed to serve generative AI workloads in distributed environments. It is
+Kubernetes-native for production deployments, with an operator, CRDs, Helm
+charts, service discovery, Gateway API integration, and topology-aware
+scheduling, while still supporting local containers, Python workers, and
+standalone components for development or incremental adoption.
+
+This page gives an overview of Dynamo's design principles, performance benefits, and production-grade features.
 
 <Tip>
 Looking to get started right away? See the [Quickstart](quickstart.mdx) to install and run Dynamo in minutes.
@@ -23,6 +30,7 @@ Inference engines optimize the GPU; Dynamo optimizes the system around them.
 - **System-level optimization on top of any engine** -- Inference engines optimize the single-GPU forward pass. Dynamo adds the distributed layer: disaggregated serving, smart routing, KV cache management across memory tiers, and auto-scaling.
 - **Composable performance improvement techniques** -- The techniques, disaggregated serving, KV cache-aware routing, and KV cache offloading, each improve performance on their own; using them together yields compounding gains.
 - **Engine-agnostic** -- Works with vLLM, SGLang, and TensorRT-LLM. Swap engines without changing your serving infrastructure. Extending support for Intel XPU and AMD hardware.
+- **Kubernetes-native production path** -- Dynamo exposes inference graphs as Kubernetes resources (`DynamoGraphDeployment`, `DynamoComponentDeployment`, `DynamoGraphDeploymentRequest`) and reconciles them with an operator, while integrating with Kubernetes service discovery, Gateway API Inference Extension, scheduling, observability, and model loading workflows.
 - **Production-ready at scale** -- Dynamo covers the full deployment lifecycle: automatic configuration (AIConfigurator), runtime auto-scaling (Planner), topology-aware gang scheduling (Grove), fault tolerance, and observability.
 - **Modular adoption** -- Start with one component (e.g., just the Router for KV-aware routing on top of your existing engine). Adopt more as needed. Each component is independently installable via pip.
 
@@ -89,9 +97,22 @@ The full list of supported ecosystem components:
 | Networking and storage | Mooncake, DOCA NetIO, GDS, POSIX, S3, 3FS ([supported via NIXL](../design-docs/kvbm-design.md)) |
 | Multi-HW | Intel XPU, AMD |
 
-## Deployment Modes
+## Deployment Posture
 
-Dynamo supports two deployment modes. Both expose the same OpenAI-compatible API and the same backends; they differ in *where* request routing happens.
+Dynamo's production path is Kubernetes-native, not Kubernetes-only. The same
+core runtime concepts can be used from a local process, a container, or a
+Kubernetes cluster:
+
+| Path | Use when | What Dynamo provides |
+|---|---|---|
+| Local or container | You are evaluating, developing, or adopting one component at a time. | OpenAI-compatible frontend, router, workers, file or etcd discovery, Python/Rust APIs, and installable packages. |
+| Kubernetes | You are deploying shared GPU capacity, multi-node serving, autoscaling, or platform-integrated inference. | Helm install, Dynamo operator, DGD/DCD/DGDR CRDs, Kubernetes-native discovery, Gateway API Inference Extension, Grove/LWS scheduling, ModelExpress, observability, and lifecycle management. |
+
+## Request Routing Modes
+
+Dynamo supports two request-routing modes. Both expose the same
+OpenAI-compatible API and the same backends; they differ in *where* request
+routing happens.
 
 - **Standalone mode** (default) -- The Dynamo Frontend serves HTTP requests directly, and the integrated Dynamo Router makes KV-aware routing decisions before dispatching to workers. No external gateway is required. This is the mode used by all local installs and the default Kubernetes deployment. Request flow: `client -> Frontend -> Router -> workers`.
 
@@ -117,7 +138,7 @@ Furthermore, when these three techniques are composed together, they yield compo
 - **KV Cache-Aware Routing + KV Cache Offloading** -- Offloading increases the total addressable cache size, increasing the KV cache hit rate, which in turn accelerates the TTFT.
 
 <Tip>
-Ready to try these techniques? See [Dynamo recipes](https://github.com/ai-dynamo/dynamo/tree/v1.2.0/recipes) for step-by-step deployment examples that compose disaggregated serving, routing, and offloading.
+Ready to try these techniques? See [Dynamo recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes) for step-by-step deployment examples that compose disaggregated serving, routing, and offloading.
 </Tip>
 
 ## From Configuration to Production-Grade Deployment
@@ -169,7 +190,7 @@ Dynamo provides built-in metrics, distributed tracing, and logging for monitorin
 
 Explore the following resources to go deeper:
 
-- [Recipes](https://github.com/ai-dynamo/dynamo/tree/v1.2.0/recipes) -- Compose disaggregated serving, routing, and offloading
+- [Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes) -- Compose disaggregated serving, routing, and offloading
 - [KV Cache-Aware Routing](../components/router/router-guide.md) -- Configure smart request routing
 - [KV Cache Offloading](../components/kvbm/kvbm-guide.md) -- Set up multi-tier memory management
 - [Planner](../components/planner/planner-guide.md) -- Configure SLA-based autoscaling
