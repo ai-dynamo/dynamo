@@ -522,7 +522,8 @@ mod tests {
 
         let suffix = &target[prefix_len..];
         let suffix_enc = tokenizer.encode(suffix).unwrap();
-        let mut merged = prefix_tokens.clone();
+        // longest_prefix_match returns the shared `Arc<[u32]>`; copy into a Vec to append the suffix.
+        let mut merged = prefix_tokens.to_vec();
         merged.extend_from_slice(suffix_enc.token_ids());
 
         let plain = tokenizer.encode(&target).unwrap();
@@ -775,7 +776,7 @@ mod tests {
         );
         let expected = tok.encode(&turns[1][..deepest]).unwrap();
         assert_eq!(
-            saved_tokens,
+            &*saved_tokens,
             expected.token_ids(),
             "persisted entry tokens must equal the uncached encode of the cached prefix"
         );
