@@ -39,8 +39,8 @@ Without MM-aware routing, the standard router treats image token blocks as opaqu
 The Rust frontend's MM-aware routing path supports whatever VLM families the
 `llm-multimodal` crate registers — see
 [`ImageProcessorRegistry::with_defaults()`](https://docs.rs/llm-multimodal/1.5.0/llm_multimodal/vision/image_processor/struct.ImageProcessorRegistry.html#method.with_defaults)
-for the up-to-date list. A model that crate doesn't recognize falls back to
-text-prefix-only KV routing (request still completes; just no prefix-cache
+for the up-to-date list. A model the registry doesn't recognize falls back
+to text-prefix-only KV routing (request still completes; just no prefix-cache
 benefit across images).
 
 The Python chat-processor variant doesn't share this constraint — it
@@ -52,12 +52,12 @@ supports.
 ### vLLM (default — Rust frontend)
 
 ```text
-Frontend (Rust + llm-multimodal + KV router) → Backend Workers
+Frontend (Rust + KV router) → Backend Workers
         │
         ├─ Hash image (xxh3_64 of the raw URL — full-URL identity; use --frontend-decoding for content-addressed hashing)
-        ├─ Resolve image-token id via the llm-multimodal per-model ModelProcessorSpec
+        ├─ Resolve image-token id via per-model ModelProcessorSpec
         ├─ Read (W, H) from a Range: 0-65535 header fetch (or in-memory data: bytes)
-        ├─ llm_multimodal::count_tokens(W, H) → expanded image-token count N
+        ├─ count_tokens(W, H) → expanded image-token count N
         ├─ Expand placeholder × N in routing_token_ids (worker token_ids unchanged)
         ├─ Build per-block MM metadata (block_mm_infos)
         ├─ KV router selects best worker
@@ -66,10 +66,10 @@ Frontend (Rust + llm-multimodal + KV router) → Backend Workers
 ```
 
 1. The Rust frontend computes an `mm_hash` per image: `xxh3_64` of the decoded bytes for `data:` URIs (and for `http(s)://` when `media_decoder` is enabled on the model), otherwise `xxh3_64` of the full URL string. Two callers will share an `mm_hash` only when they send byte-identical URLs.
-2. The image-placeholder token id is resolved by delegating to the `llm-multimodal` per-model `ModelProcessorSpec` (one spec per supported VLM family — Qwen3-VL, Qwen2.5-VL, Qwen2-VL, LLaVA-NeXT, LLaVA-1.5, Phi-3-vision, Llama-4, Kimi-K2.5). Each spec reads the appropriate `config.json` field for its model family (`image_token_id`, `image_token_index`, or `media_placeholder_token_id`) and falls back to probing the tokenizer's vocab when only the placeholder string is registered. Models the registry doesn't recognise fall back to text-prefix-only routing.
+2. The image-placeholder token id is resolved by delegating to a per-model `ModelProcessorSpec` (one spec per supported VLM family — Qwen3-VL, Qwen2.5-VL, Qwen2-VL, LLaVA-NeXT, LLaVA-1.5, Phi-3-vision, Llama-4, Kimi-K2.5). Each spec reads the appropriate `config.json` field for its model family (`image_token_id`, `image_token_index`, or `media_placeholder_token_id`) and falls back to probing the tokenizer's vocab when only the placeholder string is registered. Models the registry doesn't recognise fall back to text-prefix-only routing.
 
 > **Note:** Qwen3.5 / Qwen3.6 image token expansion is not yet supported in the Rust frontend for MM routing, so KV routing will only consider the text inputs + unexpanded image token placeholders. Support will come in a follow-up release.
-3. Per-image `(W, H)` is read from a 64KB `Range`-bounded header fetch (or from in-memory bytes for `data:` URIs); the `llm-multimodal` crate computes the per-image expanded token count.
+3. Per-image `(W, H)` is read from a 64KB `Range`-bounded header fetch (or from in-memory bytes for `data:` URIs); the image-processor registry computes the per-image expanded token count.
 4. The single placeholder token is expanded to N copies in `routing_token_ids` (a router-only view); the worker still sees one placeholder per image in `token_ids`.
 5. Per-block MM metadata (`block_mm_infos`) is built from the expanded view; the KV router evaluates overlap across workers including image-bearing blocks.
 6. The frontend forwards each image's `mm_hash` (16-hex-char prefix, padded) via `extra_args["mm_hashes"]`; the backend handler injects them as vLLM's `multi_modal_uuids`, so vLLM's own KV-cache key matches the hash the router used.
@@ -106,11 +106,11 @@ For TRT-LLM, a dedicated MM Router Worker sits between the frontend and backend 
 ### SGLang
 
 ```text
-Frontend (Rust + llm-multimodal + KV router) → SGLang Workers
+Frontend (Rust + KV router) → SGLang Workers
         │                                                       │
         ├─ Hash image (same xxh3_64 path as vLLM Rust)           │
         ├─ Resolve image-token id + (W, H) (same as vLLM Rust)   │
-        ├─ llm_multimodal::count_tokens(W, H) → expanded count N │
+        ├─ count_tokens(W, H) → expanded count N                 │
         ├─ Expand placeholder × N in routing_token_ids           │
         ├─ KV router selects best worker                         │
         ├─ Substitute pad_value per image in worker token_ids:   │
@@ -146,17 +146,11 @@ cd $DYNAMO_HOME
 bash examples/backends/vllm/launch/agg_multimodal_router.sh
 ```
 
-The Rust frontend uses the [`llm-multimodal`][llm-multimodal-crate] crate
-([source][llm-multimodal-src]) for per-image token-count and placeholder
-expansion. `llm-multimodal` provides a pure-Rust `calculate_num_tokens(W, H,
-PreProcessorConfig)` per VLM family (Qwen2/2.5/3-VL, LLaVA, Pixtral, …),
-golden-tested against `transformers`, so the router can match vLLM's
-expanded image-token count without invoking the HF image processor. The
-frontend then forwards each `mm_hash` to the worker as `multi_modal_uuids`
-so vLLM's KV events publish the same key the router computes.
-
-[llm-multimodal-crate]: https://crates.io/crates/llm-multimodal
-[llm-multimodal-src]: https://github.com/lightseekorg/smg
+The Rust frontend computes per-image token counts and expands placeholders
+in-process via the `llm-multimodal` crate, so the router can match vLLM's
+expanded image-token count without invoking the HF image processor. Each
+`mm_hash` is then forwarded to the worker as `multi_modal_uuids` so vLLM's
+KV events publish the same key the router computes.
 
 Key environment variables:
 
@@ -232,7 +226,7 @@ Key environment variables:
 
 Both prerequisites are enabled by default in the dynamo sglang image; the list below is only for users building dynamo from source:
 
-- Dynamo built with `--features lightseek-mm` (Rust frontend's image-token counter + the SGLang glue). The container build always passes this; the cargo feature is opt-in only for source builds.
+- Dynamo built with `--features mm-routing` (Rust frontend's image-token counter + the SGLang glue). The container build always passes this; the cargo feature is opt-in only for source builds.
 - SGLang with the `GenerateReqInput.mm_hashes` field — added by [sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300) and vendored into the dynamo sglang image via `container/deps/sglang/patches/<ver>/`.
 
   If you're running against your own sglang install (outside the dynamo image), apply it manually:
