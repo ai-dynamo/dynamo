@@ -165,15 +165,17 @@ spec:
 
 ## aiperf install
 
-We install aiperf from source pinned to a recent `main` SHA that
+The bench pod installs aiperf from a pinned PyPI release
+(`AIPERF_VERSION` env var in `perf.yaml`, default `0.9.0`). 0.8.0+
 includes [PR 824](https://github.com/ai-dynamo/aiperf/pull/824)
-(`feat(dataset): add session_id to single-turn for causal ordering`).
-Our sliding-window dataset writes one row per `(user, turn)` with
-`session_id=user_<N>`; PR 824 is what makes aiperf's `single_turn`
-mode honor that ordering so prefix-cache hits across turns are real.
+(`feat(dataset): add session_id to single-turn for causal ordering`),
+which is what makes aiperf's `single_turn` mode honor the
+`session_id=user_<N>` ordering our sliding-window dataset writes per
+`(user, turn)` row — without it the 8 turns of a user can interleave
+across requests and prefix-cache hits across turns disappear.
 
-The pin lives in the shared `perf.yaml` (`AIPERF_GIT_REF` env var).
-Bump when you want newer aiperf fixes.
+Bump `AIPERF_VERSION` in `perf.yaml` when you want newer aiperf
+fixes.
 
 ## Naming & ownership
 
