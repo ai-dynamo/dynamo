@@ -43,6 +43,7 @@ MOCK_TRANSCRIPT = "mock omni transcript"
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.integration,
+    pytest.mark.vllm,
     pytest.mark.gpu_0,
 ]
 

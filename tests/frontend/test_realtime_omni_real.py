@@ -41,6 +41,7 @@ ENDPOINT_PATH = "test_omni_real_ws.realtime.generate"
 pytestmark = [
     pytest.mark.gpu_1,
     pytest.mark.integration,
+    pytest.mark.vllm,
     pytest.mark.skipif(
         not OMNI_REALTIME_MODEL,
         reason="set DYN_TEST_OMNI_REALTIME_MODEL to a realtime-capable Omni model",
