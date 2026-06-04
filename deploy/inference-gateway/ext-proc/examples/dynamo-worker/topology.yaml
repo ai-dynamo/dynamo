@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# GIE topology pointing at GIE-packaged Dynamo vLLM workers (epp-dynamo-vllm).
+# Reuses the same EPP (epp-vanilla-epp Service -> epp-build pod); relaunch the
+# EPP with DYN_EPP_INFERENCE_POOL=epp-dynamo-pool so it discovers these pods.
+# Proves a vanilla-mode EPP routes to Dynamo workers exactly like vanilla vLLM.
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata: { name: epp-dynamo-pool, namespace: mkhadkevich-dev, labels: { owner: claude-epp } }
+spec:
+  selector:
+    matchLabels: { app: epp-dynamo-vllm }
+  targetPorts:
+  - { number: 8000 }
+  endpointPickerRef:
+    name: epp-vanilla-epp
+    port: { number: 9002 }
+    failureMode: FailOpen
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: epp-dynamo-route, namespace: mkhadkevich-dev, labels: { owner: claude-epp } }
+spec:
+  parentRefs:
+  - { name: inference-gateway, namespace: agentgateway-system }
+  hostnames:
+  - epp-dynamo.local
+  rules:
+  - backendRefs:
+    - { group: inference.networking.k8s.io, kind: InferencePool, name: epp-dynamo-pool }

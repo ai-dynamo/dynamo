@@ -1,0 +1,110 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# GIE-packaged Dynamo vLLM worker: a Dynamo worker pod that presents the
+# standard Gateway API Inference Extension (InferencePool) interface so any GAIE
+# Endpoint Picker can route to it like a stock `vllm serve` pod.
+#   - frontend container  -> per-pod OpenAI HTTP on :8000 (gateway target)
+#   - worker container    -> vLLM engine; emits vLLM-NATIVE KV events on :5557
+#                            (endpoint bound 0.0.0.0 so the EPP can SUB too)
+#   - kubernetes discovery (DynamoWorkerMetadata CRD) wires frontend<->worker
+# Distinct names (epp-dynamo-*) to avoid colliding with gms-bulwark work.
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: epp-dynamo-sa, namespace: mkhadkevich-dev, labels: { owner: claude-epp } }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: epp-dynamo-disc, namespace: mkhadkevich-dev, labels: { owner: claude-epp } }
+rules:
+- apiGroups: ["nvidia.com"]
+  resources: ["dynamoworkermetadatas", "dynamomodels"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: epp-dynamo-disc, namespace: mkhadkevich-dev, labels: { owner: claude-epp } }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: epp-dynamo-disc }
+subjects:
+- { kind: ServiceAccount, name: epp-dynamo-sa, namespace: mkhadkevich-dev }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: epp-dynamo-vllm
+  namespace: mkhadkevich-dev
+  labels: { app: epp-dynamo-vllm, owner: claude-epp }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: epp-dynamo-vllm } }
+  template:
+    metadata:
+      labels: { app: epp-dynamo-vllm, owner: claude-epp }
+    spec:
+      serviceAccountName: epp-dynamo-sa
+      tolerations:
+      - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+      containers:
+      # --- Dynamo vLLM worker (engine + native KV events) ---
+      - name: worker
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+        command: ["python3", "-m", "dynamo.vllm"]
+        args:
+        - --model=Qwen/Qwen3-0.6B
+        - --discovery-backend=file
+        - --request-plane=tcp
+        - --enable-prefix-caching
+        - --gpu-memory-utilization=0.45
+        - --max-model-len=8192
+        - --kv-events-config={"enable_kv_cache_events":true,"endpoint":"tcp://0.0.0.0:5557"}
+        env:
+        - { name: DYN_DISCOVERY_BACKEND, value: file }
+        - { name: DYN_FILE_KV, value: /shared/dynamo-kv }
+        - { name: DYN_NAMESPACE, value: epp-dynamo }
+        - { name: POD_NAME, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
+        - { name: POD_NAMESPACE, valueFrom: { fieldRef: { fieldPath: metadata.namespace } } }
+        - { name: POD_IP, valueFrom: { fieldRef: { fieldPath: status.podIP } } }
+        - { name: POD_UID, valueFrom: { fieldRef: { fieldPath: metadata.uid } } }
+        ports:
+        - { name: kv-events, containerPort: 5557 }
+        volumeMounts:
+        - { name: disc, mountPath: /shared }
+        resources:
+          limits: { nvidia.com/gpu: "1" }
+          requests: { nvidia.com/gpu: "1" }
+      # --- Dynamo frontend (per-pod OpenAI HTTP) ---
+      - name: frontend
+        image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.0
+        command: ["python3", "-m", "dynamo.frontend"]
+        # Gate the HTTP server on at least one registered worker so the
+        # readiness probe can't pass before the colocated worker registers.
+        args: ["--http-port=8000", "--discovery-backend=file", "--request-plane=tcp", "--router-min-initial-workers=1"]
+        env:
+        - { name: DYN_DISCOVERY_BACKEND, value: file }
+        - { name: DYN_FILE_KV, value: /shared/dynamo-kv }
+        - { name: DYN_NAMESPACE, value: epp-dynamo }
+        - { name: POD_NAME, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
+        - { name: POD_NAMESPACE, valueFrom: { fieldRef: { fieldPath: metadata.namespace } } }
+        - { name: POD_IP, valueFrom: { fieldRef: { fieldPath: status.podIP } } }
+        - { name: POD_UID, valueFrom: { fieldRef: { fieldPath: metadata.uid } } }
+        ports:
+        - { name: http, containerPort: 8000 }
+        volumeMounts:
+        - { name: disc, mountPath: /shared }
+        readinessProbe:
+          httpGet: { path: /health, port: 8000 }
+          initialDelaySeconds: 40
+          periodSeconds: 10
+          failureThreshold: 60
+      volumes:
+      - { name: disc, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: epp-dynamo-vllm
+  namespace: mkhadkevich-dev
+  labels: { app: epp-dynamo-vllm, owner: claude-epp }
+spec:
+  selector: { app: epp-dynamo-vllm }
+  ports:
+  - { name: http, port: 8000, targetPort: 8000 }

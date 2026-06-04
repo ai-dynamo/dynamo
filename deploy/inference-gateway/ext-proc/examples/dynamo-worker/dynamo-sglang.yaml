@@ -1,0 +1,122 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# GIE-packaged Dynamo SGLang worker — proves a vanilla EPP routes to a SGLang
+# Dynamo worker (incl. precise KV) exactly like vLLM. SGLang's own
+# sglang.srt.disaggregation.kv_events.ZmqEventPublisher emits vLLM-format KV
+# events; bind it to 0.0.0.0:5557 so the EPP can subscribe (NO translation shim).
+# Reuses ServiceAccount epp-dynamo-sa + Role epp-dynamo-disc (already applied).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: epp-dynamo-sglang
+  namespace: mkhadkevich-dev
+  labels: { app: epp-dynamo-sglang, owner: claude-epp }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: epp-dynamo-sglang } }
+  template:
+    metadata:
+      labels: { app: epp-dynamo-sglang, owner: claude-epp }
+    spec:
+      serviceAccountName: epp-dynamo-sa
+      tolerations:
+      - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+      containers:
+      # --- Dynamo SGLang worker (engine + vLLM-format KV events) ---
+      - name: worker
+        image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0
+        command: ["python3", "-m", "dynamo.sglang"]
+        args:
+        - --model-path
+        - Qwen/Qwen3-0.6B
+        - --served-model-name
+        - Qwen/Qwen3-0.6B
+        - --page-size
+        - "16"
+        - --tp
+        - "1"
+        - --trust-remote-code
+        - --skip-tokenizer-init
+        - --discovery-backend
+        - file
+        - --request-plane
+        - tcp
+        - --mem-fraction-static
+        - "0.45"
+        - --kv-events-config
+        - '{"publisher":"zmq","endpoint":"tcp://*:5557"}'
+        env:
+        - { name: DYN_FILE_KV, value: /shared/dynamo-kv }
+        - { name: DYN_NAMESPACE, value: epp-dynamo-sg }
+        - { name: POD_NAME, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
+        - { name: POD_NAMESPACE, valueFrom: { fieldRef: { fieldPath: metadata.namespace } } }
+        - { name: POD_IP, valueFrom: { fieldRef: { fieldPath: status.podIP } } }
+        - { name: POD_UID, valueFrom: { fieldRef: { fieldPath: metadata.uid } } }
+        ports:
+        - { name: kv-events, containerPort: 5557 }
+        volumeMounts:
+        - { name: disc, mountPath: /shared }
+        resources:
+          limits: { nvidia.com/gpu: "1" }
+          requests: { nvidia.com/gpu: "1" }
+      # --- Dynamo frontend (per-pod OpenAI HTTP; tokenizes for the worker) ---
+      - name: frontend
+        image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.0
+        command: ["python3", "-m", "dynamo.frontend"]
+        # Gate the HTTP server on at least one registered worker so the
+        # readiness probe can't pass before the colocated worker registers.
+        args: ["--http-port=8000", "--discovery-backend=file", "--request-plane=tcp", "--router-min-initial-workers=1"]
+        env:
+        - { name: DYN_FILE_KV, value: /shared/dynamo-kv }
+        - { name: DYN_NAMESPACE, value: epp-dynamo-sg }
+        - { name: POD_NAME, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
+        - { name: POD_NAMESPACE, valueFrom: { fieldRef: { fieldPath: metadata.namespace } } }
+        - { name: POD_IP, valueFrom: { fieldRef: { fieldPath: status.podIP } } }
+        - { name: POD_UID, valueFrom: { fieldRef: { fieldPath: metadata.uid } } }
+        ports:
+        - { name: http, containerPort: 8000 }
+        volumeMounts:
+        - { name: disc, mountPath: /shared }
+        readinessProbe:
+          httpGet: { path: /health, port: 8000 }
+          initialDelaySeconds: 50
+          periodSeconds: 10
+          failureThreshold: 90
+      volumes:
+      - { name: disc, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: epp-dynamo-sglang
+  namespace: mkhadkevich-dev
+  labels: { app: epp-dynamo-sglang, owner: claude-epp }
+spec:
+  selector: { app: epp-dynamo-sglang }
+  ports:
+  - { name: http, port: 8000, targetPort: 8000 }
+---
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata: { name: epp-dynamo-sglang-pool, namespace: mkhadkevich-dev, labels: { owner: claude-epp } }
+spec:
+  selector:
+    matchLabels: { app: epp-dynamo-sglang }
+  targetPorts:
+  - { number: 8000 }
+  endpointPickerRef:
+    name: epp-vanilla-epp
+    port: { number: 9002 }
+    failureMode: FailOpen
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: epp-dynamo-sglang-route, namespace: mkhadkevich-dev, labels: { owner: claude-epp } }
+spec:
+  parentRefs:
+  - { name: inference-gateway, namespace: agentgateway-system }
+  hostnames:
+  - epp-dynamo-sglang.local
+  rules:
+  - backendRefs:
+    - { group: inference.networking.k8s.io, kind: InferencePool, name: epp-dynamo-sglang-pool }
