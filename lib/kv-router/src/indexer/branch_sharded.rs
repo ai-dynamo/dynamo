@@ -27,13 +27,13 @@ use async_trait::async_trait;
 use dashmap::{DashMap, DashSet};
 use rustc_hash::{FxBuildHasher, FxHashSet};
 
-#[cfg(feature = "bench")]
-use super::ShardedIndexerMetrics;
 use super::shard_handle::AsyncShardHandle;
 use super::{
     AnchorCapableSyncIndexer, AnchorRef, AnchorTask, KvIndexerInterface, KvRouterError,
     ShardSizeSnapshot, ThreadPoolIndexer,
 };
+#[cfg(feature = "bench")]
+use super::{ShardedIndexerMetrics, ShardedIndexerMetricsSnapshot};
 use crate::protocols::*;
 
 type WorkerRoutingLookup = DashMap<ExternalSequenceBlockHash, BlockRoutingEntry, FxBuildHasher>;
@@ -471,6 +471,36 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
             (worker.worker_id == worker_id).then_some(worker)
         }));
         workers
+    }
+
+    #[cfg(feature = "bench")]
+    pub fn metrics_snapshot(&self) -> ShardedIndexerMetricsSnapshot {
+        ShardedIndexerMetricsSnapshot {
+            find_match_dispatches: self
+                .metrics
+                .counters
+                .find_match_dispatches
+                .load(Ordering::Relaxed),
+            find_match_early_returns: self
+                .metrics
+                .counters
+                .find_match_early_returns
+                .load(Ordering::Relaxed),
+            anchor_installs: self
+                .metrics
+                .counters
+                .anchor_installs
+                .load(Ordering::Relaxed),
+            anchor_reuses: self.metrics.counters.anchor_reuses.load(Ordering::Relaxed),
+            remove_broadcasts: self
+                .metrics
+                .counters
+                .remove_broadcasts
+                .load(Ordering::Relaxed),
+            timing_calls: self.metrics.timing.calls.load(Ordering::Relaxed),
+            routing_ns: self.metrics.timing.routing_ns.load(Ordering::Relaxed),
+            shard_ns: self.metrics.timing.shard_ns.load(Ordering::Relaxed),
+        }
     }
 
     fn rewritten_store_event(

@@ -44,6 +44,11 @@ name = "active_sequences_bench"
 path = "kv_router/active_sequences_bench.rs"
 harness = false
 
+[[bench]]
+name = "anchor_heavy_bench"
+path = "kv_router/anchor_heavy_bench.rs"
+harness = false
+
 [dependencies]
 anyhow = { workspace = true }
 chrono = { workspace = true }

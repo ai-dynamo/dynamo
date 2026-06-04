@@ -100,6 +100,21 @@ cargo bench --package dynamo-bench --bench mooncake_bench -- \
   branch-sharded-crtc --num-shards 2 --num-event-workers-per-shard 4 --prefix-depth 4
 ```
 
+### Anchor-heavy Stored-event steady state
+
+This synthetic benchmark isolates the BSI anchor-dedup path. It warms stable workers with one boundary-crossing `Stored` event each, then repeatedly stores new suffix continuations under the same already-installed anchors. There are no `Cleared` or `remove_worker` operations, so the output exposes `ensure_worker_anchor` reuse cost directly via Stored-event throughput, p99, and anchor install/reuse counts.
+
+```bash
+cargo bench --package dynamo-bench --bench anchor_heavy_bench -- \
+  --workers 1024 \
+  --events 100000 \
+  --submit-tasks 4 \
+  --num-shards 2 \
+  --num-event-workers-per-shard 4 \
+  --prefix-depth 2 \
+  --suffix-blocks 4
+```
+
 ### Peak throughput sweep
 
 **CRTC baseline — sweep:**

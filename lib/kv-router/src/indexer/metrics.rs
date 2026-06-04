@@ -123,6 +123,19 @@ impl ShardedIndexerMetrics {
     }
 }
 
+#[cfg(feature = "bench")]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ShardedIndexerMetricsSnapshot {
+    pub find_match_dispatches: u64,
+    pub find_match_early_returns: u64,
+    pub anchor_installs: u64,
+    pub anchor_reuses: u64,
+    pub remove_broadcasts: u64,
+    pub timing_calls: u64,
+    pub routing_ns: u64,
+    pub shard_ns: u64,
+}
+
 /// Metrics for the KV Indexer.
 #[derive(Clone)]
 #[cfg_attr(not(feature = "metrics"), derive(Default))]
