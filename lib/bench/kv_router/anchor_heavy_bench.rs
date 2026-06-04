@@ -14,6 +14,7 @@ use dynamo_kv_router::{
     BranchShardedIndexer, ConcurrentRadixTreeCompressed, LocalBlockHash, ThreadPoolIndexer,
 };
 use tokio::sync::Barrier;
+use tokio_util::sync::CancellationToken;
 
 type Bsi = BranchShardedIndexer<ThreadPoolIndexer<ConcurrentRadixTreeCompressed>>;
 
@@ -187,16 +188,19 @@ async fn main() -> anyhow::Result<()> {
     }
     indexer.flush().await;
 
-    let barrier = Arc::new(Barrier::new(args.submit_tasks + 1));
+    let ready_barrier = Arc::new(Barrier::new(args.submit_tasks + 1));
+    let start_signal = CancellationToken::new();
     let mut tasks = Vec::with_capacity(args.submit_tasks);
     for task_idx in 0..args.submit_tasks {
         let args = args.clone();
         let indexer = Arc::clone(&indexer);
-        let barrier = Arc::clone(&barrier);
+        let ready_barrier = Arc::clone(&ready_barrier);
+        let start_signal = start_signal.clone();
         let range = task_range(args.events, task_idx, args.submit_tasks);
         tasks.push(tokio::spawn(async move {
             let mut latencies_ns = Vec::with_capacity(range.len());
-            barrier.wait().await;
+            ready_barrier.wait().await;
+            start_signal.cancelled().await;
             for event_idx in range {
                 let worker_id = (event_idx % args.workers) as u64;
                 let event_id = args.workers as u64 + event_idx as u64;
@@ -215,8 +219,9 @@ async fn main() -> anyhow::Result<()> {
         }));
     }
 
-    barrier.wait().await;
+    ready_barrier.wait().await;
     let started_at = minstant::Instant::now();
+    start_signal.cancel();
 
     let mut latencies_ns = Vec::with_capacity(args.events);
     for task in tasks {
