@@ -223,7 +223,9 @@ class ImageLoader:
             except Exception as e:
                 if "Unsupported image format" in str(e):
                     logger.error(f"Unsupported image format decoding: '{image_url}'")
-                    raise HttpStatusError(415, "Unsupported Media Type", image_url) from e
+                    raise HttpStatusError(
+                        415, "Unsupported Media Type", image_url
+                    ) from e
                 logger.error(f"{type(e).__name__} decoding image: '{image_url}': {e}")
                 raise ValueError(f"Failed to decoding image: '{image_url}': {e}") from e
 
@@ -248,7 +250,10 @@ class ImageLoader:
             List of loaded image data
 
         Raises:
-            Exception: If any image fails to load
+            HttpStatusError: If any image fails with an HTTP status error
+                (e.g. 415 Unsupported Media Type); the status is preserved so the
+                frontend returns the correct client-error code instead of 500.
+            Exception: If any image fails to load for any other reason
             ValueError: If enable_frontend_decoding=True but nixl_connector is None
         """
         image_futures = []
@@ -276,6 +281,7 @@ class ImageLoader:
         results = await asyncio.gather(*image_futures, return_exceptions=True)
         loaded_images = []
         collective_exceptions = ""
+        status_error: HttpStatusError | None = None
         for media_item, result in zip(image_mm_items, results):
             if isinstance(result, Exception):
                 source = media_item.get(URL_VARIANT_KEY, "decoded")
@@ -283,8 +289,17 @@ class ImageLoader:
                 collective_exceptions += (
                     f"Failed to load image from {source[:80]}...: {result}\n"
                 )
+                # Preserve HTTP status semantics (e.g. 415 Unsupported Media Type).
+                # Folding an HttpStatusError into a generic Exception below would
+                # strip the status and force the frontend back to a 500. Surface
+                # the first one so single-item batches keep their client-error code.
+                if status_error is None and isinstance(result, HttpStatusError):
+                    status_error = result
                 continue
             loaded_images.append(result)
+
+        if status_error is not None:
+            raise status_error
 
         if collective_exceptions:
             raise Exception(collective_exceptions)
