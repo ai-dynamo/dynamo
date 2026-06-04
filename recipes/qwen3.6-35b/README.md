@@ -1,8 +1,9 @@
-# Qwen3.6-35B-A3B-FP8 — 3-way `vllm serve` vs Dynamo benchmark
+# Qwen3.6-35B-A3B-FP8 — Dynamo deployment recipe
 
-K8s recipe for benchmarking
+K8s recipe for serving
 [`Qwen/Qwen3.6-35B-A3B-FP8`](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8)
-across three configs on the same single-GPU hardware target:
+on a single GPU (H100 or GB200). It ships three deploy targets that share one
+hardware target:
 
 | Config         | Stack         | Multimodal | Frontend-decoding | Embedding cache |
 |----------------|---------------|------------|-------------------|-----------------|
@@ -10,8 +11,10 @@ across three configs on the same single-GPU hardware target:
 | `dynamo-fd`    | Dynamo + vLLM | on         | on                | off             |
 | `dynamo-fd-ec` | Dynamo + vLLM | on         | on                | 8 GiB           |
 
-All three configs share one hardware target (H100 or GB200) chosen at
-deploy time via `--hw {h100,gb200}`. See [Hardware targets](#hardware-targets) below.
+If you just want a running deployment, follow **[Deploy](#deploy)** below —
+that's the standalone install path. To reproduce the 3-way performance
+comparison across the configs, see
+**[`benchmark/README.md`](benchmark/README.md)**.
 
 ## Pre-requisites
 
@@ -35,64 +38,92 @@ deploy time via `--hw {h100,gb200}`. See [Hardware targets](#hardware-targets) b
      --from-literal=HF_TOKEN="$HF_TOKEN"
    ```
 
-## Quick start
+## Deploy
+
+This is the standalone install path — no benchmark tooling involved. Pick a
+hardware target and a config, download the weights once, then apply the deploy
+manifest.
 
 ```bash
 export NAMESPACE=<your-namespace>
-export HW=gb200   # or h100
+export HW=gb200            # or h100
 
-# Run all three configs sequentially (prep + deploy + bench + retrieve + clean
-# per config). Artifacts land under
-# ~/workspace/dynamo-tmp/logs/<MM-DD>/qwen36-fp8-${HW}/{vllm-serve,dynamo-fd,dynamo-fd-ec}/.
-./run-all-benchmarks.sh -n ${NAMESPACE} --hw ${HW}
+# Load image tag + node pin + tolerations for the chosen hardware.
+set -a; . hw/${HW}.env; set +a
+
+# 1. Download the model into shared-model-cache (one-time, config-agnostic).
+kubectl -n "$NAMESPACE" apply -f model-cache/model-download.yaml
+kubectl -n "$NAMESPACE" wait --for=condition=Complete \
+  job/qwen36-model-download --timeout=3600s
+
+# 2. Deploy one config. envsubst is limited to the hardware vars so the
+#    embedded ${MODEL_NAME} etc. stay literal.
+envsubst '$VLLM_IMAGE $HW_NODE_SELECTOR $HW_TOLERATIONS' \
+  < deploy/dynamo-fd.yaml | kubectl -n "$NAMESPACE" apply -f -
 ```
 
-Each config's `profile_export_aiperf.json` is retrieved into the matching
-sub-directory; throughput / TTFT / ITL numbers can be read directly from
-that file.
+Per-config wait + endpoint:
 
-Or step-by-step for a single config:
+| Config         | Kind                  | Wait command |
+|----------------|-----------------------|--------------|
+| `vllm-serve`   | Deployment + Service  | `kubectl -n $NAMESPACE rollout status deploy/qwen36-vllm-serve --timeout=1800s` |
+| `dynamo-fd`    | DynamoGraphDeployment | `kubectl -n $NAMESPACE wait --for=condition=Ready pod -l nvidia.com/dynamo-graph-deployment-name=qwen36-dynamo-fd --timeout=1500s` |
+| `dynamo-fd-ec` | DynamoGraphDeployment | `kubectl -n $NAMESPACE wait --for=condition=Ready pod -l nvidia.com/dynamo-graph-deployment-name=qwen36-dynamo-fd-ec --timeout=1500s` |
+
+The frontend listens on port 8000. For the DGD configs the dynamo operator
+auto-creates a `<deploy-name>-frontend` Service (e.g.
+`qwen36-dynamo-fd-frontend`); `vllm-serve` exposes the `qwen36-vllm-serve`
+Service directly. Verify it serves:
 
 ```bash
-./run-benchmark.sh -n ${NAMESPACE} --hw ${HW} --config vllm-serve
-./run-benchmark.sh -n ${NAMESPACE} --hw ${HW} --config dynamo-fd
-./run-benchmark.sh -n ${NAMESPACE} --hw ${HW} --config dynamo-fd-ec
+# DGD example — swap the service name per the table above.
+kubectl -n "$NAMESPACE" port-forward svc/qwen36-dynamo-fd-frontend 8000:8000 &
+curl -s http://localhost:8000/v1/models | jq '.data[].id'
+# → "Qwen/Qwen3.6-35B-A3B-FP8"
 ```
 
-`run-benchmark.sh` accepts `--step {pvc|download|dataset|deploy|bench|retrieve|clean}` for granular control. `pvc`, `download`, and `dataset` are config-agnostic (any `--config` works to run them once).
+### Tear down
+
+```bash
+# DGD configs:
+kubectl -n "$NAMESPACE" delete dynamographdeployment qwen36-dynamo-fd
+# vllm-serve:
+kubectl -n "$NAMESPACE" delete deploy,service qwen36-vllm-serve
+```
+
+The PVC is intentionally left in place so the model isn't re-downloaded. To
+wipe everything: `kubectl -n $NAMESPACE delete pvc shared-model-cache`.
 
 ## Directory layout
 
 ```text
 qwen3.6-35b/
-├── README.md
-├── run-benchmark.sh            # Unified driver — branches on --config/--hw
-├── run-all-benchmarks.sh       # Sequential 3-config orchestrator
-├── perf.yaml                   # Single shared aiperf bench Pod template
-├── data-gen-job.yaml           # Sliding-window jsonl generator Job
-├── hw/                         # Per-cluster user state — edit hostname here
+├── README.md                   # this file — standalone deploy guide
+├── hw/                         # per-cluster user state — edit hostname here
 │   ├── h100.env
 │   └── gb200.env
-├── model-cache/                # Model-caching subsystem
+├── model-cache/                # model-caching subsystem
 │   └── model-download.yaml
-└── deploy/                     # 3 deploy targets — grouped because >1 sibling
-    ├── vllm-serve.yaml         # Plain Deployment + Service (baseline)
-    ├── dynamo-fd.yaml          # DynamoGraphDeployment, frontend-decoding ON
-    └── dynamo-fd-ec.yaml       # DynamoGraphDeployment, FD + embedding cache
+├── deploy/                     # 3 deploy targets
+│   ├── vllm-serve.yaml         # Plain Deployment + Service (baseline)
+│   ├── dynamo-fd.yaml          # DynamoGraphDeployment, frontend-decoding ON
+│   └── dynamo-fd-ec.yaml       # DynamoGraphDeployment, FD + embedding cache
+└── benchmark/                  # perf comparison harness (built on the deploys)
+    ├── README.md
+    ├── data-gen-job.yaml       # sliding-window jsonl generator Job
+    ├── perf.yaml               # shared aiperf bench Pod template
+    ├── run-benchmark.sh        # single-config driver
+    └── run-all-benchmarks.sh   # sequential 3-config orchestrator
 ```
 
-Layout rule: **singletons flatten to root** (`perf.yaml`, `data-gen-job.yaml`); **dirs hold ≥2 files** (`hw/`, `deploy/`); **`model-cache/` is the exception** — a role bucket kept for future model-caching siblings.
-
-The three deploy targets share one `perf.yaml` because the only deltas
-across them (pod name, frontend service, run-label) are exported as
-`${BENCH_POD}` / `${BENCH_FRONTEND}` / `${BENCH_RUN_LABEL}` by
-`run-benchmark.sh` and resolved via `envsubst` at apply time.
+`hw/`, `model-cache/`, and `deploy/` are the deployment surface and are shared
+by the benchmark harness. Everything benchmark-specific lives under
+`benchmark/`.
 
 ## Hardware targets
 
-`hw/h100.env` and `hw/gb200.env` are sibling to the three config
-directories and shared across all three. Each file exports three vars
-the YAML templates substitute via `envsubst`:
+`hw/h100.env` and `hw/gb200.env` are shared across all three configs. Each file
+exports three vars the YAML templates substitute via `envsubst`:
 
 - `VLLM_IMAGE` — `nvcr.io/nvidia/ai-dynamo/vllm-runtime:<tag>` (multi-arch
   manifest, same tag works on amd64 / arm64).
@@ -125,7 +156,7 @@ RWX storage class on your cluster. It's mounted at three locations:
 |--------------|---------|------------------|
 | `/home/dynamo/.cache/huggingface` | — (root) | Shared HF Hub cache (anything else in the namespace re-uses it) |
 | `/home/dynamo/.cache/vllm`        | `qwen36-bench/vllm-cache` | vllm cudagraph compilation cache |
-| `/perf-cache`                     | `qwen36-bench/perf-cache` | Generated dataset + aiperf artifacts |
+| `/perf-cache`                     | `qwen36-bench/perf-cache` | Generated dataset + aiperf artifacts (benchmark only) |
 
 The per-recipe subPath prefix `qwen36-bench/` keeps this recipe's
 private state from colliding with future recipes (e.g.
@@ -157,19 +188,6 @@ RWO EBS volumes get pinned to whichever AZ the first-consumer pod
 schedules into, leaving the GPU pod unschedulable if your GPU
 nodes live in a different AZ.
 
-## aiperf install
-
-We install aiperf from source pinned to a recent `main` SHA that
-includes [PR 824](https://github.com/ai-dynamo/aiperf/pull/824)
-(`feat(dataset): add session_id to single-turn for causal ordering`).
-Our sliding-window dataset writes one row per `(user, turn)` with
-`session_id=user_<N>`; PR 824 is what makes aiperf's `single_turn`
-mode honor that ordering so prefix-cache hits across turns are real.
-
-The pin lives in the shared `perf.yaml` (`AIPERF_GIT_REF` env var) at
-the recipe root, applied identically across all three configs. Bump
-when you want newer aiperf fixes.
-
 ## Naming & ownership
 
 All resources carry a `qwen36-` prefix (per-model) and these labels:
@@ -189,13 +207,10 @@ kubectl -n "$NAMESPACE" get pvc,deploy,job,pod \
 
 ## Notes
 
-- Dataset is sliding-window with `window=5`, `turns=8`, `users=30`,
-  `image_size=2400x1080`, `user_text_tokens=8000`. Yields 240 requests
-  (`users × turns`) over 12 unique images per user
-  (`window + turns - 1`). Base64-inlined.
-- Each jsonl row carries `session_id=user_<N>`. With aiperf PR 824, the
-  `single_turn` dataset type honors session ordering so the 8 turns of
-  any one user are sent in causal order, letting prefix-cache hits land.
-- The vllm command in `deploy.yaml` uses `--mm-processor-cache-gb 30`
-  and `--max-model-len 32768` to handle the 5-image multimodal context
-  (mirrors the 397B sweep yaml's settings adapted for 1 GPU).
+- The vllm command in each `deploy/*.yaml` uses `--mm-processor-cache-gb 30`
+  and `--max-model-len 32768` to handle the multimodal context on 1 GPU.
+- `dynamo-fd` and `dynamo-fd-ec` share the same processor cache size (30 GiB)
+  so the only flag that differs between them is the embedding-cache capacity
+  — keeping the comparison fair.
+- All YAML uses `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0`, pinned in
+  `hw/*.env` (`VLLM_IMAGE`) and `benchmark/data-gen-job.yaml`.
