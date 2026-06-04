@@ -34,10 +34,6 @@ RUN apt-get update && \
         libsqlite3-dev && \
     rm -rf /var/lib/apt/lists/*
 
-# The base image ships older Level Zero (1.21.9) which may not work with
-# newer host drivers. Pin to known-good versions matching compute-runtime
-# 25.48.36300.8 — verified on Max 1550 (PVC) and newer cards.
-# wget retry flags guard against transient GitHub release CDN flakes.
 RUN mkdir -p /tmp/neo && cd /tmp/neo && \
     WGET="wget -q --tries=5 --waitretry=5 --retry-connrefused --retry-on-http-error=429,500,502,503,504" && \
     $WGET https://github.com/intel/intel-graphics-compiler/releases/download/v2.24.8/intel-igc-core-2_2.24.8+20344_amd64.deb && \
