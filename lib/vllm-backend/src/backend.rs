@@ -100,6 +100,7 @@ pub struct VllmBackend {
 struct Inner {
     engine_handle: ManagedEngineHandle,
     llm: Llm,
+    max_model_len: u32,
 }
 
 impl VllmBackend {
@@ -248,7 +249,9 @@ impl LLMEngine for VllmBackend {
             }
         };
 
-        let context_length = client.max_model_len();
+        let context_length = client
+            .max_model_len()
+            .ok_or_else(|| backend_unknown("vLLM engine-core did not report max_model_len"))?;
         let total_kv_blocks = match client.total_num_gpu_blocks() {
             0 => None,
             blocks => Some(blocks),
@@ -257,7 +260,11 @@ impl LLMEngine for VllmBackend {
             .with_request_id_randomization(false)
             .with_log_stats(true);
 
-        *inner = Some(Inner { engine_handle, llm });
+        *inner = Some(Inner {
+            engine_handle,
+            llm,
+            max_model_len: context_length,
+        });
 
         info!(
             model = %self.model,
@@ -301,9 +308,12 @@ impl LLMEngine for VllmBackend {
             let inner = inner
                 .as_ref()
                 .ok_or_else(|| engine_shutdown("vLLM backend has not been started"))?;
-            let max_model_len = inner.llm.engine_core_client().max_model_len();
-            let generate_request =
-                lower_request(request_id, request, max_model_len, self.disaggregation_mode)?;
+            let generate_request = lower_request(
+                request_id,
+                request,
+                inner.max_model_len,
+                self.disaggregation_mode,
+            )?;
 
             inner
                 .llm
@@ -377,7 +387,10 @@ impl LLMEngine for VllmBackend {
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
-        let Some(Inner { engine_handle, llm }) = self.inner.write().await.take() else {
+        let Some(Inner {
+            engine_handle, llm, ..
+        }) = self.inner.write().await.take()
+        else {
             return Ok(());
         };
         info!(model = %self.model, "shutting down vLLM backend");

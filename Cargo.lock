@@ -7780,7 +7780,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -10308,7 +10308,7 @@ checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
 [[package]]
 name = "vllm-engine-core-client"
 version = "0.1.0"
-source = "git+https://github.com/vllm-project/vllm.git?rev=94d3f4d205fdfe44212a7958c6af647ecba15556#94d3f4d205fdfe44212a7958c6af647ecba15556"
+source = "git+https://github.com/vllm-project/vllm.git?tag=v0.22.0#0b3ba88f165976e77ca5e6a7a3f5bba4562b80af"
 dependencies = [
  "arc-swap",
  "bytemuck",
@@ -10342,7 +10342,7 @@ dependencies = [
 [[package]]
 name = "vllm-llm"
 version = "0.1.0"
-source = "git+https://github.com/vllm-project/vllm.git?rev=94d3f4d205fdfe44212a7958c6af647ecba15556#94d3f4d205fdfe44212a7958c6af647ecba15556"
+source = "git+https://github.com/vllm-project/vllm.git?tag=v0.22.0#0b3ba88f165976e77ca5e6a7a3f5bba4562b80af"
 dependencies = [
  "easy-ext",
  "enum-as-inner",
@@ -10361,7 +10361,7 @@ dependencies = [
 [[package]]
 name = "vllm-managed-engine"
 version = "0.1.0"
-source = "git+https://github.com/vllm-project/vllm.git?rev=94d3f4d205fdfe44212a7958c6af647ecba15556#94d3f4d205fdfe44212a7958c6af647ecba15556"
+source = "git+https://github.com/vllm-project/vllm.git?tag=v0.22.0#0b3ba88f165976e77ca5e6a7a3f5bba4562b80af"
 dependencies = [
  "anyhow",
  "clap 4.6.1",
@@ -10373,7 +10373,7 @@ dependencies = [
 [[package]]
 name = "vllm-metrics"
 version = "0.1.0"
-source = "git+https://github.com/vllm-project/vllm.git?rev=94d3f4d205fdfe44212a7958c6af647ecba15556#94d3f4d205fdfe44212a7958c6af647ecba15556"
+source = "git+https://github.com/vllm-project/vllm.git?tag=v0.22.0#0b3ba88f165976e77ca5e6a7a3f5bba4562b80af"
 dependencies = [
  "prometheus-client",
 ]
