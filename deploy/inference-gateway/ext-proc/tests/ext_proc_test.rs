@@ -9,6 +9,7 @@
 //!
 //! - `x-gateway-destination-endpoint` header + `envoy.lb` dynamic_metadata
 //! - All routing headers (worker IDs, dp ranks, mode) appear in `set_headers`
+//! - Client-spoofable gateway-control headers appear in `remove_headers`
 //! - `nvext.token_data` is injected into the forwarded request body
 //!
 //! This does NOT exercise the disagg vs aggregated branching logic in
@@ -223,6 +224,31 @@ async fn test_pick_result_translates_to_ext_proc_mutations() {
         set_headers.get("x-prefill-dp-rank"),
         Some(&"0".to_string()),
         "prefill dp_rank"
+    );
+
+    // remove_headers must strip client-spoofable gateway-control headers so a
+    // client can't smuggle routing / model-rewrite hints to the backend, while
+    // NOT removing the destination endpoint the EPP sets authoritatively.
+    let remove_headers: std::collections::HashSet<&str> = header_mutation
+        .remove_headers
+        .iter()
+        .map(|h| h.as_str())
+        .collect();
+    for stripped in [
+        "x-gateway-inference-fairness-id",
+        "x-gateway-inference-objective",
+        "x-gateway-model-name-rewrite",
+        "x-gateway-destination-endpoint-subset",
+        "x-gateway-destination-endpoint-served",
+    ] {
+        assert!(
+            remove_headers.contains(stripped),
+            "system-owned header {stripped} must be in remove_headers"
+        );
+    }
+    assert!(
+        !remove_headers.contains("x-gateway-destination-endpoint"),
+        "EPP-owned destination endpoint must not be in remove_headers (it is set, not stripped)"
     );
 
     // Check dynamic_metadata has envoy.lb with the endpoint
