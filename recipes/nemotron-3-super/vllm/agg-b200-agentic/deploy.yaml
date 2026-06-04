@@ -1,20 +1,32 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Aggregated FP8 deployment of NVIDIA-Nemotron-3-Super-120B-A12B-FP8 on
-# H200x4 (TP=4) with Expert Parallel + DeepEP high-throughput all-to-all.
-# Differs from the chat variant (nemotron_3_super_agg_h200_chat.yaml),
-# which uses the FlashInfer NVLink one-sided all-to-all backend; see that
-# file for the rationale on dropped Blackwell-specific NCCL env.
+# Aggregated NVFP4 deployment of NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 on
+# B200x4 (TP=4) tuned for the agentic-coding workload: DeepEP low-latency
+# all-to-all and FP8 KV cache (fp8_e4m3) to minimise ITL/TTFT spikes
+# during short-burst tool/code edits.
+#
+# Cluster requirements: see ../agg-b200-chat/deploy.yaml.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: nemotron-3-super-h200-agentic-config
+  name: nemotron-3-super-b200-agentic-config
   labels:
-    app.kubernetes.io/name: nemotron-3-super-h200-agentic
+    app.kubernetes.io/name: nemotron-3-super-b200-agentic
     app.kubernetes.io/part-of: dynamo
 data:
+  # Stripped compilation passes for the spec-dec path (no inductor graph
+  # partitioning, no fuse passes — they don't compose with the MTP draft
+  # model's compile graph yet). This is what worker env COMPILATION_CONFIG
+  # points at by default.
   compilation-config: |-
+    {
+      "max_cudagraph_capture_size": 512
+    }
+  # Fused compilation passes — for non-spec-dec runs only. Point
+  # COMPILATION_CONFIG at this key (configMapKeyRef.key) when running
+  # without --speculative-config.
+  compilation-config-fused: |-
     {
       "use_inductor_graph_partition": true,
       "pass_config": {
@@ -23,19 +35,23 @@ data:
       },
       "max_cudagraph_capture_size": 512
     }
+  # MTP speculative decoding. moe_backend=triton on B200 because the
+  # default FlashInfer-TRTLLM MoE path isn't supported in the spec-dec
+  # draft model loop yet.
   speculative-config: |-
     {
       "method": "mtp",
-      "num_speculative_tokens": 3
+      "num_speculative_tokens": 3,
+      "moe_backend": "triton"
     }
-  # Benchmarking-only: synthetic rejection sampling with a fixed AL
-  # (matches the speculative-config-synthetic pattern in Alexandre's k26
-  # recipes). Switch SPECULATIVE_CONFIG env to this key to bench MTP
-  # at a known acceptance length without running the actual draft head.
+  # Benchmarking-only: synthetic rejection sampling with a fixed AL.
+  # Switch SPECULATIVE_CONFIG env to this key to bench MTP at a known
+  # acceptance length without running the actual draft head.
   speculative-config-synthetic: |-
     {
       "method": "mtp",
       "num_speculative_tokens": 3,
+      "moe_backend": "triton",
       "rejection_sample_method": "synthetic",
       "synthetic_acceptance_length": 2.82
     }
@@ -43,9 +59,9 @@ data:
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: nemotron-3-super-h200-agentic
+  name: nemotron-3-super-b200-agentic
   labels:
-    app.kubernetes.io/name: nemotron-3-super-h200-agentic
+    app.kubernetes.io/name: nemotron-3-super-b200-agentic
     app.kubernetes.io/part-of: dynamo
 spec:
   backendFramework: vllm
@@ -93,7 +109,7 @@ spec:
                       - key: nvidia.com/gpu.product
                         operator: In
                         values:
-                          - NVIDIA-H200
+                          - NVIDIA-B200
           tolerations:
             - key: nvidia.com/gpu
               operator: Equal
@@ -116,22 +132,23 @@ spec:
                 - dynamo.vllm
               args:
                 - --model
-                - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8
+                - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
                 - --served-model-name
-                - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8
+                - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
                 - --trust-remote-code
                 - --tensor-parallel-size
                 - "4"
                 - --enable-expert-parallel
+                - --moe-backend
+                - flashinfer_trtllm
                 - --enable-flashinfer-autotune
                 - --enable-prefix-caching
                 - --enable-chunked-prefill
                 - --max-model-len
                 - "131072"
-                - --max-num-batched-tokens
-                - "16384"
+                - --max-num-batched-tokens=$(MAX_NUM_BATCHED_TOKENS)
                 - --all2all-backend
-                - deepep_high_throughput
+                - deepep_low_latency
                 - --kv-cache-dtype
                 - fp8_e4m3
                 - --mamba-ssm-cache-dtype
@@ -160,13 +177,20 @@ spec:
                 - name: COMPILATION_CONFIG
                   valueFrom:
                     configMapKeyRef:
-                      name: nemotron-3-super-h200-agentic-config
+                      name: nemotron-3-super-b200-agentic-config
                       key: compilation-config
                 - name: SPECULATIVE_CONFIG
                   valueFrom:
                     configMapKeyRef:
-                      name: nemotron-3-super-h200-agentic-config
+                      name: nemotron-3-super-b200-agentic-config
                       key: speculative-config
+                # Tracks the spec-dec mode: 65536 when --speculative-config is
+                # active, 131072 when running without spec-dec. Update this
+                # value (and remove --speculative-config from args) to disable.
+                - name: MAX_NUM_BATCHED_TOKENS
+                  value: "65536"
+                - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
+                  value: "trtllm"
                 - name: NCCL_IB_DISABLE
                   value: "1"
                 - name: PYTHONHASHSEED

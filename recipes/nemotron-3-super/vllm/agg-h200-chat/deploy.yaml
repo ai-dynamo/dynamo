@@ -6,7 +6,7 @@
 # Hopper variant — drops Blackwell-specific NCCL SHARP / symmetric-memory
 # env vars and the FlashInfer NVFP4 MoE backend (those are B200-only).
 #
-# Cluster requirements (same as B200): see nemotron_3_super_agg_b200_chat.yaml.
+# Cluster requirements (same as B200): see ../agg-b200-chat/deploy.yaml.
 apiVersion: v1
 kind: ConfigMap
 metadata:
