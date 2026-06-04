@@ -77,6 +77,10 @@ const (
 	// so v1-compatible releases continue to generate new DCDs with the v1 value.
 	KubeLabelDynamoWorkerHash = "nvidia.com/dynamo-worker-hash"
 
+	// CheckpointAutoAnnotation marks operator-created checkpoints whose
+	// lifecycle is tied to an owning DGD generation.
+	CheckpointAutoAnnotation = "nvidia.com/dynamo-auto-checkpoint"
+
 	KubeLabelValueFalse = "false"
 	KubeLabelValueTrue  = "true"
 

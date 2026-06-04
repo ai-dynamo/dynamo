@@ -372,7 +372,7 @@ func (c *createHookClient) Create(ctx context.Context, obj client.Object, opts .
 	return c.Client.Create(ctx, obj, opts...)
 }
 
-func TestCreateOrGetAutoCheckpointDeduplicatesConcurrentSameHashCheckpoint(t *testing.T) {
+func TestCreateOrGetAutoCheckpointDoesNotReuseDifferentCheckpointWithSameLegacyHash(t *testing.T) {
 	ctx := context.Background()
 	s := testScheme()
 
@@ -412,14 +412,13 @@ func TestCreateOrGetAutoCheckpointDeduplicatesConcurrentSameHashCheckpoint(t *te
 		},
 	}
 
-	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, identity, corev1.PodTemplateSpec{}, "", nil)
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testHash, identity, corev1.PodTemplateSpec{}, "", nil)
 	require.NoError(t, err)
-	assert.Equal(t, friendly.Name, ckpt.Name)
+	assert.Equal(t, "checkpoint-"+testHash, ckpt.Name)
 
 	list := &nvidiacomv1alpha1.DynamoCheckpointList{}
 	require.NoError(t, baseClient.List(ctx, list))
-	require.Len(t, list.Items, 1)
-	assert.Equal(t, friendly.Name, list.Items[0].Name)
+	require.Len(t, list.Items, 2)
 }
 
 func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
@@ -427,10 +426,12 @@ func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
 	s := testScheme()
 	c := fake.NewClientBuilder().WithScheme(s).Build()
 
-	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testIdentity(), corev1.PodTemplateSpec{}, "", nil)
+	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testHash, testIdentity(), corev1.PodTemplateSpec{}, "", nil)
 	require.NoError(t, err)
 	require.NotNil(t, ckpt.Annotations)
 	assert.Equal(t, snapshotprotocol.DefaultCheckpointArtifactVersion, ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
+	assert.Equal(t, "true", ckpt.Annotations[consts.CheckpointAutoAnnotation])
+	assert.Equal(t, testHash, ckpt.Labels[snapshotprotocol.CheckpointIDLabel])
 }
 
 func TestCreateOrGetAutoCheckpointRejectsGMSSnapshotWhenGateDisabled(t *testing.T) {
@@ -443,6 +444,7 @@ func TestCreateOrGetAutoCheckpointRejectsGMSSnapshotWhenGateDisabled(t *testing.
 		ctx,
 		c,
 		testNamespace,
+		testHash,
 		testIdentity(),
 		corev1.PodTemplateSpec{},
 		"",
@@ -690,6 +692,27 @@ func TestResolveCheckpointForService(t *testing.T) {
 		}
 	})
 
+	t.Run("Manual mode without checkpointRef or identity errors", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(s).Build()
+		_, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
+			Enabled: true,
+			Mode:    nvidiacomv1alpha1.CheckpointModeManual,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "Manual mode requires checkpointRef or identity")
+	})
+
+	t.Run("Auto mode without identity resolves enabled without error", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(s).Build()
+		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
+			Enabled: true,
+			Mode:    nvidiacomv1alpha1.CheckpointModeAuto,
+		})
+		require.NoError(t, err)
+		assert.True(t, info.Enabled)
+		assert.False(t, info.Exists)
+	})
+
 	t.Run("checkpointRef resolves ready CR", func(t *testing.T) {
 		t.Setenv(consts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
 		hash, err := ComputeIdentityHash(testIdentity())
@@ -855,10 +878,13 @@ func TestResolveCheckpointForService(t *testing.T) {
 		assert.Len(t, info.Hash, 16)
 	})
 
-	t.Run("errors when enabled but no ref and no identity", func(t *testing.T) {
+	t.Run("enabled without ref or identity waits for caller-created checkpoint", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).Build()
-		_, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true})
-		assert.ErrorContains(t, err, "no checkpointRef or identity")
+		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true})
+		require.NoError(t, err)
+		assert.True(t, info.Enabled)
+		assert.False(t, info.Exists)
+		assert.False(t, info.Ready)
 	})
 }
 

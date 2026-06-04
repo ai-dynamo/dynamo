@@ -159,10 +159,20 @@ impl LLMMetricAnnotation {
     }
 }
 
+/// Take a standalone router's timing out of `routing_data` (see
+/// `inject_timing_from_tracker`). Removing it keeps the field off the client wire.
+fn take_router_timing(
+    data: &mut Option<BackendOutput>,
+) -> Option<crate::protocols::common::timing::TimingInfo> {
+    data.as_mut()?.routing_data.take()?.timing
+}
+
 // Reasoning State for reasoning parsing transformation step
 struct ReasoningState {
     stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
     reasoning_parser: Option<Box<dyn ReasoningParser>>,
+    bypass_bare_guided_json: bool,
+    guided_json_bypass_decision: Option<bool>,
 }
 
 /// Per-image routing payload accumulated by `gather_multi_modal_data` and
@@ -216,6 +226,100 @@ struct PreprocessRequestOptions {
     preserve_omitted_max_tokens: bool,
 }
 
+/// Backend-specific MM-routing wire shape. Resolved once from
+/// `runtime_config.backend_framework`; unknown values disable MM
+/// routing (text-prefix fallback).
+///
+/// TODO(mm-routing): collapse the 16-vs-64-char split. Blocked on
+/// kv-router's `parse_mm_hash_from_extra_key` using 64-char length as
+/// the MM-hash type tag in vLLM `BlockStored` extra_keys.
+#[cfg(feature = "lightseek-mm")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MmRoutingProtocol {
+    /// SGLang: image positions filled with `pad_value(mm_hash)`; no
+    /// `block_mm_infos` emitted (matches sglang's `BlockStored` event bytes).
+    Sglang,
+    /// vLLM: image positions filled with `image_token_id`; per-image
+    /// 64-char-hex mm_hashes forwarded via `multi_modal_uuids` in
+    /// `extra_args` (matches vLLM's mm_uuid event format).
+    Vllm,
+}
+
+/// Mirror of sglang's `MultimodalItem._compute_pad_value` constants from
+/// `python/sglang/srt/managers/multimodal_processor.py`. The pad_value
+/// shoved into routing-side block hashes for each image must match what
+/// sglang publishes via its `BlockStored` KV events — if either constant
+/// drifts from upstream, our pad_value diverges and routing silently
+/// degrades to text-prefix.
+///
+/// Pinned by `mm_pad_value_matches_sglang_protocol` in `mod tests`.
+#[cfg(feature = "lightseek-mm")]
+const MM_PAD_SHIFT_VALUE: u64 = 1_000_000;
+#[cfg(feature = "lightseek-mm")]
+const MM_PAD_HASH_MASK: u64 = (1 << 30) - 1;
+
+/// Compute the sglang per-image pad_value from a routing-side mm_hash.
+/// Wrapping the formula in a function (not just an inline closure) lets
+/// the test in `mod tests` pin both the constants and the formula
+/// directly.
+#[cfg(feature = "lightseek-mm")]
+fn pad_value_for_sglang(mm_hash: u64) -> crate::protocols::TokenIdType {
+    (MM_PAD_SHIFT_VALUE + (mm_hash & MM_PAD_HASH_MASK)) as crate::protocols::TokenIdType
+}
+
+#[cfg(feature = "lightseek-mm")]
+impl MmRoutingProtocol {
+    /// Resolve from `runtime_config.backend_framework`. Returns `None` for
+    /// missing or unrecognized values so MM-aware routing disables itself
+    /// (text-prefix fallback) instead of silently picking a wire shape.
+    fn from_backend_framework(value: Option<&str>) -> Option<Self> {
+        match value {
+            Some(s) if s.eq_ignore_ascii_case("sglang") => Some(Self::Sglang),
+            Some(s) if s.eq_ignore_ascii_case("vllm") => Some(Self::Vllm),
+            other => {
+                tracing::warn!(
+                    target: "mm_routing",
+                    backend_framework = ?other,
+                    "backend_framework missing or unrecognized; \
+                     MM-aware routing disabled (text-prefix fallback)."
+                );
+                None
+            }
+        }
+    }
+
+    /// Hex-encode `mm_hash` for `extra_args["mm_hashes"]`. Length is
+    /// load-bearing: sglang reads `int(hex, 16)` for pad_value, vLLM's
+    /// `BlockStored` parser uses 64-char as the MM-hash type tag.
+    fn format_mm_hash_hex(&self, mm_hash: u64) -> String {
+        const HEX_PAD: &str = "000000000000000000000000000000000000000000000000";
+        match self {
+            Self::Sglang => format!("{mm_hash:016x}"),
+            Self::Vllm => format!("{mm_hash:016x}{HEX_PAD}"),
+        }
+    }
+
+    /// Fill token at image positions in the routing-side `token_ids`.
+    /// sglang: `pad_value(mm_hash)` to match RadixAttention cache key.
+    /// vLLM: `find_token_id` (what the HF processor emits).
+    fn image_fill_token(
+        &self,
+        mm_hash: u64,
+        find_token_id: crate::protocols::TokenIdType,
+    ) -> crate::protocols::TokenIdType {
+        match self {
+            Self::Sglang => pad_value_for_sglang(mm_hash),
+            Self::Vllm => find_token_id,
+        }
+    }
+
+    /// Emit per-block MM-info? vLLM consumes it; sglang's pad_value
+    /// already encodes `mm_hash` in the bytes the router hashes.
+    fn emits_block_mm_infos(&self) -> bool {
+        matches!(self, Self::Vllm)
+    }
+}
+
 pub struct OpenAIPreprocessor {
     mdcsum: String,
     formatter: Arc<dyn OAIPromptFormatter>,
@@ -230,6 +334,11 @@ pub struct OpenAIPreprocessor {
     media_loader: Option<MediaLoader>,
     /// Max context length (in tokens) this model can handle, from ModelDeploymentCard
     context_length: u32,
+    /// Backend protocol the MM-routing fill path matches against. `None`
+    /// when `runtime_config.backend_framework` is missing or unrecognized
+    /// — MM-aware routing then falls back to text-prefix routing.
+    #[cfg(feature = "lightseek-mm")]
+    mm_routing_protocol: Option<MmRoutingProtocol>,
     /// Per-image token-count engine. `None` when the feature is disabled, the
     /// model isn't covered by the registry, or `preprocessor_config.json` is
     /// unreadable.
@@ -237,7 +346,7 @@ pub struct OpenAIPreprocessor {
     image_token_counter: Option<lightseek_mm::LightseekMmCounter>,
     /// Image-placeholder token id the routing-side sequence fills per image.
     /// Resolved from `config.json`'s `image_token_id` field when present,
-    /// otherwise falls back to lightseek's `ModelProcessorSpec` value. This
+    /// otherwise falls back to the `ModelProcessorSpec` registry value. This
     /// is the id the backend's HF processor emits in the expanded sequence
     /// (per-patch token for Qwen-VL families, the single placeholder for
     /// LLaVA/Phi-3), so block hashes align bit-for-bit with the worker.
@@ -382,6 +491,13 @@ impl OpenAIPreprocessor {
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
         let kv_cache_block_size = mdc.kv_cache_block_size as usize;
+
+        // Resolve the backend label once at startup; used by the MM-routing
+        // hot path to pick between sglang pad_value substitution and vLLM
+        // mm_hashes forwarding without re-checking per request.
+        #[cfg(feature = "lightseek-mm")]
+        let mm_routing_protocol =
+            MmRoutingProtocol::from_backend_framework(runtime_config.backend_framework.as_deref());
 
         // Capture MM-routing inputs before mdc is partially moved into MediaLoader.
         // model_type comes from config.json (e.g. "qwen3_vl") and lets the
@@ -563,6 +679,8 @@ impl OpenAIPreprocessor {
             tool_call_parser,
             media_loader,
             context_length,
+            #[cfg(feature = "lightseek-mm")]
+            mm_routing_protocol,
             #[cfg(feature = "lightseek-mm")]
             image_token_counter,
             #[cfg(feature = "lightseek-mm")]
@@ -762,6 +880,25 @@ impl OpenAIPreprocessor {
             )
         {
             output_options.skip_special_tokens = Some(false);
+        } else if Self::special_tokens_will_be_stripped(
+            output_options.skip_special_tokens,
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        ) {
+            // Caller forced `skip_special_tokens=true` while a special-token-
+            // dependent parser is active. The engine's markers (e.g. harmony
+            // `<|channel|>` / `<|message|>`) get stripped before the parser
+            // runs, so tool_calls / reasoning_content come back empty and the
+            // markup leaks into `content`. Warn once: this is a silent,
+            // deterministic correctness loss that no parser fixture can catch.
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    tool_call_parser = ?self.tool_call_parser,
+                    reasoning_parser = ?self.runtime_config.reasoning_parser,
+                    "skip_special_tokens=true requested while a special-token-dependent parser is active; the engine's special tokens will be stripped before parsing, so tool_calls/reasoning_content will be empty and the markup will leak into content. Unset skip_special_tokens (Dynamo defaults it to false for these parsers) or set it to false."
+                );
+            });
         }
         builder.output_options(output_options);
         builder.annotations(request.annotations().unwrap_or_default());
@@ -1124,30 +1261,26 @@ impl OpenAIPreprocessor {
                 extra_args_obj.extend(backend_extra_args);
             }
 
-            // Forward routing-side mm_hashes as `multi_modal_uuids` so vLLM
-            // publishes KV events with the same key the router computes.
-            // The kv-router parses events via parse_mm_hash_from_extra_key
-            // (kv-router/src/zmq_wire/extra_keys.rs), which requires exactly
-            // 64 hex chars and reads u64 from the first 16. We pad u64 ->
-            // 16 hex chars + 48 zeros so the byte representation matches
-            // end-to-end without forcing frontend image decoding.
+            // Forward routing-side mm_hashes in `extra_args["mm_hashes"]` so the
+            // backend's KV events publish under the same key the router computes.
+            // Each backend's hex format is owned by `MmRoutingProtocol::format_mm_hash_hex`
+            // (sglang 16-char, vLLM 64-char — both are protocol-load-bearing).
             //
             // Skip forwarding entirely if any image failed dim resolution —
             // a shorter `mm_hashes` list would misalign with the image
-            // positions vLLM derives from `multi_modal_data`, and the
-            // backend would inject the wrong UUIDs onto the wrong images.
+            // positions the backend derives from `multi_modal_data`, and
+            // the wrong UUIDs would get injected onto the wrong images.
             #[cfg(feature = "lightseek-mm")]
-            if !mm_image_entries.is_empty() && mm_image_entries.len() == total_image_count {
-                // 48 trailing zeros — paired with the {:016x} prefix this gives
-                // the 64-char hex string the kv-router's parse_mm_hash_from_extra_key
-                // expects (reads u64 from the first 16 chars).
-                const HEX_PAD: &str = "000000000000000000000000000000000000000000000000";
+            if let Some(protocol) = self.mm_routing_protocol
+                && !mm_image_entries.is_empty()
+                && mm_image_entries.len() == total_image_count
+            {
                 let hexes: Vec<serde_json::Value> = mm_image_entries
                     .iter()
-                    .map(|e| serde_json::Value::String(format!("{:016x}{}", e.mm_hash, HEX_PAD)))
+                    .map(|e| serde_json::Value::String(protocol.format_mm_hash_hex(e.mm_hash)))
                     .collect();
                 extra_args["mm_hashes"] = serde_json::Value::Array(hexes);
-            } else if !mm_image_entries.is_empty() {
+            } else if !mm_image_entries.is_empty() && self.mm_routing_protocol.is_some() {
                 tracing::warn!(
                     target: "mm_routing",
                     resolved = mm_image_entries.len(),
@@ -1185,6 +1318,13 @@ impl OpenAIPreprocessor {
         if mm_image_entries.is_empty() {
             return Ok(());
         }
+        let Some(protocol) = self.mm_routing_protocol else {
+            tracing::debug!(
+                target: "mm_routing",
+                "mm_routing_protocol unset; skipping MM routing info"
+            );
+            return Ok(());
+        };
         let Some(find_token_id) = self.routing_image_token_id else {
             tracing::debug!(
                 target: "mm_routing",
@@ -1260,13 +1400,9 @@ impl OpenAIPreprocessor {
             .collect();
         let n_total: usize = n_tokens.iter().sum();
 
-        // Replace each placeholder occurrence with N copies of the same
-        // `find_token_id` (config.json's `image_token_id` when present).
-        // That id is what the backend's HF processor emits in the expanded
-        // sequence for every supported family; filling with lightseek-mm's
-        // per-spec value previously left Qwen2-VL / Qwen2.5-VL stuck at
-        // `effective_cached_blocks=1` because their per-patch id never
-        // appears in stored block hashes.
+        // Per-protocol image-position fill (see `MmRoutingProtocol::image_fill_token`).
+        // sglang's pad_value formula is pinned by `mm_pad_value_matches_sglang_protocol`.
+        //
         // BOS ownership: when the Phi-3 splice helper produced
         // `normalized_token_ids` (Cow::Owned), it has already emitted the
         // leading BOS as part of its complete sequence. Only the non-splice
@@ -1285,7 +1421,9 @@ impl OpenAIPreprocessor {
         for &t in normalized_token_ids.iter() {
             if t == find_token_id && i < mm_image_entries.len() {
                 let start = expanded.len();
-                expanded.extend(std::iter::repeat_n(find_token_id, n_tokens[i]));
+                let fill_token =
+                    protocol.image_fill_token(mm_image_entries[i].mm_hash, find_token_id);
+                expanded.extend(std::iter::repeat_n(fill_token, n_tokens[i]));
                 img_ranges.push((start, start + n_tokens[i]));
                 i += 1;
             } else {
@@ -1304,17 +1442,22 @@ impl OpenAIPreprocessor {
             expanded.resize(total_tokens, 0);
         }
 
-        // Build request-level MM info, then derive per-block info.
-        let mm_objects: Vec<RequestMmObjectInfo> = mm_image_entries
-            .iter()
-            .zip(img_ranges.iter())
-            .map(|(entry, &(s, e))| RequestMmObjectInfo {
-                mm_hash: entry.mm_hash,
-                offsets: vec![(s, e)],
-            })
-            .collect();
-        let block_mm_infos =
-            RequestExtraInfo { mm_objects }.to_block_level(block_size, total_tokens);
+        // Build request-level MM info, then derive per-block info. In sglang
+        // mode skip block_mm_infos: pad_value already encodes mm_hash in the
+        // bytes the router hashes; sglang's events carry no extra_keys.
+        let block_mm_infos = if !protocol.emits_block_mm_infos() {
+            Vec::new()
+        } else {
+            let mm_objects: Vec<RequestMmObjectInfo> = mm_image_entries
+                .iter()
+                .zip(img_ranges.iter())
+                .map(|(entry, &(s, e))| RequestMmObjectInfo {
+                    mm_hash: entry.mm_hash,
+                    offsets: vec![(s, e)],
+                })
+                .collect();
+            RequestExtraInfo { mm_objects }.to_block_level(block_size, total_tokens)
+        };
 
         tracing::debug!(
             target: "mm_routing",
@@ -1847,20 +1990,24 @@ impl OpenAIPreprocessor {
                 Some("kimi_k25")
             );
 
-        // Under guided-decoding (tool_choice=required/named), only force-
-        // reasoning parsers must skip — they treat the bare JSON output as
-        // reasoning_content and starve the jail. Non-force-reasoning parsers
-        // (qwen3, deepseek_v4, glm45, etc.) are safe to run: vLLM's
-        // reasoner-gate allows free generation during `<think>...</think>`
-        // before clamping to the guided grammar, so the model emits
-        // `<reasoning></think><JSON>` and the parser strips the prefix so the
-        // jail sees pure JSON.
-        let skip_reasoning_for_guided_json =
-            matches!(
-                request.inner.tool_choice,
-                Some(ChatCompletionToolChoiceOption::Required)
-                    | Some(ChatCompletionToolChoiceOption::Named(_))
-            ) && Self::is_force_reasoning_parser(self.runtime_config.reasoning_parser.as_deref());
+        // Under guided-decoding (tool_choice=required/named), force-reasoning
+        // parsers must skip because the backend emits bare JSON and the jail
+        // needs to see that JSON as content. Some non-force parsers can also
+        // hit that shape after prompt-injected reasoning, but they need a
+        // stream-content check so `reasoning</think>JSON` still gets parsed.
+        let is_guided_tool_choice = matches!(
+            request.inner.tool_choice,
+            Some(ChatCompletionToolChoiceOption::Required)
+                | Some(ChatCompletionToolChoiceOption::Named(_))
+        );
+        let skip_reasoning_for_guided_json = is_guided_tool_choice
+            && Self::is_force_reasoning_parser(self.runtime_config.reasoning_parser.as_deref());
+        let bypass_reasoning_for_bare_guided_json = is_guided_tool_choice
+            && prompt_injected_reasoning
+            && !uses_tool_call_structural_tag
+            && Self::skips_guided_json_when_prompt_injected(
+                self.runtime_config.reasoning_parser.as_deref(),
+            );
 
         let reasoning_disabled_by_request = Self::is_reasoning_disabled_by_request(
             self.runtime_config.reasoning_parser.as_deref(),
@@ -1885,10 +2032,11 @@ impl OpenAIPreprocessor {
         // To address the limitation if needed in future: move this step before transform_postprocessor_stream and add new field of reasoning_content to the backend output
         // Use backend_output.reasoning_content field to fill out the deltas.
         let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
-            Box::pin(Self::parse_reasoning_content_from_stream(
+            Box::pin(Self::parse_reasoning_content_from_stream_inner(
                 stream,
                 self.runtime_config.reasoning_parser.clone().unwrap(), // Safety: We already checked that parser is some, so gtg
                 prompt_injected_reasoning,
+                bypass_reasoning_for_bare_guided_json,
             ))
         } else if should_strip_disabled_reasoning_start {
             Box::pin(Self::strip_leading_reasoning_start_from_stream(
@@ -1989,7 +2137,15 @@ impl OpenAIPreprocessor {
                     return None;
                 }
 
-                if let Some(response) = inner.response_stream.next().await {
+                if let Some(mut response) = inner.response_stream.next().await {
+                    // Split topology: overlay a standalone router's forwarded timing onto
+                    // this request's tracker so the frontend's timing surfaces populate.
+                    if let Some(timing) = take_router_timing(&mut response.data)
+                        && let Some(tracker) = inner.response_generator.tracker()
+                    {
+                        tracker.set_external_timing(timing);
+                    }
+
                     if inner.cancelled {
                         tracing::debug!(
                             request_id = inner.context.id(),
@@ -2407,6 +2563,21 @@ impl OpenAIPreprocessor {
         )
     }
 
+    /// Whether the resolved `skip_special_tokens` will strip the special-token
+    /// markers an active parser depends on — guaranteeing the parser silently
+    /// emits empty tool_calls / reasoning_content and the markup leaks into
+    /// `content`. Only true when the caller explicitly forced
+    /// `skip_special_tokens=true` while a special-token-dependent parser is
+    /// active; otherwise the default is flipped to false before this check.
+    fn special_tokens_will_be_stripped(
+        skip_special_tokens: Option<bool>,
+        tool_call_parser: Option<&str>,
+        reasoning_parser: Option<&str>,
+    ) -> bool {
+        skip_special_tokens == Some(true)
+            && Self::parser_requires_special_tokens(tool_call_parser, reasoning_parser)
+    }
+
     fn is_nemotron_force_reasoning(reasoning_parser: Option<&str>) -> bool {
         matches!(
             reasoning_parser,
@@ -2431,6 +2602,13 @@ impl OpenAIPreprocessor {
                     | "nemotron3"
                     | "nemotron_v3"
             )
+        )
+    }
+
+    fn skips_guided_json_when_prompt_injected(reasoning_parser: Option<&str>) -> bool {
+        matches!(
+            reasoning_parser,
+            Some("deepseek_v4" | "deepseek-v4" | "deepseekv4" | "glm45")
         )
     }
 
@@ -2516,6 +2694,23 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
+        Self::parse_reasoning_content_from_stream_inner(
+            stream,
+            parser_name,
+            prompt_injected_reasoning,
+            false,
+        )
+    }
+
+    fn parse_reasoning_content_from_stream_inner<S>(
+        stream: S,
+        parser_name: String,
+        prompt_injected_reasoning: bool,
+        bypass_bare_guided_json: bool,
+    ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
         // Initialize reasoning parser from parser_name
         let mut reasoning_parser = Box::new(ReasoningParserType::get_reasoning_parser_from_name(
             parser_name.as_ref(),
@@ -2528,27 +2723,58 @@ impl OpenAIPreprocessor {
         let state = ReasoningState {
             stream: Box::pin(stream),
             reasoning_parser: Some(reasoning_parser),
+            bypass_bare_guided_json,
+            guided_json_bypass_decision: None,
         };
 
         stream::unfold(state, |mut state| async move {
             if let Some(response) = state.stream.next().await {
+                let should_bypass_reasoning = if state.bypass_bare_guided_json {
+                    match state.guided_json_bypass_decision {
+                        Some(decision) => decision,
+                        None => {
+                            let decision = response.data.as_ref().and_then(|data| {
+                                data.inner.choices.iter().find_map(|choice| {
+                                    if let Some(ChatCompletionMessageContent::Text(text)) =
+                                        choice.delta.content.as_ref()
+                                    {
+                                        let text = text.trim_start();
+                                        if text.is_empty() {
+                                            return None;
+                                        }
+                                        return Some(matches!(text.as_bytes()[0], b'[' | b'{'));
+                                    }
+                                    None
+                                })
+                            });
+                            if let Some(decision) = decision {
+                                state.guided_json_bypass_decision = Some(decision);
+                            }
+                            decision.unwrap_or(false)
+                        }
+                    }
+                } else {
+                    false
+                };
+
                 // Process the response through reasoning parser if available
-                let processed_response = if let Some(ref mut parser) = state.reasoning_parser {
+                let processed_response = if should_bypass_reasoning {
+                    response
+                } else if let Some(ref mut parser) = state.reasoning_parser {
                     response.map_data(|mut data| {
                         // Process all choices, not just the first one
                         for choice in data.inner.choices.iter_mut() {
                             // Reasoning parsing only applies to text content
-                            if let Some(
-                                dynamo_protocols::types::ChatCompletionMessageContent::Text(text),
-                            ) = choice.delta.content.as_ref()
+                            if let Some(ChatCompletionMessageContent::Text(text)) =
+                                choice.delta.content.as_ref()
                             {
                                 let parser_result =
                                     parser.parse_reasoning_streaming_incremental(text, &[]);
 
                                 // Update this specific choice with parsed content
-                                choice.delta.content = parser_result.get_some_normal_text().map(
-                                    dynamo_protocols::types::ChatCompletionMessageContent::Text,
-                                );
+                                choice.delta.content = parser_result
+                                    .get_some_normal_text()
+                                    .map(ChatCompletionMessageContent::Text);
                                 choice.delta.reasoning_content = parser_result.get_some_reasoning();
                             }
                             // For multimodal content, pass through unchanged
@@ -3200,6 +3426,26 @@ mod tests {
         }
     }
 
+    /// Guard: a caller forcing `skip_special_tokens=true` while a
+    /// special-token-dependent parser is active strips the markers before
+    /// parsing → silent empty tool_calls / leaked markup. Only that exact
+    /// combination should trip the warning condition.
+    #[test]
+    fn test_special_tokens_will_be_stripped() {
+        let f = OpenAIPreprocessor::special_tokens_will_be_stripped;
+        // forced-true + marker-dependent parser → will be stripped (warn)
+        assert!(f(Some(true), Some("harmony"), Some("gpt_oss")));
+        assert!(f(Some(true), Some("harmony"), None));
+        assert!(f(Some(true), None, Some("gpt_oss")));
+        assert!(f(Some(true), Some("kimi_k2"), None));
+        // false / unset → never (default path keeps the markers)
+        assert!(!f(Some(false), Some("harmony"), None));
+        assert!(!f(None, Some("harmony"), None));
+        // forced-true but parser doesn't need special tokens → fine
+        assert!(!f(Some(true), Some("hermes"), None));
+        assert!(!f(Some(true), None, None));
+    }
+
     #[test]
     fn test_backend_extra_args_preserves_nvext_and_sampling_extensions() {
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
@@ -3602,6 +3848,40 @@ mod tests {
         assert_ne!(
             s3a, s3b,
             "s3:// query params identify objects and must not collide"
+        );
+    }
+
+    /// Pin the sglang pad_value protocol constants and formula against
+    /// upstream `MultimodalItem._compute_pad_value`. If sglang bumps
+    /// either constant in a new release, this test fails — without it
+    /// the routing-side pad_value would silently diverge from sglang's
+    /// `BlockStored` event bytes and MM-routing would degrade to text-
+    /// prefix without any error.
+    #[cfg(feature = "lightseek-mm")]
+    #[test]
+    fn mm_pad_value_matches_sglang_protocol() {
+        // Constant pins (upstream:
+        // python/sglang/srt/managers/multimodal_processor.py).
+        assert_eq!(MM_PAD_SHIFT_VALUE, 1_000_000);
+        assert_eq!(MM_PAD_HASH_MASK, (1u64 << 30) - 1);
+
+        // Formula pins. Three cases: zero, a value that exactly fits the
+        // 30-bit mask, and a value that overflows it (verifies the mask
+        // is actually applied, not just additively combined).
+        assert_eq!(
+            pad_value_for_sglang(0),
+            MM_PAD_SHIFT_VALUE as crate::protocols::TokenIdType
+        );
+        let fits = (1u64 << 30) - 1;
+        assert_eq!(
+            pad_value_for_sglang(fits),
+            (MM_PAD_SHIFT_VALUE + fits) as crate::protocols::TokenIdType
+        );
+        let overflow = (1u64 << 30) | 0xCAFE;
+        assert_eq!(
+            pad_value_for_sglang(overflow),
+            (MM_PAD_SHIFT_VALUE + 0xCAFE) as crate::protocols::TokenIdType,
+            "high bits above the 30-bit mask must be discarded"
         );
     }
 }

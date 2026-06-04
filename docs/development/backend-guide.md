@@ -18,7 +18,7 @@ subtitle: Create custom Python workers and engines for Dynamo
 > metrics, KV event publishing, KV-aware routing, OpenTelemetry
 > tracing, health-check canaries, guided decoding, and custom Jinja
 > chat templates. Stay on this path for workloads that depend on
-> multimodal, LoRA, logprob extraction, engine routes (sleep/wake,
+> multimodal, LoRA, logprob extraction, engine routes (pause/resume,
 > profiling, weight updates), text-in-text-out, snapshot/CRIU, or
 > diffusion — features the unified backend does not yet cover. See
 > the [unified-path feature gaps](python-backend-guide.md#feature-gaps)

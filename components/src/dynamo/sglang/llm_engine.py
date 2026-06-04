@@ -71,8 +71,8 @@ from dynamo.sglang.capacity import (
     runtime_capacity,
 )
 from dynamo.sglang.logits_processing import activate_logits_processors
+from dynamo.sglang.pause import SGLangEnginePauseController
 from dynamo.sglang.publisher import format_zmq_endpoint
-from dynamo.sglang.quiesce import SGLangEngineQuiesceController
 
 if TYPE_CHECKING:
     from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
@@ -141,8 +141,8 @@ class SglangLLMEngine(LLMEngine):
         self._dp_start: int = 0
         self._dp_size: int = 1
         self._logits_processor_spec: LogitsProcessorSpec | None = None
-        self._quiesce_controller: SGLangEngineQuiesceController | None = None
-        self._quiesce_lock = asyncio.Lock()
+        self._pause_controller: SGLangEnginePauseController | None = None
+        self._pause_lock = asyncio.Lock()
 
     @classmethod
     async def from_args(
@@ -179,7 +179,7 @@ class SglangLLMEngine(LLMEngine):
         del worker_id  # SGLang bootstrap uses host/port/room triples
 
         self.engine = sgl.Engine(server_args=self.server_args)
-        self._quiesce_controller = SGLangEngineQuiesceController(self.engine)
+        self._pause_controller = SGLangEnginePauseController(self.engine)
 
         tokenizer = (
             self.engine.tokenizer_manager.tokenizer
@@ -514,7 +514,7 @@ class SglangLLMEngine(LLMEngine):
         return await handler(body or {})
 
     async def release_memory_occupation(self, body: dict) -> dict:
-        controller = self._quiesce_controller
+        controller = self._pause_controller
         if controller is None:
             return {
                 "status": "error",
@@ -523,8 +523,8 @@ class SglangLLMEngine(LLMEngine):
 
         body = body or {}
         tags = body.get("tags")
-        async with self._quiesce_lock:
-            if controller.is_quiesced:
+        async with self._pause_lock:
+            if controller.is_paused:
                 return {"status": "ok", "message": "Memory already released"}
             if controller.needs_resume_recovery:
                 return {
@@ -532,7 +532,7 @@ class SglangLLMEngine(LLMEngine):
                     "message": "resume_memory_occupation required before retrying release",
                 }
             try:
-                await controller.quiesce(tags)
+                await controller.pause(tags)
                 return {
                     "status": "ok",
                     "message": (
@@ -546,7 +546,7 @@ class SglangLLMEngine(LLMEngine):
                 return {"status": "error", "message": str(e)}
 
     async def resume_memory_occupation(self, body: dict) -> dict:
-        controller = self._quiesce_controller
+        controller = self._pause_controller
         if controller is None:
             return {
                 "status": "error",
@@ -555,9 +555,9 @@ class SglangLLMEngine(LLMEngine):
 
         body = body or {}
         tags = body.get("tags")
-        async with self._quiesce_lock:
+        async with self._pause_lock:
             needs_recovery = controller.needs_resume_recovery
-            if not controller.is_quiesced and not needs_recovery:
+            if not controller.is_paused and not needs_recovery:
                 return {"status": "ok", "message": "Memory already resumed"}
             try:
                 await controller.resume(tags)
@@ -702,7 +702,7 @@ class SglangLLMEngine(LLMEngine):
             except Exception:
                 pass
             self._metrics_zmq_ctx = None
-        self._quiesce_controller = None
+        self._pause_controller = None
         if self.engine is not None:
             self.engine.shutdown()
             logger.info("SGLang engine shutdown")
