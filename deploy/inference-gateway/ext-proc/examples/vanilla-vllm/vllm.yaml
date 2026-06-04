@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Vanilla `vllm serve` deployment (stock vllm/vllm-openai image, no Dynamo runtime).
+# The native Dynamo EPP routes to these pods in external mode (worker tokenizes).
+# Each pod is a single-rank endpoint; scale data parallelism by adding replicas
+# (more endpoints in the pool) — the standard vLLM external-LB DP pattern, where
+# each DP rank is its own endpoint. (A single endpoint fanning out to multiple
+# internal DP ranks is not per-rank routable from the gateway.)
+# Distinct names (epp-vanilla-*) to avoid colliding with gms-bulwark-* work.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: epp-vanilla-vllm
+  labels: { app: epp-vanilla-vllm, owner: claude-epp }
+spec:
+  replicas: 2
+  # maxSurge:0 so the rolling restart never needs a 3rd GPU (replace in place).
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 0, maxUnavailable: 1 }
+  selector:
+    matchLabels: { app: epp-vanilla-vllm }
+  template:
+    metadata:
+      labels: { app: epp-vanilla-vllm, owner: claude-epp }
+    spec:
+      # Tolerate ONLY the standard GPU taint so we land on a free, non-reserved
+      # GPU node. We deliberately do NOT tolerate reserved-by/dra/gms-bench/etc.
+      tolerations:
+      - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+      containers:
+      - name: vllm
+        image: vllm/vllm-openai:latest
+        command: ["vllm","serve","Qwen/Qwen3-0.6B"]
+        args:
+        - --port=8000
+        - --enable-prefix-caching
+        - --gpu-memory-utilization=0.45
+        - --max-model-len=8192
+        # Publish native KV-cache events over ZMQ (PUB binds tcp://*:5557) so the
+        # EPP can consume them for precise prefix-cache-aware routing (Task #5).
+        - '--kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557"}'
+        ports:
+        - { name: http, containerPort: 8000 }
+        - { name: kv-events, containerPort: 5557 }
+        resources:
+          limits: { nvidia.com/gpu: "1" }
+          requests: { nvidia.com/gpu: "1" }
+        readinessProbe:
+          httpGet: { path: /health, port: 8000 }
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 60
+        startupProbe:
+          httpGet: { path: /health, port: 8000 }
+          periodSeconds: 10
+          failureThreshold: 120
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: epp-vanilla-vllm
+  labels: { app: epp-vanilla-vllm, owner: claude-epp }
+spec:
+  selector: { app: epp-vanilla-vllm }
+  ports:
+  - { name: http, port: 8000, targetPort: 8000 }
