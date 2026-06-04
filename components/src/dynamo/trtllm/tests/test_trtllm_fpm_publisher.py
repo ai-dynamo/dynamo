@@ -26,9 +26,14 @@ in ``test_invoke_handler_matches_publisher_keyword_set``.
 
 from __future__ import annotations
 
+import asyncio
+import queue
+import threading
 from unittest.mock import MagicMock
 
 import pytest
+
+from dynamo.trtllm import publisher as publisher_mod
 
 pytestmark = [
     pytest.mark.unit,
@@ -224,12 +229,6 @@ def _build_publisher_stub(monkeypatch, *, attention_dp_size: int, fpm_enabled: b
     via ``monkeypatch`` so initialize() reaches the FPM gate cleanly without
     needing a blanket try/except to swallow upstream failures.
     """
-    import asyncio
-    import queue
-    import threading
-
-    from dynamo.trtllm import publisher as publisher_mod
-
     engine = MagicMock()
     engine.get_attention_dp_size.return_value = attention_dp_size
 
@@ -255,7 +254,7 @@ def _build_publisher_stub(monkeypatch, *, attention_dp_size: int, fpm_enabled: b
     pub.partial_block_hashes = set()
     pub.error_queue = queue.Queue()
     pub._stop_event = threading.Event()
-    pub._last_engine_event_id = None
+    pub._last_engine_event_id_by_rank = {}
 
     fake_fpm_cls = MagicMock()
     monkeypatch.setattr(publisher_mod, "FpmDirectPublisher", fake_fpm_cls)
@@ -317,6 +316,138 @@ def test_publisher_does_not_init_fpm_publisher_under_attention_dp(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# KV event buffer telemetry
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_kv_event_polling_loop_records_drained_batch_size():
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub._stop_event = threading.Event()
+    drained_batches = []
+
+    async def fetch_events():
+        for event_id in range(3):
+            yield {"event_id": event_id}
+
+    def handle_event(event):
+        if event["event_id"] == 2:
+            pub._stop_event.set()
+
+    await pub._polling_loop(
+        fetch_events,
+        handle_event,
+        min_sleep=0.001,
+        max_sleep=0.001,
+        backoff_factor=1.0,
+        batch_size_handler_fn=drained_batches.append,
+    )
+
+    assert drained_batches == [3]
+
+
+@pytest.mark.asyncio
+async def test_polling_loop_reraises_unexpected_handler_error():
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub._stop_event = threading.Event()
+
+    async def fetch_events():
+        yield {"event_id": 0}
+
+    def handle_event(_event):
+        raise RuntimeError("handler failed")
+
+    with pytest.raises(RuntimeError, match="handler failed"):
+        await pub._polling_loop(
+            fetch_events,
+            handle_event,
+            min_sleep=0.001,
+            max_sleep=0.001,
+            backoff_factor=1.0,
+        )
+
+
+def test_managed_thread_stops_after_task_error():
+    errors = queue.Queue()
+    calls = 0
+
+    async def failing_task():
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("task failed")
+
+    thread = publisher_mod.ManagedThread(failing_task, error_queue=errors)
+    thread.start()
+    thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert calls == 1
+    assert str(errors.get_nowait()) == "task failed"
+
+
+def test_kv_event_id_gap_records_missing_event_count():
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub.additional_metrics = MagicMock()
+    pub.processing_initial_created_events = True
+    pub.max_window_size = None
+    pub._last_engine_event_id_by_rank = {0: 10}
+
+    pub._handle_kv_event({"event_id": 14, "data": {"type": "created"}})
+
+    pub.additional_metrics.record_kv_event_id_gap.assert_called_once_with(3)
+
+
+def test_filtered_kv_events_do_not_create_false_event_id_gaps():
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub.additional_metrics = MagicMock()
+    pub._last_engine_event_id_by_rank = {0: 10}
+    pub.should_drop_event = MagicMock(side_effect=[True, False])
+    pub.processing_initial_created_events = True
+    pub.max_window_size = None
+
+    pub._handle_kv_event({"event_id": 11, "data": {"type": "stored"}})
+    pub._handle_kv_event({"event_id": 12, "data": {"type": "created"}})
+
+    pub.additional_metrics.record_kv_event_id_gap.assert_not_called()
+
+
+def test_partial_only_removed_event_does_not_publish_empty_batch():
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    kv_event_publisher = MagicMock()
+    pub.additional_metrics = None
+    pub._last_engine_event_id_by_rank = {}
+    pub.should_drop_event = MagicMock(return_value=False)
+    pub.processing_initial_created_events = True
+    pub.partial_block_hashes = {123}
+    pub.zmq_kv_event_publisher = None
+    pub.kv_event_publishers = {0: kv_event_publisher}
+
+    pub._handle_kv_event(
+        {"event_id": 1, "data": {"type": "removed", "block_hashes": [123]}}
+    )
+
+    assert pub.partial_block_hashes == set()
+    kv_event_publisher.publish_removed.assert_not_called()
+
+
+def test_interleaved_attention_dp_ranks_do_not_create_false_event_id_gaps():
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub.additional_metrics = MagicMock()
+    pub._last_engine_event_id_by_rank = {}
+    pub.should_drop_event = MagicMock(return_value=True)
+
+    for event in [
+        {"event_id": 10, "attention_dp_rank": 0},
+        {"event_id": 3, "attention_dp_rank": 1},
+        {"event_id": 11, "attention_dp_rank": 0},
+        {"event_id": 4, "attention_dp_rank": 1},
+    ]:
+        pub._handle_kv_event(event)
+
+    pub.additional_metrics.record_kv_event_id_gap.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # First-stat schema probe
 # ---------------------------------------------------------------------------
 
@@ -327,8 +458,6 @@ def _build_schema_probe_publisher(fpm_publisher_mock=None):
     Bypasses __init__ (heavy deps) and seeds only the attributes the probe
     method reads or writes: fpm_publisher and _fpm_schema_checked.
     """
-    from dynamo.trtllm import publisher as publisher_mod
-
     pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
     pub.fpm_publisher = (
         fpm_publisher_mock if fpm_publisher_mock is not None else MagicMock()
@@ -443,8 +572,6 @@ def test_schema_probe_field_list_matches_default_ibs_set():
     """Guardrail: the required-fields tuple must stay in sync with the IBS
     default fixture. If someone adds an IBS field to the production reader
     but forgets the probe constant (or vice versa), this test catches it."""
-    from dynamo.trtllm import publisher as publisher_mod
-
     assert set(publisher_mod._FPM_REQUIRED_IBS_FIELDS) == set(_DEFAULT_IBS.keys())
 
 
