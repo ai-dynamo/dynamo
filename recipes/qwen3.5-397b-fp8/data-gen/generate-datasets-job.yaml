@@ -38,7 +38,7 @@ spec:
         fsGroup: 0
       containers:
         - name: generate-datasets
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
@@ -48,12 +48,13 @@ spec:
             seccompProfile:
               type: RuntimeDefault
           env:
-            # nvcr.io/.../vllm-runtime:1.1.0 was cut from a release branch
-            # that predates dynamo PR 8201 (sliding-window strategy), so the
-            # baked /workspace/benchmarks/multimodal/jsonl/main.py is the
-            # older single-turn-only version. Pull a pinned main SHA to get
-            # the sliding-window subcommand. Bump DYNAMO_REF when you want
-            # newer generator fixes.
+            # vllm-runtime:1.2.0 may still ship a baked
+            # /workspace/benchmarks/multimodal/jsonl/main.py older than
+            # dynamo PR 8201 (sliding-window strategy). To stay independent
+            # of the image's bundled copy, we always pull a pinned main
+            # SHA of main.py into the pod. Bump DYNAMO_REF when you want
+            # newer generator fixes; drop the pin entirely once 1.2.x+
+            # is confirmed to include the sliding-window subcommand.
             - name: DYNAMO_REF
               value: "dd298d6006545d1c5a676f03b7d774e3b9590bee"
           command:

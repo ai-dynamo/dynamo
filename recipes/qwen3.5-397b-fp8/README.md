@@ -106,7 +106,7 @@ Only `deploy.yaml` legitimately differs per config.
 `hw/h100.env` is shared across both configs. It exports three vars
 the YAML templates substitute via `envsubst`:
 
-- `VLLM_IMAGE` — `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0`.
+- `VLLM_IMAGE` — `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0`.
 - `HW_NODE_SELECTOR` — JSON-flow nodeSelector pinning every pod
   (Frontend, VllmWorker, bench) to one specific 8×H100 host.
 - `HW_TOLERATIONS` — JSON-flow toleration array (empty for H100).
