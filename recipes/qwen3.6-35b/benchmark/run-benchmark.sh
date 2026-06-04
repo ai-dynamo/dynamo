@@ -37,7 +37,8 @@ done
 if [[ -z "$NAMESPACE" ]]; then
   echo "ERROR: -n <namespace> required" >&2; exit 2
 fi
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "$0")" && pwd)"   # benchmark/ — holds perf.yaml + data-gen-job.yaml
+ROOT="$(cd "$HERE/.." && pwd)"          # recipe root — holds deploy/ hw/ model-cache/
 
 # Per-config metadata. Keep this list in sync with the sibling config dirs.
 #   DEPLOY_KIND branches deploy() + clean():
@@ -82,13 +83,13 @@ case "$CONFIG" in
 esac
 export BENCH_POD BENCH_FRONTEND BENCH_RUN_LABEL
 
-HW_ENV="$HERE/hw/${HW}.env"
+HW_ENV="$ROOT/hw/${HW}.env"
 if [[ ! -f "$HW_ENV" ]]; then
   echo "ERROR: hardware env file not found: $HW_ENV" >&2
-  echo "Available: $(ls "$HERE/hw/" 2>/dev/null | tr '\n' ' ')" >&2
+  echo "Available: $(ls "$ROOT/hw/" 2>/dev/null | tr '\n' ' ')" >&2
   exit 2
 fi
-DEPLOY_TPL="$HERE/deploy/${CONFIG}.yaml"
+DEPLOY_TPL="$ROOT/deploy/${CONFIG}.yaml"
 
 if ! command -v envsubst >/dev/null 2>&1; then
   echo "ERROR: envsubst missing. Install gettext-base (apt) or gettext (brew)." >&2
@@ -113,10 +114,10 @@ APPLY_TPL() { envsubst "$TPL_VARS" <"$1" | $K apply -f -; }
 pvc() {
   # `shared-model-cache` is expected to be pre-provisioned in the namespace
   # (RWX, e.g. FSx Lustre). If your cluster doesn't pre-provision it, create
-  # the PVC out-of-band — see README.md → "Storage: shared-model-cache".
+  # the PVC out-of-band — see ../README.md → "Storage: shared-model-cache".
   if ! $K get pvc shared-model-cache >/dev/null 2>&1; then
     echo "[pvc] ERROR: PVC 'shared-model-cache' not found in namespace '$NAMESPACE'" >&2
-    echo "[pvc] See README.md → 'Storage: shared-model-cache' for provisioning guidance." >&2
+    echo "[pvc] See ../README.md → 'Storage: shared-model-cache' for provisioning guidance." >&2
     exit 1
   fi
   $K get pvc shared-model-cache
@@ -131,7 +132,7 @@ download() {
     echo "[download] previous job present but not Complete — deleting and re-applying"
     $K delete job qwen36-model-download
   fi
-  $K apply -f "$HERE/model-cache/model-download.yaml"
+  $K apply -f "$ROOT/model-cache/model-download.yaml"
   $K wait --for=condition=Complete job/qwen36-model-download --timeout=3600s
 }
 
