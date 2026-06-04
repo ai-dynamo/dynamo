@@ -15,6 +15,7 @@ use crate::{
     pipeline::{
         AddressedPushRouter, AddressedRequest, Error, ManyIn, ManyOut, SingleIn,
         error::{PipelineError, PipelineErrorExt},
+        network::ConnectionInfo,
     },
     protocols::{EndpointId, maybe_error::MaybeError},
     traits::DistributedRuntimeProvider,
@@ -99,6 +100,31 @@ impl Drop for OccupancyPermit {
         if self.armed {
             self.state.decrement(self.instance_id);
         }
+    }
+}
+
+struct SelectedRoute {
+    instance_id: u64,
+    permit: Option<OccupancyPermit>,
+}
+
+impl SelectedRoute {
+    fn new(instance_id: u64) -> Self {
+        Self {
+            instance_id,
+            permit: None,
+        }
+    }
+
+    fn with_permit(permit: OccupancyPermit) -> Self {
+        Self {
+            instance_id: permit.instance_id(),
+            permit: Some(permit),
+        }
+    }
+
+    fn instance_id(&self) -> u64 {
+        self.instance_id
     }
 }
 
@@ -754,6 +780,316 @@ where
                 self.client.endpoint.id()
             )
         })
+    }
+
+    async fn select_route(&self) -> anyhow::Result<SelectedRoute> {
+        match self.router_mode {
+            RouterMode::Random => {
+                let instance_id = {
+                    let routing_instances = self.client.routing_instances();
+                    let count = routing_instances.free_ids().len();
+                    if count == 0 {
+                        return Err(self.empty_free_pool_error(&routing_instances));
+                    }
+                    let counter = rand::rng().random::<u64>() as usize;
+                    routing_instances.free_ids()[counter % count]
+                };
+                tracing::trace!("random router selected {instance_id}");
+                Ok(SelectedRoute::new(instance_id))
+            }
+            RouterMode::RoundRobin => {
+                let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
+                let instance_id = {
+                    let routing_instances = self.client.routing_instances();
+                    let count = routing_instances.free_ids().len();
+                    if count == 0 {
+                        return Err(self.empty_free_pool_error(&routing_instances));
+                    }
+                    routing_instances.free_ids()[counter % count]
+                };
+                tracing::trace!("round robin router selected {instance_id}");
+                Ok(SelectedRoute::new(instance_id))
+            }
+            RouterMode::PowerOfTwoChoices => {
+                let state = self.occupancy_state()?;
+                let instance_id = {
+                    let routing_instances = self.client.routing_instances();
+                    if routing_instances.free_ids().is_empty() {
+                        return Err(self.empty_free_pool_error(&routing_instances));
+                    }
+                    p2c_select_from(state.as_ref(), routing_instances.free_ids())
+                };
+                state.increment(instance_id);
+                Ok(SelectedRoute::with_permit(OccupancyPermit::new(
+                    state,
+                    instance_id,
+                )))
+            }
+            RouterMode::LeastLoaded => {
+                let state = self.occupancy_state()?;
+                let routing_instances = self.client.routing_instances();
+                let instance_ids = routing_instances.free_ids().to_vec();
+                let instance_id = state
+                    .select_exact_min_and_increment(&instance_ids)
+                    .await
+                    .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
+                tracing::trace!(
+                    "least loaded router selected {instance_id} (connections: {})",
+                    state.load(instance_id)
+                );
+                Ok(SelectedRoute::with_permit(OccupancyPermit::new(
+                    state,
+                    instance_id,
+                )))
+            }
+            RouterMode::DeviceAwareWeighted => {
+                let state = self.occupancy_state()?;
+                let routing_instances = self.client.routing_instances();
+                let instance_ids = routing_instances.free_ids().to_vec();
+                if instance_ids.is_empty() {
+                    return Err(self.empty_free_pool_error(&routing_instances));
+                }
+
+                let endpoint_id = self.client.endpoint.id();
+                let instances = self.client.instances();
+                let device_type_map: std::collections::HashMap<u64, Option<DeviceType>> = instances
+                    .iter()
+                    .map(|inst| (inst.instance_id, inst.device_type.clone()))
+                    .collect();
+
+                let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .filter(|v| *v >= 1)
+                    .unwrap_or(8);
+                let candidates = device_aware_candidate_group(
+                    state.as_ref(),
+                    &instance_ids,
+                    &device_type_map,
+                    cuda_to_cpu_ratio,
+                );
+
+                let instance_id = state
+                    .select_exact_min_and_increment(&candidates)
+                    .await
+                    .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
+                let is_cpu = matches!(
+                    device_type_map.get(&instance_id),
+                    Some(Some(DeviceType::Cpu))
+                );
+                tracing::info!(
+                    endpoint = %endpoint_id,
+                    selected_instance = instance_id,
+                    is_cpu,
+                    "DeviceAwareWeighted selected instance"
+                );
+                Ok(SelectedRoute::with_permit(OccupancyPermit::new(
+                    state,
+                    instance_id,
+                )))
+            }
+            RouterMode::KV => {
+                anyhow::bail!("KV routing should not use PushRouter route selection directly");
+            }
+            RouterMode::Direct => {
+                anyhow::bail!(
+                    "Direct routing should not call forward on PushRouter directly; use DirectRoutingRouter wrapper"
+                );
+            }
+        }
+    }
+
+    fn check_worker_capacity(&self, request_id: &str, instance_id: u64) -> anyhow::Result<()> {
+        if self.fault_detection_enabled {
+            let routing_instances = self.client.routing_instances();
+            let selected_worker_overloaded = routing_instances.is_overloaded(instance_id);
+            let counts = routing_instances.counts();
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                tracing::debug!(
+                    request_id = %request_id,
+                    instance_id,
+                    router_mode = ?self.router_mode,
+                    free_workers = counts.free,
+                    overloaded_workers = counts.overloaded,
+                    total_workers = counts.discovered,
+                    selected_worker_overloaded,
+                    "checked worker overload state"
+                );
+            }
+            if selected_worker_overloaded {
+                tracing::warn!(
+                    instance_id,
+                    overloaded_workers = counts.overloaded,
+                    total_workers = counts.discovered,
+                    "Rejecting request: selected worker is overloaded"
+                );
+                let cause = PipelineError::ServiceOverloaded(
+                    "Selected worker is overloaded, please retry later".to_string(),
+                );
+                return Err(DynamoError::builder()
+                    .error_type(ErrorType::ResourceExhausted)
+                    .message("Selected worker is overloaded, please retry later")
+                    .cause(cause)
+                    .build()
+                    .into());
+            }
+        }
+
+        Ok(())
+    }
+
+    fn resolve_transport_address(
+        &self,
+        instance_id: &mut u64,
+    ) -> anyhow::Result<(String, &'static str, Instance)> {
+        use crate::component::TransportType;
+
+        let resolve_transport = |id: u64| {
+            let instances = self.client.instances();
+            instances
+                .iter()
+                .find(|i| i.instance_id == id)
+                .map(|instance| {
+                    let (addr, kind) = match &instance.transport {
+                        TransportType::Tcp(tcp_endpoint) => {
+                            tracing::debug!(
+                                instance_id = id,
+                                tcp_endpoint = %tcp_endpoint,
+                                "Using TCP transport for instance"
+                            );
+                            (tcp_endpoint.clone(), "transport.tcp.request")
+                        }
+                        TransportType::Nats(subject) => {
+                            tracing::debug!(
+                                instance_id = id,
+                                subject = %subject,
+                                "Using NATS transport for instance"
+                            );
+                            (subject.clone(), "transport.nats.request")
+                        }
+                    };
+                    (addr, kind, instance.clone())
+                })
+        };
+
+        if let Some(result) = resolve_transport(*instance_id) {
+            return Ok(result);
+        }
+
+        let routing_instances = self.client.routing_instances();
+        let fallback_id = routing_instances
+            .free_ids()
+            .iter()
+            .copied()
+            .find(|&id| id != *instance_id);
+        match fallback_id {
+            Some(id) => {
+                tracing::warn!(
+                    original_instance = *instance_id,
+                    fallback_instance = id,
+                    "Instance disappeared during routing, reselecting"
+                );
+                *instance_id = id;
+                resolve_transport(id).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Fallback instance {} also not found for endpoint {}",
+                        id,
+                        self.client.endpoint.id()
+                    )
+                })
+            }
+            None => Err(anyhow::anyhow!(
+                "Instance {} not found and no other instances available for endpoint {}",
+                *instance_id,
+                self.client.endpoint.id()
+            )),
+        }
+    }
+
+    fn route_span(&self, request_id: &str, instance_id: u64) -> tracing::Span {
+        if matches!(self.router_mode, RouterMode::KV) {
+            tracing::Span::none()
+        } else {
+            tracing::info_span!(
+                "router.route_request",
+                request_id = %request_id,
+                worker_id = instance_id,
+                router_mode = ?self.router_mode,
+            )
+        }
+    }
+
+    fn prepare_addressed_request(
+        &self,
+        mut instance_id: u64,
+        request: SingleIn<T>,
+    ) -> anyhow::Result<(
+        u64,
+        &'static str,
+        SingleIn<AddressedRequest<T>>,
+        tracing::Span,
+    )> {
+        let route_start = Instant::now();
+        let request_id = request.id().to_string();
+        let route_span = self.route_span(&request_id, instance_id);
+
+        self.check_worker_capacity(&request_id, instance_id)?;
+
+        let (address, transport_kind, instance) =
+            self.resolve_transport_address(&mut instance_id)?;
+
+        let request = request.map(|req| AddressedRequest::with_instance(req, address, instance));
+
+        STAGE_DURATION_SECONDS
+            .with_label_values(&[STAGE_ROUTE])
+            .observe(route_start.elapsed().as_secs_f64());
+
+        Ok((instance_id, transport_kind, request, route_span))
+    }
+
+    async fn forward_with_response(
+        &self,
+        instance_id: u64,
+        request: SingleIn<T>,
+        response_connection_info: ConnectionInfo,
+    ) -> anyhow::Result<()> {
+        let (instance_id, transport_kind, request, route_span) =
+            self.prepare_addressed_request(instance_id, request)?;
+
+        let _nvtx_transport = dynamo_nvtx_range!(transport_kind);
+        let result = self
+            .addressed
+            .send_with_connection_info(request, response_connection_info)
+            .instrument(route_span)
+            .await;
+
+        match result {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                if self.fault_detection_enabled && is_inhibited(err.as_ref()) {
+                    tracing::debug!("Reporting instance {instance_id} down due to error: {err}");
+                    self.client.report_instance_down(instance_id);
+                }
+                Err(err)
+            }
+        }
+    }
+
+    pub async fn forward(
+        &self,
+        request: SingleIn<T>,
+        response_connection_info: ConnectionInfo,
+    ) -> anyhow::Result<()> {
+        let selected = self.select_route().await?;
+        let instance_id = selected.instance_id();
+        let result = self
+            .forward_with_response(instance_id, request, response_connection_info)
+            .await;
+
+        // Forwarded responses bypass this router, so occupancy only covers
+        // selection through request-plane send.
+        drop(selected);
+        result
     }
 
     /*

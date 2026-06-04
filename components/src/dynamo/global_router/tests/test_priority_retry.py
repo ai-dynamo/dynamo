@@ -9,6 +9,11 @@ from typing import Any
 
 import pytest
 
+from dynamo.common.global_router_protocol import (
+    GLOBAL_ROUTER_CONTROL_FIELD,
+    GLOBAL_ROUTER_RETRY_ATTEMPT_KEY,
+    get_global_router_retry_attempt,
+)
 from dynamo.global_router.handler import GlobalRouterHandler
 
 pytestmark = [
@@ -34,6 +39,8 @@ class FakeClient:
         self.fail_before_output = fail_before_output
         self.fail_after_output = fail_after_output
         self.calls = 0
+        self.forward_calls = 0
+        self.forward_requests: list[dict[str, Any]] = []
 
     async def generate(self, request: dict[str, Any]):
         self.calls += 1
@@ -50,9 +57,34 @@ class FakeClient:
 
         return stream()
 
+    async def forward(
+        self,
+        request: dict[str, Any],
+        response_connection_info: dict[str, Any],
+        context: Any | None = None,
+    ):
+        self.forward_calls += 1
+        self.forward_requests.append(request)
+        if self.fail_on_generate:
+            raise RuntimeError(f"{self.name} forward failed")
+
 
 async def _collect_outputs(generator) -> list[dict[str, Any]]:
     return [output async for output in generator]
+
+
+class FakeContext:
+    def __init__(self):
+        self._connection_info = {
+            "transport": "tcp",
+            "info": json.dumps({"subject": "frontend-response-subject"}),
+        }
+
+    def id(self) -> str:
+        return "request-123"
+
+    def connection_info(self) -> dict[str, Any]:
+        return self._connection_info
 
 
 def _write_config(tmp_dir: Path, config_data: dict[str, Any]) -> Path:
@@ -126,12 +158,37 @@ def _agg_config() -> dict[str, Any]:
     }
 
 
-def _handler(config_path: Path) -> GlobalRouterHandler:
+def _handler(
+    config_path: Path,
+    enable_delegated_response_stream: bool = True,
+) -> GlobalRouterHandler:
     return GlobalRouterHandler(
         runtime=object(),
         config_path=str(config_path),
         model_name="test-model",
+        enable_delegated_response_stream=enable_delegated_response_stream,
     )
+
+
+@pytest.mark.parametrize("value", [True, False, "1", 1.9, None])
+def test_global_router_retry_attempt_must_be_integer(value: Any) -> None:
+    request = {"routing": {GLOBAL_ROUTER_RETRY_ATTEMPT_KEY: value}}
+
+    with pytest.raises(ValueError, match="must be an integer"):
+        get_global_router_retry_attempt(request)
+
+
+def test_global_router_retry_attempt_rejects_negative_integer() -> None:
+    request = {"routing": {GLOBAL_ROUTER_RETRY_ATTEMPT_KEY: -1}}
+
+    with pytest.raises(ValueError, match="must be >= 0"):
+        get_global_router_retry_attempt(request)
+
+
+def test_global_router_retry_attempt_accepts_integer() -> None:
+    request = {"routing": {GLOBAL_ROUTER_RETRY_ATTEMPT_KEY: 1}}
+
+    assert get_global_router_retry_attempt(request) == 1
 
 
 @pytest.mark.asyncio
@@ -195,6 +252,214 @@ async def test_priority_retry_disabled_raises_first_failure(tmp_path):
 
     assert slow.calls == 1
     assert fast.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_delegation_disabled_uses_relay_when_priority_retry_has_fallback(
+    tmp_path,
+):
+    handler = _handler(
+        _write_config(tmp_path, _disagg_config()),
+        enable_delegated_response_stream=False,
+    )
+    fast = FakeClient("prefill-fast", outputs=[{"pool": "prefill-fast"}])
+    mid = FakeClient("prefill-mid", fail_before_output=True)
+    slow = FakeClient("prefill-slow", fail_on_generate=True)
+    handler.prefill_clients = {
+        "prefill-fast": fast,
+        "prefill-mid": mid,
+        "prefill-slow": slow,
+    }
+
+    outputs = await _collect_outputs(
+        handler.handle_prefill({"token_ids": [1, 2, 3]}, context=FakeContext())
+    )
+
+    assert outputs == [{"pool": "prefill-fast"}]
+    assert slow.calls == 1
+    assert mid.calls == 1
+    assert fast.calls == 1
+    assert slow.forward_calls == 0
+    assert mid.forward_calls == 0
+    assert fast.forward_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_delegated_priority_retry_requires_frontend_adapter(tmp_path):
+    handler = _handler(_write_config(tmp_path, _disagg_config()))
+    handler.prefill_clients = {
+        "prefill-fast": FakeClient("prefill-fast"),
+        "prefill-mid": FakeClient("prefill-mid"),
+        "prefill-slow": FakeClient("prefill-slow"),
+    }
+
+    with pytest.raises(RuntimeError, match="dyn-routed-engine-adapter=global-router"):
+        await _collect_outputs(
+            handler.handle_prefill({"token_ids": [1, 2, 3]}, context=FakeContext())
+        )
+
+
+@pytest.mark.asyncio
+async def test_delegated_retry_metadata_is_ignored_when_delegation_disabled(tmp_path):
+    handler = _handler(
+        _write_config(tmp_path, _disagg_config()),
+        enable_delegated_response_stream=False,
+    )
+    slow = FakeClient("prefill-slow", outputs=[{"pool": "prefill-slow"}])
+    handler.prefill_clients = {
+        "prefill-fast": FakeClient("prefill-fast"),
+        "prefill-mid": FakeClient("prefill-mid"),
+        "prefill-slow": slow,
+    }
+    request = {
+        "token_ids": [1, 2, 3],
+        "routing": {GLOBAL_ROUTER_RETRY_ATTEMPT_KEY: 1},
+    }
+
+    outputs = await _collect_outputs(
+        handler.handle_prefill(request, context=FakeContext())
+    )
+
+    assert outputs == [{"pool": "prefill-slow"}]
+    assert slow.calls == 1
+    assert slow.forward_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_delegated_response_uses_forward_when_priority_retry_has_no_fallback(
+    tmp_path,
+):
+    handler = _handler(
+        _write_config(tmp_path, _disagg_config(enable_priority_retry=False))
+    )
+    slow = FakeClient("prefill-slow", outputs=[{"pool": "prefill-slow"}])
+    handler.prefill_clients = {
+        "prefill-fast": FakeClient("prefill-fast"),
+        "prefill-mid": FakeClient("prefill-mid"),
+        "prefill-slow": slow,
+    }
+
+    outputs = await _collect_outputs(
+        handler.handle_prefill({"token_ids": [1, 2, 3]}, context=FakeContext())
+    )
+
+    assert outputs == []
+    assert slow.forward_calls == 1
+    assert slow.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_delegated_retry_attempt_uses_selected_priority_pool(tmp_path):
+    handler = _handler(_write_config(tmp_path, _disagg_config()))
+    fast = FakeClient("prefill-fast")
+    mid = FakeClient("prefill-mid")
+    slow = FakeClient("prefill-slow")
+    handler.prefill_clients = {
+        "prefill-fast": fast,
+        "prefill-mid": mid,
+        "prefill-slow": slow,
+    }
+    request = {
+        "token_ids": [1, 2, 3],
+        "routing": {GLOBAL_ROUTER_RETRY_ATTEMPT_KEY: 1},
+    }
+
+    outputs = await _collect_outputs(
+        handler.handle_prefill(request, context=FakeContext())
+    )
+
+    assert outputs == []
+    assert slow.forward_calls == 0
+    assert mid.forward_calls == 1
+    assert fast.forward_calls == 0
+    assert mid.forward_requests == [request]
+
+
+@pytest.mark.asyncio
+async def test_delegated_retry_attempt_returns_retry_control_on_forward_failure(
+    tmp_path,
+):
+    handler = _handler(_write_config(tmp_path, _disagg_config()))
+    fast = FakeClient("prefill-fast")
+    mid = FakeClient("prefill-mid")
+    slow = FakeClient("prefill-slow", fail_on_generate=True)
+    handler.prefill_clients = {
+        "prefill-fast": fast,
+        "prefill-mid": mid,
+        "prefill-slow": slow,
+    }
+    request = {
+        "token_ids": [1, 2, 3],
+        "routing": {GLOBAL_ROUTER_RETRY_ATTEMPT_KEY: 0},
+    }
+
+    outputs = await _collect_outputs(
+        handler.handle_prefill(request, context=FakeContext())
+    )
+
+    assert len(outputs) == 1
+    control = outputs[0][GLOBAL_ROUTER_CONTROL_FIELD]
+    assert control["action"] == "retry"
+    assert control["retry_attempt"] == 0
+    assert control["next_retry_attempt"] == 1
+    assert control["failed_namespace"] == "prefill-slow"
+    assert control["next_namespace"] == "prefill-mid"
+    assert slow.forward_calls == 1
+    assert mid.forward_calls == 0
+    assert fast.forward_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_delegated_retry_attempt_returns_exhausted_control(tmp_path):
+    handler = _handler(_write_config(tmp_path, _disagg_config()))
+    fast = FakeClient("prefill-fast", fail_on_generate=True)
+    handler.prefill_clients = {
+        "prefill-fast": fast,
+        "prefill-mid": FakeClient("prefill-mid"),
+        "prefill-slow": FakeClient("prefill-slow"),
+    }
+    request = {
+        "token_ids": [1, 2, 3],
+        "routing": {GLOBAL_ROUTER_RETRY_ATTEMPT_KEY: 2},
+    }
+
+    outputs = await _collect_outputs(
+        handler.handle_prefill(request, context=FakeContext())
+    )
+
+    assert len(outputs) == 1
+    control = outputs[0][GLOBAL_ROUTER_CONTROL_FIELD]
+    assert control["action"] == "exhausted"
+    assert control["retry_attempt"] == 2
+    assert control["failed_namespace"] == "prefill-fast"
+    assert "no priority retry pools remain" in control["error"]
+    assert fast.forward_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_delegated_retry_attempt_returns_exhausted_control_when_attempt_exceeds_order(
+    tmp_path,
+):
+    handler = _handler(_write_config(tmp_path, _disagg_config()))
+    handler.prefill_clients = {
+        "prefill-fast": FakeClient("prefill-fast"),
+        "prefill-mid": FakeClient("prefill-mid"),
+        "prefill-slow": FakeClient("prefill-slow"),
+    }
+    request = {
+        "token_ids": [1, 2, 3],
+        "routing": {GLOBAL_ROUTER_RETRY_ATTEMPT_KEY: 3},
+    }
+
+    outputs = await _collect_outputs(
+        handler.handle_prefill(request, context=FakeContext())
+    )
+
+    assert len(outputs) == 1
+    control = outputs[0][GLOBAL_ROUTER_CONTROL_FIELD]
+    assert control["action"] == "exhausted"
+    assert control["retry_attempt"] == 3
+    assert "exceeds retry order" in control["error"]
 
 
 @pytest.mark.asyncio

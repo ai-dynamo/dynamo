@@ -13,13 +13,17 @@
 use dynamo_runtime::logging::DistributedTraceContext;
 pub use dynamo_runtime::pipeline::AsyncEngineContext;
 use dynamo_runtime::pipeline::context::Controller;
+use dynamo_runtime::pipeline::network::ConnectionInfo;
 use opentelemetry::global::BoxedSpan;
 use opentelemetry::trace::{Span as OtelSpan, Status, TraceContextExt, Tracer};
 use opentelemetry::{KeyValue, global};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{
+    Arc, Mutex, MutexGuard, OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::sync::watch;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -64,6 +68,8 @@ pub struct Context {
     /// prefill requests.
     first_token: Option<watch::Sender<bool>>,
     metadata: Arc<Mutex<BTreeMap<String, String>>>,
+    connection_info: Option<ConnectionInfo>,
+    response_delegated: Option<Arc<AtomicBool>>,
     /// Captured `engine.generate` span. `None` for Python-instantiated test
     /// contexts (where no parent span was plumbed in) — `current_span` /
     /// `start_span` return a no-op `SpanProxy` in that case.
@@ -178,11 +184,41 @@ impl Context {
         first_token: Option<watch::Sender<bool>>,
         metadata: BTreeMap<String, String>,
     ) -> Self {
+        Self::new_with_response_controls(inner, trace_context, first_token, metadata, None, None)
+    }
+
+    pub fn new_with_connection_info(
+        inner: Arc<dyn AsyncEngineContext>,
+        trace_context: Option<DistributedTraceContext>,
+        first_token: Option<watch::Sender<bool>>,
+        metadata: BTreeMap<String, String>,
+        connection_info: Option<ConnectionInfo>,
+    ) -> Self {
+        Self::new_with_response_controls(
+            inner,
+            trace_context,
+            first_token,
+            metadata,
+            connection_info,
+            None,
+        )
+    }
+
+    pub fn new_with_response_controls(
+        inner: Arc<dyn AsyncEngineContext>,
+        trace_context: Option<DistributedTraceContext>,
+        first_token: Option<watch::Sender<bool>>,
+        metadata: BTreeMap<String, String>,
+        connection_info: Option<ConnectionInfo>,
+        response_delegated: Option<Arc<AtomicBool>>,
+    ) -> Self {
         Self {
             inner,
             trace_context,
             first_token,
             metadata: Arc::new(Mutex::new(metadata)),
+            connection_info,
+            response_delegated,
             span: None,
         }
     }
@@ -208,6 +244,12 @@ impl Context {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    pub fn set_response_delegated(&self) {
+        if let Some(response_delegated) = &self.response_delegated {
+            response_delegated.store(true, Ordering::SeqCst);
+        }
     }
 
     /// Build the `traceparent` header value. Prefers the engine.generate
@@ -258,6 +300,8 @@ impl Context {
             trace_context: None,
             first_token: None,
             metadata: Arc::new(Mutex::new(metadata.unwrap_or_default())),
+            connection_info: None,
+            response_delegated: None,
             span: None,
         }
     }
@@ -316,6 +360,23 @@ impl Context {
             .metadata
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = metadata;
+    }
+
+    /// Response stream connection information supplied by the upstream caller.
+    /// Python routers can pass this to `Client.forward(...)` to delegate response
+    /// ownership to a downstream router or worker.
+    fn connection_info(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+        match &self.connection_info {
+            Some(connection_info) => {
+                let py_obj: PyObject = pythonize::pythonize(py, connection_info)?.into();
+                Ok(Some(py_obj))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn mark_response_delegated(&self) {
+        self.set_response_delegated();
     }
 
     #[getter]

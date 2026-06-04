@@ -76,6 +76,8 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     request_plane: str
     event_plane: Optional[str] = None
     chat_processor: str
+    routed_engine_adapter: str
+    global_router_response_prologue_timeout_s: Optional[float]
     enable_anthropic_api: bool
     strip_anthropic_preamble: bool
     debug_perf: bool
@@ -87,6 +89,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     trust_remote_code: bool
 
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens"}
+    _VALID_ROUTED_ENGINE_ADAPTERS = {"default", "global-router"}
 
     def validate(self) -> None:
         if self.load_aware:
@@ -113,6 +116,27 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
             raise ValueError(
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
                 f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
+            )
+        if self.routed_engine_adapter not in self._VALID_ROUTED_ENGINE_ADAPTERS:
+            raise ValueError(
+                f"--dyn-routed-engine-adapter: invalid value "
+                f"'{self.routed_engine_adapter}' "
+                f"(choose from {sorted(self._VALID_ROUTED_ENGINE_ADAPTERS)})"
+            )
+        if (
+            self.routed_engine_adapter == "global-router"
+            and self.chat_processor == "dynamo"
+        ):
+            raise ValueError(
+                "--dyn-routed-engine-adapter=global-router currently requires "
+                "--dyn-chat-processor=vllm or --dyn-chat-processor=sglang"
+            )
+        if (
+            self.global_router_response_prologue_timeout_s is not None
+            and self.global_router_response_prologue_timeout_s <= 0
+        ):
+            raise ValueError(
+                "--dyn-global-router-response-prologue-timeout-s must be > 0"
             )
         if self.router_prefill_load_model == "aic":
             if self.router_mode != "kv":
@@ -442,6 +466,34 @@ class FrontendArgGroup(ArgGroup):
                 "parsing, and reasoning parsing."
             ),
             choices=["dynamo", "vllm", "sglang"],
+        )
+        add_argument(
+            g,
+            flag_name="--dyn-routed-engine-adapter",
+            env_var="DYN_ROUTED_ENGINE_ADAPTER",
+            default="default",
+            dest="routed_engine_adapter",
+            help=(
+                "[EXPERIMENTAL] Routed-engine topology adapter. 'default' calls "
+                "the discovered routed engine directly. 'global-router' enables "
+                "frontend-managed retry attempts for direct delegated responses "
+                "through a global router."
+            ),
+            choices=["default", "global-router"],
+        )
+        add_argument(
+            g,
+            flag_name="--dyn-global-router-response-prologue-timeout-s",
+            env_var="DYN_GLOBAL_ROUTER_RESPONSE_PROLOGUE_TIMEOUT_S",
+            default=30.0,
+            dest="global_router_response_prologue_timeout_s",
+            help=(
+                "[EXPERIMENTAL] Timeout in seconds for the frontend to wait for "
+                "a global-router delegated response stream prologue before "
+                "retrying the next priority pool. Applies only with "
+                "--dyn-routed-engine-adapter=global-router."
+            ),
+            arg_type=float,
         )
 
         add_negatable_bool_argument(

@@ -7,7 +7,11 @@ from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
-from dynamo.common.configuration.utils import add_argument, env_or_default
+from dynamo.common.configuration.utils import (
+    add_argument,
+    add_negatable_bool_argument,
+    env_or_default,
+)
 
 
 class DynamoGlobalRouterArgGroup(ArgGroup):
@@ -68,6 +72,17 @@ class DynamoGlobalRouterArgGroup(ArgGroup):
             help="Default ITL target (ms) for decode pool selection when SLA not present in request.",
             arg_type=float,
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-delegated-response-stream",
+            env_var="DYN_GLOBAL_ROUTER_ENABLE_DELEGATED_RESPONSE_STREAM",
+            default=False,
+            help=(
+                "[EXPERIMENTAL] Allow the global router to delegate response streams "
+                "directly to downstream routers. Frontends using priority retry must "
+                "also set --dyn-routed-engine-adapter=global-router."
+            ),
+        )
 
 
 class DynamoGlobalRouterConfig(ConfigBase):
@@ -79,6 +94,7 @@ class DynamoGlobalRouterConfig(ConfigBase):
     component_name: str
     default_ttft_target_ms: Optional[float] = None
     default_itl_target_ms: Optional[float] = None
+    enable_delegated_response_stream: bool = False
 
     def validate(self) -> None:
         """Require config_path and model_name to be set via CLI or env."""
