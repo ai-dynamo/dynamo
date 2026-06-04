@@ -12,13 +12,8 @@ from dynamo._internal.aic import (
     estimate_num_gpu_blocks,
 )
 from dynamo.common.utils.topology import apply_topology_config
-from dynamo.llm import (
-    MockEngineArgs,
-    ModelRuntimeConfig,
-    ReasoningConfig,
-    SglangArgs,
-    TrtllmArgs,
-)
+from dynamo.llm import ModelRuntimeConfig
+from dynamo.mocker import MockEngineArgs, ReasoningConfig, SglangArgs, TrtllmArgs
 
 _DEFAULT_NUM_GPU_BLOCKS = 16384
 _DEFAULT_MAX_NUM_SEQS = 256

@@ -1,15 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
-// Standalone harness for the lightseek-mm path: load a HF model dir, decode
-// an image header to get (w, h), call lightseek's `calculate_num_tokens`, and
-// print the count. Useful for cross-checking against the same model's vLLM
-// output when investigating routing-cache mismatches.
+// Standalone harness for the MM-routing per-image token-count path: load a
+// HF model dir, decode an image header to get (w, h), call the image
+// processor's `calculate_num_tokens`, and print the count. Useful for
+// cross-checking against the same model's vLLM output when investigating
+// routing-cache mismatches.
 //
-//   cargo run -p dynamo-llm --example lightseek_count --features lightseek-mm \
+//   cargo run -p dynamo-llm --example mm_token_count --features mm-routing \
 //     -- <model_dir> <image_path> [model_id]
 
-#[cfg(feature = "lightseek-mm")]
+#[cfg(feature = "mm-routing")]
 fn main() -> anyhow::Result<()> {
     use anyhow::Context;
     use dynamo_llm::preprocessor::lightseek_mm::LightseekMmCounter;
@@ -18,11 +19,11 @@ fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let model_dir: PathBuf = args
         .next()
-        .context("usage: lightseek_count <model_dir> <image_path> [model_id]")?
+        .context("usage: mm_token_count <model_dir> <image_path> [model_id]")?
         .into();
     let image_path: PathBuf = args
         .next()
-        .context("usage: lightseek_count <model_dir> <image_path> [model_id]")?
+        .context("usage: mm_token_count <model_dir> <image_path> [model_id]")?
         .into();
     let model_id = args
         .next()
@@ -61,8 +62,8 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(not(feature = "lightseek-mm"))]
+#[cfg(not(feature = "mm-routing"))]
 fn main() {
-    eprintln!("rebuild with --features lightseek-mm");
+    eprintln!("rebuild with --features mm-routing");
     std::process::exit(2);
 }

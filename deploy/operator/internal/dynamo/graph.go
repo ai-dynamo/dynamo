@@ -339,6 +339,16 @@ func backendFrameworkForGeneratedDCDs(parentDGD *v1beta1.DynamoGraphDeployment) 
 	return string(detected), nil
 }
 
+// BackendFrameworkForComponent returns the framework used to render a specific
+// DGD component. It is exported for controllers that need to build resources
+// from a component without going through DCD generation.
+func BackendFrameworkForComponent(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	dynamoDeployment *v1beta1.DynamoGraphDeployment,
+) (BackendFramework, error) {
+	return getBackendFrameworkFromComponent(component, dynamoDeployment)
+}
+
 func GetDynamoNamespace(object metav1.Object, service *v1beta1.DynamoComponentDeploymentSharedSpec) string {
 	return v1beta1.ComputeDynamoNamespace(service.GlobalDynamoNamespace, object.GetNamespace(), object.GetName())
 }
