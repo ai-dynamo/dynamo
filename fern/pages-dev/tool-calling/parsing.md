@@ -1,7 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Tool Call and Reasoning Parsing
+title: "Tool Calling & Reasoning Parsing"
 subtitle: Parse tool calls and reasoning out of model output into OpenAI-compatible tool_calls and reasoning_content
 ---
 
@@ -13,7 +13,7 @@ There are two ways to parse, depending on whether the parser lives in Dynamo's o
 
 | Path | When to use | Pages |
 |------|-------------|-------|
-| **Dynamo** | Dynamo ships a framework-agnostic Rust parser for the model's tool-call or reasoning format. Default path. | [Tool Call Parsing (Dynamo)](tool-calling/README.md), [Reasoning Parsing (Dynamo)](reasoning/README.md) |
+| **Dynamo** | Dynamo ships a framework-agnostic Rust parser for the model's tool-call or reasoning format. Default path. | [Tool Call Parsing (Dynamo)](README.md), [Reasoning Parsing (Dynamo)](../reasoning/README.md) |
 | **Engine Fallback** | Use the framework's own parser (vLLM or SGLang today; TRT-LLM in progress) when Dynamo doesn't ship one for your model. | [Parser Engine Fallback](engine-fallback.md) |
 
 Start with the Dynamo path. Fall back to the engine path only when Dynamo's registry doesn't list a parser for your model. For exactly which flags combine and which combinations don't make sense, see [Parser Configuration](parser-configuration.md).
@@ -25,7 +25,7 @@ In `vllm serve`, `sglang serve`, and `trtllm-serve`, tool-call and reasoning par
 ## See Also
 
 - [Parser Configuration](parser-configuration.md) -- which flags combine, and which combinations don't make sense
-- [Tool Call Parsing (Dynamo)](tool-calling/README.md) / [Reasoning Parsing (Dynamo)](reasoning/README.md) -- Dynamo-native parser names
+- [Tool Call Parsing (Dynamo)](README.md) / [Reasoning Parsing (Dynamo)](../reasoning/README.md) -- Dynamo-native parser names
 - [Parser Engine Fallback](engine-fallback.md) -- upstream vLLM / SGLang parsers
-- [Troubleshooting Tool Calls](tool-calling/troubleshooting.md) -- capture `logprobs` so issues can be localized
-- [Frontend Configuration Reference](components/frontend/configuration.md) -- full CLI flag reference
+- [Troubleshooting Tool Calls](troubleshooting.md) -- capture `logprobs` so issues can be localized
+- [Frontend Configuration Reference](../components/frontend/configuration.md) -- full CLI flag reference
