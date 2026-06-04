@@ -29,6 +29,7 @@ Learn fundamental Dynamo concepts through these introductory examples:
 - **[Quickstart](https://docs.nvidia.com/dynamo/getting-started/quickstart)** - Simple local Dynamo setup across supported backends
 - **[Disaggregated Serving](/docs/features/disaggregated-serving/README.md)** - Prefill/decode separation for enhanced performance and scalability
 - **[Multi-node TensorRT-LLM](/docs/backends/trtllm/multinode/trtllm-multinode-examples.md)** - Distributed inference across multiple nodes and GPUs
+- **[Raw Engines Routing Frontend](/examples/raw_engines_routing/README.md)** - Build a custom FastAPI gateway around raw vLLM workers and standalone routing services
 
 ## Framework Support
 
