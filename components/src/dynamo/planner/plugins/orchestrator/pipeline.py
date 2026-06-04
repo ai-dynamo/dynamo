@@ -163,7 +163,7 @@ class _PredictAdapter:
         assert method == "Predict", f"unexpected method for PREDICT: {method!r}"
         req = PredictStageRequest(context=context)
 
-        started = self._clock.now() if (self._metrics and self._clock) else 0.0
+        started = self._clock.monotonic() if (self._metrics and self._clock) else 0.0
         try:
             resp = await self._plugin.transport.call("Predict", req)
         except asyncio.CancelledError:
@@ -216,7 +216,7 @@ class _PredictAdapter:
             if self._clock is not None:
                 self._metrics.plugin_latency_seconds.labels(
                     plugin_id=self._plugin.plugin_id, stage="predict"
-                ).observe(max(0.0, self._clock.now() - started))
+                ).observe(max(0.0, self._clock.monotonic() - started))
 
         return resp  # type: ignore[return-value]
 
@@ -403,7 +403,7 @@ async def _run_fanout_stage(
     # latency collapsed into the gather deadline.
     call_starts: list[float] = []
     if metrics is not None:
-        call_starts = [clock.now() for _ in plugins]
+        call_starts = [clock.monotonic() for _ in plugins]
 
     # Bare asyncio.gather — each transport.call enforces its own
     # per-plugin timeout inside PluginTransport. Wrapping a stage-level
@@ -413,7 +413,7 @@ async def _run_fanout_stage(
         return_exceptions=True,
     )
 
-    call_end = clock.now() if metrics is not None else 0.0
+    call_end = clock.monotonic() if metrics is not None else 0.0
 
     # Pair plugins with their raw results via zip — do NOT assume the
     # result carries a back-reference to the plugin.
@@ -503,6 +503,8 @@ async def _run_fanout_stage(
             metrics,
             stage=stage,
             plugin_results=plugin_results,
+            attempted_plugin_ids=[p.plugin_id for p in plugins]
+            + [i.plugin_id for i in active.inherited],
             outcome=outcome,
         )
         _emit_clamps_and_rejects(
@@ -611,6 +613,7 @@ def _emit_override_active(
     *,
     stage: str,
     plugin_results: list,
+    attempted_plugin_ids: list,
     outcome: MergeOutcome,
 ) -> None:
     """Set ``plugin_override_active`` for every evaluated plugin in this
@@ -624,11 +627,13 @@ def _emit_override_active(
     from dynamo.planner.plugins.types import OverrideResult as _OverrideResult
     from dynamo.planner.plugins.types import RejectResult as _RejectResult
 
-    # Reset every plugin we saw this tick before setting their actual
-    # contribution.  Iteration over plugin_results covers both triggered
-    # and inherited entries.
-    for pr in plugin_results:
-        metrics.reset_overrides(pr.plugin_id, stage)
+    # Reset every plugin we ATTEMPTED this tick (triggered + inherited),
+    # not just those that produced a result. A plugin whose call raised is
+    # absent from ``plugin_results`` but may have set the gauge to 1 on a
+    # prior tick — resetting only result-producers would leave that 1
+    # lingering. ``attempted_plugin_ids`` covers the errored ones too.
+    for pid in attempted_plugin_ids:
+        metrics.reset_overrides(pid, stage)
 
     # Short-circuited REJECT winners (found by type_aware_merge) surface
     # as outcome.rejected; emit override_type=REJECT for them.
@@ -882,13 +887,13 @@ async def run_pipeline(
         # tick_duration_seconds histogram — measured around the outer
         # wait_for so it includes every stage + the timeout machinery
         # itself (matches what operators see as "tick cost").
-        tick_start = clock.now()
+        tick_start = clock.monotonic()
         try:
             outcome = await asyncio.wait_for(_body(), timeout=tick_max_duration_seconds)
         finally:
             if metrics is not None:
                 metrics.tick_duration_seconds.observe(
-                    max(0.0, clock.now() - tick_start)
+                    max(0.0, clock.monotonic() - tick_start)
                 )
         return outcome
     except asyncio.TimeoutError:

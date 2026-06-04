@@ -293,6 +293,30 @@ class OverrideResult(_ProtoMirror):
 # explicitly. Round-trip test verifies equivalence.
 
 
+def _derive_result_kind(obj: Any) -> None:
+    """Auto-derive ``result_kind`` from the set oneof payload and validate
+    the oneof invariant. Shared by every message carrying the
+    ``result_kind`` + accept/override/reject oneof (stage responses AND
+    ``ProposeResult``) so they all get identical construction ergonomics
+    and the same oneof-violation guard — without which a message built the
+    natural way (e.g. ``ProposeResult(override=...)``) leaves
+    ``result_kind=''`` and fails proto round-trip equality."""
+    set_kinds = [
+        k for k in ("accept", "override", "reject") if getattr(obj, k) is not None
+    ]
+    if obj.result_kind == "" and len(set_kinds) == 1:
+        object.__setattr__(obj, "result_kind", set_kinds[0])
+    elif len(set_kinds) > 1:
+        raise ValueError(
+            f"oneof violation: at most one of accept/override/reject may be set; "
+            f"got {set_kinds}"
+        )
+    elif obj.result_kind != "" and obj.result_kind not in set_kinds:
+        raise ValueError(
+            f"result_kind={obj.result_kind!r} but corresponding payload not set"
+        )
+
+
 class _StageOneofResponse(_ProtoMirror):
     """Common base for stage responses with proto3 ``oneof result``.
 
@@ -308,21 +332,7 @@ class _StageOneofResponse(_ProtoMirror):
     final: bool = False
 
     def model_post_init(self, __context: Any) -> None:
-        # Auto-derive result_kind from set fields if not explicit
-        set_kinds = [
-            k for k in ("accept", "override", "reject") if getattr(self, k) is not None
-        ]
-        if self.result_kind == "" and len(set_kinds) == 1:
-            object.__setattr__(self, "result_kind", set_kinds[0])
-        elif len(set_kinds) > 1:
-            raise ValueError(
-                f"oneof violation: at most one of accept/override/reject may be set; "
-                f"got {set_kinds}"
-            )
-        elif self.result_kind != "" and self.result_kind not in set_kinds:
-            raise ValueError(
-                f"result_kind={self.result_kind!r} but corresponding payload not set"
-            )
+        _derive_result_kind(self)
 
 
 class PredictStageRequest(_ProtoMirror):
@@ -365,6 +375,12 @@ class ProposeResult(_ProtoMirror):
     override: Optional[OverrideResult] = None
     reject: Optional[RejectResult] = None
     priority: int = 0
+
+    def model_post_init(self, __context: Any) -> None:
+        # Same oneof auto-derive + validation as the stage responses, so
+        # ``ProposeResult(override=...)`` round-trips through proto without
+        # ``result_kind`` drifting from '' to the WhichOneof-injected value.
+        _derive_result_kind(self)
 
 
 class ReconcileStageRequest(_ProtoMirror):

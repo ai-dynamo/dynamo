@@ -495,6 +495,33 @@ def test_reconcile_stage_request_with_proposals():
     assert msg_back.proposals[1].priority == 10
 
 
+def test_propose_result_derives_result_kind_from_payload():
+    """``ProposeResult`` built the natural way (payload only, no explicit
+    ``result_kind``) must auto-derive ``result_kind`` and survive the proto
+    round-trip unchanged — same ergonomics + oneof guard as the stage
+    responses. Pre-fix it had no model_post_init, so result_kind stayed ''
+    on construction and came back 'override' from WhichOneof, breaking
+    round-trip equality."""
+    pr = pyd.ProposeResult(
+        plugin_id="p1",
+        priority=10,
+        override=pyd.OverrideResult(
+            targets=[pyd.ComponentTarget(sub_component_type="prefill", replicas=8)]
+        ),
+    )
+    # Auto-derived on construction, not left as "".
+    assert pr.result_kind == "override"
+    assert _round_trip_pyd(pr) == pr
+
+    # Oneof violation is rejected at construction, like the stage responses.
+    with pytest.raises(ValueError, match="oneof violation"):
+        pyd.ProposeResult(
+            plugin_id="p2",
+            accept=pyd.AcceptResult(),
+            reject=pyd.RejectResult(reason="no"),
+        )
+
+
 def test_constrain_stage_response_at_least_at_most():
     """CONSTRAIN typically returns AT_LEAST + AT_MOST (no SET)."""
     msg = pyd.ConstrainStageResponse(
