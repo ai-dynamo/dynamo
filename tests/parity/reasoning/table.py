@@ -145,9 +145,9 @@ _FAMILY_METADATA = {
     },
     "nemotron_deci": {
         "models": [
-            "Nemotron-Super / -Ultra / -Deci",
+            "Nemotron-Super-v1 / Nemotron-Ultra-v1 / Nemotron-Deci-v1",
             "Llama-Nemotron",
-            "GLM-4.5 / GLM-4.7 via glm45 alias",
+            "GLM-4.5 / GLM-4.6 via glm45 alias",
         ],
         "rust_enum": "ReasoningParserType::NemotronDeci",
         "implementation": "BasicReasoningParser `<think>` / `</think>`",
