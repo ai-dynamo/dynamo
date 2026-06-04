@@ -784,25 +784,31 @@ class OrchestratorEngineAdapter:
 
     def _observe_fpm(self, obs: FpmObservations) -> None:
         """Mirror ``PlannerStateMachine._observe_fpm`` — feeds observations
-        into the orchestrator-owned regression models."""
+        into the orchestrator-owned regression models.
+
+        ``obs.prefill`` / ``obs.decode`` are already
+        ``dict[(worker_id, dp_rank) -> ForwardPassMetrics]`` — exactly the
+        shape ``PlannerEnginePerfModel.add_observations`` consumes, so we
+        hand the whole dict over in one call (matching PSM
+        ``state_machine.py`` line-for-line). The regression model only
+        exposes ``add_observations`` (plural, dict-based); there is no
+        singular ``add_observation`` on this class.
+        """
         mode = self._config.mode
         if mode == "agg":
             if obs.decode:
                 agg = self._orchestrator.get_regression("agg")
                 if agg is not None:
-                    for fpm in obs.decode.values():
-                        agg.add_observation(fpm)
+                    agg.add_observations(obs.decode)
             return
         if obs.prefill:
             p_reg = self._orchestrator.get_regression("prefill")
             if p_reg is not None:
-                for fpm in obs.prefill.values():
-                    p_reg.add_observation(fpm)
+                p_reg.add_observations(obs.prefill)
         if obs.decode:
             d_reg = self._orchestrator.get_regression("decode")
             if d_reg is not None:
-                for fpm in obs.decode.values():
-                    d_reg.add_observation(fpm)
+                d_reg.add_observations(obs.decode)
 
     def _tick_input_to_context(self, ti: TickInput) -> PipelineContext:
         traffic = None

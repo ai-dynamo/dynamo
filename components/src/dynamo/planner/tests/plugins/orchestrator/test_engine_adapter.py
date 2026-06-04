@@ -29,6 +29,7 @@ import pytest
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.types import (
     EngineCapabilities,
+    FpmObservations,
     ScheduledTick,
     TickInput,
     WorkerCapabilities,
@@ -62,6 +63,111 @@ def _agg_config_throughput_on() -> PlannerConfig:
         enable_throughput_scaling=True,
         optimization_target="sla",
         served_model_name="test",
+    )
+
+
+def _disagg_caps() -> WorkerCapabilities:
+    return WorkerCapabilities(
+        prefill=EngineCapabilities(
+            num_gpu=1, max_num_batched_tokens=2048, max_kv_tokens=16384
+        ),
+        decode=EngineCapabilities(
+            num_gpu=1, max_num_batched_tokens=2048, max_kv_tokens=16384
+        ),
+    )
+
+
+def _disagg_config_sla() -> PlannerConfig:
+    return PlannerConfig(
+        mode="disagg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+    )
+
+
+def _make_fpm(worker_id: str = "w1", dp_rank: int = 0):
+    from dynamo.common.forward_pass_metrics import (
+        ForwardPassMetrics,
+        QueuedRequestMetrics,
+        ScheduledRequestMetrics,
+    )
+
+    return ForwardPassMetrics(
+        worker_id=worker_id,
+        dp_rank=dp_rank,
+        wall_time=0.01,
+        scheduled_requests=ScheduledRequestMetrics(
+            sum_prefill_tokens=0,
+            num_prefill_requests=0,
+            sum_decode_kv_tokens=100,
+            num_decode_requests=1,
+        ),
+        queued_requests=QueuedRequestMetrics(
+            sum_prefill_tokens=0,
+            sum_decode_kv_tokens=0,
+        ),
+    )
+
+
+def _build_real_regression(cfg: PlannerConfig, caps: WorkerCapabilities, kind: str):
+    """Build a regression the exact way production does.
+
+    A ``PlannerStateMachine`` in SLA mode constructs ``PlannerEnginePerfModel``
+    instances in its ``_{agg,prefill,decode}_regression`` slots — the same
+    objects the orchestrator path installs via ``install_regressions``. We
+    reuse that construction so the test exercises the real type (which only
+    exposes ``add_observations``, never the singular ``add_observation``).
+    """
+    from dynamo.planner.core.state_machine import PlannerStateMachine
+
+    psm = PlannerStateMachine(cfg, caps)
+    return getattr(psm, f"_{kind}_regression")
+
+
+def test_observe_fpm_feeds_installed_regression_without_crashing_agg():
+    """Regression guard for the add_observation→add_observations P1.
+
+    The orchestrator FPM-observation feed (``_observe_fpm``) is reached on
+    every SLA-mode load tick when ``fpm_observations`` is non-empty and a
+    regression is installed. The regression slots hold
+    ``PlannerEnginePerfModel``, which exposes only ``add_observations(dict)``
+    — the pre-fix singular ``add_observation(fpm)`` raised AttributeError
+    and crashed the tick. No unit test or K8s smoke exercised this exact
+    combination (SLA + live FPM + installed regression), so the crash
+    shipped silently. Feed a *real* ``PlannerEnginePerfModel`` (built the
+    same way PSM builds it) and assert ``_observe_fpm`` does not raise.
+    """
+    cfg = _agg_config_throughput_on()  # agg, SLA
+    caps = _caps()
+    adapter = OrchestratorEngineAdapter(cfg, caps)
+    adapter.install_regressions(agg=_build_real_regression(cfg, caps, "agg"))
+    assert adapter._orchestrator.get_regression("agg") is not None
+
+    # Pre-fix this raised:
+    #   AttributeError: 'PlannerEnginePerfModel' object has no attribute
+    #   'add_observation'
+    adapter._observe_fpm(FpmObservations(decode={("w1", 0): _make_fpm()}))
+
+
+def test_observe_fpm_feeds_installed_regression_without_crashing_disagg():
+    """Same guard for the disagg prefill+decode branches of ``_observe_fpm``."""
+    cfg = _disagg_config_sla()
+    caps = _disagg_caps()
+    adapter = OrchestratorEngineAdapter(cfg, caps)
+    adapter.install_regressions(
+        prefill=_build_real_regression(cfg, caps, "prefill"),
+        decode=_build_real_regression(cfg, caps, "decode"),
+    )
+    assert adapter._orchestrator.get_regression("prefill") is not None
+    assert adapter._orchestrator.get_regression("decode") is not None
+
+    adapter._observe_fpm(
+        FpmObservations(
+            prefill={("p1", 0): _make_fpm("p1")},
+            decode={("d1", 0): _make_fpm("d1")},
+        )
     )
 
 

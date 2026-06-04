@@ -427,7 +427,7 @@ class ReplayPlannerAdapter:
                     continue
                 fpm = _build_fpm_from_dict(snap)
                 if fpm.wall_time > 0.0:
-                    agg_reg.add_observation(fpm)
+                    agg_reg.add_observations({(fpm.worker_id, fpm.dp_rank): fpm})
         else:
             has_prefill = self._config.mode in ("prefill", "disagg")
             has_decode = self._config.mode in ("decode", "disagg")
@@ -443,7 +443,7 @@ class ReplayPlannerAdapter:
                             continue
                         fpm = _build_fpm_from_dict(snap)
                         if fpm.wall_time > 0.0:
-                            p_reg.add_observation(fpm)
+                            p_reg.add_observations({(fpm.worker_id, fpm.dp_rank): fpm})
             if has_decode:
                 d_reg = self._get_regression("decode")
                 if d_reg is not None:
@@ -456,7 +456,7 @@ class ReplayPlannerAdapter:
                             continue
                         fpm = _build_fpm_from_dict(snap)
                         if fpm.wall_time > 0.0:
-                            d_reg.add_observation(fpm)
+                            d_reg.add_observations({(fpm.worker_id, fpm.dp_rank): fpm})
 
     def _is_easy_mode(self) -> bool:
         """Easy-mode check routed via config — both paths honour this
