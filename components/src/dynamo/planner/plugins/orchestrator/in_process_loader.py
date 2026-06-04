@@ -81,6 +81,9 @@ def load_in_process_plugins(
             hold_policy=hold_policy,
             is_builtin=False,
             version="user-in-process",
+            needs=list(spec.needs),
+            requires_produced_fields=list(spec.requires_produced_fields),
+            observation_window_seconds=spec.observation_window_seconds,
         )
         log.info(
             "load_in_process_plugins: registered plugin_id=%s module=%s class=%s",

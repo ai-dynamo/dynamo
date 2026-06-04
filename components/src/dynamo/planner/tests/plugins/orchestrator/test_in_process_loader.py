@@ -142,3 +142,35 @@ def test_loader_loads_multiple_specs(ctx_factory):
     load_in_process_plugins(ctx["orchestrator"], specs)
     ids = sorted(i.plugin_id for i in ctx["orchestrator"].list_plugins())
     assert ids == ["fake0", "fake1", "fake2"]
+
+
+def test_loader_passes_scale_interval_fields_to_registered_plugin(ctx_factory):
+    """``InProcessPluginSpec`` now exposes ``needs`` /
+    ``requires_produced_fields`` / ``observation_window_seconds`` so
+    ConfigMap-driven in-process plugins can declare the scale_interval
+    cadence contract.  Without the loader-side passthrough a
+    ``throughput_propose`` asking for ``requires_produced_fields=
+    ["predictions"]`` would have fired every tick regardless of
+    upstream predict output.
+    """
+    ctx = ctx_factory()
+    spec = InProcessPluginSpec.model_validate(
+        {
+            "module": FAKE_PLUGIN_MODULE,
+            "class": "FakePlugin",
+            "plugin_id": "throughput_propose",
+            "plugin_type": "propose",
+            "priority": 100,
+            "execution_interval_seconds": 60.0,
+            "needs": ["observations.traffic"],
+            "requires_produced_fields": ["predictions"],
+            "observation_window_seconds": 180.0,
+        }
+    )
+    load_in_process_plugins(ctx["orchestrator"], [spec])
+    plugin = ctx["orchestrator"].registry.get_plugin("throughput_propose")
+    assert plugin is not None
+    assert plugin.needs == ["observations.traffic"]
+    assert plugin.requires_produced_fields == ["predictions"]
+    assert plugin.observation_window_seconds == 180.0
+    assert plugin.execution_interval_seconds == 60.0

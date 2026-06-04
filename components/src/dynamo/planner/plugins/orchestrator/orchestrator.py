@@ -156,12 +156,20 @@ class LocalPlannerOrchestrator:
         is_builtin: bool = True,
         version: str = "builtin",
         needs: Optional[list[str]] = None,
+        requires_produced_fields: Optional[list[str]] = None,
+        observation_window_seconds: float = 0.0,
     ) -> RegisteredPlugin:
         """Register a plugin object that lives in this Python process.
 
         Thin wrapper around ``PluginRegistryServer.register_internal``;
         exists so callers (``NativePlannerBase``, tests) can interact
         with a single facade without reaching through to the registry.
+
+        ``requires_produced_fields`` / ``observation_window_seconds``
+        mirror the corresponding ``RegisterRequest`` proto fields —
+        builtins and in-process loader entries flow through this
+        facade, so they must be accepted here or the scale_interval
+        cadence contract is unreachable for any non-gRPC registrant.
         """
         return self._registry.register_internal(
             plugin_id=plugin_id,
@@ -173,6 +181,8 @@ class LocalPlannerOrchestrator:
             is_builtin=is_builtin,
             version=version,
             needs=needs,
+            requires_produced_fields=requires_produced_fields,
+            observation_window_seconds=observation_window_seconds,
         )
 
     def list_plugins(
@@ -216,6 +226,8 @@ class LocalPlannerOrchestrator:
                     execution_interval_seconds=entry.execution_interval_seconds,
                     hold_policy=entry.hold_policy,
                     needs=list(entry.needs),
+                    requires_produced_fields=list(entry.requires_produced_fields),
+                    observation_window_seconds=entry.observation_window_seconds,
                 )
                 resp = await self._registry.register(req)
             except asyncio.CancelledError:

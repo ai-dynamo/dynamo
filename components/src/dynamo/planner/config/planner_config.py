@@ -183,6 +183,30 @@ class ExternalPluginEntry(BaseModel):
         description="Capability list (consumed by type-aware merge); "
         "empty in v1 (no plugin yet uses needs declaration).",
     )
+    requires_produced_fields: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Hard dependency on earlier-stage produced fields. Each "
+            "entry is a dot-path into ``PipelineContext`` (e.g. "
+            '``"predictions"``, ``"observations.traffic"``). The '
+            "scheduler skips this plugin for the current tick if any "
+            "listed field is unset on the live context; skipped ticks "
+            "do NOT advance the plugin's anchor, so the next tick that "
+            "has the field still fires it.  Empty/unset = no gating."
+        ),
+    )
+    observation_window_seconds: float = Field(
+        default=0.0,
+        ge=0,
+        description=(
+            "Aggregation window the plugin wants for windowed observation "
+            "types in ``needs`` (currently ``observations.traffic``). "
+            "0.0 = ``scale_interval`` freshness; ``N > 0`` = Prometheus "
+            "aggregates over the last ``N`` seconds.  Enforced at "
+            "register-time to be ``>= scale_interval_seconds`` — a "
+            "smaller window than the pipeline tick rate is degenerate."
+        ),
+    )
 
     @field_validator("hold_policy", mode="before")
     @classmethod

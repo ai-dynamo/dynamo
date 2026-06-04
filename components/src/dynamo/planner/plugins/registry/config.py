@@ -97,6 +97,21 @@ class InProcessPluginSpec(BaseModel):
     priority: int
     execution_interval_seconds: float = 0.0
     hold_policy: Literal["ACCEPT_WHEN_IDLE", "HOLD_LAST"] = "ACCEPT_WHEN_IDLE"
+    needs: list[str] = Field(default_factory=list)
+    """Capability list (consumed by type-aware merge / lazy-traffic-pull)."""
+
+    requires_produced_fields: list[str] = Field(default_factory=list)
+    """Hard dependency on earlier-stage produced fields. Each entry is a
+    dot-path into ``PipelineContext`` (e.g. ``"predictions"``,
+    ``"observations.traffic"``). Scheduler skips this plugin for the
+    tick if any listed field is unset; skipping does NOT advance the
+    plugin's anchor. Empty = no gating."""
+
+    observation_window_seconds: float = Field(default=0.0, ge=0)
+    """Aggregation window the plugin wants for windowed observation
+    types in ``needs``. ``0.0`` = ``scale_interval`` freshness;
+    ``N > 0`` = aggregate over the last ``N`` seconds."""
+
     kwargs: dict[str, Any] = Field(default_factory=dict)
 
 

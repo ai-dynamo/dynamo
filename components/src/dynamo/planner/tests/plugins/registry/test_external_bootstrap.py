@@ -354,3 +354,35 @@ async def test_bootstrap_registers_all_four_stages():
         "ext-recon": "reconcile",
         "ext-cons": "constrain",
     }
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_passes_scale_interval_fields_through():
+    """``ExternalPluginEntry`` newly exposes ``requires_produced_fields``
+    and ``observation_window_seconds``. ``register_external_from_config``
+    must thread both into the ``RegisterRequest`` it constructs, or
+    ConfigMap-driven external plugins cannot use the scale_interval
+    cadence contract — even though gRPC self-registrants already can.
+    """
+    orch, server = _build_orch()
+    entry = ExternalPluginEntry(
+        plugin_id="ext-tput-propose",
+        plugin_type="propose",
+        priority=100,
+        endpoint="grpc://127.0.0.1:9000",
+        auth_token="tok",
+        protocol_version="1.0",
+        version="v1",
+        execution_interval_seconds=60.0,
+        hold_policy=HoldPolicy.HOLD_LAST,
+        needs=["observations.traffic"],
+        requires_produced_fields=["predictions"],
+        observation_window_seconds=180.0,
+    )
+    accepted, failures = await orch.register_external_from_config([entry])
+    assert accepted == 1 and failures == []
+    plugin = server.get_plugin("ext-tput-propose")
+    assert plugin is not None
+    assert plugin.requires_produced_fields == ["predictions"]
+    assert plugin.observation_window_seconds == 180.0
+    assert plugin.needs == ["observations.traffic"]
