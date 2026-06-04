@@ -176,6 +176,39 @@ Do not send `force_nonempty_content` as a top-level request parameter.
 3. Do not remove `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel` or `--no-enable-flashinfer-autotune` from the vLLM worker commands unless rerunning the benchmark qualification. These are part of the performance recipe.
 4. Raw Moontrace replay may contain over-context or pathological long-generation rows. Do not drop those rows silently; preserve them as HTTP/error evidence or classify the run accordingly.
 
+## Reproducing the runtime image
+
+The published `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-ultra-dev.1` image already
+contains the Nemotron-3 Ultra vLLM patch stack. These steps are only for reproducing it on a
+stock Dynamo vLLM runtime that has vLLM **v0.22.0**. Run them from the repo root; the four
+patches live in `container/deps/vllm/patches/v0.22.0/ultra/`.
+
+```bash
+# 1. Confirm the base has vLLM 0.22.0 (the patches target this exact version)
+python3 -c 'import importlib.metadata as m; v=m.version("vllm"); assert v=="0.22.0", v'
+
+# 2. Locate the installed vLLM package root (parent of the vllm/ dir)
+SITE_PARENT="$(python3 -c 'import pathlib, vllm; print(pathlib.Path(vllm.__file__).resolve().parent.parent)')"
+
+# 3. Apply the four patches in order (git-format diffs rooted at vllm/, so -p1)
+for p in 0001-pr42554-mamba-prefix-cache-pd-runtime.patch \
+         0002-ultra-hybrid-hash-block-kv-events.patch \
+         0003-ultra-mtp-ds-conv-state-layout.patch \
+         0004-ultra-ssm-nixl-tailfix.patch; do
+  patch --batch --forward -p1 -d "$SITE_PARENT" \
+    < "container/deps/vllm/patches/v0.22.0/ultra/$p"
+done
+
+# 4. Install the supporting kernels
+python3 -m pip install 'humming-kernels[cu13]==0.1.0'
+
+# 5. (optional) validate the patched runtime
+python3 container/deps/vllm/validate_nemotron_ultra_runtime.py
+```
+
+Then launch vLLM workers with `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel` and
+`--no-enable-flashinfer-autotune` (see the runtime settings noted above).
+
 ## File Layout
 
 ```text
