@@ -75,12 +75,12 @@ class TestIsPrefillCard:
 def _card(worker_type: str = "decode", **runtime_config_overrides) -> dict:
     """Build a minimal realistic card_json payload.
 
-    The prefill role is carried by the card's ``worker_type`` field
+    The worker role is carried by the card's ``worker_type`` field
     (defaults to "decode" here).
     """
     return {
         "display_name": "meta-llama/Llama-3.1-8B",
-        "model_type": 2,  # Completions (not prefill)
+        "model_type": 2,  # Completions
         "worker_type": worker_type,
         "kv_cache_block_size": 16,
         "context_length": 8192,
