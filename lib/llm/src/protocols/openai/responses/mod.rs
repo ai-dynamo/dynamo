@@ -727,7 +727,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                         _ => unreachable!(),
                     })
                     .collect::<Vec<_>>()
-                    .join("\n");
+                    .join("\n\n");
                 messages.drain(0..leading_system_count);
                 messages.insert(
                     0,
