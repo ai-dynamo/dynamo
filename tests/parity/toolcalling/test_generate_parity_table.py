@@ -88,7 +88,8 @@ def test_generate_parser_parity_table_html() -> None:
     assert "<strong>Parity:</strong>" in html
     assert "color: #8b949e;" in html
     assert '<span style="color:#8b949e">·</span> Dynamo-only fixture' in html
-    assert 'data-marker-dynamo="·"' in html
+    # `·` came only from the now-hidden nemotron_deci / nemotron_nano rows.
+    assert 'data-marker-dynamo="·"' not in html
     assert '<span style="color:#555">D</span> Dynamo-only fixture' not in html
     assert "green = selected implementation output is clean" in html
     assert "red = selected implementation leaks parser markup" in html

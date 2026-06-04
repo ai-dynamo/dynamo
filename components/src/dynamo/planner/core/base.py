@@ -83,6 +83,7 @@ def _engine_caps(
         max_num_seqs=worker_info.max_num_seqs if worker_info else None,
         context_length=worker_info.context_length if worker_info else None,
         max_kv_tokens=worker_info.max_kv_tokens if worker_info else None,
+        kv_cache_block_size=worker_info.kv_cache_block_size if worker_info else None,
     )
 
 

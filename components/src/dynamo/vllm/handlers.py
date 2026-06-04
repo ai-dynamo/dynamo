@@ -228,22 +228,22 @@ async def _deferred_abort_guard(
             await guard.close()
 
 
-class VllmEngineQuiesceController:
+class VllmEnginePauseController:
     def __init__(self, engine_client: Any):
         self._engine_client = engine_client
-        self._is_quiesced = False
+        self._is_paused = False
         self._generation_paused = False
 
     @property
-    def is_quiesced(self) -> bool:
-        return self._is_quiesced
+    def is_paused(self) -> bool:
+        return self._is_paused
 
     @property
     def needs_resume_recovery(self) -> bool:
         return self._generation_paused
 
-    async def quiesce(self, *args: object) -> bool:
-        if self._is_quiesced or self._generation_paused:
+    async def pause(self, *args: object) -> bool:
+        if self._is_paused or self._generation_paused:
             return False
 
         level = args[0] if args else None
@@ -259,16 +259,18 @@ class VllmEngineQuiesceController:
                 await self._engine_client.resume_generation()
                 self._generation_paused = False
             except Exception:
-                logger.exception("Failed to resume generation after sleep failure")
+                logger.exception(
+                    "Failed to resume generation after native vLLM sleep failure"
+                )
             raise
-        self._is_quiesced = True
+        self._is_paused = True
         return True
 
     async def resume(self, tags: list[str] | None = None) -> bool:
-        if not self._is_quiesced and not self._generation_paused:
+        if not self._is_paused and not self._generation_paused:
             return False
 
-        if self._is_quiesced:
+        if self._is_paused:
             if tags is None:
                 await self._engine_client.wake_up()
             else:
@@ -279,7 +281,7 @@ class VllmEngineQuiesceController:
         return True
 
     def mark_resumed(self) -> None:
-        self._is_quiesced = False
+        self._is_paused = False
         self._generation_paused = False
 
 
@@ -649,8 +651,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.use_vllm_tokenizer = use_vllm_tokenizer
 
         self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
-        self._quiesce_controller = VllmEngineQuiesceController(self.engine_client)
-        self._quiesce_lock = asyncio.Lock()
+        self._pause_controller = VllmEnginePauseController(self.engine_client)
+        self._pause_lock = asyncio.Lock()
         self._mm_kwargs_receiver: MmKwargsNixlReceiver | None = None
 
         # Some models (Kimi-K2.5) declare their image modality as
@@ -749,17 +751,17 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         Order of operations:
         1. Unregister from discovery - stop accepting new requests
         2. Abort and drain in-flight requests
-        3. Sleep engine - safe now that GPU is quiesced
+        3. Sleep engine - safe once generation has stopped
         """
         body = body or {}
         level = body.get("level", 1)
-        async with self._quiesce_lock:
-            if self._quiesce_controller.is_quiesced:
+        async with self._pause_lock:
+            if self._pause_controller.is_paused:
                 return {
                     "status": "ok",
                     "message": "Engine already sleeping",
                 }
-            if self._quiesce_controller.needs_resume_recovery:
+            if self._pause_controller.needs_resume_recovery:
                 return {
                     "status": "error",
                     "message": "wake_up required before retrying sleep",
@@ -775,9 +777,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         "[Sleep] Unregistered endpoint from discovery - worker removed from routing pool"
                     )
 
-                # Step 2: Abort in-flight requests and wait for them to drain so the
-                # GPU is fully quiesced before unmapping memory.
-                if not await self._quiesce_controller.quiesce(level):
+                # Step 2: Abort in-flight requests and wait for them to drain so
+                # generation is fully paused before unmapping memory.
+                if not await self._pause_controller.pause(level):
                     return {
                         "status": "ok",
                         "message": "Engine already sleeping",
@@ -789,13 +791,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 }
             except Exception as e:
                 logger.error(f"Failed to sleep engine: {e}")
-                # If quiesce rolled back cleanly the engine is serving-safe again,
+                # If pause rolled back cleanly the engine is serving-safe again,
                 # but discovery still shows us unregistered and wake_up will
                 # early-return. Re-register so the worker rejoins the routing pool.
                 if (
                     unregistered
-                    and not self._quiesce_controller.is_quiesced
-                    and not self._quiesce_controller.needs_resume_recovery
+                    and not self._pause_controller.is_paused
+                    and not self._pause_controller.needs_resume_recovery
                     and self.generate_endpoint is not None
                 ):
                     try:
@@ -924,20 +926,20 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """
         body = body or {}
         tags = body.get("tags")
-        async with self._quiesce_lock:
-            needs_recovery = self._quiesce_controller.needs_resume_recovery
-            if not self._quiesce_controller.is_quiesced and not needs_recovery:
+        async with self._pause_lock:
+            needs_recovery = self._pause_controller.needs_resume_recovery
+            if not self._pause_controller.is_paused and not needs_recovery:
                 return {"status": "ok", "message": "Engine already awake"}
 
             try:
                 # Step 1: Wake engine first - must be ready before accepting requests
-                await self._quiesce_controller.resume(tags)
+                await self._pause_controller.resume(tags)
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.register_endpoint_instance()
                     logger.info(
                         "[Wake] Re-registered endpoint to discovery - worker added back to routing pool"
                     )
-                self._quiesce_controller.mark_resumed()
+                self._pause_controller.mark_resumed()
 
                 return {
                     "status": "ok",
@@ -2972,8 +2974,7 @@ class EmbeddingWorkerHandler:
         dimensions = request.get("dimensions")
         if dimensions is not None and not isinstance(dimensions, int):
             raise TypeError(
-                f"Invalid 'dimensions' type {type(dimensions).__name__}; "
-                "expected int"
+                f"Invalid 'dimensions' type {type(dimensions).__name__}; expected int"
             )
         if dimensions is not None and dimensions < 1:
             raise ValueError(f"dimensions must be >= 1, got {dimensions}")
