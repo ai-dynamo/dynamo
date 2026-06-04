@@ -68,7 +68,7 @@ from dynamo.trtllm.request_handlers.handlers import (
 from dynamo.trtllm.utils.trtllm_utils import deep_update
 
 # Default buffer size for kv cache events.
-DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
+DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 100_000
 
 
 def build_kv_connector_config(config: Config):
@@ -725,6 +725,10 @@ async def init_llm_worker(
                 config.kv_block_size,
                 metrics_labels,
                 component_gauges=component_gauges,
+                additional_metrics=additional_metrics,
+                event_buffer_max_size=engine_args["kv_cache_config"].get(
+                    "event_buffer_max_size", 0
+                ),
                 zmq_endpoint=trtllm_zmq_bind_endpoint,
                 enable_local_indexer=config.enable_local_indexer,
                 metrics_collector=metrics_collector,

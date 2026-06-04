@@ -317,6 +317,71 @@ def test_publisher_does_not_init_fpm_publisher_under_attention_dp(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# KV event buffer telemetry
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_kv_event_polling_loop_records_drained_batch_size():
+    import threading
+
+    from dynamo.trtllm import publisher as publisher_mod
+
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub._stop_event = threading.Event()
+    drained_batches = []
+
+    async def fetch_events():
+        for event_id in range(3):
+            yield {"event_id": event_id}
+
+    def handle_event(event):
+        if event["event_id"] == 2:
+            pub._stop_event.set()
+
+    await pub._polling_loop(
+        fetch_events,
+        handle_event,
+        min_sleep=0.001,
+        max_sleep=0.001,
+        backoff_factor=1.0,
+        batch_size_handler_fn=drained_batches.append,
+    )
+
+    assert drained_batches == [3]
+
+
+def test_kv_event_id_gap_records_missing_event_count():
+    from dynamo.trtllm import publisher as publisher_mod
+
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub.additional_metrics = MagicMock()
+    pub.processing_initial_created_events = True
+    pub.max_window_size = None
+    pub._last_engine_event_id = 10
+
+    pub._handle_kv_event({"event_id": 14, "data": {"type": "created"}})
+
+    pub.additional_metrics.record_kv_event_id_gap.assert_called_once_with(3)
+
+
+def test_filtered_kv_events_do_not_create_false_event_id_gaps():
+    from dynamo.trtllm import publisher as publisher_mod
+
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub.additional_metrics = MagicMock()
+    pub._last_engine_event_id = 10
+    pub.should_drop_event = MagicMock(side_effect=[True, False])
+    pub.processing_initial_created_events = True
+    pub.max_window_size = None
+
+    pub._handle_kv_event({"event_id": 11, "data": {"type": "stored"}})
+    pub._handle_kv_event({"event_id": 12, "data": {"type": "created"}})
+
+    pub.additional_metrics.record_kv_event_id_gap.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # First-stat schema probe
 # ---------------------------------------------------------------------------
 

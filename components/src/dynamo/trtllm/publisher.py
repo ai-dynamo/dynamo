@@ -380,6 +380,8 @@ class Publisher:
         kv_block_size: int,
         metrics_labels: Any,
         component_gauges: LLMBackendMetrics,
+        additional_metrics: Any = None,
+        event_buffer_max_size: int = 0,
         zmq_endpoint: Optional[str] = None,
         enable_local_indexer: bool = False,
         metrics_collector: Any = None,
@@ -391,6 +393,9 @@ class Publisher:
         self.max_window_size = None
         self.metrics_labels = metrics_labels
         self.component_gauges = component_gauges
+        self.additional_metrics = additional_metrics
+        if self.additional_metrics is not None:
+            self.additional_metrics.set_kv_event_buffer_capacity(event_buffer_max_size)
         self.enable_local_indexer = enable_local_indexer
         self.metrics_collector = metrics_collector
         self.attention_dp_size = engine.get_attention_dp_size()
@@ -569,18 +574,24 @@ class Publisher:
         min_sleep: float,
         max_sleep: float,
         backoff_factor: float,
+        batch_size_handler_fn=None,
     ):
         sleep_s = min_sleep
         while not self._stop_event.is_set():
             had_data = False
+            batch_size = 0
             try:
                 async for item in fetch_fn():
                     had_data = True
+                    batch_size += 1
                     handler_fn(item)
             except (asyncio.TimeoutError, TimeoutError, asyncio.QueueEmpty):
                 pass
             except Exception as e:
                 logging.warning(f"Publisher polling loop error: {e}", exc_info=True)
+
+            if batch_size and batch_size_handler_fn is not None:
+                batch_size_handler_fn(batch_size)
 
             if not had_data:
                 await asyncio.sleep(sleep_s)
@@ -776,24 +787,34 @@ class Publisher:
             _KV_EVENTS_MIN_SLEEP_SEC,
             _KV_EVENTS_MAX_SLEEP_SEC,
             _KV_EVENTS_BACKOFF_FACTOR,
+            self._record_kv_event_drain_batch,
         )
         return True
 
-    def _handle_kv_event(self, event):
-        # drop the events that is not emitted from the global attention layer.
-        if self.should_drop_event(event):
-            return
+    def _record_kv_event_drain_batch(self, batch_size: int) -> None:
+        if self.additional_metrics is not None:
+            self.additional_metrics.record_kv_event_drain_batch(batch_size)
 
+    def _handle_kv_event(self, event):
         event_id = event["event_id"]
 
-        # Check for consecutive event IDs from the engine
+        # Check the raw engine stream before filtering non-global-attention
+        # events so expected filtering does not look like queue loss.
         if self._last_engine_event_id is not None:
             expected_id = self._last_engine_event_id + 1
             if event_id != expected_id:
                 logging.warning(
                     f"Non-consecutive engine event_id: expected {expected_id}, got {event_id}"
                 )
+                if self.additional_metrics is not None:
+                    self.additional_metrics.record_kv_event_id_gap(
+                        max(0, event_id - expected_id)
+                    )
         self._last_engine_event_id = event_id
+
+        # drop the events that is not emitted from the global attention layer.
+        if self.should_drop_event(event):
+            return
 
         data = event["data"]
         if data["type"] == "stored":
@@ -1051,6 +1072,8 @@ async def get_publisher(
     kv_block_size: int,
     metrics_labels: Any,
     component_gauges: LLMBackendMetrics,
+    additional_metrics: Any = None,
+    event_buffer_max_size: int = 0,
     zmq_endpoint: Optional[str] = None,
     enable_local_indexer: bool = False,
     metrics_collector: Any = None,
@@ -1062,6 +1085,8 @@ async def get_publisher(
         kv_block_size,
         metrics_labels,
         component_gauges=component_gauges,
+        additional_metrics=additional_metrics,
+        event_buffer_max_size=event_buffer_max_size,
         zmq_endpoint=zmq_endpoint,
         enable_local_indexer=enable_local_indexer,
         metrics_collector=metrics_collector,
