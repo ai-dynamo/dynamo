@@ -2,33 +2,42 @@
 # (ramp → peak → slow decay). Disagg, DP=2 + EP, configurable model.
 #
 # Generic Dynamo reliability repro (no deployment-specific tuning):
-#   SIGSTOP one DP rank of a worker and HOLD it (permanent stall, no auto-resume)
-#   → whenever the steady load next routes a request to that worker, the
-#   surviving rank blocks on the `shm_broadcast` collective waiting for the
-#   frozen rank → its execute_model/`sample_tokens` RPC times out
-#   (VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS) → EngineCore fatal → worker pod exits 1
-#   → restart → NEW instance_id. The KV router's dispatch is single-shot
-#   (push_router.rs `direct(instance_id).await?`, no reselect) and prefix
-#   affinity keeps re-selecting the OLD (dead) id → HTTP 500 "instance not
-#   found", decaying as the router reconverges.
+#   SIGSTOP the WORKER (compute) process of one DP rank and HOLD it (permanent
+#   stall, no auto-resume). When the steady load next routes a forward to that
+#   rank, its EngineCore dispatches execute_model to the frozen Worker and blocks
+#   on the `sample_tokens` RPC response → that RPC times out at
+#   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS → EngineDeadError → EngineCore fatal →
+#   worker pod exits 1 → restart → NEW instance_id. (The surviving rank also logs
+#   the `shm_broadcast` "no block in 60s" coordination warning — the full
+#   signature.) The KV router's dispatch is single-shot (push_router.rs
+#   `direct(instance_id).await?`, no reselect) and prefix affinity keeps
+#   re-selecting the OLD (dead) id → HTTP 500 "instance not found", decaying as
+#   the router reconverges.
 #
-# Why PERMANENT stall (`duration: null`): a timed SIGSTOP auto-SIGCONTs after N
-# seconds, rescuing the frozen rank if no in-flight forward happened to land in
-# that window — so a near-idle PREFILL worker rides it out and recovers
-# (observed). Holding the stall removes the rescue: the rank stays frozen until
-# a request lands and the surviving rank times out. Decode churns either way
-# (long generation keeps it mid-forward); prefill needs the permanent hold.
+# Why the WORKER, not the EngineCore: SIGSTOP'ing the EngineCore stalls one stage
+# EARLIER — the input `shm_broadcast` distribution — which is UPSTREAM of the
+# execute_model timeout, so it just loops the shm_broadcast warning forever and
+# never self-kills (verified: 16 min hung, RESTARTS 0). SIGSTOP'ing the Worker
+# leaves the EngineCore dispatching forwards, so it reaches the guarded
+# `sample_tokens` RPC wait → times out → dies (verified: RESTARTS 0→1, exact
+# EngineDeadError traceback). rank_index:1 → Worker_DP1 (substring "VLLM::Worker"
+# matches both Worker_DP0_EP0 and Worker_DP1_EP1).
+#
+# Why PERMANENT stall (`duration: null`): hold the freeze until a request lands
+# and the timeout fires. With the Worker target, ANY request routed to the frozen
+# rank triggers death (no dependence on the surviving rank being mid-forward), so
+# both decode (long generation) and prefill (short forwards) churn reliably.
 #
 # Determinism + observability:
 #   * After each stall, WaitForRecovery brackets the actual churn — it waits for
 #     the CR to go UNREADY (the worker died) then READY (restarted), instead of
 #     guessing with a fixed Wait. It also LOGS pod warning events during the
-#     wait, surfacing issues (probe failures, scheduling/BindingErrors, OOM,
-#     kill reasons) at exactly the failure window. NOTE: it raises if no death
-#     occurs within unready_timeout — that itself is a finding (the stall didn't
-#     churn); generous timeouts minimize false aborts.
-#   * Each CaptureMetrics uses include_events → persists per-pod
-#     `<pod><suffix>.events.yaml` (the k8s Event resources) alongside /metrics.
+#     wait. NOTE: it raises if no death occurs within unready_timeout — itself a
+#     finding (the stall didn't churn); generous timeouts minimize false aborts.
+#   * Each CaptureMetrics persists per-pod `<pod><suffix>.events.yaml` (the k8s
+#     Event resources) alongside /metrics.
+#   * ResourcePoller samples per-process mem/cpu/gpu in every worker pod (5s)
+#     → service_logs/<role>/<pod>.resources.{agg,procs}.tsv.
 #
 # ── Arms (KV only) ─────────────────────────────────────────────────────────
 #   A1  KV baseline, current image          → expect the 500 storm.   [THIS FILE]
@@ -76,8 +85,8 @@ router:
 
 admission:
   knobs:
-    # The death trigger: once the surviving rank blocks on the collective with
-    # the frozen rank, it dies after this.
+    # The death trigger: once a forward is dispatched to the frozen Worker, the
+    # EngineCore's sample_tokens RPC times out after this → EngineDeadError → exit.
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "60"
 
 load:
@@ -111,6 +120,9 @@ load:
 
 events:
   - { kind: WaitForModelReady, timeout: 2400 }
+  # Per-process mem/cpu/gpu (pynvml) sampler in every worker pod — captures the
+  # whole-pod footprint (pid1 alone is ~14% of it) + which process holds it.
+  - { kind: ResourcePoller, services: [VllmPrefillWorker, VllmDecodeWorker], interval_s: 5 }
   - { kind: PeriodicSnapshot, interval_minutes: 0.5 }
   - { kind: StartLoad, load_ref: steady }        # non-blocking near-idle, ~75 min
 
@@ -119,14 +131,15 @@ events:
   - { kind: CaptureMetrics, suffix: ".baseline" }  # 0 errors + KV-util ≪ 0.85
 
   # ── Phase 1: single DECODE stall (PERMANENT) → wait for the actual churn ───
-  - { kind: StallProcess, services: [VllmDecodeWorker], process_name: "VLLM::EngineCore", pod_indices: [0], rank_index: 1, duration: null }
+  - { kind: StallProcess, services: [VllmDecodeWorker], process_name: "VLLM::Worker", pod_indices: [0], rank_index: 1, duration: null }
   - { kind: WaitForRecovery, unready_timeout: 300, timeout: 600 }  # CR unready (died) → ready (restarted); logs pod warning events
   - { kind: Wait, duration: 120 }                 # observe stale-routing tail/decay
   - { kind: CaptureMetrics, suffix: ".after-decode-stall" }
 
   # ── Phase 2: single PREFILL stall (PERMANENT) → the OTHER role churns ──────
-  # The permanent hold is what churns prefill at near-idle (no SIGCONT-rescue).
-  - { kind: StallProcess, services: [VllmPrefillWorker], process_name: "VLLM::EngineCore", pod_indices: [0], rank_index: 1, duration: null }
+  # With the Worker target, a single prefill forward to the frozen rank trips the
+  # sample_tokens timeout → churn — no mid-forward dependence (cf. EngineCore).
+  - { kind: StallProcess, services: [VllmPrefillWorker], process_name: "VLLM::Worker", pod_indices: [0], rank_index: 1, duration: null }
   - { kind: WaitForRecovery, unready_timeout: 300, timeout: 600 }
   - { kind: Wait, duration: 120 }
   - { kind: CaptureMetrics, suffix: ".after-prefill-stall" }
@@ -135,9 +148,9 @@ events:
   # Stall 1 decode + 1 prefill (the not-yet-stalled pods) within ~60 s so both
   # churn at once → overlapping stale-routing windows. decode[0]+prefill[0]
   # (restarted) keep capacity → still capacity-bounded.
-  - { kind: StallProcess, services: [VllmDecodeWorker], process_name: "VLLM::EngineCore", pod_indices: [1], rank_index: 1, duration: null }
+  - { kind: StallProcess, services: [VllmDecodeWorker], process_name: "VLLM::Worker", pod_indices: [1], rank_index: 1, duration: null }
   - { kind: Wait, duration: 60 }
-  - { kind: StallProcess, services: [VllmPrefillWorker], process_name: "VLLM::EngineCore", pod_indices: [1], rank_index: 1, duration: null }
+  - { kind: StallProcess, services: [VllmPrefillWorker], process_name: "VLLM::Worker", pod_indices: [1], rank_index: 1, duration: null }
   - { kind: WaitForRecovery, unready_timeout: 300, timeout: 600 }  # both die → both restart
   - { kind: Wait, duration: 120 }
   - { kind: CaptureMetrics, suffix: ".peak" }

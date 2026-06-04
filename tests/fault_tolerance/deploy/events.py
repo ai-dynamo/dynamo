@@ -17,6 +17,7 @@ To create a custom event, subclass Event and implement execute() and description
 
 import asyncio
 import json
+import os
 import random
 import re
 import secrets
@@ -402,10 +403,24 @@ class StartLoad(Event):
         ctx.logger.info(f"Load '{self.name}' started")
 
     async def stop(self, ctx: "ScenarioContext") -> None:
-        """Wait for load to complete and collect results."""
+        """Teardown hook: stop the load PROMPTLY and collect results.
+
+        Runs during scenario teardown, including the abort path. It must NOT
+        wait for the load to finish naturally — that is the job of the explicit
+        ``WaitForLoadCompletion`` event, which on the normal path already
+        drained the load and set ``self._managed_load = None``, making this a
+        no-op. If we reach here with a load still running (e.g. the scenario
+        aborted before ``WaitForLoadCompletion``), ``wait_for_completion()``
+        would block for the FULL remaining load duration (up to
+        ``duration_minutes*60 + 300`` s — 4800 s for a 75-min run), stalling
+        deployment teardown: the DGD delete in ``ManagedDeployment.__aexit__``
+        runs only after this returns. So ``terminate()`` instead — SIGINT →
+        SIGTERM to aiperf with a bounded wait — then collect whatever results
+        exist. ``terminate()`` is itself a no-op if the load already completed.
+        """
         if self._managed_load:
             ctx.logger.info(f"Stopping load '{self.name}'...")
-            await self._managed_load.wait_for_completion()
+            await self._managed_load.terminate()
             self.results = await self._managed_load.get_results()
             await self._managed_load._cleanup()
             self._managed_load = None
@@ -2480,15 +2495,31 @@ class PodMemoryPoller2(Event):
             'OUTDIR="${DYN_LOG_DIR:-/tmp/service_logs}"; mkdir -p "$OUTDIR"; '
             'export OUT="$OUTDIR/$(hostname).mempoller2.tsv"; '
             "rm -f /tmp/.mempoller2.stop; "
-            'printf "# PodMemoryPoller2\\tepoch_s\\tpod\\tpid1_rss_bytes\\n" > "$OUT"; '
+            'printf "# PodMemoryPoller2\\tepoch_s\\tpod\\tworking_set_bytes\\t'
+            'cgroup_current_bytes\\tall_pids_rss_bytes\\tpid1_rss_bytes\\n" > "$OUT"; '
             # date +%s.%N is fractional on GNU coreutils (the runtime images);
             # busybox date lacks %N and would emit a literal ".%N", so strip a
             # trailing non-numeric tail back to whole seconds as a fallback.
             "nohup sh -c 'while [ ! -f /tmp/.mempoller2.stop ]; do "
             'TS="$(date +%s.%N)"; case "$TS" in *N) TS="$(date +%s)";; esac; '
-            'printf "%s\\t%s\\t%s\\n" "$TS" "$(hostname)" '
-            '"$(awk "/VmRSS/{print \\$2*1024}" /proc/1/status 2>/dev/null)" '
-            '>> "$OUT" 2>/dev/null; '
+            # working_set = cgroup usage - inactive_file (what kubelet/cAdvisor
+            # use for OOMKill). cgroup v2 (memory.current) with v1 fallback.
+            "if [ -f /sys/fs/cgroup/memory.current ]; then "
+            'CUR="$(cat /sys/fs/cgroup/memory.current 2>/dev/null)"; '
+            'INACT="$(awk "/^inactive_file /{print \\$2}" /sys/fs/cgroup/memory.stat 2>/dev/null)"; '
+            "else "
+            'CUR="$(cat /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null)"; '
+            'INACT="$(awk "/^total_inactive_file /{print \\$2}" /sys/fs/cgroup/memory/memory.stat 2>/dev/null)"; '
+            "fi; "
+            'WS="$(( ${CUR:-0} - ${INACT:-0} ))"; '
+            # all-pids RSS: sum VmRSS across every process in the pod (not just
+            # pid1 — the GPU worker spreads memory across EngineCore/Worker/etc.;
+            # pid1 alone is ~14% of the real footprint). Over-counts shared
+            # pages, so working_set above is the accurate non-double-counted total.
+            'ALLRSS="$(awk "/VmRSS/{s+=\\$2} END{print s*1024}" /proc/[0-9]*/status 2>/dev/null)"; '
+            'PID1="$(awk "/VmRSS/{print \\$2*1024}" /proc/1/status 2>/dev/null)"; '
+            'printf "%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n" "$TS" "$(hostname)" '
+            '"$WS" "$CUR" "$ALLRSS" "$PID1" >> "$OUT" 2>/dev/null; '
             f"sleep {interval}; done' >/dev/null 2>&1 & "
             'echo "mempoller2 started pid $!"'
         )
@@ -2529,6 +2560,104 @@ class PodMemoryPoller2(Event):
     @property
     def description(self) -> str:
         return f"PodMemoryPoller2 (in-pod) {self.services} every {self.interval_s}s"
+
+
+def _load_respoller_source() -> str:
+    """Read the in-pod sampler (``_respoller.py``) as text to heredoc into target
+    pods. Kept as a sibling file (not embedded) so it stays real, lintable Python."""
+    path = os.path.join(os.path.dirname(__file__), "_respoller.py")
+    with open(path, "r") as f:
+        return f.read()
+
+
+@dataclass
+class ResourcePoller(Event):
+    """In-pod per-process resource sampler — successor to :class:`PodMemoryPoller`
+    (host-side) and :class:`PodMemoryPoller2` (in-pod, pid1-only). Launches one
+    detached python sampler (``_respoller.py``) per pod that, every
+    ``interval_s``, writes two TSVs to the pod's ``$DYN_LOG_DIR`` (carried back by
+    the existing extractor):
+
+    * ``<pod>.resources.agg.tsv`` — cgroup working_set + cgroup_current + all-pid
+      RSS sum + pid1 RSS, plus per-device GPU util/mem (one row per GPU).
+    * ``<pod>.resources.procs.tsv`` — per process: RSS, utime/stime jiffies
+      (→ %CPU offline) and per-pid GPU mem + sm%.
+
+    GPU is read via **pynvml** in-pod (``nvmlDeviceGetComputeRunningProcesses`` +
+    ``nvmlDeviceGetProcessUtilization``) — node-local, so it sees the worker's own
+    GPUs and per-process attribution that a remote client (aiperf's dcgm-exporter
+    scrape) cannot. ``include`` selects dimensions from ``{mem, cpu, gpu}``
+    (default all); each is best-effort (no pynvml → gpu columns blank, mem+cpu
+    still recorded). pid1 RSS alone is ~14% of a GPU worker's real footprint —
+    this captures the whole pod, which is why it supersedes the pid1-only pollers.
+    """
+
+    services: list[str]
+    interval_s: float = 5.0
+    include: list[str] = field(default_factory=lambda: ["mem", "cpu", "gpu"])
+    name: str = ""
+    _started_pods: Any = field(default=None, init=False, repr=False)
+
+    async def execute(self, ctx: "ScenarioContext") -> None:
+        self._started_pods = []
+        include = ",".join(self.include)
+        interval = int(self.interval_s) if self.interval_s >= 1 else 1
+        # Write the sampler to the pod via a quoted heredoc (no shell expansion of
+        # the python body), then launch it detached. nohup + redirect so the
+        # closing exec session doesn't SIGHUP/EPIPE it.
+        launch = (
+            (
+                'set -e; OUTDIR="${DYN_LOG_DIR:-/tmp/service_logs}"; mkdir -p "$OUTDIR"; '
+                "cat > /tmp/respoller.py <<'PYEOF'\n"
+            )
+            + _load_respoller_source()
+            + (
+                "\nPYEOF\n"
+                "rm -f /tmp/.respoller.stop; "
+                f'RESPOLL_OUTDIR="$OUTDIR" RESPOLL_INTERVAL={interval} '
+                f"RESPOLL_INCLUDE={include} RESPOLL_STOP=/tmp/.respoller.stop "
+                "nohup python3 /tmp/respoller.py >/tmp/respoller.out 2>&1 & "
+                'echo "respoller started pid $!"'
+            )
+        )
+        started = 0
+        for svc in self.services:
+            pods_by_svc = await asyncio.to_thread(ctx.deployment.get_pods, [svc])
+            for pod in pods_by_svc.get(svc) or []:
+                try:
+                    await asyncio.to_thread(pod.exec, ["sh", "-c", launch])
+                    self._started_pods.append((svc, pod.name))
+                    started += 1
+                except Exception as e:
+                    ctx.logger.warning(
+                        f"ResourcePoller: failed to start sampler on {pod.name}: {e}"
+                    )
+        ctx.logger.info(
+            f"ResourcePoller: launched in-pod samplers on {started} pods across "
+            f"{self.services}, interval={interval}s, include={include}. Output: "
+            f"service_logs/<role>/<pod>.resources.{{agg,procs}}.tsv on the log PVC."
+        )
+
+    async def stop(self, ctx: "ScenarioContext") -> None:
+        stop_script = "touch /tmp/.respoller.stop 2>/dev/null || true"
+        for svc in self.services:
+            try:
+                pods_by_svc = await asyncio.to_thread(ctx.deployment.get_pods, [svc])
+            except Exception:
+                continue
+            for pod in pods_by_svc.get(svc) or []:
+                try:
+                    await asyncio.to_thread(pod.exec, ["sh", "-c", stop_script])
+                except Exception:
+                    pass
+        ctx.logger.info("ResourcePoller: signalled in-pod samplers to stop")
+
+    @property
+    def description(self) -> str:
+        return (
+            f"ResourcePoller(include={','.join(self.include)}) "
+            f"{self.services} every {self.interval_s}s"
+        )
 
 
 @dataclass

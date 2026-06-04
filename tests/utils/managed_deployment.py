@@ -2822,7 +2822,7 @@ class ManagedDeployment:
             pvc_name=pvc_name,
             sub_path=sub_path,
             container_path=self.container_log_dir,
-            file_patterns=["*.log", "*.mempoller2.tsv"],
+            file_patterns=["*.log", "*.tsv"],
             local_output_dir=local_output_dir,
             # clear_after_extract defaults to True
         )
@@ -3106,7 +3106,7 @@ class ManagedDeployment:
                 pvc_name=pvc_name,
                 sub_path=sub_path,
                 container_path=self.container_log_dir,
-                file_patterns=["*.log", "*.mempoller2.tsv"],
+                file_patterns=["*.log", "*.tsv"],
                 local_output_dir=self.log_dir,
                 # clear_after_extract defaults to True
             )
