@@ -765,6 +765,10 @@ class InstrumentedScheduler(AsyncScheduler):
                     block_ids=block_ids,
                     num_computed_tokens=ctx_len,
                     lora_request=None,
+                    # vLLM >=0.22's v2 GPU model runner requires prefill_token_ids
+                    # (asserted non-None in gpu/model_runner.add_requests).
+                    # Mirror what vLLM's own scheduler passes for new requests.
+                    prefill_token_ids=req._all_token_ids,
                 )
             )
             num_scheduled_tokens[req_id] = 1
