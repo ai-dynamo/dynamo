@@ -16,7 +16,9 @@ use velo::queue::backends::messenger::{MessengerQueueBackend, MessengerQueueConf
 use velo_ext::InstanceId;
 
 use super::protocol::ConditionalDisaggInstancesResponse;
-use crate::features::prefill_router::{DispatchOutcome, PrefillRequestDispatcher};
+use crate::features::prefill_router::{
+    DecodeSetProvider, DispatchOutcome, PrefillRequestDispatcher, TierBroadcaster,
+};
 use crate::features::{FeatureError, FeatureManager, HubContext};
 use crate::protocol::{self, ConditionalDisaggRole, Feature, FeatureKey, PrefillRequest};
 
@@ -39,6 +41,12 @@ pub struct ConditionalDisaggManager {
     dispatcher: Option<Arc<dyn PrefillRequestDispatcher>>,
     /// Worker task handle (set once spawned during `attach`).
     dispatcher_task: OnceLock<JoinHandle<()>>,
+    /// P2 CD-breaker tier-push broadcaster, late-bound by the binary when the
+    /// prefill-router breaker is enabled. `on_register` of a NEW decode pushes
+    /// the current tier to it so a freshly-joined decode is seeded (not left
+    /// at the default Calm while the fleet is HOT). `None` ⇒ breaker disabled
+    /// ⇒ no push (inert == prior behavior).
+    tier_broadcaster: OnceLock<Arc<TierBroadcaster>>,
 }
 
 struct CdInner {
@@ -84,7 +92,16 @@ impl ConditionalDisaggManager {
             queue_capacity: capacity,
             dispatcher: None,
             dispatcher_task: OnceLock::new(),
+            tier_broadcaster: OnceLock::new(),
         }
+    }
+
+    /// Late-bind the P2 CD-breaker [`TierBroadcaster`]. Called by the binary
+    /// after both the CD manager and the prefill-router manager (which owns the
+    /// breaker + broadcaster) have been constructed. Idempotent; first writer
+    /// wins. Wiring this is what lets a NEW decode registration seed its tier.
+    pub fn set_tier_broadcaster(&self, broadcaster: Arc<TierBroadcaster>) {
+        let _ = self.tier_broadcaster.set(broadcaster);
     }
 
     /// Builder: install a [`PrefillRequestDispatcher`]. When set, the
@@ -148,6 +165,15 @@ impl ConditionalDisaggManager {
     /// configured with a Velo instance.
     pub fn queue_backend(&self) -> Option<&Arc<MessengerQueueBackend>> {
         self.queue_backend.get()
+    }
+}
+
+/// The CD manager owns the decode/prefill role split, so it is the source of
+/// truth for the tier-push fan-out target. Returning ONLY the decode set keeps
+/// prefill instances off the push path (the MUST-FIX from the design).
+impl DecodeSetProvider for ConditionalDisaggManager {
+    fn decode_instances(&self) -> Vec<InstanceId> {
+        self.inner.read().decode.iter().copied().collect()
     }
 }
 
@@ -243,20 +269,34 @@ impl FeatureManager for ConditionalDisaggManager {
             // requires `Feature::P2P` alongside any CD register, so by the
             // time we get here the gate has already accepted the leader.
 
-            let mut inner = self.inner.write();
-            if let Some(prior) = inner.by_instance.get(&instance_id).copied() {
-                if prior != role {
-                    return Err(FeatureError::InvalidConfig(format!(
-                        "instance {instance_id} already registered as {:?}, cannot switch to {:?}",
-                        prior, role
-                    )));
+            {
+                let mut inner = self.inner.write();
+                if let Some(prior) = inner.by_instance.get(&instance_id).copied() {
+                    if prior != role {
+                        return Err(FeatureError::InvalidConfig(format!(
+                            "instance {instance_id} already registered as {:?}, cannot switch to {:?}",
+                            prior, role
+                        )));
+                    }
+                    // Same-role re-registration is idempotent — no tier re-push
+                    // (the decode already had its tier seeded on first register
+                    // and stays current via transition pushes).
+                    return Ok(());
                 }
-                // Same-role re-registration is idempotent.
-                return Ok(());
+
+                inner.by_instance.insert(instance_id, role);
+                insert_role(&mut inner, instance_id, role);
             }
 
-            inner.by_instance.insert(instance_id, role);
-            insert_role(&mut inner, instance_id, role);
+            // P2: a NEWLY-registered DECODE must be seeded with the current
+            // breaker tier (it defaults to Calm locally; if the fleet is HOT a
+            // transition-only push would leave it stale until the next change).
+            // A PREFILL register is NEVER pushed to — the tier is decode-only.
+            if role == ConditionalDisaggRole::Decode {
+                if let Some(b) = self.tier_broadcaster.get() {
+                    b.push_current_to(instance_id);
+                }
+            }
             Ok(())
         })
     }

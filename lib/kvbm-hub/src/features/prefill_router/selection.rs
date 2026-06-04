@@ -193,6 +193,16 @@ impl Selector {
             .sum()
     }
 
+    /// Total permit capacity across the whole fleet — the denominator for the
+    /// circuit breaker's free-capacity fraction
+    /// (`available_permits / total_permits`). Equals
+    /// `worker_count * per_worker_concurrency`; `0` when the fleet is empty
+    /// (callers must guard the division — an empty fleet has no spare
+    /// capacity to disaggregate into).
+    pub fn total_permits(&self) -> u32 {
+        self.state.read().len() as u32 * self.config.per_worker_concurrency
+    }
+
     /// Pick a worker for `net_new` tokens of new prefill work.
     ///
     /// Blocks until at least one worker has a free per-worker permit.
@@ -541,6 +551,28 @@ mod tests {
         let picked = sel.try_pick(10).expect("pick");
         assert_eq!(picked.slot.instance_id, b);
         assert_eq!(sel.worker_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn total_permits_is_workers_times_concurrency() {
+        let sel = Selector::new(cfg()); // per_worker_concurrency = 4
+        assert_eq!(sel.total_permits(), 0, "empty fleet has zero total permits");
+        let a = add(&sel);
+        assert_eq!(sel.total_permits(), 4);
+        add(&sel);
+        assert_eq!(sel.total_permits(), 8);
+        // Draining permits does not change the TOTAL (only available).
+        let a_slot = sel
+            .snapshot()
+            .into_iter()
+            .find(|s| s.instance_id == a)
+            .unwrap();
+        let _p = Arc::clone(&a_slot.permits).try_acquire_owned().unwrap();
+        assert_eq!(sel.total_permits(), 8);
+        assert_eq!(sel.available_permits(), 7);
+        // Removing a worker drops its capacity from the total.
+        sel.remove_worker(a);
+        assert_eq!(sel.total_permits(), 4);
     }
 
     #[tokio::test]

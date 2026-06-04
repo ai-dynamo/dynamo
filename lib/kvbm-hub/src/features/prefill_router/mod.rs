@@ -16,6 +16,7 @@
 //! Execution sits behind [`PrefillExecutionBackend`] so a worker can be
 //! reached over different transports — HTTP today, velo unary later.
 
+pub mod breaker;
 pub mod calibration;
 pub mod dispatcher;
 pub mod execution;
@@ -23,7 +24,10 @@ pub mod manager;
 pub mod protocol;
 pub mod router;
 pub mod selection;
+pub mod tier_push;
 
+pub use breaker::{BreakerConfig, CircuitBreaker};
+pub use tier_push::{DecodeSetProvider, TierBroadcaster};
 pub use calibration::{
     CALIBRATE_HANDLER, CalibrationDefaults, CalibrationRequest, CalibrationResponse,
     CalibrationResults, CalibrationSnapshot, PerformanceModel, RawCalibrationPayload, RawTrace,

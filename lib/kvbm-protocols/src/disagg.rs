@@ -219,6 +219,34 @@ impl RemotePrefillParams {
     }
 }
 
+/// Router-owned circuit-breaker tier for CD prefill-overload control.
+///
+/// The hub's prefill router computes this tier (a hysteresis state machine
+/// driven by a dedicated breaker-tick task; see `kvbm-hub`) and — in P2 —
+/// pushes it to decode workers, which cache it and read it synchronously
+/// inside GNMT. It only ever NARROWS disaggregation (more Local, never more
+/// Remote):
+/// - `Calm` (closed) — existing `min_remote_prefill_tokens` threshold policy.
+/// - `Warm` (half-open) — proportional middle (per-request admission; P3).
+/// - `Hot` (open) — coarsely downgrade all would-be-Remote to Local.
+///
+/// Default `Calm` ⇒ identical to pre-breaker behavior, so a decode that has
+/// never received a tier push (or a build with the breaker disabled) behaves
+/// exactly as today.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, PartialOrd, Ord,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum BreakerTier {
+    /// Closed: no overload; existing threshold policy applies.
+    #[default]
+    Calm,
+    /// Half-open: elevated pressure; proportional admission (P3 WARM tier).
+    Warm,
+    /// Open: saturated; downgrade all would-be-Remote to Local.
+    Hot,
+}
+
 /// Payload enqueued by a decode worker and consumed by a prefill worker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemotePrefillRequest {
@@ -390,6 +418,24 @@ mod tests {
         assert_eq!(decoded, env);
         assert!(!env.is_empty());
         assert!(KvHashingRequestEnvelope::default().is_empty());
+    }
+
+    #[test]
+    fn breaker_tier_serde_and_default() {
+        // Default is Calm (== prior behavior for a decode that never got a push).
+        assert_eq!(BreakerTier::default(), BreakerTier::Calm);
+        // snake_case wire form.
+        assert_eq!(serde_json::to_string(&BreakerTier::Calm).unwrap(), r#""calm""#);
+        assert_eq!(serde_json::to_string(&BreakerTier::Warm).unwrap(), r#""warm""#);
+        assert_eq!(serde_json::to_string(&BreakerTier::Hot).unwrap(), r#""hot""#);
+        for t in [BreakerTier::Calm, BreakerTier::Warm, BreakerTier::Hot] {
+            let s = serde_json::to_string(&t).unwrap();
+            let back: BreakerTier = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, t);
+        }
+        // Ordering reflects increasing pressure: Calm < Warm < Hot.
+        assert!(BreakerTier::Calm < BreakerTier::Warm);
+        assert!(BreakerTier::Warm < BreakerTier::Hot);
     }
 
     #[test]

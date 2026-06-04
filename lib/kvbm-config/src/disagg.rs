@@ -75,6 +75,15 @@ pub struct DisaggConfig {
     /// more Remote.
     #[serde(default = "default_cd_local_fallback_on_overload")]
     pub cd_local_fallback_on_overload: bool,
+    // NOTE: the CD prefill-overload circuit breaker is configured ENTIRELY on
+    // the hub (the `kvbm_hub --cd-breaker` CLI flags), NOT on the connector's
+    // DisaggConfig. The breaker lives in the hub's prefill-router (it senses the
+    // router's free-capacity fraction and PUSHES the resulting tier to decodes
+    // over velo); the connector only consumes the pushed tier at runtime, never
+    // the breaker's configuration. Earlier drafts carried `cd_breaker_*` fields
+    // here, but nothing in kvbm-connector ever read them — they have been
+    // removed to keep a single source of truth (the hub CLI). See
+    // `kvbm_hub::BreakerConfig` and the `--cd-breaker*` flags in the hub binary.
 }
 
 fn default_max_inflight_remote_prefill_tokens() -> usize {
@@ -83,6 +92,22 @@ fn default_max_inflight_remote_prefill_tokens() -> usize {
 
 fn default_cd_local_fallback_on_overload() -> bool {
     true
+}
+
+impl Default for DisaggConfig {
+    /// Every field at its `serde` default. `role` defaults to
+    /// [`DisaggregationRole::Decode`] (the threshold / overflow knobs are
+    /// decode-only). Lets construction sites use
+    /// `DisaggConfig { role: …, ..Default::default() }` so adding a new field
+    /// does not churn every literal — it stays inert unless explicitly set.
+    fn default() -> Self {
+        Self {
+            role: DisaggregationRole::Decode,
+            max_inflight_remote_prefill_tokens: default_max_inflight_remote_prefill_tokens(),
+            min_remote_prefill_tokens: 0,
+            cd_local_fallback_on_overload: default_cd_local_fallback_on_overload(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -104,13 +129,30 @@ mod tests {
         assert_eq!(cfg.role, DisaggregationRole::Decode);
     }
 
+    /// Build a `DisaggConfig` with every non-`role` field at its serde default,
+    /// so existing tests need not spell out each field.
+    fn disagg_with(role: DisaggregationRole) -> DisaggConfig {
+        DisaggConfig {
+            role,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_default_role_is_decode_and_inert() {
+        // The Default impl is the inert base used by `..Default::default()`
+        // construction sites: decode role, threshold 0, unlimited budget.
+        let cfg = DisaggConfig::default();
+        assert_eq!(cfg.role, DisaggregationRole::Decode);
+        assert_eq!(cfg.min_remote_prefill_tokens, 0);
+        assert_eq!(cfg.max_inflight_remote_prefill_tokens, usize::MAX);
+    }
+
     #[test]
     fn test_serialize_roundtrip() {
         let cfg = DisaggConfig {
-            role: DisaggregationRole::Decode,
             max_inflight_remote_prefill_tokens: 4096,
-            min_remote_prefill_tokens: 0,
-            cd_local_fallback_on_overload: true,
+            ..disagg_with(DisaggregationRole::Decode)
         };
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(json.contains(r#""role":"decode""#));
@@ -126,12 +168,7 @@ mod tests {
 
     #[test]
     fn test_validate_ok() {
-        let cfg = DisaggConfig {
-            role: DisaggregationRole::Prefill,
-            max_inflight_remote_prefill_tokens: default_max_inflight_remote_prefill_tokens(),
-            min_remote_prefill_tokens: 0,
-            cd_local_fallback_on_overload: default_cd_local_fallback_on_overload(),
-        };
+        let cfg = disagg_with(DisaggregationRole::Prefill);
         assert!(cfg.validate().is_ok());
     }
 
@@ -164,10 +201,9 @@ mod tests {
 
         // Roundtrips through serialize without dropping the field.
         let cfg = DisaggConfig {
-            role: DisaggregationRole::Decode,
             max_inflight_remote_prefill_tokens: 4096,
-            min_remote_prefill_tokens: 0,
             cd_local_fallback_on_overload: false,
+            ..disagg_with(DisaggregationRole::Decode)
         };
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(json.contains(r#""cd_local_fallback_on_overload":false"#));

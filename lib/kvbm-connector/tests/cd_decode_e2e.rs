@@ -38,8 +38,9 @@ use kvbm_connector::connector::leader::disagg::testing::{
 };
 use kvbm_connector::connector::leader::disagg::{
     AlwaysRemote, ConditionalDisaggCoordinator, ConnectorLeaderApi, CoordinatorParts,
-    DecodeDisaggLeader, HubWiring,
+    DecodeDisaggLeader, DecodeTierCache, HubWiring,
 };
+use kvbm_protocols::disagg::BreakerTier;
 use kvbm_engine::p2p::session::{CommittedBlock, LifecycleEvent, MockSessionFactory};
 use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
 use kvbm_engine::testing::token_blocks::{create_token_sequence, generate_sequence_hashes};
@@ -80,6 +81,10 @@ struct TestHarness {
     coordinator: Arc<ConditionalDisaggCoordinator>,
     all_hashes: Vec<kvbm_logical::SequenceHash>,
     g1_block_ids: Vec<usize>,
+    /// P2 CD-breaker tier cache shared with the wrapper. Tests drive the cached
+    /// tier through this (the production write path is the velo TIER_SIGNAL
+    /// handler; the cache + GNMT read are what these tests exercise).
+    tier_cache: Arc<DecodeTierCache>,
 }
 
 fn build_harness() -> TestHarness {
@@ -93,8 +98,24 @@ fn build_harness() -> TestHarness {
 /// tests. `max_inflight` sets the inflight token budget (set it `< 96` — the
 /// `full_block_external_tokens` for this layout, `(LOCAL+REMOTE)=6` blocks ×
 /// `BLOCK_SIZE` 16 — to trip the exhaustion branch at the first request).
-/// `local_fallback` sets `DisaggConfig::cd_local_fallback_on_overload`.
+/// `local_fallback` sets `DisaggConfig::cd_local_fallback_on_overload`. The
+/// tier cache defaults to Calm (== prior behavior); breaker tests use
+/// [`build_harness_with_tier`] to inject a hotter starting tier.
 fn build_harness_with(max_inflight: usize, local_fallback: bool) -> TestHarness {
+    build_harness_with_tier(max_inflight, local_fallback, BreakerTier::Calm)
+}
+
+/// Like [`build_harness_with`] but seeds the decode's CD-breaker tier cache to
+/// `tier`. The cache is injected via `HubWiring.tier_cache` — the same field
+/// that `None`s into a fresh default in production — so the GNMT read path is
+/// exercised exactly as in production, only the writer (the velo TIER_SIGNAL
+/// handler) is replaced by a direct seed here. `BreakerTier::Calm` reproduces
+/// the pre-breaker behavior bit-for-bit (regression guard).
+fn build_harness_with_tier(
+    max_inflight: usize,
+    local_fallback: bool,
+    tier: BreakerTier,
+) -> TestHarness {
     let g2_manager = build_g2_manager(32);
 
     let token_sequence = create_token_sequence(TOTAL_BLOCKS, BLOCK_SIZE, 100);
@@ -155,9 +176,13 @@ fn build_harness_with(max_inflight: usize, local_fallback: bool) -> TestHarness 
     let cfg = DisaggConfig {
         role: DisaggregationRole::Decode,
         max_inflight_remote_prefill_tokens: max_inflight,
-        min_remote_prefill_tokens: 0,
         cd_local_fallback_on_overload: local_fallback,
+        ..Default::default()
     };
+    // Seed the injected tier cache (epoch 1 so it is "set"; Calm @ any epoch is
+    // the pre-breaker behavior either way).
+    let tier_cache = Arc::new(DecodeTierCache::default());
+    assert!(tier_cache.apply(tier, 1), "seed tier cache");
     let wrapper = DecodeDisaggLeader::from_parts(
         inner.clone(),
         &cfg,
@@ -169,6 +194,7 @@ fn build_harness_with(max_inflight: usize, local_fallback: bool) -> TestHarness 
             hub: None,
             client: None,
             hub_velo_id: None,
+            tier_cache: Some(Arc::clone(&tier_cache)),
         },
     );
 
@@ -182,6 +208,7 @@ fn build_harness_with(max_inflight: usize, local_fallback: bool) -> TestHarness 
         coordinator,
         all_hashes,
         g1_block_ids,
+        tier_cache,
     }
 }
 
@@ -451,6 +478,184 @@ async fn cd_decode_no_overload_remote_unchanged_with_fallback_enabled() -> Resul
         "Remote reserved the full 96-token window"
     );
 
+    Ok(())
+}
+
+// ============================================================================
+// P2: CD prefill-overload circuit breaker — decode-side CALM/HOT GNMT logic.
+//
+// The breaker only ever NARROWS disaggregation. CALM (== default, == breaker
+// disabled) is byte-identical to today; HOT coarsely downgrades a would-be
+// Remote to a local prefill via the EXISTING `inner_result` actuator, with the
+// SAME four post-conditions as the B-GNMT overload downgrade
+// (`cd_decode_overload_fallback_downgrades_remote_to_local`): no queue enqueue,
+// no cd_request_state, budget untouched, no session opened.
+// ============================================================================
+
+/// (a) Regression guard: breaker DISABLED ⇒ a Calm tier cache ⇒ the Remote
+/// GNMT DECISION matches today. This asserts a SUBSET of `cd_decode_happy_path`,
+/// namely the GNMT-time disaggregation decision and its immediate side effects:
+/// the returned `(count, async_flag)`, that one remote-prefill request is
+/// enqueued for `req-1`, that cd_request_state is installed, and that a session
+/// is opened. It does NOT re-assert the wire-payload shape (num_provided_tokens
+/// / token_ids / commit / make_available) or the full USAA-1 → pull → onboard →
+/// completion lifecycle — `cd_decode_happy_path` already covers those, and a
+/// Calm tier reuses that exact code path unchanged. So this is a "same GNMT
+/// decision as today" guard, not a byte-for-byte equivalence over the whole
+/// pipeline. With an unlimited budget the request disaggregates exactly as
+/// before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_breaker_calm_matches_today_gnmt_decision() -> Result<()> {
+    // Calm @ unlimited budget == build_harness() default.
+    let h = build_harness_with_tier(usize::MAX, true, BreakerTier::Calm);
+    assert_eq!(h.tier_cache.tier(), BreakerTier::Calm);
+
+    h.wrapper.create_slot(make_request())?;
+    let (count, async_flag) = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    // Identical to cd_decode_happy_path's GNMT result: the full external window
+    // is disaggregated.
+    assert_eq!(
+        count,
+        Some((LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE),
+        "CALM must disaggregate exactly as today"
+    );
+    assert!(async_flag);
+
+    wait_until(|| h.queue.snapshot().len() == 1).await;
+    assert_eq!(h.queue.snapshot()[0].request_id, "req-1");
+    assert!(
+        h.wrapper.has_active_cd_request("req-1"),
+        "CALM Remote path installs cd_request_state"
+    );
+    assert!(
+        h.factory.last_opened().is_some(),
+        "CALM Remote path opens a session"
+    );
+    Ok(())
+}
+
+/// (c) HOT ⇒ the would-be Remote returns the inner passthrough `(Some(LOCAL*BS),
+/// true)` and installs NO CD state — the SAME four post-conditions as
+/// `cd_decode_overload_fallback_downgrades_remote_to_local`, PLUS the decode
+/// decision label `remote_downgraded_breaker_hot`. Budget is unlimited here, so
+/// the ONLY thing that downgrades is the breaker (not the B-GNMT budget path).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_breaker_hot_downgrades_remote_to_local() -> Result<()> {
+    // Unlimited budget: the B-GNMT overload path is unreachable (try_reserve
+    // always succeeds). Any downgrade is attributable to the breaker alone.
+    let h = build_harness_with_tier(usize::MAX, true, BreakerTier::Hot);
+    assert_eq!(h.tier_cache.tier(), BreakerTier::Hot);
+
+    h.wrapper.create_slot(make_request())?;
+
+    let (count, async_flag) = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    assert_eq!(
+        count,
+        Some(LOCAL_BLOCKS * BLOCK_SIZE),
+        "HOT downgrade returns the inner local-match passthrough, not the remote window"
+    );
+    assert!(
+        async_flag,
+        "HOT downgrade preserves the inner async flag (true) — NOT a (None,false) defer"
+    );
+
+    // The four post-conditions, identical to the overload-fallback downgrade.
+    assert_eq!(
+        h.queue.snapshot().len(),
+        0,
+        "HOT downgrade must NOT enqueue a remote prefill"
+    );
+    assert!(
+        !h.wrapper.has_active_cd_request("req-1"),
+        "HOT downgrade must NOT install cd_request_state"
+    );
+    assert_eq!(
+        h.wrapper.inflight_available(),
+        usize::MAX,
+        "HOT downgrade reserves nothing — budget is untouched"
+    );
+    assert!(
+        h.factory.last_opened().is_none(),
+        "HOT downgrade must NOT open a CD session"
+    );
+
+    // The HOT-downgrade decode-decision metric is recorded (the mock now hands
+    // the wrapper a REAL CdMetrics, so the GNMT `record_decision` is live, not
+    // dead). This is the hot-path decision label asserted end-to-end.
+    let cd = h.inner.cd_metrics_handle();
+    assert_eq!(
+        cd.prefill_decisions_total
+            .with_label_values(&["remote_downgraded_breaker_hot"])
+            .get(),
+        1,
+        "HOT downgrade must record the remote_downgraded_breaker_hot decision"
+    );
+    Ok(())
+}
+
+/// (d) Narrows-only: a HOT breaker can only ever produce LESS Remote than CALM,
+/// never more. Drive the identical request under CALM (disaggregates: queued +
+/// session + budget charged) and under HOT (downgraded: nothing queued, no
+/// session) and assert HOT's Remote footprint is strictly smaller.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_breaker_hot_narrows_only_vs_calm() -> Result<()> {
+    // CALM baseline.
+    let calm = build_harness_with_tier(usize::MAX, true, BreakerTier::Calm);
+    calm.wrapper.create_slot(make_request())?;
+    let _ = calm
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    wait_until(|| calm.queue.snapshot().len() == 1).await;
+    let calm_queued = calm.queue.snapshot().len();
+    let calm_session = calm.factory.last_opened().is_some();
+
+    // HOT.
+    let hot = build_harness_with_tier(usize::MAX, true, BreakerTier::Hot);
+    hot.wrapper.create_slot(make_request())?;
+    let _ = hot
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    // Give any (erroneous) spawn a chance to enqueue before asserting absence.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let hot_queued = hot.queue.snapshot().len();
+    let hot_session = hot.factory.last_opened().is_some();
+
+    assert_eq!(calm_queued, 1, "CALM disaggregates (1 queued)");
+    assert!(calm_session, "CALM opens a session");
+    assert_eq!(hot_queued, 0, "HOT enqueues nothing");
+    assert!(!hot_session, "HOT opens no session");
+    assert!(
+        hot_queued <= calm_queued,
+        "narrows-only: HOT must not produce MORE Remote than CALM"
+    );
+    Ok(())
+}
+
+/// WARM is P3 — in P2 it is treated as CALM (never a downgrade). Confirm a WARM
+/// tier disaggregates exactly like CALM (so narrows-only holds: WARM never
+/// produces more, and in P2 never less, than CALM).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_breaker_warm_treated_as_calm_in_p2() -> Result<()> {
+    let h = build_harness_with_tier(usize::MAX, true, BreakerTier::Warm);
+    assert_eq!(h.tier_cache.tier(), BreakerTier::Warm);
+
+    h.wrapper.create_slot(make_request())?;
+    let (count, async_flag) = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    assert_eq!(
+        count,
+        Some((LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE),
+        "WARM (P2) disaggregates like CALM"
+    );
+    assert!(async_flag);
+    wait_until(|| h.queue.snapshot().len() == 1).await;
+    assert!(h.wrapper.has_active_cd_request("req-1"));
+    assert!(h.factory.last_opened().is_some());
     Ok(())
 }
 

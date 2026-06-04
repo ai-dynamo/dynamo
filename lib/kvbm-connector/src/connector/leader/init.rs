@@ -989,9 +989,10 @@ impl ConnectorLeader {
             use super::disagg::{
                 AlwaysRemote, ConditionalDisaggCoordinator, ConditionalDisaggLeader,
                 ConditionalDisaggPolicy, ConnectorLeaderApi, ConnectorLeaderShim, CoordinatorParts,
-                DecodeDisaggLeader, EngineP2pBlockTransport, HubRemotePrefillQueue, HubWiring,
-                InnerLeaderShim, InnerLeaderWorkerHook, P2pBlockTransport, P2pWorkerHook,
+                DecodeDisaggLeader, DecodeTierCache, EngineP2pBlockTransport, HubRemotePrefillQueue,
+                HubWiring, InnerLeaderShim, InnerLeaderWorkerHook, P2pBlockTransport, P2pWorkerHook,
                 PeerResolver, PrefillDisaggLeader, RemotePrefillQueue, ThresholdRemote,
+                install_tier_signal_handler,
             };
             use kvbm_config::DisaggregationRole;
 
@@ -1055,6 +1056,34 @@ impl ConnectorLeader {
                     _ => {}
                 }
             }
+
+            // P2 CD breaker: for the DECODE role, install the velo TIER_SIGNAL
+            // handler BEFORE hub registration. `wire_p2p` registers
+            // `Feature::ConditionalDisagg` with the hub, which makes the hub
+            // push the current breaker tier back to this decode
+            // (`ConditionalDisaggManager::on_register`). If the handler were
+            // installed after `wire_p2p` returned, that push could race ahead
+            // of it and be dropped — defeating the seed-on-join. We build the
+            // shared cache here and thread the SAME `Arc` into the leader via
+            // `HubWiring.tier_cache` below. Mirrors the heartbeat handler, which
+            // `wire_p2p` likewise installs before registration. No-op end to end
+            // until the hub's breaker is enabled (then it pushes; the cache
+            // defaults to Calm == prior behavior).
+            let decode_tier_cache: Option<Arc<DecodeTierCache>> =
+                if disagg_cfg.role == DisaggregationRole::Decode {
+                    let cache = Arc::new(DecodeTierCache::default());
+                    let messenger = self
+                        .runtime
+                        .velo()
+                        .context("CD decode requires a KvbmRuntime built with a Velo")?
+                        .messenger()
+                        .clone();
+                    install_tier_signal_handler(&messenger, Arc::clone(&cache))
+                        .context("installing CD tier-signal handler on decode (pre-registration)")?;
+                    Some(cache)
+                } else {
+                    None
+                };
 
             let super::p2p::wire::P2pFoundation {
                 hub,
@@ -1150,6 +1179,10 @@ impl ConnectorLeader {
                             hub: Some(Arc::clone(&hub)),
                             client: Some(Arc::clone(&client)),
                             hub_velo_id,
+                            // The SAME cache the TIER_SIGNAL handler (installed
+                            // pre-registration above) writes — so a tier already
+                            // pushed on registration is visible to GNMT.
+                            tier_cache: decode_tier_cache,
                         },
                     );
                     RoleSpecific::Decode(decode)

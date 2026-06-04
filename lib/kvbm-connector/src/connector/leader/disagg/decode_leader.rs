@@ -29,7 +29,7 @@
 //! error-path design (deferred)".
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 use anyhow::{Result, anyhow};
@@ -112,6 +112,168 @@ impl InflightBudget {
             cap = self.capacity
         );
     }
+}
+
+// ============================================================================
+// CD circuit-breaker decode-side tier cache (P2)
+// ============================================================================
+
+/// Decode-local cache of the hub-pushed CD circuit-breaker tier.
+///
+/// The hub's prefill-router breaker computes the tier and PUSHES it to this
+/// decode over velo ([`kvbm_hub::TIER_SIGNAL_HANDLER`]); the
+/// [`DecodeDisaggLeader`] reads the cached value synchronously inside GNMT with
+/// a single relaxed atomic load (zero hot-path RPC). The state is ABSOLUTE
+/// (latest-by-recency via `epoch`), never a toggle:
+/// [`Self::apply`] adopts an inbound `(tier, epoch)` ONLY when
+/// `epoch >= cached_epoch`, so an older push (e.g. a reorder, or a duplicate)
+/// can never regress a newer tier, and a RESTARTED hub — whose epoch the hub
+/// seeds above any prior value — always wins.
+///
+/// Default is [`BreakerTier::Calm`] @ epoch 0: a decode that never received a
+/// push (breaker disabled, or pre-first-push) behaves EXACTLY as today.
+#[derive(Debug)]
+pub struct DecodeTierCache {
+    /// Current tier as a `u8` (0=Calm, 1=Warm, 2=Hot). Lock-free GNMT-hot-path read.
+    tier: AtomicU8,
+    /// Highest epoch applied so far (monotone non-decreasing via `apply`). Lock-free read.
+    epoch: AtomicU64,
+    /// Serializes concurrent `apply` writers so the `(epoch, tier)` pair updates
+    /// atomically with respect to other pushes. A bare epoch-CAS + a separate
+    /// tier-store lets a lower-epoch push land its tier AFTER a higher-epoch push
+    /// won the epoch (the two tier stores are unordered) — leaving `epoch=high`
+    /// with `tier=low`, a clobber that defeats latest-by-recency. The write lock
+    /// closes that. It is OFF the GNMT hot path (pushes are rare — per tier
+    /// transition / on decode registration), and readers ([`Self::tier`] /
+    /// [`Self::epoch`]) stay lock-free atomic loads.
+    write_lock: std::sync::Mutex<()>,
+}
+
+impl Default for DecodeTierCache {
+    fn default() -> Self {
+        Self {
+            tier: AtomicU8::new(tier_to_u8(kvbm_protocols::disagg::BreakerTier::Calm)),
+            epoch: AtomicU64::new(0),
+            write_lock: std::sync::Mutex::new(()),
+        }
+    }
+}
+
+impl DecodeTierCache {
+    /// Current cached tier (single relaxed load — the GNMT hot-path read).
+    pub fn tier(&self) -> kvbm_protocols::disagg::BreakerTier {
+        tier_from_u8(self.tier.load(Ordering::Relaxed))
+    }
+
+    /// Highest epoch applied so far.
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Relaxed)
+    }
+
+    /// Apply an inbound `(tier, epoch)` push iff `epoch >= cached_epoch`
+    /// (idempotent, absolute state). Returns `true` when the push was applied
+    /// (including an equal-epoch re-apply, which keeps the handler ack simple),
+    /// `false` when it was rejected as stale.
+    ///
+    /// Writers are SERIALIZED on `write_lock` so the `(epoch, tier)` pair updates
+    /// atomically with respect to other concurrent pushes: a recency-rejected
+    /// (stale / lower-epoch) push stores NOTHING, and — crucially — a lower-epoch
+    /// push can never land its tier AFTER a higher-epoch push (which a bare
+    /// epoch-CAS + separate tier-store CANNOT prevent, since the two tier stores
+    /// from different writers are unordered). The lock is off the GNMT hot path
+    /// (pushes are rare); the reader ([`Self::tier`]) takes no lock and always
+    /// observes the tier last published by the most-recent winning push.
+    pub fn apply(&self, tier: kvbm_protocols::disagg::BreakerTier, epoch: u64) -> bool {
+        // Serialize writers (rare velo pushes) — see the field doc for why a
+        // lock-free epoch-CAS is insufficient under concurrent pushes. A poisoned
+        // lock is benign here (the guarded data is two atomics, not invariants),
+        // so recover the guard rather than panic.
+        let _guard = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let cached = self.epoch.load(Ordering::Acquire);
+        if epoch < cached {
+            // Strictly older ⇒ recency-rejected: store NOTHING.
+            return false;
+        }
+        // Winning (or equal-epoch idempotent) push: publish the tier, then commit
+        // the epoch (epoch as the commit marker). Both Release; readers of `tier`
+        // are Relaxed and never gate on `epoch`, so a hypothetical epoch-then-tier
+        // reader still sees a tier no older than the epoch it observed.
+        self.tier.store(tier_to_u8(tier), Ordering::Release);
+        self.epoch.store(epoch, Ordering::Release);
+        true
+    }
+}
+
+fn tier_to_u8(t: kvbm_protocols::disagg::BreakerTier) -> u8 {
+    use kvbm_protocols::disagg::BreakerTier;
+    match t {
+        BreakerTier::Calm => 0,
+        BreakerTier::Warm => 1,
+        BreakerTier::Hot => 2,
+    }
+}
+
+fn tier_from_u8(v: u8) -> kvbm_protocols::disagg::BreakerTier {
+    use kvbm_protocols::disagg::BreakerTier;
+    match v {
+        0 => BreakerTier::Calm,
+        1 => BreakerTier::Warm,
+        _ => BreakerTier::Hot,
+    }
+}
+
+/// Install the velo `TIER_SIGNAL` handler that caches the hub-pushed
+/// `(tier, epoch)` into `cache` (idempotent, epoch-gated). Free function so it
+/// can be installed BEFORE the leader is built — the decode must register this
+/// handler BEFORE it registers with the hub, because the hub pushes the current
+/// tier on a new-decode registration (`ConditionalDisaggManager::on_register`);
+/// installing after registration would let that push race ahead of the handler
+/// and be dropped (the exact case the seeding is for: a hub already HOT when a
+/// decode joins). Mirror the heartbeat handler, which is likewise installed
+/// before registration. The SAME `cache` is then threaded into the leader via
+/// [`HubWiring::tier_cache`]. Lifecycle-free: no engine-core involvement.
+pub fn install_tier_signal_handler(
+    messenger: &Arc<velo::Messenger>,
+    cache: Arc<DecodeTierCache>,
+) -> Result<()> {
+    let handler = velo::Handler::typed_unary_async::<
+        kvbm_hub::TierSignal,
+        kvbm_hub::TierSignalAck,
+        _,
+        _,
+    >(kvbm_hub::TIER_SIGNAL_HANDLER, move |ctx| {
+        let cache = Arc::clone(&cache);
+        async move {
+            let signal = ctx.input;
+            let applied = cache.apply(signal.tier, signal.epoch);
+            if applied {
+                tracing::info!(
+                    tier = ?signal.tier,
+                    epoch = signal.epoch,
+                    "decode: applied CD-breaker tier push"
+                );
+            } else {
+                tracing::debug!(
+                    tier = ?signal.tier,
+                    epoch = signal.epoch,
+                    cached_epoch = cache.epoch(),
+                    "decode: ignored stale CD-breaker tier push (lower epoch)"
+                );
+            }
+            Ok(kvbm_hub::TierSignalAck {
+                epoch: signal.epoch,
+                ok: applied,
+            })
+        }
+    })
+    .build();
+    messenger
+        .register_handler(handler)
+        .map_err(|e| anyhow!("registering CD tier-signal handler: {e}"))?;
+    Ok(())
 }
 
 // ============================================================================
@@ -386,6 +548,13 @@ pub struct DecodeDisaggLeader {
     cd_local_fallback_on_overload: bool,
     cd_request_state: DashMap<String, Arc<CdRequestState>>,
 
+    /// P2 CD circuit-breaker: decode-local cache of the hub-pushed tier, read
+    /// synchronously in `decode_gnmt` (single relaxed atomic load). Default
+    /// Calm ⇒ no behavior change until the hub pushes a hotter tier. Shared
+    /// (`Arc`) with the velo TIER_SIGNAL handler installed on the messenger
+    /// (see [`Self::tier_signal_handler`]); a clone is what the handler writes.
+    tier_cache: Arc<DecodeTierCache>,
+
     client: Option<Arc<ConditionalDisaggClient>>,
     hub: Option<Arc<HubClient>>,
     hub_velo_id: Option<InstanceId>,
@@ -406,12 +575,16 @@ impl std::fmt::Debug for DecodeDisaggLeader {
 }
 
 /// Optional hub-side wiring for a [`DecodeDisaggLeader`]. Grouped so
-/// `from_parts` stays below the argument-count threshold; these three are a
-/// single conceptual unit (all `None` when the hub path is disabled).
+/// `from_parts` stays below the argument-count threshold; these are a single
+/// conceptual unit (all `None` when the hub path is disabled).
 pub struct HubWiring {
     pub hub: Option<Arc<HubClient>>,
     pub client: Option<Arc<ConditionalDisaggClient>>,
     pub hub_velo_id: Option<InstanceId>,
+    /// P2 CD-breaker tier cache. `None` ⇒ `from_parts` creates a fresh default
+    /// (Calm @ epoch 0). Tests inject one so they can drive the cached tier
+    /// without a real velo push.
+    pub tier_cache: Option<Arc<DecodeTierCache>>,
 }
 
 impl DecodeDisaggLeader {
@@ -429,8 +602,10 @@ impl DecodeDisaggLeader {
             hub,
             client,
             hub_velo_id,
+            tier_cache,
         } = hub_wiring;
         let inflight_budget = InflightBudget::new(config.max_inflight_remote_prefill_tokens);
+        let tier_cache = tier_cache.unwrap_or_default();
         let leader = Arc::new_cyclic(|weak_self| Self {
             inner,
             role: config.role,
@@ -441,6 +616,7 @@ impl DecodeDisaggLeader {
             inflight_budget,
             cd_local_fallback_on_overload: config.cd_local_fallback_on_overload,
             cd_request_state: DashMap::new(),
+            tier_cache,
             client,
             hub,
             hub_velo_id,
@@ -483,6 +659,27 @@ impl DecodeDisaggLeader {
 
     pub fn inflight_available(&self) -> usize {
         self.inflight_budget.available()
+    }
+
+    /// Shared P2 CD-breaker tier cache. The velo TIER_SIGNAL handler writes it;
+    /// `decode_gnmt` reads it.
+    pub fn tier_cache(&self) -> &Arc<DecodeTierCache> {
+        &self.tier_cache
+    }
+
+    /// Current cached CD-breaker tier (single relaxed load).
+    pub fn cached_tier(&self) -> kvbm_protocols::disagg::BreakerTier {
+        self.tier_cache.tier()
+    }
+
+    /// Register the velo TIER_SIGNAL handler for this decode's tier cache on
+    /// `messenger`. Thin wrapper over [`install_tier_signal_handler`] for code
+    /// paths that hold the leader. PREFER installing the handler BEFORE hub
+    /// registration (pre-build the cache, call [`install_tier_signal_handler`],
+    /// then pass the cache in via [`HubWiring::tier_cache`]) so the hub's
+    /// push-on-register cannot race ahead of the handler.
+    pub fn register_tier_signal_handler(&self, messenger: &Arc<velo::Messenger>) -> Result<()> {
+        install_tier_signal_handler(messenger, Arc::clone(&self.tier_cache))
     }
 
     pub fn has_active_cd_request(&self, request_id: &str) -> bool {
@@ -742,6 +939,49 @@ impl DecodeDisaggLeader {
                     full_block_external_tokens,
                     "decode_gnmt: Remote — sized window"
                 );
+
+                // P2 CD circuit breaker: read the hub-pushed tier (single
+                // relaxed atomic load, zero RPC). It only ever NARROWS
+                // disaggregation; it never opens a session, produces more
+                // Remote, or touches the recompute/release/mark_failed/
+                // onboarding/session lifecycles.
+                //
+                // - CALM (default; also the value when the breaker is disabled
+                //   or no push has arrived) ⇒ the existing flow below is
+                //   unchanged (the static inflight budget remains the inert
+                //   fallback actuator).
+                // - HOT ⇒ coarse downgrade: skip the RPC and return the inner
+                //   passthrough — behaviorally IDENTICAL to the B-GNMT overload
+                //   downgrade and a policy-`Local` decision (no queue enqueue,
+                //   no cd_request_state, budget untouched, no session opened).
+                // - WARM ⇒ TODO(P3): per-request `try_admit`. Until P3 lands,
+                //   WARM is treated as CALM (the existing flow) — never as a
+                //   downgrade, so it can only ever match or narrow vs today.
+                match self.cached_tier() {
+                    kvbm_protocols::disagg::BreakerTier::Hot => {
+                        tracing::warn!(
+                            full_block_external_tokens,
+                            "decode_gnmt: CD breaker HOT — downgrading remote prefill to LOCAL"
+                        );
+                        crate::audit!(
+                            "policy_remote_downgraded_breaker_hot",
+                            role = "decode",
+                            request_id,
+                            full_block_external_tokens
+                        );
+                        if let Some(cd) = &cd {
+                            cd.record_decision("remote_downgraded_breaker_hot");
+                            cd.record_remote_declined("breaker_hot");
+                            cd.record_local_prefill_tokens(inputs.num_prefill_tokens() as u64);
+                        }
+                        return Ok(inner_result);
+                    }
+                    // WARM is P3; treat as CALM for now (fall through to the
+                    // existing CALM flow). NOT a downgrade ⇒ narrows-only holds.
+                    kvbm_protocols::disagg::BreakerTier::Warm
+                    | kvbm_protocols::disagg::BreakerTier::Calm => {}
+                }
+
                 if full_block_external_tokens == 0 {
                     tracing::info!("decode_gnmt: Remote but no full block to send — passthrough");
                     crate::audit!(
@@ -2825,5 +3065,75 @@ mod tests {
         let budget = InflightBudget::new(64);
         assert!(budget.try_reserve(0));
         assert_eq!(budget.available(), 64);
+    }
+
+    // --- DecodeTierCache: latest-by-recency (epoch-gated) absolute state ------
+    // These run against the REAL DecodeTierCache (the type GNMT reads), not the
+    // TestTierCache copy in tier_push_integration.rs, so the production
+    // `apply` epoch gate is the code under test.
+
+    use kvbm_protocols::disagg::BreakerTier;
+
+    #[test]
+    fn tier_cache_default_is_calm_epoch_zero() {
+        // A decode that never received a push behaves exactly as today.
+        let cache = DecodeTierCache::default();
+        assert_eq!(cache.tier(), BreakerTier::Calm);
+        assert_eq!(cache.epoch(), 0);
+    }
+
+    #[test]
+    fn tier_cache_higher_epoch_push_applies() {
+        let cache = DecodeTierCache::default();
+        assert!(cache.apply(BreakerTier::Hot, 5), "higher epoch must apply");
+        assert_eq!(cache.tier(), BreakerTier::Hot);
+        assert_eq!(cache.epoch(), 5);
+    }
+
+    #[test]
+    fn tier_cache_lower_epoch_push_leaves_tier_unchanged() {
+        // The latest-by-recency invariant: a stale (strictly-lower-epoch) push
+        // stores NOTHING — neither the tier nor the epoch may regress. NOTE: this
+        // sequential test documents the intended SEMANTICS; it passes on both the
+        // old store-before-CAS code and the fixed store-after-CAS code, because
+        // sequentially the `epoch < cached` early-return fires before any store
+        // either way. The clobber the fix removes is a CONCURRENT interleave (a
+        // stale push reads the old cached epoch, stores its tier, then loses the
+        // CAS — leaving a high epoch paired with a stale tier); a deterministic
+        // unit test can't force that interleave. This guards the absolute-state
+        // contract against the REAL DecodeTierCache (not the TestTierCache copy).
+        let cache = DecodeTierCache::default();
+        assert!(cache.apply(BreakerTier::Hot, 50));
+        assert_eq!(cache.tier(), BreakerTier::Hot);
+        assert_eq!(cache.epoch(), 50);
+
+        // Stale push: CALM @ epoch 10 (< 50) — rejected, tier NOT regressed.
+        assert!(
+            !cache.apply(BreakerTier::Calm, 10),
+            "stale (lower-epoch) push must be rejected"
+        );
+        assert_eq!(
+            cache.tier(),
+            BreakerTier::Hot,
+            "tier must not be clobbered by a recency-rejected push"
+        );
+        assert_eq!(cache.epoch(), 50, "epoch must not regress");
+    }
+
+    #[test]
+    fn tier_cache_equal_epoch_push_is_idempotent_reapply() {
+        // Equal epoch is accepted (keeps the handler ack simple) and re-applies
+        // the tier — an idempotent no-op when the tier matches, and a re-store
+        // of the same epoch's tier when it differs (a benign duplicate).
+        let cache = DecodeTierCache::default();
+        assert!(cache.apply(BreakerTier::Warm, 7));
+        assert_eq!(cache.tier(), BreakerTier::Warm);
+
+        assert!(
+            cache.apply(BreakerTier::Warm, 7),
+            "equal-epoch re-apply is accepted"
+        );
+        assert_eq!(cache.tier(), BreakerTier::Warm);
+        assert_eq!(cache.epoch(), 7);
     }
 }

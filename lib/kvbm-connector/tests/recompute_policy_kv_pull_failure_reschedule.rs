@@ -166,9 +166,7 @@ async fn recompute_policy_pull_failure_evicts_coordinator_state() -> Result<()> 
 
     let cfg = DisaggConfig {
         role: DisaggregationRole::Decode,
-        max_inflight_remote_prefill_tokens: usize::MAX,
-        min_remote_prefill_tokens: 0,
-        cd_local_fallback_on_overload: true,
+        ..Default::default()
     };
     let wrapper = DecodeDisaggLeader::from_parts(
         inner.clone(),
@@ -181,6 +179,7 @@ async fn recompute_policy_pull_failure_evicts_coordinator_state() -> Result<()> 
             hub: None,
             client: None,
             hub_velo_id: None,
+            tier_cache: None,
         },
     );
 

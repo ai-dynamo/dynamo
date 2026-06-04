@@ -73,6 +73,32 @@ struct Cli {
     #[arg(long, default_value_t = 4)]
     prefill_worker_concurrency: u32,
 
+    /// Enable the CD prefill-overload circuit breaker (P2). OFF by default —
+    /// when off the hub never constructs the breaker, decode stays Calm, and
+    /// behavior is byte-identical to today. Requires `--prefill-router`. The
+    /// watermarks below tune the hysteresis (defaults mirror `BreakerConfig`).
+    #[arg(long)]
+    cd_breaker: bool,
+
+    /// Breaker: free-capacity fraction at/below which the breaker trips to WARM.
+    #[arg(long, default_value_t = 0.5)]
+    cd_breaker_warm_high: f64,
+
+    /// Breaker: free-capacity fraction at/below which the breaker trips to HOT.
+    /// Must be `< --cd-breaker-warm-high`.
+    #[arg(long, default_value_t = 0.15)]
+    cd_breaker_hot_high: f64,
+
+    /// Breaker: free-capacity fraction at/above which it may descend a tier
+    /// (debounced). Should be `> --cd-breaker-warm-high` for a no-flap gap.
+    #[arg(long, default_value_t = 0.7)]
+    cd_breaker_clear_low: f64,
+
+    /// Breaker: consecutive ticks the clear condition must hold before
+    /// descending one tier. Trip is immediate; clear is debounced.
+    #[arg(long, default_value_t = 3)]
+    cd_breaker_clear_debounce_ticks: u32,
+
     /// Maximum sequence length (tokens). Shared "primary" config: validated
     /// against every registrant and used to size the KV index. Required (may
     /// also come from a config file / env). Must be a non-zero multiple of
@@ -357,6 +383,28 @@ fn build_config(cli: &Cli) -> anyhow::Result<ResolvedConfig> {
     if cli.prefill_worker_concurrency == 0 {
         anyhow::bail!("--prefill-worker-concurrency must be >= 1");
     }
+    if cli.cd_breaker {
+        if !cli.prefill_router {
+            anyhow::bail!(
+                "--cd-breaker (CD prefill-overload circuit breaker) requires --prefill-router \
+                 (the breaker senses the router's free-capacity fraction)"
+            );
+        }
+        if !(cli.cd_breaker_hot_high < cli.cd_breaker_warm_high
+            && cli.cd_breaker_warm_high < cli.cd_breaker_clear_low)
+        {
+            anyhow::bail!(
+                "--cd-breaker watermarks must satisfy hot_high < warm_high < clear_low \
+                 (got hot_high={}, warm_high={}, clear_low={})",
+                cli.cd_breaker_hot_high,
+                cli.cd_breaker_warm_high,
+                cli.cd_breaker_clear_low,
+            );
+        }
+        if cli.cd_breaker_clear_debounce_ticks == 0 {
+            anyhow::bail!("--cd-breaker-clear-debounce-ticks must be >= 1");
+        }
+    }
 
     // KV indexer: resolve sizing from primary; carry ZMQ / advertise overrides.
     // Enabled iff selected in the feature set.
@@ -473,13 +521,36 @@ async fn main() -> anyhow::Result<()> {
             .primary
             .block_size
             .expect("validated above: --block-size required");
-        let router_manager = kvbm_hub::PrefillRouterManager::new(kvbm_hub::SelectorConfig {
+        let selector_config = kvbm_hub::SelectorConfig {
             per_worker_concurrency: cli.prefill_worker_concurrency,
             block_size,
-        });
+        };
+        // CD circuit breaker: opt-in (`--cd-breaker`). OFF ⇒ plain `new`, no
+        // breaker, no tick task, no tier push — byte-identical to today.
+        let router_manager = if cli.cd_breaker {
+            let breaker_config = kvbm_hub::BreakerConfig {
+                warm_high: cli.cd_breaker_warm_high,
+                hot_high: cli.cd_breaker_hot_high,
+                clear_low: cli.cd_breaker_clear_low,
+                queue_depth_warm: 0,
+                queue_depth_hot: 0,
+                clear_debounce_ticks: cli.cd_breaker_clear_debounce_ticks,
+            };
+            tracing::info!(
+                warm_high = cli.cd_breaker_warm_high,
+                hot_high = cli.cd_breaker_hot_high,
+                clear_low = cli.cd_breaker_clear_low,
+                clear_debounce_ticks = cli.cd_breaker_clear_debounce_ticks,
+                "CD prefill-overload circuit breaker ENABLED"
+            );
+            kvbm_hub::PrefillRouterManager::with_breaker(selector_config, breaker_config)
+        } else {
+            kvbm_hub::PrefillRouterManager::new(selector_config)
+        };
         tracing::info!(
             per_worker_concurrency = cli.prefill_worker_concurrency,
             block_size,
+            cd_breaker = cli.cd_breaker,
             "prefill router feature enabled (continuous fleet membership)"
         );
         router_for_late_bind = Some(Arc::clone(&router_manager));
@@ -537,6 +608,18 @@ async fn main() -> anyhow::Result<()> {
     // and queues internally until a worker registers — no startup
     // discovery window needed.
     if let (Some(cd), Some(router)) = (cd_for_late_bind, router_for_late_bind) {
+        // P2 CD-breaker tier push: cross-wire the broadcaster (owned by the
+        // router, sharing the breaker Arc) and the CD manager (the decode-set
+        // provider). Done AFTER both have attached so the velo handle is bound.
+        // Only present when `--cd-breaker` was set; otherwise this is skipped
+        // and the breaker path stays inert.
+        if let Some(broadcaster) = router.broadcaster() {
+            broadcaster.set_decode_provider(
+                Arc::downgrade(&cd) as std::sync::Weak<dyn kvbm_hub::DecodeSetProvider>
+            );
+            cd.set_tier_broadcaster(Arc::clone(broadcaster));
+            tracing::info!("CD breaker tier-push broadcaster wired to the decode set");
+        }
         cd.start_dispatcher(router.dispatcher())
             .map_err(|e| anyhow::anyhow!("install prefill router as CD dispatcher: {e}"))?;
         tracing::info!("prefill router installed as CD prefill dispatcher");

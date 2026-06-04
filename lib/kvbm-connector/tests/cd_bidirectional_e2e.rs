@@ -105,9 +105,7 @@ fn build_g2_manager(capacity: usize) -> Arc<BlockManager<G2>> {
 fn make_disagg_config() -> DisaggConfig {
     DisaggConfig {
         role: DisaggregationRole::Decode,
-        max_inflight_remote_prefill_tokens: usize::MAX,
-        min_remote_prefill_tokens: 0,
-        cd_local_fallback_on_overload: true,
+        ..Default::default()
     }
 }
 
@@ -158,6 +156,7 @@ fn build_instance(factory: Arc<MockSessionFactory>) -> DualRoleInstance {
             hub: None,
             client: None,
             hub_velo_id: None,
+            tier_cache: None,
         },
     );
 

@@ -25,6 +25,10 @@ velo-ext = { workspace = true }
 # KVBM
 kvbm-common    = { workspace = true }
 kvbm-protocols = { workspace = true, features = ["client"] }
+# Prometheus CdMetrics (leaf crate; only depends on prometheus — acyclic). The
+# hub-process breaker-tick task records the breaker tier gauge + transition
+# counter through this when a metrics surface is wired (P2 push path).
+kvbm-observability = { workspace = true }
 kvbm-logical   = { workspace = true }
 dynamo-tokens  = { workspace = true }
 # Pure config crate (no velo, no CUDA — runtime construction lives in

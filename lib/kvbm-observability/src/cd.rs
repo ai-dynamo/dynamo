@@ -20,7 +20,9 @@
 //!   `remote_blocks()` by construction ⇒ the decode `remote_prefill_tokens` and
 //!   the prefill `prefill_computed_tokens` reconcile 1:1.
 
-use prometheus::{Histogram, HistogramOpts, IntCounter, IntCounterVec, Opts, Registry};
+use prometheus::{
+    Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts, Registry,
+};
 
 /// Token-count histogram buckets (prompt-scale; Qwen3 native ctx ~40960).
 fn token_buckets() -> Vec<f64> {
@@ -37,10 +39,15 @@ pub struct CdMetrics {
     // --- decode side (Q1/Q2/Q3/Q4) ---
     /// CD prefill routing decisions, by outcome. label `decision` ∈
     /// {local, remote, remote_downgraded_zero_block, remote_downgraded_overload,
-    /// remote_rejected_budget}. Q1 = decision="local"; Q2 = decision="remote";
-    /// `remote_downgraded_overload` = a Remote decision the decode downgraded to
-    /// a local prefill because the inflight budget (hub-prefill-pressure proxy)
-    /// was exhausted (Approach B-GNMT).
+    /// remote_rejected_budget, remote_downgraded_breaker_hot,
+    /// remote_downgraded_breaker_warm, remote_admitted_breaker_warm}. Q1 =
+    /// decision="local"; Q2 = decision="remote"; `remote_downgraded_overload` =
+    /// a Remote decision the decode downgraded to a local prefill because the
+    /// inflight budget (hub-prefill-pressure proxy) was exhausted (Approach
+    /// B-GNMT). The `*_breaker_*` values are the three-tier circuit breaker's
+    /// decode-side decisions (P2): `_breaker_hot` = HOT-tier coarse downgrade,
+    /// `_breaker_warm` = WARM-tier per-request deny→Local,
+    /// `remote_admitted_breaker_warm` = WARM-tier per-request admit→Remote.
     pub prefill_decisions_total: IntCounterVec,
     /// Q3: tokens the decode will itself prefill on a Local decision
     /// (= num_prefill_tokens() = total − num_computed − local_match).
@@ -57,7 +64,9 @@ pub struct CdMetrics {
     /// surfaced explicitly so it is never folded into the remote count.
     pub prefix_cache_hit_tokens: Histogram,
     /// Interesting: Remote decisions that did not enqueue, by reason
-    /// {zero_block, budget_exhausted}. (Both were 0 in job 2180509.)
+    /// {zero_block, budget_exhausted, breaker_hot, breaker_warm_deny}. (The
+    /// first two were 0 in job 2180509; the `breaker_*` reasons are the
+    /// three-tier circuit breaker's decode-side declines, P2.)
     pub remote_prefill_declined_total: IntCounterVec,
 
     // --- prefill side (Q6 + reconciliation) ---
@@ -74,6 +83,18 @@ pub struct CdMetrics {
     /// net-new blocks than decode expected — the within-prefill divergence signal
     /// that would have surfaced the USAA-1 class as a metric, not a crash.
     pub prefill_output_residual_total: IntCounterVec,
+
+    // --- hub side (CD prefill-overload circuit breaker) ---
+    /// Current circuit-breaker tier as an integer gauge (0=Calm, 1=Warm,
+    /// 2=Hot). HUB-side metric: set by the breaker-tick task on every tier
+    /// change. Unlike the decode/prefill counters above, this is incremented
+    /// in the hub process; on an engine process it stays at 0 (Calm).
+    pub breaker_tier: IntGauge,
+    /// Circuit-breaker tier transitions, labelled by `from`/`to` tier name
+    /// ({calm, warm, hot}). HUB-side; one increment per transition. The
+    /// trip/clear ratio is visible as the asymmetry between
+    /// `to="hot"`/`to="warm"` (trips) and `to="calm"` (clears).
+    pub breaker_transitions_total: IntCounterVec,
 }
 
 impl CdMetrics {
@@ -152,6 +173,19 @@ impl CdMetrics {
                 &["outcome"],
             )
             .expect("valid metric"),
+            breaker_tier: IntGauge::with_opts(Opts::new(
+                "kvbm_cd_breaker_tier",
+                "CD prefill-overload circuit breaker current tier (0=calm, 1=warm, 2=hot); hub-side",
+            ))
+            .expect("valid metric"),
+            breaker_transitions_total: IntCounterVec::new(
+                Opts::new(
+                    "kvbm_cd_breaker_transitions_total",
+                    "CD circuit breaker tier transitions by from/to tier (calm|warm|hot); hub-side",
+                ),
+                &["from", "to"],
+            )
+            .expect("valid metric"),
         }
     }
 
@@ -167,6 +201,8 @@ impl CdMetrics {
         registry.register(Box::new(self.prefill_computed_tokens.clone()))?;
         registry.register(Box::new(self.prefill_pulled_tokens_total.clone()))?;
         registry.register(Box::new(self.prefill_output_residual_total.clone()))?;
+        registry.register(Box::new(self.breaker_tier.clone()))?;
+        registry.register(Box::new(self.breaker_transitions_total.clone()))?;
         Ok(())
     }
 
@@ -233,6 +269,23 @@ impl CdMetrics {
             .with_label_values(&[outcome])
             .inc();
     }
+
+    // --- hub-side breaker recorders -------------------------------------------
+
+    /// HUB-side: set the breaker tier gauge. `tier` is the integer encoding
+    /// (0=calm, 1=warm, 2=hot). Call on every breaker tier change alongside
+    /// [`Self::record_breaker_transition`].
+    pub fn set_breaker_tier(&self, tier: i64) {
+        self.breaker_tier.set(tier);
+    }
+
+    /// HUB-side: record one breaker tier transition. `from`/`to` are the tier
+    /// names ({calm, warm, hot}).
+    pub fn record_breaker_transition(&self, from: &'static str, to: &'static str) {
+        self.breaker_transitions_total
+            .with_label_values(&[from, to])
+            .inc();
+    }
 }
 
 impl Default for CdMetrics {
@@ -282,11 +335,33 @@ mod tests {
         cd.record_decision("remote");
         cd.record_decision("remote");
         cd.record_decision("remote_downgraded_overload");
+        // Three-tier circuit-breaker decode-side decision labels (P2).
+        cd.record_decision("remote_downgraded_breaker_hot");
+        cd.record_decision("remote_downgraded_breaker_warm");
+        cd.record_decision("remote_admitted_breaker_warm");
         assert_eq!(cd.prefill_decisions_total.with_label_values(&["local"]).get(), 1);
         assert_eq!(cd.prefill_decisions_total.with_label_values(&["remote"]).get(), 2);
         assert_eq!(
             cd.prefill_decisions_total
                 .with_label_values(&["remote_downgraded_overload"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            cd.prefill_decisions_total
+                .with_label_values(&["remote_downgraded_breaker_hot"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            cd.prefill_decisions_total
+                .with_label_values(&["remote_downgraded_breaker_warm"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            cd.prefill_decisions_total
+                .with_label_values(&["remote_admitted_breaker_warm"])
                 .get(),
             1
         );
@@ -300,6 +375,39 @@ mod tests {
         assert_eq!(cd.remote_prefill_tokens_total.get(), 1536);
         assert_eq!(cd.remote_prefill_tokens.get_sample_count(), 2);
         assert_eq!(cd.remote_prefill_tokens.get_sample_sum() as u64, 1536);
+    }
+
+    #[test]
+    fn test_breaker_metrics_register_and_record() {
+        let cd = CdMetrics::new();
+        let registry = Registry::new();
+        cd.register(&registry).unwrap();
+
+        cd.set_breaker_tier(2); // hot
+        cd.record_breaker_transition("calm", "warm");
+        cd.record_breaker_transition("warm", "hot");
+
+        assert_eq!(cd.breaker_tier.get(), 2);
+        assert_eq!(
+            cd.breaker_transitions_total
+                .with_label_values(&["calm", "warm"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            cd.breaker_transitions_total
+                .with_label_values(&["warm", "hot"])
+                .get(),
+            1
+        );
+
+        let names: Vec<_> = registry
+            .gather()
+            .iter()
+            .map(|mf| mf.name().to_string())
+            .collect();
+        assert!(names.contains(&"kvbm_cd_breaker_tier".to_string()));
+        assert!(names.contains(&"kvbm_cd_breaker_transitions_total".to_string()));
     }
 
     #[test]

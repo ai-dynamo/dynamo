@@ -528,18 +528,14 @@ mod tests {
     fn disagg() -> DisaggConfig {
         DisaggConfig {
             role: DisaggregationRole::Decode,
-            max_inflight_remote_prefill_tokens: usize::MAX,
-            min_remote_prefill_tokens: 0,
-            cd_local_fallback_on_overload: true,
+            ..Default::default()
         }
     }
 
     fn disagg_prefill() -> DisaggConfig {
         DisaggConfig {
             role: DisaggregationRole::Prefill,
-            max_inflight_remote_prefill_tokens: usize::MAX,
-            min_remote_prefill_tokens: 0,
-            cd_local_fallback_on_overload: true,
+            ..Default::default()
         }
     }
 

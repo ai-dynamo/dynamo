@@ -95,7 +95,9 @@ pub use coordinator::{
     CdRegisterObserverFn, ConditionalDisaggCoordinator, CoordinatorParts, RemotePrefillStart,
 };
 pub use decode::{BeginOutcome, CdFailureSink, RemotePrefillStatus};
-pub use decode_leader::{DecodeDisaggLeader, HubWiring};
+pub use decode_leader::{
+    DecodeDisaggLeader, DecodeTierCache, HubWiring, install_tier_signal_handler,
+};
 pub use leader::{
     ConditionalDisaggLeader, ConditionalDisaggLeaderBuilder, build_hub_client, register_with_hub,
 };

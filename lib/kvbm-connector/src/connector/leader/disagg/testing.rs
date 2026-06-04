@@ -431,6 +431,14 @@ pub struct MockInnerLeaderShim {
     /// returned set is the prefix slice of the slot's full hash
     /// chain that matches against this universe.
     g3_universe: Mutex<std::collections::HashMap<String, Vec<SequenceHash>>>,
+    /// REAL CD observability metrics handed to the decode wrapper via
+    /// [`InnerLeaderShim::cd_metrics`]. The production decode reaches its
+    /// recorders through `self.inner.cd_metrics()`; returning `Some` here (not
+    /// `None`) makes the HOT/WARM/overload decision-label recording in the GNMT
+    /// arm OBSERVABLE to tests. `CdMetrics` is `Clone` and its prometheus
+    /// counters share the underlying atomics across clones, so a test reads the
+    /// recorded counts back off [`Self::cd_metrics_handle`].
+    cd_metrics: kvbm_observability::CdMetrics,
 }
 
 impl MockInnerLeaderShim {
@@ -445,11 +453,19 @@ impl MockInnerLeaderShim {
             promotions: Mutex::new(Vec::new()),
             g3_promotions: Mutex::new(Vec::new()),
             g3_universe: Mutex::new(std::collections::HashMap::new()),
+            cd_metrics: kvbm_observability::CdMetrics::new(),
         })
     }
 
     pub fn g2_manager(&self) -> &Arc<BlockManager<G2>> {
         &self.g2_manager
+    }
+
+    /// A clone of the mock's REAL CD metrics. Counters share atomics across
+    /// clones, so a test reads decode-decision / token counts recorded by the
+    /// wrapper's GNMT path (e.g. `remote_downgraded_breaker_hot`) off this.
+    pub fn cd_metrics_handle(&self) -> kvbm_observability::CdMetrics {
+        self.cd_metrics.clone()
     }
 
     /// Number of `promote_g1_to_g2` calls observed so far.
@@ -631,7 +647,10 @@ impl InnerLeaderShim for MockInnerLeaderShim {
     }
 
     fn cd_metrics(&self) -> Option<kvbm_observability::CdMetrics> {
-        None
+        // Return a clone of the REAL metrics (not `None`) so the wrapper's
+        // GNMT decision-label recording (`record_decision`, `record_remote_*`)
+        // executes and is observable to tests via `cd_metrics_handle`.
+        Some(self.cd_metrics.clone())
     }
 
     fn get_slot_total_tokens(&self, request_id: &str) -> Result<usize> {
