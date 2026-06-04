@@ -1314,24 +1314,26 @@ mod tests {
         let messages = &chat_req.inner.messages;
 
         // Must be exactly 2 messages: one merged System + one User
-        assert_eq!(messages.len(), 2, "expected merged system + user, got {messages:?}");
+        assert_eq!(
+            messages.len(),
+            2,
+            "expected merged system + user, got {messages:?}"
+        );
 
         match &messages[0] {
-            ChatCompletionRequestMessage::System(sys) => {
-                match &sys.content {
-                    ChatCompletionRequestSystemMessageContent::Text(t) => {
-                        assert!(
-                            t.contains("You are a coding agent."),
-                            "merged text missing instructions: {t}"
-                        );
-                        assert!(
-                            t.contains("Follow safety guidelines."),
-                            "merged text missing developer content: {t}"
-                        );
-                    }
-                    _ => panic!("expected text content"),
+            ChatCompletionRequestMessage::System(sys) => match &sys.content {
+                ChatCompletionRequestSystemMessageContent::Text(t) => {
+                    assert!(
+                        t.contains("You are a coding agent."),
+                        "merged text missing instructions: {t}"
+                    );
+                    assert!(
+                        t.contains("Follow safety guidelines."),
+                        "merged text missing developer content: {t}"
+                    );
                 }
-            }
+                _ => panic!("expected text content"),
+            },
             _ => panic!("expected system message at index 0"),
         }
 
