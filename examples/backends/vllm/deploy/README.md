@@ -56,7 +56,7 @@ Hardware-specific aggregated/disaggregated deployment using Kubernetes Dynamic R
 - Communication via NIXL transfer backend with XPU buffer
 
 ### 7. **Aggregated + LMCache MP Deployment** (`agg_lmcache.yaml`)
-Aggregated deployment that offloads KV cache to a per-node LMCache MP DaemonSet, sharing tensors with the worker via cross-Pod CUDA IPC. See [`docs/components/lmcache/`](../../../../docs/components/lmcache/README.md) for the full integration guide.
+Aggregated deployment that offloads KV cache to a per-node LMCache MP DaemonSet, sharing tensors with the worker via cross-Pod CUDA IPC. See the [LMCache integration guide](../../../../docs/integrations/lmcache-integration.md#kubernetes-deployment) for the full recipe.
 
 **Architecture:**
 - `Frontend`: OpenAI-compatible API server
