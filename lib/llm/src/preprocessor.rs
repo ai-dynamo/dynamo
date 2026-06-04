@@ -1333,34 +1333,16 @@ impl OpenAIPreprocessor {
     }
 
     /// Build routing-side tokens for Phi-3-vision's `<|image_N|>` numbered
-    /// placeholder template so the router's per-block hashes match the
-    /// worker's BlockStored events byte-for-byte.
+    /// placeholder template. Mirrors vLLM's text-substitute path: split the
+    /// formatted prompt at each `<|image_N|>` text boundary, encode each
+    /// segment, insert one `find_token_id` slot (outer loop expands to N
+    /// copies), prepend a single leading BOS.
     ///
-    /// **Family contract — Phi-3-only.** The encode-decode roundtrip +
-    /// per-segment BOS pattern here is specific to Phi-3's HF processor
-    /// (and any future `LlamaTokenizer`-family with `<|image_{n}|>`
-    /// placeholders): the processor splits the prompt at `<|image_N|>` and
-    /// tokenizes each segment with `add_special_tokens=true`, prefixing
-    /// every segment (including the first) with a fresh BOS, and decodes-
-    /// then-re-encodes across special-token boundaries, which inserts
-    /// whitespace after each special token and bumps the SentencePiece
-    /// prefix token (e.g. 29871 `▁` -> 259 `▁▁` for `<|user|>\n`). Both
-    /// effects are reproduced here.
-    ///
-    /// Caller is `gather_mm_exact_routing_info`, which gates on
-    /// `placeholder_tpl.contains("{n}")`. The `routing_prepend_bos`
-    /// requirement below acts as the family guard: a future model with a
-    /// `{n}`-style placeholder but no BOS prepend (i.e. not a
-    /// LlamaTokenizer-family) would not benefit from this roundtrip and
-    /// could silently produce wrong block hashes, so we bail and let the
-    /// caller fall back to text-prefix routing.
-    ///
-    /// Returns one `find_token_id` per image; the caller's expansion loop
-    /// multiplies them to the per-image patch count. Leading BOS is
-    /// emitted here as the first element of the returned vector — the
-    /// caller does NOT prepend its own BOS when this helper succeeds.
-    /// Returns `None` (caller falls back to text-prefix routing) when the
-    /// family guard trips or on any tokenize/decode failure.
+    /// `<|image_1|>` is not a vocabulary token in Phi-3-vision so it
+    /// BPE-shatters. Splitting the original string directly avoids the
+    /// SentencePiece `▁`-prefix drift that a roundtrip encode/decode introduces.
+    /// `routing_prepend_bos` being set (add_bos_token=true) is the family guard;
+    /// returns `None` to fall back to text-prefix routing if not satisfied.
     #[cfg(feature = "lightseek-mm")]
     fn splice_phi3_numbered_placeholders_at_token_level(
         &self,
@@ -1369,21 +1351,7 @@ impl OpenAIPreprocessor {
         find_token_id: crate::protocols::TokenIdType,
         expected_count: usize,
     ) -> Option<Vec<crate::protocols::TokenIdType>> {
-        // Family guard: the encode-decode roundtrip + per-segment BOS
-        // semantics are LlamaTokenizer-family-specific. `routing_prepend_bos`
-        // is set iff the model declares `add_bos_token: true` in
-        // tokenizer_config.json, which is the marker for that family.
         let bos = self.routing_prepend_bos?;
-
-        // Encode-decode roundtrip mirrors vLLM's text-substitute fallback,
-        // which is what the Phi-3 worker actually hashes on.
-        let prompt_owned: String = self
-            .tokenizer
-            .encode(prompt)
-            .ok()
-            .and_then(|enc| self.tokenizer.decode(enc.token_ids(), false).ok())
-            .map(Into::into)?;
-        let prompt: &str = &prompt_owned;
 
         let mut byte_ranges: Vec<(usize, usize)> = Vec::with_capacity(expected_count);
         let mut search_from = 0usize;
@@ -1396,20 +1364,12 @@ impl OpenAIPreprocessor {
             search_from = end;
         }
 
-        // Leading BOS is emitted here so the caller's general-purpose
-        // BOS-prepend path can skip when this helper produced the
-        // normalized tokens (avoids the prior split-brain where leading
-        // BOS was pushed by the caller and mid/suffix BOS pushed here).
         let mut result: Vec<crate::protocols::TokenIdType> = vec![bos];
         let mut prev_end = 0usize;
         for &(ph_start, ph_end) in byte_ranges.iter() {
-            let seg = &prompt[prev_end..ph_start];
-            let seg_enc = self.tokenizer.encode(seg).ok()?;
+            let seg_enc = self.tokenizer.encode(&prompt[prev_end..ph_start]).ok()?;
             result.extend_from_slice(seg_enc.token_ids());
             result.push(find_token_id);
-            // Mid-prompt segments get a fresh BOS — Phi-3's HF processor
-            // tokenizes each segment with add_special_tokens=true.
-            result.push(bos);
             prev_end = ph_end;
         }
         let suffix_enc = self.tokenizer.encode(&prompt[prev_end..]).ok()?;
