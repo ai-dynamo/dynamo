@@ -113,7 +113,12 @@ pub struct BranchShardedIndexer<S: AsyncShardHandle> {
     kv_block_size: u32,
     root: Arc<RoutingNode>,
     worker_block_index: DashMap<WorkerWithDpRank, WorkerRoutingLookup, FxBuildHasher>,
-    installed_worker_anchors: DashSet<(usize, WorkerWithDpRank, u64), FxBuildHasher>,
+    /// Single-owner anchor dedup map: worker → set of (shard_idx, anchor_id).
+    /// Sole source of truth for installed anchors for each worker.
+    worker_anchor_index:
+        DashMap<WorkerWithDpRank, DashSet<(usize, u64), FxBuildHasher>, FxBuildHasher>,
+    /// Worker ID lookup index: worker_id → set of active `WorkerWithDpRank` values.
+    worker_id_index: DashMap<WorkerId, DashSet<WorkerWithDpRank, FxBuildHasher>, FxBuildHasher>,
     #[cfg(feature = "bench")]
     metrics: ShardedIndexerMetrics,
 }
@@ -173,7 +178,8 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
             kv_block_size,
             root: Arc::new(RoutingNode::root()),
             worker_block_index: DashMap::with_hasher(FxBuildHasher),
-            installed_worker_anchors: DashSet::with_hasher(FxBuildHasher),
+            worker_anchor_index: DashMap::with_hasher(FxBuildHasher),
+            worker_id_index: DashMap::with_hasher(FxBuildHasher),
             #[cfg(feature = "bench")]
             metrics: ShardedIndexerMetrics::new(),
         }
@@ -251,9 +257,11 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
         &self,
         worker: WorkerWithDpRank,
     ) -> dashmap::mapref::one::RefMut<'_, WorkerWithDpRank, WorkerRoutingLookup> {
-        self.worker_block_index
-            .entry(worker)
-            .or_insert_with(|| DashMap::with_hasher(FxBuildHasher))
+        self.worker_block_index.entry(worker).or_insert_with(|| {
+            // Register in worker_id_index only on first appearance.
+            self.register_worker_in_id_index(worker);
+            DashMap::with_hasher(FxBuildHasher)
+        })
     }
 
     fn route_stored(
@@ -405,8 +413,14 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
     }
 
     fn ensure_worker_anchor(&self, shard_idx: usize, worker: WorkerWithDpRank, anchor: AnchorRef) {
-        let key = (shard_idx, worker, anchor.anchor_id.0);
-        if self.installed_worker_anchors.contains(&key) {
+        let anchor_key = (shard_idx, anchor.anchor_id.0);
+
+        // Fast-path dedup: read lock only, no write.
+        if self
+            .worker_anchor_index
+            .get(&worker)
+            .map_or(false, |set| set.contains(&anchor_key))
+        {
             #[cfg(feature = "bench")]
             self.metrics
                 .counters
@@ -425,19 +439,25 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
         // while backend anchor application is idempotent by anchor_id.
         match self.shards[shard_idx].enqueue_anchor(worker, task) {
             Ok(()) => {
-                if self.installed_worker_anchors.insert(key) {
-                    #[cfg(feature = "bench")]
+                let newly_inserted = self
+                    .worker_anchor_index
+                    .entry(worker)
+                    .or_insert_with(|| DashSet::with_hasher(FxBuildHasher))
+                    .insert(anchor_key);
+                #[cfg(feature = "bench")]
+                if newly_inserted {
                     self.metrics
                         .counters
                         .anchor_installs
                         .fetch_add(1, Ordering::Relaxed);
                 } else {
-                    #[cfg(feature = "bench")]
                     self.metrics
                         .counters
                         .anchor_reuses
                         .fetch_add(1, Ordering::Relaxed);
                 }
+                #[cfg(not(feature = "bench"))]
+                let _ = newly_inserted;
             }
             Err(error) => {
                 tracing::warn!(?error, shard_idx, ?worker, "Failed to enqueue anchor");
@@ -446,31 +466,29 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
     }
 
     fn remove_worker_anchor_entries(&self, worker: WorkerWithDpRank) {
-        let keys: Vec<_> = self
-            .installed_worker_anchors
-            .iter()
-            .filter_map(|entry| {
-                let key = *entry.key();
-                (key.1 == worker).then_some(key)
-            })
-            .collect();
-        for key in keys {
-            self.installed_worker_anchors.remove(&key);
+        self.worker_anchor_index.remove(&worker);
+    }
+
+    /// Register a worker in `worker_id_index` when it first appears in
+    /// `worker_block_index`.  Called from the Stored-event path.
+    fn register_worker_in_id_index(&self, worker: WorkerWithDpRank) {
+        self.worker_id_index
+            .entry(worker.worker_id)
+            .or_insert_with(|| DashSet::with_hasher(FxBuildHasher))
+            .insert(worker);
+    }
+
+    fn deregister_worker_from_id_index(&self, worker: WorkerWithDpRank) {
+        if let Some(set) = self.worker_id_index.get(&worker.worker_id) {
+            set.remove(&worker);
         }
     }
 
     fn tracked_workers_for_worker_id(&self, worker_id: WorkerId) -> FxHashSet<WorkerWithDpRank> {
-        let mut workers: FxHashSet<_> = self
-            .worker_block_index
-            .iter()
-            .filter(|entry| entry.key().worker_id == worker_id)
-            .map(|entry| *entry.key())
-            .collect();
-        workers.extend(self.installed_worker_anchors.iter().filter_map(|entry| {
-            let worker = entry.key().1;
-            (worker.worker_id == worker_id).then_some(worker)
-        }));
-        workers
+        self.worker_id_index
+            .get(&worker_id)
+            .map(|set| set.iter().map(|r| *r).collect())
+            .unwrap_or_default()
     }
 
     fn rewritten_store_event(
@@ -497,6 +515,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
     fn remove_worker_entries(&self, worker: WorkerWithDpRank) {
         self.remove_worker_anchor_entries(worker);
         let Some((_, lookup)) = self.worker_block_index.remove(&worker) else {
+            self.deregister_worker_from_id_index(worker);
             return;
         };
         let mut seen_nodes = FxHashSet::default();
@@ -508,6 +527,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
                 }
             }
         }
+        self.deregister_worker_from_id_index(worker);
     }
 
     fn dump_router_events(&self) -> (Vec<RouterEvent>, DumpedBlockSet) {
@@ -1080,9 +1100,9 @@ mod tests {
 
     fn has_anchor_for_worker(index: &TestBSI, worker: WorkerWithDpRank) -> bool {
         index
-            .installed_worker_anchors
-            .iter()
-            .any(|entry| entry.key().1 == worker)
+            .worker_anchor_index
+            .get(&worker)
+            .map_or(false, |set| !set.is_empty())
     }
 
     async fn normalized_scores(index: &TestBSI, query: &[u64]) -> Vec<(WorkerWithDpRank, u32)> {
@@ -1375,7 +1395,12 @@ mod tests {
         assert_eq!(b.children.len(), 2);
         assert_eq!(e.shard(), 1);
         assert_eq!(e.live_workers.len(), worker_count);
-        assert_eq!(index.installed_worker_anchors.len(), worker_count + 1);
+        let total_anchors: usize = index
+            .worker_anchor_index
+            .iter()
+            .map(|e| e.value().len())
+            .sum();
+        assert_eq!(total_anchors, worker_count + 1);
         #[cfg(feature = "bench")]
         {
             assert_eq!(
