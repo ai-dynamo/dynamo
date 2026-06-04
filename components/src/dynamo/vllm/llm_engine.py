@@ -329,6 +329,14 @@ class VllmLLMEngine(LLMEngine):
 
         is_prefill = self.disaggregation_mode == DisaggregationMode.PREFILL
         tokenizer = getattr(self.engine_client, "tokenizer", None)
+        # Raw requested count drives top_logprobs gating below;
+        # `build_sampling_params` already passed `logprobs` into the
+        # engine, so a `logprobs=0` (chosen-token only) request still
+        # makes vLLM emit its selected-token logprob dict — we must
+        # suppress the top-k slice here, not at the engine.
+        requested_logprobs_count, _ = _shared_logprobs.parse_logprob_options(
+            request.get("output_options", {}) or {}
+        )
 
         total_output_tokens_by_index: dict[int, int] = {}
         async for res in gen:
@@ -361,6 +369,10 @@ class VllmLLMEngine(LLMEngine):
                 # `build_sampling_params` forces DELTA output, so each
                 # `output.logprobs` slot already aligns to this chunk —
                 # the offset into the cumulative array is 0.
+                # `fallback_to_first_on_missing=True` preserves the
+                # legacy handler's behavior of always emitting a logprob
+                # when vLLM returned a dict, even if the sampled token
+                # isn't keyed in it.
                 (
                     log_probs,
                     top_logprobs,
@@ -368,11 +380,18 @@ class VllmLLMEngine(LLMEngine):
                     output,
                     0,
                     tokenizer=tokenizer,
+                    fallback_to_first_on_missing=True,
                     include_bytes=True,
                 )
                 if log_probs is not None:
                     out["log_probs"] = log_probs
-                if top_logprobs is not None:
+                # `requested_logprobs_count == 0` means chosen-token
+                # only — suppress the top-k that vLLM still emitted.
+                if (
+                    top_logprobs is not None
+                    and requested_logprobs_count is not None
+                    and requested_logprobs_count > 0
+                ):
                     out["top_logprobs"] = top_logprobs
 
                 if finish_reason:

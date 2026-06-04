@@ -847,7 +847,7 @@ Request handling:
 
 | Feature | What's missing |
 |---------|----------------|
-| Logprob response wire | `PreprocessedRequest.output_options.{logprobs, prompt_logprobs}` exists on the request shape. Of the existing engines (Python-bridged through PyO3), only vLLM passes the option through to its sampling params on the unified path; SGLang and TRT-LLM unified `generate()` ignore it. No engine populates `log_probs` / `top_logprobs` / `cum_log_probs` on `LLMEngineOutput` — the response wire is open but unused |
+| Prompt logprobs response wire | Completion-side `log_probs` / `top_logprobs` are now populated on the unified path for vLLM, SGLang, and TRT-LLM (shared helpers in `components/src/dynamo/common/backend/logprobs.py`). `PreprocessedRequest.output_options.prompt_logprobs` is plumbed into engine sampling params but no engine extracts prompt-side logprobs onto `LLMEngineOutput` — the engine pays the cost and the client gets nothing back. `cum_log_probs` is also not emitted. |
 | Text-in-text-out mode | `ModelInput::Text` is rejected at startup — `Tokens` only |
 | Multimodal | Images / video / embeddings, NIXL embedding transfer, separate encode workers; `ENCODE` disaggregation role |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path |

@@ -2006,10 +2006,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     def _extract_logprobs(
         output, num_output_tokens_so_far: int, tokenizer=None
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
+        # `fallback_to_first_on_missing=True` preserves the legacy
+        # vLLM handler's behavior of always emitting a logprob when
+        # vLLM returned a dict, even if the sampled token isn't keyed
+        # in it.
         return _shared_logprobs.extract_from_completion_output(
             output,
             num_output_tokens_so_far,
             tokenizer=tokenizer,
+            fallback_to_first_on_missing=True,
             include_bytes=True,
         )
 

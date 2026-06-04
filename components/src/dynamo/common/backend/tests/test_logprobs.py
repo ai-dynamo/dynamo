@@ -24,7 +24,12 @@ from dynamo.common.backend.logprobs import (
     sglang_top_logprobs_allowed,
 )
 
-pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.core,
+    pytest.mark.pre_merge,
+]
 
 
 # ---------------------------------------------------------------------------
@@ -139,18 +144,34 @@ def test_extract_completion_handles_trtllm_float_edge_case():
     assert top_logprobs is None
 
 
-def test_extract_completion_skips_none_positions_in_logprobs_array():
+def test_extract_completion_bails_on_none_positions_in_logprobs_array():
     # Engines occasionally emit `None` for a position in the logprobs
-    # list (no logprobs computed at that slot). Skip without aligning
-    # log_probs to that position so the wire format stays consistent.
+    # list (no logprobs computed at that slot). The Rust response
+    # builder zips log_probs against token_ids positionally, so emitting
+    # a shorter array would misalign every later token — drop the
+    # chunk's logprobs entirely instead.
     output = SimpleNamespace(
         token_ids=[7, 8],
         logprobs=[None, {8: _logprob(-0.8, decoded="b")}],
     )
     log_probs, top_logprobs = extract_from_completion_output(output, 0)
-    assert log_probs == [-0.8]
-    assert len(top_logprobs) == 1
-    assert top_logprobs[0][0]["token_id"] == 8
+    assert log_probs is None
+    assert top_logprobs is None
+
+
+def test_extract_completion_bails_when_any_selected_token_missing():
+    # Same invariant: a single missing selected token would shrink
+    # log_probs out of alignment with token_ids — bail on the chunk.
+    output = SimpleNamespace(
+        token_ids=[7, 8],
+        logprobs=[
+            {7: _logprob(-0.7, decoded="a")},
+            {99: _logprob(-0.8, decoded="x")},  # 8 not present
+        ],
+    )
+    log_probs, top_logprobs = extract_from_completion_output(output, 0)
+    assert log_probs is None
+    assert top_logprobs is None
 
 
 def test_extract_completion_uses_tokenizer_when_decoded_missing():
@@ -296,9 +317,15 @@ def test_sglang_extract_returns_offset_unchanged_when_no_new_entries():
 
 
 def _vllm_legacy_call(output, num_so_far, tokenizer=None):
-    """Mirror of ``BaseWorkerHandler._extract_logprobs`` — vLLM legacy."""
+    """Mirror of ``BaseWorkerHandler._extract_logprobs`` — vLLM legacy.
+    `fallback_to_first_on_missing=True` matches the pre-shared-helper
+    extractor that always emitted a logprob when vLLM returned a dict."""
     return extract_from_completion_output(
-        output, num_so_far, tokenizer=tokenizer, include_bytes=True
+        output,
+        num_so_far,
+        tokenizer=tokenizer,
+        fallback_to_first_on_missing=True,
+        include_bytes=True,
     )
 
 
@@ -306,7 +333,11 @@ def _vllm_unified_call(output, tokenizer=None):
     """Mirror of ``VllmLLMEngine.generate``'s per-chunk extraction.
     DELTA outputs always slice from offset 0."""
     return extract_from_completion_output(
-        output, 0, tokenizer=tokenizer, include_bytes=True
+        output,
+        0,
+        tokenizer=tokenizer,
+        fallback_to_first_on_missing=True,
+        include_bytes=True,
     )
 
 
@@ -537,6 +568,7 @@ def test_parity_sglang_kwargs_rejects_top_logprobs_consistently():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.vllm
 def test_parity_vllm_legacy_wrapper_matches_shared():
     pytest.importorskip("vllm", reason="vLLM not installed")
     from dynamo.vllm.handlers import BaseWorkerHandler
@@ -551,12 +583,13 @@ def test_parity_vllm_legacy_wrapper_matches_shared():
 
     wrapper_lp, wrapper_top = BaseWorkerHandler._extract_logprobs(output, 0)
     direct_lp, direct_top = extract_from_completion_output(
-        output, 0, include_bytes=True
+        output, 0, fallback_to_first_on_missing=True, include_bytes=True
     )
     assert wrapper_lp == direct_lp
     assert wrapper_top == direct_top
 
 
+@pytest.mark.trtllm
 def test_parity_trtllm_legacy_wrapper_matches_shared():
     pytest.importorskip("tensorrt_llm", reason="TRT-LLM not installed")
     from dynamo.trtllm.request_handlers.handler_base import HandlerBase
@@ -578,6 +611,7 @@ def test_parity_trtllm_legacy_wrapper_matches_shared():
     assert wrapper_top == direct_top
 
 
+@pytest.mark.sglang
 def test_parity_sglang_legacy_extract_wrapper_matches_shared():
     pytest.importorskip("sglang", reason="SGLang not installed")
     from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
@@ -595,6 +629,7 @@ def test_parity_sglang_legacy_extract_wrapper_matches_shared():
     assert wrapper == direct
 
 
+@pytest.mark.sglang
 def test_parity_sglang_legacy_kwargs_wrapper_matches_shared(monkeypatch):
     pytest.importorskip("sglang", reason="SGLang not installed")
     from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler

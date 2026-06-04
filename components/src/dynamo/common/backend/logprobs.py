@@ -70,7 +70,11 @@ def extract_from_completion_output(
     absent (TRT-LLM corner case). ``include_bytes`` adds a UTF-8 byte
     array per top entry (matches the vLLM/OpenAI shape).
 
-    Returns ``(None, None)`` when nothing was extracted.
+    Returns ``(None, None)`` when nothing was extracted, or when any
+    selected-token logprob is missing in the slice — the Rust response
+    builder zips ``log_probs`` / ``top_logprobs`` against ``token_ids``
+    by position, so emitting a shorter array would misalign every later
+    token. Bail on the whole chunk instead.
     """
     if getattr(output, "logprobs", None) is None:
         return None, None
@@ -96,16 +100,16 @@ def extract_from_completion_output(
 
     for token_idx, token_logprobs_dict in enumerate(new_logprobs):
         if token_logprobs_dict is None:
-            continue
+            return None, None
 
         actual_token_id = new_token_ids[token_idx]
         selected = token_logprobs_dict.get(actual_token_id)
         if selected is None:
             if not fallback_to_first_on_missing:
-                continue
+                return None, None
             selected = next(iter(token_logprobs_dict.values()), None)
             if selected is None:
-                continue
+                return None, None
         log_probs.append(float(selected.logprob))
 
         position_entries: list[dict[str, Any]] = []
@@ -202,9 +206,6 @@ def build_sglang_logprob_kwargs(
             # prompt; SGLang's default (-1) restricts to output tokens.
             kwargs["logprob_start_len"] = 0
 
-    if kwargs.get("return_logprob") and not allow_top_logprobs:
-        kwargs["top_logprobs_num"] = 0
-
     return kwargs
 
 
@@ -213,7 +214,7 @@ def extract_from_sglang_meta(
     num_output_logprobs_so_far: int,
     *,
     return_tokens_as_token_ids: bool = False,
-) -> tuple[Optional[list[float]], Optional[list[list[dict[str, Any]]]], int,]:
+) -> tuple[Optional[list[float]], Optional[list[list[dict[str, Any]]]], int]:
     """Extract logprobs from SGLang's ``meta_info`` dict.
 
     SGLang's ``output_token_logprobs`` / ``output_top_logprobs`` are

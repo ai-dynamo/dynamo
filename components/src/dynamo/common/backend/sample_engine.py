@@ -29,6 +29,13 @@ logger = logging.getLogger(__name__)
 
 _SAMPLE_BLOCK_SIZE = 16
 
+# Upper bound on synthesised top-k alternatives. Caps the per-chunk
+# ``top_logprobs`` allocation so a client sending an unbounded
+# ``logprobs`` value can't drive arbitrary memory / CPU here. Matches
+# the Rust mocker's ``MAX_LOGPROBS`` so the two reference engines
+# behave identically.
+_MAX_SYNTHETIC_TOP_LOGPROBS = 20
+
 
 def _stamp_synthetic_logprobs(
     chunk: GenerateChunk, token_ids: list[int], logprobs_k: int
@@ -37,6 +44,7 @@ def _stamp_synthetic_logprobs(
     alternatives appear when ``logprobs_k >= 1``."""
     if not token_ids:
         return
+    logprobs_k = min(logprobs_k, _MAX_SYNTHETIC_TOP_LOGPROBS)
     log_probs: list[float] = []
     top_logprobs: list[list[dict[str, Any]]] = []
     for tid in token_ids:
