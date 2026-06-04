@@ -102,19 +102,16 @@ impl Deref for GenerateContext {
     }
 }
 
-/// Registration metadata returned by [`LLMEngine::start`].
+/// Token-pipeline registration metadata: KV cache, data-parallel layout, and
+/// disaggregation bootstrap. Populated only by token engines ([`LLMEngine`]);
+/// raw media engines ([`RawEngine`]) leave [`EngineConfig::llm`] as `None`
+/// rather than returning a struct full of inapplicable `None`s.
 ///
-/// `Worker` consumes this to build a `ModelDeploymentCard` and register the
-/// model with discovery. `None` on an optional field means "don't advertise":
-/// the router sees no value and falls back to round-robin (for scheduling
-/// hints) or its configured defaults. Engines without a traditional KV cache
-/// can leave `kv_cache_block_size` and `total_kv_blocks` unset.
+/// `None` on a field means "don't advertise": the router sees no value and
+/// falls back to round-robin (for scheduling hints) or its configured
+/// defaults.
 #[derive(Clone, Debug, Default)]
-pub struct EngineConfig {
-    /// Canonical model identifier (e.g. HF repo name).
-    pub model: String,
-    /// Public-facing model name advertised to clients. Defaults to `model`.
-    pub served_model_name: Option<String>,
+pub struct LlmRegistration {
     /// Maximum context length the engine supports, in tokens.
     pub context_length: Option<u32>,
     /// KV cache block size, in tokens. Used by KV-aware routing. `None`
@@ -145,9 +142,6 @@ pub struct EngineConfig {
     /// internal — TRT-LLM uses TRT-LLM's transceiver, vLLM uses vLLM's
     /// `NixlConnector` — should leave this `None`.
     ///
-    /// Engines that do use it set this in `start()` after the engine
-    /// has resolved its bootstrap address (SGLang reads
-    /// `tokenizer_manager.server_args.disaggregation_bootstrap_port`).
     /// When both `bootstrap_host` and `bootstrap_port` are `Some`,
     /// `Worker` publishes them via
     /// `ModelRuntimeConfig::disaggregated_endpoint` so the frontend's
@@ -157,8 +151,26 @@ pub struct EngineConfig {
     pub bootstrap_host: Option<String>,
     /// Bootstrap port for disaggregated KV transfer. See `bootstrap_host`.
     pub bootstrap_port: Option<u16>,
+}
+
+/// Registration metadata returned by an engine's `start()`.
+///
+/// `Worker` consumes this to build a `ModelDeploymentCard` and register the
+/// model with discovery. The neutral fields (`model`, `served_model_name`,
+/// `runtime_data`) apply to every modality; the token-pipeline metadata lives
+/// in the optional [`llm`](Self::llm) sub-record, which raw media engines
+/// leave `None`.
+#[derive(Clone, Debug, Default)]
+pub struct EngineConfig {
+    /// Canonical model identifier (e.g. HF repo name).
+    pub model: String,
+    /// Public-facing model name advertised to clients. Defaults to `model`.
+    pub served_model_name: Option<String>,
     /// Engine-specific metadata copied into `ModelRuntimeConfig.runtime_data`.
     pub runtime_data: HashMap<String, serde_json::Value>,
+    /// Token-pipeline registration metadata (KV cache, DP, bootstrap).
+    /// `Some` for [`LLMEngine`]s; `None` for [`RawEngine`]s.
+    pub llm: Option<LlmRegistration>,
 }
 
 /// Inference engine trait.

@@ -32,6 +32,7 @@ from dynamo.common.backend.engine import (
     GenerateChunk,
     GenerateRequest,
     LLMEngine,
+    LlmRegistration,
 )
 from dynamo.common.backend.health_check import (
     bos_token_id_or,
@@ -231,14 +232,16 @@ class VllmLLMEngine(LLMEngine):
         return EngineConfig(
             model=self.engine_args.model,
             served_model_name=self.engine_args.served_model_name,
-            context_length=self._model_max_len,
-            kv_cache_block_size=block_size,
-            total_kv_blocks=per_rank_num_gpu_blocks,
-            max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
-            max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
-            # Router needs the rank range to enumerate per-rank load.
-            data_parallel_start_rank=self._dp_range[0],
-            data_parallel_size=self._dp_range[1],
+            llm=LlmRegistration(
+                context_length=self._model_max_len,
+                kv_cache_block_size=block_size,
+                total_kv_blocks=per_rank_num_gpu_blocks,
+                max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
+                max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+                # Router needs the rank range to enumerate per-rank load.
+                data_parallel_start_rank=self._dp_range[0],
+                data_parallel_size=self._dp_range[1],
+            ),
         )
 
     async def generate(

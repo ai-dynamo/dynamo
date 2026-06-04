@@ -65,9 +65,16 @@ class GenerateChunk(TypedDict, total=False):
 
 
 @dataclass
-class EngineConfig:
-    model: str
-    served_model_name: Optional[str] = None
+class LlmRegistration:
+    """Token-pipeline registration metadata: KV cache, data-parallel layout,
+    and disaggregation bootstrap.
+
+    Populated only by token engines (:class:`LLMEngine`); raw media engines
+    (:class:`RawEngine`) leave :attr:`EngineConfig.llm` as ``None`` rather than
+    returning a struct full of inapplicable ``None``s. ``None`` on a field
+    means "don't advertise" — the router falls back to its defaults.
+    """
+
     context_length: Optional[int] = None
     kv_cache_block_size: Optional[int] = None
     total_kv_blocks: Optional[int] = None
@@ -96,7 +103,23 @@ class EngineConfig:
     # decode concurrent with prefill).
     bootstrap_host: Optional[str] = None
     bootstrap_port: Optional[int] = None
+
+
+@dataclass
+class EngineConfig:
+    """Registration metadata returned by an engine's :meth:`start`.
+
+    The neutral fields (``model``, ``served_model_name``, ``runtime_data``)
+    apply to every modality; token-pipeline metadata lives in the optional
+    :attr:`llm` sub-record, which raw media engines leave ``None``.
+    """
+
+    model: str
+    served_model_name: Optional[str] = None
     runtime_data: Optional[dict[str, Any]] = None
+    # Token-pipeline registration metadata (KV cache, DP, bootstrap).
+    # ``Some`` for LLMEngines; ``None`` for RawEngines.
+    llm: Optional[LlmRegistration] = None
 
 
 class BaseEngine(ABC):

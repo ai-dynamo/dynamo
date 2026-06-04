@@ -561,11 +561,18 @@ impl Worker {
             return Ok(());
         }
         let enable_local_indexer = self.config.effective_enable_local_indexer();
+        // KV events require a block-structured cache; only LLM engines have one
+        // (raw engines reach here only if they declared dp_ranks, which they
+        // don't). `llm` is None for raw → kv_cache_block_size None.
+        let kv_cache_block_size = engine_config
+            .llm
+            .as_ref()
+            .and_then(|l| l.kv_cache_block_size);
         tracing::debug!(
             kv_sources = kv_sources.len(),
             snapshot_dp_ranks = bindings.dp_ranks.len(),
             enable_local_indexer,
-            kv_cache_block_size = ?engine_config.kv_cache_block_size,
+            kv_cache_block_size = ?kv_cache_block_size,
             "Starting KV-aware-routing publishers"
         );
         let handles = setup_publishers(
@@ -574,7 +581,7 @@ impl Worker {
             kv_sources,
             bindings.dp_ranks,
             bindings.on_publisher_ready,
-            engine_config.kv_cache_block_size,
+            kv_cache_block_size,
             enable_local_indexer,
         )
         .await?;
@@ -1103,13 +1110,18 @@ async fn build_local_model(
     // Mirrors the legacy non-unified vLLM path (worker_factory.py).
     let enable_local_indexer = config.effective_enable_local_indexer();
 
+    // Token-pipeline registration metadata. Raw media engines leave
+    // `engine_config.llm = None`; defaulting yields all-`None` fields so the
+    // model registers with no KV/DP/bootstrap hints (correct for media).
+    let llm = engine_config.llm.clone().unwrap_or_default();
+
     // Publish the disaggregated bootstrap endpoint when the engine
     // returned one. Only meaningful for prefill workers — decode/agg
     // engines leave both fields `None`. The frontend's `PrefillRouter`
     // reads this from `model_manager.get_disaggregated_endpoint(...)` to
     // take its optimised "Bootstrap path" (route decode concurrent with
     // prefill instead of waiting for prefill to drain).
-    let disaggregated_endpoint = match (&engine_config.bootstrap_host, engine_config.bootstrap_port)
+    let disaggregated_endpoint = match (&llm.bootstrap_host, llm.bootstrap_port)
     {
         (Some(host), Some(port)) => {
             tracing::info!(
@@ -1126,11 +1138,11 @@ async fn build_local_model(
     };
 
     let rt_cfg = ModelRuntimeConfig {
-        total_kv_blocks: engine_config.total_kv_blocks,
-        max_num_seqs: engine_config.max_num_seqs,
-        max_num_batched_tokens: engine_config.max_num_batched_tokens,
-        data_parallel_size: engine_config.data_parallel_size.unwrap_or(1),
-        data_parallel_start_rank: engine_config.data_parallel_start_rank.unwrap_or(0),
+        total_kv_blocks: llm.total_kv_blocks,
+        max_num_seqs: llm.max_num_seqs,
+        max_num_batched_tokens: llm.max_num_batched_tokens,
+        data_parallel_size: llm.data_parallel_size.unwrap_or(1),
+        data_parallel_start_rank: llm.data_parallel_start_rank.unwrap_or(0),
         tool_call_parser: config.tool_call_parser.clone(),
         reasoning_parser: config.reasoning_parser.clone(),
         exclude_tools_when_tool_choice_none: config.exclude_tools_when_tool_choice_none,
@@ -1146,8 +1158,8 @@ async fn build_local_model(
     let mut builder = LocalModelBuilder::default();
     builder
         .model_name(served_name)
-        .context_length(engine_config.context_length)
-        .kv_cache_block_size(engine_config.kv_cache_block_size)
+        .context_length(llm.context_length)
+        .kv_cache_block_size(llm.kv_cache_block_size)
         .custom_template_path(config.custom_jinja_template.clone())
         .runtime_config(rt_cfg);
 
@@ -1313,14 +1325,17 @@ mod tests {
         };
         let engine_config = EngineConfig {
             model: "nvidia/Kimi-K2.5-NVFP4".to_string(),
-            total_kv_blocks: Some(100),
-            max_num_seqs: Some(16),
-            max_num_batched_tokens: Some(8192),
             runtime_data: [(
                 "sglang_worker_group_id".to_string(),
                 serde_json::json!("group-a"),
             )]
             .into(),
+            llm: Some(crate::engine::LlmRegistration {
+                total_kv_blocks: Some(100),
+                max_num_seqs: Some(16),
+                max_num_batched_tokens: Some(8192),
+                ..Default::default()
+            }),
             ..EngineConfig::default()
         };
 
@@ -1449,8 +1464,11 @@ mod tests {
         };
         let engine_config = EngineConfig {
             model: "test/model".to_string(),
-            bootstrap_host: Some("10.0.0.5".to_string()),
-            bootstrap_port: Some(12345),
+            llm: Some(crate::engine::LlmRegistration {
+                bootstrap_host: Some("10.0.0.5".to_string()),
+                bootstrap_port: Some(12345),
+                ..Default::default()
+            }),
             ..EngineConfig::default()
         };
 

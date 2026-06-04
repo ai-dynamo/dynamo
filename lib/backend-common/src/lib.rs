@@ -34,8 +34,8 @@ pub use engine::{
     AsyncEngineContext, BootstrapInfo, CompletionUsage, ComponentSnapshot, EngineConfig,
     FinishReason, GenerateContext, HEALTH_CHECK_KEY, KvEventPublisher, KvEventSource, LLMEngine,
     LLMEngineOutput, LLMEngineOutputExt, Metrics, MetricsBindings, MetricsCtx, OnPublisherReady,
-    OnSnapshotPublisherReady, OutputOptions, PrefillResult, PreprocessedRequest, RawEngine,
-    SamplingOptions, StopConditions, chunk, usage,
+    LlmRegistration, OnSnapshotPublisherReady, OutputOptions, PrefillResult, PreprocessedRequest,
+    RawEngine, SamplingOptions, StopConditions, chunk, usage,
 };
 pub use error::{BackendError, DynamoError, ErrorType};
 pub use metrics::{ComponentGauges, EngineMetrics, LifecycleGauges};

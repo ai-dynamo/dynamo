@@ -21,7 +21,8 @@ use async_trait::async_trait;
 use dynamo_backend_common::{
     AsyncEngineContext, BackendError, ComponentSnapshot,
     DisaggregationMode as RsDisaggregationMode, DynamoError, EngineConfig as RsEngineConfig,
-    ErrorType, KvEventSource as RsKvEventSource, LLMEngine, LLMEngineOutput, MetricsBindings,
+    ErrorType, KvEventSource as RsKvEventSource, LLMEngine, LLMEngineOutput,
+    LlmRegistration as RsLlmRegistration, MetricsBindings,
     MetricsCtx, OnPublisherReady, PreprocessedRequest, RawEngine, RuntimeConfig as RsRuntimeConfig,
     SnapshotPublisher as RsSnapshotPublisher, Worker as RsWorker, WorkerConfig as RsWorkerConfig,
 };
@@ -50,6 +51,7 @@ pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let m = PyModule::new(py, "backend")?;
     m.add_class::<DisaggregationMode>()?;
     m.add_class::<EngineConfig>()?;
+    m.add_class::<LlmRegistration>()?;
     m.add_class::<RuntimeConfig>()?;
     m.add_class::<WorkerConfig>()?;
     m.add_class::<Worker>()?;
@@ -104,18 +106,16 @@ impl From<DisaggregationMode> for RsDisaggregationMode {
 // strong typing can opt in.
 // ---------------------------------------------------------------------------
 
-#[pyclass(module = "dynamo._core.backend", name = "EngineConfig")]
+#[pyclass(module = "dynamo._core.backend", name = "LlmRegistration")]
 #[derive(Clone, Default)]
-pub struct EngineConfig {
-    inner: RsEngineConfig,
+pub struct LlmRegistration {
+    inner: RsLlmRegistration,
 }
 
 #[pymethods]
-impl EngineConfig {
+impl LlmRegistration {
     #[new]
     #[pyo3(signature = (
-        model,
-        served_model_name = None,
         context_length = None,
         kv_cache_block_size = None,
         total_kv_blocks = None,
@@ -125,12 +125,9 @@ impl EngineConfig {
         data_parallel_start_rank = None,
         bootstrap_host = None,
         bootstrap_port = None,
-        runtime_data = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
-        model: String,
-        served_model_name: Option<String>,
         context_length: Option<u32>,
         kv_cache_block_size: Option<u32>,
         total_kv_blocks: Option<u64>,
@@ -140,7 +137,38 @@ impl EngineConfig {
         data_parallel_start_rank: Option<u32>,
         bootstrap_host: Option<String>,
         bootstrap_port: Option<u16>,
+    ) -> Self {
+        Self {
+            inner: RsLlmRegistration {
+                context_length,
+                kv_cache_block_size,
+                total_kv_blocks,
+                max_num_seqs,
+                max_num_batched_tokens,
+                data_parallel_size,
+                data_parallel_start_rank,
+                bootstrap_host,
+                bootstrap_port,
+            },
+        }
+    }
+}
+
+#[pyclass(module = "dynamo._core.backend", name = "EngineConfig")]
+#[derive(Clone, Default)]
+pub struct EngineConfig {
+    inner: RsEngineConfig,
+}
+
+#[pymethods]
+impl EngineConfig {
+    #[new]
+    #[pyo3(signature = (model, served_model_name = None, runtime_data = None, llm = None))]
+    fn new(
+        model: String,
+        served_model_name: Option<String>,
         runtime_data: Option<&Bound<'_, PyDict>>,
+        llm: Option<LlmRegistration>,
     ) -> PyResult<Self> {
         let runtime_data = runtime_data
             .map(|dict| depythonize::<HashMap<String, serde_json::Value>>(dict))
@@ -152,16 +180,8 @@ impl EngineConfig {
             inner: RsEngineConfig {
                 model,
                 served_model_name,
-                context_length,
-                kv_cache_block_size,
-                total_kv_blocks,
-                max_num_seqs,
-                max_num_batched_tokens,
-                data_parallel_size,
-                data_parallel_start_rank,
-                bootstrap_host,
-                bootstrap_port,
                 runtime_data,
+                llm: llm.map(|l| l.inner),
             },
         })
     }
@@ -175,40 +195,11 @@ impl EngineConfig {
         self.inner.served_model_name.as_deref()
     }
     #[getter]
-    fn context_length(&self) -> Option<u32> {
-        self.inner.context_length
-    }
-    #[getter]
-    fn kv_cache_block_size(&self) -> Option<u32> {
-        self.inner.kv_cache_block_size
-    }
-    #[getter]
-    fn total_kv_blocks(&self) -> Option<u64> {
-        self.inner.total_kv_blocks
-    }
-    #[getter]
-    fn max_num_seqs(&self) -> Option<u64> {
-        self.inner.max_num_seqs
-    }
-    #[getter]
-    fn max_num_batched_tokens(&self) -> Option<u64> {
-        self.inner.max_num_batched_tokens
-    }
-    #[getter]
-    fn data_parallel_size(&self) -> Option<u32> {
-        self.inner.data_parallel_size
-    }
-    #[getter]
-    fn data_parallel_start_rank(&self) -> Option<u32> {
-        self.inner.data_parallel_start_rank
-    }
-    #[getter]
-    fn bootstrap_host(&self) -> Option<&str> {
-        self.inner.bootstrap_host.as_deref()
-    }
-    #[getter]
-    fn bootstrap_port(&self) -> Option<u16> {
-        self.inner.bootstrap_port
+    fn llm(&self) -> Option<LlmRegistration> {
+        self.inner
+            .llm
+            .clone()
+            .map(|inner| LlmRegistration { inner })
     }
     #[getter]
     fn runtime_data(&self, py: Python<'_>) -> PyResult<PyObject> {
@@ -759,22 +750,30 @@ impl LLMEngine for PyLLMEngine {
             if let Ok(cfg) = bound.extract::<EngineConfig>() {
                 return Ok(cfg.inner);
             }
+            // Token-pipeline metadata lives in the optional `.llm` sub-record
+            // (LlmRegistration). LLMEngines set it; RawEngines leave it None.
+            let llm = match bound.getattr("llm") {
+                Ok(v) if !v.is_none() => Some(RsLlmRegistration {
+                    context_length: opt_attr::<u32>(&v, "context_length")?,
+                    kv_cache_block_size: opt_attr::<u32>(&v, "kv_cache_block_size")?,
+                    total_kv_blocks: opt_attr::<u64>(&v, "total_kv_blocks")?,
+                    max_num_seqs: opt_attr::<u64>(&v, "max_num_seqs")?,
+                    max_num_batched_tokens: opt_attr::<u64>(&v, "max_num_batched_tokens")?,
+                    data_parallel_size: opt_attr::<u32>(&v, "data_parallel_size")?,
+                    data_parallel_start_rank: opt_attr::<u32>(&v, "data_parallel_start_rank")?,
+                    bootstrap_host: opt_attr::<String>(&v, "bootstrap_host")?,
+                    bootstrap_port: opt_attr::<u16>(&v, "bootstrap_port")?,
+                }),
+                _ => None,
+            };
             Ok(RsEngineConfig {
                 model: bound.getattr("model")?.extract()?,
                 served_model_name: opt_attr::<String>(bound, "served_model_name")?,
-                context_length: opt_attr::<u32>(bound, "context_length")?,
-                kv_cache_block_size: opt_attr::<u32>(bound, "kv_cache_block_size")?,
-                total_kv_blocks: opt_attr::<u64>(bound, "total_kv_blocks")?,
-                max_num_seqs: opt_attr::<u64>(bound, "max_num_seqs")?,
-                max_num_batched_tokens: opt_attr::<u64>(bound, "max_num_batched_tokens")?,
-                data_parallel_size: opt_attr::<u32>(bound, "data_parallel_size")?,
-                data_parallel_start_rank: opt_attr::<u32>(bound, "data_parallel_start_rank")?,
-                bootstrap_host: opt_attr::<String>(bound, "bootstrap_host")?,
-                bootstrap_port: opt_attr::<u16>(bound, "bootstrap_port")?,
                 runtime_data: match bound.getattr("runtime_data") {
                     Ok(value) if !value.is_none() => depythonize(&value).map_err(to_pyerr)?,
                     _ => HashMap::new(),
                 },
+                llm,
             })
         })
         .map_err(py_err_to_dynamo)
