@@ -156,8 +156,15 @@ class SglangDiffusionEngine(DiffusionEngine):
     async def cleanup(self) -> None:
         # Null-safe against a partial start() (the ABC contract).
         if self._handler is not None:
+            # Handler.cleanup() drops the generator + empties the CUDA cache.
             self._handler.cleanup()
             self._handler = None
-        # The handler owns the generator and frees it in cleanup(); drop our
-        # reference too.
+        elif self._generator is not None:
+            # Partial start: generator built but _make_handler failed, so the
+            # handler never took ownership. Free the model directly rather than
+            # leak its weights (and scheduler child).
+            import torch
+
+            del self._generator
+            torch.cuda.empty_cache()
         self._generator = None

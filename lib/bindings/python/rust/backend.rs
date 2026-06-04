@@ -100,10 +100,13 @@ impl From<DisaggregationMode> for RsDisaggregationMode {
 // ---------------------------------------------------------------------------
 // EngineConfig — mirror of `dynamo_backend_common::EngineConfig`.
 //
-// Engines are free to return either a `dynamo._core.backend.EngineConfig`
-// or any plain Python dataclass with the canonical attribute names; the
-// bridge accepts both. We expose this pyclass mainly so engines that want
-// strong typing can opt in.
+// Engines may return either this pyclass or any object with the canonical
+// attributes `model` / `served_model_name` / `runtime_data` / `llm`; the
+// bridge's `start()` extraction accepts both. Note `llm` is a nested record
+// (LlmRegistration), NOT flat fields — an object exposing flat `context_length`
+// etc. (the pre-split shape) registers with `llm=None`, i.e. no KV/DP/bootstrap
+// hints. We expose this pyclass mainly so engines that want strong typing can
+// opt in.
 // ---------------------------------------------------------------------------
 
 #[pyclass(module = "dynamo._core.backend", name = "LlmRegistration")]
@@ -151,6 +154,43 @@ impl LlmRegistration {
                 bootstrap_port,
             },
         }
+    }
+
+    #[getter]
+    fn context_length(&self) -> Option<u32> {
+        self.inner.context_length
+    }
+    #[getter]
+    fn kv_cache_block_size(&self) -> Option<u32> {
+        self.inner.kv_cache_block_size
+    }
+    #[getter]
+    fn total_kv_blocks(&self) -> Option<u64> {
+        self.inner.total_kv_blocks
+    }
+    #[getter]
+    fn max_num_seqs(&self) -> Option<u64> {
+        self.inner.max_num_seqs
+    }
+    #[getter]
+    fn max_num_batched_tokens(&self) -> Option<u64> {
+        self.inner.max_num_batched_tokens
+    }
+    #[getter]
+    fn data_parallel_size(&self) -> Option<u32> {
+        self.inner.data_parallel_size
+    }
+    #[getter]
+    fn data_parallel_start_rank(&self) -> Option<u32> {
+        self.inner.data_parallel_start_rank
+    }
+    #[getter]
+    fn bootstrap_host(&self) -> Option<&str> {
+        self.inner.bootstrap_host.as_deref()
+    }
+    #[getter]
+    fn bootstrap_port(&self) -> Option<u16> {
+        self.inner.bootstrap_port
     }
 }
 

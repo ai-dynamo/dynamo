@@ -94,7 +94,8 @@ class SampleDiffusionEngine(DiffusionEngine):
     ) -> AsyncGenerator[dict[str, Any], None]:
         del context  # sample engine ignores cancellation (single short step)
 
-        n = request.get("n") or 1
+        n = request.get("n")
+        n = 1 if n is None else n
         response_format = request.get("response_format") or "url"
 
         # Simulate a single denoising step.
