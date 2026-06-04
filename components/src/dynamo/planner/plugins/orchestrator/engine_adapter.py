@@ -482,6 +482,7 @@ class OrchestratorEngineAdapter:
             diagnostics.predicted_num_req = p.predicted_num_req
             diagnostics.predicted_isl = p.predicted_isl
             diagnostics.predicted_osl = p.predicted_osl
+            diagnostics.predicted_kv_hit_rate = p.predicted_kv_hit_rate
 
         # Surface builtin_load_propose's per-tick reason + estimates
         # onto ``TickDiagnostics`` so orchestrator-path logs + Prometheus
@@ -771,6 +772,7 @@ class OrchestratorEngineAdapter:
                 num_req=ti.traffic.num_req,
                 isl=ti.traffic.isl,
                 osl=ti.traffic.osl,
+                kv_hit_rate=ti.traffic.kv_hit_rate,
             )
         workers = None
         if ti.worker_counts is not None:

@@ -162,6 +162,13 @@ class TrafficMetrics(_ProtoMirror):
     num_req: float = 0.0
     isl: float = 0.0
     osl: float = 0.0
+    # KV cache hit rate over the window.  ``Optional`` mirrors proto3
+    # field presence (``optional float kv_hit_rate = 5``) and matches the
+    # PSM-side ``TrafficObservation.kv_hit_rate`` semantic: ``None`` =
+    # Prometheus returned no datapoint; ``0.0`` = all-cold cache.  PSM
+    # throughput scaling consumes this; external throughput-propose
+    # plugins replicating PSM behaviour read it here.
+    kv_hit_rate: Optional[float] = None
 
 
 class FpmData(_ProtoMirror):
@@ -188,7 +195,7 @@ class ObservationData(_ProtoMirror):
 
 
 class PredictionData(_ProtoMirror):
-    """All three prediction fields are ``Optional[float]``.
+    """All four prediction fields are ``Optional[float]``.
 
     ``chain_augment`` partial-merge uses field set/unset to distinguish
     "I assert this value (even 0.0)" vs "no opinion, preserve previous".
@@ -196,11 +203,16 @@ class PredictionData(_ProtoMirror):
     this; here in Pydantic, ``Optional[float] = None`` carries the same
     semantics — ``None`` means unset, any concrete float (including 0.0)
     means asserted.
+
+    ``predicted_kv_hit_rate`` mirrors the PSM-side
+    ``TickDiagnostics.predicted_kv_hit_rate``; external throughput-propose
+    plugins replicating PSM behaviour emit it here.
     """
 
     predicted_num_req: Optional[float] = None
     predicted_isl: Optional[float] = None
     predicted_osl: Optional[float] = None
+    predicted_kv_hit_rate: Optional[float] = None
     source: str = ""
 
 

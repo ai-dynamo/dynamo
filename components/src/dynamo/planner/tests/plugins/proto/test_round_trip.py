@@ -240,6 +240,7 @@ def test_prediction_data_optional_unset_vs_zero():
     assert not pb1.HasField("predicted_num_req")
     assert not pb1.HasField("predicted_isl")
     assert not pb1.HasField("predicted_osl")
+    assert not pb1.HasField("predicted_kv_hit_rate")
 
     # Explicit 0.0 (rare but valid)
     p2 = pyd.PredictionData(predicted_num_req=0.0)
@@ -256,6 +257,64 @@ def test_prediction_data_optional_unset_vs_zero():
     p2_back = proto_to_pydantic(pb2)
     assert p2_back.predicted_num_req == 0.0
     assert p2_back.predicted_isl is None
+    assert p1_back.predicted_kv_hit_rate is None
+
+
+def test_kv_hit_rate_round_trip_traffic_and_prediction():
+    """PSM-parity gap fix: ``TrafficMetrics.kv_hit_rate`` and
+    ``PredictionData.predicted_kv_hit_rate`` must round-trip as
+    optional floats so external throughput-propose plugins can
+    replicate PSM behaviour over the wire.
+
+    Locks:
+      - TrafficMetrics: unset → no proto field presence; 0.0 → set
+        (all-cold cache is a real signal, distinct from "no datapoint")
+      - PredictionData: unset / 0.0 follow the same first-writer-wins
+        partial-merge semantic as the other predicted_* fields.
+    """
+    # TrafficMetrics: kv_hit_rate unset
+    tm_none = pyd.TrafficMetrics(duration_s=60.0, num_req=100, isl=512, osl=128)
+    pb_tm_none = pydantic_to_proto(tm_none)
+    assert not pb_tm_none.HasField("kv_hit_rate"), (
+        "unset kv_hit_rate must survive as proto field-absent — distinguishes "
+        "'Prometheus returned no datapoint' from 'all-cold cache 0.0'"
+    )
+    tm_none_back = proto_to_pydantic(pb_tm_none)
+    assert tm_none_back.kv_hit_rate is None
+
+    # TrafficMetrics: kv_hit_rate=0.0 (cold cache, valid datapoint)
+    tm_cold = pyd.TrafficMetrics(
+        duration_s=60.0, num_req=100, isl=512, osl=128, kv_hit_rate=0.0
+    )
+    pb_tm_cold = pydantic_to_proto(tm_cold)
+    assert pb_tm_cold.HasField("kv_hit_rate")
+    assert pb_tm_cold.kv_hit_rate == 0.0
+    tm_cold_back = proto_to_pydantic(pb_tm_cold)
+    assert tm_cold_back.kv_hit_rate == 0.0
+
+    # TrafficMetrics: kv_hit_rate=0.42 (typical warm cache)
+    tm_warm = pyd.TrafficMetrics(
+        duration_s=60.0, num_req=100, isl=512, osl=128, kv_hit_rate=0.42
+    )
+    pb_tm_warm = pydantic_to_proto(tm_warm)
+    assert pb_tm_warm.kv_hit_rate == pytest.approx(0.42)
+    tm_warm_back = proto_to_pydantic(pb_tm_warm)
+    assert tm_warm_back.kv_hit_rate == pytest.approx(0.42)
+
+    # PredictionData: predicted_kv_hit_rate unset/set parity with the
+    # other predicted_* fields.
+    pd_partial = pyd.PredictionData(
+        predicted_num_req=1000.0, predicted_kv_hit_rate=0.65, source="ext"
+    )
+    pb_pd = pydantic_to_proto(pd_partial)
+    assert pb_pd.HasField("predicted_num_req")
+    assert pb_pd.HasField("predicted_kv_hit_rate")
+    assert not pb_pd.HasField("predicted_isl")  # untouched stays unset
+    assert pb_pd.predicted_kv_hit_rate == pytest.approx(0.65)
+    pd_back = proto_to_pydantic(pb_pd)
+    assert pd_back.predicted_kv_hit_rate == pytest.approx(0.65)
+    assert pd_back.predicted_isl is None
+    assert pd_back.predicted_osl is None
 
 
 def test_component_target_optional_replicas():

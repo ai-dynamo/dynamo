@@ -242,6 +242,14 @@ message TrafficMetrics
   float num_req = 2;     // request count in window
   float isl = 3;         // avg input sequence length
   float osl = 4;         // avg output sequence length
+
+  // KV cache hit rate over the window, derived from prefill prompt-cache
+  // hit metrics emitted by the engine.  ``optional`` distinguishes
+  // "Prometheus returned no hit-rate datapoint" (unset) from
+  // "all-cold cache, 0.0 hit rate" (set to 0.0).  PSM throughput
+  // scaling consumes this — external throughput-propose plugins
+  // replicating PSM behaviour need it for parity.
+  optional float kv_hit_rate = 5;
 }
 
 // Mirrors FpmObservations (types.py).
@@ -285,6 +293,15 @@ message PredictionData
   optional float predicted_isl = 2;
   optional float predicted_osl = 3;
   string source = 4;  // plugin_id or "builtin"
+
+  // Predicted KV cache hit rate.  ``optional`` follows the same
+  // first-writer-wins partial-merge semantic as the other predicted_*
+  // fields — ``unset`` means "no opinion, preserve previous chain
+  // plugin's value", ``set`` means "I assert this value (even 0.0)".
+  // PSM ``TickDiagnostics.predicted_kv_hit_rate`` mirrors this; external
+  // throughput-propose plugins replicating PSM behaviour need it on the
+  // wire schema for parity.
+  optional float predicted_kv_hit_rate = 5;
 }
 
 // Aligns wire format with existing ScaleRequest.target_replicas
