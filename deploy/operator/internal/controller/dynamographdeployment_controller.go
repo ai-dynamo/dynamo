@@ -389,13 +389,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	}
 	dynamoDeployment.Status.Checkpoints = checkpointStatuses
 
-	// Reconcile DynamoGraphDeploymentScalingAdapters for each component.
-	err = r.reconcileScalingAdapters(ctx, dynamoDeployment)
-	if err != nil {
-		logger.Error(err, "Failed to reconcile scaling adapters")
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
-	}
-
 	// Reconcile EPP resources (ConfigMaps, Services, InferencePools) if EPP service exists
 	err = r.reconcileEPPResources(ctx, dynamoDeployment)
 	if err != nil {
@@ -744,7 +737,8 @@ func preserveGrovePodCliqueSetReplicas(
 		for componentName, info := range checkpointInfoByComponent[0] {
 			if info != nil &&
 				info.Enabled &&
-				info.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint {
+				info.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
+				!info.Ready {
 				replicaPreserveSkips[strings.ToLower(componentName)] = struct{}{}
 			}
 		}

@@ -591,7 +591,6 @@ func TestDGD_RoundTrip_MultipleServicesOrderStable(t *testing.T) {
 }
 
 func TestDGD_RoundTrip_Experimental(t *testing.T) {
-	ref := "my-checkpoint"
 	clientPodTemplate := &corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"role": "loader"}},
 		Spec: corev1.PodSpec{
@@ -625,7 +624,6 @@ func TestDGD_RoundTrip_Experimental(t *testing.T) {
 						Checkpoint: &v1beta1.ComponentCheckpointConfig{
 							Mode:                v1beta1.CheckpointModeAuto,
 							StartupPolicy:       v1beta1.CheckpointStartupPolicyWaitForCheckpoint,
-							CheckpointRef:       &ref,
 							TargetContainerName: "worker",
 							Job: &v1beta1.ComponentCheckpointJobConfig{
 								GMSClientContainers: []string{"gms-saver"},

@@ -2619,6 +2619,23 @@ func TestPreserveGrovePodCliqueSetReplicasSkipsCheckpointGatedComponents(t *test
 	g.Expect(desired.Spec.Template.Cliques[0].Spec.Replicas).To(gomega.Equal(int32(0)))
 	g.Expect(desired.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas).NotTo(gomega.BeNil())
 	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas).To(gomega.Equal(int32(0)))
+
+	preserveGrovePodCliqueSetReplicas(desired, existing, map[string]*checkpoint.CheckpointInfo{
+		"worker": {
+			Enabled:       true,
+			Ready:         true,
+			StartupPolicy: v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+		},
+		"decode": {
+			Enabled:       true,
+			Ready:         true,
+			StartupPolicy: v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+		},
+	})
+
+	g.Expect(desired.Spec.Template.Cliques[0].Spec.Replicas).To(gomega.Equal(int32(5)))
+	g.Expect(desired.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas).NotTo(gomega.BeNil())
+	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas).To(gomega.Equal(int32(7)))
 }
 
 func TestDynamoGraphDeploymentReconciler_prepareGroveRenderDeployment_KeepsNativeWorkerSelectors(t *testing.T) {

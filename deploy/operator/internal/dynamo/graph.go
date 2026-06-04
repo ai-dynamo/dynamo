@@ -2053,6 +2053,7 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	replicas := p.r.Replicas
 	if p.r.Role != RoleGMS &&
 		p.checkpointInfo != nil &&
+		p.checkpointInfo.Enabled &&
 		p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
 		!p.checkpointInfo.Ready {
 		replicas = 0
@@ -2265,6 +2266,7 @@ func GenerateGrovePodCliqueSet(
 			replicas := component.Replicas
 			minAvailable := ptr.To(int32(1))
 			if checkpointInfo != nil &&
+				checkpointInfo.Enabled &&
 				checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
 				!checkpointInfo.Ready {
 				replicas = ptr.To(int32(0))

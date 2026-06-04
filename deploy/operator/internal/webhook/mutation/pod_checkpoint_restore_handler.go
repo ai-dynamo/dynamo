@@ -94,6 +94,12 @@ func (h *PodCheckpointRestoreMutator) Handle(ctx context.Context, req admission.
 	if checkpointName == "" {
 		return admission.Allowed("restore candidate has no checkpoint name")
 	}
+	if pod.Labels == nil ||
+		pod.Labels[consts.KubeLabelDynamoComponent] == "" ||
+		pod.Labels[consts.KubeLabelDynamoNamespace] == "" ||
+		pod.Labels[consts.KubeLabelDynamoSelector] == "" {
+		return admission.Allowed("restore candidate is not operator-stamped")
+	}
 
 	ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{}
 	if err := h.client.Get(ctx, types.NamespacedName{Namespace: podNamespace, Name: checkpointName}, ckpt); err != nil {

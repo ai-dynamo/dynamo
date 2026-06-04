@@ -85,10 +85,8 @@ func TestPodCheckpointRestoreMutatorHandle(t *testing.T) {
 		for _, patch := range resp.Patches {
 			patchesByPath[patch.Path] = patch.Value
 		}
-		labelsPatch, ok := patchesByPath["/metadata/labels"].(map[string]any)
-		require.True(t, ok, "expected labels patch, got %#v", patchesByPath["/metadata/labels"])
-		assert.Equal(t, "checkpoint-123", labelsPatch[snapshotprotocol.CheckpointIDLabel])
-		assert.Equal(t, "true", labelsPatch[snapshotprotocol.RestoreTargetLabel])
+		assert.Equal(t, "checkpoint-123", patchesByPath["/metadata/labels/nvidia.com~1snapshot-checkpoint-id"])
+		assert.Equal(t, "true", patchesByPath["/metadata/labels/nvidia.com~1snapshot-is-restore-target"])
 		assert.Equal(t, "2", patchesByPath["/metadata/annotations/nvidia.com~1snapshot-artifact-version"])
 		assert.NotContains(t, patchesByPath, "/metadata/annotations/nvidia.com~1snapshot-target-containers")
 		assert.Contains(t, patchesByPath, "/spec/volumes")
@@ -108,6 +106,20 @@ func TestPodCheckpointRestoreMutatorHandle(t *testing.T) {
 		require.True(t, resp.Allowed)
 		assert.Empty(t, resp.Patches)
 	})
+
+	t.Run("arbitrary annotated pod without operator stamp is ignored", func(t *testing.T) {
+		pod := checkpointCandidatePod("worker-checkpoint")
+		delete(pod.Labels, consts.KubeLabelDynamoComponent)
+		req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+			Operation: admissionv1.Create,
+			Namespace: "default",
+			Object:    runtime.RawExtension{Raw: mustMarshalPod(t, pod)},
+		}}
+
+		resp := mutator.Handle(context.Background(), req)
+		require.True(t, resp.Allowed)
+		assert.Empty(t, resp.Patches)
+	})
 }
 
 func checkpointCandidatePod(checkpointName string) *corev1.Pod {
@@ -115,7 +127,11 @@ func checkpointCandidatePod(checkpointName string) *corev1.Pod {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "worker-0",
 			Namespace: "default",
-			Labels:    map[string]string{},
+			Labels: map[string]string{
+				consts.KubeLabelDynamoComponent: "worker",
+				consts.KubeLabelDynamoNamespace: "default-worker",
+				consts.KubeLabelDynamoSelector:  "worker",
+			},
 			Annotations: map[string]string{
 				consts.CheckpointRestoreCandidateAnnotation: consts.KubeLabelValueTrue,
 				consts.CheckpointNameAnnotation:             checkpointName,
