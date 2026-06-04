@@ -76,17 +76,17 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	logger.Info("Reconciling DynamoCheckpoint", "name", ckpt.Name, "phase", ckpt.Status.Phase)
 
-	identityHash, err := checkpoint.ComputeIdentityHash(ckpt.Spec.Identity)
+	checkpointID, err := checkpoint.CheckpointID(ckpt)
 	if err != nil {
-		logger.Error(err, "Failed to compute checkpoint identity hash")
-		return ctrl.Result{}, fmt.Errorf("failed to compute checkpoint identity hash: %w", err)
+		logger.Error(err, "Failed to resolve checkpoint ID")
+		return ctrl.Result{}, fmt.Errorf("failed to resolve checkpoint ID: %w", err)
 	}
 
 	if ckpt.Labels == nil {
 		ckpt.Labels = map[string]string{}
 	}
-	if ckpt.Labels[snapshotprotocol.CheckpointIDLabel] != identityHash {
-		ckpt.Labels[snapshotprotocol.CheckpointIDLabel] = identityHash
+	if ckpt.Labels[snapshotprotocol.CheckpointIDLabel] != checkpointID {
+		ckpt.Labels[snapshotprotocol.CheckpointIDLabel] = checkpointID
 		if err := r.Update(ctx, ckpt); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -97,11 +97,15 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	needsStatusUpdate := false
 	phaseWasEmpty := ckpt.Status.Phase == ""
-	if ckpt.Status.IdentityHash != identityHash {
-		ckpt.Status.IdentityHash = identityHash
+	if ckpt.Status.CheckpointID != checkpointID {
+		ckpt.Status.CheckpointID = checkpointID
 		needsStatusUpdate = true
 	}
-	existing, err := checkpoint.FindCheckpointByIdentityHash(ctx, r.Client, ckpt.Namespace, identityHash, ckpt.Name)
+	if ckpt.Status.IdentityHash != checkpointID {
+		ckpt.Status.IdentityHash = checkpointID
+		needsStatusUpdate = true
+	}
+	existing, err := checkpoint.FindCheckpointByCheckpointID(ctx, r.Client, ckpt.Namespace, checkpointID, ckpt.Name)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -109,7 +113,7 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
 		ckpt.Status.JobName = ""
 		ckpt.Status.CreatedAt = nil
-		ckpt.Status.Message = fmt.Sprintf("checkpoint identity hash %s is already owned by %s", identityHash, existing.Name)
+		ckpt.Status.Message = fmt.Sprintf("checkpoint ID %s is already owned by %s", checkpointID, existing.Name)
 		if err := r.Status().Update(ctx, ckpt); err != nil {
 			logger.Error(err, "Failed to mark duplicate DynamoCheckpoint as failed")
 			return ctrl.Result{}, err
@@ -117,7 +121,7 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 	desiredJobName := snapshotprotocol.GetCheckpointJobName(
-		identityHash,
+		checkpointID,
 		ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation],
 	)
 	switch ckpt.Status.Phase {
@@ -182,12 +186,15 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 		return r.failPendingCheckpoint(ctx, ckpt, "GMSPodTemplateNotPrepared", err)
 	}
 
-	hash := ckpt.Status.IdentityHash
+	hash := ckpt.Status.CheckpointID
+	if hash == "" {
+		hash = ckpt.Status.IdentityHash
+	}
 	if hash == "" {
 		var err error
-		hash, err = checkpoint.ComputeIdentityHash(ckpt.Spec.Identity)
+		hash, err = checkpoint.CheckpointID(ckpt)
 		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to compute checkpoint identity hash: %w", err)
+			return ctrl.Result{}, fmt.Errorf("failed to resolve checkpoint ID: %w", err)
 		}
 	}
 

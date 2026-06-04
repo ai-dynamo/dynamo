@@ -184,13 +184,11 @@ type ExperimentalSpec struct {
 	Failover *FailoverSpec `json:"failover,omitempty"`
 
 	// checkpoint configures container-image snapshotting and restore for
-	// this component. When set, the DGD controller can produce a
-	// DynamoCheckpoint CR from a running pod and later restore pods from
-	// that checkpoint for faster cold start. The user-facing shape of this
-	// field -- especially its interaction with the standalone
-	// DynamoCheckpoint resource and the identity-hash computation -- is
-	// still settling, which is why it lives under `experimental` in v1beta1
-	// instead of at the top level.
+	// this component. When set, the DGD controller can produce a DGD-scoped
+	// DynamoCheckpoint CR and later restore pods in the same DGD generation
+	// from that checkpoint for faster cold start. The user-facing shape of
+	// this field is still settling, which is why it lives under `experimental`
+	// in v1beta1 instead of at the top level.
 	// +optional
 	Checkpoint *ComponentCheckpointConfig `json:"checkpoint,omitempty"`
 }
@@ -286,7 +284,6 @@ const (
 )
 
 // ComponentCheckpointConfig configures checkpointing for a DGD component.
-// +kubebuilder:validation:XValidation:rule="(has(self.checkpointRef) && size(self.checkpointRef) > 0) || has(self.identity)",message="When checkpoint is configured, either checkpointRef or identity must be specified"
 // +kubebuilder:validation:XValidation:rule="!has(self.job) || !has(self.checkpointRef) || size(self.checkpointRef) == 0",message="checkpoint.job cannot be set when checkpointRef is specified"
 // +kubebuilder:validation:XValidation:rule="!has(self.job) || !has(self.mode) || self.mode == 'Auto'",message="checkpoint.job can only be set in Auto mode"
 type ComponentCheckpointConfig struct {
@@ -303,9 +300,9 @@ type ComponentCheckpointConfig struct {
 	// +optional
 	CheckpointRef *string `json:"checkpointRef,omitempty"`
 
-	// identity defines the checkpoint identity for hash computation. Used
-	// when `mode` is `Auto` or when looking up existing checkpoints.
-	// Required when `checkpointRef` is not specified.
+	// Deprecated: identity is ignored by DGD-managed automatic checkpoints.
+	// Automatic checkpoints are scoped to the owning DGD/component generation and
+	// are never reused across DGDs.
 	// +optional
 	Identity *DynamoCheckpointIdentity `json:"identity,omitempty"`
 
@@ -343,8 +340,9 @@ type ComponentCheckpointJobConfig struct {
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }
 
-// DynamoCheckpointIdentity defines the inputs that determine checkpoint equivalence.
-// Two checkpoints with the same identity hash are considered equivalent.
+// DynamoCheckpointIdentity is legacy compatibility metadata retained for the
+// v1alpha1 standalone DynamoCheckpoint shape. DGD-managed automatic checkpoints
+// do not use this as a reuse boundary.
 // Duplicated from v1alpha1 to keep the v1beta1 type graph self-contained. The
 // DynamoCheckpoint resource itself is not graduating in this MR; this type is
 // only used as a sub-field of `ComponentCheckpointConfig`.
@@ -359,34 +357,44 @@ type DynamoCheckpointIdentity struct {
 	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
 	BackendFramework string `json:"backendFramework"`
 
-	// dynamoVersion is the Dynamo platform version. If empty, the version is
-	// not included in the identity hash, so checkpoints remain compatible
-	// across releases.
+	// dynamoVersion is the Dynamo platform version. Deprecated for DGD-managed
+	// automatic checkpoints; it only participates in the legacy identity hash
+	// fallback for standalone objects.
 	// +optional
 	DynamoVersion string `json:"dynamoVersion,omitempty"`
 
 	// tensorParallelSize is the tensor parallel configuration.
+	// Deprecated for DGD-managed automatic checkpoints; it only participates in
+	// the legacy identity hash fallback for standalone objects.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=1
 	TensorParallelSize int32 `json:"tensorParallelSize,omitempty"`
 
 	// pipelineParallelSize is the pipeline parallel configuration.
+	// Deprecated for DGD-managed automatic checkpoints; it only participates in
+	// the legacy identity hash fallback for standalone objects.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=1
 	PipelineParallelSize int32 `json:"pipelineParallelSize,omitempty"`
 
 	// dtype is the data type (`fp16`, `bf16`, `fp8`, etc.).
+	// Deprecated for DGD-managed automatic checkpoints; it only participates in
+	// the legacy identity hash fallback for standalone objects.
 	// +optional
 	Dtype string `json:"dtype,omitempty"`
 
 	// maxModelLen is the maximum sequence length.
+	// Deprecated for DGD-managed automatic checkpoints; it only participates in
+	// the legacy identity hash fallback for standalone objects.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	MaxModelLen int32 `json:"maxModelLen,omitempty"`
 
 	// extraParameters are additional parameters that affect the checkpoint hash.
+	// Deprecated for DGD-managed automatic checkpoints; it only participates in
+	// the legacy identity hash fallback for standalone objects.
 	// +optional
 	ExtraParameters map[string]string `json:"extraParameters,omitempty"`
 }
@@ -561,10 +569,15 @@ type ComponentCheckpointStatus struct {
 	// checkpointName is the name of the associated DynamoCheckpoint CR.
 	// +optional
 	CheckpointName string `json:"checkpointName,omitempty"`
+	// checkpointID is the artifact ID used by the snapshot protocol.
+	// +optional
+	CheckpointID string `json:"checkpointID,omitempty"`
 	// identityHash is the computed hash of the checkpoint identity.
+	// Deprecated: automatic checkpoints use checkpointID. This field is retained
+	// for older status consumers.
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
-	// ready indicates if the checkpoint was visible to the worker at startup.
+	// ready indicates the checkpoint artifact is ready for future pods to restore.
 	// +optional
 	Ready bool `json:"ready,omitempty"`
 }

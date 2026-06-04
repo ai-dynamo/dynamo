@@ -226,7 +226,7 @@ kubectl apply -f qwen3-checkpoint.yaml -n ${NAMESPACE}
 
 ```bash
 kubectl get dckpt -n ${NAMESPACE} \
-  -o custom-columns=NAME:.metadata.name,HASH:.status.identityHash,PHASE:.status.phase
+  -o custom-columns=NAME:.metadata.name,CHECKPOINT_ID:.status.checkpointID,PHASE:.status.phase
 
 kubectl wait \
   --for=jsonpath='{.status.phase}'=Ready \
@@ -238,7 +238,8 @@ kubectl wait \
 The useful status fields are:
 
 - `status.phase`: high-level lifecycle (`Pending`, `Creating`, `Ready`, `Failed`)
-- `status.identityHash`: deterministic hash of `spec.identity`
+- `status.checkpointID`: artifact ID used by the snapshot protocol
+- `status.identityHash`: deprecated compatibility mirror for older clients
 - `status.jobName`: checkpoint Job name
 - `status.createdAt`: timestamp recorded when the checkpoint became ready
 - `status.message`: progress or failure detail when available
@@ -285,18 +286,14 @@ The `VllmDecodeWorker` pod should restore from the ready checkpoint instead of c
 
 ## DGD Auto Flow
 
-`checkpointRef` is the most explicit path. `mode: Auto` is the higher-level path: the operator computes the checkpoint identity hash, looks for an equivalent `DynamoCheckpoint`, and creates one only when no matching checkpoint exists. If a `DynamoCheckpoint` already exists with the same identity, Auto mode reuses it. If no matching checkpoint exists yet, the first worker cold-starts and the operator creates the checkpoint in the background.
+`checkpointRef` is the explicit path for users who already know which `DynamoCheckpoint` to use. `mode: Auto` is the higher-level path: the operator creates a new DGD-scoped `DynamoCheckpoint` for the owning `DynamoGraphDeployment` worker generation and does not reuse checkpoints across DGDs by legacy identity.
+
+Automatic checkpoint IDs are derived from the DGD namespace/name/UID, component name, and active worker generation hash. This avoids treating model/backend/dtype-style identity fields as a compatibility guarantee. The legacy `checkpoint.identity` shape is no longer required for DGD Auto mode and is ignored for automatic reuse decisions.
 
 ```yaml
 checkpoint:
   enabled: true
   mode: Auto
-  identity:
-    model: Qwen/Qwen3-0.6B
-    backendFramework: vllm
-    tensorParallelSize: 1
-    dtype: bfloat16
-    maxModelLen: 2048
 ```
 
 Inside a `DynamoGraphDeployment`, it looks like this:
@@ -321,12 +318,6 @@ spec:
       checkpoint:
         enabled: true
         mode: Auto
-        identity:
-          model: Qwen/Qwen3-0.6B
-          backendFramework: vllm
-          tensorParallelSize: 1
-          dtype: bfloat16
-          maxModelLen: 2048
       extraPodSpec:
         mainContainer:
           image: registry.example.com/dynamo/vllm-placeholder:1.0.0
@@ -334,13 +325,13 @@ spec:
         ...
 ```
 
-Auto mode only hashes `checkpoint.identity`. GMS-specific checkpoint behavior is not yet available.
+Auto mode scopes the checkpoint to the DGD worker generation. GMS-specific checkpoint behavior is not yet available.
 
 Useful inspection commands:
 
 ```bash
 kubectl get dgd vllm-auto-demo -n ${NAMESPACE} \
-  -o jsonpath='{.status.checkpoints.VllmDecodeWorker.checkpointName}{"\n"}{.status.checkpoints.VllmDecodeWorker.identityHash}{"\n"}{.status.checkpoints.VllmDecodeWorker.ready}{"\n"}'
+  -o jsonpath='{.status.checkpoints.VllmDecodeWorker.checkpointName}{"\n"}{.status.checkpoints.VllmDecodeWorker.checkpointID}{"\n"}{.status.checkpoints.VllmDecodeWorker.ready}{"\n"}'
 
 kubectl get dckpt -n ${NAMESPACE}
 ```
@@ -410,7 +401,9 @@ This patches restore metadata onto an existing pod that is already snapshot-comp
 
 ## Checkpoint Identity
 
-Checkpoints are uniquely identified by a **16-character SHA256 hash** (64 bits) of configuration that affects runtime state:
+Standalone `DynamoCheckpoint` objects still carry `spec.identity` for compatibility with the manual flow and older status consumers. DGD-managed automatic checkpoints do not treat this identity as a reuse boundary; their artifact ID is an operator-owned `checkpointID`.
+
+For standalone identity-hash compatibility, the hash is computed from configuration that affects runtime state:
 
 | Field | Required | Affects Hash | Example |
 |-------|----------|-------------|---------|
@@ -460,6 +453,7 @@ The `status` block looks like:
 ```yaml
 status:
   phase: Ready
+  checkpointID: 3bff874d069f0ed5
   identityHash: 3bff874d069f0ed5
   jobName: checkpoint-job-3bff874d069f0ed5-1
   createdAt: "2026-01-29T10:05:00Z"

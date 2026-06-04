@@ -61,7 +61,7 @@ from dynamo.trtllm.args import parse_args
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine
 from dynamo.trtllm.logits_processing.adapter import attach_logits_processors
-from dynamo.trtllm.request_handlers.handler_base import TRTLLMEngineQuiesceController
+from dynamo.trtllm.request_handlers.handler_base import TRTLLMEnginePauseController
 from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
@@ -189,8 +189,8 @@ class TrtllmLLMEngine(LLMEngine):
         # One-shot guards so a misbehaving engine doesn't flood logs.
         self._warned_dispatch_failed = False
         self._warned_unknown_dp_rank = False
-        self._quiesce_controller: TRTLLMEngineQuiesceController | None = None
-        self._quiesce_lock = asyncio.Lock()
+        self._pause_controller: TRTLLMEnginePauseController | None = None
+        self._pause_lock = asyncio.Lock()
         self._inflight_lock = asyncio.Lock()
         self._inflight_requests = 0
         self._no_inflight_requests = asyncio.Event()
@@ -320,7 +320,7 @@ class TrtllmLLMEngine(LLMEngine):
 
         self._engine = TensorRTLLMEngine(self.engine_args, self.disaggregation_mode)
         await self._engine.initialize()
-        self._quiesce_controller = TRTLLMEngineQuiesceController(self._engine)
+        self._pause_controller = TRTLLMEnginePauseController(self._engine)
 
         # Resolve the engine-declared spec now the engine (and its tokenizer)
         # is initialized; see `logits_processor_spec()`.
@@ -627,20 +627,20 @@ class TrtllmLLMEngine(LLMEngine):
 
     @staticmethod
     def _controller_needs_resume_recovery(
-        controller: TRTLLMEngineQuiesceController,
+        controller: TRTLLMEnginePauseController,
     ) -> bool:
         needs_recovery = getattr(controller, "needs_resume_recovery", False)
         return needs_recovery if isinstance(needs_recovery, bool) else False
 
     async def release_memory_occupation(self, body: dict) -> dict:
-        controller = self._quiesce_controller
+        controller = self._pause_controller
         if controller is None:
             return {"status": "error", "message": "engine is not initialized"}
 
         body = body or {}
         tags = body.get("tags")
-        async with self._quiesce_lock:
-            if controller.is_quiesced:
+        async with self._pause_lock:
+            if controller.is_paused:
                 return {"status": "ok", "message": "Memory already released"}
             if (
                 self._resume_recovery_required
@@ -655,35 +655,35 @@ class TrtllmLLMEngine(LLMEngine):
                 timeout_s = float(body.get("timeout_s", 30.0))
                 await self._wait_for_inflight_requests(timeout_s)
             except Exception as exc:
-                logger.error("release_memory_occupation failed before quiesce: %s", exc)
+                logger.error("release_memory_occupation failed before pause: %s", exc)
                 await self._set_reject_new_requests(False)
                 return {"status": "error", "message": str(exc)}
 
             try:
-                await controller.quiesce(tags)
+                await controller.pause(tags)
                 self._resume_recovery_required = False
                 return {"status": "ok", "message": "Memory released"}
             except Exception as exc:
-                logger.error("release_memory_occupation quiesce failed: %s", exc)
+                logger.error("release_memory_occupation pause failed: %s", exc)
                 self._resume_recovery_required = True
                 return {"status": "error", "message": str(exc)}
 
     async def resume_memory_occupation(self, body: dict) -> dict:
-        controller = self._quiesce_controller
+        controller = self._pause_controller
         if controller is None:
             return {"status": "error", "message": "engine is not initialized"}
 
         body = body or {}
         tags = body.get("tags")
-        async with self._quiesce_lock:
+        async with self._pause_lock:
             needs_recovery = (
                 self._resume_recovery_required
                 or self._controller_needs_resume_recovery(controller)
             )
-            if not controller.is_quiesced and not needs_recovery:
+            if not controller.is_paused and not needs_recovery:
                 return {"status": "ok", "message": "Memory already resumed"}
             try:
-                if controller.is_quiesced or self._controller_needs_resume_recovery(
+                if controller.is_paused or self._controller_needs_resume_recovery(
                     controller
                 ):
                     await controller.resume(tags)
@@ -1041,7 +1041,7 @@ class TrtllmLLMEngine(LLMEngine):
         self._kv_events_thread = None
         self._metrics_thread = None
         self._kv_publishers.clear()
-        self._quiesce_controller = None
+        self._pause_controller = None
         if self._engine is not None:
             await self._engine.cleanup()
             logger.info("TensorRT-LLM engine shutdown")
