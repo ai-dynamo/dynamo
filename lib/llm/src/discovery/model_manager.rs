@@ -841,10 +841,12 @@ impl ModelManager {
         // in bindings/python/rust/llm/kv.rs), so aggregated KV feeds load here too. Only
         // disaggregated PREFILL is excluded — its load is transient and would double-count the
         // decode component's active sequences. Without this feed the estimator is never fed in KV
-        // mode and every LoRA stays "inactive" forever. (When router_track_active_blocks is off the
-        // endpoint is treated as prefill-like and KV routing is not load-aware; dynamic LoRA
-        // allocation then degrades to cold-start pins, while the filter still routes by loaded
-        // worker.)
+        // mode and every LoRA stays "inactive" forever. (Edge case specific to the Python KV path:
+        // create_kv_router_from_endpoint infers WORKER_TYPE_PREFILL for a non-prefill endpoint when
+        // router_track_active_blocks=false, so that aggregated worker would skip this feed and KV
+        // routing is not load-aware — dynamic LoRA allocation then degrades to cold-start pins while
+        // the filter still routes by loaded worker. Constructors that pass WORKER_TYPE_DECODE
+        // directly, e.g. the watcher / C bindings, are unaffected.)
         if Self::should_start_lora_load_feed(self.lora_enabled, worker_type) {
             let feed_key = format!("{}/{}", endpoint.id().namespace, endpoint.id().component);
             // Start a feed if none runs for this component yet, or restart it if the previous
