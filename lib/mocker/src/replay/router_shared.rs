@@ -32,7 +32,7 @@ impl SequencePublisher for ReplayNoopPublisher {
     fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct ReplayWorkerConfig {
     pub(super) max_num_batched_tokens: u64,
     pub(super) total_kv_blocks: u64,

@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::marker::PhantomData;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot, watch};
@@ -97,6 +97,10 @@ struct SchedulerQueueActor<
     overlap_scores_refresh: Option<Arc<RF>>,
     overlap_refresh_after: Option<Duration>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+    /// Workers registered via `register_workers` (external / GAIE mode) that
+    /// are absent from the discovery-fed `workers_with_configs` map. Shared
+    /// with the `SchedulerQueue` handle that populates it.
+    external_worker_ids: Arc<Mutex<HashSet<WorkerId>>>,
 }
 
 /// Queue that gates scheduling requests behind a capacity check.
@@ -122,12 +126,13 @@ pub struct SchedulerQueue<
     /// Cached threshold fraction; None means queueing is disabled.
     threshold_frac: Option<f64>,
     supports_overlap_refresh: bool,
+    external_worker_ids: Arc<Mutex<HashSet<WorkerId>>>,
     _marker: PhantomData<(S, Sel, RF)>,
 }
 
 impl<
     P: SequencePublisher + 'static,
-    C: WorkerConfigLike + Send + Sync + 'static,
+    C: WorkerConfigLike + Clone + Default + Send + Sync + 'static,
     S: SchedulingPolicy + 'static,
     Sel: WorkerSelector<C> + Send + 'static,
     RF: OverlapScoresRefresh + Send + Sync + 'static,
@@ -170,6 +175,7 @@ impl<
         let pending_count = Arc::new(AtomicUsize::new(0));
         let pending_isl_tokens = Arc::new(AtomicUsize::new(0));
         let (admission_tx, admission_rx) = mpsc::channel(ADMISSION_CHANNEL_CAPACITY);
+        let external_worker_ids = Arc::new(Mutex::new(HashSet::new()));
         let actor = SchedulerQueueActor {
             pending: BinaryHeap::new(),
             pending_count: Arc::clone(&pending_count),
@@ -186,6 +192,7 @@ impl<
             overlap_scores_refresh,
             overlap_refresh_after,
             overloaded_worker_provider,
+            external_worker_ids: Arc::clone(&external_worker_ids),
         };
         tokio::spawn(actor.run(admission_rx));
         Self {
@@ -196,6 +203,7 @@ impl<
             workers_with_configs,
             threshold_frac,
             supports_overlap_refresh: overlap_refresh_after.is_some(),
+            external_worker_ids,
             _marker: PhantomData,
         }
     }
@@ -203,7 +211,7 @@ impl<
 
 impl<
     P: SequencePublisher + 'static,
-    C: WorkerConfigLike + Send + Sync + 'static,
+    C: WorkerConfigLike + Clone + Default + Send + Sync + 'static,
     S: SchedulingPolicy + 'static,
     Sel: WorkerSelector<C> + Send + 'static,
 > SchedulerQueue<P, C, S, Sel, NoopOverlapScoresRefresh>
@@ -271,7 +279,13 @@ impl<
     /// Register externally-provided workers in the slot tracker.
     ///
     /// Looks up DP rank/size from the discovery watch channel; defaults to
-    /// `(0, 1)` for workers not yet known to discovery.
+    /// `(0, 1)` for workers not in discovery. Externally-discovered
+    /// (gateway / InferencePool) workers are **single-rank per endpoint**:
+    /// vLLM data-parallel deployments expose each DP rank as its own endpoint
+    /// (external load balancing), so data parallelism is scaled by adding
+    /// endpoints to the pool and the single-rank default is correct by
+    /// construction. A single endpoint that fans out to multiple internal DP
+    /// ranks is not addressable per-rank from the gateway and is out of scope.
     pub fn register_workers(&self, worker_ids: &std::collections::HashSet<u64>) {
         let discovery_workers = self.workers_with_configs.borrow();
         for &worker_id in worker_ids {
@@ -288,6 +302,12 @@ impl<
             if let Err(error) = self.slots.upsert_worker(range) {
                 tracing::warn!(worker_id, %error, "Invalid externally-provided worker topology");
             }
+        }
+        // Track external IDs so `admit_one` can merge a default config for them
+        // into the selector's candidate map (they never appear in the
+        // discovery-fed `workers_with_configs`).
+        if let Ok(mut external) = self.external_worker_ids.lock() {
+            external.extend(worker_ids.iter().copied());
         }
     }
 
@@ -379,7 +399,7 @@ impl<
 
 impl<
     P: SequencePublisher + 'static,
-    C: WorkerConfigLike + Send + Sync + 'static,
+    C: WorkerConfigLike + Clone + Default + Send + Sync + 'static,
     S: SchedulingPolicy + 'static,
     Sel: WorkerSelector<C> + Send + 'static,
     RF: OverlapScoresRefresh + Send + Sync + 'static,
@@ -579,14 +599,41 @@ impl<
         request.prefill_tokens = prefill_tokens;
 
         let selection = {
-            let workers = self.workers_with_configs.borrow();
+            // External (vanilla-vLLM / GAIE) workers are registered into the
+            // slot tracker but never appear in the discovery-fed config map.
+            // Merge a default config for them so the selector treats them as
+            // eligible candidates. Capacity checks are skipped for
+            // allowed-worker-id requests, and external workers are single-rank
+            // per endpoint (DP is scaled by adding endpoints, not by fanning a
+            // single endpoint across ranks), so a default config is sufficient.
+            // (Synchronous snapshot only; the borrow is dropped before await.)
+            let discovery = self.workers_with_configs.borrow();
+            // Hot path: borrow the discovery map with no allocation. Only
+            // clone + merge when an external worker is missing from it.
+            let merged: Option<HashMap<WorkerId, C>> = {
+                let external = self.external_worker_ids.lock();
+                match external {
+                    Ok(external) if !external.iter().all(|id| discovery.contains_key(id)) => {
+                        let mut merged = (*discovery).clone();
+                        for id in external.iter() {
+                            merged.entry(*id).or_default();
+                        }
+                        Some(merged)
+                    }
+                    _ => None,
+                }
+            };
+            let workers: &HashMap<WorkerId, C> = match &merged {
+                Some(m) => m,
+                None => &discovery,
+            };
             let overloaded_worker_ids = self
                 .overloaded_worker_provider
                 .as_ref()
                 .and_then(|provider| provider());
             let eligibility = request.eligibility_with_overloaded(overloaded_worker_ids.as_ref());
             self.selector
-                .select_worker(&workers, &request, eligibility, self.block_size)
+                .select_worker(workers, &request, eligibility, self.block_size)
         };
 
         let selection = match selection {
