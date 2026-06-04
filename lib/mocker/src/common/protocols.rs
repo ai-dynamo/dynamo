@@ -245,7 +245,14 @@ impl PrefillCost {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputSignal {
     pub uuid: Uuid,
+    /// Terminal flag: the request's lifecycle has ended. Replay drivers free
+    /// resources and advance/notify on this.
     pub completed: bool,
+    /// Set with `completed` when the request was rejected without ever running
+    /// (its footprint exceeds the whole KV pool); drivers free/advance but
+    /// exclude it from token/latency/throughput stats.
+    #[serde(default)]
+    pub rejected: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff_delay_ms: Option<f64>,
 }
