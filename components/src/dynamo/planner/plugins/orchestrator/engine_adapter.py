@@ -688,10 +688,22 @@ class OrchestratorEngineAdapter:
         # pipeline still ticks (e.g. for FPM-driven load decisions or
         # worker-state-only constrain logic), it just skips the
         # Prometheus query.
+        #
+        # ``needs`` are dot-paths into ``PipelineContext`` per the proto
+        # contract.  Match the parent path ``"observations.traffic"``
+        # AND any sub-path ``"observations.traffic.<field>"`` — both
+        # require the traffic observation to be present, since the
+        # sub-path can only resolve if its parent does.  The trailing
+        # ``.`` in the prefix is load-bearing: it stops false-positives
+        # on a sibling like ``"observations.traffic_legacy"`` (no such
+        # field today but defensive against future schema additions).
         traffic_consumers_due = [
             p
             for p in self._orchestrator._registry.all_plugins()
-            if "observations.traffic" in p.needs
+            if any(
+                n == "observations.traffic" or n.startswith("observations.traffic.")
+                for n in p.needs
+            )
             and self._orchestrator._scheduler._is_due(p, at_monotonic)
         ]
         if traffic_consumers_due:

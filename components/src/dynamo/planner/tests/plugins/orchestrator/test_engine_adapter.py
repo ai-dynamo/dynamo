@@ -304,3 +304,77 @@ def test_lazy_traffic_due_check_uses_monotonic_not_wall_epoch():
         "lazy traffic pull broke: plugin with last_call_at in monotonic domain "
         "was read as due against a wall-epoch projection of the next tick"
     )
+
+
+def test_lazy_traffic_pull_matches_dot_path_sub_paths_of_observations_traffic():
+    """``needs`` are dot-paths into ``PipelineContext`` per the proto
+    contract.  A plugin declaring a sub-path like
+    ``"observations.traffic.num_req"`` (signalling "I only consume
+    num_req — you may trim the rest from ctx") must still trigger the
+    lazy Prometheus pull, because the sub-path can only resolve if
+    its parent ``ctx.observations.traffic`` is populated.
+
+    Sibling fields like ``"observations.traffic_legacy"`` must NOT
+    trigger the pull — the trailing ``.`` in the prefix-match is
+    load-bearing.  Locks both branches.
+    """
+    from dynamo.planner.plugins.registry.types import RegisteredPlugin
+    from dynamo.planner.plugins.types import HoldPolicy
+
+    def _make_traffic_plugin(plugin_id: str, needs: list[str]) -> RegisteredPlugin:
+        plugin = RegisteredPlugin(
+            plugin_id=plugin_id,
+            plugin_type="propose",
+            priority=10,
+            endpoint=f"inproc://{plugin_id}",
+            version="test",
+            protocol_version="1.0",
+            execution_interval_seconds=0.0,  # every tick, always due
+            hold_policy=HoldPolicy.ACCEPT_WHEN_IDLE,
+            needs=needs,
+            is_builtin=False,
+            transport=None,  # type: ignore[arg-type]
+            transport_type="grpc",
+            registered_at=0.0,
+        )
+        plugin.last_call_at = float("-inf")
+        return plugin
+
+    # --- Case 1: exact parent path matches (existing behavior, keep working) ---
+    adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps())
+    adapter._orchestrator._registry._plugins["p_parent"] = _make_traffic_plugin(
+        "p_parent", ["observations.traffic"]
+    )
+    sched = adapter._compute_next_scheduled_tick()
+    assert sched.need_traffic_metrics is True, "parent path must trigger pull"
+    del adapter._orchestrator._registry._plugins["p_parent"]
+
+    # --- Case 2: sub-path matches (regression — was broken before fix) ---
+    adapter._orchestrator._registry._plugins["p_child"] = _make_traffic_plugin(
+        "p_child", ["observations.traffic.num_req"]
+    )
+    sched = adapter._compute_next_scheduled_tick()
+    assert sched.need_traffic_metrics is True, (
+        "sub-path of observations.traffic must trigger pull — without this "
+        "the plugin would receive ctx.observations.traffic == None despite "
+        "declaring a dot-path into it"
+    )
+    del adapter._orchestrator._registry._plugins["p_child"]
+
+    # --- Case 3: sibling field must NOT match (prefix guard) ---
+    adapter._orchestrator._registry._plugins["p_sibling"] = _make_traffic_plugin(
+        "p_sibling", ["observations.traffic_legacy"]
+    )
+    sched = adapter._compute_next_scheduled_tick()
+    assert (
+        sched.need_traffic_metrics is False
+    ), "prefix match must not over-fire on sibling field 'observations.traffic_legacy'"
+
+    # --- Case 4: completely unrelated needs must NOT match ---
+    adapter._orchestrator._registry._plugins["p_other"] = _make_traffic_plugin(
+        "p_other", ["observations.fpm", "predictions"]
+    )
+    sched = adapter._compute_next_scheduled_tick()
+    assert (
+        sched.need_traffic_metrics is False
+    ), "unrelated needs must not trigger the traffic pull"
