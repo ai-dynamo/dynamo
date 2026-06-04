@@ -134,13 +134,16 @@ async def _register_model_with_runtime_config(
 
     # Advertise the worker's LoRA slot budget on the BASE registration so the frontend allocator
     # can place adapters onto idle-but-LoRA-capable workers before any adapter is loaded here.
-    # Gated on LoRA being enabled so non-LoRA workers advertise no capacity.
+    # Only generative LLM workers (decode/prefill) serve the LoRA load endpoints (init_llm.py);
+    # embedding workers register through this same path but do not, so they must not advertise
+    # capacity they cannot fulfill. Gated on LoRA being enabled AND a generative output type.
     lora_enabled = bool(
         getattr(server_args, "enable_lora", None)
         or getattr(server_args, "lora_paths", None)
     )
+    lora_load_capable = lora_enabled and output_type != ModelType.Embedding
     max_gpu_lora_count = (
-        getattr(server_args, "max_loras_per_batch", None) if lora_enabled else None
+        getattr(server_args, "max_loras_per_batch", None) if lora_load_capable else None
     )
 
     try:

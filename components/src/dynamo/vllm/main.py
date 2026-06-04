@@ -827,14 +827,16 @@ async def register_vllm_model(
         ignore_weights=should_register_model_ignore_weights(config),
         # Advertise the worker's LoRA slot budget on the BASE registration so the frontend
         # allocator can place adapters onto idle-but-LoRA-capable workers before any adapter is
-        # loaded here. Only decode/aggregated workers serve the LoRA load endpoints
-        # (load_lora/unload_lora); vLLM prefill workers do not, so they must not advertise capacity
-        # they cannot fulfill. None (no capacity) for non-LoRA or prefill workers.
+        # loaded here. Only generative decode/aggregated workers serve the LoRA load endpoints
+        # (load_lora/unload_lora). Prefill and embedding workers register through this same path
+        # but do NOT serve them, so they must not advertise capacity they cannot fulfill — gate on
+        # the model type rather than worker_type (vLLM embedding registers as Aggregated). None
+        # (no capacity) for non-LoRA, prefill, or embedding workers.
         max_gpu_lora_count=(
             config.engine_args.max_loras
             if (
                 getattr(config.engine_args, "enable_lora", False)
-                and model_type != ModelType.Prefill
+                and model_type not in (ModelType.Prefill, ModelType.Embedding)
             )
             else None
         ),
