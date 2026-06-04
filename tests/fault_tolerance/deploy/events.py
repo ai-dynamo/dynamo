@@ -16,6 +16,7 @@ To create a custom event, subclass Event and implement execute() and description
 """
 
 import asyncio
+import glob
 import json
 import os
 import random
@@ -35,6 +36,8 @@ __all__ = [
     "WaitForLogPattern",
     "TerminateProcess",
     "StallProcess",
+    "StallWorker",
+    "StallEngineCore",
     "RunCommand",
     "NetworkPartition",
     "WaitForModelReady",
@@ -42,6 +45,9 @@ __all__ = [
     "RstInjection",
     "RstFromInsidePod",
     "PodMemoryPoller",
+    "PodMemoryPoller2",
+    "ResourcePoller",
+    "synthesize_pod_memory_growth_tsv",
     "PeriodicSnapshot",
     "RANDOM",
     "ALL",
@@ -977,7 +983,11 @@ class StallProcess(Event):
     """
 
     services: list[str]
-    process_name: str
+    # Explicit process-name substring (matched in the ps cmdline), OR leave it
+    # empty and set ``target`` to resolve the backend's process via
+    # engine_details — so the same scenario works across vllm/sglang/trtllm/mocker.
+    process_name: str = ""
+    target: str | None = None  # semantic: "main"|"engine"|"worker" -> engine_details
     duration: float | None = None  # seconds; None = hold until scenario stop()
     # Pod / rank selection — see DeletePod / TerminateProcess and the
     # module-level ``RANDOM`` sentinel for semantics.
@@ -989,10 +999,33 @@ class StallProcess(Event):
         default_factory=list, init=False, repr=False
     )
 
+    def _effective_process_name(self, ctx: "ScenarioContext") -> str:
+        """The concrete process-name substring to match: either the explicit
+        ``process_name``, or — if only ``target`` is set — the backend's process
+        for that semantic target, resolved via engine_details from the deployment
+        backend (so the same scenario works across vllm/sglang/trtllm/mocker)."""
+        if self.process_name:
+            return self.process_name
+        if self.target:
+            try:
+                from engine_details import process_name_for
+            except ImportError:  # when imported as a package
+                from .engine_details import process_name_for
+            backend = ctx.deployment.deployment_spec.backend
+            resolved = process_name_for(backend, self.target)
+            ctx.logger.info(
+                f"StallProcess: target={self.target!r} backend={backend!r} "
+                f"-> process_name={resolved!r}"
+            )
+            return resolved
+        raise ValueError(
+            f"StallProcess needs process_name or target (name={self.name!r})"
+        )
+
     async def execute(self, ctx: "ScenarioContext") -> None:
+        proc_name = self._effective_process_name(ctx)
         ctx.logger.info(
-            f"Stalling process '{self.process_name}' (SIGSTOP) "
-            f"in services: {self.services}"
+            f"Stalling process '{proc_name}' (SIGSTOP) " f"in services: {self.services}"
         )
         service_pod_dict = ctx.deployment.get_pods(self.services)
         for service_name, pods in service_pod_dict.items():
@@ -1000,7 +1033,7 @@ class StallProcess(Event):
             pods = _resolve_pod_selection(pods, self.pod_indices, ctx.logger)
             for pod in pods:
                 processes = ctx.deployment.get_processes(pod)
-                matches = [p for p in processes if self.process_name in p.command]
+                matches = [p for p in processes if proc_name in p.command]
                 matches.sort(key=lambda p: p.pid)
                 chosen = _resolve_rank_selection(
                     matches, self.rank_index, pod.name, ctx.logger
@@ -1124,7 +1157,30 @@ class StallProcess(Event):
     @property
     def description(self) -> str:
         suffix = f" for {self.duration}s" if self.duration else ""
-        return f"Stall '{self.process_name}' in {', '.join(self.services)}" f"{suffix}"
+        what = self.process_name or (f"target={self.target}" if self.target else "?")
+        return f"Stall '{what}' in {', '.join(self.services)}" f"{suffix}"
+
+
+@dataclass
+class StallWorker(StallProcess):
+    """:class:`StallProcess` preset to the backend's *worker* process
+    (``target='worker'``) — e.g. ``VLLM::Worker`` for vllm. For vllm this is the
+    rank whose ``sample_tokens`` RPC timeout drives the EngineCore to self-kill →
+    instance_id churn; leave ``process_name`` empty and the backend is resolved
+    at runtime via engine_details (works for sglang/trtllm/mocker too)."""
+
+    target: str | None = "worker"
+
+
+@dataclass
+class StallEngineCore(StallProcess):
+    """:class:`StallProcess` preset to the backend's *engine* process
+    (``target='engine'``) — e.g. ``VLLM::EngineCore`` for vllm. NOTE: for vllm,
+    stalling the EngineCore only hangs at ``shm_broadcast`` (no self-kill) — use
+    :class:`StallWorker` for the death/churn repro. Provided for symmetry + for
+    backends whose engine *is* the death target (see engine_details.DEATH_TARGET)."""
+
+    target: str | None = "engine"
 
 
 @dataclass
@@ -2265,303 +2321,6 @@ def _parse_k8s_quantity(s: str) -> int:
         return 0
 
 
-@dataclass
-class PodMemoryPoller(Event):
-    """Spawn a background task that on every poll, for each pod of
-    ``services``, records two memory numbers and appends a row to
-    ``ctx.log_dir/pod_memory_growth.tsv``:
-
-    Columns: ``epoch_s, service, pod, container, working_set_bytes, pid1_rss_bytes``.
-
-    - ``working_set_bytes``: from metrics.k8s.io (same as
-      `kubectl top pod`; kubelet uses this for OOMKill).
-    - ``pid1_rss_bytes``: from `/proc/1/status:VmRSS` inside the
-      container (per-process attribution).
-
-    The ``PodMemoryGrowth`` check reads either column.
-
-    Best placed right after ``WaitForModelReady`` so polling starts
-    before any fault is injected. Stops automatically when ``stop()``
-    fires at scenario teardown.
-
-    metrics-server's scrape interval is ~15s on most clusters — polling
-    faster yields duplicate working-set samples but pid1 RSS is fresh
-    every call. 15s default matches the metrics-server cadence.
-    """
-
-    services: list[str]
-    interval_s: float = 15.0
-    name: str = ""
-    results: dict[str, Any] | None = field(default=None, init=False)
-    _task: Any = field(default=None, init=False, repr=False)
-    _stop: Any = field(default=None, init=False, repr=False)
-
-    async def execute(self, ctx: "ScenarioContext") -> None:
-        import os
-
-        log_dir = getattr(ctx, "log_dir", None)
-        if not log_dir:
-            ctx.logger.warning("PodMemoryPoller: no ctx.log_dir; skipping")
-            return
-        os.makedirs(log_dir, exist_ok=True)
-        # Per-pod memory files written to ``<log_dir>/<service>/<pod>_memory.tsv``
-        # — parallel construction with the per-pod ``<pod>_<ts>.log`` files
-        # written by the framework's log-collection pipeline. Removes the
-        # single-file contention that caused the 14s stutter on sanity Run 1
-        # and matches the canonical layout used by downstream verifier
-        # scripts. A union TSV at <log_dir>/pod_memory_growth.tsv is kept
-        # for backward compatibility — written at stop time.
-        TSV_HEADER = (
-            "epoch_s\tservice\tpod\tcontainer\t" "working_set_bytes\tpid1_rss_bytes\n"
-        )
-        # Initialize the legacy flat file too (for tooling that still reads it)
-        legacy_out = os.path.join(log_dir, "pod_memory_growth.tsv")
-        with open(legacy_out, "w") as fh:
-            fh.write(TSV_HEADER)
-        self._stop = asyncio.Event()
-        self._per_pod_files: set[str] = set()  # type: ignore[name-defined]
-        self._tsv_header = TSV_HEADER
-        self._log_dir = log_dir
-        self._legacy_out = legacy_out
-
-        custom = client.CustomObjectsApi()
-
-        async def read_working_set(pod_name):
-            """metrics.k8s.io -> dict[container_name, working_set_bytes]."""
-            try:
-                obj = await custom.get_namespaced_custom_object(
-                    group="metrics.k8s.io",
-                    version="v1beta1",
-                    namespace=ctx.namespace,
-                    plural="pods",
-                    name=pod_name,
-                )
-            except k8s_exceptions.ApiException:
-                return {}
-            return {
-                c.get("name", "?"): _parse_k8s_quantity(
-                    (c.get("usage") or {}).get("memory") or "0"
-                )
-                for c in (obj.get("containers") or [])
-            }
-
-        async def read_pid1_rss(pod):
-            """`cat /proc/1/status:VmRSS` -> bytes (or 0)."""
-            try:
-                result = await asyncio.to_thread(
-                    pod.exec,
-                    ["sh", "-c", "grep VmRSS /proc/1/status 2>/dev/null || true"],
-                )
-                stdout = (
-                    result.stdout.decode() if hasattr(result, "stdout") else str(result)
-                )
-                for ln in stdout.splitlines():
-                    if "VmRSS" in ln:
-                        for tok in ln.split():
-                            if tok.isdigit():
-                                return int(tok) * 1024  # kB → bytes
-            except Exception:
-                pass
-            return 0
-
-        async def loop():
-            import time
-
-            while not self._stop.is_set():
-                try:
-                    for svc in self.services:
-                        pods_by_svc = await asyncio.to_thread(
-                            ctx.deployment.get_pods, [svc]
-                        )
-                        for pod in pods_by_svc.get(svc) or []:
-                            ws_by_container = await read_working_set(pod.name)
-                            pid1_rss = await read_pid1_rss(pod)
-                            ts = time.time()
-                            if not ws_by_container:
-                                ws_by_container = {"?": 0}
-                            # Per-pod file: <log_dir>/<service>/<pod>_memory.tsv
-                            pod_dir = os.path.join(self._log_dir, svc)
-                            os.makedirs(pod_dir, exist_ok=True)
-                            pod_file = os.path.join(pod_dir, f"{pod.name}_memory.tsv")
-                            if pod_file not in self._per_pod_files:
-                                with open(pod_file, "w") as fh:
-                                    fh.write(self._tsv_header)
-                                self._per_pod_files.add(pod_file)
-                            for cname, ws_bytes in ws_by_container.items():
-                                row = (
-                                    f"{ts:.0f}\t{svc}\t{pod.name}\t"
-                                    f"{cname}\t{ws_bytes}\t{pid1_rss}\n"
-                                )
-                                with open(pod_file, "a") as fh:
-                                    fh.write(row)
-                                # Legacy flat file for backward compat
-                                with open(self._legacy_out, "a") as fh:
-                                    fh.write(row)
-                except Exception as e:
-                    ctx.logger.warning(f"PodMemoryPoller loop err: {e}")
-                try:
-                    await asyncio.wait_for(self._stop.wait(), timeout=self.interval_s)
-                except asyncio.TimeoutError:
-                    pass
-
-        self._task = asyncio.create_task(loop())
-        ctx.logger.info(
-            f"PodMemoryPoller(metrics.k8s.io): services={self.services} "
-            f"interval={self.interval_s}s"
-        )
-
-    async def stop(self, ctx: "ScenarioContext") -> None:
-        if self._stop is not None:
-            self._stop.set()
-        if self._task is not None:
-            try:
-                await asyncio.wait_for(self._task, timeout=15.0)
-            except asyncio.TimeoutError:
-                self._task.cancel()
-        ctx.logger.info("PodMemoryPoller: stopped")
-
-    @property
-    def description(self) -> str:
-        return f"PodMemoryPoller {self.services} every {self.interval_s}s"
-
-
-@dataclass
-class PodMemoryPoller2(Event):
-    """In-pod memory sampler — the deterministic-cadence successor to
-    :class:`PodMemoryPoller` (vault task #60, "option d").
-
-    The original poller samples from the *host*: a single asyncio loop that,
-    each tick, walks every pod doing one ``metrics.k8s.io`` GET + one
-    ``kubectl exec`` of ``/proc/1/status``. At 60 pods that serialised walk
-    takes longer than the nominal ``interval_s``, so the effective cadence
-    drifts (the "14s stutter" seen on sanity Run 1), and the working-set
-    column is additionally quantised to metrics-server's ~15s scrape.
-
-    ``PodMemoryPoller2`` instead launches a **detached in-pod daemon** once
-    per pod at ``execute()`` time:
-
-    .. code-block:: sh
-
-        nohup sh -c 'while true; do
-            printf "%s\\t%s\\t%s\\n" "$(date +%s.%N)" "$HOSTNAME" \\
-                "$(awk "/VmRSS/{print \\$2*1024}" /proc/1/status)" \\
-                >> "$OUTDIR/$HOSTNAME.tsv"
-            sleep 5
-        done' &
-
-    The sampling loop and its 5 s timer live **inside** the pod, so the
-    cadence is exact regardless of pod count or host scheduling, and RSS is
-    read straight from ``/proc/1/status`` (no metrics-server quantisation).
-    Output is written to the already-mounted shared log PVC, so the existing
-    ``PvcExtractor`` pulls the per-pod TSVs back with the rest of
-    ``/tmp/service_logs`` — no new volume or extraction path needed.
-
-    Columns (no header — appended rows only): ``epoch_s, pod, pid1_rss_bytes``.
-    ``epoch_s`` is fractional (``date +%s.%N``) so inter-sample spacing can be
-    verified to confirm the deterministic cadence.
-
-    This runs in the main container (reads its own ``/proc/1``), so it needs
-    neither a sidecar container nor ``shareProcessNamespace`` — it is
-    functionally the option-d in-pod sampler with a far smaller blast radius.
-    Do not run it concurrently with ``PodMemoryPoller`` on the same pods
-    (both attribute pid1 RSS; one is enough).
-    """
-
-    services: list[str]
-    interval_s: float = 5.0
-    # Subdir under the run's service_logs root on the shared PVC. Derived
-    # in-pod from $DYN_LOG_DIR so samples co-locate with the run's logs and
-    # don't collide across runs on a reused PVC.
-    name: str = ""
-    _started_pods: Any = field(default=None, init=False, repr=False)
-
-    async def execute(self, ctx: "ScenarioContext") -> None:
-        self._started_pods = []
-        interval = int(self.interval_s) if self.interval_s >= 1 else 1
-        # In-pod sampler. Write straight into the pod's own service_logs dir
-        # ($DYN_LOG_DIR = .../service_logs/<role>) as `<pod>.mempoller2.tsv`, so
-        # the existing end-of-test service_logs extraction carries it back with
-        # the pod's logs — it lands locally at <role>/<pod>.mempoller2.tsv,
-        # beside that pod's other artifacts. (Previously it wrote to a sibling
-        # <run_root>/mempoller2/ dir that the extractor never pulled.)
-        # Marker file lets stop() find+kill exactly this daemon.
-        # NOTE on the nohup child shell: the sampling loop runs in a *new*
-        # `sh -c '...'` whose single-quoted body is NOT expanded by the parent.
-        # That child shell does not inherit non-exported parent variables, so
-        # OUT must be `export`ed. We export OUT and use `$(hostname)` so the
-        # loop body resolves them in its own env.
-        launch_script = (
-            "set -e; "
-            'OUTDIR="${DYN_LOG_DIR:-/tmp/service_logs}"; mkdir -p "$OUTDIR"; '
-            'export OUT="$OUTDIR/$(hostname).mempoller2.tsv"; '
-            "rm -f /tmp/.mempoller2.stop; "
-            'printf "# PodMemoryPoller2\\tepoch_s\\tpod\\tworking_set_bytes\\t'
-            'cgroup_current_bytes\\tall_pids_rss_bytes\\tpid1_rss_bytes\\n" > "$OUT"; '
-            # date +%s.%N is fractional on GNU coreutils (the runtime images);
-            # busybox date lacks %N and would emit a literal ".%N", so strip a
-            # trailing non-numeric tail back to whole seconds as a fallback.
-            "nohup sh -c 'while [ ! -f /tmp/.mempoller2.stop ]; do "
-            'TS="$(date +%s.%N)"; case "$TS" in *N) TS="$(date +%s)";; esac; '
-            # working_set = cgroup usage - inactive_file (what kubelet/cAdvisor
-            # use for OOMKill). cgroup v2 (memory.current) with v1 fallback.
-            "if [ -f /sys/fs/cgroup/memory.current ]; then "
-            'CUR="$(cat /sys/fs/cgroup/memory.current 2>/dev/null)"; '
-            'INACT="$(awk "/^inactive_file /{print \\$2}" /sys/fs/cgroup/memory.stat 2>/dev/null)"; '
-            "else "
-            'CUR="$(cat /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null)"; '
-            'INACT="$(awk "/^total_inactive_file /{print \\$2}" /sys/fs/cgroup/memory/memory.stat 2>/dev/null)"; '
-            "fi; "
-            'WS="$(( ${CUR:-0} - ${INACT:-0} ))"; '
-            # all-pids RSS: sum VmRSS across every process in the pod (not just
-            # pid1 — the GPU worker spreads memory across EngineCore/Worker/etc.;
-            # pid1 alone is ~14% of the real footprint). Over-counts shared
-            # pages, so working_set above is the accurate non-double-counted total.
-            'ALLRSS="$(awk "/VmRSS/{s+=\\$2} END{print s*1024}" /proc/[0-9]*/status 2>/dev/null)"; '
-            'PID1="$(awk "/VmRSS/{print \\$2*1024}" /proc/1/status 2>/dev/null)"; '
-            'printf "%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n" "$TS" "$(hostname)" '
-            '"$WS" "$CUR" "$ALLRSS" "$PID1" >> "$OUT" 2>/dev/null; '
-            f"sleep {interval}; done' >/dev/null 2>&1 & "
-            'echo "mempoller2 started pid $!"'
-        )
-        started = 0
-        for svc in self.services:
-            pods_by_svc = await asyncio.to_thread(ctx.deployment.get_pods, [svc])
-            for pod in pods_by_svc.get(svc) or []:
-                try:
-                    await asyncio.to_thread(pod.exec, ["sh", "-c", launch_script])
-                    self._started_pods.append((svc, pod.name))
-                    started += 1
-                except Exception as e:
-                    ctx.logger.warning(
-                        f"PodMemoryPoller2: failed to start sampler on {pod.name}: {e}"
-                    )
-        ctx.logger.info(
-            f"PodMemoryPoller2: launched in-pod samplers on {started} pods "
-            f"across {self.services}, interval={interval}s. "
-            f"Output: service_logs/<role>/<pod>.mempoller2.tsv on the log PVC "
-            f"(extracted to <role>/<pod>.mempoller2.tsv)."
-        )
-
-    async def stop(self, ctx: "ScenarioContext") -> None:
-        # Signal the in-pod loops to exit, then they flush their last sample.
-        stop_script = "touch /tmp/.mempoller2.stop 2>/dev/null || true"
-        for svc in self.services:
-            try:
-                pods_by_svc = await asyncio.to_thread(ctx.deployment.get_pods, [svc])
-            except Exception:
-                continue
-            for pod in pods_by_svc.get(svc) or []:
-                try:
-                    await asyncio.to_thread(pod.exec, ["sh", "-c", stop_script])
-                except Exception:
-                    pass
-        ctx.logger.info("PodMemoryPoller2: signalled in-pod samplers to stop")
-
-    @property
-    def description(self) -> str:
-        return f"PodMemoryPoller2 (in-pod) {self.services} every {self.interval_s}s"
-
-
 def _load_respoller_source() -> str:
     """Read the in-pod sampler (``_respoller.py``) as text to heredoc into target
     pods. Kept as a sibling file (not embedded) so it stays real, lintable Python."""
@@ -2658,6 +2417,73 @@ class ResourcePoller(Event):
             f"ResourcePoller(include={','.join(self.include)}) "
             f"{self.services} every {self.interval_s}s"
         )
+
+
+# ── PodMemoryPoller / PodMemoryPoller2 retired -> ResourcePoller ─────────────
+# The pid1-only host-side (PMP1) and in-pod (PMP2) pollers are superseded by
+# ResourcePoller (per-process mem+cpu+gpu, in-pod). The old names are kept as
+# aliases so existing Python imports + ``kind:`` references resolve to
+# ResourcePoller — field signatures are identical (services + interval_s). The
+# YAML registry also maps the old kinds (scenario_lib/_runtime.py).
+PodMemoryPoller = ResourcePoller
+PodMemoryPoller2 = ResourcePoller
+
+
+def synthesize_pod_memory_growth_tsv(log_dir: str) -> str | None:
+    """Build PMP1's legacy ``pod_memory_growth.tsv`` (v3 format) from the per-pod
+    ``<role>/<pod>.resources.agg.tsv`` files ResourcePoller writes, so the
+    ``PodMemoryGrowth`` check + ``PeriodicSnapshot`` keep working now that PMP1
+    (which produced the union file host-side) is retired. Per-GPU rows are
+    deduped (working_set / pid1_rss are pod-level, repeated per GPU row of a
+    tick). ``service`` is the role dir name (lower-case) — the check matches
+    services case-insensitively. Returns the written path, or None if no agg
+    files were found."""
+    agg_files = sorted(glob.glob(os.path.join(log_dir, "*", "*.resources.agg.tsv")))
+    if not agg_files:
+        return None
+    rows = []
+    for f in agg_files:
+        service = os.path.basename(os.path.dirname(f))
+        header = None
+        seen = set()
+        try:
+            with open(f) as fh:
+                for ln in fh:
+                    ln = ln.rstrip("\n")
+                    if not ln or ln.startswith("#"):
+                        continue
+                    cols = ln.split("\t")
+                    if header is None and cols[:1] == ["epoch_s"]:
+                        header = cols
+                        continue
+                    if header is None:
+                        continue
+                    r = dict(zip(header, cols))
+                    epoch = r.get("epoch_s", "")
+                    if epoch in seen:  # dedup per-GPU rows of one tick
+                        continue
+                    seen.add(epoch)
+                    rows.append(
+                        (
+                            epoch,
+                            service,
+                            r.get("pod", ""),
+                            "main",
+                            r.get("working_set", "-1"),
+                            r.get("pid1_rss", "-1"),
+                        )
+                    )
+        except OSError:
+            continue
+    rows.sort(key=lambda x: (x[1], x[2], x[0]))
+    out_path = os.path.join(log_dir, "pod_memory_growth.tsv")
+    with open(out_path, "w") as out:
+        out.write(
+            "epoch_s\tservice\tpod\tcontainer\tworking_set_bytes\tpid1_rss_bytes\n"
+        )
+        for r in rows:
+            out.write("\t".join(str(x) for x in r) + "\n")
+    return out_path
 
 
 @dataclass

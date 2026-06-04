@@ -22,7 +22,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 from tests.fault_tolerance.deploy.checks import Check
-from tests.fault_tolerance.deploy.events import Event, StartLoad
+from tests.fault_tolerance.deploy.events import (
+    Event,
+    StartLoad,
+    synthesize_pod_memory_growth_tsv,
+)
 from tests.fault_tolerance.deploy.reports import Report
 from tests.utils.managed_deployment import DeploymentSpec, ManagedDeployment
 
@@ -343,6 +347,18 @@ async def run_scenario(
 
     # Deployment context has exited - cleanup completed
     ctx.deployment = None  # Mark that deployment is no longer active
+
+    # Retired PMP1 produced pod_memory_growth.tsv host-side; ResourcePoller now
+    # writes per-pod <role>/<pod>.resources.agg.tsv (extracted during teardown).
+    # Synthesize the legacy union file from them so the PodMemoryGrowth check +
+    # downstream tooling keep working. No-op if no resource TSVs were collected.
+    try:
+        if log_dir:
+            pmg = synthesize_pod_memory_growth_tsv(log_dir)
+            if pmg:
+                logger.info(f"Synthesized {pmg} from per-pod resource TSVs")
+    except Exception as e:
+        logger.warning(f"pod_memory_growth.tsv synthesis failed: {e}")
 
     # Phase 2: Reports and checks (AFTER deployment cleanup)
     # Reports run first so check failures don't block report generation

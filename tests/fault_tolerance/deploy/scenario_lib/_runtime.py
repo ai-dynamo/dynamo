@@ -64,6 +64,11 @@ def _build_registry(base: type) -> dict[str, type]:
 
 
 EVENT_REGISTRY = _build_registry(Event)
+# Retired pollers: PodMemoryPoller / PodMemoryPoller2 are now aliases of
+# ResourcePoller (events.py). Map the old ``kind:`` strings so existing scenario
+# YAMLs need no edits (field signatures are identical: services + interval_s).
+EVENT_REGISTRY["PodMemoryPoller"] = EVENT_REGISTRY["ResourcePoller"]
+EVENT_REGISTRY["PodMemoryPoller2"] = EVENT_REGISTRY["ResourcePoller"]
 REPORT_REGISTRY = _build_registry(Report)
 CHECK_REGISTRY = _build_registry(Check)
 

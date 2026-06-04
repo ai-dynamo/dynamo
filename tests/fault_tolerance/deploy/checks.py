@@ -776,7 +776,10 @@ class PodMemoryGrowth(Check):
                         continue
                 except ValueError:
                     continue
-                if svc not in self.services:
+                # Case-insensitive: ResourcePoller's synthesized pod_memory_growth.tsv
+                # uses the lower-case role dir name (e.g. "vllmdecodeworker") while
+                # scenarios list services in CamelCase ("VllmDecodeWorker").
+                if svc.lower() not in {s.lower() for s in self.services}:
                     continue
                 per_pod.setdefault(pod, []).append((t, bytes_))
 
