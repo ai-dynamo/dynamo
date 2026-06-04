@@ -983,7 +983,14 @@ class HandlerBase(BaseGenerativeHandler):
             embeddings: Optional tensor or dict containing embeddings for multimodal processing
             ep_disaggregated_params: Optional DisaggregatedParams from encode worker (full EPD flow)
         """
-        logging.debug(f"Request: {request}")
+        request_token_ids = request.get("token_ids")
+        logging.debug(
+            "Request summary: token_ids=%s keys=%s has_embeddings=%s has_ep_disaggregated_params=%s",
+            len(request_token_ids) if isinstance(request_token_ids, list) else None,
+            len(request),
+            embeddings is not None,
+            ep_disaggregated_params is not None,
+        )
 
         # Additional metrics: request type detection
         metrics_collector = self.additional_metrics
