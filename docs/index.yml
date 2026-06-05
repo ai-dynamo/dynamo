@@ -181,22 +181,22 @@ navigation:
             path: features/disaggregated-serving/aiconfigurator.md
       - page: KV Cache Offloading
         path: components/kvbm/kvbm-guide.md
-      - section: Tool Call and Reasoning Parsing
+      - page: Benchmarking
+        path: benchmarks/benchmarking.md
+      - section: "Tool Calling & Reasoning Parsing"
         slug: parsing
-        path: parsing.md
+        path: tool-calling/parsing.md
         contents:
           - page: Tool Call Parsing (Dynamo)
             path: tool-calling/README.md
           - page: Reasoning Parsing (Dynamo)
             path: reasoning/README.md
           - page: Parser Engine Fallback
-            path: engine-fallback.md
+            path: tool-calling/engine-fallback.md
           - page: Parser Configuration
-            path: parser-configuration.md
+            path: tool-calling/parser-configuration.md
           - page: Troubleshooting Tool Calls
             path: tool-calling/troubleshooting.md
-      - page: Benchmarking
-        path: benchmarks/benchmarking.md
       - section: Fault Tolerance
         path: fault-tolerance/README.md
         contents:

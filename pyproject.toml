@@ -204,8 +204,6 @@ filterwarnings = [
     "ignore:.*unclosed event loop.*:ResourceWarning",
     # unraisable exception warnings
     "ignore:.*Exception ignored in.*:pytest.PytestUnraisableExceptionWarning",
-    # CPython relaunches resource_tracker after engine subprocess teardown
-    "ignore:resource_tracker.*process died unexpectedly.*:UserWarning",
     # pynvml deprecation, temporary until upstream migrates to nvidia-ml-py
     "ignore:The pynvml package is deprecated.*:FutureWarning",
     # Dynamo's own KV events deprecation warning
@@ -462,6 +460,15 @@ ignore_missing_imports = true
 # msgspec.Struct uses custom __init_subclass__ kwargs (frozen, gc) that mypy
 # cannot resolve without the msgspec package installed.
 module = ["msgspec", "msgspec.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# grpc / google.protobuf ship without type stubs in the dynamo-runtime image
+# (grpc-stubs / types-protobuf are not pulled in by requirements.common.txt).
+# The planner plugin transport imports grpc.aio + google.protobuf.message at
+# module top — silence import-untyped errors there.
+module = ["grpc", "grpc.*", "google.protobuf", "google.protobuf.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
 

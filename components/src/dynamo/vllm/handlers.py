@@ -32,6 +32,7 @@ from vllm.sampling_params import (
 from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo._core import Context
+from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
@@ -378,39 +379,13 @@ def build_sampling_params(
             sampling_params.thinking_token_budget = value
 
     # Apply output_options (logprobs, prompt_logprobs, etc.)
-    output_options = request.get("output_options", {})
-    if output_options:
-        # Handle logprobs - vLLM expects this as an integer or None
-        logprobs_value = output_options.get("logprobs")
-        if logprobs_value is not None and logprobs_value != "":
-            try:
-                parsed_logprobs = int(logprobs_value)
-                if parsed_logprobs < 0:
-                    logger.warning(
-                        f"Invalid logprobs value: {logprobs_value} (must be non-negative), ignoring"
-                    )
-                else:
-                    sampling_params.logprobs = parsed_logprobs
-            except (ValueError, TypeError):
-                logger.warning(
-                    f"Invalid logprobs value: {logprobs_value} (must be integer), ignoring"
-                )
-
-        # Handle prompt_logprobs - vLLM expects this as an integer or None
-        prompt_logprobs_value = output_options.get("prompt_logprobs")
-        if prompt_logprobs_value is not None and prompt_logprobs_value != "":
-            try:
-                parsed_prompt_logprobs = int(prompt_logprobs_value)
-                if parsed_prompt_logprobs < 0:
-                    logger.warning(
-                        f"Invalid prompt_logprobs value: {prompt_logprobs_value} (must be non-negative), ignoring"
-                    )
-                else:
-                    sampling_params.prompt_logprobs = parsed_prompt_logprobs
-            except (ValueError, TypeError):
-                logger.warning(
-                    f"Invalid prompt_logprobs value: {prompt_logprobs_value} (must be integer), ignoring"
-                )
+    logprobs, prompt_logprobs = _shared_logprobs.parse_logprob_options(
+        request.get("output_options", {}) or {}
+    )
+    if logprobs is not None:
+        sampling_params.logprobs = logprobs
+    if prompt_logprobs is not None:
+        sampling_params.prompt_logprobs = prompt_logprobs
 
     # If max_tokens wasn't provided (None or missing), compute a dynamic default
     provided_max_tokens = request.get("stop_conditions", {}).get("max_tokens", None)
@@ -2031,76 +2006,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     def _extract_logprobs(
         output, num_output_tokens_so_far: int, tokenizer=None
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
-        """
-        Extract logprobs from vLLM CompletionOutput for new tokens.
-
-        Args:
-            output: vLLM CompletionOutput object
-            num_output_tokens_so_far: Number of tokens already processed
-            tokenizer: Optional tokenizer for decoding token IDs when
-                       decoded_token is not populated by the engine
-
-        Returns:
-            Tuple of (log_probs, top_logprobs) in Dynamo's expected format:
-            - log_probs: List of log probabilities for each new token
-            - top_logprobs: List of top logprobs dicts for each new token
-        """
-        if output.logprobs is None:
-            return None, None
-
-        token_ids = list(output.token_ids or [])
-        if not token_ids or num_output_tokens_so_far >= len(token_ids):
-            return None, None
-
-        # Get logprobs for new tokens only
-        new_logprobs = output.logprobs[num_output_tokens_so_far:]
-        new_token_ids = token_ids[num_output_tokens_so_far:]
-        new_logprobs = new_logprobs[: len(new_token_ids)]
-        if not new_logprobs:
-            return None, None
-
-        log_probs = []
-        top_logprobs = []
-
-        for token_idx, token_logprobs_dict in enumerate(new_logprobs):
-            if token_logprobs_dict is None:
-                continue
-
-            # Get the actual token_id that was generated at this position
-            actual_token_id = new_token_ids[token_idx]
-
-            # Extract log probability for the selected token
-            # vLLM guarantees the selected token is always in the logprobs dict
-            selected_logprob = token_logprobs_dict.get(actual_token_id)
-            if selected_logprob is None:
-                continue
-            log_probs.append(float(selected_logprob.logprob))
-
-            # Build top_logprobs list for this token position
-            token_top_logprobs = []
-            for tok_id, logprob_info in token_logprobs_dict.items():
-                token_str = getattr(logprob_info, "decoded_token", None)
-                if not token_str and tokenizer:
-                    try:
-                        token_str = tokenizer.decode([tok_id])
-                    except Exception:
-                        token_str = None
-                token_top_logprobs.append(
-                    {
-                        "rank": (
-                            logprob_info.rank if hasattr(logprob_info, "rank") else 0
-                        ),
-                        "token_id": tok_id,
-                        "token": token_str,
-                        "logprob": float(logprob_info.logprob),
-                        "bytes": (
-                            list(token_str.encode("utf-8")) if token_str else None
-                        ),
-                    }
-                )
-            top_logprobs.append(token_top_logprobs)
-
-        return log_probs if log_probs else None, top_logprobs if top_logprobs else None
+        # Legacy vLLM handler always emits when vLLM returned a dict.
+        return _shared_logprobs.extract_from_completion_output(
+            output,
+            num_output_tokens_so_far,
+            tokenizer=tokenizer,
+            fallback_to_first_on_missing=True,
+            include_bytes=True,
+        )
 
     @staticmethod
     def _log_with_lora_context(

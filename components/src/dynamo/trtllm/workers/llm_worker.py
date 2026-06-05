@@ -495,6 +495,7 @@ async def init_llm_worker(
         # The callback uses this to poll active request count during shutdown.
         if engine_holder is not None:
             engine_holder.append(engine)
+        engine.start_health_monitor(runtime=runtime, shutdown_event=shutdown_event)
 
         endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"

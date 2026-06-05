@@ -21,12 +21,55 @@ from . import telemetry
 from .disagg import enforce_prefill_max_tokens, require_prefill_result
 from .engine import EngineConfig, GenerateChunk, GenerateRequest, LLMEngine
 from .health_check import build_health_check_payload, is_probe
+from .logprobs import parse_logprob_options
 from .publisher import ComponentSnapshot, KvEventSource, PushSource
 from .worker import WorkerConfig
 
 logger = logging.getLogger(__name__)
 
 _SAMPLE_BLOCK_SIZE = 16
+
+# Mirrors the Rust mocker's `MAX_LOGPROBS` so unbounded `logprobs`
+# requests can't drive arbitrary memory / CPU here.
+_MAX_SYNTHETIC_TOP_LOGPROBS = 20
+
+
+def _stamp_synthetic_logprobs(
+    chunk: GenerateChunk, token_ids: list[int], logprobs_k: int
+) -> None:
+    """Stamp deterministic synthetic logprobs onto ``chunk``. Top-k
+    alternatives appear when ``logprobs_k >= 1``."""
+    if not token_ids:
+        return
+    logprobs_k = min(logprobs_k, _MAX_SYNTHETIC_TOP_LOGPROBS)
+    log_probs: list[float] = []
+    top_logprobs: list[list[dict[str, Any]]] = []
+    for tid in token_ids:
+        selected_lp = -0.1 * (tid % 10)
+        log_probs.append(selected_lp)
+        if logprobs_k > 0:
+            position = [
+                {
+                    "rank": 1,
+                    "token_id": tid,
+                    "token": f"token_id:{tid}",
+                    "logprob": selected_lp,
+                }
+            ]
+            for r in range(1, logprobs_k + 1):
+                alt_id = (tid + r) % 32000
+                position.append(
+                    {
+                        "rank": r + 1,
+                        "token_id": alt_id,
+                        "token": f"token_id:{alt_id}",
+                        "logprob": selected_lp - 0.1 * r,
+                    }
+                )
+            top_logprobs.append(position)
+    chunk["log_probs"] = log_probs
+    if top_logprobs:
+        chunk["top_logprobs"] = top_logprobs
 
 
 class SampleLLMEngine(LLMEngine):
@@ -222,18 +265,27 @@ class SampleLLMEngine(LLMEngine):
         prompt_len = len(token_ids)
         stop_conditions = request.get("stop_conditions", {})
         max_new = stop_conditions.get("max_tokens") or self.max_tokens
+        logprobs_k, _prompt_logprobs = parse_logprob_options(
+            request.get("output_options", {}) or {}
+        )
 
         block_hashes = self._emit_synthetic_events(prompt_len)
         try:
             # Parent-chain pinned in test_unified_worker_otlp_export.
             with telemetry.start_span(context, "sample.tokens", prompt_len=prompt_len):
-                async for chunk in self._generate_tokens(prompt_len, max_new, context):
+                async for chunk in self._generate_tokens(
+                    prompt_len, max_new, context, logprobs_k
+                ):
                     yield chunk
         finally:
             self._release_synthetic_blocks(block_hashes)
 
     async def _generate_tokens(
-        self, prompt_len: int, max_new: int, context: Context
+        self,
+        prompt_len: int,
+        max_new: int,
+        context: Context,
+        logprobs_k: Optional[int],
     ) -> AsyncGenerator[GenerateChunk, None]:
         for i in range(max_new):
             if context.is_stopped():
@@ -251,6 +303,8 @@ class SampleLLMEngine(LLMEngine):
             await asyncio.sleep(self.delay)
             token_id = (i + 1) % 32000
             out: GenerateChunk = {"token_ids": [token_id], "index": 0}
+            if logprobs_k is not None:
+                _stamp_synthetic_logprobs(out, [token_id], logprobs_k)
             if i == max_new - 1:
                 out["finish_reason"] = "length"
                 out["completion_usage"] = {
