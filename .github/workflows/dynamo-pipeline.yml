@@ -259,20 +259,24 @@ jobs:
 
           OUTPUT_DIR="${RUNNER_TEMP}/frontend-perf-pr-guard"
           mkdir -p "${OUTPUT_DIR}"
+          DYNAMO_PYTHON="$(command -v python3)"
 
           if ! command -v aiperf >/dev/null 2>&1 && ! python3 -c "import aiperf" >/dev/null 2>&1; then
             AIPERF_VENV="${RUNNER_TEMP}/frontend-perf-tools"
+            AIPERF_BIN_DIR="${RUNNER_TEMP}/frontend-perf-bin"
             if command -v uv >/dev/null 2>&1; then
-              uv venv "${AIPERF_VENV}" --python "$(command -v python3)"
+              uv venv "${AIPERF_VENV}" --python "${DYNAMO_PYTHON}"
               UV_CACHE_DIR="${RUNNER_TEMP}/uv-cache" uv pip install \
                 --python "${AIPERF_VENV}/bin/python" \
                 --requirement container/deps/requirements.benchmark.txt
             else
-              python3 -m venv "${AIPERF_VENV}"
+              "${DYNAMO_PYTHON}" -m venv "${AIPERF_VENV}"
               "${AIPERF_VENV}/bin/python" -m pip install \
                 --requirement container/deps/requirements.benchmark.txt
             fi
-            export PATH="${AIPERF_VENV}/bin:${PATH}"
+            mkdir -p "${AIPERF_BIN_DIR}"
+            ln -sf "${AIPERF_VENV}/bin/aiperf" "${AIPERF_BIN_DIR}/aiperf"
+            export PATH="${AIPERF_BIN_DIR}:${PATH}"
           fi
 
           BASELINE_ARGS=()
@@ -280,7 +284,7 @@ jobs:
             BASELINE_ARGS=(--baseline "${{ inputs.frontend_perf_guard_baseline }}")
           fi
 
-          python3 benchmarks/frontend/scripts/ci/frontend_perf_pr_guard.py run \
+          "${DYNAMO_PYTHON}" benchmarks/frontend/scripts/ci/frontend_perf_pr_guard.py run \
             --output-dir "${OUTPUT_DIR}" \
             --report-json "${OUTPUT_DIR}/pr_guard_report.json" \
             --summary-file "${OUTPUT_DIR}/pr_guard_summary.md" \
