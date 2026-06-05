@@ -22,7 +22,7 @@ pub use dynamo_runtime::{
 };
 
 use super::context::{Context, callable_accepts_kwarg};
-use super::errors::py_exception_to_backend_error;
+use super::errors::{extract_http_like_error, py_exception_to_backend_error};
 
 /// Add bindings from this crate to the provided module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -308,6 +308,28 @@ where
                     DynamoError::builder()
                         .error_type(ErrorType::Backend(backend_err))
                         .message(message)
+                        .build(),
+                );
+            }
+
+            // openai.rs::extract_backend_error_if_present parses the DynamoError
+            // message as JSON {message, code}; emit that shape so the HTTP status
+            // survives instead of defaulting to 500.
+            if let Some((code, message)) = extract_http_like_error(py, &e) {
+                let backend_err = if (400..500).contains(&code) {
+                    BackendError::InvalidArgument
+                } else {
+                    BackendError::Unknown
+                };
+                let json_msg = serde_json::json!({
+                    "message": message,
+                    "code": code,
+                })
+                .to_string();
+                return ResponseProcessingError::Dynamo(
+                    DynamoError::builder()
+                        .error_type(ErrorType::Backend(backend_err))
+                        .message(json_msg)
                         .build(),
                 );
             }
