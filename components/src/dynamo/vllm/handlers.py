@@ -2098,6 +2098,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             )
 
             total_output_tokens_by_index: dict[int, int] = {}
+            # The engine tokenizer is only consulted for logprob detokenization;
+            # fetch it once per request instead of once per token.
+            tokenizer = getattr(self.engine_client, "tokenizer", None)
             async for res in gen:
                 # res is vllm's RequestOutput
 
@@ -2116,42 +2119,44 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     }
                     break
 
-                prepared_outputs = []
+                # Count pass: account every output's tokens for this step first,
+                # so a sequence that finishes this step reports usage that includes
+                # sibling outputs emitted in the same step (n > 1).
                 for output in res.outputs:
-                    output_idx = getattr(output, "index", 0) or 0
-                    token_ids = list(output.token_ids or [])
-                    total_output_tokens_by_index[
-                        output_idx
-                    ] = total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
-                    finish_reason = getattr(output, "finish_reason", None)
-                    stop_reason = getattr(output, "stop_reason", None)
+                    token_ids = output.token_ids
+                    if token_ids:
+                        idx = output.index or 0
+                        total_output_tokens_by_index[idx] = (
+                            total_output_tokens_by_index.get(idx, 0) + len(token_ids)
+                        )
+
+                # Emit pass: build and yield each chunk directly. vLLM DELTA
+                # outputs already align token_ids/logprobs to this chunk, so
+                # token_ids can be forwarded without a defensive copy.
+                for output in res.outputs:
+                    output_idx = output.index or 0
+                    token_ids = output.token_ids or []
+                    finish_reason = output.finish_reason
+                    stop_reason = output.stop_reason
                     if not token_ids and not finish_reason and not stop_reason:
                         continue
-                    prepared_outputs.append(
-                        (output, output_idx, token_ids, finish_reason, stop_reason)
-                    )
 
-                for (
-                    output,
-                    output_idx,
-                    token_ids,
-                    finish_reason,
-                    stop_reason,
-                ) in prepared_outputs:
                     out = {
                         "index": output_idx,
                         "token_ids": token_ids,
                     }
 
-                    # vLLM DELTA outputs already align token_ids/logprobs to this chunk.
-                    tokenizer = getattr(self.engine_client, "tokenizer", None)
-                    log_probs, top_logprobs = self._extract_logprobs(
-                        output, 0, tokenizer=tokenizer
-                    )
-                    if log_probs is not None:
-                        out["log_probs"] = log_probs
-                    if top_logprobs is not None:
-                        out["top_logprobs"] = top_logprobs
+                    # Only touch the logprobs path when this chunk actually carries
+                    # logprobs (populated iff the request asked for them); avoids a
+                    # per-token call that would otherwise just early-return.
+                    if output.logprobs is not None:
+                        log_probs, top_logprobs = self._extract_logprobs(
+                            output, 0, tokenizer=tokenizer
+                        )
+                        if log_probs is not None:
+                            out["log_probs"] = log_probs
+                        if top_logprobs is not None:
+                            out["top_logprobs"] = top_logprobs
 
                     if finish_reason:
                         out["finish_reason"] = normalize_finish_reason(finish_reason)
