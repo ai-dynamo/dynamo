@@ -75,6 +75,16 @@ def _torch_tensor_type() -> type | None:
     return torch.Tensor
 
 
+@cache
+def _numpy_array_type() -> type | None:
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+
+    return np.ndarray
+
+
 def _torch_tensor_to_payload(value: Any) -> dict[str, Any] | None:
     tensor_type = _torch_tensor_type()
     if tensor_type is None or not isinstance(value, tensor_type):
@@ -96,6 +106,22 @@ def _torch_tensor_to_payload(value: Any) -> dict[str, Any] | None:
     }
 
 
+def _numpy_array_to_payload(value: Any) -> dict[str, Any] | None:
+    array_type = _numpy_array_type()
+    if array_type is None or not isinstance(value, array_type):
+        return None
+
+    import numpy as np
+
+    array = np.ascontiguousarray(value)
+    return {
+        "type": "ndarray",
+        "dtype": str(array.dtype),
+        "shape": list(array.shape),
+        "data": array.tobytes(),
+    }
+
+
 def _normalize_for_upload(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool, bytes)):
         return value
@@ -107,6 +133,10 @@ def _normalize_for_upload(value: Any) -> Any:
     tensor_payload = _torch_tensor_to_payload(value)
     if tensor_payload is not None:
         return tensor_payload
+
+    array_payload = _numpy_array_to_payload(value)
+    if array_payload is not None:
+        return array_payload
 
     return value
 

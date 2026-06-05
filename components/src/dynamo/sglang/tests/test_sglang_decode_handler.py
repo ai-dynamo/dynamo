@@ -382,6 +382,23 @@ async def test_metadata_upload_normalizes_tensor_values(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_metadata_upload_normalizes_numpy_values(tmp_path):
+    np = pytest.importorskip("numpy")
+    uploader = MetadataUploader(url=(tmp_path / "metadata/arrays").as_uri())
+    array = np.array([[1.5, 2.5], [3.5, 4.5]], dtype=np.float32)
+
+    await uploader.upload_choice(0, {"scores": array[:, ::-1]})
+
+    payload = _read_zstd_payload(tmp_path / "metadata/arrays/choice_0.msgpack.zst")
+    uploaded_array = payload["metadata"]["scores"]
+    expected = np.ascontiguousarray(array[:, ::-1])
+    assert uploaded_array["type"] == "ndarray"
+    assert uploaded_array["dtype"] == "float32"
+    assert uploaded_array["shape"] == [2, 2]
+    assert uploaded_array["data"] == expected.tobytes()
+
+
+@pytest.mark.asyncio
 async def test_process_token_stream_tracks_logprobs_per_choice_index():
     handler = _new_decode_handler()
 
