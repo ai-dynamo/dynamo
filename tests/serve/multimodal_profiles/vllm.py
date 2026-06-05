@@ -255,21 +255,15 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         name="microsoft/Phi-3-vision-128k-instruct",
         short_name="phi3-vision",
         topologies={
-            # Phi-3-vision is the largest of the post_merge additions
-            # (~8.6 GB weights × 2 workers + KV ≈ ~21 GiB peak); profile
-            # leaves slim headroom on a 24 GiB box. If first post_merge
-            # run OOMs, drop to one worker (NUM_WORKERS=1) or move to
+            # ~8.6 GB weights × 2 workers + KV ≈ ~21 GiB peak; slim
+            # headroom on 24 GiB. If OOM, drop NUM_WORKERS=1 or move to
             # gpu_2 with one worker per GPU.
             "agg_router": TopologyConfig(
-                marks=[pytest.mark.post_merge],
+                marks=[pytest.mark.pre_merge],
                 timeout_s=500,
                 profiled_vram_gib=22.0,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
                 env={"SINGLE_GPU": "true"},
-                # cached_tokens-asserting payload proves MM-aware routing
-                # engaged (2nd identical request hits the warm worker's KV
-                # cache); a silent regression to text-prefix-only routing
-                # would still return "green" but 0 cached tokens.
                 tests=[
                     MmCase(
                         payload=make_image_payload_cached_tokens(
