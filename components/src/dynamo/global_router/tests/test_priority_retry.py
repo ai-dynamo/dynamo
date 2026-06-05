@@ -285,18 +285,26 @@ async def test_delegation_disabled_uses_relay_when_priority_retry_has_fallback(
 
 
 @pytest.mark.asyncio
-async def test_delegated_priority_retry_requires_frontend_adapter(tmp_path):
+async def test_delegated_response_relays_without_frontend_adapter_metadata(tmp_path):
     handler = _handler(_write_config(tmp_path, _disagg_config()))
+    fast = FakeClient("prefill-fast", outputs=[{"pool": "prefill-fast"}])
+    mid = FakeClient("prefill-mid", outputs=[{"pool": "prefill-mid"}])
+    slow = FakeClient("prefill-slow", outputs=[{"pool": "prefill-slow"}])
     handler.prefill_clients = {
-        "prefill-fast": FakeClient("prefill-fast"),
-        "prefill-mid": FakeClient("prefill-mid"),
-        "prefill-slow": FakeClient("prefill-slow"),
+        "prefill-fast": fast,
+        "prefill-mid": mid,
+        "prefill-slow": slow,
     }
 
-    with pytest.raises(RuntimeError, match="dyn-routed-engine-adapter=global-router"):
-        await _collect_outputs(
-            handler.handle_prefill({"token_ids": [1, 2, 3]}, context=FakeContext())
-        )
+    outputs = await _collect_outputs(
+        handler.handle_prefill({"token_ids": [1, 2, 3]}, context=FakeContext())
+    )
+
+    assert outputs == [{"pool": "prefill-slow"}]
+    assert slow.calls == 1
+    assert slow.forward_calls == 0
+    assert mid.calls == 0
+    assert fast.calls == 0
 
 
 @pytest.mark.asyncio
@@ -326,7 +334,7 @@ async def test_delegated_retry_metadata_is_ignored_when_delegation_disabled(tmp_
 
 
 @pytest.mark.asyncio
-async def test_delegated_response_uses_forward_when_priority_retry_has_no_fallback(
+async def test_delegated_response_relays_without_adapter_when_priority_retry_has_no_fallback(
     tmp_path,
 ):
     handler = _handler(
@@ -341,6 +349,33 @@ async def test_delegated_response_uses_forward_when_priority_retry_has_no_fallba
 
     outputs = await _collect_outputs(
         handler.handle_prefill({"token_ids": [1, 2, 3]}, context=FakeContext())
+    )
+
+    assert outputs == [{"pool": "prefill-slow"}]
+    assert slow.forward_calls == 0
+    assert slow.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_delegated_response_uses_forward_with_adapter_metadata_when_no_fallback(
+    tmp_path,
+):
+    handler = _handler(
+        _write_config(tmp_path, _disagg_config(enable_priority_retry=False))
+    )
+    slow = FakeClient("prefill-slow", outputs=[{"pool": "prefill-slow"}])
+    handler.prefill_clients = {
+        "prefill-fast": FakeClient("prefill-fast"),
+        "prefill-mid": FakeClient("prefill-mid"),
+        "prefill-slow": slow,
+    }
+    request = {
+        "token_ids": [1, 2, 3],
+        "routing": {GLOBAL_ROUTER_RETRY_ATTEMPT_KEY: 0},
+    }
+
+    outputs = await _collect_outputs(
+        handler.handle_prefill(request, context=FakeContext())
     )
 
     assert outputs == []

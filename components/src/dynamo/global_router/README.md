@@ -248,21 +248,21 @@ By default, the global router relays response streams through itself. To allow d
 --enable-delegated-response-stream
 ```
 
-When delegated response streaming is enabled with priority retry, the frontend must also use the global-router routed-engine adapter:
+When delegated response streaming is enabled, the frontend must also use the global-router routed-engine adapter before the global router will delegate a response stream:
 
 ```bash
 --dyn-routed-engine-adapter=global-router
 ```
 
-The adapter lets the frontend reissue the request with the next retry attempt when the global router returns retry control, or when an already-established delegated response stream fails before any output has been streamed. If priority retry has multiple candidate pools and the frontend adapter is not enabled, the global router rejects the request instead of falling back to a relayed stream with delayed response-stream setup.
+The adapter lets the frontend reissue the request with the next retry attempt when the global router returns retry control, or when an already-established delegated response stream fails before any output has been streamed. If the frontend adapter is not enabled, the global router relays the response stream through itself instead of delegating.
 
-The frontend adapter also bounds how long it waits for the delegated response stream prologue. Configure this with:
+The frontend adapter also carries a prologue timeout to the Rust routed-engine client. Configure this with:
 
 ```bash
 --dyn-global-router-response-prologue-timeout-s 30
 ```
 
-If the timeout expires before the response prologue is observed, the frontend treats the selected pool as too slow or unavailable and retries the next priority attempt when one is available.
+If the timeout expires before the response prologue is observed, Rust cancels the pending response registration and fails the attempt. The frontend treats the selected pool as too slow or unavailable and retries the next priority attempt when one is available.
 
 ### Passing SLA Targets
 

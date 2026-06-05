@@ -7,6 +7,9 @@ from typing import Any, Mapping, Optional
 
 GLOBAL_ROUTER_CONTROL_FIELD = "global_router_control"
 GLOBAL_ROUTER_RETRY_ATTEMPT_KEY = "global_router_retry_attempt"
+GLOBAL_ROUTER_RESPONSE_PROLOGUE_TIMEOUT_S_KEY = (
+    "dynamo.global_router_response_prologue_timeout_s"
+)
 
 GLOBAL_ROUTER_ACTION_RETRY = "retry"
 GLOBAL_ROUTER_ACTION_EXHAUSTED = "exhausted"

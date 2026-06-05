@@ -488,9 +488,10 @@ class FrontendArgGroup(ArgGroup):
             default=30.0,
             dest="global_router_response_prologue_timeout_s",
             help=(
-                "[EXPERIMENTAL] Timeout in seconds for the frontend to wait for "
-                "a global-router delegated response stream prologue before "
-                "retrying the next priority pool. Applies only with "
+                "[EXPERIMENTAL] Timeout in seconds for the Rust routed-engine "
+                "client to wait for a global-router delegated response stream "
+                "prologue before failing the attempt so the frontend can retry "
+                "the next priority pool. Applies only with "
                 "--dyn-routed-engine-adapter=global-router."
             ),
             arg_type=float,

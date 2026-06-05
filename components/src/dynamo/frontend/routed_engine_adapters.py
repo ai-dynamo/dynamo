@@ -3,13 +3,13 @@
 
 """Topology-specific wrappers for frontend routed-engine calls."""
 
-import asyncio
 import logging
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
 from dynamo.common.global_router_protocol import (
     GLOBAL_ROUTER_ACTION_EXHAUSTED,
     GLOBAL_ROUTER_ACTION_RETRY,
+    GLOBAL_ROUTER_RESPONSE_PROLOGUE_TIMEOUT_S_KEY,
     GLOBAL_ROUTER_RETRY_ATTEMPT_KEY,
     get_global_router_control,
 )
@@ -90,16 +90,19 @@ class GlobalRouterRoutedEngineAdapter:
                 stream = await self._generate_attempt(
                     _request_for_retry_attempt(request, attempt), **kwargs
                 )
-            except TimeoutError as exc:
-                next_attempt = attempt + 1
-                retry_error = exc
-                logger.warning(
-                    "Retrying global-router request after response prologue "
-                    "timeout: attempt=%s next_attempt=%s timeout_s=%s",
-                    attempt,
-                    next_attempt,
-                    self._response_prologue_timeout_s,
-                )
+            except Exception as exc:
+                if _is_response_prologue_timeout(exc):
+                    next_attempt = attempt + 1
+                    retry_error = exc
+                    logger.warning(
+                        "Retrying global-router request after response prologue "
+                        "timeout: attempt=%s next_attempt=%s timeout_s=%s",
+                        attempt,
+                        next_attempt,
+                        self._response_prologue_timeout_s,
+                    )
+                else:
+                    raise
             else:
                 try:
                     async for output in stream:
@@ -165,13 +168,11 @@ class GlobalRouterRoutedEngineAdapter:
     async def _generate_attempt(
         self, request: Any, **kwargs: Any
     ) -> AsyncIterator[Any]:
-        generate = self._routed_engine.generate(request, **kwargs)
-        if self._response_prologue_timeout_s is None:
-            return await generate
-        return await asyncio.wait_for(
-            generate,
-            timeout=self._response_prologue_timeout_s,
+        _set_response_prologue_timeout_metadata(
+            kwargs.get("context"),
+            self._response_prologue_timeout_s,
         )
+        return await self._routed_engine.generate(request, **kwargs)
 
 
 def _retry_exhausted_message(control: Any) -> str:
@@ -193,6 +194,26 @@ def _request_for_retry_attempt(request: Any, retry_attempt: int) -> Any:
     routing[GLOBAL_ROUTER_RETRY_ATTEMPT_KEY] = retry_attempt
     next_request["routing"] = routing
     return next_request
+
+
+def _set_response_prologue_timeout_metadata(
+    context: Any,
+    timeout_s: float | None,
+) -> None:
+    if context is None or timeout_s is None:
+        return
+    metadata = getattr(context, "metadata", None)
+    if metadata is None:
+        return
+    metadata[GLOBAL_ROUTER_RESPONSE_PROLOGUE_TIMEOUT_S_KEY] = str(timeout_s)
+
+
+def _is_response_prologue_timeout(exc: Exception) -> bool:
+    message = str(exc)
+    return (
+        "ConnectionTimeout" in message
+        and "response stream prologue timed out" in message
+    )
 
 
 def _next_retry_attempt(control: Any) -> int:

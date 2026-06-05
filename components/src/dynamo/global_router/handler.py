@@ -108,6 +108,7 @@ class GlobalRouterHandler:
             pool_priorities=pool_priorities,
             enable_priority_retry=self.config.enable_priority_retry,
         )
+        retry_attempt = None
         if (
             self.enable_delegated_response_stream
             and response_connection_info is not None
@@ -127,24 +128,19 @@ class GlobalRouterHandler:
                     yield output
                 return
 
-        should_delegate_response = (
-            self.enable_delegated_response_stream
-            and response_connection_info is not None
-            and len(pool_order) == 1
-        )
-        if response_connection_info is not None and not should_delegate_response:
-            if self.enable_delegated_response_stream:
-                retry_attempt = get_global_router_retry_attempt(request)
-                if retry_attempt is None:
-                    raise RuntimeError(
-                        "global-router delegated response streaming with priority "
-                        "retry requires frontend "
-                        "--dyn-routed-engine-adapter=global-router"
-                    )
-            logger.info(
-                f"Relaying {request_type} response stream through global router "
-                f"to preserve retry semantics: retry_order={pool_order}"
-            )
+        if response_connection_info is not None:
+            if self.enable_delegated_response_stream and retry_attempt is None:
+                logger.info(
+                    f"Relaying {request_type} response stream through global router "
+                    f"because delegated response streaming requires frontend "
+                    f"--dyn-routed-engine-adapter=global-router metadata: "
+                    f"retry_order={pool_order}"
+                )
+            else:
+                logger.info(
+                    f"Relaying {request_type} response stream through global router "
+                    f"to preserve retry semantics: retry_order={pool_order}"
+                )
 
         for attempt_idx, pool_idx in enumerate(pool_order):
             namespace = namespaces[pool_idx]
@@ -152,25 +148,6 @@ class GlobalRouterHandler:
             yielded_output = False
 
             try:
-                if should_delegate_response:
-                    request_id = context.id() if context is not None else None
-                    logger.info(
-                        f"Delegating {request_type} response stream directly to downstream "
-                        f"router: request_id={request_id}, namespace={namespace}, "
-                        f"transport={response_connection_info.get('transport')}, "
-                        f"response_subject={_connection_subject(response_connection_info)}"
-                    )
-                    await client.forward(
-                        request,
-                        response_connection_info,
-                        context=context,
-                    )
-                    logger.info(
-                        f"Delegated {request_type} request to {namespace}; global router "
-                        f"will not publish response stream: request_id={request_id}"
-                    )
-                    return
-
                 logger.info(
                     f"Relaying {request_type} response stream through global router: "
                     f"namespace={namespace}"

@@ -3,12 +3,12 @@
 
 """Tests for frontend routed-engine topology adapters."""
 
-import asyncio
 from typing import Any
 
 import pytest
 
 from dynamo.common.global_router_protocol import (
+    GLOBAL_ROUTER_RESPONSE_PROLOGUE_TIMEOUT_S_KEY,
     GLOBAL_ROUTER_RETRY_ATTEMPT_KEY,
     make_global_router_retry_control,
     make_global_router_retry_exhausted_control,
@@ -44,9 +44,6 @@ class SequenceRoutedEngine:
         self.requests.append(request)
         self.kwargs.append(kwargs)
         items = self._streams.pop(0)
-        if isinstance(items, DelayedGenerate):
-            await asyncio.sleep(items.delay_s)
-            items = items.items
         if isinstance(items, Exception):
             raise items
 
@@ -59,12 +56,6 @@ class SequenceRoutedEngine:
         return stream()
 
 
-class DelayedGenerate:
-    def __init__(self, delay_s: float, items: list[FakeRoutedItem]):
-        self.delay_s = delay_s
-        self.items = items
-
-
 class FakeConfig:
     def __init__(
         self,
@@ -75,6 +66,11 @@ class FakeConfig:
         self.global_router_response_prologue_timeout_s = (
             global_router_response_prologue_timeout_s
         )
+
+
+class FakeContext:
+    def __init__(self):
+        self.metadata: dict[str, str] = {}
 
 
 async def _collect(stream) -> list[dict[str, Any]]:
@@ -193,7 +189,9 @@ async def test_global_router_adapter_does_not_retry_generate_failure_before_outp
 async def test_global_router_adapter_retries_generate_timeout_before_output():
     routed_engine = SequenceRoutedEngine(
         streams=[
-            DelayedGenerate(0.05, [FakeRoutedItem({"late": True})]),
+            RuntimeError(
+                "ConnectionTimeout: response stream prologue timed out after 0.001s"
+            ),
             [FakeRoutedItem({"done": True})],
         ]
     )
@@ -210,6 +208,25 @@ async def test_global_router_adapter_retries_generate_timeout_before_output():
         request["routing"][GLOBAL_ROUTER_RETRY_ATTEMPT_KEY]
         for request in routed_engine.requests
     ] == [0, 1]
+
+
+async def test_global_router_adapter_sets_prologue_timeout_metadata():
+    routed_engine = SequenceRoutedEngine(
+        streams=[
+            [FakeRoutedItem({"done": True})],
+        ]
+    )
+    adapter = GlobalRouterRoutedEngineAdapter(
+        routed_engine,
+        response_prologue_timeout_s=12.5,
+    )
+    context = FakeContext()
+
+    stream = await adapter.generate({"token_ids": [1]}, context=context)
+    outputs = await _collect(stream)
+
+    assert outputs == [{"done": True}]
+    assert context.metadata[GLOBAL_ROUTER_RESPONSE_PROLOGUE_TIMEOUT_S_KEY] == "12.5"
 
 
 async def test_wrap_global_router_adapter_passes_prologue_timeout():

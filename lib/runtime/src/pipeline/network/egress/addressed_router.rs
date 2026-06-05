@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::unified_client::RequestPlaneClient;
 use super::*;
@@ -39,6 +39,8 @@ use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
 
 const CONTROL_MESSAGE_MAX_BYTES: usize = 128 * 1024;
+const RESPONSE_PROLOGUE_TIMEOUT_METADATA_KEY: &str =
+    "dynamo.global_router_response_prologue_timeout_s";
 
 fn serialize_control_message(control_message: &RequestControlMessage) -> Result<Vec<u8>, Error> {
     let ctrl = serde_json::to_vec(control_message)?;
@@ -51,6 +53,25 @@ fn serialize_control_message(control_message: &RequestControlMessage) -> Result<
         .into());
     }
     Ok(ctrl)
+}
+
+fn response_prologue_timeout_from_metadata(
+    metadata: &BTreeMap<String, String>,
+) -> Option<Duration> {
+    let raw = metadata.get(RESPONSE_PROLOGUE_TIMEOUT_METADATA_KEY)?;
+    match raw.parse::<f64>() {
+        Ok(seconds) if seconds.is_finite() && seconds > 0.0 => {
+            Some(Duration::from_secs_f64(seconds))
+        }
+        _ => {
+            tracing::warn!(
+                key = RESPONSE_PROLOGUE_TIMEOUT_METADATA_KEY,
+                value = %raw,
+                "ignoring invalid response prologue timeout metadata"
+            );
+            None
+        }
+    }
 }
 
 /// RAII guard that decrements REQUEST_PLANE_INFLIGHT on drop unless disarmed.
@@ -287,6 +308,7 @@ where
         let (request, address, instance_info) = addressed_request.into_parts();
         let engine_ctx = context.context();
         let engine_ctx_ = engine_ctx.clone();
+        let response_prologue_timeout = response_prologue_timeout_from_metadata(context.metadata());
 
         // registration options for the data plane in a singe in / many out configuration
         let options = StreamOptions::builder()
@@ -437,9 +459,31 @@ where
         let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
         tracing::trace!(request_id, "awaiting transport handshake");
 
+        let response_stream_result = if let Some(timeout) = response_prologue_timeout {
+            match tokio::time::timeout(timeout, response_stream_provider).await {
+                Ok(result) => result,
+                Err(_) => {
+                    if let Some(subject) = &recv_subject {
+                        self.resp_transport.cancel_recv_stream(subject).await;
+                    }
+                    return Err(anyhow::anyhow!(
+                        DynamoError::builder()
+                            .error_type(ErrorType::ConnectionTimeout)
+                            .message(format!(
+                                "response stream prologue timed out after {:.3}s",
+                                timeout.as_secs_f64()
+                            ))
+                            .build()
+                    ));
+                }
+            }
+        } else {
+            response_stream_provider.await
+        };
+
         // RecvError → migratable Disconnected (watcher cancelled the subject
         // or the worker died before establishing the response stream).
-        let response_stream = match response_stream_provider.await {
+        let response_stream = match response_stream_result {
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) => {
                 // generate() failed before any response bytes; migrate via
@@ -549,10 +593,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo, RequestControlMessage, RequestType,
-        ResponseType, serialize_control_message,
+        CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo, RESPONSE_PROLOGUE_TIMEOUT_METADATA_KEY,
+        RequestControlMessage, RequestType, ResponseType, response_prologue_timeout_from_metadata,
+        serialize_control_message,
     };
     use std::collections::BTreeMap;
+    use std::time::Duration;
 
     fn base_control_message(metadata: BTreeMap<String, String>) -> RequestControlMessage {
         RequestControlMessage {
@@ -591,5 +637,32 @@ mod tests {
             .to_string();
         assert!(err.contains("request control message too large"));
         assert!(err.contains(&CONTROL_MESSAGE_MAX_BYTES.to_string()));
+    }
+
+    #[test]
+    fn response_prologue_timeout_metadata_accepts_positive_seconds() {
+        let mut metadata = BTreeMap::new();
+        metadata.insert(
+            RESPONSE_PROLOGUE_TIMEOUT_METADATA_KEY.to_string(),
+            "12.5".to_string(),
+        );
+
+        assert_eq!(
+            response_prologue_timeout_from_metadata(&metadata),
+            Some(Duration::from_secs_f64(12.5))
+        );
+    }
+
+    #[test]
+    fn response_prologue_timeout_metadata_ignores_invalid_values() {
+        for value in ["0", "-1", "nan", "inf", "not-a-number"] {
+            let mut metadata = BTreeMap::new();
+            metadata.insert(
+                RESPONSE_PROLOGUE_TIMEOUT_METADATA_KEY.to_string(),
+                value.to_string(),
+            );
+
+            assert_eq!(response_prologue_timeout_from_metadata(&metadata), None);
+        }
     }
 }
