@@ -15,7 +15,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Dict, Final, Generic, Optional, TypeVar
+from typing import Any, AsyncIterator, Dict, Final, Generic, Iterator, Optional, TypeVar
 
 import torch
 from vllm.config import ModelConfig, VllmConfig
@@ -379,39 +379,43 @@ def _attach_prompt_logprobs_engine_data(
         engine_data["prompt_logprobs"] = prompt_logprobs
 
 
-def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
-    """Return True iff the request opted into the given nvext extra field.
+def _iter_nvext_sources(request: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
+    """Yield each nvext dict on the request, in priority order:
 
-    Looks in two places (in order):
-      1. `request["nvext"]["extra_fields"]` — raw OpenAI request shape
-         (used by SGLang's handler; also covers any direct test injection).
-      2. `request["extra_args"]["nvext"]["extra_fields"]` — what the Rust
-         preprocessor stashes when building PreprocessedRequest from an
-         OpenAI request (PreprocessedRequest itself has no nvext field).
+      1. ``request["nvext"]``               — raw OpenAI shape (SGLang / tests).
+      2. ``request["extra_args"]["nvext"]`` — what the Rust preprocessor stashes
+         when building PreprocessedRequest from an OpenAI request
+         (PreprocessedRequest itself has no nvext field).
+
+    Centralizing this lookup keeps ``_nvext_extra_field_requested``,
+    ``_is_token_in_request`` and ``_apply_nvext_cache_salt`` consistent so an
+    nvext field is never honored by one helper but silently missed by another.
     """
+    extra_args = request.get("extra_args")
     for source in (
         request.get("nvext"),
-        (request.get("extra_args") or {}).get("nvext")
-        if isinstance(request.get("extra_args"), dict)
-        else None,
+        extra_args.get("nvext") if isinstance(extra_args, dict) else None,
     ):
-        if not isinstance(source, dict):
-            continue
-        extra_fields = source.get("extra_fields")
-        if isinstance(extra_fields, list) and field in extra_fields:
-            return True
-    return False
+        if isinstance(source, dict):
+            yield source
+
+
+def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
+    """Return True iff the request opted into the given nvext extra field."""
+    return any(
+        isinstance(source.get("extra_fields"), list) and field in source["extra_fields"]
+        for source in _iter_nvext_sources(request)
+    )
 
 
 def _apply_nvext_cache_salt(request: Dict[str, Any], prompt: Any) -> None:
-    extra_args = request.get("extra_args") or {}
-    nvext_args = extra_args.get("nvext") if isinstance(extra_args, dict) else None
-    if not isinstance(nvext_args, dict):
+    if not isinstance(prompt, dict):
         return
-
-    cache_salt = nvext_args.get("cache_salt")
-    if cache_salt is not None and isinstance(prompt, dict):
-        prompt["cache_salt"] = cache_salt
+    for source in _iter_nvext_sources(request):
+        cache_salt = source.get("cache_salt")
+        if cache_salt is not None:
+            prompt["cache_salt"] = cache_salt
+            return
 
 
 def _prompt_token_ids_for_engine_data(
@@ -465,19 +469,10 @@ def _flatten_logprobs(
 
 
 def _is_token_in_request(request: Dict[str, Any]) -> bool:
-    nvext = request.get("nvext")
-    if isinstance(nvext, dict) and nvext.get("token_data"):
-        return True
-
-    extra_args = request.get("extra_args") or {}
-    nvext_args = extra_args.get("nvext") if isinstance(extra_args, dict) else None
-    if not isinstance(nvext_args, dict):
-        return False
-
-    if nvext_args.get("token_in"):
-        return True
-
-    return False
+    return any(
+        source.get("token_data") or source.get("token_in")
+        for source in _iter_nvext_sources(request)
+    )
 
 
 def _accumulate_engine_data(
