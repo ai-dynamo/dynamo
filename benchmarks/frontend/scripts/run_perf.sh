@@ -299,6 +299,12 @@ INFRA_TASKSET=()
 [[ -n "$LOAD_CPUSET" ]] && LOAD_TASKSET=(taskset -c "$LOAD_CPUSET")
 [[ -n "$INFRA_CPUSET" ]] && INFRA_TASKSET=(taskset -c "$INFRA_CPUSET")
 
+tcp_port_open() {
+    local host="$1"
+    local port="$2"
+    (exec 3<>"/dev/tcp/${host}/${port}") >/dev/null 2>&1
+}
+
 # ─── Tracked PIDs for cleanup ───────────────────────────────────────────────
 ALL_PIDS=()      # everything we need to kill on exit
 CAPTURE_PIDS=()  # capture processes we wait for
@@ -362,13 +368,14 @@ if ! curl -sf http://localhost:2379/health >/dev/null 2>&1; then
     if command -v etcd &>/dev/null; then
         echo "  etcd not running — starting it..."
         ETCD_DATA_DIR=$(mktemp -d)
+        ETCD_LOG="$OUTPUT_DIR/logs/etcd.log"
         "${INFRA_TASKSET[@]}" etcd --data-dir="$ETCD_DATA_DIR" \
              --listen-client-urls=http://localhost:2379 \
              --advertise-client-urls=http://localhost:2379 \
              --listen-peer-urls=http://localhost:2380 \
              --initial-advertise-peer-urls=http://localhost:2380 \
              --initial-cluster=default=http://localhost:2380 \
-             > /dev/null 2>&1 &
+             > "$ETCD_LOG" 2>&1 &
         ETCD_PID=$!
         for i in $(seq 1 30); do
             if curl -sf http://localhost:2379/health >/dev/null 2>&1; then
@@ -377,7 +384,9 @@ if ! curl -sf http://localhost:2379/health >/dev/null 2>&1; then
             fi
             sleep 1
             if [[ $i -eq 30 ]]; then
-                echo "ERROR: etcd failed to start after 30s"; exit 1
+                echo "ERROR: etcd failed to start after 30s"
+                tail -n 80 "$ETCD_LOG" || true
+                exit 1
             fi
         done
     else
@@ -388,19 +397,27 @@ else
 fi
 
 # NATS
-if ! nc -z localhost 4222 2>/dev/null; then
+if ! tcp_port_open localhost 4222; then
     if command -v nats-server &>/dev/null; then
         echo "  nats-server not running — starting it..."
-        "${INFRA_TASKSET[@]}" nats-server > /dev/null 2>&1 &
+        NATS_LOG="$OUTPUT_DIR/logs/nats-server.log"
+        "${INFRA_TASKSET[@]}" nats-server > "$NATS_LOG" 2>&1 &
         NATS_PID=$!
         for i in $(seq 1 30); do
-            if nc -z localhost 4222 2>/dev/null; then
+            if tcp_port_open localhost 4222; then
                 echo "  nats-server ready (PID $NATS_PID)"
                 break
             fi
+            if ! kill -0 "$NATS_PID" 2>/dev/null; then
+                echo "ERROR: nats-server exited before it became ready"
+                tail -n 80 "$NATS_LOG" || true
+                exit 1
+            fi
             sleep 1
             if [[ $i -eq 30 ]]; then
-                echo "ERROR: nats-server failed to start after 30s"; exit 1
+                echo "ERROR: nats-server failed to start after 30s"
+                tail -n 80 "$NATS_LOG" || true
+                exit 1
             fi
         done
     else
