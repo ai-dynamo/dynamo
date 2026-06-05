@@ -244,8 +244,16 @@ class MxRefitWorkerExtension:
                 _pin_local_nic(
                     device_id=self.device.index, mode=mx_config.nic_pin
                 )
+                # Agent name must be pod-globally unique. When tree_scale_out
+                # is on, receivers pull from each other — NIXL rejects
+                # loadRemoteMD with NIXL_ERR_INVALID_PARAM ("remote agent
+                # name same as local agent") if any two receivers share an
+                # agent_name. Hostname is pod-unique on K8s; rank
+                # disambiguates the 2 TP processes per pod.
+                import socket
+                pod_hostname = socket.gethostname()
                 self._mx_receiver = MxV2RefitReceiver(  # noqa: SLF001
-                    agent_name=f"dynamo-vllm-r{rank}",
+                    agent_name=f"dynamo-vllm-{pod_hostname}-r{rank}",
                     device_id=self.device.index,
                     mx_server_url=mx_config.mx_server_url,
                     worker_rank=rank,
@@ -313,11 +321,23 @@ class MxRefitWorkerExtension:
             # the yielded tensors come back with their original shape (not
             # flat 1D). vLLM's ``load_weights`` calls ``.copy_(t)`` into the
             # model param, so shape must match (or .view() must succeed).
+            from modelexpress.nemo_rl_v2 import ROLE_INFERENCE_REPLICA
+
             tensor_shapes: dict[str, tuple[int, ...]] = {}
             registry = getattr(chosen, "registry", None)
             if registry:
                 for td in registry.get("tensors", []):
                     tensor_shapes[td.name] = tuple(int(s) for s in td.global_shape)
+            # Replicas don't publish a shape_registry (publish_self_as_source
+            # only emits role/version/rank). Fall back to the receiver's own
+            # named_parameters layout — by construction, source replica and
+            # this receiver are both vLLM TP=N instances at the same rank,
+            # so the local shapes line up tensor-for-tensor.
+            if chosen.role == ROLE_INFERENCE_REPLICA and not tensor_shapes:
+                tensor_shapes = {
+                    name: tuple(p.shape)
+                    for name, p in self.model_runner.model.named_parameters()
+                }
             weights: list[tuple[str, torch.Tensor]] = list(
                 self._mx_receiver._receiver.receive_weights_scratch(
                     chosen.ref,
@@ -326,8 +346,40 @@ class MxRefitWorkerExtension:
                 )
             )
 
-            # ---- vLLM's load_weights handles HF→fused merge ----
-            self._mx_load_weights(weights)
+            # ---- Load: HF→fused merge (trainer) vs direct copy (replica) ----
+            # Trainer publishes HF state_dict (q_proj/k_proj/v_proj separately
+            # at GLOBAL shapes) so vLLM's load_weights fuses into qkv_proj and
+            # re-shards to local TP. Inference_replicas publish their own
+            # named_parameters — already fused, already locally TP-sharded.
+            # Feeding those to load_weights triggers the stacked-params merger
+            # against an already-merged tensor → shape assert in
+            # vocab_parallel_embedding ("loaded_weight.shape[0] != org_vocab_size").
+            # For replicas, byte-copy straight into the matching named_param —
+            # same trick MxModelLoader uses on the autoscaling boot path.
+            if chosen.role == ROLE_INFERENCE_REPLICA:
+                model_params = dict(
+                    self.model_runner.model.named_parameters()
+                )
+                copied = 0
+                for name, tensor in weights:
+                    param = model_params.get(name)
+                    if param is None:
+                        logger.warning(
+                            "[mx] replica direct-copy: unknown param %s; "
+                            "skipping",
+                            name,
+                        )
+                        continue
+                    with torch.no_grad():
+                        param.copy_(tensor, non_blocking=True)
+                    copied += 1
+                logger.info(
+                    "[mx] replica direct-copy: %d/%d tensors loaded",
+                    copied,
+                    len(weights),
+                )
+            else:
+                self._mx_load_weights(weights)
             torch.cuda.current_stream().synchronize()
             self._mx_maybe_process_fp8_kv_cache()
 
