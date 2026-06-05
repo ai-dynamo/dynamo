@@ -297,6 +297,36 @@ mod tests {
     }
 
     #[test]
+    fn decode_local_token_quantities_per_final_local_path() {
+        // The decode-side `kvbm_cd_local_prefill_tokens_total` is recorded with a
+        // DIFFERENT quantity depending on the final-local path, and the two must
+        // not be conflated (the difference is exactly the G2 local-match):
+        //   * passthrough paths — policy-Local, breaker-HOT, B-GNMT overload,
+        //     zero-block — return (Some(matched), …), so vLLM onboards the G2
+        //     match and computes num_prefill_tokens() = total − computed − match.
+        //   * budget-reject — returns (None, false): NO external match onboarded,
+        //     so vLLM recomputes the whole uncached prompt = total − computed.
+        let inputs = PolicyInputs {
+            total_tokens: 1000,
+            num_computed_tokens: 100, // vLLM G1 prefix-cache hit
+            num_connector_tokens: 200, // kvbm G2 local match
+            transfer_params: None,
+        };
+        // passthrough (G2 onboarded): total − computed − match
+        assert_eq!(inputs.num_prefill_tokens(), 700);
+        // budget-reject (None ⇒ G2 NOT onboarded): total − computed
+        let reject_local_tokens = inputs
+            .total_tokens
+            .saturating_sub(inputs.num_computed_tokens);
+        assert_eq!(reject_local_tokens, 900);
+        // The reject path computes the local-match too — exactly num_connector more.
+        assert_eq!(
+            reject_local_tokens - inputs.num_prefill_tokens(),
+            inputs.num_connector_tokens
+        );
+    }
+
+    #[test]
     fn threshold_remote_gates_on_uncached_prefill_tokens() {
         let policy = ThresholdRemote {
             min_remote_prefill_tokens: 256,

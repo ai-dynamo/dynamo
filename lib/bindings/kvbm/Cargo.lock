@@ -3009,6 +3009,7 @@ dependencies = [
  "kvbm-common",
  "kvbm-config",
  "kvbm-logical",
+ "kvbm-observability",
  "kvbm-protocols",
  "linregress",
  "parking_lot",

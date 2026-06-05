@@ -993,6 +993,10 @@ impl DecodeDisaggLeader {
                     if let Some(cd) = &cd {
                         cd.record_decision("remote_downgraded_zero_block");
                         cd.record_remote_declined("zero_block");
+                        // FINAL placement = local: this returns the passthrough
+                        // (Some(matched)), so vLLM onboards the G2 local-match and
+                        // computes num_prefill_tokens() = total − num_computed − match.
+                        cd.record_local_prefill_tokens(inputs.num_prefill_tokens() as u64);
                     }
                     return Ok(inner_result);
                 }
@@ -1046,6 +1050,14 @@ impl DecodeDisaggLeader {
                     if let Some(cd) = &cd {
                         cd.record_decision("remote_rejected_budget");
                         cd.record_remote_declined("budget_exhausted");
+                        // FINAL placement = local: this returns (None, false), so the
+                        // connector provides NO external match — vLLM prefills the whole
+                        // uncached prompt itself = total − num_computed (the G2 local-match
+                        // is NOT onboarded on the None path, so it is recomputed here; do
+                        // NOT use num_prefill_tokens(), which would undercount by the match).
+                        cd.record_local_prefill_tokens(
+                            inputs.total_tokens.saturating_sub(inputs.num_computed_tokens) as u64,
+                        );
                     }
                     return Ok((None, false));
                 }

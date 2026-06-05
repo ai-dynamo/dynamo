@@ -22,7 +22,8 @@ use velo::{Handler, Messenger};
 
 use kvbm_observability::SharedKvbmObservability;
 use kvbm_protocols::control::modules::metrics::{
-    MetricsSnapshotRequest, MetricsSnapshotResponse, PoolBreakdown, SNAPSHOT_HANDLER,
+    CdSnapshot, HistogramBucket, HistogramSummary, MetricsSnapshotRequest, MetricsSnapshotResponse,
+    PoolBreakdown, SNAPSHOT_HANDLER,
 };
 use kvbm_protocols::control::{ControlReply, ModuleId};
 
@@ -78,7 +79,10 @@ fn build_snapshot(
     leader: &InstanceLeader,
     obs: &SharedKvbmObservability,
 ) -> MetricsSnapshotResponse {
-    let pools = roll_up_pool_gauges(&obs.registry().gather());
+    // Gather once; both the pool roll-up and the CD roll-up read these families.
+    let families = obs.registry().gather();
+    let pools = roll_up_pool_gauges(&families);
+    let cd = build_cd_snapshot(&families);
     let sessions_inflight = leader.session_manager().len() as u64;
     let gathered_at_unix_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -88,6 +92,114 @@ fn build_snapshot(
         gathered_at_unix_ms,
         sessions_inflight,
         pools,
+        cd,
+    }
+}
+
+/// Fold the `kvbm_cd_*` Prometheus families into a [`CdSnapshot`] so the hub
+/// `/v1/metrics` fan-out carries the full CD-observability surface without each
+/// leader exporting its own `/metrics` axum. Returns `None` when the registry
+/// has no CD families (e.g. a build without the CD metrics registered).
+///
+/// The CD registry is plain (no external/const labels — `set_external_labels`
+/// only decorates the logical aggregator), so labeled counters carry exactly
+/// their one intrinsic label (`decision`/`reason`/`outcome`).
+fn build_cd_snapshot(families: &[MetricFamily]) -> Option<CdSnapshot> {
+    let mut cd = CdSnapshot::default();
+    let mut found = false;
+    for family in families {
+        let name = family.name();
+        if !name.starts_with("kvbm_cd_") {
+            continue;
+        }
+        found = true;
+        match name {
+            "kvbm_cd_prefill_decisions_total" => {
+                cd.prefill_decisions = labeled_counter_map(family, "decision")
+            }
+            "kvbm_cd_remote_prefill_declined_total" => {
+                cd.remote_prefill_declined = labeled_counter_map(family, "reason")
+            }
+            "kvbm_cd_prefill_output_residual_total" => {
+                cd.prefill_output_residual = labeled_counter_map(family, "outcome")
+            }
+            "kvbm_cd_local_prefill_tokens_total" => {
+                cd.local_prefill_tokens_total = scalar_counter(family)
+            }
+            "kvbm_cd_remote_prefill_tokens_total" => {
+                cd.remote_prefill_tokens_total = scalar_counter(family)
+            }
+            "kvbm_cd_remote_prefill_window_tokens_total" => {
+                cd.remote_prefill_window_tokens_total = scalar_counter(family)
+            }
+            "kvbm_cd_prefill_computed_tokens_total" => {
+                cd.prefill_computed_tokens_total = scalar_counter(family)
+            }
+            "kvbm_cd_prefill_pulled_tokens_total" => {
+                cd.prefill_pulled_tokens_total = scalar_counter(family)
+            }
+            "kvbm_cd_prefill_local_hit_tokens_total" => {
+                cd.prefill_local_hit_tokens_total = scalar_counter(family)
+            }
+            "kvbm_cd_remote_prefill_tokens" => {
+                cd.remote_prefill_tokens = histogram_summary(family)
+            }
+            "kvbm_cd_prefix_cache_hit_tokens" => {
+                cd.prefix_cache_hit_tokens = histogram_summary(family)
+            }
+            "kvbm_cd_prefill_computed_tokens" => {
+                cd.prefill_computed_tokens = histogram_summary(family)
+            }
+            _ => {}
+        }
+    }
+    found.then_some(cd)
+}
+
+/// Sum the counter value(s) of an unlabeled counter family (clamped at 0).
+fn scalar_counter(family: &MetricFamily) -> u64 {
+    family
+        .get_metric()
+        .iter()
+        .map(|m| m.get_counter().value().max(0.0) as u64)
+        .sum()
+}
+
+/// Map a single-label counter-vec family to `{label value -> cumulative count}`.
+fn labeled_counter_map(family: &MetricFamily, label: &str) -> BTreeMap<String, u64> {
+    let mut out = BTreeMap::new();
+    for metric in family.get_metric() {
+        let Some(pair) = metric
+            .get_label()
+            .iter()
+            .find(|l: &&LabelPair| l.name() == label)
+        else {
+            continue;
+        };
+        let value = metric.get_counter().value().max(0.0) as u64;
+        out.insert(pair.value().to_string(), value);
+    }
+    out
+}
+
+/// Reduce a histogram family (one unlabeled CD metric) to count + sum + buckets.
+fn histogram_summary(family: &MetricFamily) -> HistogramSummary {
+    let Some(metric) = family.get_metric().first() else {
+        return HistogramSummary::default();
+    };
+    let h = metric.get_histogram();
+    let buckets = h
+        .get_bucket()
+        .iter()
+        .map(|b| HistogramBucket {
+            le: b.upper_bound(),
+            count: b.cumulative_count(),
+        })
+        .collect();
+    HistogramSummary {
+        count: h.get_sample_count(),
+        sum: h.get_sample_sum(),
+        buckets,
     }
 }
 
@@ -177,7 +289,9 @@ fn pool_rank(pool: &str) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prometheus::proto::{Gauge, LabelPair, Metric, MetricFamily, MetricType};
+    use prometheus::proto::{
+        Bucket, Counter, Gauge, Histogram, LabelPair, Metric, MetricFamily, MetricType,
+    };
 
     fn family(name: &str, samples: &[(&str, f64)]) -> MetricFamily {
         let mut mf = MetricFamily::default();
@@ -274,5 +388,121 @@ mod tests {
         let pools = roll_up_pool_gauges(&fams);
         assert_eq!(pools.len(), 1);
         assert_eq!(pools[0].mutable, 0);
+    }
+
+    // --- CD snapshot parsing --------------------------------------------------
+
+    fn counter_metric(labels: &[(&str, &str)], value: f64) -> Metric {
+        let mut m = Metric::default();
+        let lp: Vec<LabelPair> = labels
+            .iter()
+            .map(|(n, v)| {
+                let mut l = LabelPair::default();
+                l.set_name(n.to_string());
+                l.set_value(v.to_string());
+                l
+            })
+            .collect();
+        m.set_label(lp);
+        let mut c = Counter::default();
+        c.set_value(value);
+        m.set_counter(c);
+        m
+    }
+
+    fn counter_family(name: &str, metrics: Vec<Metric>) -> MetricFamily {
+        let mut mf = MetricFamily::default();
+        mf.set_name(name.to_string());
+        mf.set_field_type(MetricType::COUNTER);
+        mf.set_metric(metrics);
+        mf
+    }
+
+    fn histogram_family(name: &str, count: u64, sum: f64, buckets: &[(f64, u64)]) -> MetricFamily {
+        let mut mf = MetricFamily::default();
+        mf.set_name(name.to_string());
+        mf.set_field_type(MetricType::HISTOGRAM);
+        let mut h = Histogram::default();
+        h.set_sample_count(count);
+        h.set_sample_sum(sum);
+        let bk: Vec<Bucket> = buckets
+            .iter()
+            .map(|(le, c)| {
+                let mut b = Bucket::default();
+                b.set_upper_bound(*le);
+                b.set_cumulative_count(*c);
+                b
+            })
+            .collect();
+        h.set_bucket(bk);
+        let mut m = Metric::default();
+        m.set_histogram(h);
+        mf.set_metric(vec![m]);
+        mf
+    }
+
+    #[test]
+    fn cd_snapshot_parses_labels_scalars_and_histograms() {
+        let fams = vec![
+            counter_family(
+                "kvbm_cd_prefill_decisions_total",
+                vec![
+                    counter_metric(&[("decision", "local")], 7.0),
+                    counter_metric(&[("decision", "remote")], 3.0),
+                ],
+            ),
+            counter_family(
+                "kvbm_cd_local_prefill_tokens_total",
+                vec![counter_metric(&[], 1234.0)],
+            ),
+            counter_family(
+                "kvbm_cd_remote_prefill_tokens_total",
+                vec![counter_metric(&[], 5678.0)],
+            ),
+            counter_family(
+                "kvbm_cd_prefill_pulled_tokens_total",
+                vec![counter_metric(&[], 9000.0)],
+            ),
+            counter_family(
+                "kvbm_cd_prefill_local_hit_tokens_total",
+                vec![counter_metric(&[], 4096.0)],
+            ),
+            histogram_family(
+                "kvbm_cd_remote_prefill_tokens",
+                2,
+                900.0,
+                &[(256.0, 1), (1024.0, 2)],
+            ),
+            // A non-CD family must be ignored by the CD roll-up.
+            family("kvbm_inflight_mutable", &[("G2", 1.0)]),
+        ];
+        let cd = build_cd_snapshot(&fams).expect("CD families present => Some");
+        assert_eq!(cd.prefill_decisions.get("local"), Some(&7));
+        assert_eq!(cd.prefill_decisions.get("remote"), Some(&3));
+        assert_eq!(cd.local_prefill_tokens_total, 1234);
+        assert_eq!(cd.remote_prefill_tokens_total, 5678);
+        assert_eq!(cd.prefill_pulled_tokens_total, 9000);
+        assert_eq!(cd.prefill_local_hit_tokens_total, 4096);
+        assert_eq!(cd.remote_prefill_tokens.count, 2);
+        assert_eq!(cd.remote_prefill_tokens.sum, 900.0);
+        assert_eq!(
+            cd.remote_prefill_tokens.buckets,
+            vec![
+                HistogramBucket { le: 256.0, count: 1 },
+                HistogramBucket {
+                    le: 1024.0,
+                    count: 2,
+                },
+            ]
+        );
+        // Untouched fields default to zero / empty.
+        assert_eq!(cd.prefill_computed_tokens_total, 0);
+        assert!(cd.remote_prefill_declined.is_empty());
+    }
+
+    #[test]
+    fn cd_snapshot_none_when_no_cd_families() {
+        let fams = vec![family("kvbm_inflight_mutable", &[("G2", 1.0)])];
+        assert!(build_cd_snapshot(&fams).is_none());
     }
 }

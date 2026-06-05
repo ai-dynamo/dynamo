@@ -1843,6 +1843,11 @@ impl ConditionalDisaggCoordinator {
         if let Some(cd) = self.inner.cd_metrics() {
             cd.record_prefill_computed_tokens((expected_outputs.len() * block_size) as u64);
             cd.record_prefill_pulled_tokens((pulled.len() * block_size) as u64);
+            // Q7: of the pulled prefix, how much the prefill worker already had
+            // cached locally (its vLLM-G1 prefix-cache hit) — over-pulled today;
+            // the genuine pull supplement = pulled − this = num_external_tokens.
+            // LOWER BOUND: excludes prefill's own G2/G3 match (future PNCT work).
+            cd.record_prefill_local_hit_tokens(prefill_num_computed_tokens as u64);
         }
 
         let observer_handle: ObserverHandle = self

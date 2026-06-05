@@ -13,6 +13,8 @@
 //! TOKEN-QUANTITY CORRECTNESS (the USAA-1 trap): the CD path has four
 //! confusable token quantities. The metrics below read the EXACT variable:
 //! - local prefill tokens  = `num_prefill_tokens()` = total − num_computed − local_match
+//!   on the passthrough final-local paths; = total − num_computed on the budget-reject
+//!   path (returns None ⇒ the local_match is not onboarded and is recomputed)
 //! - remote prefill tokens = `split.remote_blocks() * block_size` (NOT
 //!   `full_block_external_tokens`, which over-counts by the local-match; NOT
 //!   the wire `num_prefill_tokens` field, which includes the prefix-cache hit).
@@ -49,8 +51,15 @@ pub struct CdMetrics {
     /// `_breaker_warm` = WARM-tier per-request deny→Local,
     /// `remote_admitted_breaker_warm` = WARM-tier per-request admit→Remote.
     pub prefill_decisions_total: IntCounterVec,
-    /// Q3: tokens the decode will itself prefill on a Local decision
-    /// (= num_prefill_tokens() = total − num_computed − local_match).
+    /// Q3: tokens the decode itself prefills LOCALLY, counted on EVERY path whose
+    /// FINAL placement is local — a policy-Local decision AND every policy-Remote
+    /// request that filtering downgrades back to local (breaker-HOT, B-GNMT
+    /// overload, zero-block, budget-reject). For the passthrough paths this is
+    /// num_prefill_tokens() = total − num_computed − local_match; for the
+    /// budget-reject path (returns None ⇒ no external match onboarded) it is
+    /// total − num_computed. Paired with [`Self::remote_prefill_tokens_total`]
+    /// these two counters partition the post-policy prefill compute by where it
+    /// actually ran, so a dashboard divides each by its decision count for an avg.
     pub local_prefill_tokens_total: IntCounter,
     /// Q4: tokens the decode expects the REMOTE to compute
     /// (= split.remote_blocks() * block_size), summed.
@@ -76,8 +85,18 @@ pub struct CdMetrics {
     /// Q6 distribution: per-request prefill forward-pass size.
     pub prefill_computed_tokens: Histogram,
     /// Interesting: tokens the prefill worker PULLED from decode (the onboarded
-    /// prefix it did NOT compute) — the deliberate complement of Q6.
+    /// prefix it did NOT compute) — the deliberate complement of Q6. Today this
+    /// is the FULL `[0, DNPT)` prefix window (conservative over-pull).
     pub prefill_pulled_tokens_total: IntCounter,
+    /// Q7: tokens in decode's committed prefix window that the prefill worker
+    /// ALREADY had cached locally — its own vLLM-**G1** prefix-cache hit
+    /// (`prefill_num_computed_tokens`). These are over-pulled from decode today;
+    /// they are the prefill-side "effective local cache hit" and the size of the
+    /// PNCT over-pull opportunity. The genuine pull SUPPLEMENT (still needed after
+    /// PNCT) = `prefill_pulled_tokens_total` − this. NOTE: this is a LOWER BOUND —
+    /// it counts only the G1 hit; the prefill worker's own G2/G3 local-match (the
+    /// other half of the PNCT search) is not yet folded in.
+    pub prefill_local_hit_tokens_total: IntCounter,
     /// Reconciliation: per-request finalize outcome of the expected_outputs set,
     /// by `outcome` ∈ {drained, undrained}. `undrained` = prefill produced fewer
     /// net-new blocks than decode expected — the within-prefill divergence signal
@@ -110,7 +129,7 @@ impl CdMetrics {
             .expect("valid metric"),
             local_prefill_tokens_total: IntCounter::with_opts(Opts::new(
                 "kvbm_cd_local_prefill_tokens_total",
-                "Tokens the decode prefills locally (uncached, unmatched) on Local CD decisions",
+                "Tokens the decode prefills locally on every FINAL-local path (Local decision plus breaker/overload/zero-block/budget downgrades)",
             ))
             .expect("valid metric"),
             remote_prefill_tokens_total: IntCounter::with_opts(Opts::new(
@@ -165,6 +184,11 @@ impl CdMetrics {
                 "Tokens the prefill worker pulled from decode (onboarded prefix, not computed)",
             ))
             .expect("valid metric"),
+            prefill_local_hit_tokens_total: IntCounter::with_opts(Opts::new(
+                "kvbm_cd_prefill_local_hit_tokens_total",
+                "Tokens in decode's prefix window the prefill worker already had in its vLLM-G1 prefix cache (over-pulled today = PNCT opportunity; LOWER BOUND, excludes prefill G2/G3)",
+            ))
+            .expect("valid metric"),
             prefill_output_residual_total: IntCounterVec::new(
                 Opts::new(
                     "kvbm_cd_prefill_output_residual_total",
@@ -200,6 +224,7 @@ impl CdMetrics {
         registry.register(Box::new(self.prefill_computed_tokens_total.clone()))?;
         registry.register(Box::new(self.prefill_computed_tokens.clone()))?;
         registry.register(Box::new(self.prefill_pulled_tokens_total.clone()))?;
+        registry.register(Box::new(self.prefill_local_hit_tokens_total.clone()))?;
         registry.register(Box::new(self.prefill_output_residual_total.clone()))?;
         registry.register(Box::new(self.breaker_tier.clone()))?;
         registry.register(Box::new(self.breaker_transitions_total.clone()))?;
@@ -217,7 +242,9 @@ impl CdMetrics {
             .inc();
     }
 
-    /// Q3: tokens the decode will prefill locally (Local decision).
+    /// Q3: tokens the decode prefills locally. Call on EVERY final-local path
+    /// (Local decision + breaker/overload/zero-block/budget downgrades) so the
+    /// counter reflects where prefill actually ran after all filtering.
     pub fn record_local_prefill_tokens(&self, tokens: u64) {
         self.local_prefill_tokens_total.inc_by(tokens);
     }
@@ -260,6 +287,14 @@ impl CdMetrics {
     /// Interesting: tokens pulled from decode (onboarded prefix, not computed).
     pub fn record_prefill_pulled_tokens(&self, tokens: u64) {
         self.prefill_pulled_tokens_total.inc_by(tokens);
+    }
+
+    /// Q7: tokens the prefill worker already had cached locally within decode's
+    /// prefix window (its own vLLM prefix-cache hit) — the effective prefill
+    /// cache hit / PNCT over-pull opportunity. Call once per remote-prefill
+    /// request alongside [`Self::record_prefill_pulled_tokens`].
+    pub fn record_prefill_local_hit_tokens(&self, tokens: u64) {
+        self.prefill_local_hit_tokens_total.inc_by(tokens);
     }
 
     /// Reconciliation: prefill finalize residual outcome. `outcome` ∈
@@ -408,6 +443,35 @@ mod tests {
             .collect();
         assert!(names.contains(&"kvbm_cd_breaker_tier".to_string()));
         assert!(names.contains(&"kvbm_cd_breaker_transitions_total".to_string()));
+    }
+
+    #[test]
+    fn test_prefill_local_hit_decomposes_pulled() {
+        // The prefill-side prefix acquisition partitions as:
+        //   pulled (over-pull window) = local-hit (already cached) + genuine supplement.
+        // Q7 (local-hit) is recorded independently; the supplement is derived.
+        let cd = CdMetrics::new();
+        let registry = Registry::new();
+        cd.register(&registry).unwrap();
+
+        cd.record_prefill_pulled_tokens(9000);
+        cd.record_prefill_local_hit_tokens(4096);
+        cd.record_prefill_computed_tokens(2048);
+
+        assert_eq!(cd.prefill_pulled_tokens_total.get(), 9000);
+        assert_eq!(cd.prefill_local_hit_tokens_total.get(), 4096);
+        // derived genuine pull supplement = pulled − local-hit
+        assert_eq!(
+            cd.prefill_pulled_tokens_total.get() - cd.prefill_local_hit_tokens_total.get(),
+            4904
+        );
+
+        let names: Vec<_> = registry
+            .gather()
+            .iter()
+            .map(|mf| mf.name().to_string())
+            .collect();
+        assert!(names.contains(&"kvbm_cd_prefill_local_hit_tokens_total".to_string()));
     }
 
     #[test]
