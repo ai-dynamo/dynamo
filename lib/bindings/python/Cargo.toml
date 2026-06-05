@@ -24,8 +24,9 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
-kv-indexer = ["dep:clap", "dep:tracing-subscriber"]
+kv-indexer = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-indexer"]
 kv-indexer-metrics = ["kv-indexer", "dynamo-kv-router/metrics"]
+slot-tracker = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-slot-tracker"]
 mocker-kvbm-offload = ["dynamo-mocker/kvbm-offload"]
 aic-forward-pass = ["dynamo-mocker/aic-forward-pass", "dep:aiconfigurator-core"]
 nvtx = ["dynamo-runtime/nvtx"]
@@ -68,8 +69,8 @@ tracing-opentelemetry = { version = "0.32.0" }
 opentelemetry = { version = "0.31.0", features = ["trace"] }
 uuid = { version = "1.18.1" }
 
-# kv-indexer / shared kv-router types
-dynamo-kv-router = { path = "../../kv-router", features = ["standalone-indexer"] }
+# kv-indexer / slot-tracker / shared kv-router types
+dynamo-kv-router = { path = "../../kv-router" }
 clap = { version = "4.5", features = ["derive"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 

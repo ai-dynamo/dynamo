@@ -298,6 +298,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     // Peer routers still approximate decay anchoring with local receive time.
                     let decay_now = Instant::now();
                     let mut remote_capacity_changed = false;
+                    // TODO: Extract a reusable single-event apply method with structured errors
+                    // and lazy or strict worker admission. Native sync assumes discovery plus lazy
+                    // registration; standalone transports must reject stale adds after removal.
                     match &event.data {
                         ActiveSequenceEventData::AddRequest {
                             token_sequence,
@@ -446,7 +449,28 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         req: SequenceRequest,
         decay_now: Instant,
     ) -> Result<(), SequenceError> {
-        let event = ActiveSequenceEvent {
+        self.add_request_impl(req, decay_now, true)
+    }
+
+    /// Add a request only when its worker is already registered.
+    ///
+    /// External control planes use this stricter variant so a request racing
+    /// worker removal cannot lazily recreate the removed worker.
+    pub fn add_request_if_registered(
+        &self,
+        req: SequenceRequest,
+        decay_now: Instant,
+    ) -> Result<(), SequenceError> {
+        self.add_request_impl(req, decay_now, false)
+    }
+
+    fn add_request_impl(
+        &self,
+        req: SequenceRequest,
+        decay_now: Instant,
+        lazily_register_worker: bool,
+    ) -> Result<(), SequenceError> {
+        let event = self.replica_sync.then(|| ActiveSequenceEvent {
             request_id: req.request_id.clone(),
             worker: req.worker,
             data: ActiveSequenceEventData::AddRequest {
@@ -457,9 +481,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             },
             router_id: self.router_id,
             lora_name: req.lora_name.clone(),
-        };
-        self.add_request_local(req, decay_now)?;
-        self.spawn_publish_event(event);
+        });
+        self.add_request_local(req, decay_now, lazily_register_worker)?;
+        if let Some(event) = event {
+            self.spawn_publish_event(event);
+        }
         Ok(())
     }
 
@@ -744,6 +770,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         &self,
         req: SequenceRequest,
         decay_now: Instant,
+        lazily_register_worker: bool,
     ) -> Result<(), SequenceError> {
         let SequenceRequest {
             request_id,
@@ -755,7 +782,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             lora_name,
         } = req;
 
-        self.ensure_worker_registered(worker);
+        if lazily_register_worker {
+            self.ensure_worker_registered(worker);
+        }
 
         let (expired_request_ids, load) = {
             let table = self.workers.read();
@@ -1852,6 +1881,46 @@ mod tests {
 
         sequences.update_workers(&HashMap::from([(1_u64, (0_u32, 1_u32))]));
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
+        assert!(sequences.prompt_registry.is_block_index_empty());
+    }
+
+    #[test]
+    fn strict_add_after_worker_removal_cannot_recreate_worker() {
+        let sequences = Arc::new(make_sequences());
+        let worker = WorkerWithDpRank::new(1, 0);
+        let ready = Arc::new(std::sync::Barrier::new(2));
+        let proceed = Arc::new(std::sync::Barrier::new(2));
+        let add_sequences = Arc::clone(&sequences);
+        let add_ready = Arc::clone(&ready);
+        let add_proceed = Arc::clone(&proceed);
+
+        let add = std::thread::spawn(move || {
+            add_ready.wait();
+            add_proceed.wait();
+            add_sequences.add_request_if_registered(
+                SequenceRequest {
+                    request_id: "req-1".to_string(),
+                    token_sequence: Some(vec![1, 2, 3]),
+                    track_prefill_tokens: false,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                    worker,
+                    lora_name: None,
+                },
+                Instant::now(),
+            )
+        });
+
+        ready.wait();
+        sequences.update_workers(&HashMap::new());
+        proceed.wait();
+        let result = add.join().unwrap();
+
+        assert!(
+            matches!(result, Err(SequenceError::WorkerNotFound { worker: missing }) if missing == worker)
+        );
+        assert_eq!(sequences.num_workers(), 0);
+        assert!(sequences.request_index.is_empty());
         assert!(sequences.prompt_registry.is_block_index_empty());
     }
 

@@ -105,10 +105,11 @@ type the `generate()` signature.  `GenerateRequest` has `token_ids`
 (required) plus optional `sampling_options`, `stop_conditions`, and
 `output_options`.  `GenerateChunk` has `token_ids` and `index` (both
 required; use `index=0` for single-choice chunks), plus optional
-`finish_reason` and `completion_usage` (both required on the final chunk).
-Engines may read
-backend-specific request keys, but response chunk keys should be added to
-the shared contract before use.
+`finish_reason` and `completion_usage` (both required on the final chunk),
+`log_probs` (one float per emitted token), and `top_logprobs` (per-position
+list of ranked alternative dicts — see `logprobs.py` for the entry shape).
+Engines may read backend-specific request keys, but response chunk keys
+should be added to the shared contract before use.
 
 Build the `completion_usage` dict inline. Finish reason normalization
 (e.g. `"abort"` → `"cancelled"`) is handled by the Rust layer.
@@ -268,6 +269,7 @@ spans should be.
 | `metrics.py` | Prometheus integration helpers. `register_global_registry` / `register_engine_registry` are engine-facing (vendor-registry bridge inside `register_prometheus`). `ensure_prometheus_multiproc_dir` / `gather_with_labels` remain engine-side utilities. |
 | `worker.py` | `Worker` -- thin shim over `dynamo._core.backend.Worker`; lifecycle state machine and signal handling live in Rust (`lib/backend-common`) |
 | `run.py` | Common entry point -- `run(engine_cls)` used by all `unified_main.py` files |
+| `logprobs.py` | Shared logprob helpers: `parse_logprob_options`, `extract_from_completion_output` (vLLM/TRT-LLM shape), `extract_from_sglang_meta` + `build_sglang_logprob_kwargs` (SGLang cumulative-array shape). Both unified engines and the legacy handlers delegate here. |
 | `sample_engine.py` | Reference engine -- use as template and for testing |
 
 The Rust `Worker` (in `lib/backend-common/src/worker.rs`) owns:

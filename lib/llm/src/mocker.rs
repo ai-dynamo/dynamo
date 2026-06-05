@@ -618,6 +618,17 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             break;
                         };
 
+                        // A terminally rejected request never ran (its footprint
+                        // exceeds the KV pool): emit no token and do not complete the
+                        // bootstrap room — surface the rejection and end the stream
+                        // before any token/prefill bookkeeping.
+                        if signal.rejected {
+                            let _ = stream_tx.send(LLMEngineOutput::error(
+                                "request rejected: KV footprint exceeds pool capacity".to_string(),
+                            ));
+                            break;
+                        }
+
                         // Generate a token (with thinking boundaries if configured)
                         let token_id = if token_count == 0 && think_len > 0 {
                             reasoning.as_ref().unwrap().start_thinking_token_id
