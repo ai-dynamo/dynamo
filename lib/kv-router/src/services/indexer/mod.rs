@@ -7,7 +7,7 @@
 //! `/query_by_hash`, and peer-discovery routes that workers / gateways can
 //! call to drive cache-aware routing decisions. Each registered worker spawns
 //! a ZMQ listener that ingests its KV events into a per-(model, tenant)
-//! [`indexer::Indexer`].
+//! [`backend::Indexer`].
 //!
 //! ## Multi-tier responses
 //!
@@ -23,7 +23,7 @@
 //! Tier counts are CUMULATIVE through each tier's walk — see the doc on the
 //! response struct in [`server`] for the exact semantics.
 
-pub mod indexer;
+pub mod backend;
 pub mod listener;
 pub mod metrics;
 pub mod recovery;

@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::protocols::WorkerId;
 
-use super::indexer::{Indexer, create_indexer};
+use super::backend::{Indexer, create_indexer};
 use super::listener::spawn_zmq_listener;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
@@ -93,7 +93,6 @@ impl fmt::Display for ListenerStatus {
 #[serde(rename_all = "snake_case")]
 pub enum WorkerSource {
     Zmq,
-    Discovery,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -123,9 +122,6 @@ pub enum ListenerControlError {
 
     #[error("instance {instance_id} dp_rank {dp_rank} not found")]
     ListenerNotFound { instance_id: WorkerId, dp_rank: u32 },
-
-    #[error("instance {instance_id} is discovery-managed; no ZMQ listener to control")]
-    DiscoveryManaged { instance_id: WorkerId },
 
     #[error("instance {instance_id} dp_rank {dp_rank} cannot be paused from status {status}")]
     InvalidPauseState {
@@ -657,8 +653,8 @@ impl WorkerRegistry {
                 let key = &worker.key;
 
                 // Apply caller-supplied filters.
-                if !model_name.map_or(true, |m| key.model_name == m)
-                    || !tenant_id.map_or(true, |t| key.tenant_id == t)
+                if model_name.is_some_and(|m| key.model_name != m)
+                    || tenant_id.is_some_and(|t| key.tenant_id != t)
                 {
                     return None;
                 }

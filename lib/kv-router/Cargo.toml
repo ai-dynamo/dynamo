@@ -21,7 +21,6 @@ profile = []
 shard-metrics = []
 standalone-indexer = ["dep:axum", "dep:serde_json", "dep:reqwest", "dep:zmq"]
 standalone-slot-tracker = ["dep:axum", "dep:serde_json"]
-indexer-runtime = ["metrics", "runtime-protocols", "standalone-indexer"]
 
 [dependencies]
 # repo

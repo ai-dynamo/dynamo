@@ -14,6 +14,7 @@ pub mod protocols;
 pub mod recovery;
 pub mod scheduling;
 pub mod sequences;
+pub mod services;
 pub mod zmq_wire;
 
 // Backward-compat re-exports: old top-level module paths still work
@@ -28,15 +29,6 @@ pub use scheduling::queue;
 pub use scheduling::selector;
 pub use sequences::multi_worker as multi_worker_sequence;
 pub use sequences::single as sequence;
-
-#[cfg(feature = "standalone-indexer")]
-pub mod standalone_indexer;
-
-#[cfg(feature = "standalone-indexer")]
-pub mod standalone_shared_cache;
-
-#[cfg(feature = "standalone-slot-tracker")]
-pub mod standalone_slot_tracker;
 
 #[cfg(any(test, feature = "bench"))]
 pub mod test_utils;
