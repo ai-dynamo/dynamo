@@ -100,7 +100,7 @@ limitations under the License.
 
 ### 1.0 新功能
 
-- **零配置部署（[DGDR](https://docs.nvidia.com/dynamo/kubernetes-deployment/deployment-guide/dgdr-reference)）** *(beta)：* 在一个 YAML 中指定模型、硬件和 SLA；AIConfigurator 自动分析工作负载，Planner 优化拓扑，然后由 Dynamo 完成部署
+- **零配置部署（[DGDR](https://docs.nvidia.com/dynamo/kubernetes-deployment/deploy-models/dgdr-reference)）** *(beta)：* 在一个 YAML 中指定模型、硬件和 SLA；AIConfigurator 自动分析工作负载，Planner 优化拓扑，然后由 Dynamo 完成部署
 - **Agentic inference：** 按请求提供延迟优先级、预期输出长度和缓存固定 TTL 等提示。集成 [LangChain](https://docs.langchain.com/oss/python/integrations/chat/nvidia_ai_endpoints#use-with-nvidia-dynamo) + [NeMo Agent Toolkit](https://github.com/NVIDIA/NeMo-Agent-Toolkit)
 - **多模态 E/P/D：** 带 embedding cache 的分离式 encode/prefill/decode；图像工作负载 TTFT 快 30%
 - **视频生成：** 原生支持 [FastVideo](https://github.com/hao-ai-lab/FastVideo) + [SGLang Diffusion](https://lmsys.org/blog/2026-02-16-sglang-diffusion-advanced-optimizations/)；单张 B200 上实现实时 1080p
@@ -143,7 +143,7 @@ uv pip install --prerelease=allow "ai-dynamo[sglang]"   # 或 [vllm]
 
 ### 选项 C：Kubernetes（推荐）
 
-对于生产级多节点集群，安装 [Dynamo Platform](https://docs.nvidia.com/dynamo/kubernetes-deployment/deployment-guide)，并使用单个 manifest 部署：
+对于生产级多节点集群，安装 [Dynamo Platform](https://docs.nvidia.com/dynamo/kubernetes-deployment/start-here/installation-guide)，并使用单个 manifest 部署：
 
 ```yaml
 # 零配置部署：指定模型 + SLA，剩余工作由 Dynamo 处理
@@ -262,7 +262,7 @@ Dynamo 使用 TCP 进行组件间通信。在 Kubernetes 上，原生资源（[C
 - **[支持矩阵](https://docs.nvidia.com/dynamo/resources/support-matrix)** — 硬件、操作系统、CUDA 和后端版本
 - **[功能矩阵](https://docs.nvidia.com/dynamo/resources/feature-matrix)** — 详细后端兼容性
 - **[发布产物](https://docs.nvidia.com/dynamo/resources/release-artifacts)** — 容器、wheel、Helm chart
-- **[服务发现](https://docs.nvidia.com/dynamo/kubernetes-deployment/deployment-guide/service-discovery)** — K8s 原生、etcd 与基于文件的服务发现对比
+- **[服务发现](https://docs.nvidia.com/dynamo/kubernetes-deployment/advanced-platform/service-discovery)** — K8s 原生、etcd 与基于文件的服务发现对比
 - **[基准测试指南](https://docs.nvidia.com/dynamo/user-guides/benchmarking)** — 使用 AIPerf 比较部署拓扑
 
 <!-- Reference links for Feature Compatibility Matrix -->
