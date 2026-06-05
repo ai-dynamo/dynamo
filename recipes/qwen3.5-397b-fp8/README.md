@@ -194,7 +194,7 @@ includes [PR 824](https://github.com/ai-dynamo/aiperf/pull/824)
 (`feat(dataset): add session_id to single-turn for causal ordering`),
 which is what makes aiperf's `single_turn` mode honor the
 `session_id=user_<N>` ordering our sliding-window dataset writes per
-`(user, turn)` row — without it the 8 turns of a user can interleave
+`(user, turn)` row — without it the 3 turns of a user can interleave
 across requests and prefix-cache hits across turns disappear.
 
 Bump `AIPERF_VERSION` in `benchmark/perf.yaml` when you want newer aiperf
@@ -219,12 +219,15 @@ kubectl -n "$NAMESPACE" get pvc,deploy,job,pod \
 
 ## Notes
 
-- Dataset is sliding-window with `window=5`, `turns=8`, `users=30`,
-  `image_size=2400x1080`, `user_text_tokens=8000`. Yields 240 requests
-  (`users × turns`) over 12 unique images per user
-  (`window + turns - 1`). Base64-inlined.
+- Dataset is sliding-window with `window=5`, `turns=3`, `users=30`,
+  `image_size=2400x1080`, `user_text_tokens=8000`. Yields 90 requests
+  (`users × turns`) over 7 unique images per user
+  (`window + turns - 1`). Base64-inlined. 3 turns keeps the warm-request
+  fraction at 2/3 (turn-1 cold, turns 2-3 reuse 4-of-5 images), so the
+  benchmark exercises fresh-image preprocessing rather than a
+  cache-saturated steady state.
 - Each jsonl row carries `session_id=user_<N>`. With aiperf PR 824, the
-  `single_turn` dataset type honors session ordering so the 8 turns of
+  `single_turn` dataset type honors session ordering so the 3 turns of
   any one user are sent in causal order, letting prefix-cache hits land.
 - The vllm command in `deploy-<config>.yaml` uses `--tensor-parallel-size 8
   --enable-expert-parallel --mm-encoder-tp-mode data

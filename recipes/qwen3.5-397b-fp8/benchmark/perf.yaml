@@ -20,7 +20,7 @@
 # 903 ("HF Image(decode=False) byte dicts") — landed in the 0.8.0
 # release (2026-05-16), so any 0.8.0+ wheel works. Our sliding-window
 # jsonl writes session_id=user_<N> per row; PR 824 makes single_turn
-# mode honor that ordering so the 8 turns of any one user are issued
+# mode honor that ordering so the 3 turns of any one user are issued
 # in causal order and prefix-cache hits across turns actually land.
 apiVersion: v1
 kind: Pod
@@ -65,7 +65,7 @@ spec:
           done
           echo "Model '${MODEL_NAME}' is ready."
 
-          INPUT_FILE="${DATASET_DIR}/30u_8t_5w_8000word_base64.jsonl"
+          INPUT_FILE="${DATASET_DIR}/30u_3t_5w_8000word_base64.jsonl"
           if [[ ! -f "${INPUT_FILE}" ]]; then
             echo "Dataset not found: ${INPUT_FILE}" >&2
             exit 1
@@ -76,7 +76,7 @@ spec:
           echo "Running benchmark; artifacts → ${RUN_DIR}"
 
           # single_turn (NOT multi_turn): each jsonl row is one request.
-          # PR 824 makes single_turn respect session_id, so the 8 turns
+          # PR 824 makes single_turn respect session_id, so the 3 turns
           # of user_<N> are issued in causal order.
           aiperf profile \
             --model "${MODEL_NAME}" \
@@ -134,7 +134,7 @@ spec:
         - name: MAX_TOKENS
           value: "1024"
         - name: REQUEST_COUNT
-          value: "240"  # 30 users × 8 turns
+          value: "90"  # 30 users × 3 turns
         - name: CONCURRENCY
           value: "30"
         - name: WARMUP_REQUEST_COUNT

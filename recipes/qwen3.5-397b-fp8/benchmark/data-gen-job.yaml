@@ -1,18 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Generate 30u_8t_5w_8000word_base64.jsonl into /perf-cache/datasets/.
-# Sliding-window: 30 users × 8 turns × window=5 = 240 requests over 12
-# unique images per user (window + turns - 1 = 5 + 8 - 1 = 12), so 360
+# Generate 30u_3t_5w_8000word_base64.jsonl into /perf-cache/datasets/.
+# Sliding-window: 30 users × 3 turns × window=5 = 90 requests over 7
+# unique images per user (window + turns - 1 = 5 + 3 - 1 = 7), so 210
 # total images; 8000 text tokens per request, 2400x1080 base64-inlined.
 # Each row has session_id=user_<N> so aiperf can issue same-user turns
 # in causal order (requires aiperf PR 824).
 #
-# Matches the dataset shape implied by PR 8235's sweep_397b.yaml
-# (8K ISL × 5 images per turn × 1K OSL × conc=30) but extended from 3 to
-# 8 turns so prefix-cache hits across same-user turns have time to land
-# (turn-1 is a cold-cache baseline; turns 2-8 each reuse 4-of-5 images
-# from the prior turn).
+# Matches PR 8235's sweep_397b.yaml shape (8K ISL × 5 images per turn ×
+# 1K OSL × conc=30, 3 turns per user): turn-1 is a cold-cache baseline,
+# turns 2-3 each reuse 4-of-5 images from the prior turn. The modest
+# turn count keeps the warm-request fraction at 2/3, so the benchmark
+# reflects fresh-image preprocessing cost rather than a cache-saturated
+# steady state (8-turn pushes warm-fraction to 7/8 and lets the
+# baseline's processor/prefix caches mask the frontend-decoding win).
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -79,14 +81,14 @@ spec:
               mkdir -p "${OUTPUT_DIR}" "${IMAGE_DIR}"
               python3 main.py sliding-window \
                 --num-users 30 \
-                --turns-per-user 8 \
+                --turns-per-user 3 \
                 --window-size 5 \
                 --image-size 2400 1080 \
                 --image-mode base64 \
                 --image-dir "${IMAGE_DIR}" \
                 --user-text-tokens 8000 \
-                -o "${OUTPUT_DIR}/30u_8t_5w_8000word_base64.jsonl"
-              ls -lh "${OUTPUT_DIR}/30u_8t_5w_8000word_base64.jsonl"
+                -o "${OUTPUT_DIR}/30u_3t_5w_8000word_base64.jsonl"
+              ls -lh "${OUTPUT_DIR}/30u_3t_5w_8000word_base64.jsonl"
               echo "Dataset generation complete in ${OUTPUT_DIR}"
           volumeMounts:
             - name: shared-model-cache
