@@ -226,6 +226,33 @@ struct PreprocessRequestOptions {
     preserve_omitted_max_tokens: bool,
 }
 
+/// Patch the Phi-3 fast-vs-slow tokenizer divergence while appending: after
+/// a Phi-3 special token (id ≥ 32000), the slow `LlamaTokenizer` vLLM uses
+/// emits `▁▁` (259) where the Rust fast tokenizer emits `▁` (29871). Without
+/// this, block 0's hash never matches the worker's.
+#[cfg(feature = "mm-routing")]
+fn extend_phi3_with_prefix_fixup(
+    result: &mut Vec<crate::protocols::TokenIdType>,
+    tokens: &[crate::protocols::TokenIdType],
+) {
+    const SINGLE_SPACE: crate::protocols::TokenIdType = 29871;
+    const DOUBLE_SPACE: crate::protocols::TokenIdType = 259;
+    const PHI3_SPECIAL_START: crate::protocols::TokenIdType = 32000;
+    for (i, &tok) in tokens.iter().enumerate() {
+        let prev = if i == 0 {
+            result.last().copied()
+        } else {
+            Some(tokens[i - 1])
+        };
+        let patched = if tok == SINGLE_SPACE && prev.is_some_and(|p| p >= PHI3_SPECIAL_START) {
+            DOUBLE_SPACE
+        } else {
+            tok
+        };
+        result.push(patched);
+    }
+}
+
 pub struct OpenAIPreprocessor {
     mdcsum: String,
     formatter: Arc<dyn OAIPromptFormatter>,
@@ -1350,24 +1377,25 @@ impl OpenAIPreprocessor {
     /// placeholder template so the router's per-block hashes match the
     /// worker's BlockStored events byte-for-byte.
     ///
-    /// **Family contract — Phi-3-only.** The encode-decode roundtrip +
-    /// per-segment BOS pattern here is specific to Phi-3's HF processor
-    /// (and any future `LlamaTokenizer`-family with `<|image_{n}|>`
-    /// placeholders): the processor splits the prompt at `<|image_N|>` and
-    /// tokenizes each segment with `add_special_tokens=true`, prefixing
-    /// every segment (including the first) with a fresh BOS, and decodes-
-    /// then-re-encodes across special-token boundaries, which inserts
-    /// whitespace after each special token and bumps the SentencePiece
-    /// prefix token (e.g. 29871 `▁` -> 259 `▁▁` for `<|user|>\n`). Both
-    /// effects are reproduced here.
+    /// Mirrors Phi3VProcessor's `_convert_images_texts_to_inputs`: split
+    /// the prompt at `<|image_N|>`, tokenize each chunk with
+    /// `add_special_tokens=True` (which prepends BOS per chunk for Phi-3's
+    /// LlamaTokenizer family), and interleave with one `find_token_id` per
+    /// image (the caller expands it to N copies). Result is byte-for-byte
+    /// identical to the worker's `prompt_token_ids` — verified via
+    /// `phi3_token_diff.py` against vLLM 0.22 + Phi-3-vision.
+    ///
+    /// **Previous version** (pre-fix) added an encode-decode-encode
+    /// roundtrip intended to mirror vLLM's `_apply_text_matches` fallback
+    /// (which inserts a space after special tokens, bumping `▁` (29871)
+    /// to `▁▁` (259)). vLLM 0.22's Phi-3 processor emits image-placeholder
+    /// IDs at processor-time, BEFORE `_apply_token_matches` runs, so the
+    /// fallback path is dead — and the roundtrip's double-space made
+    /// every router-side block hash diverge from the worker.
     ///
     /// Caller is `gather_mm_exact_routing_info`, which gates on
-    /// `placeholder_tpl.contains("{n}")`. The `routing_prepend_bos`
-    /// requirement below acts as the family guard: a future model with a
-    /// `{n}`-style placeholder but no BOS prepend (i.e. not a
-    /// LlamaTokenizer-family) would not benefit from this roundtrip and
-    /// could silently produce wrong block hashes, so we bail and let the
-    /// caller fall back to text-prefix routing.
+    /// `placeholder_tpl.contains("{n}")`. `routing_prepend_bos` acts as
+    /// the LlamaTokenizer-family guard.
     ///
     /// Returns one `find_token_id` per image; the caller's expansion loop
     /// multiplies them to the per-image patch count. Leading BOS is
@@ -1383,21 +1411,9 @@ impl OpenAIPreprocessor {
         find_token_id: crate::protocols::TokenIdType,
         expected_count: usize,
     ) -> Option<Vec<crate::protocols::TokenIdType>> {
-        // Family guard: the encode-decode roundtrip + per-segment BOS
-        // semantics are LlamaTokenizer-family-specific. `routing_prepend_bos`
-        // is set iff the model declares `add_bos_token: true` in
-        // tokenizer_config.json, which is the marker for that family.
+        // Family guard: only LlamaTokenizer-family models (add_bos_token=true)
+        // use this splice — others fall back to the generic path.
         let bos = self.routing_prepend_bos?;
-
-        // Encode-decode roundtrip mirrors vLLM's text-substitute fallback,
-        // which is what the Phi-3 worker actually hashes on.
-        let prompt_owned: String = self
-            .tokenizer
-            .encode(prompt)
-            .ok()
-            .and_then(|enc| self.tokenizer.decode(enc.token_ids(), false).ok())
-            .map(Into::into)?;
-        let prompt: &str = &prompt_owned;
 
         let mut byte_ranges: Vec<(usize, usize)> = Vec::with_capacity(expected_count);
         let mut search_from = 0usize;
@@ -1410,24 +1426,18 @@ impl OpenAIPreprocessor {
             search_from = end;
         }
 
-        // Leading BOS is emitted here so the caller's general-purpose
-        // BOS-prepend path can skip when this helper produced the
-        // normalized tokens (avoids the prior split-brain where leading
-        // BOS was pushed by the caller and mid/suffix BOS pushed here).
         let mut result: Vec<crate::protocols::TokenIdType> = vec![bos];
         let mut prev_end = 0usize;
         for &(ph_start, ph_end) in byte_ranges.iter() {
             let seg = &prompt[prev_end..ph_start];
             let seg_enc = self.tokenizer.encode(seg).ok()?;
-            result.extend_from_slice(seg_enc.token_ids());
+            extend_phi3_with_prefix_fixup(&mut result, seg_enc.token_ids());
             result.push(find_token_id);
-            // Mid-prompt segments get a fresh BOS — Phi-3's HF processor
-            // tokenizes each segment with add_special_tokens=true.
             result.push(bos);
             prev_end = ph_end;
         }
         let suffix_enc = self.tokenizer.encode(&prompt[prev_end..]).ok()?;
-        result.extend_from_slice(suffix_enc.token_ids());
+        extend_phi3_with_prefix_fixup(&mut result, suffix_enc.token_ids());
         Some(result)
     }
 

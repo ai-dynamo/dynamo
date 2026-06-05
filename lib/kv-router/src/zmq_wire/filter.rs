@@ -72,10 +72,17 @@ impl KvCacheSpecKind {
         }
     }
 
+    /// Kinds whose blocks are valid prefix-match targets. SW variants are
+    /// included — their blocks are stored normally; the window only affects
+    /// per-token attention, not block reuse.
     pub(crate) fn is_main_attention(self) -> bool {
         matches!(
             self,
-            Self::FullAttention | Self::MlaAttention | Self::SinkFullAttention
+            Self::FullAttention
+                | Self::MlaAttention
+                | Self::SinkFullAttention
+                | Self::SlidingWindow
+                | Self::SlidingWindowMla
         )
     }
 }

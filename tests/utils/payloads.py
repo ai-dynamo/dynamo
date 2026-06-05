@@ -384,6 +384,32 @@ class GuidedDecodingChatPayload(ChatPayload):
         logger.info(f"Guided decoding validation passed: {parsed}")
 
 
+def _extract_image_url(body: Dict[str, Any]) -> Optional[str]:
+    """Return the first image_url found in a chat-completions body, or None."""
+    for msg in body.get("messages", []) or []:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "image_url":
+                url = (part.get("image_url") or {}).get("url")
+                if isinstance(url, str):
+                    return url
+    return None
+
+
+def _set_image_url(body: Dict[str, Any], new_url: str) -> None:
+    """Mutate the first image_url part in-place to ``new_url``."""
+    for msg in body.get("messages", []) or []:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "image_url":
+                part["image_url"] = {**(part.get("image_url") or {}), "url": new_url}
+                return
+
+
 @dataclass
 class CachedTokensChatPayload(ChatPayload):
     """
@@ -409,6 +435,8 @@ class CachedTokensChatPayload(ChatPayload):
         require_rust_processor_init: bool = False,
         require_vllm_mm_processor_init: bool = False,
         min_avg_kv_hit_rate: float = 0.0,
+        vary_image_url: Optional[str] = None,
+        max_overlap_on_vary: float = 0.5,
     ):
         # MM-aware routing checks: piggyback on engine_process.validate_expected_logs.
         log_patterns: List[str] = list(expected_log or [])
@@ -432,6 +460,14 @@ class CachedTokensChatPayload(ChatPayload):
             log_patterns.append(
                 rf"\[ROUTING\].*with\s+\d+/[1-9]\d{{{min_digits - 1},}}\s+blocks overlap"
             )
+        # Append one final probe request with a different image URL to
+        # catch text-prefix-only routing that would otherwise pass.
+        self._vary_image_url = vary_image_url
+        self._max_overlap_on_vary = max_overlap_on_vary
+        self._original_image_url: Optional[str] = None
+        if vary_image_url is not None:
+            repeat_count = repeat_count + 1
+            self._original_image_url = _extract_image_url(body)
         super().__init__(
             body=body,
             repeat_count=repeat_count,
@@ -442,6 +478,8 @@ class CachedTokensChatPayload(ChatPayload):
         self.min_cached_tokens = min_cached_tokens
         self._request_count = 0
         self._cached_tokens_found = False
+        self._vary_probe_cached_tokens: Optional[int] = None
+        self._vary_probe_prompt_tokens: Optional[int] = None
         self.router_nvext_expectation = router_nvext_expectation
         # Asserts the post-R1 mean of router_kv_hit_rate >= threshold. Catches
         # router/worker hash divergence (overlap=0) that cached_tokens alone
@@ -455,11 +493,24 @@ class CachedTokensChatPayload(ChatPayload):
         # mixin/subclass.
         self.min_avg_kv_hit_rate = min_avg_kv_hit_rate
         self._metrics_baseline: Optional[tuple[float, float]] = None
+        # Snapshot of router_kv_hit_rate taken after the last steady-state
+        # request, BEFORE the vary-image probe fires. Without this the probe
+        # (intentional near-miss) would drag the post-R1 mean below the
+        # threshold even when MM-routing is working perfectly.
+        self._metrics_pre_probe: Optional[tuple[float, float]] = None
 
     def validate(self, response: Any, content: str) -> None:
         """Validate response and check for cached tokens on repeated requests."""
-        # First run the standard content validation
-        super().validate(response, content)
+        # The vary-image probe deliberately sends a different image; its
+        # response content (e.g. a different color) is expected to differ
+        # from `expected_response`, so skip content validation for that one
+        # iteration. We still capture its cached_tokens for the probe gate.
+        is_vary_probe = (
+            self._vary_image_url is not None
+            and self._request_count + 1 == self.repeat_count
+        )
+        if not is_vary_probe:
+            super().validate(response, content)
 
         self._request_count += 1
         result = response.json()
@@ -478,11 +529,14 @@ class CachedTokensChatPayload(ChatPayload):
         logger.info(
             f"Request {self._request_count}: prompt_tokens={usage.get('prompt_tokens')}, "
             f"cached_tokens={cached_tokens}, prompt_tokens_details={prompt_tokens_details}"
+            f"{' [vary-image probe]' if is_vary_probe else ''}"
         )
 
-        # For requests after the first one, we expect cached tokens > 0
-        # (since identical prompts should hit the prefix cache)
-        if self._request_count > 1:
+        if is_vary_probe:
+            # Stash for final_validation; not counted toward the regular gate.
+            self._vary_probe_cached_tokens = int(cached_tokens)
+            self._vary_probe_prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        elif self._request_count > 1:
             if cached_tokens >= self.min_cached_tokens:
                 self._cached_tokens_found = True
                 logger.info(
@@ -502,6 +556,18 @@ class CachedTokensChatPayload(ChatPayload):
             and self.min_avg_kv_hit_rate > 0
         ):
             self._metrics_baseline = self._scrape_router_kv_hit_rate()
+
+        # Swap image URL for the final probe; driver re-reads self.body.
+        # Also snapshot the kv_hit_rate metric NOW (before the probe fires)
+        # so the gate evaluates only steady-state hits — the probe is an
+        # intentional near-miss and would otherwise drag the mean down.
+        if (
+            self._vary_image_url is not None
+            and self._request_count == self.repeat_count - 1
+        ):
+            if self.min_avg_kv_hit_rate > 0:
+                self._metrics_pre_probe = self._scrape_router_kv_hit_rate()
+            _set_image_url(self.body, self._vary_image_url)
 
     def _scrape_router_kv_hit_rate(self) -> Optional[tuple[float, float]]:
         """Return ``(sum, count)`` for ``router_kv_hit_rate`` from the
@@ -548,6 +614,36 @@ class CachedTokensChatPayload(ChatPayload):
             "✓ Final validation PASSED: cached_tokens found in repeated requests"
         )
 
+        # Vary-image probe: only the shared text prefix can legitimately hit.
+        if self._vary_image_url is not None:
+            if self._vary_probe_cached_tokens is None:
+                raise AssertionError(
+                    "vary_image_url set but no probe response captured; "
+                    "the final request did not run."
+                )
+            prompt_tokens = self._vary_probe_prompt_tokens or 0
+            ratio = (
+                self._vary_probe_cached_tokens / prompt_tokens
+                if prompt_tokens > 0
+                else 0.0
+            )
+            if ratio > self._max_overlap_on_vary:
+                raise AssertionError(
+                    f"vary-image probe: cached_tokens="
+                    f"{self._vary_probe_cached_tokens}/{prompt_tokens} "
+                    f"(ratio={ratio:.3f}) exceeds max_overlap_on_vary="
+                    f"{self._max_overlap_on_vary}. Steady-state hits should "
+                    f"come from MM-aware routing on the image hash, but the "
+                    f"probe with a different image still hits — suggests "
+                    f"text-prefix fallback (image not actually keyed)."
+                )
+            logger.info(
+                f"✓ vary-image probe: cached_tokens="
+                f"{self._vary_probe_cached_tokens}/{prompt_tokens} "
+                f"(ratio={ratio:.3f}) within max_overlap_on_vary="
+                f"{self._max_overlap_on_vary}"
+            )
+
         if self.min_avg_kv_hit_rate <= 0:
             return
         if self._metrics_baseline is None:
@@ -555,7 +651,10 @@ class CachedTokensChatPayload(ChatPayload):
                 "min_avg_kv_hit_rate set but no metrics baseline captured "
                 "(R1 validate() didn't run or /metrics was unreachable)."
             )
-        after = self._scrape_router_kv_hit_rate()
+        # When a vary-image probe is configured, the pre-probe snapshot is
+        # the right "after" — the probe is an intentional near-miss and
+        # should not be averaged into the steady-state gate.
+        after = self._metrics_pre_probe or self._scrape_router_kv_hit_rate()
         if after is None:
             raise AssertionError(
                 "router_kv_hit_rate scrape failed at final_validation; "

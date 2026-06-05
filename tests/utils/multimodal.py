@@ -72,6 +72,8 @@ def make_image_payload_cached_tokens(
     require_vllm_mm_processor_init: bool = False,
     min_routing_total_blocks: int = 0,
     min_avg_kv_hit_rate: float = 0.0,
+    vary_image_url: Optional[str] = None,
+    max_overlap_on_vary: float = 0.5,
 ) -> CachedTokensChatPayload:
     """Image payload that asserts MM-aware KV cache reuse on repeats.
 
@@ -80,6 +82,10 @@ def make_image_payload_cached_tokens(
     [ROUTING] block count is well above text-prefix fallback (~1-3 blocks).
     ``min_avg_kv_hit_rate`` asserts the post-R1 mean of router_kv_hit_rate
     >= threshold (fails closed when router-side hashes diverge from the worker).
+
+    ``vary_image_url`` sends one final probe with a different image; the test
+    then asserts cached_tokens ≤ prompt_len * ``max_overlap_on_vary`` —
+    proving the hit comes from the image hash, not text-prefix reuse alone.
     """
     return CachedTokensChatPayload(
         body={
@@ -106,6 +112,8 @@ def make_image_payload_cached_tokens(
         require_vllm_mm_processor_init=require_vllm_mm_processor_init,
         min_routing_total_blocks=min_routing_total_blocks,
         min_avg_kv_hit_rate=min_avg_kv_hit_rate,
+        vary_image_url=vary_image_url,
+        max_overlap_on_vary=max_overlap_on_vary,
     )
 
 
