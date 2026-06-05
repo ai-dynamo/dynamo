@@ -6,8 +6,11 @@
 #   ${BENCH_POD}        — Pod name (qwen35-bench / qwen35-fd-bench)
 #   ${BENCH_FRONTEND}   — Service the bench hits at $FRONTEND:8000
 #                         (qwen35-vllm-serve / qwen35-dynamo-fd-frontend)
-#   ${BENCH_RUN_LABEL}  — Sub-dir under /perf-cache/artifacts/qwen35_fp8/
-#                         (vllm-serve / dynamo-fd)
+#   ${BENCH_RUN_LABEL}  — Run-isolated sub-path under
+#                         /perf-cache/artifacts/qwen35_fp8/, resolved by
+#                         run-benchmark.sh as <namespace>/<run-id>/<config>
+#                         so runs across namespaces (all sharing one FSx
+#                         filesystem) never read or clobber each other.
 # The hostname pin (${HW_NODE_SELECTOR}) is the same as the
 # server/worker pods, which is what guarantees same-node placement.
 # No podAffinity — the hostname pin makes it redundant.
@@ -121,8 +124,9 @@ spec:
         # auto-created <dgd>-frontend Service).
         - name: FRONTEND
           value: ${BENCH_FRONTEND}
-        # Driver-exported: per-config sub-dir under ARTIFACT_BASE_DIR so
-        # retrieve() can scoop only this config's run.
+        # Driver-exported run-isolated sub-path (<namespace>/<run-id>/<config>)
+        # under ARTIFACT_BASE_DIR so retrieve() scoops only this run and
+        # runs never collide on the shared FSx PVC.
         - name: RUN_LABEL
           value: ${BENCH_RUN_LABEL}
         - name: AIPERF_VERSION

@@ -14,6 +14,7 @@
 #   ./run-all-benchmarks.sh -n <namespace> --skip-prep              # already PVC/download/dataset-ready
 #   ./run-all-benchmarks.sh -n <namespace> --context <kube-context> # pin kubectl context for every call
 #   KUBE_CONTEXT=<ctx> ./run-all-benchmarks.sh -n <namespace>       # env-var form, same effect
+#   ./run-all-benchmarks.sh -n <namespace> --run-id <id>           # pin the run-isolation id (else a timestamp)
 #
 # Prep step (PVC + model download + data gen) runs once before the first
 # deploy unless --skip-prep is passed.
@@ -23,6 +24,7 @@ NAMESPACE=""
 HW="h100"
 SKIP_PREP="0"
 KUBE_CONTEXT="${KUBE_CONTEXT:-}"
+RUN_ID="${RUN_ID:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -30,6 +32,7 @@ while [[ $# -gt 0 ]]; do
     --hw) HW="$2"; shift 2 ;;
     --skip-prep) SKIP_PREP="1"; shift ;;
     --context) KUBE_CONTEXT="$2"; shift 2 ;;
+    --run-id) RUN_ID="$2"; shift 2 ;;
     -h|--help)
       grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
@@ -40,6 +43,11 @@ done
 # --context through identically.
 DRIVER_EXTRA=()
 [[ -n "$KUBE_CONTEXT" ]] && DRIVER_EXTRA+=(--context "$KUBE_CONTEXT")
+# Pin ONE run-id for the whole 2-config pass so vllm-serve and dynamo-fd
+# land under the same isolated run dir and each step's retrieve agrees
+# with its bench (the steps run as separate run-benchmark.sh processes).
+RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
+DRIVER_EXTRA+=(--run-id "$RUN_ID")
 if [[ -z "$NAMESPACE" ]]; then
   echo "ERROR: -n <namespace> required" >&2; exit 2
 fi
@@ -55,7 +63,7 @@ BASE_DIR="${BENCHMARK_RESULTS_DIR:-$HOME/workspace/dynamo-tmp/logs}"
 SUMMARY_DIR="$BASE_DIR/${TS_DIR}/qwen35-fp8-${HW}"
 mkdir -p "$SUMMARY_DIR"
 RUN_LOG="$SUMMARY_DIR/run-all-benchmarks.log"
-echo "[run-all] hw=$HW namespace=$NAMESPACE" | tee -a "$RUN_LOG"
+echo "[run-all] hw=$HW namespace=$NAMESPACE run-id=$RUN_ID" | tee -a "$RUN_LOG"
 echo "[run-all] summary dir: $SUMMARY_DIR" | tee -a "$RUN_LOG"
 
 # Prep is config-agnostic; pick any config to source so the env loads cleanly.

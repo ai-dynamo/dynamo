@@ -11,6 +11,9 @@
 #
 # Optional:
 #   --context <ctx>  → kubectl --context to pin every call (else KUBE_CONTEXT env, else current-context)
+#   --run-id <id>    → run-isolation key for the artifact dir on the shared
+#                      FSx PVC (else $RUN_ID env; bench mints a timestamp,
+#                      retrieve discovers the newest run). See run_label_* below.
 #
 # Usage:
 #   ./run-benchmark.sh -n <namespace> --hw h100 --config vllm-serve
@@ -31,6 +34,10 @@ CONFIG=""
 # silently retarget the sweep mid-run. Falls back to KUBE_CONTEXT env
 # var, then to the global current-context. CLI flag wins.
 KUBE_CONTEXT="${KUBE_CONTEXT:-}"
+# Run-isolation key for the artifact dir (see run_label_* below). The
+# orchestrator pins one value across deploy/bench/retrieve; standalone
+# bench mints a timestamp and standalone retrieve discovers the newest.
+RUN_ID="${RUN_ID:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -39,6 +46,7 @@ while [[ $# -gt 0 ]]; do
     --hw) HW="$2"; shift 2 ;;
     --config) CONFIG="$2"; shift 2 ;;
     --context) KUBE_CONTEXT="$2"; shift 2 ;;
+    --run-id) RUN_ID="$2"; shift 2 ;;
     -h|--help)
       grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
@@ -66,8 +74,9 @@ case "$CONFIG" in
     BENCH_POD="qwen35-bench"
     # Service the bench Pod hits at http://$FRONTEND:8000.
     BENCH_FRONTEND="qwen35-vllm-serve"
-    # Sub-dir under /perf-cache/artifacts/qwen35_fp8/ for this config's run.
-    BENCH_RUN_LABEL="vllm-serve"
+    # Config leaf of the run dir; full path is <ns>/<run-id>/<leaf>
+    # (see run_label_* below).
+    CONFIG_LABEL="vllm-serve"
     ;;
   dynamo-fd)
     DEPLOY_KIND="dgd"
@@ -75,7 +84,7 @@ case "$CONFIG" in
     BENCH_POD="qwen35-fd-bench"
     # The Dynamo operator auto-creates a <dgd-name>-frontend Service.
     BENCH_FRONTEND="qwen35-dynamo-fd-frontend"
-    BENCH_RUN_LABEL="dynamo-fd"
+    CONFIG_LABEL="dynamo-fd"
     ;;
   "")
     echo "ERROR: --config <name> required" >&2
@@ -87,8 +96,11 @@ case "$CONFIG" in
     exit 2 ;;
 esac
 # Export the per-config knobs so envsubst can substitute them into the
-# shared root-level perf.yaml at apply time.
-export BENCH_POD BENCH_FRONTEND BENCH_RUN_LABEL
+# shared root-level perf.yaml at apply time. BENCH_RUN_LABEL is the
+# namespaced + run-id'd sub-path; it depends on RUN_ID so it's resolved
+# and exported just-in-time by run_label_write (bench) / run_label_read
+# (retrieve) rather than here.
+export BENCH_POD BENCH_FRONTEND
 
 HW_ENV="$RECIPE_ROOT/hw/${HW}.env"
 if [[ ! -f "$HW_ENV" ]]; then
@@ -166,6 +178,45 @@ dataset() {
   $K logs job/qwen35-generate-datasets | tail -20
 }
 
+# ---------------- run-dir isolation ----------------
+# Every run writes to its own dir on the shared FSx PVC, keyed by
+# namespace + run-id:
+#   /perf-cache/artifacts/qwen35_fp8/<namespace>/<run-id>/<config>/
+# This is load-bearing: the per-namespace `shared-model-cache` PVCs are
+# distinct PV names over ONE FSx Lustre filesystem, so a fixed
+# `.../<config>/` path lets two runs — even in different namespaces —
+# read and clobber each other's artifacts. The namespace + run-id prefix
+# gives each run its own dir. RUN_ID resolution:
+#   - explicit --run-id / $RUN_ID wins. The orchestrator pins one id so
+#     bench (writer) and retrieve (reader) agree across their separate
+#     run-benchmark.sh invocations, and both configs group under it.
+#   - bench with no id mints a fresh timestamp.
+#   - retrieve with no id discovers the newest run for this
+#     (namespace, config) on the still-running bench pod.
+run_label_write() {
+  [[ -z "$RUN_ID" ]] && RUN_ID="$(date +%Y%m%d-%H%M%S)"
+  export BENCH_RUN_LABEL="${NAMESPACE}/${RUN_ID}/${CONFIG_LABEL}"
+  echo "[run]    run-id=$RUN_ID label=$BENCH_RUN_LABEL"
+}
+run_label_read() {
+  if [[ -z "$RUN_ID" ]]; then
+    # ls -1t sorts newest-first; pick the first run-id that has this
+    # config's sub-dir. Args are passed positionally to avoid quoting
+    # the namespace path into the remote shell.
+    local nsbase="/perf-cache/artifacts/qwen35_fp8/${NAMESPACE}"
+    RUN_ID="$($K exec "$BENCH_POD" -- sh -c '
+      for rid in $(ls -1t "$1" 2>/dev/null); do
+        [ -d "$1/$rid/$2" ] && { echo "$rid"; break; }
+      done' _ "$nsbase" "$CONFIG_LABEL" 2>/dev/null)"
+    if [[ -z "$RUN_ID" ]]; then
+      echo "ERROR: no run dir under $nsbase/*/$CONFIG_LABEL — pass --run-id." >&2
+      exit 2
+    fi
+    echo "[retrieve] discovered newest run-id: $RUN_ID"
+  fi
+  export BENCH_RUN_LABEL="${NAMESPACE}/${RUN_ID}/${CONFIG_LABEL}"
+}
+
 # ---------------- config-specific lifecycle ----------------
 
 deploy() {
@@ -200,22 +251,20 @@ deploy() {
 }
 
 bench() {
+  run_label_write
   $K delete pod "$BENCH_POD" --ignore-not-found
   # Shared bench template at benchmark/perf.yaml. Per-config knobs
-  # (pod name, frontend service, run sub-dir) come from envsubst on
-  # $BENCH_POD / $BENCH_FRONTEND / $BENCH_RUN_LABEL, exported by the
-  # case statement near the top of this script.
+  # (pod name, frontend service) come from envsubst on $BENCH_POD /
+  # $BENCH_FRONTEND (set by the case statement near the top); the
+  # run-isolated $BENCH_RUN_LABEL is set by run_label_write above.
   APPLY_TPL "$HERE/perf.yaml"
   $K wait --for=condition=Ready "pod/$BENCH_POD" --timeout=300s
-  # Clear any stale .aiperf-done sentinel from a prior run BEFORE we
-  # start polling. The sentinel lives on the FSx-shared
-  # /perf-cache/artifacts/qwen35_fp8/<run-label>/ subpath, which any
-  # namespace on this cluster sharing the same FSx mount can have
-  # written to in the past (also affects re-runs in the same namespace
-  # if a prior retrieve failed and clean was skipped). Without this rm,
-  # the poll below sees the old sentinel on its very first tick and
-  # exits "done" before the fresh aiperf has even finished its pip
-  # install — giving you May-12 artifacts instead of today's.
+  # Clear any stale .aiperf-done sentinel BEFORE we start polling. The
+  # run-isolated <namespace>/<run-id>/<config> path makes a cross-run
+  # stale sentinel nearly impossible, but a re-invocation that reuses
+  # the same --run-id (e.g. a retried bench) would still see the prior
+  # tick's sentinel and exit "done" before the fresh aiperf finishes its
+  # pip install. This rm keeps that case honest — cheap safety net.
   local sentinel="/perf-cache/artifacts/qwen35_fp8/${BENCH_RUN_LABEL}/.aiperf-done"
   $K exec "$BENCH_POD" -- rm -f "$sentinel" 2>/dev/null || true
   echo "[bench] pod Ready; polling for .aiperf-done sentinel (max ~50 min)"
@@ -242,6 +291,7 @@ bench() {
 }
 
 retrieve() {
+  run_label_read
   # Override the destination root via $BENCHMARK_RESULTS_DIR if your
   # workspace layout differs from the default.
   local base="${BENCHMARK_RESULTS_DIR:-$HOME/workspace/dynamo-tmp/logs}"
@@ -254,6 +304,7 @@ retrieve() {
   # the bench writes a fixed set of small artifacts (~few MB total
   # without inputs.json), each retried independently.
   local src="/perf-cache/artifacts/qwen35_fp8/${BENCH_RUN_LABEL}"
+  echo "[retrieve] remote src: $src"
   for f in profile_export_aiperf.json profile_export_aiperf.csv \
            server_metrics_export.json server_metrics_export.csv \
            profile_export.jsonl; do

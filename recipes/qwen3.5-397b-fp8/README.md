@@ -133,7 +133,7 @@ locations:
 |--------------|---------|------------------|
 | `/home/dynamo/.cache/huggingface` | — (root) | Shared HF Hub cache (anything else in the namespace re-uses it) |
 | `/home/dynamo/.cache/vllm`        | `qwen35-bench/vllm-cache` | vllm cudagraph + DeepGEMM JIT compilation cache |
-| `/perf-cache`                     | `qwen35-bench/perf-cache` | Generated dataset + aiperf artifacts |
+| `/perf-cache`                     | `qwen35-bench/perf-cache` | Generated dataset + aiperf artifacts (artifacts are run-isolated, see below) |
 
 The per-recipe subPath prefix `qwen35-bench/` keeps this recipe's
 private state from colliding with other recipes (e.g. `qwen36-bench/`,
@@ -142,6 +142,28 @@ private state from colliding with other recipes (e.g. `qwen36-bench/`,
 The HF cache is mounted at the root so any model already cached in
 the namespace is reused. The Qwen3.5-397B-A17B-FP8 download lands in
 the standard `hub/models--Qwen--Qwen3.5-397B-A17B-FP8/` directory.
+
+### Run isolation (aiperf artifacts)
+
+The per-namespace `shared-model-cache` PVCs are distinct PV names over
+**one** FSx Lustre filesystem, so a fixed artifact path is shared by
+every namespace on the cluster. Writing each run to a constant
+`.../qwen35_fp8/<config>/` therefore lets two runs — even in different
+namespaces — silently read and clobber each other's
+`profile_export_aiperf.json`. To prevent that, the bench writes to a
+run-isolated path:
+
+```text
+/perf-cache/artifacts/qwen35_fp8/<namespace>/<run-id>/<config>/
+```
+
+`<run-id>` comes from `--run-id` / `$RUN_ID`; `run-all-benchmarks.sh`
+pins one id per pass (so both configs group under it and each step's
+`retrieve` agrees with its `bench`). A standalone `bench` mints a
+timestamp; a standalone `retrieve` with no id discovers the newest run
+for that `(namespace, config)`. Model weights and the generated dataset
+are intentionally **not** isolated — they're content-deterministic and
+shared by design.
 
 If your cluster doesn't pre-provision `shared-model-cache`, create
 one yourself before running the recipe. The driver's `pvc()` step
