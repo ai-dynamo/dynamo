@@ -16,6 +16,7 @@
 use std::{
     collections::{BTreeMap, HashSet},
     sync::Arc,
+    time::SystemTime,
 };
 
 use anyhow::{Context as _, Result};
@@ -419,6 +420,8 @@ impl AuditSink for OtelSink {
     }
 
     async fn emit(&self, rec: &AuditRecord) {
+        let event_timestamp = SystemTime::now();
+
         // Keep the full payload JSON walk off Tokio worker threads. The OTEL
         // SDK emit below remains on this sink task; it only enqueues to the
         // BatchLogProcessor.
@@ -459,6 +462,7 @@ impl AuditSink for OtelSink {
         };
 
         let mut record = self.logger.create_log_record();
+        record.set_timestamp(event_timestamp);
         record.set_severity_number(Severity::Info);
         record.set_severity_text("INFO");
         record.set_body(AnyValue::String(
