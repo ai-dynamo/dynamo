@@ -497,22 +497,20 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Helm Charts" >> $GITHUB_STEP_SUMMARY
 
-          PLATFORM_CHART_DIR="deploy/helm/charts/platform"
-          CHART_NAME=$(awk '/^name:/ {print $2}' "${PLATFORM_CHART_DIR}/Chart.yaml")
-          pushd "${PLATFORM_CHART_DIR}"
-          helm dep build .
-          popd
-
-          echo "Packaging ${CHART_NAME} with version ${HELM_CHART_VERSION}..."
-          helm package \
-            --version "${HELM_CHART_VERSION}" \
-            --app-version "${HELM_CHART_VERSION}" \
-            "${PLATFORM_CHART_DIR}"
-
-          CHART_FILE="${CHART_NAME}-${HELM_CHART_VERSION}.tgz"
-          echo "Pushing ${CHART_FILE} to NGC Helm registry..."
-          helm cm-push "${CHART_FILE}" "${REPO_ALIAS}"
-          echo "- \`${CHART_NAME}:${HELM_CHART_VERSION}\` pushed to NGC Helm registry" >> $GITHUB_STEP_SUMMARY
+          # snapshot + dynamo-platform, mirroring the rcs/dynamo helm runbook.
+          for CHART_DIR in deploy/helm/charts/platform deploy/helm/charts/snapshot; do
+            CHART_NAME=$(awk '/^name:/ {print $2; exit}' "${CHART_DIR}/Chart.yaml")
+            ( cd "${CHART_DIR}" && helm dep build . )
+            echo "Packaging ${CHART_NAME} with version ${HELM_CHART_VERSION}..."
+            helm package \
+              --version "${HELM_CHART_VERSION}" \
+              --app-version "${HELM_CHART_VERSION}" \
+              "${CHART_DIR}"
+            CHART_FILE="${CHART_NAME}-${HELM_CHART_VERSION}.tgz"
+            echo "Pushing ${CHART_FILE} to NGC Helm registry..."
+            helm cm-push "${CHART_FILE}" "${REPO_ALIAS}"
+            echo "- \`${CHART_NAME}:${HELM_CHART_VERSION}\` pushed to NGC Helm registry" >> $GITHUB_STEP_SUMMARY
+          done
 
           helm repo remove "${REPO_ALIAS}"
 
@@ -595,6 +593,7 @@ jobs:
     env:
       COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
       NIGHTLY: ${{ needs.prepare-release.outputs.nightly }}
+      ON_DEMAND: ${{ needs.prepare-release.outputs.on_demand }}
       VERSION: ${{ needs.prepare-release.outputs.version }}
       RC_NUMBER: ${{ needs.prepare-release.outputs.rc_number }}
       REGISTRY_IMAGE: ai-dynamo/dynamo
@@ -729,6 +728,9 @@ jobs:
 
           if [[ "${NIGHTLY}" == "true" ]]; then
             SUBPATH="nightly/${{ github.run_id }}"
+          elif [[ "${ON_DEMAND}" == "true" ]]; then
+            # GA release: no rc segment (matches wheels.sh release/<version>/).
+            SUBPATH="release/${VERSION}"
           else
             if [ -z "${RC_NUMBER}" ]; then
               echo "Error: RC_NUMBER is empty for a non-nightly release"
@@ -773,9 +775,10 @@ jobs:
           done
 
   # ============================================================================
-  # ARTIFACTORY STAGING: build + verify the publishable crates with cargo
-  # package (inside the dynamo build image so native deps resolve), then upload
-  # the .crate files alongside the wheels. On-demand releases only.
+  # ARTIFACTORY STAGING: publish the publishable workspace crates to the
+  # Artifactory cargo registry (sw-dl-dynamo-cargo-local) via `cargo publish`,
+  # dependency-ordered. Runs inside the dynamo build image (cargo + native deps
+  # for the per-crate `cargo check`). On-demand releases only.
   # ============================================================================
 
   stage-crates-artifactory:
@@ -790,97 +793,22 @@ jobs:
         HOME: /__w/dynamo/dynamo
         USER: dynamo
     env:
-      COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
-      VERSION: ${{ needs.prepare-release.outputs.version }}
-      # Crates uploaded to Artifactory (the public set). UPLOAD ⊆ PACKAGE.
-      UPLOAD_CRATES: "dynamo-runtime dynamo-llm dynamo-protocols dynamo-parsers dynamo-memory dynamo-tokens dynamo-mocker dynamo-kv-router"
-      # Verified together so workspace-only deps (tokenizers, renderer) resolve
-      # during the package verify build. Extend if cargo reports more unpublished
-      # path-deps (see release plan concern C1).
-      PACKAGE_CRATES: "dynamo-runtime dynamo-llm dynamo-protocols dynamo-parsers dynamo-memory dynamo-tokens dynamo-mocker dynamo-kv-router dynamo-tokenizers dynamo-renderer"
-      CARGO_TARGET_DIR: /tmp/cargo-target
+      RUSTFLAGS: --cfg tokio_unstable
     steps:
       - name: Checkout at source commit
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ needs.prepare-release.outputs.commit_sha }}
 
-      - name: Build and verify crates
-        id: package
+      - name: Publish crates to Artifactory cargo registry
         env:
-          SCCACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
-          SCCACHE_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          ARTIFACTORY_CARGO_TOKEN: ${{ secrets.ARTIFACTORY_CARGO_TOKEN }}
         run: |
           set -euo pipefail
-
-          /workspace/container/use-sccache.sh install || true
-          eval "$(/workspace/container/use-sccache.sh setup-env)" || true
-
-          PKG_ARGS=()
-          for c in ${PACKAGE_CRATES}; do PKG_ARGS+=("-p" "${c}"); done
-          # cargo cross-verifies the listed crates against each other, so
-          # workspace-only path-deps resolve without being on crates.io.
-          cargo package --locked "${PKG_ARGS[@]}"
-
-          OUT="${RUNNER_TEMP}/crates"
-          mkdir -p "${OUT}"
-          missing=0
-          for c in ${UPLOAD_CRATES}; do
-            f=$(ls "${CARGO_TARGET_DIR}/package/${c}-"*.crate 2>/dev/null | head -1 || true)
-            if [ -z "${f}" ]; then
-              echo "::error::missing .crate for ${c} in ${CARGO_TARGET_DIR}/package"
-              missing=1
-              continue
-            fi
-            cp "${f}" "${OUT}/"
-            echo "staged $(basename "${f}")"
-          done
-          [ "${missing}" -eq 0 ] || exit 1
-          echo "upload_dir=${OUT}" >> "$GITHUB_OUTPUT"
-
-      - name: Upload crates to Artifactory
-        env:
-          ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }}
-          ARTIFACTORY_USER: ${{ secrets.ARTIFACTORY_USER }}
-          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
-          UPLOAD_DIR: ${{ steps.package.outputs.upload_dir }}
-        run: |
-          set -euo pipefail
-
-          BASE_URL="${ARTIFACTORY_URL%/}/release/${VERSION}/crates"
-          echo "Uploading to: ${BASE_URL}/"
-
-          echo "## Crate Staging Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Crate | Target |" >> $GITHUB_STEP_SUMMARY
-          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
-
-          shopt -s nullglob
-          CRATE_FILES=("${UPLOAD_DIR}"/*.crate)
-          if [ ${#CRATE_FILES[@]} -eq 0 ]; then
-            echo "Error: no .crate files in ${UPLOAD_DIR}"
-            exit 1
-          fi
-
-          for CRATE in "${CRATE_FILES[@]}"; do
-            CRATE_FILENAME=$(basename "${CRATE}")
-            TARGET_URL="${BASE_URL}/${CRATE_FILENAME}"
-            BODY_FILE=$(mktemp)
-            HTTP_CODE=$(curl -sSL -o "${BODY_FILE}" -w "%{http_code}" \
-              --connect-timeout 30 --max-time 300 \
-              --retry 3 --retry-delay 5 --retry-all-errors \
-              -u "${ARTIFACTORY_USER}:${ARTIFACTORY_TOKEN}" \
-              -T "${CRATE}" \
-              "${TARGET_URL}")
-            if [ "${HTTP_CODE}" != "201" ]; then
-              echo "::error::Artifactory deploy failed: HTTP ${HTTP_CODE} at ${TARGET_URL}"
-              cat "${BODY_FILE}" || true
-              exit 1
-            fi
-            echo "Uploaded: ${CRATE_FILENAME} -> ${TARGET_URL}"
-            echo "| \`${CRATE_FILENAME}\` | ${TARGET_URL} |" >> $GITHUB_STEP_SUMMARY
-            rm -f "${BODY_FILE}"
-          done
+          python3 .github/scripts/stage_crates.py \
+            --registry artifactory \
+            --host artifactory.nvidia.com \
+            --repo sw-dl-dynamo-cargo-local
 
   # Combined NGC + Artifactory staging reply on the nightly thread.
   notify-slack-staging:
