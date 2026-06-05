@@ -587,8 +587,9 @@ async fn call_lora_endpoint(
 
     anyhow::bail!(
         "LoRA management not available: no '{}' handler is registered \
-         (neither a local LoRA endpoint nor an engine update). Ensure the \
-         worker was started with LoRA support enabled.",
+         (neither a local LoRA endpoint nor an engine update). This worker \
+         either has LoRA disabled or its backend does not support LoRA \
+         management.",
         endpoint_name
     )
 }

@@ -166,6 +166,10 @@ class VllmLLMEngine(LLMEngine):
         self._prometheus_temp_dir: tempfile.TemporaryDirectory[str] | None = None
         self._model_max_len: int | None = None
         self._dp_range: Optional[tuple[int, int]] = None
+        # Effective KV-event block size, computed in start(). LoRA MDCs must
+        # publish this (not engine_args.block_size) so LoRA block hashes match
+        # vLLM's emitted KV events for routing.
+        self._kv_event_block_size: int | None = None
         # Constructed in start() before AsyncLLM init so vLLM's stat-logger
         # factory call sees a valid object. `num_gpu_blocks` is patched
         # after KV profiling finishes.
@@ -179,6 +183,15 @@ class VllmLLMEngine(LLMEngine):
         # publishes against it.
         self._endpoint = None
         self.loaded_loras: dict[str, LoRAInfo] = {}
+        # Adapters whose discovery ModelDeploymentCard is currently published.
+        # Tracked separately from `loaded_loras` because the engine load and the
+        # discovery publish can diverge on partial failure: an adapter may be
+        # loaded into vLLM yet have no card (publish failed and engine-side
+        # rollback also failed), or have a stale card with no engine load
+        # (unregister failed and re-add rollback also failed). Keeping the two
+        # states apart lets a retried load/unload reconcile the divergence
+        # instead of short-circuiting as "already loaded" / "not found".
+        self._published_loras: set[str] = set()
         self._lora_load_locks: dict[str, asyncio.Lock] = {}
         self._lora_load_locks_guard = threading.Lock()
 
@@ -265,6 +278,7 @@ class VllmLLMEngine(LLMEngine):
         # both to the runtime via `EngineConfig` and to any future readers.
         await configure_kv_event_block_size(self.engine_client, vllm_config)
         block_size = get_configured_kv_event_block_size(vllm_config)
+        self._kv_event_block_size = block_size
 
         return EngineConfig(
             model=self.engine_args.model,
@@ -584,6 +598,44 @@ class VllmLLMEngine(LLMEngine):
                 self._lora_load_locks[lora_name] = lock
             return lock
 
+    async def _publish_lora_card(self, lora_name: str, lora_id: int) -> None:
+        """Publish a LoRA adapter as a ModelDeploymentCard for discovery.
+
+        Assumes ``self._endpoint`` is set (callers gate on it). Raises on
+        failure so callers can roll back or retry; on success the caller is
+        responsible for recording ``lora_name`` in ``self._published_loras``.
+        """
+        user_data = {
+            "lora_adapter": True,
+            "lora_id": lora_id,
+        }
+
+        runtime_config = ModelRuntimeConfig()
+        runtime_config.tool_call_parser = self._dyn_tool_call_parser
+        runtime_config.reasoning_parser = self._dyn_reasoning_parser
+
+        # Publish the effective KV-event block size (computed in start() and
+        # used by the base-model MDC) so LoRA block hashes match vLLM's emitted
+        # KV events. start() always runs before a load, but fall back to the
+        # engine arg if it somehow hasn't.
+        kv_cache_block_size = (
+            self._kv_event_block_size
+            if self._kv_event_block_size is not None
+            else self.engine_args.block_size
+        )
+
+        await register_model(
+            model_input=ModelInput.Tokens,
+            model_type=ModelType.Chat | ModelType.Completions,
+            endpoint=self._endpoint,
+            model_path=self.engine_args.model,
+            kv_cache_block_size=kv_cache_block_size,
+            runtime_config=runtime_config,
+            user_data=user_data,
+            lora_name=lora_name,
+            base_model_path=self.engine_args.model,
+        )
+
     async def load_lora(self, body: dict) -> dict:
         """Load a LoRA adapter dynamically into vLLM's AsyncLLM engine.
 
@@ -634,6 +686,30 @@ class VllmLLMEngine(LLMEngine):
                     # request may have loaded this LoRA while we waited.
                     if lora_name in self.loaded_loras:
                         lora_id = self.loaded_loras[lora_name].id
+                        # The adapter is loaded into the engine, but its
+                        # discovery card may be missing (a prior publish failed
+                        # and the engine-side rollback also failed). Reconcile by
+                        # retrying the publish instead of reporting early success.
+                        if (
+                            self._endpoint is not None
+                            and lora_name not in self._published_loras
+                        ):
+                            logger.info(
+                                f"LoRA '{lora_name}' loaded but unpublished; "
+                                f"retrying discovery publish"
+                            )
+                            try:
+                                await self._publish_lora_card(lora_name, lora_id)
+                                self._published_loras.add(lora_name)
+                            except Exception as e:
+                                logger.exception(
+                                    f"Failed to publish LoRA {lora_name} ModelDeploymentCard: {e}"
+                                )
+                                return {
+                                    "status": "error",
+                                    "message": f"LoRA '{lora_name}' is loaded but discovery publish failed: {str(e)}",
+                                    "lora_name": lora_name,
+                                }
                         logger.info(
                             f"LoRA adapter already loaded (concurrent request completed): "
                             f"{lora_name} with ID {lora_id}"
@@ -682,26 +758,8 @@ class VllmLLMEngine(LLMEngine):
                             f"Publishing LoRA '{lora_name}' ModelDeploymentCard to {self._endpoint}"
                         )
                         try:
-                            user_data = {
-                                "lora_adapter": True,
-                                "lora_id": lora_id,
-                            }
-
-                            runtime_config = ModelRuntimeConfig()
-                            runtime_config.tool_call_parser = self._dyn_tool_call_parser
-                            runtime_config.reasoning_parser = self._dyn_reasoning_parser
-
-                            await register_model(
-                                model_input=ModelInput.Tokens,
-                                model_type=ModelType.Chat | ModelType.Completions,
-                                endpoint=self._endpoint,
-                                model_path=self.engine_args.model,
-                                kv_cache_block_size=self.engine_args.block_size,
-                                runtime_config=runtime_config,
-                                user_data=user_data,
-                                lora_name=lora_name,
-                                base_model_path=self.engine_args.model,
-                            )
+                            await self._publish_lora_card(lora_name, lora_id)
+                            self._published_loras.add(lora_name)
                             logger.info(
                                 f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
                             )
@@ -711,7 +769,10 @@ class VllmLLMEngine(LLMEngine):
                             )
 
                             # Rollback: remove the LoRA from the engine to keep
-                            # engine state and discovery consistent.
+                            # engine state and discovery consistent. If the
+                            # rollback itself fails, the entry stays in
+                            # `loaded_loras` but absent from `_published_loras`,
+                            # so a retried load reconciles the publish.
                             try:
                                 logger.debug(
                                     f"Rolling back: removing LoRA '{lora_name}' from engine"
@@ -725,6 +786,7 @@ class VllmLLMEngine(LLMEngine):
                                 logger.exception(
                                     f"Failed to rollback LoRA {lora_name}: {rollback_error}"
                                 )
+                            self._published_loras.discard(lora_name)
 
                             return {
                                 "status": "error",
@@ -778,6 +840,38 @@ class VllmLLMEngine(LLMEngine):
                     # Check existence *after* waiting for any in-progress load.
                     lora = self.loaded_loras.get(lora_name)
                     if lora is None:
+                        # The adapter is gone from the engine but may still have
+                        # a stale discovery card (a prior unload's unregister
+                        # failed and the re-add rollback also failed). Reconcile
+                        # by retrying the unregister so discovery converges.
+                        if (
+                            self._endpoint is not None
+                            and lora_name in self._published_loras
+                        ):
+                            logger.info(
+                                f"LoRA '{lora_name}' not loaded but still published; "
+                                f"retrying discovery unregister"
+                            )
+                            try:
+                                await unregister_model(
+                                    endpoint=self._endpoint,
+                                    lora_name=lora_name,
+                                )
+                                self._published_loras.discard(lora_name)
+                                return {
+                                    "status": "success",
+                                    "message": f"LoRA adapter '{lora_name}' discovery card removed",
+                                    "lora_name": lora_name,
+                                }
+                            except Exception as e:
+                                logger.exception(
+                                    f"Failed to unregister stale LoRA {lora_name} ModelDeploymentCard: {e}"
+                                )
+                                return {
+                                    "status": "error",
+                                    "message": f"Failed to unregister stale LoRA '{lora_name}' from discovery registry: {str(e)}",
+                                    "lora_name": lora_name,
+                                }
                         return {
                             "status": "error",
                             "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self.loaded_loras.keys())}",
@@ -785,13 +879,16 @@ class VllmLLMEngine(LLMEngine):
 
                     logger.debug(f"Unloading LoRA adapter: {lora_name}")
                     lora_id = lora.id
-                    lora_path = lora.path
 
-                    await self.engine_client.remove_lora(lora_id)
-
-                    del self.loaded_loras[lora_name]
-
-                    if self._endpoint is not None:
+                    # Stop advertising the adapter *before* removing it from the
+                    # engine, so the frontend stops routing LoRA traffic here
+                    # while the adapter still exists. Removing it first would
+                    # leave a window where requests route to a worker that no
+                    # longer has the adapter (falling back to base or failing).
+                    if (
+                        self._endpoint is not None
+                        and lora_name in self._published_loras
+                    ):
                         logger.debug(
                             f"Unregistering LoRA '{lora_name}' ModelDeploymentCard"
                         )
@@ -800,47 +897,47 @@ class VllmLLMEngine(LLMEngine):
                                 endpoint=self._endpoint,
                                 lora_name=lora_name,
                             )
+                            self._published_loras.discard(lora_name)
                             logger.info(
                                 f"Successfully unregistered LoRA '{lora_name}' ModelDeploymentCard"
                             )
                         except Exception as e:
+                            # Nothing mutated yet: the engine still has the
+                            # adapter and discovery still advertises it
+                            # (consistent and still routable). Surface the error
+                            # and leave state intact for a retry.
                             logger.exception(
                                 f"Failed to unregister LoRA {lora_name} ModelDeploymentCard: {e}"
                             )
-
-                            # Rollback: re-add the LoRA to the engine to keep
-                            # engine state and discovery consistent.
-                            try:
-                                logger.debug(
-                                    f"Rolling back: re-adding LoRA '{lora_name}' to engine"
-                                )
-                                await self.engine_client.add_lora(
-                                    LoRARequest(
-                                        lora_name=lora_name,
-                                        lora_int_id=lora_id,
-                                        lora_path=lora_path,
-                                    )
-                                )
-                                self.loaded_loras[lora_name] = LoRAInfo(
-                                    id=lora_id, path=lora_path
-                                )
-                                logger.debug(
-                                    f"Successfully rolled back LoRA '{lora_name}'"
-                                )
-                            except Exception as rollback_error:
-                                logger.exception(
-                                    f"Failed to rollback LoRA {lora_name}: {rollback_error}"
-                                )
-
                             return {
                                 "status": "error",
                                 "message": f"Failed to unregister LoRA '{lora_name}' from discovery registry: {str(e)}",
                                 "lora_name": lora_name,
                             }
-                    else:
+                    elif self._endpoint is None:
                         logger.debug(
                             f"Cannot unregister LoRA '{lora_name}': serving endpoint not ready"
                         )
+
+                    # Discovery no longer routes to this adapter; remove it from
+                    # the engine.
+                    try:
+                        await self.engine_client.remove_lora(lora_id)
+                    except Exception as e:
+                        # The discovery card is already gone but the engine still
+                        # holds the adapter (loaded-but-unpublished). Leave it in
+                        # loaded_loras so a retried unload skips the unregister
+                        # and retries only the engine removal.
+                        logger.exception(
+                            f"Failed to remove LoRA {lora_name} from engine: {e}"
+                        )
+                        return {
+                            "status": "error",
+                            "message": f"Failed to remove LoRA '{lora_name}' from engine: {str(e)}",
+                            "lora_name": lora_name,
+                        }
+
+                    del self.loaded_loras[lora_name]
 
                     logger.info(
                         f"Successfully unloaded LoRA adapter: {lora_name} with ID {lora_id}"

@@ -990,6 +990,16 @@ fn control_request_body_error(body: &serde_json::Value) -> Option<serde_json::Va
     }
 }
 
+fn update_request_body_error(body: &serde_json::Value) -> Option<serde_json::Value> {
+    if body.is_object() {
+        None
+    } else {
+        Some(control_error_response(
+            "engine update request body must be a JSON object",
+        ))
+    }
+}
+
 fn engine_control_callback(
     control_name: String,
     engine: Arc<dyn LLMEngine>,
@@ -1011,6 +1021,9 @@ fn engine_update_callback(update_name: String, engine: Arc<dyn LLMEngine>) -> En
         let engine = engine.clone();
         let update_name = update_name.clone();
         Box::pin(async move {
+            if let Some(response) = update_request_body_error(&body) {
+                return Ok(response);
+            }
             engine
                 .engine_update(update_name, body)
                 .await
@@ -1079,7 +1092,7 @@ fn wrap_engine_control_callback(
                         && let Err(e) = endpoint.register_endpoint_instance().await
                     {
                         // The engine is serving-safe but absent from discovery. The
-                        // operation is idempotent: retrying /engine/{control_name}
+                        // operation is idempotent: retrying /engine/control/{control_name}
                         // re-registers without repeating the wake/resume work (the
                         // controller short-circuits "already awake/resumed"), so surface
                         // that it is safe to retry.
@@ -1380,6 +1393,26 @@ mod tests {
             assert_eq!(
                 response.get("message").and_then(|value| value.as_str()),
                 Some("engine control request body must be a JSON object")
+            );
+        }
+    }
+
+    #[test]
+    fn update_request_body_validation_requires_json_object() {
+        assert!(update_request_body_error(&serde_json::json!({})).is_none());
+        assert!(update_request_body_error(&serde_json::json!({"lora_name": "a"})).is_none());
+
+        for body in [
+            serde_json::json!(null),
+            serde_json::json!(true),
+            serde_json::json!("bad"),
+            serde_json::json!(["lora_name"]),
+        ] {
+            let response = update_request_body_error(&body).unwrap();
+            assert!(control_response_is_error(&response));
+            assert_eq!(
+                response.get("message").and_then(|value| value.as_str()),
+                Some("engine update request body must be a JSON object")
             );
         }
     }

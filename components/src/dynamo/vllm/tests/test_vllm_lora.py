@@ -53,6 +53,7 @@ def _make_lora_engine(enable_lora: bool = True, endpoint=None) -> VllmLLMEngine:
     engine._dyn_tool_call_parser = None
     engine._dyn_reasoning_parser = None
     engine.loaded_loras = {}
+    engine._published_loras = set()
     engine._lora_load_locks = {}
     engine._lora_load_locks_guard = threading.Lock()
     return engine
@@ -243,7 +244,10 @@ async def test_load_lora_idempotent_reload(monkeypatch):
     engine = _make_lora_engine(endpoint=object())
     manager = SimpleNamespace(download_lora=AsyncMock())
     register, _ = _patch_discovery(monkeypatch, manager=manager)
+    # A healthy adapter is both loaded into the engine AND published to
+    # discovery; re-loading it must short-circuit without re-publishing.
     engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    engine._published_loras = {"adapterA"}
 
     result = await engine.load_lora(
         {"lora_name": "adapterA", "source": {"uri": "file:///x"}}
@@ -254,6 +258,77 @@ async def test_load_lora_idempotent_reload(monkeypatch):
     manager.download_lora.assert_not_awaited()
     engine.engine_client.add_lora.assert_not_awaited()
     register.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_load_lora_reconciles_loaded_but_unpublished(monkeypatch):
+    # Simulate a sticky partial-failure state: the adapter is loaded into the
+    # engine but its discovery card was never published (a prior publish + its
+    # rollback both failed). A retried load must re-publish rather than report
+    # early success.
+    engine = _make_lora_engine(endpoint=object())
+    manager = SimpleNamespace(download_lora=AsyncMock())
+    register, _ = _patch_discovery(monkeypatch, manager=manager)
+    engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    # _published_loras intentionally left empty -> loaded-but-unpublished.
+
+    result = await engine.load_lora(
+        {"lora_name": "adapterA", "source": {"uri": "file:///x"}}
+    )
+
+    assert result["status"] == "success"
+    # Engine load is not repeated, but discovery publication is reconciled.
+    manager.download_lora.assert_not_awaited()
+    engine.engine_client.add_lora.assert_not_awaited()
+    register.assert_awaited_once()
+    assert "adapterA" in engine._published_loras
+
+
+@pytest.mark.asyncio
+async def test_load_lora_reconcile_publish_failure_surfaces_error(monkeypatch):
+    engine = _make_lora_engine(endpoint=object())
+    register, _ = _patch_discovery(monkeypatch)
+    register.side_effect = RuntimeError("discovery is down")
+    engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+
+    result = await engine.load_lora(
+        {"lora_name": "adapterA", "source": {"uri": "file:///x"}}
+    )
+
+    # Reconciliation tried and failed: report error (not a false "already
+    # loaded" success) and leave the adapter unpublished so a later retry can
+    # reconcile again.
+    assert result["status"] == "error"
+    assert "discovery publish failed" in result["message"]
+    assert "adapterA" not in engine._published_loras
+
+
+@pytest.mark.asyncio
+async def test_load_lora_marks_adapter_published(monkeypatch):
+    engine = _make_lora_engine(endpoint=object())
+    _patch_discovery(monkeypatch)
+
+    await engine.load_lora({"lora_name": "adapterA", "source": {"uri": "file:///x"}})
+
+    assert "adapterA" in engine._published_loras
+
+
+@pytest.mark.asyncio
+async def test_load_lora_rollback_failure_leaves_adapter_unpublished(monkeypatch):
+    # register fails AND the engine-side remove_lora rollback also fails: the
+    # adapter stays in loaded_loras but must NOT be marked published, so a
+    # subsequent load reconciles instead of short-circuiting.
+    engine = _make_lora_engine(endpoint=object())
+    register, _ = _patch_discovery(monkeypatch)
+    register.side_effect = RuntimeError("discovery is down")
+    engine.engine_client.remove_lora.side_effect = RuntimeError("engine wedged")
+
+    result = await engine.load_lora(
+        {"lora_name": "adapterA", "source": {"uri": "file:///x"}}
+    )
+
+    assert result["status"] == "error"
+    assert "adapterA" not in engine._published_loras
 
 
 @pytest.mark.asyncio
@@ -297,13 +372,52 @@ async def test_load_lora_rolls_back_when_register_fails(monkeypatch):
 async def test_unload_lora_happy_path(monkeypatch):
     engine = _make_lora_engine(endpoint=object())
     _, unregister = _patch_discovery(monkeypatch)
+    # Healthy adapter: loaded into the engine AND published to discovery.
     engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    engine._published_loras = {"adapterA"}
 
     result = await engine.unload_lora({"lora_name": "adapterA"})
 
     assert result["status"] == "success"
     engine.engine_client.remove_lora.assert_awaited_once_with(123)
     unregister.assert_awaited_once()
+    assert "adapterA" not in engine.loaded_loras
+    assert "adapterA" not in engine._published_loras
+
+
+@pytest.mark.asyncio
+async def test_unload_lora_unregisters_before_engine_removal(monkeypatch):
+    # Discovery must be unpublished before the engine drops the adapter, so the
+    # frontend stops routing LoRA traffic before the adapter disappears.
+    engine = _make_lora_engine(endpoint=object())
+    _, unregister = _patch_discovery(monkeypatch)
+    engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    engine._published_loras = {"adapterA"}
+
+    order: list[str] = []
+    unregister.side_effect = lambda **_: order.append("unregister")
+    engine.engine_client.remove_lora.side_effect = lambda *_: order.append("remove")
+
+    result = await engine.unload_lora({"lora_name": "adapterA"})
+
+    assert result["status"] == "success"
+    assert order == ["unregister", "remove"]
+
+
+@pytest.mark.asyncio
+async def test_unload_lora_loaded_but_unpublished_skips_unregister(monkeypatch):
+    # Loaded-but-unpublished adapter (a prior load's publish failed): unload
+    # should not attempt an unregister, just drop it from the engine.
+    engine = _make_lora_engine(endpoint=object())
+    _, unregister = _patch_discovery(monkeypatch)
+    engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    # _published_loras intentionally empty.
+
+    result = await engine.unload_lora({"lora_name": "adapterA"})
+
+    assert result["status"] == "success"
+    unregister.assert_not_awaited()
+    engine.engine_client.remove_lora.assert_awaited_once_with(123)
     assert "adapterA" not in engine.loaded_loras
 
 
@@ -320,20 +434,75 @@ async def test_unload_lora_not_found(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_unload_lora_rolls_back_when_unregister_fails(monkeypatch):
+async def test_unload_lora_happy_path_clears_published(monkeypatch):
+    engine = _make_lora_engine(endpoint=object())
+    _, unregister = _patch_discovery(monkeypatch)
+    engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    engine._published_loras = {"adapterA"}
+
+    result = await engine.unload_lora({"lora_name": "adapterA"})
+
+    assert result["status"] == "success"
+    unregister.assert_awaited_once()
+    assert "adapterA" not in engine._published_loras
+
+
+@pytest.mark.asyncio
+async def test_unload_lora_reconciles_stale_published_card(monkeypatch):
+    # Adapter is gone from the engine but still has a stale discovery card (a
+    # prior unload's unregister + re-add rollback both failed). A retried
+    # unload must retry the unregister so discovery converges.
+    engine = _make_lora_engine(endpoint=object())
+    _, unregister = _patch_discovery(monkeypatch)
+    engine.loaded_loras = {}
+    engine._published_loras = {"adapterA"}
+
+    result = await engine.unload_lora({"lora_name": "adapterA"})
+
+    assert result["status"] == "success"
+    unregister.assert_awaited_once()
+    engine.engine_client.remove_lora.assert_not_awaited()
+    assert "adapterA" not in engine._published_loras
+
+
+@pytest.mark.asyncio
+async def test_unload_lora_unregister_failure_leaves_state_intact(monkeypatch):
+    # Unregister runs first; if it fails, nothing has been mutated yet, so the
+    # adapter stays both loaded and published (consistent and still routable)
+    # and the engine is never touched.
     engine = _make_lora_engine(endpoint=object())
     _, unregister = _patch_discovery(monkeypatch)
     unregister.side_effect = RuntimeError("discovery is down")
     engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    engine._published_loras = {"adapterA"}
 
     result = await engine.unload_lora({"lora_name": "adapterA"})
 
     assert result["status"] == "error"
     assert "Failed to unregister" in result["message"]
-    # Rollback re-adds the adapter to the engine and restores tracking.
-    engine.engine_client.add_lora.assert_awaited_once()
+    engine.engine_client.remove_lora.assert_not_awaited()
     assert "adapterA" in engine.loaded_loras
-    assert engine.loaded_loras["adapterA"].id == 123
+    assert "adapterA" in engine._published_loras
+
+
+@pytest.mark.asyncio
+async def test_unload_lora_engine_removal_failure_after_unregister(monkeypatch):
+    # Unregister succeeds (card removed, discarded from published) but the
+    # engine removal fails: the adapter stays loaded-but-unpublished so a
+    # retried unload skips the unregister and retries only the engine removal.
+    engine = _make_lora_engine(endpoint=object())
+    _, unregister = _patch_discovery(monkeypatch)
+    engine.engine_client.remove_lora.side_effect = RuntimeError("engine wedged")
+    engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    engine._published_loras = {"adapterA"}
+
+    result = await engine.unload_lora({"lora_name": "adapterA"})
+
+    assert result["status"] == "error"
+    assert "Failed to remove" in result["message"]
+    unregister.assert_awaited_once()
+    assert "adapterA" not in engine._published_loras
+    assert "adapterA" in engine.loaded_loras
 
 
 # --------------------------------------------------------------------------- #
