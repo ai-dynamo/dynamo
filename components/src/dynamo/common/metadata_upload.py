@@ -7,7 +7,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 from functools import cache
-from typing import Any
+from typing import Any, cast
 
 _DEFAULT_FORMAT = "msgpack"
 _FORMATS = {"json", "msgpack"}
@@ -92,7 +92,7 @@ def _torch_tensor_to_payload(value: Any) -> dict[str, Any] | None:
 
     import torch
 
-    tensor = value.detach().cpu().contiguous()
+    tensor = cast(Any, value).detach().cpu().contiguous()
     try:
         data = tensor.numpy().tobytes()
     except TypeError:
