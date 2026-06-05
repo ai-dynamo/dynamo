@@ -13,12 +13,14 @@ import asyncio
 import logging
 import os
 import tempfile
+import threading
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any, Optional, cast
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.inputs import TokensPrompt
+from vllm.lora.request import LoRARequest
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.loggers import StatLoggerBase
@@ -46,7 +48,15 @@ from dynamo.common.backend.metrics import (
 from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, ZmqSource
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
-from dynamo.llm import ModelInput
+from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
+from dynamo.llm import (
+    ModelInput,
+    ModelRuntimeConfig,
+    ModelType,
+    lora_name_to_id,
+    register_model,
+    unregister_model,
+)
 from dynamo.vllm.args import parse_args
 from dynamo.vllm.cache_info import (
     configure_kv_event_block_size,
@@ -141,11 +151,15 @@ class VllmLLMEngine(LLMEngine):
         disaggregation_mode: DisaggregationMode,
         served_model_name: str,
         component: str,
+        dyn_tool_call_parser: Optional[str] = None,
+        dyn_reasoning_parser: Optional[str] = None,
     ):
         self.engine_args = engine_args
         self.disaggregation_mode = disaggregation_mode
         self._served_model_name = served_model_name
         self._component = component
+        self._dyn_tool_call_parser = dyn_tool_call_parser
+        self._dyn_reasoning_parser = dyn_reasoning_parser
         self.engine_client: AsyncLLM | None = None
         self._vllm_config: Any = None
         self._default_sampling_params: Any = None
@@ -160,6 +174,13 @@ class VllmLLMEngine(LLMEngine):
         self._pause_lock = asyncio.Lock()
         self._scale_ep_lock = asyncio.Lock()
         self._scale_ep_in_progress = False
+        # Dynamic LoRA state. `_endpoint` is set by `on_endpoint_ready` before
+        # serving begins; LoRA discovery (register_model/unregister_model)
+        # publishes against it.
+        self._endpoint = None
+        self.loaded_loras: dict[str, LoRAInfo] = {}
+        self._lora_load_locks: dict[str, asyncio.Lock] = {}
+        self._lora_load_locks_guard = threading.Lock()
 
     @classmethod
     async def from_args(
@@ -188,6 +209,8 @@ class VllmLLMEngine(LLMEngine):
             mode,
             served_model_name=config.served_model_name or config.model,
             component=config.component,
+            dyn_tool_call_parser=config.dyn_tool_call_parser,
+            dyn_reasoning_parser=config.dyn_reasoning_parser,
         )
         worker_config = WorkerConfig.from_runtime_config(
             config,
@@ -196,6 +219,10 @@ class VllmLLMEngine(LLMEngine):
             model_input=ModelInput.Tokens,
         )
         return engine, worker_config
+
+    async def on_endpoint_ready(self, endpoint) -> None:
+        """Stash the serving endpoint for dynamic-LoRA discovery publishing."""
+        self._endpoint = endpoint
 
     async def start(self, worker_id: int) -> EngineConfig:
         del worker_id  # vLLM's NixlConnector handles its own per-worker IDs
@@ -319,11 +346,16 @@ class VllmLLMEngine(LLMEngine):
             )
             local_dp_rank = None if rank is None else rank - dp_start
 
+        # Route to a loaded LoRA adapter when the request names one; base-model
+        # and unknown names resolve to None (no adapter).
+        lora_request = self._resolve_lora_request(request.get("model"))
+
         gen = self.engine_client.generate(
             prompt,
             sampling_params,
             request_id,
             data_parallel_rank=local_dp_rank,
+            lora_request=lora_request,
             **telemetry.engine_trace_kwargs(context),
         )
 
@@ -474,6 +506,14 @@ class VllmLLMEngine(LLMEngine):
                 multiproc_only_prefixes=["lmcache:"],
             )
 
+    def _lora_enabled(self) -> bool:
+        """Dynamic-LoRA updates are available only when the engine was built
+        with ``--enable-lora`` AND the LoRA manager is initialized
+        (``DYN_LORA_ENABLED=true``)."""
+        return bool(getattr(self.engine_args, "enable_lora", False)) and (
+            get_lora_manager() is not None
+        )
+
     def supported_controls(self) -> set[str]:
         controls = {"start_profile", "stop_profile", "sleep", "wake_up"}
         if self.engine_client is not None and hasattr(
@@ -501,6 +541,336 @@ class VllmLLMEngine(LLMEngine):
                 "message": f"unsupported engine control: {control}",
             }
         return await handler(body or {})
+
+    def supported_updates(self) -> set[str]:
+        # LoRA lifecycle ops mutate engine-managed adapters, so they ride the
+        # engine-update surface (/engine/update/<name>) rather than inflating
+        # the engine-control surface.
+        if self._lora_enabled():
+            return {"load_lora", "unload_lora", "list_loras"}
+        return set()
+
+    async def engine_update(self, update: str, body: dict) -> dict:
+        handlers = {}
+        if self._lora_enabled():
+            handlers["load_lora"] = self.load_lora
+            handlers["unload_lora"] = self.unload_lora
+            handlers["list_loras"] = self.list_loras
+
+        handler = handlers.get(update)
+        if handler is None:
+            return {
+                "status": "error",
+                "message": f"unsupported engine update: {update}",
+            }
+        return await handler(body or {})
+
+    def _resolve_lora_request(self, model_name: str | None) -> LoRARequest | None:
+        """Return a LoRARequest if model_name is a loaded adapter, else None."""
+        if model_name and (lora := self.loaded_loras.get(model_name)):
+            return LoRARequest(
+                lora_name=model_name,
+                lora_int_id=lora.id,
+                lora_path=lora.path,
+            )
+        return None
+
+    def _get_lora_lock(self, lora_name: str) -> asyncio.Lock:
+        """Get/create the per-LoRA lock without eagerly allocating a new lock each call."""
+        with self._lora_load_locks_guard:
+            lock = self._lora_load_locks.get(lora_name)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._lora_load_locks[lora_name] = lock
+            return lock
+
+    async def load_lora(self, body: dict) -> dict:
+        """Load a LoRA adapter dynamically into vLLM's AsyncLLM engine.
+
+        Request body: ``{"lora_name": str, "source": {"uri": str}}``.
+
+        Idempotent: concurrent loads of the same name are serialized and only
+        one load operation happens.
+        """
+        request = body or {}
+        try:
+            lora_name = request.get("lora_name")
+            if not lora_name:
+                return {
+                    "status": "error",
+                    "message": "'lora_name' is required in request",
+                }
+
+            logger.debug(f"load_lora request keys: {list(request.keys())}")
+
+            source = request.get("source")
+            if not source or not isinstance(source, dict):
+                return {
+                    "status": "error",
+                    "message": "'source' object is required in request",
+                }
+
+            lora_uri = source.get("uri")
+            if not lora_uri:
+                return {
+                    "status": "error",
+                    "message": "'source.uri' is required in request",
+                }
+
+            lora_manager = get_lora_manager()
+            if lora_manager is None:
+                return {
+                    "status": "error",
+                    "message": "LoRAManager not initialized. Set DYN_LORA_ENABLED=true to enable URI-based LoRA loading.",
+                }
+
+            # Serialize load/unload operations per lora_name.
+            lock = self._get_lora_lock(lora_name)
+            async with lock:
+                try:
+                    # Idempotency check after acquiring the lock: a concurrent
+                    # request may have loaded this LoRA while we waited.
+                    if lora_name in self.loaded_loras:
+                        lora_id = self.loaded_loras[lora_name].id
+                        logger.info(
+                            f"LoRA adapter already loaded (concurrent request completed): "
+                            f"{lora_name} with ID {lora_id}"
+                        )
+                        return {
+                            "status": "success",
+                            "message": f"LoRA adapter '{lora_name}' already loaded",
+                            "lora_name": lora_name,
+                            "lora_id": lora_id,
+                        }
+
+                    logger.info(
+                        f"Downloading LoRA adapter: {lora_name} from {lora_uri}"
+                    )
+                    download_result = await lora_manager.download_lora(lora_uri)
+
+                    if download_result["status"] != "success":
+                        return {
+                            "status": "error",
+                            "message": f"Failed to download LoRA: {download_result.get('message', 'Unknown error')}",
+                        }
+
+                    lora_path = download_result["local_path"]
+                    logger.debug(f"LoRA downloaded to: {lora_path}")
+
+                    # Deterministic ID from lora_name before using it.
+                    lora_id = lora_name_to_id(lora_name)
+
+                    await self.engine_client.add_lora(
+                        LoRARequest(
+                            lora_name=lora_name,
+                            lora_int_id=lora_id,
+                            lora_path=lora_path,
+                        )
+                    )
+
+                    self.loaded_loras[lora_name] = LoRAInfo(id=lora_id, path=lora_path)
+                    logger.info(
+                        f"Successfully loaded LoRA adapter: {lora_name} with ID {lora_id}"
+                    )
+
+                    # Publish the LoRA as a ModelDeploymentCard so the frontend
+                    # can discover it and route to this worker instance.
+                    if self._endpoint is not None:
+                        logger.debug(
+                            f"Publishing LoRA '{lora_name}' ModelDeploymentCard to {self._endpoint}"
+                        )
+                        try:
+                            user_data = {
+                                "lora_adapter": True,
+                                "lora_id": lora_id,
+                            }
+
+                            runtime_config = ModelRuntimeConfig()
+                            runtime_config.tool_call_parser = self._dyn_tool_call_parser
+                            runtime_config.reasoning_parser = self._dyn_reasoning_parser
+
+                            await register_model(
+                                model_input=ModelInput.Tokens,
+                                model_type=ModelType.Chat | ModelType.Completions,
+                                endpoint=self._endpoint,
+                                model_path=self.engine_args.model,
+                                kv_cache_block_size=self.engine_args.block_size,
+                                runtime_config=runtime_config,
+                                user_data=user_data,
+                                lora_name=lora_name,
+                                base_model_path=self.engine_args.model,
+                            )
+                            logger.info(
+                                f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
+                            )
+                        except Exception as e:
+                            logger.exception(
+                                f"Failed to publish LoRA {lora_name} ModelDeploymentCard: {e}"
+                            )
+
+                            # Rollback: remove the LoRA from the engine to keep
+                            # engine state and discovery consistent.
+                            try:
+                                logger.debug(
+                                    f"Rolling back: removing LoRA '{lora_name}' from engine"
+                                )
+                                await self.engine_client.remove_lora(lora_id)
+                                self.loaded_loras.pop(lora_name, None)
+                                logger.debug(
+                                    f"Successfully rolled back LoRA '{lora_name}'"
+                                )
+                            except Exception as rollback_error:
+                                logger.exception(
+                                    f"Failed to rollback LoRA {lora_name}: {rollback_error}"
+                                )
+
+                            return {
+                                "status": "error",
+                                "message": f"Failed to register LoRA '{lora_name}' in discovery registry: {str(e)}",
+                                "lora_name": lora_name,
+                            }
+                    else:
+                        logger.debug(
+                            f"Cannot publish LoRA '{lora_name}': serving endpoint not ready"
+                        )
+
+                    return {
+                        "status": "success",
+                        "message": f"LoRA adapter '{lora_name}' loaded successfully",
+                        "lora_name": lora_name,
+                        "lora_id": lora_id,
+                    }
+                finally:
+                    # Avoid lock-map growth on failed loads: if this attempt did
+                    # not leave the LoRA loaded, drop the lock entry (best-effort).
+                    with self._lora_load_locks_guard:
+                        if (
+                            lora_name not in self.loaded_loras
+                            and self._lora_load_locks.get(lora_name) is lock
+                        ):
+                            self._lora_load_locks.pop(lora_name, None)
+        except Exception as e:
+            logger.exception(f"Failed to load LoRA adapter: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def unload_lora(self, body: dict) -> dict:
+        """Unload a LoRA adapter dynamically from vLLM's AsyncLLM engine.
+
+        Request body: ``{"lora_name": str}``.
+        """
+        request = body or {}
+        try:
+            lora_name = request.get("lora_name")
+            if not lora_name:
+                return {
+                    "status": "error",
+                    "message": "'lora_name' is required in request",
+                }
+
+            # Serialize load/unload operations per lora_name.
+            lock = self._get_lora_lock(lora_name)
+            async with lock:
+                try:
+                    # Check existence *after* waiting for any in-progress load.
+                    lora = self.loaded_loras.get(lora_name)
+                    if lora is None:
+                        return {
+                            "status": "error",
+                            "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self.loaded_loras.keys())}",
+                        }
+
+                    logger.debug(f"Unloading LoRA adapter: {lora_name}")
+                    lora_id = lora.id
+                    lora_path = lora.path
+
+                    await self.engine_client.remove_lora(lora_id)
+
+                    del self.loaded_loras[lora_name]
+
+                    if self._endpoint is not None:
+                        logger.debug(
+                            f"Unregistering LoRA '{lora_name}' ModelDeploymentCard"
+                        )
+                        try:
+                            await unregister_model(
+                                endpoint=self._endpoint,
+                                lora_name=lora_name,
+                            )
+                            logger.info(
+                                f"Successfully unregistered LoRA '{lora_name}' ModelDeploymentCard"
+                            )
+                        except Exception as e:
+                            logger.exception(
+                                f"Failed to unregister LoRA {lora_name} ModelDeploymentCard: {e}"
+                            )
+
+                            # Rollback: re-add the LoRA to the engine to keep
+                            # engine state and discovery consistent.
+                            try:
+                                logger.debug(
+                                    f"Rolling back: re-adding LoRA '{lora_name}' to engine"
+                                )
+                                await self.engine_client.add_lora(
+                                    LoRARequest(
+                                        lora_name=lora_name,
+                                        lora_int_id=lora_id,
+                                        lora_path=lora_path,
+                                    )
+                                )
+                                self.loaded_loras[lora_name] = LoRAInfo(
+                                    id=lora_id, path=lora_path
+                                )
+                                logger.debug(
+                                    f"Successfully rolled back LoRA '{lora_name}'"
+                                )
+                            except Exception as rollback_error:
+                                logger.exception(
+                                    f"Failed to rollback LoRA {lora_name}: {rollback_error}"
+                                )
+
+                            return {
+                                "status": "error",
+                                "message": f"Failed to unregister LoRA '{lora_name}' from discovery registry: {str(e)}",
+                                "lora_name": lora_name,
+                            }
+                    else:
+                        logger.debug(
+                            f"Cannot unregister LoRA '{lora_name}': serving endpoint not ready"
+                        )
+
+                    logger.info(
+                        f"Successfully unloaded LoRA adapter: {lora_name} with ID {lora_id}"
+                    )
+                    return {
+                        "status": "success",
+                        "message": f"LoRA adapter '{lora_name}' unloaded successfully",
+                        "lora_name": lora_name,
+                        "lora_id": lora_id,
+                    }
+                finally:
+                    # Remove lock entry once the LoRA is not loaded (or never was).
+                    with self._lora_load_locks_guard:
+                        if (
+                            lora_name not in self.loaded_loras
+                            and self._lora_load_locks.get(lora_name) is lock
+                        ):
+                            self._lora_load_locks.pop(lora_name, None)
+        except Exception as e:
+            logger.exception(f"Failed to unload LoRA adapter: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def list_loras(self, body: dict) -> dict:
+        """List all loaded LoRA adapters as a lora_name -> lora_id mapping."""
+        try:
+            loras = {name: lora.id for name, lora in self.loaded_loras.items()}
+            return {
+                "status": "success",
+                "loras": loras,
+                "count": len(loras),
+            }
+        except Exception as e:
+            logger.error(f"Failed to list LoRA adapters: {e}")
+            return {"status": "error", "message": str(e)}
 
     async def sleep(self, body: dict) -> dict:
         body = body or {}

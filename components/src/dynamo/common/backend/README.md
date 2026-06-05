@@ -5,7 +5,8 @@ inference, metrics + Prometheus bridging, KV event publishing,
 KV-aware (DP-rank) routing, health-check canaries, OpenTelemetry
 tracing, and request-side guided decoding / structural tag.
 
-> **Work in progress.** Multimodal, diffusion (image/video/DLLM), LoRA,
+> **Work in progress.** Multimodal, diffusion (image/video/DLLM),
+> LoRA (SGLang / TRT-LLM — vLLM is supported),
 > engine routes (pause/resume, profiling, weight updates),
 > text-in-text-out, and snapshot/CRIU are still on the non-unified
 > path. See [Feature Gaps](#feature-gaps) for the per-engine matrix.
@@ -440,6 +441,31 @@ Lifecycle and runtime:
 - `DynamoException` error chain wrapping
 - Finish reason normalization handled by the Rust layer
 - Engine control plumbing, with per-backend profiling, pause/resume, and supported weight-update controls
+- **Dynamic LoRA (vLLM)** — load / unload / list adapters at runtime,
+  with ModelDeploymentCard publishing for frontend discovery,
+  per-adapter serialization locks, and per-request routing. Gated on
+  `--enable-lora` **and** `DYN_LORA_ENABLED=true`; SGLang / TRT-LLM
+  advertise no LoRA updates yet. Because LoRA ops mutate engine-managed
+  adapters rather than the serving lifecycle, they ride the generic
+  **engine-update** mechanism (a sibling of engine controls, kept separate
+  so the control surface isn't inflated):
+  - **Canonical API** (unified backend): `POST /engine/update/load_lora`
+    `{lora_name, source:{uri}}`, `POST /engine/update/unload_lora`
+    `{lora_name}`, `POST /engine/update/list_loras` `{}` (uniform `POST` +
+    JSON body). Engine updates return **HTTP 200** with a
+    `{"status": "error", ...}` body on semantic failure (5xx only when the
+    handler raises).
+  - **`/v1/loras` compatibility alias** — for the unified backend, the
+    legacy surface forwards to the engine updates (`POST /v1/loras` →
+    `load_lora`, `GET /v1/loras` → `list_loras`,
+    `DELETE /v1/loras/{name}` → `unload_lora`), preserving legacy HTTP
+    semantics (a `status:"error"` response maps to **HTTP 500** on
+    load/unload). When LoRA is unsupported, these return an explicit
+    "LoRA management not available" error rather than failing opaquely.
+  - **Legacy (non-unified) vLLM** continues to serve `/v1/loras`
+    unchanged.
+  - Loaded adapters appear in `GET /v1/models`; inference selects an
+    adapter by sending `"model": "<lora_name>"`.
 - **Disaggregated serving** (`agg`/`prefill`/`decode`) — KV transfer
   uses NIXL across all three engines; SGLang exchanges a Dynamo-level
   bootstrap address, vLLM and TRT-LLM use an engine-internal handshake.
@@ -498,7 +524,7 @@ Request handling:
 | Text-in-text-out mode | OpenAI-compatible chat/completion with engine-side tokenization. Unified hardcodes `ModelInput.Tokens`. |
 | Multimodal | Images / video / embeddings, NIXL embedding transfer, encode workers. `worker.py:_to_rust_disaggregation_mode` rejects the `ENCODE` role. |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path. |
-| LoRA adapters | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization locks, per-request adapter threading on prefill. |
+| LoRA adapters (SGLang / TRT-LLM) | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization locks, per-request adapter threading. **vLLM is supported on the unified path** — see [What works today](#what-works-today); SGLang and TRT-LLM advertise no LoRA updates yet. |
 | Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload. |
 
 ### vLLM-specific gaps
@@ -517,7 +543,6 @@ Request handling:
 | `--benchmark-mode` family | The `--benchmark-*` flag family (mode, prefill/decode granularities, warmup, output path, timeout) injects into `vllm_config.additional_config` |
 | "Omni" alternative entry point | `dynamo.vllm.omni.*` parallel mode for alternative tensor workflows |
 | Multimodal (vLLM) | NIXL embedding transfer (`EmbeddingTransferMode`, `--embedding-transfer-mode`), embedding LRU cache (`--multimodal-embedding-cache-capacity-gb`), Qwen VL mRoPE, `EncodeWorkerHandler`, `--route-to-encoder` |
-| LoRA (vLLM) | Three endpoints (`load_lora`, `unload_lora`, `list_loras`); also: unified prefill doesn't thread per-request LoRA adapters into the engine call |
 
 ### SGLang-specific gaps
 
@@ -563,9 +588,10 @@ For users picking what to land next on the unified path:
 
 1. **Text-in-text-out** (`ModelInput.Text`) — common ask; needs
    engine-side tokenization + chat templating path.
-2. **LoRA dynamic load/unload + MDC publishing** — production-visible
-   feature with concrete API surface (three endpoints on vLLM
-   `handlers.py`).
+2. **LoRA dynamic load/unload + MDC publishing** — **done for vLLM**
+   (engine updates `/engine/update/load_lora|unload_lora|list_loras` + a
+   `/v1/loras` compatibility alias; see [What works today](#what-works-today)).
+   Remaining: SGLang and TRT-LLM, which advertise no LoRA updates yet.
 3. **Engine routes / lifecycle endpoints** — sleep/wake, profile
    start/stop, weight updates, KV block clearing, prefix cache
    reset. Visible in operator workflows.
