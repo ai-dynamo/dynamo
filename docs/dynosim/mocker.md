@@ -89,6 +89,7 @@ python -m dynamo.mocker \
 | `--data-parallel-size` | 1 | Number of DP replicas |
 | `--startup-time` | None | Simulated startup delay (seconds) |
 | `--planner-profile-data` | None | Path to either a mocker-format `.npz` file or a profiler results directory |
+| `--server-oracle-url` | `DYNAMO_SERVER_ORACLE_URL` | HTTP oracle URL for prefill/decode timing and KV capacity predictions. Enables server-based modeling without requiring AIC |
 | `--num-workers` | 1 | Workers per process |
 | `--reasoning` | None | JSON config for emitting reasoning token spans, with `start_thinking_token_id`, `end_thinking_token_id`, and `thinking_ratio` |
 | `--engine-type` | `vllm` | Engine simulation type: `vllm` or `sglang` |
@@ -124,6 +125,7 @@ python -m dynamo.mocker \
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DYN_MOCKER_KV_CACHE_TRACE` | off | Set to `1` or `true` to log structured KV cache allocation and eviction traces |
+| `DYNAMO_SERVER_ORACLE_URL` | None | Default HTTP latency oracle URL used by `--server-oracle-url` when the flag is omitted |
 
 > **Note:** For local scale tests and router benchmarks, prefer `--num-workers` over launching many separate mocker processes. All workers share one tokio runtime and thread pool, which is both lighter weight and closer to how the test harnesses exercise the mocker.
 
@@ -255,6 +257,122 @@ python -m dynamo.mocker \
     --planner-profile-data components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D \
     --speedup-ratio 1.0
 ```
+
+### Server Oracle Performance Model
+
+The mocker can get prefill/decode timing and KV capacity estimates from an external HTTP server
+instead of using the polynomial, interpolation, or AIC performance models. This is useful when
+another process can answer mocker-style latency and capacity queries more accurately than static
+profile data.
+
+Configure it with either `--server-oracle-url` or `DYNAMO_SERVER_ORACLE_URL`:
+
+```bash
+python -m dynamo.mocker \
+    --model-path nvidia/Llama-3.1-8B-Instruct-FP8 \
+    --server-oracle-url http://127.0.0.1:8010
+```
+
+The DynoSim run CLI accepts the same top-level flag:
+
+```bash
+python -m dynamo.replay \
+    --input-tokens 8192 \
+    --output-tokens 1024 \
+    --request-count 100 \
+    --server-oracle-url http://127.0.0.1:8010 \
+    --extra-engine-args '{"block_size":64}'
+```
+
+`--server-oracle-url` is mutually exclusive with top-level AIC flags such as
+`--aic-perf-model`, `--aic-backend`, and `--aic-system`.
+
+#### HTTP API Contract
+
+Dynamo posts JSON to two endpoints under the configured base URL.
+
+Prefill prediction:
+
+```http
+POST /v1/mocker/predict_prefill
+Content-Type: application/json
+```
+
+```json
+{
+  "batch_size": 1,
+  "effective_isl": 8192,
+  "prefix": 0
+}
+```
+
+Decode prediction:
+
+```http
+POST /v1/mocker/predict_decode
+Content-Type: application/json
+```
+
+```json
+{
+  "batch_size": 4,
+  "context_length": 8192
+}
+```
+
+The server must return a JSON object containing either finite, non-negative `latency_ms`
+or finite, non-negative `latency_us`. `latency_ms` is preferred:
+
+```json
+{
+  "latency_ms": 8.125
+}
+```
+
+or:
+
+```json
+{
+  "latency_us": 8125.0
+}
+```
+
+Dynamo treats the returned value as the mocker compute time for that prefill or decode step. Extra
+response fields are ignored. A non-2xx response, invalid JSON response, invalid latency
+value, or response without `latency_ms`/`latency_us` fails the prediction call.
+
+The server may expose additional endpoints such as `/health` or `/stats`, but Dynamo only requires
+the prediction and capacity endpoints documented here.
+
+KV capacity estimation:
+
+```http
+POST /v1/mocker/estimate_num_gpu_blocks
+Content-Type: application/json
+```
+
+```json
+{
+  "model_path": "nvidia/Llama-3.1-8B-Instruct-FP8",
+  "tp_size": 1,
+  "block_size": 64,
+  "max_num_batched_tokens": 8192,
+  "gpu_memory_utilization": 0.9,
+  "mem_fraction_static": 0.88,
+  "engine_type": "vllm"
+}
+```
+
+The server must return a positive `num_gpu_blocks`:
+
+```json
+{
+  "num_gpu_blocks": 16384
+}
+```
+
+When `--server-oracle-url` is used and `num_gpu_blocks` is not set explicitly, Dynamo uses this
+server response for the mocker KV capacity. This path does not load or require AIC.
 
 ### AIC Performance Model
 
@@ -440,11 +558,13 @@ Each active request is tracked as a sequence, managing its token blocks and gene
 
 ### Performance Model
 
-The mocker supports three timing prediction modes:
+The mocker supports four timing prediction modes:
 
 **Polynomial Model (Default):** Uses hardcoded polynomial formulas that approximate typical GPU behavior. Prefill time scales quadratically with token count, while decode time depends on the total active KV cache size.
 
 **Interpolated Model:** Loads actual profiling data from an NPZ file containing measured prefill and decode latencies. The mocker interpolates between data points to predict timing for any input size. This enables high-fidelity simulation matching a specific hardware configuration.
+
+**Server Oracle Model (`--server-oracle-url`):** Calls an external HTTP server for prefill/decode latency and KV capacity predictions. This keeps scheduling and KV-cache behavior in mocker while delegating timing and capacity estimation to a service-provided model, without loading AIC.
 
 **AIC Model (`--aic-perf-model`):** Uses the NVIDIA AI Configurator (AIC) SDK for latency prediction. AIC provides calibrated performance models for specific GPU/model/engine combinations, predicting prefill and decode latency as a function of batch size, sequence length, and prefix cache hits. The model path is automatically derived from `--model-path`, and the engine type from `--engine-type`. This mode is opt-in and requires both the `aiconfigurator` SDK and loadable systems/perf data for the requested tuple.
 

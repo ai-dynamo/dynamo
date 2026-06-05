@@ -247,6 +247,7 @@ The dedicated DynoSim CLI exposes:
 - `--aic-moe-tp-size`
 - `--aic-moe-ep-size`
 - `--aic-attention-dp-size`
+- `--server-oracle-url`
 - `--report-json`
 
 Defaults:
@@ -292,6 +293,10 @@ DynoSim has two independent AIC surfaces:
 - engine timing AIC via `--extra-engine-args` / staged engine JSON
 - router-side prompt-load AIC via top-level `--aic-*` flags together with
   `router_prefill_load_model: "aic"` in `--router-config`
+
+For engine timing and KV capacity from an HTTP oracle, use the top-level `--server-oracle-url` flag
+instead of AIC fields. The server contract is documented in
+[Live Simulation with Mocker](mocker.md#server-oracle-performance-model).
 
 Both surfaces accept MoE parallelism fields. For Kimi-style TP-only MoE configs, keep them aligned by
 setting `aic_moe_tp_size` to the same value as `aic_tp_size`, with `aic_moe_ep_size=1` and
@@ -541,6 +546,8 @@ If you violate those constraints, DynoSim fails immediately with a validation er
   `--inter-turn-delay-ms` only apply to synthetic workloads
 - `--extra-engine-args`, `--prefill-engine-args`, `--decode-engine-args`, and `--router-config`
   are JSON strings on the standalone DynoSim CLI
+- `--server-oracle-url` applies server-based prefill/decode timing and KV capacity estimation to the
+  selected mocker engine args and is mutually exclusive with top-level `--aic-*` flags
 - top-level `--aic-*` flags are used only for router-side prompt-load modeling; engine timing AIC
   still belongs in the engine-args JSON
 - offline mode does not need planner runtime setup, router registration, or external event transport

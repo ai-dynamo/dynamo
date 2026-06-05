@@ -5,8 +5,15 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import os
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections import OrderedDict
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +33,10 @@ DEFAULT_GPU_MEMORY_UTILIZATION = 0.9
 DEFAULT_MEM_FRACTION_STATIC = 0.88
 DEFAULT_FREE_GPU_MEMORY_FRACTION = 0.9
 _BYTES_PER_GIB = 1 << 30
+SERVER_ORACLE_BACKEND_NAME = "server_oracle"
+DEFAULT_SERVER_ORACLE_URL = "http://127.0.0.1:8010"
+DEFAULT_SERVER_ORACLE_TIMEOUT_S = 120.0
+DEFAULT_SERVER_ORACLE_LATENCY_CACHE_SIZE = 8192
 
 
 def _validate_kv_capacity_backend(backend_name: str) -> None:
@@ -362,6 +373,215 @@ class AicSession:
         return num_gpu_blocks
 
 
+class ServerOracleSession:
+    """Session backed by an HTTP latency oracle server."""
+
+    def __init__(
+        self,
+        base_url: str | None = None,
+        timeout_s: float | None = None,
+    ):
+        self._base_url = _resolve_server_oracle_url(base_url)
+        self._timeout_s = _resolve_server_oracle_timeout(timeout_s)
+        self._latency_cache_size = _resolve_server_oracle_latency_cache_size()
+        self._latency_cache: OrderedDict[
+            tuple[str, tuple[tuple[str, int], ...]], float
+        ] = OrderedDict()
+        logger.info("Server oracle session initialized: url=%s", self._base_url)
+
+    @property
+    def base_url(self) -> str:
+        return self._base_url
+
+    def predict_prefill(
+        self, batch_size: int, effective_isl: int, prefix: int
+    ) -> float:
+        """Predict prefill latency in ms from uncached tokens and cached prefix."""
+        return self._predict(
+            "/v1/mocker/predict_prefill",
+            {
+                "batch_size": int(batch_size),
+                "effective_isl": int(effective_isl),
+                "prefix": int(prefix),
+            },
+        )
+
+    def predict_decode(self, batch_size: int, isl: int, osl: int) -> float:
+        """Predict decode latency in ms for the current context length."""
+        del osl
+        return self._predict(
+            "/v1/mocker/predict_decode",
+            {
+                "batch_size": int(batch_size),
+                "context_length": int(isl),
+            },
+        )
+
+    def estimate_num_gpu_blocks(
+        self,
+        *,
+        model_path: str,
+        tp_size: int,
+        block_size: int,
+        max_num_batched_tokens: int,
+        gpu_memory_utilization: float | None = None,
+        mem_fraction_static: float | None = None,
+        free_gpu_memory_fraction: float | None = None,
+        backend_version: str | None = None,
+        moe_tp_size: int | None = None,
+        moe_ep_size: int | None = None,
+        attention_dp_size: int | None = None,
+        engine_type: str | None = None,
+    ) -> int:
+        """Estimate rank-local KV cache blocks from the HTTP oracle server."""
+        payload: dict[str, Any] = {
+            "model_path": model_path,
+            "tp_size": int(tp_size),
+            "block_size": int(block_size),
+            "max_num_batched_tokens": int(max_num_batched_tokens),
+        }
+        optional_values = {
+            "gpu_memory_utilization": gpu_memory_utilization,
+            "mem_fraction_static": mem_fraction_static,
+            "free_gpu_memory_fraction": free_gpu_memory_fraction,
+            "backend_version": backend_version,
+            "moe_tp_size": moe_tp_size,
+            "moe_ep_size": moe_ep_size,
+            "attention_dp_size": attention_dp_size,
+            "engine_type": engine_type,
+        }
+        payload.update(
+            {
+                name: value
+                for name, value in optional_values.items()
+                if value is not None
+            }
+        )
+
+        response = self._post_json("/v1/mocker/estimate_num_gpu_blocks", payload)
+        if "num_gpu_blocks" not in response:
+            raise RuntimeError(
+                "Server oracle response from /v1/mocker/estimate_num_gpu_blocks "
+                "did not include num_gpu_blocks"
+            )
+        num_gpu_blocks = response["num_gpu_blocks"]
+        if not isinstance(num_gpu_blocks, int) or isinstance(num_gpu_blocks, bool):
+            raise RuntimeError(
+                f"Server oracle returned invalid num_gpu_blocks: {num_gpu_blocks!r}"
+            )
+        if num_gpu_blocks <= 0:
+            raise RuntimeError(
+                "Server oracle returned non-positive num_gpu_blocks: "
+                f"{num_gpu_blocks}"
+            )
+        return num_gpu_blocks
+
+    def _predict(self, path: str, payload: dict[str, int]) -> float:
+        cache_key = (path, tuple(sorted(payload.items())))
+        try:
+            latency_ms = self._latency_cache[cache_key]
+        except KeyError:
+            pass
+        else:
+            self._latency_cache.move_to_end(cache_key)
+            return latency_ms
+
+        response = self._post_json(path, payload)
+        if "latency_ms" in response:
+            latency_ms = float(response["latency_ms"])
+        elif "latency_us" in response:
+            latency_ms = float(response["latency_us"]) / 1000.0
+        else:
+            raise RuntimeError(
+                f"Server oracle response from {path} did not include "
+                "latency_ms or latency_us"
+            )
+        if not math.isfinite(latency_ms) or latency_ms < 0.0:
+            raise RuntimeError(
+                f"Server oracle response from {path} returned invalid "
+                f"latency_ms: {latency_ms}"
+            )
+        if self._latency_cache_size > 0:
+            self._latency_cache[cache_key] = latency_ms
+            self._latency_cache.move_to_end(cache_key)
+            while len(self._latency_cache) > self._latency_cache_size:
+                self._latency_cache.popitem(last=False)
+        return latency_ms
+
+    def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        url = f"{self._base_url}{path}"
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self._timeout_s) as response:
+                response_body = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"Server oracle request failed: {url} returned HTTP {exc.code}: {error_body}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Server oracle request failed: {url}: {exc}") from exc
+
+        try:
+            decoded = json.loads(response_body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"Server oracle response from {url} was not valid JSON: {response_body!r}"
+            ) from exc
+        if not isinstance(decoded, dict):
+            raise RuntimeError(
+                f"Server oracle response from {url} was not a JSON object: {decoded!r}"
+            )
+        return decoded
+
+
+def _resolve_server_oracle_url(system: str | None) -> str:
+    if system:
+        if system.startswith(("http://", "https://")):
+            return system.rstrip("/")
+        if urllib.parse.urlsplit(system).scheme:
+            raise ValueError(
+                f"Server oracle URL must use http:// or https:// scheme, got: {system}"
+            )
+    url = os.environ.get("DYNAMO_SERVER_ORACLE_URL") or DEFAULT_SERVER_ORACLE_URL
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(
+            f"Server oracle URL must use http:// or https:// scheme, got: {url}"
+        )
+    return url.rstrip("/")
+
+
+def _resolve_server_oracle_timeout(timeout_s: float | None) -> float:
+    if timeout_s is not None:
+        return timeout_s
+    value = os.environ.get("DYNAMO_SERVER_ORACLE_TIMEOUT_S")
+    if value:
+        return float(value)
+    return DEFAULT_SERVER_ORACLE_TIMEOUT_S
+
+
+def _resolve_server_oracle_latency_cache_size() -> int:
+    value = os.environ.get("DYNAMO_SERVER_ORACLE_LATENCY_CACHE_SIZE")
+    if value is None:
+        return DEFAULT_SERVER_ORACLE_LATENCY_CACHE_SIZE
+    cache_size = int(value)
+    if cache_size < 0:
+        raise ValueError(
+            "DYNAMO_SERVER_ORACLE_LATENCY_CACHE_SIZE must be non-negative, "
+            f"got {cache_size}"
+        )
+    return cache_size
+
+
 def create_session(
     backend_name: str,
     system: str,
@@ -373,8 +593,10 @@ def create_session(
     attention_dp_size: int | None = None,
     nextn: int | None = None,
     nextn_accept_rates: list[float] | str | None = None,
-) -> AicSession:
+) -> AicSession | ServerOracleSession:
     """Factory function called from Rust via PyO3."""
+    if backend_name.lower() == SERVER_ORACLE_BACKEND_NAME:
+        return ServerOracleSession(system)
     return AicSession(
         backend_name,
         system,
@@ -403,21 +625,38 @@ def estimate_num_gpu_blocks(
     moe_tp_size: int | None = None,
     moe_ep_size: int | None = None,
     attention_dp_size: int | None = None,
+    engine_type: str | None = None,
 ) -> int:
-    """Estimate rank-local KV cache blocks for mocker/replay AIC configs."""
+    """Estimate rank-local KV cache blocks for mocker/replay latency configs."""
+    if backend_name.lower() == SERVER_ORACLE_BACKEND_NAME:
+        return ServerOracleSession(system).estimate_num_gpu_blocks(
+            model_path=model_path,
+            tp_size=tp_size,
+            block_size=block_size,
+            max_num_batched_tokens=max_num_batched_tokens,
+            gpu_memory_utilization=gpu_memory_utilization,
+            mem_fraction_static=mem_fraction_static,
+            free_gpu_memory_fraction=free_gpu_memory_fraction,
+            backend_version=backend_version,
+            moe_tp_size=moe_tp_size,
+            moe_ep_size=moe_ep_size,
+            attention_dp_size=attention_dp_size,
+            engine_type=engine_type,
+        )
+
     _validate_kv_capacity_backend(backend_name)
     # TODO: account for whether specdec is enabled, (i.e. pass in `nextn=...`
-    #   to `create_session``). Currently omitted to downstream AIC calculation
+    #   to `AicSession`). Currently omitted to downstream AIC calculation
     #   bug causing `_get_memory_usage` to predict negative KV capacity w/ Eagle.
-    session = create_session(
-        backend_name=backend_name,
-        system=system,
-        model_path=model_path,
-        tp_size=tp_size,
-        backend_version=backend_version,
-        moe_tp_size=moe_tp_size,
-        moe_ep_size=moe_ep_size,
-        attention_dp_size=attention_dp_size,
+    session = AicSession(
+        backend_name,
+        system,
+        model_path,
+        tp_size,
+        backend_version,
+        moe_tp_size,
+        moe_ep_size,
+        attention_dp_size,
     )
     return session.estimate_num_gpu_blocks(
         block_size=block_size,

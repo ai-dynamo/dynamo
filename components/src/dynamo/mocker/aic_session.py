@@ -3,6 +3,6 @@
 
 """Backward-compatible mocker wrapper around the shared internal AIC bridge."""
 
-from dynamo._internal.aic import AicSession, create_session
+from dynamo._internal.aic import AicSession, ServerOracleSession, create_session
 
-__all__ = ["AicSession", "create_session"]
+__all__ = ["AicSession", "ServerOracleSession", "create_session"]

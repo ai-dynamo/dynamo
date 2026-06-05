@@ -64,6 +64,7 @@ def make_args(**overrides):
         "gpu_memory_utilization": None,
         "mem_fraction_static": None,
         "free_gpu_memory_fraction": None,
+        "server_oracle_url": None,
         "model_path": None,
         "is_prefill_worker": False,
         "is_decode_worker": False,
@@ -538,6 +539,76 @@ def test_load_mocker_engine_args_estimates_json_aic_blocks(tmp_path, monkeypatch
     )
 
     assert engine_args.num_gpu_blocks == 47000
+
+
+def test_server_oracle_url_enables_server_oracle_perf_model():
+    args = make_args(
+        engine_type="vllm",
+        num_gpu_blocks=2048,
+        server_oracle_url="http://127.0.0.1:8010",
+        model_path="/models/minimax",
+    )
+
+    engine_args = CONFIG.build_mocker_engine_args(args)
+
+    assert engine_args.aic_backend == "server_oracle"
+    assert engine_args.aic_system == "http://127.0.0.1:8010"
+    assert engine_args.aic_model_path == "/models/minimax"
+    assert engine_args.num_gpu_blocks == 2048
+
+
+def test_server_oracle_url_estimates_capacity_from_server(monkeypatch):
+    calls = []
+
+    def fake_estimate_num_gpu_blocks(**kwargs):
+        calls.append(kwargs)
+        return 4242
+
+    monkeypatch.setattr(CONFIG, "estimate_num_gpu_blocks", fake_estimate_num_gpu_blocks)
+
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(
+            engine_type="sglang",
+            server_oracle_url="http://127.0.0.1:8010",
+            model_path="/models/minimax",
+            sglang_page_size=128,
+            max_num_batched_tokens=4096,
+            gpu_memory_utilization=0.8,
+            mem_fraction_static=0.7,
+        )
+    )
+
+    assert engine_args.num_gpu_blocks == 4242
+    assert calls == [
+        {
+            "backend_name": "server_oracle",
+            "system": "http://127.0.0.1:8010",
+            "model_path": "/models/minimax",
+            "tp_size": 1,
+            "block_size": 128,
+            "max_num_batched_tokens": 4096,
+            "gpu_memory_utilization": 0.8,
+            "mem_fraction_static": 0.7,
+            "free_gpu_memory_fraction": None,
+            "backend_version": None,
+            "moe_tp_size": None,
+            "moe_ep_size": None,
+            "attention_dp_size": None,
+            "engine_type": "sglang",
+        }
+    ]
+
+
+def test_server_oracle_url_rejects_aic_perf_model():
+    args = make_args(
+        aic_perf_model=True,
+        aic_backend="sglang",
+        aic_system="h200_sxm",
+        server_oracle_url="http://127.0.0.1:8010",
+    )
+
+    with pytest.raises(ValueError, match="server-oracle-url"):
+        CONFIG.build_mocker_engine_args(args)
 
 
 def test_mock_engine_args_from_json_ignores_legacy_has_perf_model_field():

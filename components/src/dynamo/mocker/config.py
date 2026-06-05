@@ -23,6 +23,7 @@ _DEFAULT_VLLM_BLOCK_SIZE = 64
 _DEFAULT_SGLANG_BLOCK_SIZE = 1
 # Recent TRT-LLM PyTorch backend default tokens_per_block (older builds use 64).
 _DEFAULT_TRTLLM_BLOCK_SIZE = 32
+_SERVER_ORACLE_BACKEND = "server_oracle"
 
 
 def _parse_reasoning_config(reasoning_json: str | None) -> ReasoningConfig | None:
@@ -98,35 +99,59 @@ def _estimate_aic_num_gpu_blocks(
     free_gpu_memory_fraction: float | None,
     sglang_page_size: int | None,
 ) -> int:
-    if not aic_model_path:
+    is_server_oracle = aic_backend == _SERVER_ORACLE_BACKEND
+    if not aic_model_path and not is_server_oracle:
         raise ValueError(
-            "AIC KV cache capacity estimation requires a model path; "
+            "KV cache capacity estimation requires a model path; "
             "set --model-path or aic_model_path"
         )
+    if not aic_model_path:
+        aic_model_path = _SERVER_ORACLE_BACKEND
     resolved_block_size = _resolve_block_size_for_capacity(
         engine_type, block_size, sglang_page_size
     )
+    resolved_max_num_batched_tokens = (
+        max_num_batched_tokens
+        if max_num_batched_tokens is not None
+        else _DEFAULT_MAX_NUM_BATCHED_TOKENS
+    )
+    resolved_gpu_memory_utilization = (
+        gpu_memory_utilization
+        if gpu_memory_utilization is not None
+        else DEFAULT_GPU_MEMORY_UTILIZATION
+    )
+    resolved_mem_fraction_static = (
+        mem_fraction_static
+        if mem_fraction_static is not None
+        else DEFAULT_MEM_FRACTION_STATIC
+    )
+    if is_server_oracle:
+        return estimate_num_gpu_blocks(
+            backend_name=aic_backend,
+            system=aic_system or _DEFAULT_AIC_SYSTEM,
+            model_path=aic_model_path,
+            tp_size=aic_tp_size if aic_tp_size is not None else 1,
+            block_size=resolved_block_size,
+            max_num_batched_tokens=resolved_max_num_batched_tokens,
+            gpu_memory_utilization=resolved_gpu_memory_utilization,
+            mem_fraction_static=resolved_mem_fraction_static,
+            # None -> aic.py applies the TRT-LLM default (0.9).
+            free_gpu_memory_fraction=free_gpu_memory_fraction,
+            backend_version=aic_backend_version,
+            moe_tp_size=aic_moe_tp_size,
+            moe_ep_size=aic_moe_ep_size,
+            attention_dp_size=aic_attention_dp_size,
+            engine_type=engine_type,
+        )
     return estimate_num_gpu_blocks(
         backend_name=aic_backend,
         system=aic_system or _DEFAULT_AIC_SYSTEM,
         model_path=aic_model_path,
         tp_size=aic_tp_size if aic_tp_size is not None else 1,
         block_size=resolved_block_size,
-        max_num_batched_tokens=(
-            max_num_batched_tokens
-            if max_num_batched_tokens is not None
-            else _DEFAULT_MAX_NUM_BATCHED_TOKENS
-        ),
-        gpu_memory_utilization=(
-            gpu_memory_utilization
-            if gpu_memory_utilization is not None
-            else DEFAULT_GPU_MEMORY_UTILIZATION
-        ),
-        mem_fraction_static=(
-            mem_fraction_static
-            if mem_fraction_static is not None
-            else DEFAULT_MEM_FRACTION_STATIC
-        ),
+        max_num_batched_tokens=resolved_max_num_batched_tokens,
+        gpu_memory_utilization=resolved_gpu_memory_utilization,
+        mem_fraction_static=resolved_mem_fraction_static,
         # None -> aic.py applies the TRT-LLM default (0.9).
         free_gpu_memory_fraction=free_gpu_memory_fraction,
         backend_version=aic_backend_version,
@@ -229,7 +254,15 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
     aic_moe_tp_size = None
     aic_moe_ep_size = None
     aic_attention_dp_size = None
-    if getattr(args, "aic_perf_model", False):
+    server_oracle_url = getattr(args, "server_oracle_url", None)
+    if server_oracle_url is not None and getattr(args, "aic_perf_model", False):
+        raise ValueError("--server-oracle-url cannot be combined with --aic-perf-model")
+
+    if server_oracle_url is not None:
+        aic_backend = _SERVER_ORACLE_BACKEND
+        aic_system = server_oracle_url
+        aic_model_path = getattr(args, "model_path", None)
+    elif getattr(args, "aic_perf_model", False):
         aic_backend = (
             getattr(args, "aic_backend", None)
             or getattr(args, "engine_type", None)

@@ -30,6 +30,14 @@ use super::entrypoint::{AicPerfConfig, KvRouterConfig, to_pyerr};
 const DEFAULT_GPU_MEMORY_UTILIZATION: f64 = 0.9;
 const DEFAULT_MEM_FRACTION_STATIC: f64 = 0.88;
 
+fn mocker_engine_type_name(engine_type: RsMockerEngineType) -> &'static str {
+    match engine_type {
+        RsMockerEngineType::Vllm => "vllm",
+        RsMockerEngineType::Sglang => "sglang",
+        RsMockerEngineType::Trtllm => "trtllm",
+    }
+}
+
 fn parse_mocker_engine_type(engine_type: &str) -> PyResult<RsMockerEngineType> {
     match engine_type {
         "vllm" => Ok(RsMockerEngineType::Vllm),
@@ -163,7 +171,7 @@ impl MockEngineArgs {
         self.inner.clone()
     }
 
-    pub(crate) fn num_gpu_blocks_explicit(&self) -> bool {
+    pub(crate) fn is_num_gpu_blocks_explicit(&self) -> bool {
         self.num_gpu_blocks_explicit
     }
 }
@@ -332,6 +340,15 @@ impl MockEngineArgs {
 
     fn copy(&self) -> Self {
         self.clone()
+    }
+
+    fn num_gpu_blocks_explicit(&self) -> bool {
+        self.num_gpu_blocks_explicit
+    }
+
+    #[getter]
+    fn engine_type(&self) -> &'static str {
+        mocker_engine_type_name(self.inner.engine_type)
     }
 
     #[getter]
@@ -1244,11 +1261,17 @@ fn materialize_replay_mocker_args(
 
     if let Some(ref backend_name) = args.aic_backend.clone() {
         let backend = backend_name.clone();
+        let is_server_oracle = backend == "server_oracle";
         let system = args.aic_system.as_deref().unwrap_or("h200_sxm").to_string();
-        let model_name = args
-            .aic_model_path
-            .clone()
-            .ok_or_else(|| PyException::new_err("--aic-perf-model requires --model-path"))?;
+        let model_name = match args.aic_model_path.clone() {
+            Some(model_name) => model_name,
+            None if is_server_oracle => "server_oracle".to_string(),
+            None => {
+                return Err(PyException::new_err(
+                    "--aic-perf-model requires --model-path",
+                ));
+            }
+        };
         let backend_version = args.aic_backend_version.clone();
         let tp_size = args.aic_tp_size.unwrap_or(1);
         let moe_tp_size = args.aic_moe_tp_size;
@@ -1256,9 +1279,19 @@ fn materialize_replay_mocker_args(
         let attention_dp_size = args.aic_attention_dp_size;
         let nextn = args.aic_nextn;
         let nextn_accept_rates = args.aic_nextn_accept_rates.clone();
-        // AIC-backed config may intentionally omit num_gpu_blocks. Estimate it
-        // here, after candidate TP/backend/model overrides have been applied.
-        if !extra_args.num_gpu_blocks_explicit() {
+        // Python-backed latency configs may intentionally omit num_gpu_blocks.
+        // Estimate it here, after candidate TP/backend/model overrides have been applied.
+        if !extra_args.is_num_gpu_blocks_explicit() {
+            let source = if is_server_oracle {
+                "--server-oracle-url was requested"
+            } else {
+                "--aic-perf-model was requested"
+            };
+            let engine_type = if is_server_oracle {
+                Some(mocker_engine_type_name(args.engine_type))
+            } else {
+                None
+            };
             args.num_gpu_blocks = estimate_aic_num_gpu_blocks(
                 py,
                 &backend,
@@ -1276,11 +1309,11 @@ fn materialize_replay_mocker_args(
                 moe_tp_size,
                 moe_ep_size,
                 attention_dp_size,
+                engine_type,
             )
             .map_err(|e| {
                 PyException::new_err(format!(
-                    "Failed to estimate AIC KV cache capacity (--aic-perf-model was requested): {}",
-                    e
+                    "Failed to estimate KV cache capacity ({source}): {e}"
                 ))
             })?;
         }
@@ -1298,18 +1331,28 @@ fn materialize_replay_mocker_args(
             nextn_accept_rates.as_deref(),
         )
         .map_err(|e| {
-            PyException::new_err(format!(
-                "Failed to create AIC callback (--aic-perf-model was requested): {}",
-                e
-            ))
+            let source = if is_server_oracle {
+                "--server-oracle-url was requested"
+            } else {
+                "--aic-perf-model was requested"
+            };
+            PyException::new_err(format!("Failed to create latency callback ({source}): {e}"))
         })?;
-        tracing::debug!(
-            "AIC perf model: backend={}, gpu={}, model={}, version={:?}",
-            backend,
-            system,
-            model_name,
-            backend_version
-        );
+        if is_server_oracle {
+            tracing::debug!(
+                "Server oracle perf model: url={}, model={}",
+                system,
+                model_name
+            );
+        } else {
+            tracing::debug!(
+                "AIC perf model: backend={}, gpu={}, model={}, version={:?}",
+                backend,
+                system,
+                model_name,
+                backend_version
+            );
+        }
         args.perf_model = Arc::new(PerfModel::from_aic_callback(callback));
     }
 

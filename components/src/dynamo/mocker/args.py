@@ -295,6 +295,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "selected_decode_interpolation/ subdirectories (default: None, uses hardcoded polynomials)",
     )
     parser.add_argument(
+        "--server-oracle-url",
+        type=str,
+        default=os.environ.get("DYNAMO_SERVER_ORACLE_URL"),
+        help="HTTP oracle URL for mocker prefill/decode latency and KV capacity predictions. "
+        "This enables server-based modeling without requiring AIC.",
+    )
+    parser.add_argument(
         "--aic-perf-model",
         action="store_true",
         default=False,

@@ -736,9 +736,10 @@ async fn select_engine(
                 RsMockEngineArgs::default()
             };
 
-            // If aic_backend is set, create Python AIC callback and override perf_model
+            // If a latency callback backend is set, create the Python callback and override perf_model.
             if let Some(ref backend_name) = mocker_args.aic_backend {
                 let backend = backend_name.clone();
+                let is_server_oracle = backend == "server_oracle";
                 let system = mocker_args.aic_system.as_deref().unwrap_or("h200_sxm");
                 let model_name = mocker_args
                     .aic_model_path
@@ -767,19 +768,31 @@ async fn select_engine(
                     )
                 }) {
                     Ok(callback) => {
-                        tracing::info!(
-                            "AIC perf model: backend={}, gpu={}, model={}, version={:?}",
-                            backend,
-                            system,
-                            model_name,
-                            backend_version
-                        );
+                        if is_server_oracle {
+                            tracing::info!(
+                                "Server oracle perf model: url={}, model={}",
+                                system,
+                                model_name
+                            );
+                        } else {
+                            tracing::info!(
+                                "AIC perf model: backend={}, gpu={}, model={}, version={:?}",
+                                backend,
+                                system,
+                                model_name,
+                                backend_version
+                            );
+                        }
                         mocker_args.perf_model = Arc::new(PerfModel::from_aic_callback(callback));
                     }
                     Err(e) => {
+                        let source = if is_server_oracle {
+                            "--server-oracle-url was requested"
+                        } else {
+                            "--aic-perf-model was requested"
+                        };
                         return Err(anyhow::anyhow!(
-                            "Failed to create AIC callback (--aic-perf-model was requested): {}",
-                            e
+                            "Failed to create latency callback ({source}): {e}"
                         ));
                     }
                 }

@@ -65,6 +65,79 @@ def test_load_engine_args_estimates_aic_blocks(monkeypatch):
     ]
 
 
+def test_load_engine_args_estimates_server_oracle_blocks(monkeypatch):
+    calls = []
+
+    def fake_estimate_num_gpu_blocks(**kwargs):
+        calls.append(kwargs)
+        return 4242
+
+    monkeypatch.setattr(
+        replay_main, "estimate_num_gpu_blocks", fake_estimate_num_gpu_blocks
+    )
+
+    engine_args = replay_main._load_engine_args(
+        json.dumps(
+            {
+                "engine_type": "sglang",
+                "aic_backend": "server_oracle",
+                "aic_system": "http://127.0.0.1:8010",
+                "aic_model_path": "/models/mock",
+                "block_size": 128,
+                "max_num_batched_tokens": 4096,
+                "gpu_memory_utilization": 0.8,
+            }
+        )
+    )
+
+    assert engine_args.num_gpu_blocks == 4242
+    assert calls == [
+        {
+            "backend_name": "server_oracle",
+            "system": "http://127.0.0.1:8010",
+            "model_path": "/models/mock",
+            "tp_size": 1,
+            "block_size": 128,
+            "max_num_batched_tokens": 4096,
+            "gpu_memory_utilization": 0.8,
+            "mem_fraction_static": 0.88,
+            "free_gpu_memory_fraction": None,
+            "backend_version": None,
+            "moe_tp_size": None,
+            "moe_ep_size": None,
+            "attention_dp_size": None,
+            "engine_type": "sglang",
+        }
+    ]
+
+
+def test_with_server_oracle_estimates_unset_blocks(monkeypatch):
+    calls = []
+
+    def fake_estimate_num_gpu_blocks(**kwargs):
+        calls.append(kwargs)
+        return 5555
+
+    monkeypatch.setattr(
+        replay_main, "estimate_num_gpu_blocks", fake_estimate_num_gpu_blocks
+    )
+
+    engine_args = replay_main._with_server_oracle(
+        MockEngineArgs(
+            aic_model_path="/models/mock",
+            block_size=64,
+            max_num_batched_tokens=4096,
+        ),
+        "http://127.0.0.1:8010",
+    )
+
+    assert engine_args.num_gpu_blocks == 5555
+    assert calls[0]["backend_name"] == "server_oracle"
+    assert calls[0]["system"] == "http://127.0.0.1:8010"
+    assert calls[0]["model_path"] == "/models/mock"
+    assert calls[0]["engine_type"] == "vllm"
+
+
 def test_resolve_aic_blocks_preserves_explicit_zero_inputs(monkeypatch):
     calls = []
 

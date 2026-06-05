@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Python↔Rust bridge for the AIC (AI Configurator) perf model.
+//! Python↔Rust bridge for Python-backed latency perf models.
 //!
-//! [`PyAicCallback`] wraps a Python `AicSession` object and implements the
-//! [`AicCallback`] trait so the Rust mocker scheduler can call AIC latency
+//! [`PyAicCallback`] wraps a Python session object and implements the
+//! [`AicCallback`] trait so the Rust mocker scheduler can call latency
 //! predictions without knowing about PyO3.
 
 use std::sync::Arc;
@@ -16,7 +16,7 @@ use pyo3::types::PyDict;
 use dynamo_kv_router::PrefillLoadEstimator;
 use dynamo_mocker::common::perf_model::AicCallback;
 
-/// Wraps a Python AIC InferenceSession for direct calls from Rust.
+/// Wraps a Python latency prediction session for direct calls from Rust.
 ///
 /// The Python object must expose:
 /// - `predict_prefill(batch_size, effective_isl, prefix) -> float`
@@ -72,9 +72,9 @@ impl PrefillLoadEstimator for PyAicCallback {
     }
 }
 
-/// Initialize an AIC callback by importing and calling the Python setup function.
+/// Initialize a Python latency callback by importing and calling the setup function.
 ///
-/// Called once at mocker startup when `--aic-perf-model` is requested.
+/// Called once at mocker startup when a Python-backed perf model is requested.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn create_aic_callback(
     py: Python<'_>,
@@ -162,6 +162,7 @@ pub(super) fn estimate_aic_num_gpu_blocks(
     moe_tp_size: Option<usize>,
     moe_ep_size: Option<usize>,
     attention_dp_size: Option<usize>,
+    engine_type: Option<&str>,
 ) -> PyResult<usize> {
     let module = py.import("dynamo._internal.aic")?;
     let kwargs = PyDict::new(py);
@@ -178,6 +179,9 @@ pub(super) fn estimate_aic_num_gpu_blocks(
     kwargs.set_item("moe_tp_size", moe_tp_size)?;
     kwargs.set_item("moe_ep_size", moe_ep_size)?;
     kwargs.set_item("attention_dp_size", attention_dp_size)?;
+    if let Some(engine_type) = engine_type {
+        kwargs.set_item("engine_type", engine_type)?;
+    }
     let blocks = module.call_method("estimate_num_gpu_blocks", (), Some(&kwargs))?;
     blocks.extract()
 }

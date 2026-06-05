@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -29,6 +30,9 @@ from dynamo.mocker import MockEngineArgs
 from dynamo.mocker.utils.kv_cache import compute_kv_bytes_per_token
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 from dynamo.replay.reporting import format_report_table, write_report_json
+
+SERVER_ORACLE_BACKEND = "server_oracle"
+SERVER_ORACLE_MODEL_PATH = "server_oracle"
 
 
 class PlannerProfileDataResult(Protocol):
@@ -82,10 +86,13 @@ def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
     if aic_backend is None:
         return
 
-    aic_model_path = raw.get("aic_model_path")
+    is_server_oracle = aic_backend == SERVER_ORACLE_BACKEND
+    aic_model_path = raw.get("aic_model_path") or (
+        SERVER_ORACLE_MODEL_PATH if is_server_oracle else None
+    )
     if not aic_model_path:
         raise ValueError(
-            "AIC KV cache capacity estimation requires aic_model_path in engine args"
+            "KV cache capacity estimation requires aic_model_path in engine args"
         )
 
     tp_size = raw.get("aic_tp_size")
@@ -94,37 +101,40 @@ def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
     mem_fraction_static = raw.get("mem_fraction_static")
     free_gpu_memory_fraction = raw.get("free_gpu_memory_fraction")
 
-    raw["num_gpu_blocks"] = estimate_num_gpu_blocks(
-        backend_name=aic_backend,
-        system=raw.get("aic_system") or _DEFAULT_AIC_SYSTEM,
-        model_path=aic_model_path,
-        tp_size=cast(int, tp_size if tp_size is not None else 1),
-        block_size=_resolve_block_size_for_capacity(raw),
-        max_num_batched_tokens=cast(
+    estimator_kwargs = {
+        "backend_name": aic_backend,
+        "system": raw.get("aic_system") or _DEFAULT_AIC_SYSTEM,
+        "model_path": aic_model_path,
+        "tp_size": cast(int, tp_size if tp_size is not None else 1),
+        "block_size": _resolve_block_size_for_capacity(raw),
+        "max_num_batched_tokens": cast(
             int,
             max_num_batched_tokens
             if max_num_batched_tokens is not None
             else _DEFAULT_MAX_NUM_BATCHED_TOKENS,
         ),
-        gpu_memory_utilization=cast(
+        "gpu_memory_utilization": cast(
             float,
             gpu_memory_utilization
             if gpu_memory_utilization is not None
             else DEFAULT_GPU_MEMORY_UTILIZATION,
         ),
-        mem_fraction_static=cast(
+        "mem_fraction_static": cast(
             float,
             mem_fraction_static
             if mem_fraction_static is not None
             else DEFAULT_MEM_FRACTION_STATIC,
         ),
         # None -> aic.py applies the TRT-LLM default (0.9).
-        free_gpu_memory_fraction=free_gpu_memory_fraction,
-        backend_version=raw.get("aic_backend_version"),
-        moe_tp_size=raw.get("aic_moe_tp_size"),
-        moe_ep_size=raw.get("aic_moe_ep_size"),
-        attention_dp_size=raw.get("aic_attention_dp_size"),
-    )
+        "free_gpu_memory_fraction": free_gpu_memory_fraction,
+        "backend_version": raw.get("aic_backend_version"),
+        "moe_tp_size": raw.get("aic_moe_tp_size"),
+        "moe_ep_size": raw.get("aic_moe_ep_size"),
+        "attention_dp_size": raw.get("aic_attention_dp_size"),
+    }
+    if is_server_oracle:
+        estimator_kwargs["engine_type"] = raw.get("engine_type") or "vllm"
+    raw["num_gpu_blocks"] = estimate_num_gpu_blocks(**estimator_kwargs)
 
 
 def _resolve_kv_bytes_per_token(raw: dict) -> None:
@@ -224,6 +234,96 @@ def _load_aic_perf_config(args: argparse.Namespace):
         aic_nextn=values["aic_nextn"],
         aic_nextn_accept_rates=values["aic_nextn_accept_rates"],
     )
+
+
+def _uses_aic_replay_args(args: argparse.Namespace) -> bool:
+    return any(
+        value is not None
+        for value in (
+            args.aic_backend,
+            args.aic_system,
+            args.aic_backend_version,
+            args.aic_tp_size,
+            args.aic_model_path,
+            args.aic_moe_tp_size,
+            args.aic_moe_ep_size,
+            args.aic_attention_dp_size,
+            args.aic_nextn,
+            args.aic_nextn_accept_rates,
+        )
+    )
+
+
+def _with_server_oracle(
+    engine_args: MockEngineArgs | None,
+    server_oracle_url: str,
+) -> MockEngineArgs:
+    if engine_args is None:
+        engine_args = MockEngineArgs()
+    if engine_args.aic_backend not in (None, SERVER_ORACLE_BACKEND):
+        raise ValueError(
+            "--server-oracle-url cannot be combined with engine args that set "
+            f"aic_backend={engine_args.aic_backend!r}"
+        )
+    engine_args.aic_backend = SERVER_ORACLE_BACKEND
+    engine_args.aic_system = server_oracle_url
+    if engine_args.aic_model_path is None:
+        engine_args.aic_model_path = SERVER_ORACLE_MODEL_PATH
+    if not engine_args.num_gpu_blocks_explicit():
+        engine_args.num_gpu_blocks = estimate_num_gpu_blocks(
+            backend_name=SERVER_ORACLE_BACKEND,
+            system=server_oracle_url,
+            model_path=engine_args.aic_model_path,
+            tp_size=engine_args.aic_tp_size or 1,
+            block_size=engine_args.block_size or _DEFAULT_VLLM_BLOCK_SIZE,
+            max_num_batched_tokens=(
+                engine_args.max_num_batched_tokens or _DEFAULT_MAX_NUM_BATCHED_TOKENS
+            ),
+            gpu_memory_utilization=(
+                engine_args.gpu_memory_utilization
+                if engine_args.gpu_memory_utilization is not None
+                else DEFAULT_GPU_MEMORY_UTILIZATION
+            ),
+            mem_fraction_static=(
+                engine_args.mem_fraction_static
+                if engine_args.mem_fraction_static is not None
+                else DEFAULT_MEM_FRACTION_STATIC
+            ),
+            free_gpu_memory_fraction=engine_args.free_gpu_memory_fraction,
+            backend_version=engine_args.aic_backend_version,
+            moe_tp_size=engine_args.aic_moe_tp_size,
+            moe_ep_size=engine_args.aic_moe_ep_size,
+            attention_dp_size=engine_args.aic_attention_dp_size,
+            engine_type=engine_args.engine_type,
+        )
+    return engine_args
+
+
+def _apply_server_oracle(
+    args: argparse.Namespace,
+    extra_engine_args: MockEngineArgs | None,
+    prefill_engine_args: MockEngineArgs | None,
+    decode_engine_args: MockEngineArgs | None,
+):
+    if args.server_oracle_url is None:
+        return extra_engine_args, prefill_engine_args, decode_engine_args
+    if _uses_aic_replay_args(args):
+        raise ValueError("--server-oracle-url cannot be combined with --aic-* flags")
+
+    if prefill_engine_args is None and decode_engine_args is None:
+        extra_engine_args = _with_server_oracle(
+            extra_engine_args, args.server_oracle_url
+        )
+    else:
+        if prefill_engine_args is not None:
+            prefill_engine_args = _with_server_oracle(
+                prefill_engine_args, args.server_oracle_url
+            )
+        if decode_engine_args is not None:
+            decode_engine_args = _with_server_oracle(
+                decode_engine_args, args.server_oracle_url
+            )
+    return extra_engine_args, prefill_engine_args, decode_engine_args
 
 
 def _engine_caps(args: MockEngineArgs) -> EngineCapabilities:
@@ -512,6 +612,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--aic-attention-dp-size", type=int)
     parser.add_argument("--aic-nextn", type=int)
     parser.add_argument("--aic-nextn-accept-rates")
+    parser.add_argument(
+        "--server-oracle-url",
+        default=os.environ.get("DYNAMO_SERVER_ORACLE_URL"),
+        help="HTTP oracle URL for mocker prefill/decode latency and KV capacity predictions.",
+    )
     parser.add_argument("--input-tokens", type=int)
     parser.add_argument("--output-tokens", type=int)
     parser.add_argument(
@@ -652,6 +757,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     extra_engine_args = _load_engine_args(args.extra_engine_args)
     prefill_engine_args = _load_engine_args(args.prefill_engine_args)
     decode_engine_args = _load_engine_args(args.decode_engine_args)
+    try:
+        (
+            extra_engine_args,
+            prefill_engine_args,
+            decode_engine_args,
+        ) = _apply_server_oracle(
+            args,
+            extra_engine_args,
+            prefill_engine_args,
+            decode_engine_args,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     router_config = (
         KvRouterConfig.from_json(args.router_config)
         if args.router_config is not None
