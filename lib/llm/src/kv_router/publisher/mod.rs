@@ -77,6 +77,7 @@ enum KvEventSource {
 }
 
 impl KvEventSource {
+    #[allow(clippy::too_many_arguments)]
     fn start(
         component: Component,
         worker_id: WorkerId,
@@ -85,6 +86,7 @@ impl KvEventSource {
         cancellation_token: CancellationToken,
         tx: mpsc::UnboundedSender<PlacementEvent>,
         next_event_id: Arc<AtomicU64>,
+        image_token_id: Option<u32>,
     ) -> Result<Self> {
         match source_config {
             KvEventSourceConfig::Zmq { endpoint, topic } => {
@@ -100,6 +102,7 @@ impl KvEventSource {
                         cancellation_token.clone(),
                         kv_block_size,
                         next_event_id,
+                        image_token_id,
                     ));
 
                 Ok(KvEventSource::Zmq { zmq_handle })
@@ -165,9 +168,11 @@ impl KvEventPublisher {
             enable_local_indexer,
             dp_rank,
             batching_timeout_ms,
+            None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_local_indexer_and_worker_id(
         component: Component,
         worker_id: Option<WorkerId>,
@@ -176,6 +181,7 @@ impl KvEventPublisher {
         enable_local_indexer: bool,
         dp_rank: DpRank,
         batching_timeout_ms: Option<u64>,
+        image_token_id: Option<u32>,
     ) -> Result<Self> {
         let cancellation_token = CancellationToken::new();
         let batching_timeout_ms = batching_timeout_ms
@@ -219,6 +225,7 @@ impl KvEventPublisher {
                 cancellation_token.clone(),
                 tx.clone(),
                 next_event_id.clone(),
+                image_token_id,
             )?);
         }
 

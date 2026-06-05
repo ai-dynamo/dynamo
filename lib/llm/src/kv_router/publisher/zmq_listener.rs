@@ -22,6 +22,7 @@ pub(super) async fn start_zmq_listener(
     cancellation_token: CancellationToken,
     kv_block_size: u32,
     next_event_id: Arc<AtomicU64>,
+    image_token_id: Option<u32>,
 ) {
     tracing::debug!(
         "KVEventPublisher connecting to ZMQ endpoint {} (topic '{}')",
@@ -29,7 +30,7 @@ pub(super) async fn start_zmq_listener(
         zmq_topic
     );
 
-    let mut normalizer = ZmqEventNormalizer::new(kv_block_size);
+    let mut normalizer = ZmqEventNormalizer::new(kv_block_size).with_image_token_id(image_token_id);
     let socket = match connect_sub_socket(&zmq_endpoint, Some(&zmq_topic)).await {
         Ok(socket) => socket,
         Err(error) => {

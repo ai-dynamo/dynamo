@@ -678,7 +678,6 @@ class ModelRuntimeConfig:
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
     reasoning_parser: str | None
-    backend_framework: str | None
     exclude_tools_when_tool_choice_none: bool
     data_parallel_start_rank: int
     data_parallel_size: int
@@ -978,6 +977,8 @@ class KvEventPublisher:
         enable_local_indexer: bool = False,
         zmq_endpoint: Optional[str] = None,
         zmq_topic: Optional[str] = None,
+        batching_timeout_ms: Optional[int] = None,
+        image_token_id: Optional[int] = None,
     ) -> None:
         """
         Create a `KvEventPublisher` object.

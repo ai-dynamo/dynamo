@@ -287,6 +287,24 @@ def setup_metrics_collection(
             )
 
 
+def _resolve_image_token_id(vllm_config: VllmConfig) -> Optional[int]:
+    """Image placeholder token id from the model's HF config (None if absent).
+
+    The KV publisher's router-side normalizer uses it to map vLLM BlockStored
+    events onto the canonical pad_value MM-routing scheme; None leaves events
+    unchanged (graceful degrade for text-only models).
+    """
+    try:
+        hf_config = vllm_config.model_config.hf_config
+    except AttributeError:
+        return None
+    for attr in ("image_token_id", "image_token_index"):
+        val = getattr(hf_config, attr, None)
+        if isinstance(val, int):
+            return val
+    return None
+
+
 def setup_kv_event_publisher(
     config: Config,
     generate_endpoint: Endpoint,
@@ -331,6 +349,12 @@ def setup_kv_event_publisher(
     dp_start, dp_size = get_dp_range_for_worker(vllm_config)
     kv_publishers = []
     kv_event_block_size = get_configured_kv_event_block_size(vllm_config)
+    # The image placeholder token id vLLM emits at image positions in its
+    # BlockStored events. Passed to the KV publisher so the router-side
+    # normalizer can rewrite those runs to the canonical pad_value scheme that
+    # the Rust frontend uses for MM-aware routing. None (text-only models or
+    # unknown config) leaves events unchanged.
+    image_token_id = _resolve_image_token_id(vllm_config)
 
     for dp_rank in range(dp_start, dp_start + dp_size):
         if consolidator_enabled:
@@ -356,6 +380,7 @@ def setup_kv_event_publisher(
             zmq_topic="",
             enable_local_indexer=config.enable_local_indexer,
             dp_rank=dp_rank,
+            image_token_id=image_token_id,
         )
         kv_publishers.append(kv_publisher)
 
@@ -638,7 +663,6 @@ async def register_vllm_model(
             (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
-    runtime_config.backend_framework = "vllm"
 
     # Get runtime configuration from vLLM engine
     logging.info(
