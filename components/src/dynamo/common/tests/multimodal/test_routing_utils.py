@@ -47,7 +47,7 @@ class TestBuildMmRoutingInfoFromFeatures:
         features = [self._make_feature("abcdef0123456789" + "0" * 48, 2, 4)]
         token_ids = list(range(10))
 
-        result = build_mm_routing_info_from_features(features, token_ids, block_size=16)
+        result = build_mm_routing_info_from_features(features, token_ids)
 
         assert result is not None
         assert result["block_mm_infos"] == []
@@ -64,25 +64,25 @@ class TestBuildMmRoutingInfoFromFeatures:
         ]
         token_ids = list(range(6))
 
-        result = build_mm_routing_info_from_features(features, token_ids, block_size=16)
+        result = build_mm_routing_info_from_features(features, token_ids)
 
         p1, p2 = pad_value_for_mm_hash(h1), pad_value_for_mm_hash(h2)
         assert result["routing_token_ids"] == [p1, p1, 2, 3, p2, p2]
         assert result["block_mm_infos"] == []
 
     def test_no_features_returns_none(self):
-        assert build_mm_routing_info_from_features([], [1, 2, 3], 16) is None
+        assert build_mm_routing_info_from_features([], [1, 2, 3]) is None
 
     def test_feature_with_none_hash_skipped(self):
         feat = self._make_feature(None, 0, 16)
-        result = build_mm_routing_info_from_features([feat], list(range(16)), 16)
+        result = build_mm_routing_info_from_features([feat], list(range(16)))
         assert result is None  # all features skipped
 
     def test_range_clamped_to_token_count(self):
         # length overruns the token list; substitution must not index past end.
         features = [self._make_feature("ff" * 32, 0, 100)]
         token_ids = list(range(4))
-        result = build_mm_routing_info_from_features(features, token_ids, block_size=16)
+        result = build_mm_routing_info_from_features(features, token_ids)
         assert result is not None
         pad = pad_value_for_mm_hash(int("ff" * 8, 16))
         assert result["routing_token_ids"] == [pad, pad, pad, pad]

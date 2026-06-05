@@ -30,7 +30,6 @@ def pad_value_for_mm_hash(mm_hash: int) -> int:
 def build_mm_routing_info_from_features(
     mm_features: list[Any],
     prompt_token_ids: list[int],
-    block_size: int,
 ) -> dict | None:
     """Convert vLLM's mm_features to KvRouter mm_routing_info (pad_value scheme).
 
@@ -43,7 +42,6 @@ def build_mm_routing_info_from_features(
     Args:
         mm_features: List of MultiModalFeatureSpec from EngineCoreRequest.
         prompt_token_ids: The expanded prompt token IDs.
-        block_size: KV cache block size (must match backend).
 
     Returns:
         Dict with ``routing_token_ids`` (pad_value-substituted) and an empty
