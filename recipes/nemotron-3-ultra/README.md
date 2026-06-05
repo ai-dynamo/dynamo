@@ -33,9 +33,9 @@ The recipes pin `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel` and pa
 | **Max batched tokens**   | 32768 | 32768 | 32768 | 32768 | 32768 |
 | **Block size**           | 64 | 64 | 64 | 64 | 64 |
 | **Reference concurrency** | 18 | 10 | 20 | 8 | 32 |
-| **Manifest**             | `vllm/agg/ultra_agg_b200_chat_mtp.yaml` | `vllm/agg/ultra_agg_h200_chat_mtp.yaml` | `vllm/agg/ultra_agg_b200_agentic_mtp.yaml` | `vllm/agg/ultra_agg_h200_agentic_mtp.yaml` | `vllm/disagg/ultra_1p1d_b200_agentic_nomtp.yaml` |
+| **Manifest**             | `vllm/agg-b200-chat-mtp/deploy.yaml` | `vllm/agg-h200-chat-mtp/deploy.yaml` | `vllm/agg-b200-agentic-mtp/deploy.yaml` | `vllm/agg-h200-agentic-mtp/deploy.yaml` | `vllm/disagg-b200-agentic/deploy.yaml` |
 
-Aggregated no-MTP fallback manifests are also included under `vllm/agg/*_nomtp.yaml`.
+Aggregated no-MTP fallback manifests are also included under `vllm/agg-*-nomtp/deploy.yaml`.
 
 ## Supported Features
 
@@ -89,7 +89,7 @@ SKU=b200       # or h200
 USECASE=chat   # or agentic
 SPEC=mtp       # or nomtp
 
-kubectl apply -f vllm/agg/ultra_agg_${SKU}_${USECASE}_${SPEC}.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/agg-${SKU}-${USECASE}-${SPEC}/deploy.yaml -n ${NAMESPACE}
 ```
 
 The DGD name includes the `-nomtp` suffix only for no-MTP recipes:
@@ -102,7 +102,7 @@ kubectl get dgd ${DGD} -n ${NAMESPACE} -w
 Disaggregated recipes are currently agentic b200, no-MTP only.
 
 ```bash
-kubectl apply -f vllm/disagg/ultra_1p1d_b200_agentic_nomtp.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/disagg-b200-agentic/deploy.yaml -n ${NAMESPACE}
 ```
 
 ### 3. Smoke Test
@@ -133,15 +133,15 @@ The B200 rows below point at the actual recipe manifests in this tree. `User out
 
 | Recipe | GPU | Topology | Workload | MTP | Concurrency | User output tok/s | System output tok/s/GPU |
 |--------|-----|----------|----------|-----|-------------|-------------------|-------------------------|
-| `vllm/agg/ultra_agg_b200_agentic_mtp.yaml` | B200 | AGG | agentic | yes | 20 | 80.6 | 310.8 |
-| `vllm/agg/ultra_agg_b200_agentic_nomtp.yaml` | B200 | AGG | agentic | no | 8 | 99.5 | 175.9 |
-| `vllm/agg/ultra_agg_b200_chat_mtp.yaml` | B200 | AGG | chat | yes | 18 | 52.0 | 201.4 |
-| `vllm/agg/ultra_agg_b200_chat_nomtp.yaml` | B200 | AGG | chat | no | 16 | 51.0 | 181.3 |
-| `vllm/disagg/ultra_1p1d_b200_agentic_nomtp.yaml` | B200 | 1P1D | agentic | no | 32 | 61.6 | 231.1 |
-| `vllm/agg/ultra_agg_h200_agentic_mtp.yaml` | H200 | AGG | agentic | yes | 8 | 53.2 | 27.4 |
-| `vllm/agg/ultra_agg_h200_agentic_nomtp.yaml` | H200 | AGG | agentic | no | 8 | 52.3 | 26.5 |
-| `vllm/agg/ultra_agg_h200_chat_mtp.yaml` | H200 | AGG | chat | yes | 10 | 58.7 | 46.8 |
-| `vllm/agg/ultra_agg_h200_chat_nomtp.yaml` | H200 | AGG | chat | no | 8 | 54.2 | 43.0 |
+| `vllm/agg-b200-agentic-mtp/deploy.yaml` | B200 | AGG | agentic | yes | 20 | 80.6 | 310.8 |
+| `vllm/agg-b200-agentic-nomtp/deploy.yaml` | B200 | AGG | agentic | no | 8 | 99.5 | 175.9 |
+| `vllm/agg-b200-chat-mtp/deploy.yaml` | B200 | AGG | chat | yes | 18 | 52.0 | 201.4 |
+| `vllm/agg-b200-chat-nomtp/deploy.yaml` | B200 | AGG | chat | no | 16 | 51.0 | 181.3 |
+| `vllm/disagg-b200-agentic/deploy.yaml` | B200 | 1P1D | agentic | no | 32 | 61.6 | 231.1 |
+| `vllm/agg-h200-agentic-mtp/deploy.yaml` | H200 | AGG | agentic | yes | 8 | 53.2 | 27.4 |
+| `vllm/agg-h200-agentic-nomtp/deploy.yaml` | H200 | AGG | agentic | no | 8 | 52.3 | 26.5 |
+| `vllm/agg-h200-chat-mtp/deploy.yaml` | H200 | AGG | chat | yes | 10 | 58.7 | 46.8 |
+| `vllm/agg-h200-chat-nomtp/deploy.yaml` | H200 | AGG | chat | no | 8 | 54.2 | 43.0 |
 
 
 ## Reasoning Controls
@@ -187,17 +187,15 @@ recipes/nemotron-3-ultra/
     model-download.yaml       # Job: populate patched Ultra model view
     model-validate.yaml       # Job: validate model/tokenizer/parser files
   vllm/
-    agg/
-      ultra_agg_b200_chat_mtp.yaml
-      ultra_agg_b200_chat_nomtp.yaml
-      ultra_agg_b200_agentic_mtp.yaml
-      ultra_agg_b200_agentic_nomtp.yaml
-      ultra_agg_h200_chat_mtp.yaml
-      ultra_agg_h200_chat_nomtp.yaml
-      ultra_agg_h200_agentic_mtp.yaml
-      ultra_agg_h200_agentic_nomtp.yaml
-    disagg/
-      ultra_1p1d_b200_agentic_nomtp.yaml
+    agg-b200-chat-mtp/deploy.yaml
+    agg-b200-chat-nomtp/deploy.yaml
+    agg-b200-agentic-mtp/deploy.yaml
+    agg-b200-agentic-nomtp/deploy.yaml
+    agg-h200-chat-mtp/deploy.yaml
+    agg-h200-chat-nomtp/deploy.yaml
+    agg-h200-agentic-mtp/deploy.yaml
+    agg-h200-agentic-nomtp/deploy.yaml
+    disagg-b200-agentic/deploy.yaml
   perf/
     README.md                 # benchmark workflow
     perf.yaml                 # AIPerf trace-replay Job

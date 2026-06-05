@@ -19,10 +19,10 @@ parameters.
 
 This page covers parser names for the default Dynamo-native path. If Dynamo
 does not list a parser for your model, see
-[Parser Engine Fallback](../engine-fallback.md). For how
+[Parser Engine Fallback](engine-fallback.md). For how
 `--dyn-tool-call-parser` combines with `--dyn-chat-processor` and
 `--dyn-reasoning-parser` (and which combinations are invalid), see
-[Parser Configuration](../parser-configuration.md).
+[Parser Configuration](parser-configuration.md).
 
 ## Prerequisites
 
@@ -47,7 +47,7 @@ python -m dynamo.<backend> --help
 The table below lists the currently supported tool call parsers in Dynamo's registry. The
 **Upstream name** column shows where the vLLM or SGLang parser name differs
 from Dynamo's -- relevant when using `--dyn-chat-processor vllm` or `sglang`
-(see [Parser Engine Fallback](../engine-fallback.md)). A blank upstream
+(see [Parser Engine Fallback](engine-fallback.md)). A blank upstream
 column means the same name works everywhere. `Dynamo-only` means no upstream
 parser exists for this format.
 

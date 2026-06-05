@@ -452,14 +452,10 @@ impl VllmCore {
                 }
                 max_output_tokens = clamped;
             }
-            // TODO(trtllm-reject-propagation): reject a prompt that leaves no decode
-            // room (prompt_len >= pool capacity — the `None` case above). DISABLED as
-            // a NO-OP: any in-PR handling (silent reject via `return uuid`, or clamping
-            // output to 0) emits no terminal signal, dead-ending aggregated offline
-            // replay (in_flight) and live replay (waiter) — verified to hang. MUST NOT
-            // be enabled until offline + live replay propagate an explicit terminal-
-            // rejection outcome. Until then the request is left unchanged and stalls at
-            // the FIFO head like any oversized request (also deferred).
+            // The `None` case (prompt alone exceeds the pool) is left unchanged
+            // here on purpose: terminal rejection is decided at the admission gate,
+            // the only place that can emit the terminal rejection signal and where
+            // the no-evict footprint check lives (see `execute_pass_internal`).
         }
         let sequence = ActiveSequence::new(
             request.tokens,
@@ -802,6 +798,7 @@ impl VllmCore {
 
         let max_num_running = self.args.max_num_seqs.unwrap_or(usize::MAX);
         let trtllm_no_evict = trtllm::is_no_evict(self.args.scheduling_policy());
+        let mut rejected_uuids: Vec<Uuid> = Vec::new();
         while !preempted_any && self.state.running.len() < max_num_running {
             let Some(uuid) = self.state.next_waiting_uuid() else {
                 break;
@@ -812,6 +809,32 @@ impl VllmCore {
             // first non-fitting candidate (no skip-ahead) to preserve FIFO
             // fairness, matching TRT-LLM's `capacityScheduler.cpp`.
             if trtllm_no_evict {
+                // "Can it ever fit?" uses the UNDISCOUNTED footprint: a reused
+                // prefix block stays physically resident while the request runs, so
+                // a request whose full footprint exceeds the whole pool can never be
+                // admitted even when reusing an active prefix. Terminally reject it —
+                // leaving it at the FIFO head would block every follower and hang
+                // offline (`in_flight`) / live (`waiter`) replay. The terminal signal
+                // is emitted after `emit_ready_tokens`.
+                let footprint = self
+                    .state
+                    .requests
+                    .get(&uuid)
+                    .map(|request| request.sequence.to_completion_blocks())
+                    .unwrap_or(0);
+                if footprint > self.args.num_gpu_blocks {
+                    tracing::warn!(
+                        %uuid,
+                        footprint,
+                        num_gpu_blocks = self.args.num_gpu_blocks,
+                        "rejecting TRT-LLM request whose footprint exceeds the entire KV pool"
+                    );
+                    rejected_uuids.push(uuid);
+                    self.drop_request(uuid);
+                    continue;
+                }
+                // "Can it be admitted now?" uses the prefix-discounted `needed`
+                // against the reservation-aware free pool.
                 let needed = self
                     .state
                     .requests
@@ -838,19 +861,8 @@ impl VllmCore {
                         &self.kv_manager,
                     )
                 {
-                    // TODO(trtllm-reject-propagation): terminal-reject a request
-                    // whose footprint exceeds the whole pool — it can never be
-                    // admitted, so an oversized FIFO head stalls replay. DISABLED —
-                    // drop_request here removes the request without a terminal
-                    // signal, which dead-ends offline (in_flight) and live (waiter)
-                    // replay the same way a silent enqueue-reject would. MUST NOT be
-                    // enabled until both propagate an explicit terminal-rejection
-                    // outcome. For now, break (FIFO) as before:
-                    //     if needed > self.args.num_gpu_blocks {
-                    //         tracing::warn!(%uuid, "exceeds entire KV pool");
-                    //         self.drop_request(uuid);
-                    //         continue;
-                    //     }
+                    // Fits the pool but not right now (running reservations);
+                    // halt here (FIFO, no skip-ahead) and retry next pass.
                     break;
                 }
             }
@@ -898,7 +910,17 @@ impl VllmCore {
         let prefill_time =
             predict_prefill_duration(batch_count, batch_total_isl, batch_total_prefix, &self.args);
         let decode_start_ms = now_ms + prefill_time.as_secs_f64() * 1000.0;
-        let (decode_time, output_signals) = self.emit_ready_tokens(collector, decode_start_ms);
+        let (decode_time, mut output_signals) = self.emit_ready_tokens(collector, decode_start_ms);
+        // Emit the terminal signals for the requests the gate rejected above
+        // (see the gate comment for why this can't be done inline).
+        for uuid in rejected_uuids {
+            output_signals.push(OutputSignal {
+                uuid,
+                completed: true,
+                rejected: true,
+                handoff_delay_ms: None,
+            });
+        }
         #[cfg_attr(not(feature = "kvbm-offload"), allow(unused_mut))]
         let mut end_ms = decode_start_ms + decode_time.as_secs_f64() * 1000.0;
 
@@ -1266,27 +1288,22 @@ impl VllmCore {
             if let Some(collector) = collector.as_deref_mut() {
                 collector.on_token(uuid, decode_end_ms);
             }
-            if let Some(request) = self.state.requests.get(&uuid) {
+            let handoff_delay_ms = self.state.requests.get(&uuid).and_then(|request| {
                 request.debug_assert_progress(uuid);
-                let handoff_delay_ms = compute_prefill_handoff_delay_ms(
+                compute_prefill_handoff_delay_ms(
                     self.args.worker_type,
                     completed,
                     request.sequence.num_input_tokens(),
                     self.args.kv_transfer_bandwidth,
                     self.args.kv_bytes_per_token,
-                );
-                output_signals.push(OutputSignal {
-                    uuid,
-                    completed,
-                    handoff_delay_ms,
-                });
-            } else {
-                output_signals.push(OutputSignal {
-                    uuid,
-                    completed,
-                    handoff_delay_ms: None,
-                });
-            }
+                )
+            });
+            output_signals.push(OutputSignal {
+                uuid,
+                completed,
+                rejected: false,
+                handoff_delay_ms,
+            });
             if completed {
                 self.state.complete(&uuid);
                 running_changed = true;
