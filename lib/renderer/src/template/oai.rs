@@ -560,7 +560,10 @@ mod tests {
                     .map(|d| d.join("chat_template.jinja"));
                 match sibling {
                     Some(p) if p.exists() => {
-                        eprintln!("[info] {path} had no chat_template field; using {}", p.display());
+                        eprintln!(
+                            "[info] {path} had no chat_template field; using {}",
+                            p.display()
+                        );
                         std::fs::read_to_string(&p).expect("read sibling chat_template.jinja")
                     }
                     _ => raw,
@@ -578,7 +581,8 @@ mod tests {
         );
 
         let chat_template: ChatTemplate =
-            serde_json::from_value(serde_json::json!({ "chat_template": template_string })).unwrap();
+            serde_json::from_value(serde_json::json!({ "chat_template": template_string }))
+                .unwrap();
 
         let formatter =
             HfTokenizerConfigJsonFormatter::new(chat_template, ContextMixins::new(&[])).unwrap();
@@ -610,7 +614,11 @@ mod tests {
             "constrain",
             "analysis",
         ] {
-            eprintln!("  {:>22}: {}", format!("{needle:?}"), rendered.contains(needle));
+            eprintln!(
+                "  {:>22}: {}",
+                format!("{needle:?}"),
+                rendered.contains(needle)
+            );
         }
     }
 
