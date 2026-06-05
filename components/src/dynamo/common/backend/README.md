@@ -5,11 +5,10 @@ inference, metrics + Prometheus bridging, KV event publishing,
 KV-aware (DP-rank) routing, health-check canaries, OpenTelemetry
 tracing, and request-side guided decoding / structural tag.
 
-> **Work in progress.** Logprob response wire, multimodal, diffusion
-> (image/video/DLLM), LoRA, engine routes (pause/resume, profiling,
-> weight updates), text-in-text-out, and snapshot/CRIU are still on
-> the non-unified path. See [Feature Gaps](#feature-gaps) for the
-> per-engine matrix.
+> **Work in progress.** Multimodal, diffusion (image/video/DLLM), LoRA,
+> engine routes (pause/resume, profiling, weight updates),
+> text-in-text-out, and snapshot/CRIU are still on the non-unified
+> path. See [Feature Gaps](#feature-gaps) for the per-engine matrix.
 
 > **Looking for a walkthrough?** Start with the
 > [Writing Unified Backends](../../../../../docs/development/unified-backends.md)
@@ -402,6 +401,9 @@ common/backend/
     worker.py            # Worker + WorkerConfig (incl. disaggregation_mode)
     disagg.py            # Disagg request helpers (prefill clamp,
                          #   prefill_result extraction)
+    logprobs.py          # Shared logprob helpers
+                         #   (vLLM/TRT-LLM extractor, SGLang variant,
+                         #   option parsing, SGLang gate)
     metrics.py           # Prometheus helpers (gather_with_labels,
                          #   ensure_prometheus_multiproc_dir, registration)
     publisher.py         # ComponentSnapshot dataclass (push payload)
@@ -409,7 +411,7 @@ common/backend/
     sample_engine.py     # SampleLLMEngine (reference impl)
     sample_main.py       # Entry point for sample engine
     tests/               # test_backend_bindings, test_disagg_helpers,
-                         #   test_sample_engine
+                         #   test_logprobs, test_sample_engine
     CLAUDE.md            # Design notes (rationale, invariants)
 
 vllm/llm_engine.py       # VllmLLMEngine (agg + disagg)
@@ -442,6 +444,12 @@ Lifecycle and runtime:
   uses NIXL across all three engines; SGLang exchanges a Dynamo-level
   bootstrap address, vLLM and TRT-LLM use an engine-internal handshake.
   See [Disaggregated Serving](#disaggregated-serving) below.
+- **Logprobs** — selected-token + top-k logprob extraction and
+  streaming, sourced from `dynamo.common.backend.logprobs` and used by
+  both unified engines and the legacy handlers (which now delegate
+  here). vLLM/TRT-LLM share an extractor; SGLang has a cumulative-array
+  variant. The sample engine and Rust mocker emit synthetic logprobs
+  when `output_options.logprobs` is set.
 
 Observability:
 - **Health-check canary** — `health_check_payload()` + operator
@@ -487,7 +495,6 @@ Request handling:
 
 | Feature | Description |
 |---------|-------------|
-| Logprob response wire | Legacy handlers extract logprobs onto response chunks (`vllm/handlers.py:_extract_logprobs`, `sglang/.../decode_handler.py:_extract_logprobs`, `trtllm/.../handler_base.py:_extract_logprobs`); the unified `generate()` loops do not populate `log_probs` / `top_logprobs` / `cum_log_probs` on `GenerateChunk`. vLLM's `build_sampling_params` still passes `output_options.logprobs` to the engine on the unified path, so the engine computes them, but the values are dropped before reaching the chunk. SGLang and TRT-LLM unified `generate()` do not read `output_options.logprobs` at all. |
 | Text-in-text-out mode | OpenAI-compatible chat/completion with engine-side tokenization. Unified hardcodes `ModelInput.Tokens`. |
 | Multimodal | Images / video / embeddings, NIXL embedding transfer, encode workers. `worker.py:_to_rust_disaggregation_mode` rejects the `ENCODE` role. |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path. |
@@ -554,21 +561,14 @@ Request handling:
 
 For users picking what to land next on the unified path:
 
-1. **Logprob response wire** — smallest lift. Wire
-   `output_options.{logprobs, prompt_logprobs}` through to each
-   engine's sampling params, and emit the engine's per-token
-   logprobs onto `GenerateChunk.{log_probs, top_logprobs,
-   cum_log_probs}` in each `generate()`. vLLM already has the
-   request-side passthrough (`build_sampling_params`); SGLang and
-   TRT-LLM unified `generate()` need it added.
-2. **Text-in-text-out** (`ModelInput.Text`) — common ask; needs
+1. **Text-in-text-out** (`ModelInput.Text`) — common ask; needs
    engine-side tokenization + chat templating path.
-3. **LoRA dynamic load/unload + MDC publishing** — production-visible
+2. **LoRA dynamic load/unload + MDC publishing** — production-visible
    feature with concrete API surface (three endpoints on vLLM
    `handlers.py`).
-4. **Engine routes / lifecycle endpoints** — sleep/wake, profile
+3. **Engine routes / lifecycle endpoints** — sleep/wake, profile
    start/stop, weight updates, KV block clearing, prefix cache
    reset. Visible in operator workflows.
-5. **Snapshot / CRIU** — production checkpoint support.
-6. **Multimodal / diffusion / video / DLLM** — biggest functional
+4. **Snapshot / CRIU** — production checkpoint support.
+5. **Multimodal / diffusion / video / DLLM** — biggest functional
    gap, but largest scope. Best parallelized across modality leads.

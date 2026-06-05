@@ -28,10 +28,12 @@ use super::{AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Respons
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AsyncTransportEngine, Context, Data, Error, ManyOut, PipelineError, PipelineIO, SegmentSource,
-    ServiceBackend, ServiceEngine, SingleIn, Source, context,
+    AsyncTransportEngine, Context, Data, Error, ManyIn, ManyOut, PipelineError, PipelineIO,
+    SegmentSource, ServiceBackend, ServiceEngine, SingleIn, Source, context,
 };
 use crate::metrics::MetricsHierarchy;
+use crate::metrics::prometheus_names::work_handler;
+use crate::protocols::maybe_error::MaybeError;
 use ingress::push_handler::WorkHandlerMetrics;
 use prometheus::{CounterVec, Histogram, IntCounter, IntCounterVec, IntGauge};
 
@@ -94,6 +96,11 @@ pub(crate) struct RequestControlMessage {
     /// Reliable for single-machine profiling; treat cross-host values as approximate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) frontend_send_ts_ns: Option<u64>,
+    /// For bidirectional dispatch (`request_type == ManyIn`): connection info the
+    /// worker dials back to in order to receive subsequent request frames. `None`
+    /// for the unary path, which is the wire-compatible default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) request_stream_connection_info: Option<ConnectionInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

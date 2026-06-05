@@ -33,6 +33,7 @@ from tensorrt_llm.scheduling_params import SchedulingParams
 from torch.cuda import device_count
 
 from dynamo._core import Context
+from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend import telemetry
 from dynamo.common.backend.disagg import require_prefill_result
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
@@ -772,6 +773,24 @@ class TrtllmLLMEngine(LLMEngine):
             self._default_sampling_params, request
         )
 
+        # TRT-LLM's `logprobs=0` disables computation entirely. Floor at 1
+        # so a `logprobs=0` request still gets the chosen-token logprob;
+        # the raw requested count gates top_logprobs emission below.
+        (
+            requested_logprobs_count,
+            prompt_logprobs_count,
+        ) = _shared_logprobs.parse_logprob_options(
+            request.get("output_options", {}) or {}
+        )
+        if requested_logprobs_count is not None and hasattr(
+            sampling_params, "logprobs"
+        ):
+            sampling_params.logprobs = max(1, requested_logprobs_count)
+        if prompt_logprobs_count is not None and hasattr(
+            sampling_params, "prompt_logprobs"
+        ):
+            sampling_params.prompt_logprobs = prompt_logprobs_count
+
         # Prefill: context_only handle → packed into the response.
         # Decode: read prefill peer's handle, flip to generation_only.
         disaggregated_params: LlmDisaggregatedParams | None = None
@@ -855,12 +874,39 @@ class TrtllmLLMEngine(LLMEngine):
                         "index": output_idx,
                     }
 
+                    # output.logprobs is cumulative in lockstep with
+                    # output.token_ids — reuse the same slice offset.
+                    (
+                        log_probs,
+                        top_logprobs,
+                    ) = _shared_logprobs.extract_from_completion_output(
+                        output,
+                        tokens_so_far,
+                        fallback_to_first_on_missing=True,
+                        include_bytes=False,
+                    )
+                    if log_probs is not None:
+                        out["log_probs"] = log_probs
+                    if (
+                        top_logprobs is not None
+                        and requested_logprobs_count is not None
+                        and requested_logprobs_count > 0
+                    ):
+                        out["top_logprobs"] = top_logprobs
+
                     if output.finish_reason:
                         out["finish_reason"] = str(output.finish_reason)
 
                     if out.get("finish_reason") or res.finished:
                         if not out.get("finish_reason"):
                             out["finish_reason"] = "unknown"
+                        # TRT-LLM shares vLLM's prompt_logprobs shape.
+                        if prompt_logprobs_count is not None:
+                            prompt_payload = _shared_logprobs.extract_prompt_logprobs_from_completion_output(
+                                res
+                            )
+                            if prompt_payload is not None:
+                                out["engine_data"] = {"prompt_logprobs": prompt_payload}
                         prompt_tokens = len(token_ids)
                         total_completion_tokens = sum(
                             len(o.token_ids) for o in res.outputs

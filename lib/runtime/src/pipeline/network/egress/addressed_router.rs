@@ -21,22 +21,99 @@ use crate::metrics::request_plane::{
 use crate::pipeline::network::ConnectionInfo;
 use crate::pipeline::network::NetworkStreamWrapper;
 use crate::pipeline::network::PendingConnections;
+use crate::pipeline::network::RegisteredStream;
+use crate::pipeline::network::RequestControlMessage;
+use crate::pipeline::network::RequestType;
+use crate::pipeline::network::ResponseType;
 use crate::pipeline::network::StreamOptions;
+use crate::pipeline::network::StreamProvider;
+use crate::pipeline::network::StreamReceiver;
+use crate::pipeline::network::StreamSender;
 use crate::pipeline::network::TwoPartCodec;
 use crate::pipeline::network::codec::TwoPartMessage;
 use crate::pipeline::network::tcp;
-use crate::pipeline::{ManyOut, PipelineError, ResponseStream, SingleIn};
+use crate::pipeline::{ManyIn, ManyOut, PipelineError, ResponseStream, SingleIn};
 use crate::protocols::maybe_error::MaybeError;
 use crate::traits::DistributedRuntimeProvider;
 
 use anyhow::{Error, Result};
 use futures::stream::Stream;
-use serde::Deserialize;
-use serde::Serialize;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
+
+/// Stream transformation helper that:
+/// - decodes a response byte stream from network into the fully-shaped `ManyOut<U>`
+/// - emits TTFT and transport-roundtrip metrics on first response
+/// - hands off the `InflightGuard` to a stream-lifetime `InflightDecStream` so
+///   the inflight gauge stays accurate for the whole response lifetime.
+fn decode_response_stream<U>(
+    response_rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
+    engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
+    queue_start: Instant,
+    tx_start: Instant,
+    inflight_guard: InflightGuard,
+) -> ManyOut<U>
+where
+    U: Data + for<'de> Deserialize<'de> + MaybeError,
+{
+    let engine_ctx_for_stream = engine_ctx.clone();
+    let mut is_complete_final = false;
+    let mut first_response = true;
+    let stream = StreamNotifyClose::new(ReceiverStream::new(response_rx)).filter_map(move |res| {
+        if let Some(res_bytes) = res {
+            if first_response {
+                first_response = false;
+                REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS.observe(tx_start.elapsed().as_secs_f64());
+                STAGE_DURATION_SECONDS
+                    .with_label_values(&["transport_roundtrip"])
+                    .observe(queue_start.elapsed().as_secs_f64());
+            }
+            if is_complete_final {
+                let err = DynamoError::msg(
+                    "Response received after generation ended - this should never happen",
+                );
+                return Some(U::from_err(err));
+            }
+            match serde_json::from_slice::<NetworkStreamWrapper<U>>(&res_bytes) {
+                Ok(item) => {
+                    is_complete_final = item.complete_final;
+                    if let Some(data) = item.data {
+                        Some(data)
+                    } else if is_complete_final {
+                        None
+                    } else {
+                        let err =
+                            DynamoError::msg("Empty response received - this should never happen");
+                        Some(U::from_err(err))
+                    }
+                }
+                Err(err) => {
+                    let json_str = String::from_utf8_lossy(&res_bytes);
+                    tracing::warn!(%err, %json_str, "Failed deserializing JSON to response");
+                    Some(U::from_err(DynamoError::msg(err.to_string())))
+                }
+            }
+        } else if is_complete_final {
+            None
+        } else if engine_ctx_for_stream.is_stopped() {
+            tracing::debug!("Request cancelled and then trying to read a response");
+            None
+        } else {
+            let err = DynamoError::builder()
+                .error_type(ErrorType::Disconnected)
+                .message("Stream ended before generation completed")
+                .build();
+            tracing::debug!("{err}");
+            Some(U::from_err(err))
+        }
+    });
+
+    inflight_guard.disarm();
+    let stream = InflightDecStream { inner: stream };
+    ResponseStream::new(Box::pin(stream), engine_ctx)
+}
 
 const CONTROL_MESSAGE_MAX_BYTES: usize = 128 * 1024;
 
@@ -51,6 +128,145 @@ fn serialize_control_message(control_message: &RequestControlMessage) -> Result<
         .into());
     }
     Ok(ctrl)
+}
+
+/// Build the request control message, and serialize for transfer.
+///
+/// `request` provides the optional unary request payload. Should set for
+/// SingleIn generation.
+/// `send_conn_info` provides the connection info for the request stream.
+/// Should set for ManyIn generation.
+fn build_request_envelope<T>(
+    context: &context::Context<()>,
+    recv_conn_info: ConnectionInfo,
+    send_conn_info: Option<ConnectionInfo>,
+    request: Option<&T>,
+) -> Result<bytes::Bytes, Error>
+where
+    T: serde::Serialize + ?Sized,
+{
+    let request_id = context.id();
+    let request_type = if send_conn_info.is_some() {
+        RequestType::ManyIn
+    } else {
+        RequestType::SingleIn
+    };
+    let control_message = RequestControlMessage {
+        id: request_id.to_string(),
+        request_type,
+        response_type: ResponseType::ManyOut,
+        connection_info: recv_conn_info,
+        metadata: context.metadata().clone(),
+        frontend_send_ts_ns: None,
+        request_stream_connection_info: send_conn_info,
+    };
+
+    let ctrl = serialize_control_message(&control_message)?;
+    let data: Option<Vec<u8>> = match request {
+        Some(req) => Some(serde_json::to_vec(req)?),
+        None => None,
+    };
+
+    let msg = match data {
+        Some(d) => {
+            tracing::trace!(
+                request_id,
+                "packaging two-part message; ctrl: {} bytes, data: {} bytes",
+                ctrl.len(),
+                d.len(),
+            );
+            TwoPartMessage::from_parts(ctrl.into(), d.into())
+        }
+        None => {
+            tracing::trace!(
+                request_id,
+                "packaging bidirectional header-only envelope; ctrl: {} bytes",
+                ctrl.len(),
+            );
+            TwoPartMessage::from_header(ctrl.into())
+        }
+    };
+
+    let codec = TwoPartCodec::default();
+    let buffer = codec.encode_message(msg)?;
+    Ok(buffer)
+}
+
+/// Await the network request-stream dial-in (if `request_stream_provider` is `Some`)
+/// and spawn a detached task that forwards every item from `input_stream` onto
+/// the request stream. Returns once the forwarder is spawned; `Err` if request-stream
+/// dial-in fails.
+async fn spawn_request_stream_forwarder<T>(
+    request_stream_provider: Option<StreamProvider<StreamSender>>,
+    mut input_stream: crate::engine::DataStream<T>,
+    engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
+) -> Result<(), Error>
+where
+    T: serde::Serialize + Send + 'static,
+{
+    let Some(provider) = request_stream_provider else {
+        return Ok(());
+    };
+
+    let request_sender = match provider.await {
+        Ok(Ok(sender)) => sender,
+        Ok(Err(e)) => {
+            return Err(anyhow::anyhow!(
+                DynamoError::builder()
+                    .error_type(ErrorType::CannotConnect)
+                    .message(format!("Worker dial-in failed for request stream: {e}"))
+                    .build()
+            ));
+        }
+        Err(_) => {
+            return Err(anyhow::anyhow!(
+                DynamoError::builder()
+                    .error_type(ErrorType::Disconnected)
+                    .message("Worker disconnected before request stream was established")
+                    .build()
+            ));
+        }
+    };
+
+    // The task exits on stream end, context kill/stop, send error (worker
+    // dropped its receiver), or local serialize failure. On any exit
+    // `request_sender` drops and triggers transport shutdown (see server.rs for details)
+    // which closes the upstream mpsc, triggering the server-side handler to emit
+    // `Sentinel`, which signals the worker's reader to end cleanly.
+    tokio::spawn(async move {
+        loop {
+            let item = tokio::select! {
+                biased;
+                _ = engine_ctx.killed() => break,
+                _ = engine_ctx.stopped() => break,
+                item = input_stream.next() => match item {
+                    Some(item) => item,
+                    None => break,
+                },
+            };
+            let bytes = match serde_json::to_vec(&item) {
+                Ok(b) => b,
+                Err(e) => {
+                    // Stream-side framing failure: the engine sees a
+                    // partial input, so kill the context to abort both
+                    // directions consistently rather than silently
+                    // dropping frames.
+                    tracing::error!(
+                        error = %e,
+                        "failed to serialize bidirectional request frame; killing context"
+                    );
+                    engine_ctx.kill();
+                    break;
+                }
+            };
+            if request_sender.send(bytes.into()).await.is_err() {
+                tracing::debug!("worker request-stream receiver dropped; forwarder exiting");
+                break;
+            }
+        }
+    });
+
+    Ok(())
 }
 
 /// RAII guard that decrements REQUEST_PLANE_INFLIGHT on drop unless disarmed.
@@ -100,6 +316,15 @@ impl<S> Drop for InflightDecStream<S> {
     fn drop(&mut self) {
         REQUEST_PLANE_INFLIGHT.dec();
     }
+}
+
+/// Extract the TCP stream subject from a [`ConnectionInfo`], if it carries a
+/// well-formed [`tcp::TcpStreamConnectionInfo`]. Used for the pre-dispatch
+/// tombstone check.
+fn subject_of(conn_info: &ConnectionInfo) -> Option<String> {
+    serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&conn_info.info)
+        .ok()
+        .map(|ci| ci.subject)
 }
 
 pub struct AddressedRequest<T> {
@@ -188,173 +413,132 @@ impl AddressedPushRouter {
             .clear_instance_tombstone(instance_id)
             .await
     }
-}
 
-#[async_trait::async_trait]
-impl<T, U> AsyncEngine<SingleIn<AddressedRequest<T>>, ManyOut<U>, Error> for AddressedPushRouter
-where
-    T: Data + Serialize,
-    U: Data + for<'de> Deserialize<'de> + MaybeError,
-{
-    async fn generate(&self, request: SingleIn<AddressedRequest<T>>) -> Result<ManyOut<U>, Error> {
+    /// Bidirectional generation. Note that it doesn't implement the AsyncEngine trait directly
+    /// because there is no trivial way to wrap (instance and address) into ManyIn style.
+    /// May wrap as SingleIn<AddressedStreamRequest<T>> and unwrap here but really just syntax
+    /// sugar, so we just do it inline here. Will consider only if we do want to call this from
+    /// typed erased AsyncEngine impls.
+    pub async fn generate_bidirectional<T, U>(
+        &self,
+        instance: Instance,
+        address: String,
+        input: ManyIn<T>,
+    ) -> Result<ManyOut<U>, Error>
+    where
+        T: Data + Serialize,
+        U: Data + for<'de> Deserialize<'de> + MaybeError,
+    {
+        let (request_stream, context) = input.into_parts();
+        let input_stream = request_stream.take().ok_or_else(|| {
+            anyhow::anyhow!("RequestStream::take called twice on bidirectional dispatch input")
+        })?;
+
+        self.dispatch_and_finalize::<T, U>(
+            &context,
+            address,
+            Some(&instance),
+            None,
+            Some(input_stream),
+        )
+        .await
+    }
+
+    /// Shared dispatch core for both unary and bidirectional requests. Wire
+    /// shape is inferred from the inputs:
+    ///   - `input_stream = Some(_)` + `request = None` → bidirectional,
+    ///     header-only envelope. The worker dials back for both halves and
+    ///     pulls request frames off the spawned forwarder.
+    ///   - `input_stream = None` + `request = Some(_)` → unary, two-part
+    ///     `[ctrl, data]` envelope. The payload travels in the data part.
+    async fn dispatch_and_finalize<T, U>(
+        &self,
+        context: &context::Context<()>,
+        address: String,
+        instance: Option<&Instance>,
+        request: Option<&T>,
+        input_stream: Option<crate::engine::DataStream<T>>,
+    ) -> Result<ManyOut<U>, Error>
+    where
+        T: Data + Serialize,
+        U: Data + for<'de> Deserialize<'de> + MaybeError,
+    {
+        let engine_ctx = context.context();
+
         let queue_start = Instant::now();
         REQUEST_PLANE_INFLIGHT.inc();
         let inflight_guard = InflightGuard::new();
 
-        let request_id = request.context().id().to_string();
-        let (addressed_request, context) = request.transfer(());
-        let (request, address, instance_info) = addressed_request.into_parts();
-        let engine_ctx = context.context();
-        let engine_ctx_ = engine_ctx.clone();
+        let enable_request_stream = input_stream.is_some();
 
-        // registration options for the data plane in a singe in / many out configuration
-        let options = StreamOptions::builder()
-            .context(engine_ctx.clone())
-            .enable_request_stream(false)
-            .enable_response_stream(true)
-            .build()
-            .unwrap();
+        // Hold the `RegisteredStream` as their RAII cleanup stays armed while held,
+        // which simplifies the cancellation of registration on error. Each side is
+        // disarmed by `into_parts()` on awaiting stream provider: past that point the
+        // subject is reaped by the worker's dial-in (instance healthy) or the discovery
+        // watcher (instance dropped), so no cleanup is owed.
+        let (send_registered, recv_registered) = self
+            .register_streams(engine_ctx.clone(), enable_request_stream, true)
+            .await?;
+        let recv_registered = recv_registered.ok_or_else(|| {
+            anyhow::anyhow!("response stream registration missing despite enable_response_stream")
+        })?;
 
-        // register our needs with the data plane
-        // todo - generalize this with a generic data plane object which hides the specific transports
-        let pending_connections: PendingConnections = self.resp_transport.register(options).await;
-
-        // validate and unwrap the RegisteredStream object
-        let pending_response_stream = match pending_connections.into_parts() {
-            (None, Some(recv_stream)) => recv_stream,
-            _ => {
-                panic!("Invalid data plane registration for a SingleIn/ManyOut transport");
-            }
-        };
-
-        // separate out the connection info and the stream provider from the registered stream
-        let (connection_info, response_stream_provider) = pending_response_stream.into_parts();
-
-        // Snapshot subject before connection_info is moved; used for cleanup.
-        let recv_subject: Option<String> =
-            serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&connection_info.info)
-                .ok()
-                .map(|ci| ci.subject);
-
-        // If the instance is already tombstoned, fail fast with a migratable
-        // error instead of writing to the request plane.
-        if let (Some(subject), Some(inst)) = (&recv_subject, &instance_info) {
-            let endpoint_instance_id = inst.endpoint_instance_id();
-            if !self
+        // Tombstone check: if discovery already removed the worker, fail fast
+        // with a migratable error rather than writing to the request plane.
+        // Dropping the held registrations on this return runs their cleanup.
+        let recv_subject = subject_of(&recv_registered.connection_info);
+        let send_subject = send_registered
+            .as_ref()
+            .and_then(|r| subject_of(&r.connection_info));
+        if let (Some(subject), Some(inst)) = (&recv_subject, instance)
+            && !self
                 .resp_transport
-                .associate_instance(subject, None, &endpoint_instance_id)
+                .associate_instance(
+                    subject,
+                    send_subject.as_deref(),
+                    &inst.endpoint_instance_id(),
+                )
                 .await
-            {
-                return Err(anyhow::anyhow!(
-                    DynamoError::builder()
-                        .error_type(ErrorType::Disconnected)
-                        .message(
-                            "Worker removed before request could be sent (tombstoned instance)"
-                        )
-                        .build()
-                ));
-            }
+        {
+            return Err(anyhow::anyhow!(
+                DynamoError::builder()
+                    .error_type(ErrorType::Disconnected)
+                    .message("Worker removed before request could be sent (tombstoned instance)")
+                    .build()
+            ));
         }
 
-        // package up the connection info as part of the "header" component of the two part message
-        // used to issue the request on the
-        // todo -- this object should be automatically created by the register call, and achieved by to the two into_parts()
-        // calls. all the information here is provided by the [`StreamOptions`] object and/or the dataplane object
-        let control_message = RequestControlMessage {
-            id: engine_ctx.id().to_string(),
-            request_type: RequestType::SingleIn,
-            response_type: ResponseType::ManyOut,
-            connection_info,
-            metadata: context.metadata().clone(),
-            frontend_send_ts_ns: None,
-        };
-
-        // next build the two part message where we package the connection info and the request into
-        // a single Vec<u8> that can be sent over the wire.
-        // --- package this up in the WorkQueuePublisher ---
-        let ctrl = match serialize_control_message(&control_message) {
-            Ok(v) => v,
-            Err(e) => {
-                if let Some(subject) = &recv_subject {
-                    self.resp_transport.cancel_recv_stream(subject).await;
-                }
-                return Err(e);
-            }
-        };
-        let data = match serde_json::to_vec(&request) {
-            Ok(v) => v,
-            Err(e) => {
-                if let Some(subject) = &recv_subject {
-                    self.resp_transport.cancel_recv_stream(subject).await;
-                }
-                return Err(e.into());
-            }
-        };
-
-        tracing::trace!(
-            request_id,
-            "packaging two-part message; ctrl: {} bytes, data: {} bytes",
-            ctrl.len(),
-            data.len()
-        );
-
-        let msg = TwoPartMessage::from_parts(ctrl.into(), data.into());
-
-        // the request plane / work queue should provide a two part message codec that can be used
-        // or it should take a two part message directly
-        // todo - update this
-        let codec = TwoPartCodec::default();
-        let buffer = match codec.encode_message(msg) {
-            Ok(v) => v,
-            Err(e) => {
-                if let Some(subject) = &recv_subject {
-                    self.resp_transport.cancel_recv_stream(subject).await;
-                }
-                return Err(e.into());
-            }
-        };
-
+        let buffer = build_request_envelope(
+            context,
+            recv_registered.connection_info.clone(),
+            send_registered.as_ref().map(|r| r.connection_info.clone()),
+            request,
+        )?;
         REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
+
         let tx_start = Instant::now();
-
-        // TRANSPORT ABSTRACT REQUIRED - END HERE
-
-        // Send request using unified client interface
-        tracing::trace!(
-            request_id,
-            transport = self.req_client.transport_name(),
-            address = %address,
-            "Sending request via request plane client"
-        );
-
-        // Prepare trace headers using shared helper
-        let mut headers = std::collections::HashMap::new();
-        inject_trace_headers_into_map(&mut headers);
-        headers.insert("request-id".to_string(), request_id.clone());
-
-        // Stamp send time right before the transport write so the network
-        // transit metric excludes serialization/encoding overhead.
-        let send_ts_ns = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64;
-        headers.insert("x-frontend-send-ts-ns".to_string(), send_ts_ns.to_string());
-
-        // Phase A: Frontend → Backend (network + queue + ack)
-        let _nvtx_send = dynamo_nvtx_range!("transport.tcp.send");
-        let send_result = self.req_client.send_request(address, buffer, headers).await;
-        drop(_nvtx_send);
-
-        if let Err(e) = send_result {
-            if let Some(subject) = &recv_subject {
-                self.resp_transport.cancel_recv_stream(subject).await;
-            }
-            return Err(e);
-        }
+        self.dispatch_buffer(address, buffer, context.id()).await?;
         REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
 
+        // Spawn the forwarder before awaiting the response prologue so request
+        // frames pre-load into the worker's input buffer while the engine
+        // initialises in parallel. The response provider only resolves after
+        // `engine.generate()` returns; awaiting it second avoids stalling the
+        // request-side handshake on engine setup latency.
+        if let Some(stream) = input_stream {
+            let request_stream_provider = send_registered.map(|r| {
+                let (_conn_info, provider) = r.into_parts();
+                provider
+            });
+            spawn_request_stream_forwarder(request_stream_provider, stream, engine_ctx.clone())
+                .await?;
+        }
+
         let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
-        tracing::trace!(request_id, "awaiting transport handshake");
+        tracing::trace!(request_id = context.id(), "awaiting transport handshake");
+
+        // Disarms the recv-side cleanup; see the holding rationale above.
+        let (_recv_conn_info, response_stream_provider) = recv_registered.into_parts();
 
         // RecvError → migratable Disconnected (watcher cancelled the subject
         // or the worker died before establishing the response stream).
@@ -367,9 +551,6 @@ where
                 // opaque string today, so app-level rejections also retry
                 // -- safe because no side effects are visible yet. Follow-up:
                 // structured prologue error type for finer routing.
-                if let Some(subject) = &recv_subject {
-                    self.resp_transport.cancel_recv_stream(subject).await;
-                }
                 return Err(anyhow::anyhow!(
                     DynamoError::builder()
                         .error_type(ErrorType::CannotConnect)
@@ -382,9 +563,6 @@ where
             Err(_recv_err) => {
                 // oneshot dropped: either the discovery watcher cancelled
                 // this subject or the worker died mid-handshake.
-                if let Some(subject) = &recv_subject {
-                    self.resp_transport.cancel_recv_stream(subject).await;
-                }
                 return Err(anyhow::anyhow!(
                     DynamoError::builder()
                         .error_type(ErrorType::Disconnected)
@@ -395,73 +573,104 @@ where
         };
         drop(_nvtx_wait);
 
-        // TODO: Detect end-of-stream using Server-Sent Events (SSE)
-        let mut is_complete_final = false;
-        let mut first_response = true;
-        let stream = tokio_stream::StreamNotifyClose::new(
-            tokio_stream::wrappers::ReceiverStream::new(response_stream.rx),
+        Ok(decode_response_stream(
+            response_stream.rx,
+            engine_ctx,
+            queue_start,
+            tx_start,
+            inflight_guard,
+        ))
+    }
+
+    /// Register the requested halves of a data-plane stream with the response
+    /// transport. Returns `(send_stream, recv_stream)` mirroring the
+    /// `PendingConnections::into_parts` shape — either side is `None` when not
+    /// requested. Asserts post-registration that the transport produced
+    /// exactly the requested shape; a mismatch is a transport-layer bug, not
+    /// a runtime error path.
+    async fn register_streams(
+        &self,
+        engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
+        enable_request_stream: bool,
+        enable_response_stream: bool,
+    ) -> Result<
+        (
+            Option<RegisteredStream<StreamSender>>,
+            Option<RegisteredStream<StreamReceiver>>,
+        ),
+        Error,
+    > {
+        let options = StreamOptions::builder()
+            .context(engine_ctx)
+            .enable_request_stream(enable_request_stream)
+            .enable_response_stream(enable_response_stream)
+            .build()?;
+
+        let pending: PendingConnections = self.resp_transport.register(options).await;
+        let (send_stream, recv_stream) = pending.into_parts();
+
+        // Transport-layer invariant: the data plane produces exactly the halves
+        // we requested. A mismatch is a bug in the transport, not a runtime
+        // error path, so assert only in debug builds rather than panicking prod.
+        debug_assert_eq!(
+            send_stream.is_some(),
+            enable_request_stream,
+            "data-plane registration: request-stream presence does not match request"
+        );
+        debug_assert_eq!(
+            recv_stream.is_some(),
+            enable_response_stream,
+            "data-plane registration: response-stream presence does not match request"
+        );
+
+        Ok((send_stream, recv_stream))
+    }
+
+    /// Build standard request-plane headers (trace propagation, request-id,
+    /// frontend send-timestamp) and write the encoded buffer through the
+    /// request-plane client.
+    async fn dispatch_buffer(
+        &self,
+        address: String,
+        buffer: bytes::Bytes,
+        request_id: &str,
+    ) -> Result<(), Error> {
+        let mut headers = std::collections::HashMap::new();
+        inject_trace_headers_into_map(&mut headers);
+        headers.insert("request-id".to_string(), request_id.to_string());
+        let send_ts_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        headers.insert("x-frontend-send-ts-ns".to_string(), send_ts_ns.to_string());
+
+        let _nvtx_send = dynamo_nvtx_range!("transport.tcp.send");
+        self.req_client
+            .send_request(address, buffer, headers)
+            .await?;
+        drop(_nvtx_send);
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl<T, U> AsyncEngine<SingleIn<AddressedRequest<T>>, ManyOut<U>, Error> for AddressedPushRouter
+where
+    T: Data + Serialize,
+    U: Data + for<'de> Deserialize<'de> + MaybeError,
+{
+    async fn generate(&self, request: SingleIn<AddressedRequest<T>>) -> Result<ManyOut<U>, Error> {
+        let (addressed_request, context) = request.transfer(());
+        let (request, address, instance_info) = addressed_request.into_parts();
+
+        self.dispatch_and_finalize::<T, U>(
+            &context,
+            address,
+            instance_info.as_ref(),
+            Some(&request),
+            None,
         )
-        .filter_map(move |res| {
-            if let Some(res_bytes) = res {
-                if first_response {
-                    first_response = false;
-                    let roundtrip_ttft = tx_start.elapsed().as_secs_f64();
-                    REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS.observe(roundtrip_ttft);
-                    STAGE_DURATION_SECONDS
-                        .with_label_values(&["transport_roundtrip"])
-                        .observe(queue_start.elapsed().as_secs_f64());
-                }
-                if is_complete_final {
-                    let err = DynamoError::msg(
-                        "Response received after generation ended - this should never happen",
-                    );
-                    return Some(U::from_err(err));
-                }
-                match serde_json::from_slice::<NetworkStreamWrapper<U>>(&res_bytes) {
-                    Ok(item) => {
-                        is_complete_final = item.complete_final;
-                        if let Some(data) = item.data {
-                            Some(data)
-                        } else if is_complete_final {
-                            None
-                        } else {
-                            let err = DynamoError::msg(
-                                "Empty response received - this should never happen",
-                            );
-                            Some(U::from_err(err))
-                        }
-                    }
-                    Err(err) => {
-                        // legacy log print
-                        let json_str = String::from_utf8_lossy(&res_bytes);
-                        tracing::warn!(%err, %json_str, "Failed deserializing JSON to response");
-
-                        Some(U::from_err(DynamoError::msg(err.to_string())))
-                    }
-                }
-            } else if is_complete_final {
-                // end of stream
-                None
-            } else if engine_ctx_.is_stopped() {
-                // Gracefully end the stream if 'stop_generating()' was called. Do NOT check for
-                // 'is_killed()' here because it implies the stream ended abnormally which should be
-                // handled by the error branch below.
-                tracing::debug!("Request cancelled and then trying to read a response");
-                None
-            } else {
-                // stream ended unexpectedly
-                let err = DynamoError::builder()
-                    .error_type(ErrorType::Disconnected)
-                    .message("Stream ended before generation completed")
-                    .build();
-                tracing::debug!("{err}");
-                Some(U::from_err(err))
-            }
-        });
-
-        inflight_guard.disarm();
-        let stream = InflightDecStream { inner: stream };
-        Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
+        .await
     }
 }
 
@@ -484,6 +693,7 @@ mod tests {
             },
             metadata,
             frontend_send_ts_ns: None,
+            request_stream_connection_info: None,
         }
     }
 

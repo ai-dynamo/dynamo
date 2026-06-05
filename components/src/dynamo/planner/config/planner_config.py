@@ -23,11 +23,20 @@ from typing import Dict, Literal, Optional
 from urllib.parse import parse_qsl
 
 import yaml
-from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
 from dynamo.planner.config.defaults import SLAPlannerDefaults
 from dynamo.planner.config.parallelization import PickedParallelConfig
+from dynamo.planner.plugins.registry.config import PluginRegistrationConfig
+from dynamo.planner.plugins.types import HoldPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +77,280 @@ class AICPerfModelSpec(BaseModel):
     moe_dtype: Optional[str] = None
     activation_dtype: Optional[str] = None
     kv_cache_dtype: Optional[str] = None
+
+
+class ExternalPluginEntry(BaseModel):
+    """One entry in the static external-plugin registration list.
+
+    The planner reads this list at startup and calls
+    ``await registry.register(RegisterRequest(...))`` for each entry —
+    same code path an external plugin would hit through the gRPC
+    gateway, so behaviour is identical to dynamic registration.
+
+    Sourced from PlannerConfig (which itself comes from a ConfigMap in
+    K8s). The plugin process must already be running and reachable at
+    ``endpoint`` when the planner starts; if it isn't, the entry's
+    register fails and is logged but the planner keeps booting (a bad
+    plugin entry must NOT take down the planner).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    plugin_id: str = Field(
+        ...,
+        min_length=1,
+        description="Unique identifier; must not collide with builtin "
+        "plugin_ids (e.g. ``builtin_load_propose``).",
+    )
+    plugin_type: Literal["predict", "propose", "reconcile", "constrain"] = Field(
+        ...,
+        description="Stage this plugin participates in.",
+    )
+    priority: int = Field(
+        ...,
+        description=(
+            "Stage priority — smaller number = more authoritative in this "
+            "stage. The number's *meaning* is uniform but the *mechanism* "
+            "by which it takes effect differs between the merge stages "
+            "(parallel) and PREDICT (sequential chain):\n"
+            "  • PROPOSE / RECONCILE / CONSTRAIN: plugins run in parallel; "
+            "    smallest-priority SET wins on conflict (type-aware merge). "
+            "    AT_LEAST / AT_MOST clamps stack regardless of priority — "
+            "    AT_LEAST = max of floors, AT_MOST = min of ceilings.\n"
+            "  • PREDICT: plugins run sequentially in priority-ASCENDING "
+            "    order (smallest priority number runs first). Partial-merge "
+            "    is first-writer-wins per prediction field — once a plugin "
+            "    sets a field, later (larger-priority) plugins can only "
+            "    fill the fields left as None. The smallest-priority "
+            "    plugin is therefore the most authoritative: it writes "
+            "    first and its values are immutable for the rest of the "
+            "    chain. Only the smallest-priority plugin should set "
+            "    ``final=True`` to terminate the chain. Setting "
+            "    ``final=True`` on a non-smallest-priority plugin still "
+            "    breaks the chain at that point (skipping larger-"
+            "    priority-number fallback plugins) — which may be "
+            "    intentional (cost / policy override) or a config "
+            "    mistake; chain_augment cannot tell. The event is "
+            "    recorded on ``ChainAugmentOutcome.chain_break_warnings`` "
+            "    (surfaced via ``PipelineOutcome.audit_events``) for "
+            "    operator audit; a Prometheus counter is deferred to a "
+            "    follow-up observability PR."
+        ),
+    )
+    endpoint: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Wire endpoint where the plugin is reachable. Must start with "
+            "``grpc://host:port`` (TCP). ``inproc://`` is rejected by "
+            "``register()`` since static-config plugins are out-of-process "
+            "by definition."
+        ),
+    )
+    auth_token: str = Field(
+        default="",
+        description="Bearer token validated by the registry's "
+        "``AuthValidator``. PR #1 only ships ``static_secret`` (shared "
+        "secret) — populate it from a mounted ``Secret`` rather than "
+        "hard-coding in the ConfigMap. K8s SA / SPIFFE JWT support "
+        "lands in a follow-up PR.",
+    )
+    protocol_version: str = Field(
+        default="1.0",
+        description="Plugin protocol version. Must match planner's "
+        "supported range (``[1.0, 1.0]`` today).",
+    )
+    version: str = Field(
+        default="v1",
+        description="Plugin's own version string — surfaced in "
+        "ListPlugins for debugging / canary identification.",
+    )
+    execution_interval_seconds: float = Field(
+        default=0.0,
+        ge=0,
+        description="0.0 means ``run every tick``; positive value "
+        "throttles to ``every N seconds`` (PluginScheduler enforces).",
+    )
+    hold_policy: HoldPolicy = Field(
+        default=HoldPolicy.HOLD_LAST,
+        description="What to do when this plugin is throttled by "
+        "execution_interval. ``HOLD_LAST`` reuses the cached result "
+        "(typical for static-config plugins); ``ACCEPT_WHEN_IDLE`` "
+        "treats it as no-opinion when not due.",
+    )
+    needs: list[str] = Field(
+        default_factory=list,
+        description="Capability list (consumed by type-aware merge); "
+        "empty in v1 (no plugin yet uses needs declaration).",
+    )
+    requires_produced_fields: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Hard dependency on earlier-stage produced fields. Each "
+            "entry is a dot-path into ``PipelineContext`` (e.g. "
+            '``"predictions"``, ``"observations.traffic"``). The '
+            "scheduler skips this plugin for the current tick if any "
+            "listed field is unset on the live context; skipped ticks "
+            "do NOT advance the plugin's anchor, so the next tick that "
+            "has the field still fires it.  Empty/unset = no gating."
+        ),
+    )
+    observation_window_seconds: float = Field(
+        default=0.0,
+        ge=0,
+        description=(
+            "Aggregation window the plugin wants for windowed observation "
+            "types in ``needs`` (currently ``observations.traffic``). "
+            "0.0 = ``scale_interval`` freshness; ``N > 0`` = Prometheus "
+            "aggregates over the last ``N`` seconds.  Enforced at "
+            "register-time to be ``>= scale_interval_seconds`` — a "
+            "smaller window than the pipeline tick rate is degenerate."
+        ),
+    )
+
+    @field_validator("hold_policy", mode="before")
+    @classmethod
+    def _coerce_hold_policy(cls, v):
+        # IntEnum doesn't auto-accept string names from JSON/YAML
+        # config (Pydantic just sees ``"HOLD_LAST"`` and tries the int
+        # path). ConfigMap authors think in names, so accept either:
+        # ``"HOLD_LAST"`` / ``"ACCEPT_WHEN_IDLE"`` (case-insensitive)
+        # OR the raw integer the IntEnum already accepts.
+        if isinstance(v, str):
+            try:
+                return HoldPolicy[v.upper()]
+            except KeyError:
+                raise ValueError(
+                    f"hold_policy must be one of {[p.name for p in HoldPolicy]}, "
+                    f"got {v!r}"
+                )
+        return v
+
+
+class GatewayConfig(BaseModel):
+    """Plugin-registry gRPC gateway config.
+
+    When ``enabled=True``, the planner stands up a gRPC server hosting
+    the public ``PluginRegistry`` service so external plugin processes
+    can register / heartbeat / unregister themselves over the network.
+    See ``plugins/registry/README.md`` for the Register/Heartbeat
+    protocol and ``plugins/registry/gateway.py`` for the server
+    implementation.
+
+    Default ``enabled=False`` keeps existing deployments unchanged.
+    Operators opt in explicitly.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Open the gRPC gateway at ``listen``. Required for "
+            "self-registering plugins. Static-config plugins"
+            "registered via ``external_plugins`` do NOT need this."
+        ),
+    )
+    listen: str = Field(
+        default="unix:///var/run/dynamo/planner/registry.sock",
+        description=(
+            "Bind address, passed verbatim to gRPC's "
+            "``add_insecure_port`` / ``add_secure_port``. Both accept "
+            "gRPC's URI scheme: ``unix:/abs/path`` (or "
+            "``unix:///abs/path``) for an in-Pod socket file — useful "
+            "when plugins register from inside the same Pod and the "
+            "Pod boundary is the trust boundary. ``host:port`` (e.g. "
+            "``0.0.0.0:9099``) for TCP. mTLS for the cross-Pod TCP "
+            "case lands in a follow-up PR; PR #1 callers either bind "
+            "on an in-Pod ``unix:`` socket path (Pod-local trust) or "
+            "pair TCP with K8s NetworkPolicy / Pod-to-Pod identity."
+        ),
+    )
+    allow_insecure: bool = Field(
+        default=False,
+        description=(
+            "Permit binding a plaintext (no-TLS) gRPC gateway on a TCP "
+            "``host:port`` listen. Default False fails closed: a TCP "
+            "listen with no server credentials is rejected, because the "
+            "gateway receives plugins' shared-secret ``auth_token`` and a "
+            "plaintext TCP bind would expose it on the wire. Mirrors the "
+            "outbound ``transport.allow_insecure_grpc`` gate. ``unix:`` "
+            "(Pod-local) listens are always allowed — the Pod boundary is "
+            "the trust boundary. Set True only when TCP plaintext is "
+            "acceptable (e.g. a trusted mesh / NetworkPolicy-isolated net)."
+        ),
+    )
+
+
+class SchedulingConfig(BaseModel):
+    """Planner-level scheduling config.
+
+    Controls which tick engine drives the planner and how long each
+    tick may run. Backwards compatible: all fields have safe defaults,
+    so existing deployments see no behaviour change until
+    ``use_orchestrator=True`` is set explicitly. Read by
+    ``NativePlannerBase`` at startup.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    use_orchestrator: bool = Field(
+        default=False,
+        description=(
+            "Feature flag: when True, the planner drives ticks through "
+            "``LocalPlannerOrchestrator`` + real builtin plugins; when "
+            "False (default), uses the legacy ``PlannerStateMachine`` "
+            "path. Both paths are wired in ``NativePlannerBase`` via "
+            "``EngineProtocol``. Defaulted OFF so upgrade ≠ cutover — "
+            "operations control the enable timing."
+        ),
+    )
+    tick_max_duration_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            "Outermost deadline wrapping the entire 4-stage pipeline "
+            "(orchestrator path only)."
+        ),
+    )
+    external_plugins: list[ExternalPluginEntry] = Field(
+        default_factory=list,
+        description=(
+            "Static external plugin registration list. Each entry "
+            "is registered at planner startup via the same code path "
+            "the gRPC gateway would use — so behaviour is "
+            "identical between static-config and self-register models. "
+            "Per-entry register failures are logged but do not crash "
+            "the planner. Only used when ``use_orchestrator=True``; "
+            "ignored on the legacy PSM path."
+        ),
+    )
+    gateway: GatewayConfig = Field(
+        default_factory=GatewayConfig,
+        description=(
+            "gRPC registration gateway config. Default disabled. "
+            "Only used when ``use_orchestrator=True``."
+        ),
+    )
+    scale_interval_seconds: float = Field(
+        default=5.0,
+        gt=0.0,
+        description=(
+            "Base pipeline cadence for the orchestrator path. Pipeline "
+            "fires one tick per ``scale_interval_seconds`` regardless of "
+            "individual plugin intervals; per-plugin throttling via "
+            "``RegisterRequest.execution_interval_seconds`` then governs "
+            "which plugins actually fire each tick. Must be <= every "
+            "plugin's ``execution_interval_seconds`` and a divisor of "
+            "every plugin's ``observation_window_seconds`` so windows "
+            "align to tick boundaries. Ignored when "
+            "``use_orchestrator=False`` (PSM path uses its legacy "
+            "load_adjustment_interval_seconds / "
+            "throughput_adjustment_interval_seconds two-cadence model). "
+            "Surface added in PR #10124; full lazy-pull behaviour lands "
+            "in the engine_adapter rewrite commit later in this PR."
+        ),
+    )
 
 
 class PlannerConfig(BaseModel):
@@ -368,6 +651,30 @@ class PlannerConfig(BaseModel):
             "Port for the live diagnostics dashboard HTTP server. "
             "Set to 0 to disable. When enabled, visit http://host:port/ "
             "to view a real-time Plotly report of accumulated snapshots."
+        ),
+    )
+
+    scheduling: SchedulingConfig = Field(
+        default_factory=SchedulingConfig,
+        description=(
+            "Tick-engine scheduling config — see ``SchedulingConfig`` "
+            "docstring. Default uses the legacy PSM path; set "
+            "``scheduling.use_orchestrator=true`` to opt into the "
+            "orchestrator path."
+        ),
+    )
+
+    plugin_registration: PluginRegistrationConfig = Field(
+        default_factory=PluginRegistrationConfig,
+        description=(
+            "Plugin registry config — auth validators, transport, "
+            "heartbeat, in-process plugins, admin RBAC. Default leaves "
+            "``auth.trusted_sources`` empty, which falls back to "
+            "``AllowUnauthenticatedAuth`` in the orchestrator (DEV ONLY — "
+            "logs WARN on startup). Production: set "
+            "``auth.trusted_sources=['static_secret']`` and populate "
+            "``auth.static_secrets`` from a mounted ``Secret``. "
+            "K8s SA / SPIFFE JWT support lands in a follow-up PR."
         ),
     )
 
