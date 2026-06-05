@@ -30,6 +30,8 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+const restorePlaceholderModeEnv = "DYN_SNAPSHOT_RESTORE_PLACEHOLDER"
+
 func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]string, checkpointInfo *CheckpointInfo) {
 	_ = ApplyRestorePodMetadataWithStorageConfig(
 		labels,
@@ -232,6 +234,29 @@ func injectCheckpointIntoPodSpec(
 	if len(targets) == 0 {
 		targets = []string{commonconsts.MainContainerName}
 	}
+	originalEntrypoints := make(map[string]struct {
+		command []string
+		args    []string
+	}, len(targets))
+	for _, name := range targets {
+		found := false
+		for i := range podSpec.Containers {
+			if podSpec.Containers[i].Name == name {
+				originalEntrypoints[name] = struct {
+					command []string
+					args    []string
+				}{
+					command: append([]string(nil), podSpec.Containers[i].Command...),
+					args:    append([]string(nil), podSpec.Containers[i].Args...),
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("restore target container %q not found in pod spec", name)
+		}
+	}
 	annotations := map[string]string{
 		snapshotprotocol.TargetContainersAnnotation: snapshotprotocol.FormatTargetContainers(targets),
 	}
@@ -269,6 +294,24 @@ func injectCheckpointIntoPodSpec(
 		}
 		if container == nil {
 			return fmt.Errorf("checkpoint restore target %q does not exist in pod spec", name)
+		}
+		restoreEntrypoint := originalEntrypoints[name]
+		container.Command = restoreEntrypoint.command
+		container.Args = restoreEntrypoint.args
+		foundRestorePlaceholderModeEnv := false
+		for i := range container.Env {
+			if container.Env[i].Name == restorePlaceholderModeEnv {
+				container.Env[i].Value = "1"
+				container.Env[i].ValueFrom = nil
+				foundRestorePlaceholderModeEnv = true
+				break
+			}
+		}
+		if !foundRestorePlaceholderModeEnv {
+			container.Env = append(container.Env, corev1.EnvVar{
+				Name:  restorePlaceholderModeEnv,
+				Value: "1",
+			})
 		}
 		EnsurePodInfoMount(container)
 		targetContainers = append(targetContainers, container)

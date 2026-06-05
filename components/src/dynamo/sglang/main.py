@@ -10,6 +10,10 @@ import uvloop
 from dynamo.common.config_dump import dump_config
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.runtime import create_runtime
+from dynamo.common.utils.snapshot.restore_context import (
+    is_restore_placeholder_mode,
+    run_restore_placeholder,
+)
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import parse_args
 from dynamo.sglang.init_diffusion import (
@@ -32,6 +36,9 @@ logger = logging.getLogger(__name__)
 
 
 async def worker():
+    if is_restore_placeholder_mode():
+        run_restore_placeholder()
+
     config = await parse_args(sys.argv[1:])
     dump_config(config.dynamo_args.dump_config_to, config)
 
@@ -47,13 +54,13 @@ async def worker():
     snapshot_engine = None
     if snapshot_controller is not None:
         snapshot_engine = snapshot_controller.engine
-        (
-            dynamo_args.namespace,
-            dynamo_args.discovery_backend,
-        ) = snapshot_controller.reload_restore_identity(
-            dynamo_args.namespace,
-            dynamo_args.discovery_backend,
+        restore_config = snapshot_controller.reload_restore_config(
+            namespace=dynamo_args.namespace,
+            discovery_backend=dynamo_args.discovery_backend,
+            request_plane=dynamo_args.request_plane,
+            event_plane=dynamo_args.event_plane,
         )
+        restore_config.apply_to(dynamo_args)
 
     shutdown_event = asyncio.Event()
     shutdown_endpoints: list = []

@@ -1,34 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared Dynamo snapshot helpers for checkpoint lifecycle."""
+"""Checkpoint lifecycle and transport environment helpers."""
 
 import asyncio
 import logging
 import os
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Generic, TypeVar
+from typing import Any
 
-from dynamo.common.utils.namespace import get_worker_namespace
+from .constants import (
+    READY_FOR_CHECKPOINT_FILE,
+    RESTORE_COMPLETE_FILE,
+    SNAPSHOT_COMPLETE_FILE,
+    SNAPSHOT_CONTROL_DIR_ENV,
+)
 
 logger = logging.getLogger(__name__)
-PODINFO_ROOT = "/etc/podinfo"
-KUBERNETES_REQUIRED_PODINFO_FILES = {
-    "DYN_NAMESPACE": "dyn_namespace",
-    "DYN_COMPONENT": "dyn_component",
-    "DYN_PARENT_DGD_K8S_NAME": "dyn_parent_dgd_k8s_name",
-    "DYN_PARENT_DGD_K8S_NAMESPACE": "dyn_parent_dgd_k8s_namespace",
-}
-KUBERNETES_OPTIONAL_PODINFO_FILES = {
-    "DYN_NAMESPACE_WORKER_SUFFIX": "dyn_namespace_worker_suffix",
-}
-EngineT = TypeVar("EngineT")
-
-# Must match snapshotprotocol.{SnapshotCompleteFile,RestoreCompleteFile,ReadyForCheckpointFile}.
-SNAPSHOT_COMPLETE_FILE = "snapshot-complete"
-RESTORE_COMPLETE_FILE = "restore-complete"
-READY_FOR_CHECKPOINT_FILE = "ready-for-checkpoint"
 
 # Poll interval for the snapshot-control directory. Checkpoint and restore
 # latencies are seconds, so 100ms is negligible overhead.
@@ -44,7 +32,7 @@ class CheckpointConfig:
 
     @classmethod
     def from_env(cls) -> "CheckpointConfig | None":
-        control_dir = os.environ.get("DYN_SNAPSHOT_CONTROL_DIR")
+        control_dir = os.environ.get(SNAPSHOT_CONTROL_DIR_ENV)
         if not control_dir:
             return None
 
@@ -175,74 +163,10 @@ def configure_checkpoint_transport_env() -> None:
     torch_nccl_monitoring = os.environ.get("TORCH_NCCL_ENABLE_MONITORING")
     if torch_nccl_monitoring and torch_nccl_monitoring != "0":
         logger.warning(
-            "Overriding TORCH_NCCL_ENABLE_MONITORING=%r with '0' for checkpoint mode "
-            "because ProcessGroupNCCL monitoring can terminate restored processes",
+            "Overriding TORCH_NCCL_ENABLE_MONITORING=%r with '0' for "
+            "checkpoint mode because ProcessGroupNCCL monitoring can "
+            "terminate restored processes",
             torch_nccl_monitoring,
         )
     os.environ["TORCH_NCCL_ENABLE_MONITORING"] = "0"
     os.environ.setdefault("TORCH_NCCL_DUMP_ON_TIMEOUT", "0")
-
-
-@dataclass
-class EngineSnapshotController(Generic[EngineT]):
-    engine: EngineT
-    pause_controller: Any
-    checkpoint_config: CheckpointConfig
-    pause_args: tuple[object, ...] = ()
-
-    async def wait_for_restore(self) -> bool:
-        return await self.checkpoint_config.run_lifecycle(
-            self.pause_controller,
-            *self.pause_args,
-        )
-
-    def reload_restore_identity(
-        self,
-        namespace: str,
-        discovery_backend: str,
-    ) -> tuple[str, str]:
-        return reload_snapshot_restore_identity(namespace, discovery_backend)
-
-
-def reload_snapshot_restore_identity(
-    namespace: str,
-    discovery_backend: str,
-) -> tuple[str, str]:
-    if discovery_backend != "kubernetes":
-        logger.info(
-            "Snapshot restore reusing configured discovery backend",
-            extra={
-                "dynamo_namespace": namespace,
-                "discovery_backend": discovery_backend,
-            },
-        )
-        return namespace, discovery_backend
-
-    for env_name, podinfo_file in KUBERNETES_REQUIRED_PODINFO_FILES.items():
-        podinfo_path = os.path.join(PODINFO_ROOT, podinfo_file)
-        if not os.path.isfile(podinfo_path):
-            raise RuntimeError(f"snapshot restore requires {podinfo_path}")
-
-        with open(podinfo_path, encoding="utf-8") as podinfo:
-            value = podinfo.read().strip()
-        if not value:
-            raise RuntimeError(f"snapshot restore requires a non-empty {podinfo_path}")
-
-        os.environ[env_name] = value
-
-    for env_name, podinfo_file in KUBERNETES_OPTIONAL_PODINFO_FILES.items():
-        podinfo_path = os.path.join(PODINFO_ROOT, podinfo_file)
-        if not os.path.isfile(podinfo_path):
-            os.environ.pop(env_name, None)
-            continue
-
-        with open(podinfo_path, encoding="utf-8") as podinfo:
-            value = podinfo.read().strip()
-        if not value:
-            os.environ.pop(env_name, None)
-            continue
-
-        os.environ[env_name] = value
-
-    os.environ["DYN_DISCOVERY_BACKEND"] = "kubernetes"
-    return get_worker_namespace(), "kubernetes"

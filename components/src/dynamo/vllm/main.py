@@ -28,6 +28,10 @@ from dynamo.common.utils.prometheus import (
     register_engine_metrics_callback,
 )
 from dynamo.common.utils.runtime import create_runtime
+from dynamo.common.utils.snapshot.restore_context import (
+    is_restore_placeholder_mode,
+    run_restore_placeholder,
+)
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
     KvEventPublisher,
@@ -113,6 +117,9 @@ def run_dynamo_headless(config: Config) -> None:
 
 
 async def worker() -> None:
+    if is_restore_placeholder_mode():
+        run_restore_placeholder()
+
     config = parse_args()
 
     dump_config(config.dump_config_to, config)
@@ -146,13 +153,13 @@ async def worker() -> None:
     snapshot_engine = None
     if snapshot_controller is not None:
         snapshot_engine = snapshot_controller.engine
-        (
-            config.namespace,
-            config.discovery_backend,
-        ) = snapshot_controller.reload_restore_identity(
-            config.namespace,
-            config.discovery_backend,
+        restore_config = snapshot_controller.reload_restore_config(
+            namespace=config.namespace,
+            discovery_backend=config.discovery_backend,
+            request_plane=config.request_plane,
+            event_plane=config.event_plane,
         )
+        restore_config.apply_to(config)
 
     # HEADLESS MODE: bypass DistributedRuntime entirely.
     # Workers run vLLM only (no NATS, etcd, or dynamo endpoints).
