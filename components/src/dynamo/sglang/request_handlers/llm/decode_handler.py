@@ -29,6 +29,7 @@ _SAMPLING_OPTION_FIELDS = (
     "min_p",
 )
 
+
 def _extract_media_urls(mm_data: Dict[str, Any], media_key: str) -> list[str] | None:
     """Normalize multimodal URL items from the frontend wire format."""
 
@@ -179,9 +180,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Engine.async_generate does not declare it (notably the deepseek_v4
         # branch). Doing this at init keeps the per-request hot path free of
         # signature inspection.
-        self._routed_experts_kwargs: Dict[
-            str, Any
-        ] = self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
+        self._routed_experts_kwargs: Dict[str, Any] = (
+            self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
+        )
         self._enable_frontend_decoding = enable_frontend_decoding
         self._image_loader: Optional[ImageLoader] = None
         if self._enable_frontend_decoding:
