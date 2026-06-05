@@ -8,6 +8,8 @@ Topology Aware Scheduling (TAS) lets you control where Dynamo places inference w
 
 TAS is **opt-in**. Existing deployments without topology constraints continue to work unchanged.
 
+TAS controls pod placement. To constrain or bias the Dynamo router's prefill-to-decode handoff after pods are already running, see [Topology-Aware KV Transfer](topology-aware-kv-transfer.md).
+
 ## Prerequisites
 
 | Requirement | Details |

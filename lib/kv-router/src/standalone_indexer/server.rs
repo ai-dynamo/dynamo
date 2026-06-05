@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -23,6 +23,21 @@ use super::registry::{IndexerKey, ListenerControlError, WorkerRegistry};
 
 /// We need to fit one million tokens as JSON text, this should do it.
 const QUERY_REQUEST_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+
+/// Gates the listener-control test endpoints; unset in production, set by the
+/// e2e harness. Accepts `1`/`true`/`yes`/`on`.
+const DYN_KV_INDEXER_TEST_ENDPOINTS: &str = "DYN_KV_INDEXER_TEST_ENDPOINTS";
+
+fn test_endpoints_enabled() -> bool {
+    matches!(
+        std::env::var(DYN_KV_INDEXER_TEST_ENDPOINTS)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
 
 pub struct AppState {
     pub registry: Arc<WorkerRegistry>,
@@ -195,8 +210,25 @@ async fn unregister(
     }
 }
 
-async fn list_workers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    Json(state.registry.list())
+/// Optional query parameters for `GET /workers`.
+///
+/// Both fields are independent filters; omitting one skips that dimension.
+/// Example: `GET /workers?model_name=llama3&tenant_id=acme`
+#[derive(Deserialize)]
+struct WorkersQuery {
+    model_name: Option<String>,
+    tenant_id: Option<String>,
+}
+
+async fn list_workers(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<WorkersQuery>,
+) -> impl IntoResponse {
+    Json(
+        state
+            .registry
+            .list_filtered(params.model_name.as_deref(), params.tenant_id.as_deref()),
+    )
 }
 
 /// Build the [`ScoreResponse`] in both the flat (legacy) and per-instance
@@ -504,6 +536,12 @@ async fn handle_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
+    build_router(state, test_endpoints_enabled())
+}
+
+/// Mounts the listener-control test endpoints only when `test_endpoints` is
+/// true; the explicit parameter lets tests exercise both states.
+fn build_router(state: Arc<AppState>, test_endpoints: bool) -> Router {
     let router = Router::new()
         .route("/register", post(register))
         .route("/unregister", post(unregister))
@@ -519,10 +557,18 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/peers", get(list_peers))
         .route("/health", get(handle_health));
 
-    let router = router
-        .route("/test/pause_listener", post(test_pause_listener))
-        .route("/test/resume_listener", post(test_resume_listener))
-        .with_state(state.clone());
+    let mut router = router;
+    if test_endpoints {
+        tracing::warn!(
+            "Mounting listener-control test endpoints (/test/pause_listener, \
+             /test/resume_listener). These manipulate worker listener state and must never be \
+             enabled in production."
+        );
+        router = router
+            .route("/test/pause_listener", post(test_pause_listener))
+            .route("/test/resume_listener", post(test_resume_listener));
+    }
+    let router = router.with_state(state.clone());
 
     #[cfg(feature = "metrics")]
     let router = {
@@ -691,5 +737,181 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    fn empty_indexer_router(test_endpoints: bool) -> Router {
+        build_router(
+            Arc::new(AppState {
+                registry: Arc::new(WorkerRegistry::new(1)),
+                #[cfg(feature = "metrics")]
+                prom_registry: prometheus::Registry::new(),
+            }),
+            test_endpoints,
+        )
+    }
+
+    /// Malformed body so the states are distinguishable: an unmounted route
+    /// 404s before parsing, a mounted handler rejects it with a non-404. (A
+    /// valid body would 404 via `WorkerNotFound` either way.)
+    async fn post_malformed(app: &Router, uri: &str) -> StatusCode {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("not json"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    const LISTENER_CONTROL_ROUTES: [&str; 2] = ["/test/pause_listener", "/test/resume_listener"];
+
+    #[tokio::test]
+    async fn listener_control_endpoints_are_not_mounted_by_default() {
+        let app = empty_indexer_router(false);
+        for uri in LISTENER_CONTROL_ROUTES {
+            assert_eq!(
+                post_malformed(&app, uri).await,
+                StatusCode::NOT_FOUND,
+                "{uri} must not be mounted unless test endpoints are explicitly enabled"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn listener_control_endpoints_are_mounted_when_enabled() {
+        let app = empty_indexer_router(true);
+        for uri in LISTENER_CONTROL_ROUTES {
+            let status = post_malformed(&app, uri).await;
+            assert_ne!(
+                status,
+                StatusCode::NOT_FOUND,
+                "{uri} should be mounted and reject the malformed body, not 404"
+            );
+            assert!(
+                status.is_client_error(),
+                "{uri} should reject the malformed body with a 4xx, got {status}"
+            );
+        }
+    }
+
+    // ── /workers endpoint tests ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_workers_returns_registered_workers_with_metadata() {
+        let registry = Arc::new(WorkerRegistry::new(1));
+        registry.signal_ready();
+
+        // Worker 20: llama3 / acme, block_size=4
+        registry
+            .register(
+                20,
+                "tcp://127.0.0.1:15590".to_string(),
+                0,
+                "llama3".to_string(),
+                "acme".to_string(),
+                4,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Worker 21: mistral / acme, block_size=8
+        registry
+            .register(
+                21,
+                "tcp://127.0.0.1:15591".to_string(),
+                0,
+                "mistral".to_string(),
+                "acme".to_string(),
+                8,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let app = create_router(Arc::new(AppState {
+            registry,
+            #[cfg(feature = "metrics")]
+            prom_registry: prometheus::Registry::new(),
+        }));
+
+        // Unfiltered: both workers
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/workers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let workers: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(workers.len(), 2);
+
+        let mut model_names: Vec<_> = workers
+            .iter()
+            .filter_map(|w| w["model_name"].as_str())
+            .collect();
+        model_names.sort();
+        assert_eq!(model_names, ["llama3", "mistral"]);
+
+        let llama = workers
+            .iter()
+            .find(|w| w["model_name"] == "llama3")
+            .unwrap();
+        assert_eq!(llama["block_size"], 4);
+        assert_eq!(llama["tenant_id"], "acme");
+
+        // Filtered by model_name=llama3: only one result
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/workers?model_name=llama3")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let filtered: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0]["model_name"], "llama3");
+
+        // Filtered by nonexistent model: empty array, not a 404
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/workers?model_name=nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let empty: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        assert!(empty.is_empty());
     }
 }

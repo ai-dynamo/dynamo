@@ -5,6 +5,7 @@ use derive_builder::Builder;
 use dynamo_kv_router::config::RouterQueuePolicy;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 use uuid::Uuid;
 use validator::{Validate, ValidationError};
@@ -119,10 +120,18 @@ impl KvEventPublishers {
 /// schema in `components/src/dynamo/common/forward_pass_metrics.py`.
 ///
 /// Produced by the scheduler core after each `execute_pass_internal()` call.
-/// The runtime-dependent layer (`lib/llm`) wraps this with identity fields
-/// (worker_id, dp_rank, counter_id) and serializes to msgpack for the event plane.
+/// Runtime publishers may either stamp identity at serialization time or fill
+/// the identity fields directly when snapshots are consumed in-process.
 #[derive(Debug, Clone, Default)]
 pub struct ForwardPassSnapshot {
+    // -- identity --
+    // `Default::default()` leaves `version == 0` and identity fields empty or
+    // zero, which means an unstamped local snapshot. Runtime publishers may
+    // stamp or overwrite these fields at the serialization boundary.
+    pub version: u32,
+    pub worker_id: String,
+    pub dp_rank: u32,
+    pub counter_id: u64,
     // -- scheduled requests (executed this iteration) --
     pub num_prefill_requests: u32,
     pub sum_prefill_tokens: u64,
@@ -215,6 +224,9 @@ pub struct PrefillCost {
     /// Number of tokens already cached (prefix hit).
     /// isl = cached_tokens + new_tokens
     pub cached_tokens: usize,
+    /// Subset of `cached_tokens` backed by active blocks; TRT-LLM no-evict
+    /// capacity reservation discounts only these (inactive reuse is re-consumed).
+    pub active_cached_tokens: usize,
 }
 
 impl PrefillCost {
@@ -233,7 +245,14 @@ impl PrefillCost {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputSignal {
     pub uuid: Uuid,
+    /// Terminal flag: the request's lifecycle has ended. Replay drivers free
+    /// resources and advance/notify on this.
     pub completed: bool,
+    /// Set with `completed` when the request was rejected without ever running
+    /// (its footprint exceeds the whole KV pool); drivers free/advance but
+    /// exclude it from token/latency/throughput stats.
+    #[serde(default)]
+    pub rejected: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff_delay_ms: Option<f64>,
 }
@@ -248,6 +267,20 @@ pub enum PreemptionMode {
     Fifo,
 }
 
+impl FromStr for PreemptionMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "lifo" => Ok(Self::Lifo),
+            "fifo" => Ok(Self::Fifo),
+            other => Err(format!(
+                "Invalid preemption_mode: '{other}'. Must be 'lifo' or 'fifo'."
+            )),
+        }
+    }
+}
+
 /// Engine type for selecting scheduling and KV cache simulation behavior
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum EngineType {
@@ -256,6 +289,38 @@ pub enum EngineType {
     Vllm,
     /// SGLang-style scheduling with radix-tree KV cache
     Sglang,
+    /// TensorRT-LLM-style scheduling. Reuses the vLLM scheduler
+    /// core with a TensorRT-LLM-style admission policy.
+    Trtllm,
+}
+
+impl FromStr for EngineType {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "vllm" => Ok(Self::Vllm),
+            "sglang" => Ok(Self::Sglang),
+            "trtllm" => Ok(Self::Trtllm),
+            other => Err(format!(
+                "Invalid engine_type '{other}'. Must be 'vllm', 'sglang', or 'trtllm'."
+            )),
+        }
+    }
+}
+
+/// Scheduling policy applied by the shared vLLM scheduler core.
+///
+/// Derived from [`EngineType`] (+ engine-specific args) so the core reads a
+/// single discriminant instead of re-deriving engine behavior per pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SchedulingPolicy {
+    /// vLLM semantics: optimistic admission, preempt under KV pressure.
+    #[default]
+    Vllm,
+    /// TRT-LLM `GUARANTEED_NO_EVICT`: reserve `prompt + max_output` per
+    /// admitted request up front; never preempt.
+    TrtllmGuaranteedNoEvict,
 }
 
 /// Worker type for disaggregated serving configurations
@@ -268,6 +333,21 @@ pub enum WorkerType {
     Prefill,
     /// Dedicated decode worker in disaggregated mode
     Decode,
+}
+
+impl FromStr for WorkerType {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "aggregated" => Ok(Self::Aggregated),
+            "prefill" => Ok(Self::Prefill),
+            "decode" => Ok(Self::Decode),
+            other => Err(format!(
+                "Invalid worker_type '{other}'. Must be 'aggregated', 'prefill', or 'decode'."
+            )),
+        }
+    }
 }
 
 /// Configuration for reasoning/thinking token output in the mocker.
@@ -325,6 +405,17 @@ pub struct SglangArgs {
     /// Schedule conservativeness factor (0.0–1.0). Default: 1.0.
     #[validate(range(min = 0.0, max = 1.0))]
     pub schedule_conservativeness: Option<f64>,
+}
+
+/// TensorRT-LLM-specific configuration parameters.
+///
+/// Grouped into a nested struct to keep the `MockEngineArgs` namespace clean,
+/// following the same pattern as [`SglangArgs`].
+#[derive(Debug, Clone, Serialize, Deserialize, Validate, Default)]
+pub struct TrtllmArgs {
+    /// Capacity scheduler policy, supported only `"guaranteed_no_evict"`
+    /// (TensorRT-LLM's default). Default: `"guaranteed_no_evict"`.
+    pub capacity_scheduler_policy: Option<String>,
 }
 
 /// Keeps omitted JSON fields distinct from explicit `null` so serde can replace
@@ -391,8 +482,11 @@ struct MockEngineArgsSerde {
     aic_moe_tp_size: OptionalConfigValue<usize>,
     aic_moe_ep_size: OptionalConfigValue<usize>,
     aic_attention_dp_size: OptionalConfigValue<usize>,
+    aic_nextn: OptionalConfigValue<usize>,
+    aic_nextn_accept_rates: OptionalConfigValue<String>,
     gpu_memory_utilization: OptionalConfigValue<f64>,
     mem_fraction_static: OptionalConfigValue<f64>,
+    free_gpu_memory_fraction: OptionalConfigValue<f64>,
     enable_local_indexer: OptionalConfigValue<bool>,
     bootstrap_port: OptionalConfigValue<u16>,
     kv_bytes_per_token: OptionalConfigValue<usize>,
@@ -413,39 +507,9 @@ struct MockEngineArgsSerde {
     preemption_mode: OptionalConfigValue<String>,
     router_queue_policy: OptionalConfigValue<String>,
     sglang: OptionalConfigValue<SglangArgs>,
+    trtllm: OptionalConfigValue<TrtllmArgs>,
     #[serde(rename = "has_perf_model")]
     _has_perf_model: OptionalConfigValue<serde_json::Value>,
-}
-
-fn parse_engine_type(value: &str) -> Result<EngineType, String> {
-    match value {
-        "vllm" => Ok(EngineType::Vllm),
-        "sglang" => Ok(EngineType::Sglang),
-        other => Err(format!(
-            "Invalid engine_type '{other}'. Must be 'vllm' or 'sglang'."
-        )),
-    }
-}
-
-fn parse_worker_type(value: &str) -> Result<WorkerType, String> {
-    match value {
-        "aggregated" => Ok(WorkerType::Aggregated),
-        "prefill" => Ok(WorkerType::Prefill),
-        "decode" => Ok(WorkerType::Decode),
-        other => Err(format!(
-            "Invalid worker_type '{other}'. Must be 'aggregated', 'prefill', or 'decode'."
-        )),
-    }
-}
-
-fn parse_preemption_mode(value: &str) -> Result<PreemptionMode, String> {
-    match value {
-        "lifo" => Ok(PreemptionMode::Lifo),
-        "fifo" => Ok(PreemptionMode::Fifo),
-        other => Err(format!(
-            "Invalid preemption_mode: '{other}'. Must be 'lifo' or 'fifo'."
-        )),
-    }
 }
 
 fn load_perf_model(path: &Path) -> Arc<PerfModel> {
@@ -471,7 +535,7 @@ fn load_perf_model(path: &Path) -> Arc<PerfModel> {
 #[validate(schema(function = "validate_mock_engine_args"))]
 #[builder(pattern = "owned", build_fn(public))]
 pub struct MockEngineArgs {
-    /// Engine type: vLLM or SGLang simulation
+    /// Engine type: vLLM, SGLang, or TensorRT-LLM simulation
     #[builder(default = "EngineType::Vllm")]
     pub engine_type: EngineType,
 
@@ -580,6 +644,21 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub aic_attention_dp_size: Option<usize>,
 
+    /// MTP/Eagle speculative-decoding draft-token count (1..=5). When set,
+    /// AIC's perf model applies the spec-dec speedup to decode latency.
+    /// Validated here so the mocker/replay JSON path shares the same 1..=5
+    /// contract as `AicPerfConfig` (omit to disable spec dec).
+    #[serde(skip)]
+    #[builder(default = "None")]
+    #[validate(range(min = 1, max = 5))]
+    pub aic_nextn: Option<usize>,
+
+    /// Per-position accept rates for MTP draft tokens, comma-separated
+    /// (e.g. "0.85,0.3,0,0,0"). Padded to length 5 by the Python layer.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub aic_nextn_accept_rates: Option<String>,
+
     /// GPU memory fraction for AIC KV capacity estimation with vLLM.
     #[builder(default = "None")]
     #[validate(range(min = 0.0, max = 1.0))]
@@ -589,6 +668,15 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     #[validate(range(min = 0.0, max = 1.0))]
     pub mem_fraction_static: Option<f64>,
+
+    /// Fraction of *free* GPU memory (after weights/buffers) allocated to the KV
+    /// cache, for AIC KV capacity estimation with TRT-LLM. Mirrors TRT-LLM's
+    /// `KvCacheConfig.free_gpu_memory_fraction`. Unlike vLLM's
+    /// `gpu_memory_utilization` (a fraction of *total* memory), this is a
+    /// fraction of what remains after the model is loaded.
+    #[builder(default = "None")]
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub free_gpu_memory_fraction: Option<f64>,
 
     /// Enable worker-local KV indexer for tracking this worker's own KV cache state
     #[builder(default = "false")]
@@ -704,6 +792,10 @@ pub struct MockEngineArgs {
     /// SGLang-specific configuration. Only used when `engine_type == Sglang`.
     #[builder(default = "None")]
     pub sglang: Option<SglangArgs>,
+
+    /// TensorRT-LLM-specific configuration. Only used when `engine_type == Trtllm`.
+    #[builder(default = "None")]
+    pub trtllm: Option<TrtllmArgs>,
 }
 
 fn mock_engine_args_validation_error(code: &'static str, message: String) -> ValidationError {
@@ -731,6 +823,20 @@ fn validate_mock_engine_args(args: &MockEngineArgs) -> Result<(), ValidationErro
             "g4_requires_g2",
             "enable_g4_storage requires num_g2_blocks because mocker stages G4 through G2"
                 .to_string(),
+        ));
+    }
+
+    if let Some(policy) = args
+        .trtllm
+        .as_ref()
+        .and_then(|trtllm| trtllm.capacity_scheduler_policy.as_deref())
+        && policy != "guaranteed_no_evict"
+    {
+        return Err(mock_engine_args_validation_error(
+            "trtllm_unsupported_capacity_scheduler_policy",
+            format!(
+                "engine_type=trtllm v1 supports only capacity_scheduler_policy='guaranteed_no_evict', got '{policy}'",
+            ),
         ));
     }
 
@@ -775,7 +881,7 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         let mut builder = Self::builder();
 
         if let Some(engine_type) = compat.engine_type.into_non_null("engine_type")? {
-            builder = builder.engine_type(parse_engine_type(&engine_type)?);
+            builder = builder.engine_type(engine_type.parse()?);
         }
         if let Some(Some(num_gpu_blocks)) = compat.num_gpu_blocks.into_nullable() {
             builder = builder.num_gpu_blocks(num_gpu_blocks);
@@ -820,7 +926,7 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         let worker_type = if let Some(worker_type) =
             compat.worker_type.into_non_null("worker_type")?
         {
-            parse_worker_type(&worker_type)?
+            worker_type.parse()?
         } else {
             let is_prefill = compat
                 .is_prefill
@@ -876,11 +982,20 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         if let Some(aic_attention_dp_size) = compat.aic_attention_dp_size.into_nullable() {
             builder = builder.aic_attention_dp_size(aic_attention_dp_size);
         }
+        if let Some(aic_nextn) = compat.aic_nextn.into_nullable() {
+            builder = builder.aic_nextn(aic_nextn);
+        }
+        if let Some(aic_nextn_accept_rates) = compat.aic_nextn_accept_rates.into_nullable() {
+            builder = builder.aic_nextn_accept_rates(aic_nextn_accept_rates);
+        }
         if let Some(gpu_memory_utilization) = compat.gpu_memory_utilization.into_nullable() {
             builder = builder.gpu_memory_utilization(gpu_memory_utilization);
         }
         if let Some(mem_fraction_static) = compat.mem_fraction_static.into_nullable() {
             builder = builder.mem_fraction_static(mem_fraction_static);
+        }
+        if let Some(free_gpu_memory_fraction) = compat.free_gpu_memory_fraction.into_nullable() {
+            builder = builder.free_gpu_memory_fraction(free_gpu_memory_fraction);
         }
         if let Some(enable_local_indexer) = compat
             .enable_local_indexer
@@ -940,7 +1055,7 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
             builder = builder.zmq_replay_port(zmq_replay_port);
         }
         if let Some(preemption_mode) = compat.preemption_mode.into_non_null("preemption_mode")? {
-            builder = builder.preemption_mode(parse_preemption_mode(&preemption_mode)?);
+            builder = builder.preemption_mode(preemption_mode.parse()?);
         }
         if let Some(router_queue_policy) = compat.router_queue_policy.into_nullable() {
             let router_queue_policy = router_queue_policy
@@ -950,6 +1065,9 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         }
         if let Some(sglang) = compat.sglang.into_nullable() {
             builder = builder.sglang(sglang);
+        }
+        if let Some(trtllm) = compat.trtllm.into_nullable() {
+            builder = builder.trtllm(trtllm);
         }
 
         builder
@@ -973,6 +1091,7 @@ impl Default for MockEngineArgs {
 impl MockEngineArgs {
     const DEFAULT_VLLM_BLOCK_SIZE: usize = 64;
     const DEFAULT_SGLANG_BLOCK_SIZE: usize = 1;
+    const DEFAULT_TRTLLM_BLOCK_SIZE: usize = 32;
 
     pub fn builder() -> MockEngineArgsBuilder {
         MockEngineArgsBuilder::default()
@@ -1004,6 +1123,11 @@ impl MockEngineArgs {
                     (_, None) => {}
                 }
             }
+            EngineType::Trtllm => {
+                if self.block_size == 0 {
+                    self.block_size = Self::DEFAULT_TRTLLM_BLOCK_SIZE;
+                }
+            }
         }
 
         if self.num_g2_blocks == Some(0) {
@@ -1021,6 +1145,15 @@ impl MockEngineArgs {
         self.validate()
             .map_err(|error| anyhow::anyhow!("Failed to validate MockEngineArgs: {error}"))?;
         Ok(())
+    }
+
+    /// Scheduling policy applied by the shared vLLM scheduler core, derived
+    /// from the engine type. TRT-LLM uses `GUARANTEED_NO_EVICT`.
+    pub fn scheduling_policy(&self) -> SchedulingPolicy {
+        match self.engine_type {
+            EngineType::Trtllm => SchedulingPolicy::TrtllmGuaranteedNoEvict,
+            EngineType::Vllm | EngineType::Sglang => SchedulingPolicy::Vllm,
+        }
     }
 
     pub fn is_prefill(&self) -> bool {
@@ -1253,6 +1386,29 @@ mod tests {
             missing_g2.to_string().contains("requires num_g2_blocks"),
             "unexpected error: {missing_g2}",
         );
+    }
+
+    #[test]
+    fn test_normalized_rejects_out_of_range_aic_nextn() {
+        // The mocker/replay JSON path must share AicPerfConfig's 1..=5 contract.
+        for bad in [0_usize, 6] {
+            let err = MockEngineArgs::builder()
+                .aic_nextn(Some(bad))
+                .build()
+                .unwrap()
+                .normalized()
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("aic_nextn"),
+                "unexpected error for nextn={bad}: {err}",
+            );
+        }
+        MockEngineArgs::builder()
+            .aic_nextn(Some(3))
+            .build()
+            .unwrap()
+            .normalized()
+            .expect("in-range aic_nextn should validate");
     }
 
     #[test]
