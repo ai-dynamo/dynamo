@@ -11,6 +11,7 @@
 //! - [`start_metrics_server`]: Optional HTTP server exposing `/metrics` in Prometheus text format.
 
 mod cache;
+mod cd;
 mod collector;
 mod observability;
 mod pool;
@@ -19,6 +20,7 @@ mod stats;
 mod transfer;
 
 pub use cache::CacheStatsTracker;
+pub use cd::CdMetrics;
 pub use collector::MetricsAggregator;
 pub use observability::{KvbmObservability, SharedKvbmObservability};
 pub use pool::{BlockPoolMetrics, MetricsSnapshot};

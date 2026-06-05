@@ -73,6 +73,26 @@ pub struct CdRequest {
     pub session: Mutex<Option<Arc<dyn Session>>>,
     /// Coarse lifecycle status.
     pub status: Mutex<CdRequestStatus>,
+    /// Lifecycle-driven cancel signal. Fires when the session's
+    /// lifecycle watcher observes Detached / Failed from velo (peer
+    /// crash, Frame::Error, heartbeat loss). Cloned into
+    /// `run_setup`'s drain loops so a wedged session bails
+    /// immediately instead of pinning the spawned task forever —
+    /// the commits/availability mpsc streams never return None
+    /// while run_setup still holds an Arc<dyn Session>, so the
+    /// lifecycle stream is the only viable abort signal.
+    pub cancel: tokio_util::sync::CancellationToken,
+    /// CAS-guard for `cleanup_failed_request`. Both the lifecycle
+    /// watcher and the spawn-catch path can race to clean up the
+    /// same request; the winner of the CAS (false → true) runs the
+    /// role-aware cleanup (mark_failed_onboarding, session.close,
+    /// pre-USAA failure stash, state eviction). Losers early-return.
+    /// Without this guard, two concurrent calls could both invoke
+    /// `mark_failed_onboarding` on vLLM (double-notify the failed
+    /// G1 window) or — worse — race the pre-USAA stash so vLLM's
+    /// `on_usaa` replay never sees the failure reason. Dies with
+    /// the `CdRequest` Arc.
+    pub cleanup_claimed: std::sync::atomic::AtomicBool,
     /// Per-role state.
     pub role: CdRequestRole,
 }
@@ -111,6 +131,32 @@ pub struct DecodeBits {
     pub remote_slot_index: HashMap<SequenceHash, usize>,
     pub remote_pipeline_complete: AtomicBool,
     pub completed: AtomicBool,
+
+    /// Stage 1 G1→G2 prefix promotion task spawned at USAA. Lives
+    /// here (vs. on the wrapper's `CdRequestState`) so that
+    /// `coordinator.release` can defer `session.finalize` until
+    /// the task completes — `finalize` implies
+    /// `CommitsClosed + Drained` per session CONTRACT §2.13, which
+    /// would close the availability stream before the promotion's
+    /// `make_available` lands and strand the prefill peer.
+    ///
+    /// The task's bool return value signals what the
+    /// deferred-release path should do:
+    ///
+    /// - `true` — promotion succeeded; deferred release MUST call
+    ///   `session.finalize` to close the streams cooperatively.
+    /// - `false` — promotion failed and the task already called
+    ///   `session.close(reason)` (which per CONTRACT §2.14
+    ///   implies `finish_commits + finish_availability` + drives
+    ///   the Detached lifecycle event). Deferred release MUST
+    ///   skip `finalize` — calling it on a closed session emits
+    ///   `Frame::Finished` after the close terminators, which is
+    ///   undefined protocol behavior.
+    ///
+    /// Dropping the JoinHandle does NOT abort the task (tokio
+    /// detaches on drop). The task survives request teardown —
+    /// the G2 blocks remain registered in the cache.
+    pub pending_promotion_task: Mutex<Option<tokio::task::JoinHandle<bool>>>,
 }
 
 /// Prefill-side state.
@@ -217,6 +263,8 @@ impl CdRequest {
             peer_instance_id,
             session: Mutex::new(None),
             status: Mutex::new(CdRequestStatus::Active),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            cleanup_claimed: std::sync::atomic::AtomicBool::new(false),
             role: CdRequestRole::Decode(bits),
         })
     }
@@ -234,6 +282,8 @@ impl CdRequest {
             peer_instance_id,
             session: Mutex::new(None),
             status: Mutex::new(CdRequestStatus::Active),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            cleanup_claimed: std::sync::atomic::AtomicBool::new(false),
             role: CdRequestRole::Prefill(bits),
         })
     }
@@ -308,6 +358,7 @@ mod tests {
             remote_slot_index: HashMap::new(),
             remote_pipeline_complete: AtomicBool::new(false),
             completed: AtomicBool::new(false),
+            pending_promotion_task: Mutex::new(None),
         }
     }
 

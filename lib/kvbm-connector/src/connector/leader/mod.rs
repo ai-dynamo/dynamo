@@ -359,6 +359,13 @@ impl ConnectorLeader {
         self.cache_stats.maybe_log();
     }
 
+    /// CD observability metrics handle (Prometheus; cheap, Arc-backed clone).
+    /// The decode wrapper reaches this through the `InnerLeaderShim::cd_metrics`
+    /// accessor so it can record per-request CD decisions/token counts.
+    pub fn cd_metrics(&self) -> kvbm_observability::CdMetrics {
+        self.runtime.observability().cd_metrics().clone()
+    }
+
     /// Get the total number of tokens in a slot's sequence.
     ///
     /// This is used to compare with the vLLM Request's token count to detect
@@ -400,36 +407,67 @@ impl ConnectorLeader {
     /// still proceed with a fully-remote prefill.
     #[allow(dead_code)]
     pub(crate) fn slot_match_split(&self, request_id: &str) -> Result<SlotMatchSplit> {
+        self.slot_match_split_inner(request_id, None)
+    }
+
+    /// Conditional-disagg variant: the caller supplies the AUTHORITATIVE
+    /// `num_computed_tokens` (the GNMT `base_offset`). A vLLM prefix-cache hit
+    /// with zero G2 match leaves `onboarding = None`, so the onboarding-derived
+    /// `num_computed_tokens` would be 0 and `computed_blocks` would under-count
+    /// the prefix — over-counting `remote_blocks()` and tripping the USAA-1
+    /// block-count check. `local_match_blocks` still comes from the onboarding
+    /// span (0 when absent). See `compute_slot_match_split`.
+    pub(crate) fn slot_match_split_with_num_computed(
+        &self,
+        request_id: &str,
+        num_computed_tokens: usize,
+    ) -> Result<SlotMatchSplit> {
+        self.slot_match_split_inner(request_id, Some(num_computed_tokens))
+    }
+
+    fn slot_match_split_inner(
+        &self,
+        request_id: &str,
+        num_computed_override: Option<usize>,
+    ) -> Result<SlotMatchSplit> {
         let slot = self.get_slot(request_id)?;
         let slot = slot.lock();
         let block_size = slot.block_size();
         let total_blocks = slot.sequence.blocks().len();
         let all_sequence_hashes = slot.all_sequence_hashes();
 
-        let onboarding = slot.onboarding_state().map(|o| {
-            // The CD wrapper requires `local == take_local_match_g2_blocks().len()`,
-            // which itself routes through `collect_g2_blocks_from_shards`. Both
-            // must apply matched-span (first-hole) semantics with head-mask +
-            // tail-truncate; using `aggregate_breakdown()` (raw per-tier sums)
-            // would over-count when a later shard partially matches or when
-            // num_computed_tokens advanced after the shard was issued.
-            //
-            // Empty shards = CD-only state (cold-cache): zero local match —
-            // `matched_span` debug_asserts non-empty, so short-circuit here.
-            let local = if o.shards.is_empty() {
-                0
-            } else {
-                let (effective_start, final_end) = o.matched_span(block_size);
-                final_end - effective_start
-            };
-            (local, o.num_computed_tokens)
-        });
+        let (local_match_blocks, onboarding_num_computed) = match slot.onboarding_state() {
+            Some(o) => {
+                // The CD wrapper requires `local == take_local_match_g2_blocks().len()`,
+                // which itself routes through `collect_g2_blocks_from_shards`. Both
+                // must apply matched-span (first-hole) semantics with head-mask +
+                // tail-truncate; using `aggregate_breakdown()` (raw per-tier sums)
+                // would over-count when a later shard partially matches or when
+                // num_computed_tokens advanced after the shard was issued.
+                //
+                // Empty shards = CD-only state (cold-cache): zero local match —
+                // `matched_span` debug_asserts non-empty, so short-circuit here.
+                let local = if o.shards.is_empty() {
+                    0
+                } else {
+                    let (effective_start, final_end) = o.matched_span(block_size);
+                    final_end - effective_start
+                };
+                (local, o.num_computed_tokens)
+            }
+            None => (0, 0),
+        };
+
+        // CD callers override with the authoritative GNMT base_offset; onboarding
+        // is None for a vLLM prefix-cache hit, so its derived value is 0.
+        let num_computed_tokens = num_computed_override.unwrap_or(onboarding_num_computed);
 
         Ok(compute_slot_match_split(
             block_size,
             total_blocks,
             all_sequence_hashes,
-            onboarding,
+            num_computed_tokens,
+            local_match_blocks,
         ))
     }
 
@@ -509,8 +547,12 @@ impl ConnectorLeader {
     ///   full Vec and the wrapper publishes them all on the session.
     /// * **Any miss** (returned len `< num_prefix_blocks`, including 0) —
     ///   drops the partial G2 hits (RAII-release returns them to G2's
-    ///   inactive pool) and returns an empty Vec. The wrapper advertises
-    ///   no prefix blocks to prefill in this case.
+    ///   inactive pool) and returns an empty Vec. The wrapper handles
+    ///   the empty arm via the Stage 1 promotion plan (see
+    ///   `decode_leader.rs::commit_gnmt_remote`): the planned-promoted
+    ///   hashes are committed up front on the session and the actual
+    ///   G1→G2 transfer fires at USAA when vLLM hands over the G1
+    ///   `block_ids`.
     ///
     /// Why all-or-nothing rather than partial-publish: G2's first-hole
     /// policy returns the leading-contiguous G2-resident prefix. If
@@ -520,21 +562,8 @@ impl ConnectorLeader {
     /// for the FULL prefix `[0..P)` — the "missing" `[M..P)` is a hole
     /// only in G2, not in the conversation state. Advertising the partial
     /// set creates an inconsistent view: prefill would believe positions
-    /// `[M..P)` are unavailable and either treat them as cache misses or
-    /// fail contiguity checks, when in reality decode could serve them
-    /// once the G1→G2 backfill is wired.
-    ///
-    /// The intended recovery for any miss is a G1→G2 copy in
-    /// `update_state_after_alloc` (vLLM has the blocks in G1, decode just
-    /// hasn't materialized them in G2 yet). **That arm is not yet wired.**
-    /// Until it is, returning empty matches pre-prefix-backfill behavior:
-    /// no prefix in session, prefill computes the whole prefix itself.
-    ///
-    /// Per Ryan's directive: the panic stub for the unimplemented G1→G2
-    /// backfill arm belongs in `update_state_after_alloc`, not here.
-    /// Failing GNMT on a G2 miss would regress every PC-enabled CD request
-    /// whose prefix isn't already in G2 (typically most of them on a fresh
-    /// worker).
+    /// `[M..P)` are unavailable when in reality decode can serve them via
+    /// the promotion path.
     ///
     /// # Errors
     ///
@@ -585,16 +614,19 @@ impl ConnectorLeader {
         let g2 = leader.g2_manager().match_blocks(&prefix_hashes);
 
         if g2.len() != num_prefix_blocks {
-            // Any miss → advertise none (all-or-nothing). Publishing the
-            // partial leading-contiguous G2 hits would tell prefill
-            // "decode has [0..M) of the prefix" while vLLM's G1 actually
-            // holds the full [0..P) — an inconsistent advertisement that
-            // makes the holes look like real cache misses to prefill.
+            // Any miss → return empty (all-or-nothing). Publishing
+            // the partial leading-contiguous G2 hits would tell
+            // prefill "decode has [0..M) of the prefix" while
+            // vLLM's G1 actually holds the full [0..P) — an
+            // inconsistent advertisement that makes the holes look
+            // like real cache misses to prefill.
             //
-            // Drop the partial G2 hits (RAII returns them to the inactive
-            // pool intact, available for future requests). The G1→G2
-            // backfill that would close the gap belongs in USAA; until
-            // it's wired, "no prefix advertised" = pre-merge behavior.
+            // Drop the partial G2 hits (RAII returns them to the
+            // inactive pool intact, available for future requests).
+            // The caller (`commit_gnmt_remote`) plans a Stage 1
+            // G1→G2 promotion for the full prefix window in the
+            // empty arm — the actual transfer fires at USAA when
+            // vLLM hands over the G1 `block_ids`.
             let hits = g2.len();
             let misses = num_prefix_blocks - hits;
             drop(g2);
@@ -603,8 +635,7 @@ impl ConnectorLeader {
                 num_prefix_blocks,
                 hits,
                 misses,
-                "find_prefix_g2_blocks: incomplete G2 backing; advertising no prefix \
-                 (G1→G2 backfill unimplemented)"
+                "find_prefix_g2_blocks: incomplete G2 backing; deferring to Stage 1 promotion"
             );
             crate::audit!(
                 "prefix_g2_incomplete_skip",
@@ -682,6 +713,25 @@ impl ConnectorLeader {
         self.runtime.messenger().instance_id()
     }
 
+    /// Borrow the slot's LoRA adapter name. Used by the CD wire to
+    /// forward the canonical `kv_hashing::Request` shape to the prefill
+    /// side so it can recompute identical hashes locally.
+    #[allow(dead_code)]
+    pub(crate) fn slot_lora_name(&self, request_id: &str) -> Result<Option<String>> {
+        let slot = self.get_slot(request_id)?;
+        let slot = slot.lock();
+        Ok(slot.request.lora_name.clone())
+    }
+
+    /// Borrow the slot's raw salt string (the input to `salt_hash`
+    /// computation). Forwarded onto the CD wire alongside `lora_name`.
+    #[allow(dead_code)]
+    pub(crate) fn slot_salt(&self, request_id: &str) -> Result<Option<String>> {
+        let slot = self.get_slot(request_id)?;
+        let slot = slot.lock();
+        Ok(slot.request.salt.clone())
+    }
+
     /// Read the slot's parsed CD transfer params, if any. Returns `None`
     /// when the slot has no metadata or no `kv_transfer_params`.
     ///
@@ -734,25 +784,28 @@ pub struct SlotMatchSplit {
     pub all_sequence_hashes: Vec<crate::SequenceHash>,
 }
 
-/// Pure split-computation. Extracted for unit-testing the
-/// no-onboarding-state degenerate case (cold-cache prefill request)
-/// without standing up a full `ConnectorLeader` fixture.
+/// Pure split-computation. Extracted for unit-testing without standing up a
+/// full `ConnectorLeader` fixture.
 ///
-/// `onboarding` carries `(local_match_blocks, num_computed_tokens)`
-/// when the slot has an onboarding state attached, `None` otherwise.
+/// `num_computed_tokens` and `local_match_blocks` are INDEPENDENT inputs and must
+/// not be coupled: a vLLM prefix-cache hit advances `num_computed_tokens` (so
+/// `computed_blocks > 0`) even when there is NO kvbm onboarding state and hence
+/// zero local G2 match. Bundling them (the old `onboarding: Option` shape, which
+/// forced both to 0 when onboarding was absent) under-counted `computed_blocks`
+/// for the PC-hit/zero-G2-match request, so `remote_blocks()` over-counted by the
+/// prefix and `commit_usaa1`'s USAA-1 block-count check bailed (decode EngineCore
+/// crash). Callers source `num_computed_tokens` authoritatively — the CD wrapper
+/// from the GNMT `base_offset`, because onboarding is `None` for that case.
 fn compute_slot_match_split(
     block_size: usize,
     total_blocks: usize,
     all_sequence_hashes: Vec<crate::SequenceHash>,
-    onboarding: Option<(usize, usize)>,
+    num_computed_tokens: usize,
+    local_match_blocks: usize,
 ) -> SlotMatchSplit {
-    let (local_match_blocks, computed_blocks) = match onboarding {
-        Some((local, num_computed)) => (local, num_computed / block_size),
-        None => (0, 0),
-    };
     SlotMatchSplit {
         block_size,
-        computed_blocks,
+        computed_blocks: num_computed_tokens / block_size,
         local_match_blocks,
         total_blocks,
         all_sequence_hashes,
@@ -819,6 +872,24 @@ impl ConnectorLeader {
             .expect("slot should exist");
 
         let mut slot = shared_slot.lock();
+
+        // Bounded escape for a hung async find session. Without this a stuck
+        // PreparingToOnboard slot would survive arbitrarily many GNMT calls
+        // and only get cleaned up when the request was explicitly finished.
+        if slot.force_error_if_preparing_timed_out(slot::PREPARING_TO_ONBOARD_DEFAULT_TIMEOUT) {
+            crate::audit!(
+                "preparing_to_onboard_timeout",
+                request_id,
+                num_computed_tokens,
+                timeout_secs = slot::PREPARING_TO_ONBOARD_DEFAULT_TIMEOUT.as_secs(),
+            );
+            // Drain the find sessions held in the now-Error state and fall
+            // back to local prefill. `recover_from_match_error` takes the
+            // Error state, releases per-shard sessions on the InstanceLeader,
+            // and returns the slot to Inactive.
+            self.recover_from_match_error(&mut slot);
+            return Ok((None, false));
+        }
 
         if slot.match_requires_reset() {
             // Check for inflight offloads - potential race with block freeing
@@ -1328,8 +1399,8 @@ mod tests {
             .map(|i| SequenceHash::new(i as u64, None, i as u64))
             .collect();
 
-        // No onboarding state — the cold-cache path that crashed.
-        let split = compute_slot_match_split(block_size, total_blocks, hashes.clone(), None);
+        // Cold cache: nothing computed locally, no local G2 match.
+        let split = compute_slot_match_split(block_size, total_blocks, hashes.clone(), 0, 0);
 
         assert_eq!(split.local_match_blocks, 0);
         assert_eq!(split.computed_blocks, 0);
@@ -1354,13 +1425,43 @@ mod tests {
             .collect();
 
         // 2 blocks already computed (32 tokens), 3 blocks matched locally.
-        let split =
-            compute_slot_match_split(block_size, total_blocks, hashes.clone(), Some((3, 32)));
+        let split = compute_slot_match_split(block_size, total_blocks, hashes.clone(), 32, 3);
 
         assert_eq!(split.computed_blocks, 2);
         assert_eq!(split.local_match_blocks, 3);
         assert_eq!(split.local_match_range(), 2..5);
         assert_eq!(split.remote_range(), 5..total_blocks);
         assert_eq!(split.remote_blocks(), 5);
+    }
+
+    /// Regression for the CD USAA-1 crash (job 2179284): a vLLM prefix-cache hit
+    /// (num_computed_tokens > 0) with ZERO local G2 match — i.e. NO onboarding
+    /// state. `computed_blocks` must reflect the prefix independently of the
+    /// (absent) local match; otherwise `remote_blocks()` over-counts by the
+    /// prefix and `commit_usaa1`'s block-count check vs vLLM's num_external_tokens
+    /// bails, crashing the decode EngineCore.
+    ///
+    /// Mirrors the crash: block_size 64, 361 total blocks, 512 computed tokens
+    /// (= 8 prefix blocks), 0 local match. Before the fix, the coupled
+    /// `onboarding=None` path forced computed_blocks=0 (remote=361 vs vLLM's 353).
+    #[test]
+    fn slot_match_split_pc_hit_without_onboarding_counts_prefix() {
+        let block_size = 64;
+        let total_blocks = 361;
+        let hashes: Vec<SequenceHash> = (0..total_blocks)
+            .map(|i| SequenceHash::new(i as u64, None, i as u64))
+            .collect();
+
+        // PC hit: 512 computed tokens = 8 prefix blocks; no local G2 match.
+        let split = compute_slot_match_split(block_size, total_blocks, hashes.clone(), 512, 0);
+
+        assert_eq!(split.computed_blocks, 8, "prefix must be counted even with no onboarding/local-match");
+        assert_eq!(split.local_match_blocks, 0);
+        // remote excludes the prefix (matches vLLM num_external_tokens/bs = 353).
+        assert_eq!(split.remote_blocks(), total_blocks - 8);
+        assert_eq!(split.local_match_range(), 8..8);
+        assert_eq!(split.remote_range(), 8..total_blocks);
+        // the USAA-1 invariant the crash violated: local_match + remote == external.
+        assert_eq!(split.local_match_blocks + split.remote_blocks(), total_blocks - 8);
     }
 }

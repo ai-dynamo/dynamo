@@ -20,13 +20,25 @@ name = "_core"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["v2"]
+default = ["v2", "hub"]
 v2 = [
     "dep:kvbm-connector",
     "kvbm-connector/static-kernels",
     "dep:kvbm-common",
 ]
 kernels = ["dep:kvbm-kernels", "dep:cudarc", "dep:once_cell"]
+# Hub-facing pyclasses: `PrefillRouterHandler` + `CompletionEvent`. Pulls
+# kvbm-hub + velo. Independent of the v2 connector, so a slim hub-only
+# wheel is possible by disabling the v2 default feature.
+hub = [
+    "dep:kvbm-hub",
+    "dep:kvbm-protocols",
+    "dep:velo",
+    "dep:velo-ext",
+    "dep:tokio",
+    "dep:parking_lot",
+    "dep:pythonize",
+]
 
 [dependencies]
 # v2 deps (optional)
@@ -35,6 +47,15 @@ kvbm-connector = { path = "../../kvbm-connector", optional = true }
 
 # kernels deps (optional)
 kvbm-kernels = { path = "../../kvbm-kernels", optional = true }
+
+# hub deps (optional)
+kvbm-hub = { path = "../../kvbm-hub", optional = true }
+kvbm-protocols = { path = "../../kvbm-protocols", optional = true }
+velo = { version = "0.4.1", optional = true }
+velo-ext = { version = "0.2.0", optional = true }
+tokio = { version = "1.46", features = ["rt-multi-thread", "sync", "macros", "time"], optional = true }
+parking_lot = { version = "0.12.4", optional = true }
+pythonize = { version = "0.28", optional = true }
 
 anyhow = { version = "1" }
 serde = { version = "1" }

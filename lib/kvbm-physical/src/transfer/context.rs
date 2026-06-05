@@ -570,6 +570,7 @@ impl TransferContext {
     pub(crate) fn register_nixl_status(
         &self,
         xfer_req: XferRequest,
+        telemetry: Option<notifications::XferTelemetry>,
     ) -> TransferCompleteNotification {
         let event = self
             .event_system
@@ -588,6 +589,7 @@ impl TransferContext {
                 xfer_req,
             ),
             event_handle: handle,
+            telemetry,
         };
 
         // Send to background handler — log error if channel is full or closed
@@ -620,6 +622,7 @@ impl TransferContext {
             uuid: Uuid::new_v4(),
             checker: notifications::CudaEventChecker::new(event),
             event_handle: handle,
+            telemetry: None,
         };
 
         // Send to background handler — log error if channel is full or closed

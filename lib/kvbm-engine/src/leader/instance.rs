@@ -1836,6 +1836,14 @@ impl Leader for InstanceLeader {
         // Warm-cache short-circuit: the synchronous G2 prefix already covers
         // everything queried — no staging, no remote pull, no composer.
         if local_covers_all {
+            // DECLINE REASON: this instance already holds every queried block in
+            // its own G2, so no remote pull is attempted. At TP=4 this fires when
+            // B re-hits its own offloaded blocks across bench iters.
+            crate::engine_audit!(
+                "find_warm_cache_ready",
+                local_g2_count,
+                queried = sequence_hashes.len()
+            );
             return Ok(FindMatchesResult::Ready(ReadyResult::new(
                 matched_g2_blocks,
                 super::MatchBreakdown {
@@ -1861,6 +1869,19 @@ impl Leader for InstanceLeader {
 
         // Local-only Ready: no G3 to stage AND no remote pull to run.
         if matched_g3_blocks.is_empty() && !use_remote_search {
+            // DECLINE REASON: remote search not taken. The fields disambiguate
+            // why use_remote_search is false: tail below the block threshold, vs
+            // search disabled by the caller, vs discovery (hub) not wired.
+            crate::engine_audit!(
+                "find_local_only_ready",
+                local_g2_count,
+                local_g3_count,
+                post_local_tail,
+                min_remote_blocks = self.min_remote_blocks,
+                search_remote = options.search_remote,
+                discovery_wired = self.remote_discovery.get().is_some(),
+                use_remote_search
+            );
             return Ok(FindMatchesResult::Ready(ReadyResult::new(
                 matched_g2_blocks,
                 super::MatchBreakdown {
@@ -1872,6 +1893,18 @@ impl Leader for InstanceLeader {
         }
 
         // AsyncSession path: spawn the composer.
+        // DECISIVE DISCRIMINATOR: presence of this event (vs the two Ready exits
+        // above) means the remote-pull path IS entered. At TP=1 this fires every
+        // cold bench iter; its ABSENCE at TP=4 localizes the decline to the find
+        // layer (warm cache / tail-below-threshold), upstream of any pull.
+        crate::engine_audit!(
+            "find_async_composer_spawned",
+            local_g2_count,
+            local_g3_count,
+            post_local_tail,
+            min_remote_blocks = self.min_remote_blocks,
+            use_remote_search
+        );
         let session_id = SessionId::from(Uuid::new_v4());
         let (status_tx, status_rx) = watch::channel(OnboardingStatus::Searching);
         let all_g2_blocks = Arc::new(Mutex::new(None));

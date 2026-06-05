@@ -452,6 +452,7 @@ impl ConnectorLeader {
                     reference_config.page_size,
                     cfg.block_layout,
                     cfg.disagg.as_ref(),
+                    super::hub_handshake::WorkerCapabilities::default(),
                 )
                 .await
                 .context("kvbm-hub handshake")?,
@@ -988,9 +989,10 @@ impl ConnectorLeader {
             use super::disagg::{
                 AlwaysRemote, ConditionalDisaggCoordinator, ConditionalDisaggLeader,
                 ConditionalDisaggPolicy, ConnectorLeaderApi, ConnectorLeaderShim, CoordinatorParts,
-                DecodeDisaggLeader, EngineP2pBlockTransport, HubRemotePrefillQueue, HubWiring,
-                InnerLeaderShim, InnerLeaderWorkerHook, P2pBlockTransport, P2pWorkerHook,
-                PeerResolver, PrefillDisaggLeader, RemotePrefillQueue,
+                DecodeDisaggLeader, DecodeTierCache, EngineP2pBlockTransport, HubRemotePrefillQueue,
+                HubWiring, InnerLeaderShim, InnerLeaderWorkerHook, P2pBlockTransport, P2pWorkerHook,
+                PeerResolver, PrefillDisaggLeader, RemotePrefillQueue, ThresholdRemote,
+                install_tier_signal_handler,
             };
             use kvbm_config::DisaggregationRole;
 
@@ -1004,6 +1006,85 @@ impl ConnectorLeader {
                 DisaggregationRole::Prefill => kvbm_hub::ConditionalDisaggRole::Prefill,
                 DisaggregationRole::Decode => kvbm_hub::ConditionalDisaggRole::Decode,
             };
+
+            // Prefill workers may advertise an HTTP frontend so the hub's
+            // prefill router can POST `/v1/completions` against it. Gated
+            // on the hub actually offering the prefill-router feature —
+            // without that gate, advertising the feature against a hub
+            // that doesn't have the manager attached fails the whole
+            // registration (unknown feature keys are rejected, not
+            // ignored). Set both env vars *and* enable
+            // `--prefill-router` on the hub to opt in. Decode roles
+            // never advertise.
+            let mut features: Vec<kvbm_hub::Feature> = vec![kvbm_hub::Feature::ConditionalDisagg(
+                kvbm_hub::ConditionalDisaggConfig { role: cd_role },
+            )];
+            let hub_offers_router = handshake.has(kvbm_hub::FeatureKey::PrefillRouter);
+            if cd_role == kvbm_hub::ConditionalDisaggRole::Prefill {
+                match (
+                    std::env::var("KVBM_VLLM_HTTP_URL").ok(),
+                    std::env::var("KVBM_VLLM_HTTP_MODEL").ok(),
+                ) {
+                    (Some(base_url), Some(model))
+                        if !base_url.is_empty() && !model.is_empty() && hub_offers_router =>
+                    {
+                        tracing::info!(
+                            base_url,
+                            model,
+                            "advertising vLLM HTTP endpoint to hub prefill router"
+                        );
+                        features.push(kvbm_hub::Feature::PrefillRouter(
+                            kvbm_hub::PrefillRouterConfig {
+                                backend: kvbm_hub::PrefillBackendAdvertisement::Http(
+                                    kvbm_hub::VllmHttpEndpoint { base_url, model },
+                                ),
+                            },
+                        ));
+                    }
+                    (Some(_), Some(_)) if !hub_offers_router => {
+                        tracing::warn!(
+                            "KVBM_VLLM_HTTP_URL/MODEL set but hub does not offer the \
+                             prefill-router feature; skipping advertisement"
+                        );
+                    }
+                    (Some(_), None) | (None, Some(_)) => {
+                        tracing::warn!(
+                            "KVBM_VLLM_HTTP_URL and KVBM_VLLM_HTTP_MODEL must both be set to \
+                             advertise an HTTP prefill backend; skipping"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+
+            // P2 CD breaker: for the DECODE role, install the velo TIER_SIGNAL
+            // handler BEFORE hub registration. `wire_p2p` registers
+            // `Feature::ConditionalDisagg` with the hub, which makes the hub
+            // push the current breaker tier back to this decode
+            // (`ConditionalDisaggManager::on_register`). If the handler were
+            // installed after `wire_p2p` returned, that push could race ahead
+            // of it and be dropped — defeating the seed-on-join. We build the
+            // shared cache here and thread the SAME `Arc` into the leader via
+            // `HubWiring.tier_cache` below. Mirrors the heartbeat handler, which
+            // `wire_p2p` likewise installs before registration. No-op end to end
+            // until the hub's breaker is enabled (then it pushes; the cache
+            // defaults to Calm == prior behavior).
+            let decode_tier_cache: Option<Arc<DecodeTierCache>> =
+                if disagg_cfg.role == DisaggregationRole::Decode {
+                    let cache = Arc::new(DecodeTierCache::default());
+                    let messenger = self
+                        .runtime
+                        .velo()
+                        .context("CD decode requires a KvbmRuntime built with a Velo")?
+                        .messenger()
+                        .clone();
+                    install_tier_signal_handler(&messenger, Arc::clone(&cache))
+                        .context("installing CD tier-signal handler on decode (pre-registration)")?;
+                    Some(cache)
+                } else {
+                    None
+                };
+
             let super::p2p::wire::P2pFoundation {
                 hub,
                 hub_velo_id,
@@ -1016,9 +1097,7 @@ impl ConnectorLeader {
                 &leader,
                 handshake,
                 layout_compat_payload,
-                vec![kvbm_hub::Feature::ConditionalDisagg(
-                    kvbm_hub::ConditionalDisaggConfig { role: cd_role },
-                )],
+                features,
             )
             .await
             .context("disagg P2P foundation wiring failed")?;
@@ -1053,12 +1132,28 @@ impl ConnectorLeader {
 
             let role_specific: RoleSpecific = match disagg_cfg.role {
                 DisaggregationRole::Decode => {
-                    // Production policy: AlwaysRemote (every CD-eligible
-                    // request goes remote). Threshold-based policies are
-                    // a Phase B.4 follow-up; the local-only path is
-                    // exercised by running with `disagg = None`, which
-                    // bypasses this whole block.
-                    let policy: Arc<dyn ConditionalDisaggPolicy> = Arc::new(AlwaysRemote);
+                    // Decode policy. `min_remote_prefill_tokens > 0` selects
+                    // the threshold policy: prompts whose *uncached* prefill
+                    // work (total − computed − local match) is below the
+                    // threshold prefill locally on the decode worker; at or
+                    // above it they disaggregate to a remote prefill worker.
+                    // `0` (default) ⇒ AlwaysRemote (every CD-eligible request
+                    // goes remote). The fully-local path is reached by running
+                    // with `disagg = None`, which bypasses this whole block.
+                    let policy: Arc<dyn ConditionalDisaggPolicy> =
+                        if disagg_cfg.min_remote_prefill_tokens > 0 {
+                            tracing::info!(
+                                min_remote_prefill_tokens =
+                                    disagg_cfg.min_remote_prefill_tokens,
+                                "decode CD policy: ThresholdRemote"
+                            );
+                            Arc::new(ThresholdRemote {
+                                min_remote_prefill_tokens: disagg_cfg.min_remote_prefill_tokens,
+                            })
+                        } else {
+                            tracing::info!("decode CD policy: AlwaysRemote (no threshold)");
+                            Arc::new(AlwaysRemote)
+                        };
                     let queue: Arc<dyn RemotePrefillQueue> =
                         HubRemotePrefillQueue::new(Arc::clone(&client));
                     let coord = ConditionalDisaggCoordinator::new_with_decode(
@@ -1084,6 +1179,10 @@ impl ConnectorLeader {
                             hub: Some(Arc::clone(&hub)),
                             client: Some(Arc::clone(&client)),
                             hub_velo_id,
+                            // The SAME cache the TIER_SIGNAL handler (installed
+                            // pre-registration above) writes — so a tier already
+                            // pushed on registration is visible to GNMT.
+                            tier_cache: decode_tier_cache,
                         },
                     );
                     RoleSpecific::Decode(decode)

@@ -90,6 +90,26 @@ impl TestDtype for f64 {
     }
 }
 
+// FP8 is exercised as a dtype-agnostic 1-byte byte-mover via `u8`. Tolerances
+// are EXACT (0) — a layout transform on a 1-byte type is byte-permutation, so
+// it must reproduce inputs bit-for-bit. NOTE: the generic generator used by the
+// other dtype tests is `from_f64(rng * 2.0 - 1.0)`, which for `u8` collapses to
+// (negative/fractional → saturating cast → almost all zeros) and would make a
+// round-trip pass trivially. The FP8 round-trip test below therefore does NOT
+// use the generic generator; it fills with full-range bytes directly.
+impl TestDtype for u8 {
+    const DTYPE: TensorDataType = TensorDataType::FP8;
+    const ATOL: f64 = 0.0;
+    const RTOL: f64 = 0.0;
+
+    fn from_f64(v: f64) -> Self {
+        v as u8
+    }
+    fn to_f64(self) -> f64 {
+        self as f64
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -360,6 +380,144 @@ block_universal_test!(block_universal_roundtrip_hnd_f16, f16, BlockLayout::HND);
 block_universal_test!(block_universal_roundtrip_hnd_bf16, bf16, BlockLayout::HND);
 block_universal_test!(block_universal_roundtrip_hnd_f32, f32, BlockLayout::HND);
 block_universal_test!(block_universal_roundtrip_hnd_f64, f64, BlockLayout::HND);
+
+// ---------------------------------------------------------------------------
+// FP8 (1-byte) byte-identity round-trip
+// ---------------------------------------------------------------------------
+//
+// Dedicated FP8 path. The 1-byte byte-mover must reproduce inputs bit-for-bit,
+// so this test asserts EXACT byte identity (not tolerance-based). It does NOT
+// reuse the generic `block_universal_roundtrip_inner` because that helper fills
+// via `from_f64(rng * 2.0 - 1.0)`, which for `u8` saturating-casts to mostly
+// zeros — a degenerate buffer that would pass a round-trip without proving the
+// permutation is correct. Instead we fill with full-range, position-encoded
+// bytes so every (nh,nl,no,nt,hd) coordinate maps to a distinct value mod 256.
+//
+// Two checks, mirroring the production HND path (G1 is OperationalHND):
+//   1. Forward (blocks -> universal) compared against the `make_blocks`-derived
+//      ground-truth universal (exact, catches a 1-byte FORWARD permute bug).
+//   2. Reverse (universal -> blocks) compared against the original blocks with
+//      raw `assert_eq!` on the `u8` slices (unambiguous byte-identity; catches
+//      a reverse bug that isn't a symmetric mirror of the forward one).
+fn fp8_byte_identity_roundtrip_inner(layout: BlockLayout) -> Result<(), DriverError> {
+    let (stream, stream_raw) = match cuda_setup() {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
+    let nh = 3usize;
+    let nl = 2usize;
+    let no = 2usize;
+    let nt = 4usize;
+    let hd = 5usize;
+    let nb = 3usize;
+    let universal_volume = nh * nl * no * nt * hd;
+
+    // Full-range, position-encoded universal tensors (distinct value per coord,
+    // wrapped mod 256). This guarantees the forward permute can't be satisfied
+    // by a constant/zero buffer and that every byte's destination is verified.
+    let universals: Vec<Array5<u8>> = (0..nb)
+        .map(|b| {
+            Array5::from_shape_fn((nh, nl, no, nt, hd), |(nh_i, nl_i, no_i, nt_i, hd_i)| {
+                let flat = (((((b * nh + nh_i) * nl + nl_i) * no + no_i) * nt + nt_i) * hd) + hd_i;
+                (flat % 256) as u8
+            })
+        })
+        .collect();
+
+    let ref_blocks: Vec<Vec<Vec<u8>>> =
+        universals.iter().map(|u| make_blocks(u, layout)).collect();
+
+    // Upload reference blocks; allocate universal output buffers (poison-filled).
+    let (mut block_slices, block_ptrs) = upload_blocks(&stream, &ref_blocks)?;
+    let (universal_slices, universal_ptrs) = alloc_buffers::<u8>(&stream, nb, universal_volume)?;
+
+    // --- Forward: blocks -> universal ---
+    {
+        let (bp, _g1) = block_ptrs.device_ptr(&stream);
+        let (up, _g2) = universal_ptrs.device_ptr(&stream);
+        let status = unsafe {
+            universal_from_block(
+                up as usize as *const *mut c_void,
+                bp as usize as *const *const c_void,
+                nb,
+                nh,
+                nl,
+                no,
+                nt,
+                hd,
+                nl,
+                0,
+                TensorDataType::FP8,
+                layout,
+                stream_raw,
+            )
+        };
+        assert_eq!(status, cuda_runtime::cudaError::cudaSuccess);
+    }
+    stream.synchronize()?;
+
+    // Forward result must equal the contiguous universal byte image exactly.
+    for (i, (slice, expected)) in universal_slices.iter().zip(universals.iter()).enumerate() {
+        let host = stream.clone_dtoh(slice)?;
+        let expected_flat: Vec<u8> = expected.as_standard_layout().as_slice().unwrap().to_vec();
+        assert_eq!(
+            host, expected_flat,
+            "FP8 forward universal byte-identity mismatch, batch {i} ({layout:?})"
+        );
+    }
+
+    // --- Reverse: poison-fill blocks, then universal -> blocks ---
+    poison_fill_blocks(&stream, &mut block_slices, nh * nt * hd)?;
+    stream.synchronize()?;
+
+    {
+        let (bp, _g1) = block_ptrs.device_ptr(&stream);
+        let (up, _g2) = universal_ptrs.device_ptr(&stream);
+        let status = unsafe {
+            block_from_universal(
+                up as usize as *const *const c_void,
+                bp as usize as *const *mut c_void,
+                nb,
+                nh,
+                nl,
+                no,
+                nt,
+                hd,
+                nl,
+                0,
+                TensorDataType::FP8,
+                layout,
+                stream_raw,
+            )
+        };
+        assert_eq!(status, cuda_runtime::cudaError::cudaSuccess);
+    }
+    stream.synchronize()?;
+
+    // Reverse must restore the original blocks byte-for-byte.
+    for (bi, (batch, ref_batch)) in block_slices.iter().zip(ref_blocks.iter()).enumerate() {
+        for (ci, (slice, expected)) in batch.iter().zip(ref_batch.iter()).enumerate() {
+            let host = stream.clone_dtoh(slice)?;
+            assert_eq!(
+                &host, expected,
+                "FP8 reverse block byte-identity mismatch, batch {bi} chunk {ci} ({layout:?})"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn fp8_byte_identity_roundtrip_hnd() -> Result<(), DriverError> {
+    fp8_byte_identity_roundtrip_inner(BlockLayout::HND)
+}
+
+#[test]
+fn fp8_byte_identity_roundtrip_nhd() -> Result<(), DriverError> {
+    fp8_byte_identity_roundtrip_inner(BlockLayout::NHD)
+}
 
 // ---------------------------------------------------------------------------
 // NHD ↔ HND transpose

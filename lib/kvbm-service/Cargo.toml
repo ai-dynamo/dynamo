@@ -1,0 +1,75 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "kvbm-service"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "gRPC service shell hosting kvbm-engine over a unix domain socket"
+
+[dependencies]
+# Internal
+dynamo-memory = { workspace = true }
+
+# gRPC
+tonic = { workspace = true }
+prost = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# HTTP sidecar
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+
+# Observability
+prometheus = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Config + CLI (used by the bin and ServiceConfig)
+clap = { workspace = true }
+figment = { workspace = true }
+humantime = { workspace = true }
+
+# Serde
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Errors / utility
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+uuid = { workspace = true }
+blake3 = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }
+
+[dev-dependencies]
+kvbm-client = { workspace = true }
+tempfile = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+
+[features]
+default = []
+# Opt-in tests that need a working CUDA driver + NIXL backends (pool
+# allocation, /v1/pool integration).
+testing-cuda = []
+
+[[bin]]
+name = "kvbm_service"
+path = "src/bin/kvbm_service.rs"

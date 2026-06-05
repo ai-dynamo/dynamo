@@ -7,13 +7,9 @@
 #[cfg(feature = "kvbmctl")]
 pub mod cli;
 pub mod client;
-pub mod dispatcher;
 pub mod manager;
 pub mod protocol;
 
 pub use client::ConditionalDisaggClient;
-pub use dispatcher::{
-    DispatchOutcome, HttpVllmDispatcher, PrefillRequestDispatcher, RecordingDispatcher,
-};
 pub use manager::ConditionalDisaggManager;
 pub use protocol::{ConditionalDisaggInstancesResponse, ROUTE_PREFIX};

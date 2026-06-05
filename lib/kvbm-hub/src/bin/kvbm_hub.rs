@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use clap::Parser;
 use kvbm_hub::config::HubConfig;
 use kvbm_hub::{BlockLayoutMode, FeatureKey};
@@ -57,19 +58,46 @@ struct Cli {
     #[arg(long)]
     heartbeat_max_failures: Option<u32>,
 
-    /// Enable hub-driven prefill dispatcher: when set, the hub spawns a
-    /// background worker that drains the CD prefill queue and POSTs each
-    /// dequeued request to this URL's `/v1/completions` endpoint
-    /// (typically the prefill vLLM frontend). Single-prefill only;
-    /// multi-prefill routing is a future enhancement.
+    /// Enable the prefill-router feature. The hub spawns a load-aware
+    /// dispatcher that pops requests off the CD prefill queue and routes
+    /// them to workers that registered with the
+    /// `Feature::PrefillRouter` payload. Both HTTP and velo backends
+    /// are supported. Requires the `disagg` feature.
     #[arg(long)]
-    prefill_vllm_url: Option<String>,
+    prefill_router: bool,
 
-    /// Model name passed in dispatched POST bodies. Must match the
-    /// `--model` flag the prefill vLLM was started with. Required when
-    /// `--prefill-vllm-url` is set.
+    /// Per-worker in-flight concurrency cap used by the prefill router.
+    /// The fleet-wide backpressure shape is preserved by per-worker
+    /// semaphores; a worker at the cap is skipped during selection and
+    /// the dispatch blocks until *some* worker frees a slot.
+    #[arg(long, default_value_t = 4)]
+    prefill_worker_concurrency: u32,
+
+    /// Enable the CD prefill-overload circuit breaker (P2). OFF by default —
+    /// when off the hub never constructs the breaker, decode stays Calm, and
+    /// behavior is byte-identical to today. Requires `--prefill-router`. The
+    /// watermarks below tune the hysteresis (defaults mirror `BreakerConfig`).
     #[arg(long)]
-    prefill_vllm_model: Option<String>,
+    cd_breaker: bool,
+
+    /// Breaker: free-capacity fraction at/below which the breaker trips to WARM.
+    #[arg(long, default_value_t = 0.5)]
+    cd_breaker_warm_high: f64,
+
+    /// Breaker: free-capacity fraction at/below which the breaker trips to HOT.
+    /// Must be `< --cd-breaker-warm-high`.
+    #[arg(long, default_value_t = 0.15)]
+    cd_breaker_hot_high: f64,
+
+    /// Breaker: free-capacity fraction at/above which it may descend a tier
+    /// (debounced). Should be `> --cd-breaker-warm-high` for a no-flap gap.
+    #[arg(long, default_value_t = 0.7)]
+    cd_breaker_clear_low: f64,
+
+    /// Breaker: consecutive ticks the clear condition must hold before
+    /// descending one tier. Trip is immediate; clear is debounced.
+    #[arg(long, default_value_t = 3)]
+    cd_breaker_clear_debounce_ticks: u32,
 
     /// Maximum sequence length (tokens). Shared "primary" config: validated
     /// against every registrant and used to size the KV index. Required (may
@@ -139,10 +167,25 @@ struct Cli {
     /// base config (below individual `--kvbm` overrides).
     #[arg(long = "kvbm-config", value_name = "JSON")]
     kvbm_config: Option<String>,
+
+    /// Deep-merge a `kv_connector_extra_config` document read from a file into
+    /// the served base config (below `--kvbm-config` and `--kvbm`). The file
+    /// is parsed as TOML when the path ends in `.toml`, otherwise JSON. The
+    /// flat / role-overlay shapes accepted by `KvbmConfig::from_figment_with_json`
+    /// are supported (see lib/kvbm-config). Lets the operator point the hub
+    /// at the same ConfigMap the workers mount: the hub bridges
+    /// `cache.host.cache_size_gb` / `num_blocks` into its own
+    /// `primary.g2_memory_gib` / `primary.g2_blocks` so the `--g2-memory` /
+    /// `--g2-block` validation gate passes without duplicating the value on
+    /// the CLI.
+    #[arg(long = "kvbm-config-file", value_name = "PATH")]
+    kvbm_config_file: Option<PathBuf>,
 }
 
 /// All hub features a client can be granted via `--features` (in dependency
 /// order). `ConnectorControl` is infrastructure, always attached, not listed.
+/// `PrefillRouter` is not selectable here — it is gated by the
+/// `--prefill-router` flag so it is always paired with the disagg dispatcher.
 const SELECTABLE_FEATURES: [FeatureKey; 3] = [
     FeatureKey::P2P,
     FeatureKey::ConditionalDisagg,
@@ -268,18 +311,99 @@ fn build_config(cli: &Cli) -> anyhow::Result<ResolvedConfig> {
              --block-size ({block_size})"
         );
     }
+    // --kvbm-config-file: load TOML or JSON from disk and stage it as a
+    // pre-merged base layer before --kvbm-config / --kvbm overrides land.
+    // Auto-detected by extension; default to JSON when the suffix is anything
+    // else. Bridge `cache.host.cache_size_gb` / `num_blocks` into primary so
+    // pointing the hub at the worker's ConfigMap satisfies the g2 gate.
+    let kvbm_config_file_blob: Option<String> = match &cli.kvbm_config_file {
+        None => None,
+        Some(path) => {
+            let raw = std::fs::read_to_string(path)
+                .with_context(|| format!("reading --kvbm-config-file {}", path.display()))?;
+            let json_value: serde_json::Value = if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
+            {
+                let toml_value: toml::Value = toml::from_str(&raw).with_context(|| {
+                    format!("parsing --kvbm-config-file {} as TOML", path.display())
+                })?;
+                serde_json::to_value(toml_value).with_context(|| {
+                    format!(
+                        "converting --kvbm-config-file {} TOML to JSON",
+                        path.display()
+                    )
+                })?
+            } else {
+                serde_json::from_str(&raw).with_context(|| {
+                    format!("parsing --kvbm-config-file {} as JSON", path.display())
+                })?
+            };
+            if !json_value.is_object() {
+                anyhow::bail!("--kvbm-config-file {} must be an object", path.display());
+            }
+            // Bridge flat-shape cache.host sizes into HubConfig.primary so the
+            // gate check below sees what the worker's mount would have given
+            // each worker. CLI flags retain priority — only fill if absent.
+            if config.primary.g2_memory_gib.is_none()
+                && let Some(gib) = json_value
+                    .pointer("/cache/host/cache_size_gb")
+                    .and_then(|v| v.as_f64())
+            {
+                config.primary.g2_memory_gib = Some(gib);
+            }
+            if config.primary.g2_blocks.is_none()
+                && let Some(n) = json_value
+                    .pointer("/cache/host/num_blocks")
+                    .and_then(|v| v.as_u64())
+            {
+                config.primary.g2_blocks = Some(n as usize);
+            }
+            Some(json_value.to_string())
+        }
+    };
+
     if config.primary.g2_memory_gib.is_none() && config.primary.g2_blocks.is_none() {
-        anyhow::bail!("at least one of --g2-memory / --g2-block is required");
+        anyhow::bail!(
+            "at least one of --g2-memory / --g2-block (or `cache.host.cache_size_gb` / \
+             `cache.host.num_blocks` via --kvbm-config-file) is required"
+        );
     }
 
     let enabled = parse_features(cli.features.as_deref())?;
 
     // Reconcile implicit enablers with the explicit feature set.
-    if cli.prefill_vllm_url.is_some() && !enabled.contains(&FeatureKey::ConditionalDisagg) {
+    if cli.prefill_router && !enabled.contains(&FeatureKey::ConditionalDisagg) {
         anyhow::bail!(
-            "--prefill-vllm-url enables the disagg dispatcher but \
+            "--prefill-router routes CD prefill traffic but \
              disagg is not in --features"
         );
+    }
+    if cli.prefill_worker_concurrency == 0 {
+        anyhow::bail!("--prefill-worker-concurrency must be >= 1");
+    }
+    if cli.cd_breaker {
+        if !cli.prefill_router {
+            anyhow::bail!(
+                "--cd-breaker (CD prefill-overload circuit breaker) requires --prefill-router \
+                 (the breaker senses the router's free-capacity fraction)"
+            );
+        }
+        if !(cli.cd_breaker_hot_high < cli.cd_breaker_warm_high
+            && cli.cd_breaker_warm_high < cli.cd_breaker_clear_low)
+        {
+            anyhow::bail!(
+                "--cd-breaker watermarks must satisfy hot_high < warm_high < clear_low \
+                 (got hot_high={}, warm_high={}, clear_low={})",
+                cli.cd_breaker_hot_high,
+                cli.cd_breaker_warm_high,
+                cli.cd_breaker_clear_low,
+            );
+        }
+        if cli.cd_breaker_clear_debounce_ticks == 0 {
+            anyhow::bail!("--cd-breaker-clear-debounce-ticks must be >= 1");
+        }
     }
 
     // KV indexer: resolve sizing from primary; carry ZMQ / advertise overrides.
@@ -300,11 +424,18 @@ fn build_config(cli: &Cli) -> anyhow::Result<ResolvedConfig> {
         config.indexer = None;
     }
 
-    // Build the operator's base connector config from `--kvbm-config` +
-    // `--kvbm`, then round-trip-validate it through the same parser the
-    // connector uses (CUDA-free; kvbm-config carries no velo/CUDA). A bad
-    // override aborts startup with the parser's error.
+    // Build the operator's base connector config from `--kvbm-config-file` +
+    // `--kvbm-config` + `--kvbm`, then round-trip-validate through the same
+    // parser the connector uses (CUDA-free; kvbm-config carries no velo/CUDA).
+    // Precedence (lowest → highest): file → inline `--kvbm-config` JSON →
+    // individual `--kvbm` dotted overrides. Each layer is applied via
+    // `apply_overrides` so a single bad value aborts startup with the
+    // parser's error.
     let mut base_config = serde_json::json!({});
+    if let Some(blob) = kvbm_config_file_blob.as_deref() {
+        kvbm_config::overrides::apply_overrides(&mut base_config, Some(blob), &[])
+            .context("applying --kvbm-config-file")?;
+    }
     kvbm_config::overrides::apply_overrides(
         &mut base_config,
         cli.kvbm_config.as_deref(),
@@ -368,33 +499,67 @@ async fn main() -> anyhow::Result<()> {
         builder = builder.add_feature_manager(p2p_manager as Arc<dyn kvbm_hub::FeatureManager>);
     }
 
-    // ConditionalDisagg, optionally with the HTTP prefill dispatcher.
+    // ConditionalDisagg + optional prefill router. The router is its
+    // own FeatureManager (it owns the fleet selector and the
+    // /v1/features/prefill-router/ HTTP surface). The CD manager
+    // continues to own the messenger queue; if `--prefill-router` is
+    // set we late-bind the router as the CD manager's dispatcher after
+    // both have attached.
+    let mut cd_for_late_bind: Option<Arc<kvbm_hub::ConditionalDisaggManager>> = None;
+    let mut router_for_late_bind: Option<Arc<kvbm_hub::PrefillRouterManager>> = None;
     if enabled.contains(&FeatureKey::ConditionalDisagg) {
-        let cd_manager = match (&cli.prefill_vllm_url, &cli.prefill_vllm_model) {
-            (Some(url), Some(model)) => {
-                let dispatcher = kvbm_hub::HttpVllmDispatcher::new(url.clone(), model.clone())?;
-                tracing::info!(
-                    prefill_url = %url,
-                    prefill_model = %model,
-                    "CD prefill dispatcher enabled (HTTP → vLLM frontend)"
-                );
-                kvbm_hub::ConditionalDisaggManager::new()
-                    .with_dispatcher(dispatcher as Arc<dyn kvbm_hub::PrefillRequestDispatcher>)
-            }
-            (Some(_), None) | (None, Some(_)) => {
-                anyhow::bail!(
-                    "--prefill-vllm-url and --prefill-vllm-model must be specified together"
-                );
-            }
-            (None, None) => {
-                tracing::info!(
-                    "CD prefill dispatcher disabled (set --prefill-vllm-url + --prefill-vllm-model to enable)"
-                );
-                kvbm_hub::ConditionalDisaggManager::new()
-            }
+        let cd_manager = Arc::new(kvbm_hub::ConditionalDisaggManager::new());
+        if cli.prefill_router {
+            cd_for_late_bind = Some(Arc::clone(&cd_manager));
+        }
+        builder = builder
+            .add_feature_manager(Arc::clone(&cd_manager) as Arc<dyn kvbm_hub::FeatureManager>);
+    }
+
+    if cli.prefill_router {
+        let block_size = config
+            .primary
+            .block_size
+            .expect("validated above: --block-size required");
+        let selector_config = kvbm_hub::SelectorConfig {
+            per_worker_concurrency: cli.prefill_worker_concurrency,
+            block_size,
         };
-        builder =
-            builder.add_feature_manager(Arc::new(cd_manager) as Arc<dyn kvbm_hub::FeatureManager>);
+        // CD circuit breaker: opt-in (`--cd-breaker`). OFF ⇒ plain `new`, no
+        // breaker, no tick task, no tier push — byte-identical to today.
+        let router_manager = if cli.cd_breaker {
+            let breaker_config = kvbm_hub::BreakerConfig {
+                warm_high: cli.cd_breaker_warm_high,
+                hot_high: cli.cd_breaker_hot_high,
+                clear_low: cli.cd_breaker_clear_low,
+                queue_depth_warm: 0,
+                queue_depth_hot: 0,
+                clear_debounce_ticks: cli.cd_breaker_clear_debounce_ticks,
+            };
+            tracing::info!(
+                warm_high = cli.cd_breaker_warm_high,
+                hot_high = cli.cd_breaker_hot_high,
+                clear_low = cli.cd_breaker_clear_low,
+                clear_debounce_ticks = cli.cd_breaker_clear_debounce_ticks,
+                "CD prefill-overload circuit breaker ENABLED"
+            );
+            kvbm_hub::PrefillRouterManager::with_breaker(selector_config, breaker_config)
+        } else {
+            kvbm_hub::PrefillRouterManager::new(selector_config)
+        };
+        tracing::info!(
+            per_worker_concurrency = cli.prefill_worker_concurrency,
+            block_size,
+            cd_breaker = cli.cd_breaker,
+            "prefill router feature enabled (continuous fleet membership)"
+        );
+        router_for_late_bind = Some(Arc::clone(&router_manager));
+        builder = builder
+            .add_feature_manager(Arc::clone(&router_manager) as Arc<dyn kvbm_hub::FeatureManager>);
+    } else {
+        tracing::info!(
+            "prefill router disabled (pass --prefill-router to route CD prefill traffic)"
+        );
     }
 
     builder = builder.add_feature_manager(cpm as Arc<dyn kvbm_hub::FeatureManager>);
@@ -437,6 +602,28 @@ async fn main() -> anyhow::Result<()> {
         control = %server.control_addr(),
         "kvbm-hub listening"
     );
+
+    // Install the prefill router as the CD manager's dispatcher AFTER
+    // both have attached. The router accepts dispatch calls right away
+    // and queues internally until a worker registers — no startup
+    // discovery window needed.
+    if let (Some(cd), Some(router)) = (cd_for_late_bind, router_for_late_bind) {
+        // P2 CD-breaker tier push: cross-wire the broadcaster (owned by the
+        // router, sharing the breaker Arc) and the CD manager (the decode-set
+        // provider). Done AFTER both have attached so the velo handle is bound.
+        // Only present when `--cd-breaker` was set; otherwise this is skipped
+        // and the breaker path stays inert.
+        if let Some(broadcaster) = router.broadcaster() {
+            broadcaster.set_decode_provider(
+                Arc::downgrade(&cd) as std::sync::Weak<dyn kvbm_hub::DecodeSetProvider>
+            );
+            cd.set_tier_broadcaster(Arc::clone(broadcaster));
+            tracing::info!("CD breaker tier-push broadcaster wired to the decode set");
+        }
+        cd.start_dispatcher(router.dispatcher())
+            .map_err(|e| anyhow::anyhow!("install prefill router as CD dispatcher: {e}"))?;
+        tracing::info!("prefill router installed as CD prefill dispatcher");
+    }
 
     tokio::signal::ctrl_c().await?;
     tracing::info!("shutting down");

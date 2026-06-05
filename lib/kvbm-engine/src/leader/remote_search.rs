@@ -170,15 +170,37 @@ pub(super) async fn pull_from(
             committed,
             ..
         } => (capability, committed),
-        OpenTransferSessionResponse::NoBlocksFound => return Ok(false),
+        OpenTransferSessionResponse::NoBlocksFound => {
+            // DECLINE REASON (holder side): the candidate holds none of the
+            // target hashes in its G2 — puller moves to the next candidate.
+            crate::engine_audit!(
+                "remote_pull_candidate_declined",
+                %candidate,
+                num_target = target.len(),
+                reason = "holder_no_blocks"
+            );
+            return Ok(false);
+        }
         OpenTransferSessionResponse::Async { capability } => {
             // We requested Sync; an Async reply means nothing usable inline.
+            crate::engine_audit!(
+                "remote_pull_candidate_declined",
+                %candidate,
+                num_target = target.len(),
+                reason = "unexpected_async"
+            );
             close(&client, capability.session_id, "unexpected async open").await;
             return Ok(false);
         }
     };
 
     if committed.is_empty() {
+        crate::engine_audit!(
+            "remote_pull_candidate_declined",
+            %candidate,
+            num_target = target.len(),
+            reason = "empty_commit"
+        );
         close(&client, capability.session_id, "no committed blocks").await;
         return Ok(false);
     }

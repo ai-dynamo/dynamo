@@ -202,6 +202,13 @@ impl OnboardingComposer {
         let plan =
             remote_search::DiscoveryPlan::new(&self.sequence_hashes, expected_remaining_start);
         if plan.is_empty() || plan.remaining_len() < self.min_remote_blocks {
+            crate::engine_audit!(
+                "remote_pull_skipped_plan",
+                session_id = %self.session_id,
+                remaining_len = plan.remaining_len(),
+                min_remote_blocks = self.min_remote_blocks,
+                empty = plan.is_empty()
+            );
             return;
         }
 
@@ -215,7 +222,16 @@ impl OnboardingComposer {
             }
             res = discovery.discover(plan.query_hashes().to_vec()) => match res {
                 Ok(Some(c)) => c,
-                Ok(None) => return,
+                Ok(None) => {
+                    // DECLINE REASON: the hub indexer returned no holder for the
+                    // queried hashes (nothing indexed OR all holders unreachable).
+                    crate::engine_audit!(
+                        "remote_pull_skipped_no_candidates",
+                        session_id = %self.session_id,
+                        queried = plan.query_hashes().len()
+                    );
+                    return;
+                }
                 Err(e) => {
                     tracing::warn!(
                         session_id = %self.session_id,
@@ -249,6 +265,14 @@ impl OnboardingComposer {
         // either staging fully covered the indexer's reach or the reply was
         // unusable; either way we degrade to local match.
         let Some(pin_range) = plan.resolve_pin_target(candidates.deepest, current_prefix) else {
+            // DECLINE REASON: indexer found candidates but the post-staging pin
+            // range is empty (staging already covered the indexer reach, or the
+            // reply was unusable) — nothing left to pull remotely.
+            crate::engine_audit!(
+                "remote_pull_skipped_pin_empty",
+                session_id = %self.session_id,
+                current_prefix
+            );
             return;
         };
         let target: Vec<SequenceHash> = self.sequence_hashes[pin_range].to_vec();

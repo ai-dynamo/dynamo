@@ -22,6 +22,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use velo_ext::{InstanceId, PeerInfo, WorkerId};
 
+pub use crate::features::prefill_router::protocol::{
+    PrefillBackendAdvertisement, PrefillRouterConfig, VllmHttpEndpoint,
+};
+
 /// Default HTTP port for peer-discovery lookups (the `PeerDiscovery` surface).
 pub const DEFAULT_DISCOVERY_PORT: u16 = 1337;
 
@@ -226,6 +230,13 @@ pub enum Feature {
     /// today — block-size consistency is validated via [`RuntimeConfigSummary`]
     /// at registration, not a per-feature config.
     Indexer(IndexerFeatureConfig),
+    /// The client participates in the hub-side prefill router: it
+    /// advertises a transport the hub can use to dispatch prefill
+    /// requests to this worker. Decoupled from `ConditionalDisagg` so
+    /// the router can serve a non-disagg caller in future; the binary
+    /// wires the router as the disagg manager's dispatcher when both
+    /// features are enabled.
+    PrefillRouter(PrefillRouterConfig),
 }
 
 /// Stable discriminant for [`Feature`] — lets managers match by kind
@@ -247,6 +258,9 @@ pub enum FeatureKey {
     /// entries on unregister. The manager also contributes axum routes and the
     /// ingest loop.
     Indexer,
+    /// Matches [`Feature::PrefillRouter`]. Hub-side load-aware router that
+    /// dispatches prefill requests to a fleet of advertised workers.
+    PrefillRouter,
 }
 
 impl FeatureKey {
@@ -259,6 +273,7 @@ impl FeatureKey {
             FeatureKey::ConditionalDisagg => "disagg",
             FeatureKey::ConnectorControl => "connector_control",
             FeatureKey::Indexer => "indexer",
+            FeatureKey::PrefillRouter => "prefill_router",
         }
     }
 
@@ -269,6 +284,7 @@ impl FeatureKey {
             "disagg" => Some(FeatureKey::ConditionalDisagg),
             "connector_control" => Some(FeatureKey::ConnectorControl),
             "indexer" => Some(FeatureKey::Indexer),
+            "prefill_router" => Some(FeatureKey::PrefillRouter),
             _ => None,
         }
     }
@@ -412,6 +428,7 @@ impl Feature {
             Feature::P2P(_) => FeatureKey::P2P,
             Feature::ConditionalDisagg(_) => FeatureKey::ConditionalDisagg,
             Feature::Indexer(_) => FeatureKey::Indexer,
+            Feature::PrefillRouter(_) => FeatureKey::PrefillRouter,
         }
     }
 }
@@ -596,7 +613,6 @@ pub fn instance_describe(id: InstanceId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kvbm_common::SequenceHash;
     use velo_ext::WorkerAddress;
 
     fn make_peer_info() -> PeerInfo {
@@ -707,6 +723,47 @@ mod tests {
     }
 
     #[test]
+    fn feature_prefill_router_serde_round_trip() {
+        let f = Feature::PrefillRouter(PrefillRouterConfig {
+            backend: PrefillBackendAdvertisement::Http(VllmHttpEndpoint {
+                base_url: "http://10.0.0.5:8000".into(),
+                model: "Qwen/Qwen3-0.6B".into(),
+            }),
+        });
+        let json = serde_json::to_string(&f).unwrap();
+        // Adjacently-tagged: {"kind":"prefill_router","config":{"backend":{"kind":"http",...}}}
+        assert!(
+            json.contains("\"kind\":\"prefill_router\""),
+            "expected kind=prefill_router, got: {json}"
+        );
+        let back: Feature = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, f);
+        assert_eq!(back.key(), FeatureKey::PrefillRouter);
+    }
+
+    #[test]
+    fn feature_prefill_router_velo_serde_round_trip() {
+        let target = InstanceId::new_v4();
+        let f = Feature::PrefillRouter(PrefillRouterConfig {
+            backend: PrefillBackendAdvertisement::Velo {
+                instance_id: target,
+            },
+        });
+        let json = serde_json::to_string(&f).unwrap();
+        let back: Feature = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, f);
+    }
+
+    #[test]
+    fn feature_key_prefill_router_wire_label_is_stable() {
+        assert_eq!(FeatureKey::PrefillRouter.as_str(), "prefill_router");
+        assert_eq!(
+            FeatureKey::from_label("prefill_router"),
+            Some(FeatureKey::PrefillRouter)
+        );
+    }
+
+    #[test]
     fn cd_role_serde_lowercase() {
         let prefill = serde_json::to_string(&ConditionalDisaggRole::Prefill).unwrap();
         let decode = serde_json::to_string(&ConditionalDisaggRole::Decode).unwrap();
@@ -716,18 +773,17 @@ mod tests {
 
     #[test]
     fn prefill_request_serde_round_trip() {
+        use kvbm_protocols::disagg::KvHashingRequestEnvelope;
         let orig = PrefillRequest {
             protocol_version: DISAGG_PROTOCOL_VERSION,
             request_id: "req-123".to_string(),
             session_id: uuid::Uuid::new_v4(),
             initiator_instance_id: InstanceId::new_v4(),
             decode_endpoint: None,
-            sequence_hashes: vec![
-                SequenceHash::new(11, None, 11),
-                SequenceHash::new(12, None, 12),
-            ],
             token_ids: vec![1, 2, 3],
-            num_computed_tokens: 16,
+            num_provided_tokens: 48,
+            request: KvHashingRequestEnvelope::default(),
+            expected_hash_digest: Some(0xABCD_EF01_2345_6789),
         };
         let json = serde_json::to_string(&orig).unwrap();
         let back: PrefillRequest = serde_json::from_str(&json).unwrap();

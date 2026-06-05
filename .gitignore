@@ -62,6 +62,7 @@ tensorrtllm_engines/
 api_server_models/
 server/
 !lib/gpu_memory_service/server/
+!lib/kvbm-service/src/server/
 # Replay/Snapshot test artifacts
 *.new
 lib/llm/tests/data/sample-models/models--*/

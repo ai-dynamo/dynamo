@@ -29,7 +29,7 @@
 //! error-path design (deferred)".
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 use anyhow::{Result, anyhow};
@@ -115,6 +115,168 @@ impl InflightBudget {
 }
 
 // ============================================================================
+// CD circuit-breaker decode-side tier cache (P2)
+// ============================================================================
+
+/// Decode-local cache of the hub-pushed CD circuit-breaker tier.
+///
+/// The hub's prefill-router breaker computes the tier and PUSHES it to this
+/// decode over velo ([`kvbm_hub::TIER_SIGNAL_HANDLER`]); the
+/// [`DecodeDisaggLeader`] reads the cached value synchronously inside GNMT with
+/// a single relaxed atomic load (zero hot-path RPC). The state is ABSOLUTE
+/// (latest-by-recency via `epoch`), never a toggle:
+/// [`Self::apply`] adopts an inbound `(tier, epoch)` ONLY when
+/// `epoch >= cached_epoch`, so an older push (e.g. a reorder, or a duplicate)
+/// can never regress a newer tier, and a RESTARTED hub — whose epoch the hub
+/// seeds above any prior value — always wins.
+///
+/// Default is [`BreakerTier::Calm`] @ epoch 0: a decode that never received a
+/// push (breaker disabled, or pre-first-push) behaves EXACTLY as today.
+#[derive(Debug)]
+pub struct DecodeTierCache {
+    /// Current tier as a `u8` (0=Calm, 1=Warm, 2=Hot). Lock-free GNMT-hot-path read.
+    tier: AtomicU8,
+    /// Highest epoch applied so far (monotone non-decreasing via `apply`). Lock-free read.
+    epoch: AtomicU64,
+    /// Serializes concurrent `apply` writers so the `(epoch, tier)` pair updates
+    /// atomically with respect to other pushes. A bare epoch-CAS + a separate
+    /// tier-store lets a lower-epoch push land its tier AFTER a higher-epoch push
+    /// won the epoch (the two tier stores are unordered) — leaving `epoch=high`
+    /// with `tier=low`, a clobber that defeats latest-by-recency. The write lock
+    /// closes that. It is OFF the GNMT hot path (pushes are rare — per tier
+    /// transition / on decode registration), and readers ([`Self::tier`] /
+    /// [`Self::epoch`]) stay lock-free atomic loads.
+    write_lock: std::sync::Mutex<()>,
+}
+
+impl Default for DecodeTierCache {
+    fn default() -> Self {
+        Self {
+            tier: AtomicU8::new(tier_to_u8(kvbm_protocols::disagg::BreakerTier::Calm)),
+            epoch: AtomicU64::new(0),
+            write_lock: std::sync::Mutex::new(()),
+        }
+    }
+}
+
+impl DecodeTierCache {
+    /// Current cached tier (single relaxed load — the GNMT hot-path read).
+    pub fn tier(&self) -> kvbm_protocols::disagg::BreakerTier {
+        tier_from_u8(self.tier.load(Ordering::Relaxed))
+    }
+
+    /// Highest epoch applied so far.
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Relaxed)
+    }
+
+    /// Apply an inbound `(tier, epoch)` push iff `epoch >= cached_epoch`
+    /// (idempotent, absolute state). Returns `true` when the push was applied
+    /// (including an equal-epoch re-apply, which keeps the handler ack simple),
+    /// `false` when it was rejected as stale.
+    ///
+    /// Writers are SERIALIZED on `write_lock` so the `(epoch, tier)` pair updates
+    /// atomically with respect to other concurrent pushes: a recency-rejected
+    /// (stale / lower-epoch) push stores NOTHING, and — crucially — a lower-epoch
+    /// push can never land its tier AFTER a higher-epoch push (which a bare
+    /// epoch-CAS + separate tier-store CANNOT prevent, since the two tier stores
+    /// from different writers are unordered). The lock is off the GNMT hot path
+    /// (pushes are rare); the reader ([`Self::tier`]) takes no lock and always
+    /// observes the tier last published by the most-recent winning push.
+    pub fn apply(&self, tier: kvbm_protocols::disagg::BreakerTier, epoch: u64) -> bool {
+        // Serialize writers (rare velo pushes) — see the field doc for why a
+        // lock-free epoch-CAS is insufficient under concurrent pushes. A poisoned
+        // lock is benign here (the guarded data is two atomics, not invariants),
+        // so recover the guard rather than panic.
+        let _guard = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let cached = self.epoch.load(Ordering::Acquire);
+        if epoch < cached {
+            // Strictly older ⇒ recency-rejected: store NOTHING.
+            return false;
+        }
+        // Winning (or equal-epoch idempotent) push: publish the tier, then commit
+        // the epoch (epoch as the commit marker). Both Release; readers of `tier`
+        // are Relaxed and never gate on `epoch`, so a hypothetical epoch-then-tier
+        // reader still sees a tier no older than the epoch it observed.
+        self.tier.store(tier_to_u8(tier), Ordering::Release);
+        self.epoch.store(epoch, Ordering::Release);
+        true
+    }
+}
+
+fn tier_to_u8(t: kvbm_protocols::disagg::BreakerTier) -> u8 {
+    use kvbm_protocols::disagg::BreakerTier;
+    match t {
+        BreakerTier::Calm => 0,
+        BreakerTier::Warm => 1,
+        BreakerTier::Hot => 2,
+    }
+}
+
+fn tier_from_u8(v: u8) -> kvbm_protocols::disagg::BreakerTier {
+    use kvbm_protocols::disagg::BreakerTier;
+    match v {
+        0 => BreakerTier::Calm,
+        1 => BreakerTier::Warm,
+        _ => BreakerTier::Hot,
+    }
+}
+
+/// Install the velo `TIER_SIGNAL` handler that caches the hub-pushed
+/// `(tier, epoch)` into `cache` (idempotent, epoch-gated). Free function so it
+/// can be installed BEFORE the leader is built — the decode must register this
+/// handler BEFORE it registers with the hub, because the hub pushes the current
+/// tier on a new-decode registration (`ConditionalDisaggManager::on_register`);
+/// installing after registration would let that push race ahead of the handler
+/// and be dropped (the exact case the seeding is for: a hub already HOT when a
+/// decode joins). Mirror the heartbeat handler, which is likewise installed
+/// before registration. The SAME `cache` is then threaded into the leader via
+/// [`HubWiring::tier_cache`]. Lifecycle-free: no engine-core involvement.
+pub fn install_tier_signal_handler(
+    messenger: &Arc<velo::Messenger>,
+    cache: Arc<DecodeTierCache>,
+) -> Result<()> {
+    let handler = velo::Handler::typed_unary_async::<
+        kvbm_hub::TierSignal,
+        kvbm_hub::TierSignalAck,
+        _,
+        _,
+    >(kvbm_hub::TIER_SIGNAL_HANDLER, move |ctx| {
+        let cache = Arc::clone(&cache);
+        async move {
+            let signal = ctx.input;
+            let applied = cache.apply(signal.tier, signal.epoch);
+            if applied {
+                tracing::info!(
+                    tier = ?signal.tier,
+                    epoch = signal.epoch,
+                    "decode: applied CD-breaker tier push"
+                );
+            } else {
+                tracing::debug!(
+                    tier = ?signal.tier,
+                    epoch = signal.epoch,
+                    cached_epoch = cache.epoch(),
+                    "decode: ignored stale CD-breaker tier push (lower epoch)"
+                );
+            }
+            Ok(kvbm_hub::TierSignalAck {
+                epoch: signal.epoch,
+                ok: applied,
+            })
+        }
+    })
+    .build();
+    messenger
+        .register_handler(handler)
+        .map_err(|e| anyhow!("registering CD tier-signal handler: {e}"))?;
+    Ok(())
+}
+
+// ============================================================================
 // Per-request state
 // ============================================================================
 
@@ -176,8 +338,70 @@ impl Drop for CdRequestStatePayload {
     }
 }
 
+/// Source tier for a pending prefix promotion. Selected at decode
+/// GNMT based on which lower tier (G1 or G3) actually backs the
+/// requested prefix window. Drives dispatch in `commit_usaa1`'s
+/// promotion-spawn block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceTier {
+    /// Prefix lives in vLLM's G1 (HBM). Source blocks are built
+    /// at USAA from the `block_ids` vLLM hands the wrapper, paired
+    /// with the GNMT-time `prefix_hashes`. Promotion runs through
+    /// the offload pipeline's `enqueue_g1_to_g2`.
+    G1,
+    /// Prefix lives in decode's G3 (NVMe/SSD). Source blocks are
+    /// resolved by the production shim by querying the G3 manager
+    /// for `prefix_hashes` at promotion time. Promotion runs
+    /// through `kvbm_engine::leader::staging::stage_g3_to_g2`.
+    ///
+    /// Producer wiring lands in Stage 2c (extend
+    /// `commit_gnmt_remote`'s empty-prefix arm to try G3 first);
+    /// dispatch wiring lands in Stage 2d (match on `source_tier`
+    /// in `commit_usaa1`'s promotion-spawn block). Until then,
+    /// `commit_usaa1` bails on any G3 plan that reaches it.
+    #[allow(dead_code)] // wired in Stage 2c/2d
+    G3,
+}
+
+/// Decision recorded at decode GNMT when the slot's prefix range is
+/// known to vLLM (G1) but not yet backed by decode's G2 cache, OR
+/// when decode's G3 holds the prefix and a G3→G2 stage is required.
+/// The promotion fires at USAA — when vLLM has handed the wrapper
+/// the actual G1 `block_ids` (G1 source) or simply at the admission
+/// boundary (G3 source) — and runs as an uncancellable task that
+/// completes the alloc + transfer + register flow then publishes the
+/// resulting G2 blocks on the open CD session.
+///
+/// `prefix_hashes` are the canonical hashes from the slot's full
+/// sequence; they are committed up-front in `begin_remote_prefill`
+/// alongside the local-match hashes (so the prefill peer observes
+/// the full planned set when `finish_commits` seals the commit set)
+/// and re-asserted when the promotion task calls `session.commit`
+/// with the same hashes (which deduplicates against the up-front
+/// commit — see `lib/kvbm-engine/src/p2p/session/CONTRACT.md` §3.2
+/// "Monotonic-add sets"). `session.finish_availability` is
+/// **deferred** at GNMT — it only fires once the promotion task
+/// reaches `session.make_available(promoted_g2)`.
+#[derive(Debug, Clone)]
+struct PendingTierPromotion {
+    /// Which lower tier the source blocks live in.
+    source_tier: SourceTier,
+    /// Width of the prefix slice — `num_computed_tokens / block_size`.
+    prefix_block_count: usize,
+    /// Canonical sequence hashes for blocks `[0..prefix_block_count)`,
+    /// in absolute-position order.
+    prefix_hashes: Vec<SequenceHash>,
+}
+
 struct CdRequestState {
     reserved_tokens: usize,
+
+    /// GNMT-time `inputs.num_computed_tokens` (the vLLM-computed prefix length).
+    /// Authoritative `num_computed` for the USAA-1 split: a vLLM prefix-cache hit
+    /// with zero G2 match leaves the slot's onboarding state `None`, so the
+    /// onboarding-derived num_computed would be 0 and the split would under-count
+    /// `computed_blocks` (over-counting `remote_blocks()` → USAA-1 mismatch crash).
+    base_offset: usize,
 
     /// Pinned local-match G2 (Arc clones).  Held until the local
     /// G2→G1 kick resolves so the G2 entries stay live for the
@@ -235,6 +459,52 @@ struct CdRequestState {
     /// the request is torn down before USAA arrives, no notification
     /// is emitted (vLLM owns the cancellation path in that case).
     pending_failure: Mutex<Option<String>>,
+
+    /// CAS-guard for `cleanup_failed_request`. Five connector-spawned
+    /// paths can call cleanup for the same request_id concurrently:
+    /// the lifecycle watcher's failure-sink route, commit_usaa1's
+    /// local-kick spawn Err, commit_usaa1's remote-pipeline spawn
+    /// Err, commit_usaa1's session-missing branch spawn, and the
+    /// enqueue spawn's `mark_failed` → failure-sink route. The
+    /// winner of the CAS (false → true) runs the cleanup (gathers
+    /// unfilled_ids, calls `mark_failed_onboarding`, releases state);
+    /// losers early-return so vLLM is not double-notified. Mirrors
+    /// the prefill-side guard on `CdRequest.cleanup_claimed`.
+    cleanup_claimed: std::sync::atomic::AtomicBool,
+
+    /// Stage 1/2 prefix promotion plan, captured at GNMT when
+    /// `num_computed_tokens > 0` but decode's G2 has no record of
+    /// the prefix. The plan's `source_tier` indicates whether the
+    /// backing comes from vLLM's G1 (Stage 1) or decode's G3 (Stage
+    /// 2). Consumed at USAA, where the promotion task is spawned;
+    /// the G1 path needs the actual G1 `block_ids` from vLLM, the
+    /// G3 path resolves source blocks internally from the hashes.
+    /// `None` outside this path (the common case).
+    ///
+    /// The actual `JoinHandle` for the spawned task lives on the
+    /// COORDINATOR-side `DecodeBits.pending_promotion_task`, not
+    /// here — `coordinator.release` awaits the handle before
+    /// calling `session.finalize` (finalize would otherwise emit
+    /// `CommitsClosed + Drained` per session CONTRACT §2.13 and
+    /// pre-empt the task's `make_available`).
+    pending_promotion: Option<PendingTierPromotion>,
+}
+
+/// Opaque test handle wrapping an `Arc<CdRequestState>` snapshot,
+/// so that tests/ integration code can capture the per-lifecycle
+/// Arc identity without exposing the private `CdRequestState`
+/// type. Produced by
+/// [`DecodeDisaggLeader::snapshot_cd_state_for_test`] and consumed
+/// by [`DecodeDisaggLeader::release_request_if_matches_for_test`].
+#[cfg(any(test, feature = "testing"))]
+pub struct CdRequestStateHandle(Arc<CdRequestState>);
+
+#[cfg(any(test, feature = "testing"))]
+impl CdRequestStateHandle {
+    /// Two handles refer to the same lifecycle's Arc.
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 impl CdRequestState {
@@ -263,7 +533,27 @@ pub struct DecodeDisaggLeader {
     tokio_handle: tokio::runtime::Handle,
 
     inflight_budget: InflightBudget,
+
+    /// Approach B-GNMT: when a Remote decision cannot reserve from the
+    /// inflight budget (the decode-side proxy for hub prefill-router
+    /// pressure), downgrade the request to a LOCAL prefill on the decode
+    /// worker instead of returning `(None, false)` to vLLM (which DEFERS,
+    /// re-queuing the request and pinning the saturated prefill at the
+    /// TTFT tail). `true` (default) narrows disaggregation under overload;
+    /// `false` preserves the prior defer-on-exhaustion behavior. Sourced
+    /// from `DisaggConfig::cd_local_fallback_on_overload`. Inert unless
+    /// `max_inflight_remote_prefill_tokens` is finite (the default
+    /// `usize::MAX` short-circuits `try_reserve` so the branch is
+    /// unreachable).
+    cd_local_fallback_on_overload: bool,
     cd_request_state: DashMap<String, Arc<CdRequestState>>,
+
+    /// P2 CD circuit-breaker: decode-local cache of the hub-pushed tier, read
+    /// synchronously in `decode_gnmt` (single relaxed atomic load). Default
+    /// Calm ⇒ no behavior change until the hub pushes a hotter tier. Shared
+    /// (`Arc`) with the velo TIER_SIGNAL handler installed on the messenger
+    /// (see [`Self::tier_signal_handler`]); a clone is what the handler writes.
+    tier_cache: Arc<DecodeTierCache>,
 
     client: Option<Arc<ConditionalDisaggClient>>,
     hub: Option<Arc<HubClient>>,
@@ -285,12 +575,16 @@ impl std::fmt::Debug for DecodeDisaggLeader {
 }
 
 /// Optional hub-side wiring for a [`DecodeDisaggLeader`]. Grouped so
-/// `from_parts` stays below the argument-count threshold; these three are a
-/// single conceptual unit (all `None` when the hub path is disabled).
+/// `from_parts` stays below the argument-count threshold; these are a single
+/// conceptual unit (all `None` when the hub path is disabled).
 pub struct HubWiring {
     pub hub: Option<Arc<HubClient>>,
     pub client: Option<Arc<ConditionalDisaggClient>>,
     pub hub_velo_id: Option<InstanceId>,
+    /// P2 CD-breaker tier cache. `None` ⇒ `from_parts` creates a fresh default
+    /// (Calm @ epoch 0). Tests inject one so they can drive the cached tier
+    /// without a real velo push.
+    pub tier_cache: Option<Arc<DecodeTierCache>>,
 }
 
 impl DecodeDisaggLeader {
@@ -308,8 +602,10 @@ impl DecodeDisaggLeader {
             hub,
             client,
             hub_velo_id,
+            tier_cache,
         } = hub_wiring;
         let inflight_budget = InflightBudget::new(config.max_inflight_remote_prefill_tokens);
+        let tier_cache = tier_cache.unwrap_or_default();
         let leader = Arc::new_cyclic(|weak_self| Self {
             inner,
             role: config.role,
@@ -318,7 +614,9 @@ impl DecodeDisaggLeader {
             worker_hook,
             tokio_handle,
             inflight_budget,
+            cd_local_fallback_on_overload: config.cd_local_fallback_on_overload,
             cd_request_state: DashMap::new(),
+            tier_cache,
             client,
             hub,
             hub_velo_id,
@@ -363,13 +661,181 @@ impl DecodeDisaggLeader {
         self.inflight_budget.available()
     }
 
+    /// Shared P2 CD-breaker tier cache. The velo TIER_SIGNAL handler writes it;
+    /// `decode_gnmt` reads it.
+    pub fn tier_cache(&self) -> &Arc<DecodeTierCache> {
+        &self.tier_cache
+    }
+
+    /// Current cached CD-breaker tier (single relaxed load).
+    pub fn cached_tier(&self) -> kvbm_protocols::disagg::BreakerTier {
+        self.tier_cache.tier()
+    }
+
+    /// Register the velo TIER_SIGNAL handler for this decode's tier cache on
+    /// `messenger`. Thin wrapper over [`install_tier_signal_handler`] for code
+    /// paths that hold the leader. PREFER installing the handler BEFORE hub
+    /// registration (pre-build the cache, call [`install_tier_signal_handler`],
+    /// then pass the cache in via [`HubWiring::tier_cache`]) so the hub's
+    /// push-on-register cannot race ahead of the handler.
+    pub fn register_tier_signal_handler(&self, messenger: &Arc<velo::Messenger>) -> Result<()> {
+        install_tier_signal_handler(messenger, Arc::clone(&self.tier_cache))
+    }
+
     pub fn has_active_cd_request(&self, request_id: &str) -> bool {
         self.cd_request_state.contains_key(request_id)
+    }
+
+    /// Test-only: read the wrapper's per-request `cleanup_claimed`
+    /// CAS flag. Returns `None` if no `cd_request_state` entry exists.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn cleanup_claimed_for_test(&self, request_id: &str) -> Option<bool> {
+        self.cd_request_state.get(request_id).map(|e| {
+            e.value()
+                .cleanup_claimed
+                .load(std::sync::atomic::Ordering::Acquire)
+        })
+    }
+
+    /// Test-only: force-set the wrapper's per-request
+    /// `cleanup_claimed` flag. Returns `false` if no entry exists.
+    /// Used to simulate the racy "existing state had a CAS claimed
+    /// before commit_usaa1's rebuild" scenario without timing
+    /// fragility — see the rebuild-loses-stash test in
+    /// `tests/cd_decode_e2e.rs`.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn force_cleanup_claimed_for_test(&self, request_id: &str, value: bool) -> bool {
+        if let Some(e) = self.cd_request_state.get(request_id) {
+            e.value()
+                .cleanup_claimed
+                .store(value, std::sync::atomic::Ordering::Release);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Test-only: force-set the wrapper's per-request
+    /// `pending_failure` stash. Returns `false` if no entry exists.
+    /// Used to simulate the racy "cleanup_failed_request landed
+    /// between decode_usaa's pending check and commit_usaa1's read"
+    /// scenario without timing fragility — see the
+    /// commit_usaa1-race-replay test in `tests/cd_decode_e2e.rs`.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn force_pending_failure_for_test(&self, request_id: &str, reason: Option<String>) -> bool {
+        if let Some(e) = self.cd_request_state.get(request_id) {
+            *e.value().pending_failure.lock() = reason;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Test-only: enter `commit_usaa1` directly, bypassing
+    /// `decode_usaa`'s outer pending_failure check. Lets tests
+    /// simulate the race where a `cleanup_failed_request` stashes
+    /// `pending_failure` AFTER `decode_usaa` already observed
+    /// `None` — exercising the inner re-check inside commit_usaa1.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn commit_usaa1_for_test(
+        &self,
+        request_id: &str,
+        block_ids: Vec<BlockId>,
+        num_external_tokens: usize,
+    ) -> Result<()> {
+        self.commit_usaa1(request_id, block_ids, num_external_tokens)
+    }
+
+    /// Test-only: snapshot the current `Arc<CdRequestState>` for
+    /// `request_id`. Opaque to keep the inner type crate-private;
+    /// the handle is consumed by
+    /// [`Self::release_request_if_matches_for_test`] to drive the
+    /// identity-checked release path.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn snapshot_cd_state_for_test(&self, request_id: &str) -> Option<CdRequestStateHandle> {
+        self.cd_request_state
+            .get(request_id)
+            .map(|e| CdRequestStateHandle(Arc::clone(e.value())))
+    }
+
+    /// Test-only: drive [`Self::release_request_if_matches`] with a
+    /// captured handle. Returns the bool the inner method returns
+    /// (`true` if the captured Arc still matches the DashMap entry
+    /// and the release fired; `false` otherwise).
+    #[cfg(any(test, feature = "testing"))]
+    pub fn release_request_if_matches_for_test(
+        &self,
+        request_id: &str,
+        handle: &CdRequestStateHandle,
+    ) -> bool {
+        self.release_request_if_matches(request_id, &handle.0)
+    }
+
+    /// Test-only: drive [`Self::cleanup_failed_request`] directly.
+    /// Needed by the cross-lifecycle stale-cleanup reproducer
+    /// which spawns the cleanup against a parked
+    /// `mark_failed_onboarding` await, then resolves the await
+    /// after manipulating other lifecycle state.
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn cleanup_failed_request_for_test(
+        self: &Arc<Self>,
+        request_id: &str,
+        reason: String,
+    ) {
+        self.cleanup_failed_request(request_id, reason).await;
+    }
+
+    /// Test-only: peek at the `pending_promotion.source_tier`
+    /// recorded for `request_id` by `commit_gnmt_remote`. Returns
+    /// `None` if no promotion is planned; `Some("G1")` or
+    /// `Some("G3")` for the planned tier. Used by Stage 2
+    /// reproducer tests to verify the G3 path won the GNMT-time
+    /// finder race.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn pending_promotion_tier_for_test(&self, request_id: &str) -> Option<&'static str> {
+        self.cd_request_state.get(request_id).and_then(|e| {
+            e.value()
+                .pending_promotion
+                .as_ref()
+                .map(|p| match p.source_tier {
+                    SourceTier::G1 => "G1",
+                    SourceTier::G3 => "G3",
+                })
+        })
     }
 
     fn release_request(&self, request_id: &str) {
         if let Some((_, state)) = self.cd_request_state.remove(request_id) {
             self.inflight_budget.release(state.reserved_tokens);
+        }
+    }
+
+    /// Identity-checked variant of [`Self::release_request`] for
+    /// callers that captured a specific `Arc<CdRequestState>`
+    /// snapshot and want to release ONLY if the DashMap still
+    /// holds that same Arc.
+    ///
+    /// Pairs with [`ConditionalDisaggCoordinator::release_if_matches`]
+    /// to close the cross-lifecycle stale-release window under
+    /// `kv_load_failure_policy=recompute`: a spawn-replay task
+    /// parked in `mark_failed_onboarding.await` from a prior
+    /// lifecycle MUST NOT wipe the budget reservation or evict the
+    /// freshly-installed state of a subsequent lifecycle for the
+    /// same rid.
+    ///
+    /// Returns `true` if the matching entry was removed and the
+    /// budget was released; `false` if the captured Arc no longer
+    /// matches what the DashMap holds.
+    fn release_request_if_matches(&self, request_id: &str, expected: &Arc<CdRequestState>) -> bool {
+        match self
+            .cd_request_state
+            .remove_if(request_id, |_, v| Arc::ptr_eq(expected, v))
+        {
+            Some((_, state)) => {
+                self.inflight_budget.release(state.reserved_tokens);
+                true
+            }
+            None => false,
         }
     }
 
@@ -444,9 +910,25 @@ impl DecodeDisaggLeader {
             block_size,
             matched_tokens
         );
+
+        // CD observability (Prometheus; independent of the kvbm_audit log level
+        // — the durable channel for long benchmarks where audit is quieted).
+        let cd = self.inner.cd_metrics();
+        if let Some(cd) = &cd {
+            if num_computed_tokens > 0 {
+                cd.observe_prefix_cache_hit(num_computed_tokens as u64);
+            }
+        }
+
         match selection {
             PrefillSelection::Local => {
                 tracing::info!(?inner_result, "decode_gnmt: Local — passthrough");
+                if let Some(cd) = &cd {
+                    // Q1 + Q3: a Local decision and the tokens the decode will
+                    // itself prefill (uncached, unmatched = num_prefill_tokens()).
+                    cd.record_decision("local");
+                    cd.record_local_prefill_tokens(inputs.num_prefill_tokens() as u64);
+                }
                 Ok(inner_result)
             }
             PrefillSelection::Remote => {
@@ -457,6 +939,49 @@ impl DecodeDisaggLeader {
                     full_block_external_tokens,
                     "decode_gnmt: Remote — sized window"
                 );
+
+                // P2 CD circuit breaker: read the hub-pushed tier (single
+                // relaxed atomic load, zero RPC). It only ever NARROWS
+                // disaggregation; it never opens a session, produces more
+                // Remote, or touches the recompute/release/mark_failed/
+                // onboarding/session lifecycles.
+                //
+                // - CALM (default; also the value when the breaker is disabled
+                //   or no push has arrived) ⇒ the existing flow below is
+                //   unchanged (the static inflight budget remains the inert
+                //   fallback actuator).
+                // - HOT ⇒ coarse downgrade: skip the RPC and return the inner
+                //   passthrough — behaviorally IDENTICAL to the B-GNMT overload
+                //   downgrade and a policy-`Local` decision (no queue enqueue,
+                //   no cd_request_state, budget untouched, no session opened).
+                // - WARM ⇒ TODO(P3): per-request `try_admit`. Until P3 lands,
+                //   WARM is treated as CALM (the existing flow) — never as a
+                //   downgrade, so it can only ever match or narrow vs today.
+                match self.cached_tier() {
+                    kvbm_protocols::disagg::BreakerTier::Hot => {
+                        tracing::warn!(
+                            full_block_external_tokens,
+                            "decode_gnmt: CD breaker HOT — downgrading remote prefill to LOCAL"
+                        );
+                        crate::audit!(
+                            "policy_remote_downgraded_breaker_hot",
+                            role = "decode",
+                            request_id,
+                            full_block_external_tokens
+                        );
+                        if let Some(cd) = &cd {
+                            cd.record_decision("remote_downgraded_breaker_hot");
+                            cd.record_remote_declined("breaker_hot");
+                            cd.record_local_prefill_tokens(inputs.num_prefill_tokens() as u64);
+                        }
+                        return Ok(inner_result);
+                    }
+                    // WARM is P3; treat as CALM for now (fall through to the
+                    // existing CALM flow). NOT a downgrade ⇒ narrows-only holds.
+                    kvbm_protocols::disagg::BreakerTier::Warm
+                    | kvbm_protocols::disagg::BreakerTier::Calm => {}
+                }
+
                 if full_block_external_tokens == 0 {
                     tracing::info!("decode_gnmt: Remote but no full block to send — passthrough");
                     crate::audit!(
@@ -465,23 +990,88 @@ impl DecodeDisaggLeader {
                         request_id,
                         prefill_window
                     );
+                    if let Some(cd) = &cd {
+                        cd.record_decision("remote_downgraded_zero_block");
+                        cd.record_remote_declined("zero_block");
+                        // FINAL placement = local: this returns the passthrough
+                        // (Some(matched)), so vLLM onboards the G2 local-match and
+                        // computes num_prefill_tokens() = total − num_computed − match.
+                        cd.record_local_prefill_tokens(inputs.num_prefill_tokens() as u64);
+                    }
                     return Ok(inner_result);
                 }
 
                 if !self.inflight_budget.try_reserve(full_block_external_tokens) {
+                    // Approach B-GNMT: the inflight budget — the decode-side
+                    // proxy for hub prefill-router pressure (few prefill
+                    // workers saturated by many decodes' disagg load) — is
+                    // exhausted. Default behavior DOWNGRADES this Remote
+                    // decision to a LOCAL prefill: take the inner passthrough
+                    // (mirroring the zero-block downgrade above), so the
+                    // request prefills on the decode worker with low latency
+                    // and the saturated prefill stops being the TTFT-tail
+                    // bottleneck.
+                    //
+                    // SAFETY: `try_reserve` FAILED, so nothing was reserved and
+                    // `commit_gnmt_remote` was never called — no
+                    // `cd_request_state` was inserted, no session was opened,
+                    // no budget is held. Returning `inner_result` is therefore
+                    // behaviorally IDENTICAL to a policy-`Local` decision: zero
+                    // CD state to unwind, no new failure path, and no contact
+                    // with the recompute / release / mark_failed / onboarding
+                    // lifecycles. It only ever NARROWS disaggregation (more
+                    // Local, never more Remote).
+                    if self.cd_local_fallback_on_overload {
+                        tracing::warn!(
+                            full_block_external_tokens,
+                            available = self.inflight_available(),
+                            "decode_gnmt: inflight budget exhausted — downgrading remote prefill to LOCAL (overload fallback)"
+                        );
+                        crate::audit!(
+                            "policy_remote_downgraded_overload",
+                            role = "decode",
+                            request_id,
+                            full_block_external_tokens,
+                            available = self.inflight_available()
+                        );
+                        if let Some(cd) = &cd {
+                            cd.record_decision("remote_downgraded_overload");
+                            cd.record_remote_declined("budget_exhausted");
+                            cd.record_local_prefill_tokens(inputs.num_prefill_tokens() as u64);
+                        }
+                        return Ok(inner_result);
+                    }
+
                     tracing::warn!(
                         full_block_external_tokens,
                         available = self.inflight_available(),
                         "decode_gnmt: remote prefill rejected — inflight budget exhausted"
                     );
+                    if let Some(cd) = &cd {
+                        cd.record_decision("remote_rejected_budget");
+                        cd.record_remote_declined("budget_exhausted");
+                        // FINAL placement = local: this returns (None, false), so the
+                        // connector provides NO external match — vLLM prefills the whole
+                        // uncached prompt itself = total − num_computed (the G2 local-match
+                        // is NOT onboarded on the None path, so it is recomputed here; do
+                        // NOT use num_prefill_tokens(), which would undercount by the match).
+                        cd.record_local_prefill_tokens(
+                            inputs.total_tokens.saturating_sub(inputs.num_computed_tokens) as u64,
+                        );
+                    }
                     return Ok((None, false));
                 }
 
                 if let Err(err) =
                     self.commit_gnmt_remote(request_id, full_block_external_tokens, &inputs)
                 {
+                    // `commit_gnmt_remote` owns the budget lifecycle for
+                    // every internal failure path: pre-insert paths
+                    // release directly; post-insert paths route through
+                    // `release_request` (idempotent against the
+                    // payload-Drop release). No additional cleanup
+                    // needed here — propagating the Err is correct.
                     tracing::error!(error = %err, "decode_gnmt: commit_gnmt_remote failed");
-                    self.inflight_budget.release(full_block_external_tokens);
                     return Err(err);
                 }
 
@@ -495,6 +1085,22 @@ impl DecodeDisaggLeader {
                     request_id,
                     full_block_external_tokens
                 );
+                if let Some(cd) = &cd {
+                    // Q2 + Q4 + Q2-dist. Q4 = the block-aligned uncached
+                    // remote-COMPUTE remainder = full_block_external_tokens minus
+                    // the local-match (which the remote PULLS, not computes).
+                    // full_block_external_tokens already excludes the prefix-cache
+                    // hit (it is (total − num_computed) block-floored). Block-aligned
+                    // ⇒ reconciles 1:1 with the prefill-side computed tokens (Q6).
+                    // NOT full_block_external_tokens alone (that over-counts by the
+                    // local-match — the USAA-1 conflation class).
+                    let local_match_tokens = (matched_tokens / block_size) * block_size;
+                    let remote_compute_tokens =
+                        full_block_external_tokens.saturating_sub(local_match_tokens);
+                    cd.record_decision("remote");
+                    cd.record_remote_prefill_tokens(remote_compute_tokens as u64);
+                    cd.record_remote_prefill_window(full_block_external_tokens as u64);
+                }
                 Ok((Some(full_block_external_tokens), true))
             }
         }
@@ -511,7 +1117,28 @@ impl DecodeDisaggLeader {
         full_block_external_tokens: usize,
         inputs: &PolicyInputs,
     ) -> Result<()> {
-        let split = self.inner.slot_match_split(request_id)?;
+        // Budget lifecycle for this call:
+        //   - decode_gnmt reserved `full_block_external_tokens` before
+        //     invoking us. The reservation is OURS to release on any
+        //     failure path until ownership transfers to per-request
+        //     state at the `cd_request_state.insert` below.
+        //   - Pre-insert failures (everything between here and the
+        //     insert at the bottom of this section) MUST release the
+        //     reservation explicitly via `release_pre_insert_budget`.
+        //     No `cd_request_state` exists yet, so `release_request`
+        //     would be a no-op and the reservation would leak.
+        //   - Post-insert failures (begin_remote_prefill Err arm) route
+        //     through `release_request`, which is state-guarded and
+        //     idempotent against the payload-Drop path.
+        let release_pre_insert_budget = |e: anyhow::Error| -> anyhow::Error {
+            self.inflight_budget.release(full_block_external_tokens);
+            e
+        };
+
+        let split = self
+            .inner
+            .slot_match_split(request_id)
+            .map_err(release_pre_insert_budget)?;
         tracing::info!(
             local_match_blocks = split.local_match_blocks,
             computed_blocks = split.computed_blocks,
@@ -519,12 +1146,16 @@ impl DecodeDisaggLeader {
             "commit_gnmt_remote: slot_match_split"
         );
 
-        let local_g2 = self.inner.take_local_match_g2_blocks(request_id)?;
+        let local_g2 = self
+            .inner
+            .take_local_match_g2_blocks(request_id)
+            .map_err(release_pre_insert_budget)?;
         tracing::info!(
             local_g2_len = local_g2.len(),
             "commit_gnmt_remote: took local-match G2 blocks"
         );
         if local_g2.len() != split.local_match_blocks {
+            self.inflight_budget.release(full_block_external_tokens);
             anyhow::bail!(
                 "GNMT split says {} local-match blocks but find_session yielded {}",
                 split.local_match_blocks,
@@ -550,23 +1181,19 @@ impl DecodeDisaggLeader {
         //      (the session's `available_pins` owns the pin for the
         //      session's lifetime once we hand it to
         //      `begin_remote_prefill`).
-        //   2. Any miss — vLLM has the full prefix in G1, but G2 doesn't
-        //      back all of it. `find_prefix_g2_blocks` drops any partial
-        //      hits and returns empty; we advertise no prefix to prefill.
-        //      Publishing a partial set would tell prefill "decode has
-        //      prefix `[0..M)` available, not `[M..P)`" while decode's
-        //      G1 actually holds the full `[0..P)` — an inconsistent
-        //      advertisement.
-        //
-        // Recovery for the miss case is a G1→G2 copy in
-        // `update_state_after_alloc`. **That arm is not yet wired.**
-        // Until it is, "advertise none on any miss" = pre-merge
-        // functional parity: no prefix in session, prefill computes the
-        // whole prefix itself. The panic stub for the unimplemented
-        // G1→G2 backfill belongs in USAA when that code path is added,
-        // not at GNMT — bailing here would regress every PC-enabled CD
-        // request whose prefix isn't already in G2 (most of them on a
-        // fresh worker).
+        //   2. Any miss — vLLM has the full prefix in G1, but G2
+        //      doesn't back all of it. `find_prefix_g2_blocks` drops
+        //      any partial hits and returns empty; the empty arm
+        //      below plans a G1→G2 promotion task that fires at
+        //      USAA, when vLLM has handed us the actual G1
+        //      `block_ids`. The session's commit set includes the
+        //      planned-promoted hashes from the start (see
+        //      `begin_remote_prefill` — `pending_promotion_hashes`),
+        //      so `finish_commits` seals the full planned window up
+        //      front and the prefill peer never observes a partial
+        //      commit set. `session.finish_availability` is deferred
+        //      until the promotion task calls
+        //      `session.make_available` on the landed G2 blocks.
         //
         // Why prefix and local-match are passed to `begin_remote_prefill`
         // as SEPARATE Vecs (not concatenated) — two invariants:
@@ -599,7 +1226,8 @@ impl DecodeDisaggLeader {
         let num_prefix_blocks = inputs.num_computed_tokens / block_size;
         let prefix_g2 = self
             .inner
-            .find_prefix_g2_blocks(request_id, num_prefix_blocks)?;
+            .find_prefix_g2_blocks(request_id, num_prefix_blocks)
+            .map_err(release_pre_insert_budget)?;
         if !prefix_g2.is_empty() {
             tracing::info!(
                 prefix_g2_len = prefix_g2.len(),
@@ -614,6 +1242,55 @@ impl DecodeDisaggLeader {
                 num_prefix_blocks
             );
         }
+
+        // Stage 1/2: when G2 didn't cover the prefix but vLLM is
+        // claiming one (`num_computed_tokens > 0`), plan a
+        // promotion to fire at USAA. Try G3 first (decode's NVMe
+        // tier) since promoting from G3 doesn't need vLLM's G1
+        // `block_ids` and avoids contending for the G1 offload
+        // pipeline; fall back to G1 (Stage 1 path) if G3 doesn't
+        // hold the prefix.
+        //
+        // The slot's full sequence is the source of truth for the
+        // prefix hashes; the G3 finder is contract-bound to return
+        // the same canonical chain on hit (verified by debug
+        // assert).
+        let pending_promotion = if prefix_g2.is_empty() && num_prefix_blocks > 0 {
+            let prefix_hashes_from_slot: Vec<SequenceHash> =
+                split.all_sequence_hashes[..num_prefix_blocks].to_vec();
+            let g3_hashes = self
+                .inner
+                .find_prefix_g3_hashes(request_id, num_prefix_blocks)
+                .map_err(release_pre_insert_budget)?;
+            let (source_tier, prefix_hashes) = if !g3_hashes.is_empty() {
+                debug_assert_eq!(
+                    g3_hashes, prefix_hashes_from_slot,
+                    "find_prefix_g3_hashes returned hashes inconsistent with slot PLH chain"
+                );
+                crate::audit!(
+                    "prefix_g3_to_g2_promotion_planned",
+                    role = "decode",
+                    request_id,
+                    prefix_block_count = num_prefix_blocks
+                );
+                (SourceTier::G3, g3_hashes)
+            } else {
+                crate::audit!(
+                    "prefix_g1_to_g2_promotion_planned",
+                    role = "decode",
+                    request_id,
+                    prefix_block_count = num_prefix_blocks
+                );
+                (SourceTier::G1, prefix_hashes_from_slot)
+            };
+            Some(PendingTierPromotion {
+                source_tier,
+                prefix_block_count: num_prefix_blocks,
+                prefix_hashes,
+            })
+        } else {
+            None
+        };
 
         let num_local_match_hashes = local_g2.len();
         let local_match_g2_block_ids: Vec<BlockId> =
@@ -631,14 +1308,24 @@ impl DecodeDisaggLeader {
         let session_local_g2: Vec<ImmutableBlock<G2>> = local_g2.to_vec();
         let session_prefix_g2: Vec<ImmutableBlock<G2>> = prefix_g2;
 
-        let all_token_ids = self.inner.slot_token_ids(request_id)?;
-        // Slice tokens to the prefill window: only the full-block
-        // prefix `[num_computed_tokens, num_computed_tokens +
-        // full_block_external_tokens)`. The partial tail block (if
-        // any) and decode-already-computed prefix stay on decode.
+        // Send the FULL prompt tokens on the wire (not the suffix
+        // starting at `num_computed_tokens`). Prefill's slot must
+        // hash the same TokenBlockSequence decode hashed so its
+        // PositionalLineageHash chain matches decode's at absolute
+        // positions — windowing the tokens would reset prefill's
+        // chain to relative position 0 and silently break
+        // cross-instance pull keying for PC-on requests.
+        // `num_computed_tokens` rides separately on the wire so
+        // prefill's vLLM knows to skip recomputing the prefix portion;
+        // the connector pulls the prefix-G2 hashes decode published.
+        let all_token_ids = self
+            .inner
+            .slot_token_ids(request_id)
+            .map_err(release_pre_insert_budget)?;
         let base_offset = inputs.num_computed_tokens;
         let prefill_window_end = base_offset + full_block_external_tokens;
         if prefill_window_end > all_token_ids.len() {
+            self.inflight_budget.release(full_block_external_tokens);
             anyhow::bail!(
                 "prefill window [{}..{}] out of bounds for {} tokens",
                 base_offset,
@@ -646,10 +1333,14 @@ impl DecodeDisaggLeader {
                 all_token_ids.len(),
             );
         }
-        let prefill_token_ids: Vec<u32> = all_token_ids[base_offset..prefill_window_end].to_vec();
+        // Reserve only the full-block tail still in `all_token_ids`
+        // (everything before `prefill_window_end`). The partial tail
+        // block, if any, stays on decode.
+        let prefill_token_ids: Vec<u32> = all_token_ids[..prefill_window_end].to_vec();
 
         let new_state = Arc::new(CdRequestState {
             reserved_tokens: full_block_external_tokens,
+            base_offset,
             local_match_g2_pins: Mutex::new(Some(local_g2)),
             local_match_g2_block_ids,
             local_match_g1_block_ids: Vec::new(),
@@ -664,6 +1355,8 @@ impl DecodeDisaggLeader {
             // doc-comment on `CdRequestState::session`.
             session: Mutex::new(None),
             pending_failure: Mutex::new(None),
+            cleanup_claimed: std::sync::atomic::AtomicBool::new(false),
+            pending_promotion: pending_promotion.clone(),
         });
         self.cd_request_state
             .insert(request_id.to_string(), Arc::clone(&new_state));
@@ -702,6 +1395,20 @@ impl DecodeDisaggLeader {
             });
             inner_for_install.install_cd_onboarding_payload(rid, payload)
         };
+        // Past the cd_request_state.insert: failures here clean up via
+        // release_request (removes state + releases budget; idempotent
+        // against the payload-Drop path that runs inside
+        // begin_remote_prefill on install failure).
+        let lora_name = self.inner.slot_lora_name(request_id).inspect_err(|_| {
+            self.release_request(request_id);
+        })?;
+        let salt = self.inner.slot_salt(request_id).inspect_err(|_| {
+            self.release_request(request_id);
+        })?;
+        let pending_promotion_hashes_for_session = pending_promotion
+            .as_ref()
+            .map(|p| p.prefix_hashes.clone())
+            .unwrap_or_default();
         match self.coordinator.begin_remote_prefill(
             RemotePrefillStart {
                 request_id,
@@ -710,6 +1417,9 @@ impl DecodeDisaggLeader {
                 prefix_g2: session_prefix_g2,
                 local_match_g2: session_local_g2,
                 prefill_token_ids,
+                lora_name,
+                salt,
+                pending_promotion_hashes: pending_promotion_hashes_for_session,
             },
             install_payload,
         ) {
@@ -735,10 +1445,16 @@ impl DecodeDisaggLeader {
             }
             Err(err) => {
                 tracing::error!(error = %err, "commit_gnmt_remote: begin_remote_prefill failed");
-                // Coordinator state was already rolled back inside
-                // begin_remote_prefill on payload-install failure; we
-                // also drop our wrapper-side cd_request_state.
-                self.cd_request_state.remove(request_id);
+                // Two cases collapse into one cleanup:
+                //   - Payload-install failed inside begin_remote_prefill:
+                //     the payload's Drop ran wrapper.release_request
+                //     (removed cd_request_state + released budget).
+                //     release_request here is a state-guarded no-op.
+                //   - Pre-payload bailout (e.g. "called twice" at
+                //     driver.rs:1085): cd_request_state still has the
+                //     entry, no Drop fired. release_request removes
+                //     it and releases budget.
+                self.release_request(request_id);
                 Err(err)
             }
         }
@@ -779,10 +1495,13 @@ impl DecodeDisaggLeader {
         // vLLM treats as success). USAA is the first point we have
         // real G1 destinations to report — emit them as failed and
         // tear down without continuing the USAA bookkeeping.
-        let pending = self
+        let existing_wrapper = self
             .cd_request_state
             .get(request_id)
-            .and_then(|e| e.pending_failure.lock().clone());
+            .map(|e| Arc::clone(e.value()));
+        let pending = existing_wrapper
+            .as_ref()
+            .and_then(|s| s.pending_failure.lock().clone());
         if let Some(reason) = pending {
             // Only the EXTERNAL slice should be reported failed.
             // vLLM truncates `request.num_computed_tokens` at the
@@ -818,6 +1537,16 @@ impl DecodeDisaggLeader {
             // side cleanup. Returning Ok lets vLLM's USAA bookkeeping
             // complete; the failure surfaces via finished_recving with
             // the failed_block_ids in the same forward pass.
+            //
+            // Capture both per-lifecycle Arcs BEFORE the spawn so the
+            // identity-checked release inside the task no-ops if a
+            // subsequent lifecycle (recompute reschedule of the same
+            // rid) has already replaced the DashMap entries. See
+            // `release_request_if_matches` /
+            // `ConditionalDisaggCoordinator::release_if_matches`.
+            let captured_wrapper =
+                existing_wrapper.expect("pending was Some, so the wrapper Arc must exist");
+            let captured_coord = self.coordinator.state_for_decode(request_id);
             let weak_self = self.weak_self.clone();
             let request_id_owned = request_id.to_string();
             self.tokio_handle.spawn(async move {
@@ -833,8 +1562,11 @@ impl DecodeDisaggLeader {
                             "mark_failed_onboarding failed during USAA replay"
                         );
                     }
-                    this.release_request(&request_id_owned);
-                    this.coordinator.release(&request_id_owned);
+                    this.release_request_if_matches(&request_id_owned, &captured_wrapper);
+                    if let Some(coord) = captured_coord {
+                        this.coordinator
+                            .release_if_matches(&request_id_owned, &coord);
+                    }
                 }
             });
             return Ok(());
@@ -858,7 +1590,67 @@ impl DecodeDisaggLeader {
             );
         }
 
-        let split = self.inner.slot_match_split(request_id)?;
+        // Resolve the wrapper's gnmt-time state up front — BEFORE the split (we
+        // need its authoritative base_offset) and BEFORE any state mutation. The
+        // soft-skip covers the CD USAA-1 cleanup race: under
+        // `kv_load_failure_policy=recompute`, a sibling `cleanup_failed_request`
+        // on a previous run of this request id can call `coordinator.release`
+        // (coordinator.rs:1045) between the `is_active` check at the top of
+        // `decode_usaa` and the lookup here, dropping the wrapper-side state. The
+        // cleanup chain has already run — bailing would propagate worker-fatal to
+        // vLLM's EngineCore for a race vLLM already owns recovery for. Mirrors the
+        // soft-skip at coordinator.rs:1045 and coordinator.rs:309-313 (see
+        // `feedback-bail-vs-softskip-callbacks`, Tier-2 under Graham King's review skill).
+        let existing = match self
+            .cd_request_state
+            .get(request_id)
+            .map(|e| Arc::clone(e.value()))
+        {
+            Some(s) => s,
+            None => {
+                crate::audit!(
+                    "commit_usaa1_state_gone",
+                    role = "decode",
+                    request_id,
+                    reason = "cd_state_removed_between_is_active_and_commit_usaa1"
+                );
+                return Ok(());
+            }
+        };
+
+        // Observability only (NOT a bail): GNMT's sizing (reserved_tokens) is
+        // EXPECTED to equal vLLM's external allocation (num_external_tokens), but
+        // chunked-prefill can split the prefill across scheduler steps, so this may
+        // legitimately differ — bailing would trade the USAA-1 crash for a NEW
+        // crash on a previously-working path. The corrected block-count check below
+        // is the real guard (it cross-checks the split's computed/total against
+        // vLLM independently). Promote to a hard check once a clean run proves
+        // equality holds across chunked-prefill.
+        if existing.reserved_tokens != num_external_tokens {
+            crate::audit!(
+                "usaa1_reserved_external_desync",
+                role = "decode",
+                request_id,
+                reserved_tokens = existing.reserved_tokens,
+                num_external_tokens
+            );
+            tracing::warn!(
+                request_id,
+                reserved_tokens = existing.reserved_tokens,
+                num_external_tokens,
+                "CD USAA-1: GNMT reserved_tokens != vLLM num_external_tokens \
+                 (chunked-prefill?) — not fatal; block-count check is the guard"
+            );
+        }
+
+        // Authoritative num_computed = the GNMT base_offset. A vLLM prefix-cache
+        // hit with zero G2 match leaves onboarding=None, so the slot's
+        // onboarding-derived num_computed would be 0 and computed_blocks would
+        // under-count the prefix (over-counting remote_blocks() → the mismatch
+        // below). See slot_match_split_with_num_computed.
+        let split = self
+            .inner
+            .slot_match_split_with_num_computed(request_id, existing.base_offset)?;
 
         let actual_external_blocks = num_external_tokens / block_size;
         let expected_external_blocks = split.local_match_blocks + split.remote_blocks();
@@ -884,44 +1676,84 @@ impl DecodeDisaggLeader {
         }
         let local_match_g1: Vec<BlockId> = block_ids[split.local_match_range()].to_vec();
         let remote_g1: Vec<BlockId> = block_ids[split.remote_range()].to_vec();
+        // Stage 1: capture the prefix slice now (before
+        // `apply_block_assignments` consumes `block_ids`). The
+        // promotion task built at the bottom of `commit_usaa1`
+        // pairs these G1 ids with the GNMT-time `prefix_hashes`.
+        let prefix_g1_block_ids: Vec<BlockId> = block_ids[..split.computed_blocks].to_vec();
         let expected_remote_hashes = split.expected_remote_hashes();
         let remote_range = split.remote_range();
 
+        // Race re-check: `decode_usaa`'s pending_failure check happens
+        // BEFORE entering `commit_usaa1`. A concurrent
+        // `cleanup_failed_request` firing between that check and here
+        // stashes pending_failure=Some on `existing` (pre-USAA branch
+        // does NOT release). Without this re-check, commit_usaa1
+        // would call apply_block_assignments, drain
+        // local_match_g2_pins, build remote_slots, and spawn the
+        // local-kick + remote-pipeline. Those tasks could complete
+        // successfully, fire mark_onboarding_complete, and report
+        // the failed request to vLLM as a SUCCESS — the stash would
+        // never reach mark_failed_onboarding. Take the same replay
+        // path `decode_usaa` uses for pre-USAA stashes, BEFORE any
+        // mutation.
+        let pending = existing.pending_failure.lock().clone();
+        if let Some(reason) = pending {
+            let external_blocks = if block_size > 0 {
+                num_external_tokens / block_size
+            } else {
+                0
+            };
+            let external_slice_start = block_ids.len().saturating_sub(external_blocks);
+            let external_g1_ids: Vec<BlockId> = block_ids[external_slice_start..].to_vec();
+            crate::audit!(
+                "commit_usaa1_replay_pending_failure",
+                role = "decode",
+                request_id,
+                reason = %reason,
+                num_external_g1_ids = external_g1_ids.len(),
+                num_total_g1_ids = block_ids.len()
+            );
+            tracing::warn!(
+                request_id,
+                reason = %reason,
+                num_external_g1_ids = external_g1_ids.len(),
+                num_total_g1_ids = block_ids.len(),
+                "commit_usaa1: replaying pre-USAA failure stashed after decode_usaa check"
+            );
+            // Capture per-lifecycle Arcs so the spawn's release no-ops
+            // if a recompute reschedule replaces the entries before
+            // `mark_failed_onboarding.await` returns. See
+            // `release_request_if_matches`.
+            let captured_wrapper = Arc::clone(&existing);
+            let captured_coord = self.coordinator.state_for_decode(request_id);
+            let weak_self = self.weak_self.clone();
+            let request_id_owned = request_id.to_string();
+            self.tokio_handle.spawn(async move {
+                if let Some(this) = weak_self.upgrade() {
+                    if let Err(err) = this
+                        .worker_hook
+                        .mark_failed_onboarding(request_id_owned.clone(), external_g1_ids)
+                        .await
+                    {
+                        tracing::error!(
+                            request_id = request_id_owned,
+                            error = %err,
+                            "mark_failed_onboarding failed during commit_usaa1 replay"
+                        );
+                    }
+                    this.release_request_if_matches(&request_id_owned, &captured_wrapper);
+                    if let Some(coord) = captured_coord {
+                        this.coordinator
+                            .release_if_matches(&request_id_owned, &coord);
+                    }
+                }
+            });
+            return Ok(());
+        }
+
         self.inner.apply_block_assignments(request_id, block_ids)?;
 
-        // Drain stashed local-match pins + ids and rebuild per-
-        // request state with the USAA-1 derived fields.
-        //
-        // CD USAA-1 race (read side): under
-        // `kv_load_failure_policy=recompute`, a sibling
-        // `cleanup_failed_request` on a previous run of this same
-        // request id can call `coordinator.release` (Bug B's atomic-
-        // remove site, coordinator.rs:1045) between the `is_active`
-        // check at the top of `decode_usaa` and the lookup here,
-        // dropping the wrapper-side state. The cleanup chain has
-        // already run — there's nothing for us to do, and bailing
-        // would propagate worker-fatal up to vLLM's EngineCore for
-        // a race vLLM already owns recovery for.
-        //
-        // Mirrors the soft-skip pattern at coordinator.rs:1045 and
-        // coordinator.rs:309-313. See `feedback-bail-vs-softskip-callbacks`
-        // for the Tier-2 ranking under Graham King's review skill.
-        let existing = match self
-            .cd_request_state
-            .get(request_id)
-            .map(|e| Arc::clone(e.value()))
-        {
-            Some(s) => s,
-            None => {
-                crate::audit!(
-                    "commit_usaa1_state_gone",
-                    role = "decode",
-                    request_id,
-                    reason = "cd_state_removed_between_is_active_and_commit_usaa1"
-                );
-                return Ok(());
-            }
-        };
         let local_match_g2_pins = existing.local_match_g2_pins.lock().take().ok_or_else(|| {
             anyhow!(
                 "CD USAA-1: local_match_g2_pins already drained for {} (USAA called twice?)",
@@ -955,6 +1787,7 @@ impl DecodeDisaggLeader {
 
         let updated = Arc::new(CdRequestState {
             reserved_tokens: existing.reserved_tokens,
+            base_offset: existing.base_offset,
             local_match_g2_pins: Mutex::new(None),
             local_match_g2_block_ids: existing.local_match_g2_block_ids.clone(),
             local_match_g1_block_ids: local_match_g1.clone(),
@@ -968,12 +1801,121 @@ impl DecodeDisaggLeader {
             // coordinator. Closes the CD USAA-1 race; see the
             // doc-comment on `CdRequestState::session`.
             session: Mutex::new(existing.session.lock().clone()),
-            // Carry over any pre-USAA stash from the gnmt-time state;
-            // commit_usaa1 replaces the Arc entry so we must thread it.
-            pending_failure: Mutex::new(existing.pending_failure.lock().clone()),
+            // The new state ALWAYS starts with `pending_failure=None`
+            // and `cleanup_claimed=false`. Threading either field
+            // forward from `existing` re-opens the rebuild race:
+            //
+            // - If the new state inherits `pending_failure=Some` from
+            //   a stash captured during rebuild, no downstream code
+            //   surfaces it. The outer pending_failure re-check has
+            //   already passed (it ran against `existing` before the
+            //   rebuild started); any stash that lands during rebuild
+            //   is missed unless the post-insert check below catches
+            //   it on `existing`.
+            // - If the new state inherits `cleanup_claimed=true`, no
+            //   future `cleanup_failed_request` can pass the CAS to
+            //   emit `mark_failed_onboarding` with the now-known G1
+            //   ids — vLLM is never notified.
+            //
+            // The post-insert re-check (below `cd_request_state.insert`)
+            // is the canonical surface for late-arriving stashes; it
+            // queries `existing.pending_failure` (the OLD Arc which
+            // commit_usaa1 still holds) so any cleanup that stashed
+            // between the outer re-check and the insert is caught.
+            //
+            // Starting fresh is safe: a fully-completed cleanup would
+            // have called `release_request`, removing the
+            // `cd_request_state` entry; then commit_usaa1's `get` of
+            // `existing` would fail and we wouldn't reach here.
+            pending_failure: Mutex::new(None),
+            cleanup_claimed: std::sync::atomic::AtomicBool::new(false),
+            // Carry the GNMT-time promotion plan forward — the task
+            // is spawned BELOW (after the post-insert pending_failure
+            // re-check). Threading it through `updated` keeps cleanup
+            // paths observing a single source of truth via the latest
+            // per-request Arc.
+            pending_promotion: existing.pending_promotion.clone(),
         });
         self.cd_request_state
             .insert(request_id.to_string(), Arc::clone(&updated));
+
+        // Post-insert pending_failure re-check. A
+        // `cleanup_failed_request` that fired between the outer
+        // pending_failure re-check (above the rebuild) and here would
+        // have:
+        //   - Seen `existing` (OLD state) in `cd_request_state.get`
+        //     because the insert above had not yet replaced the entry.
+        //   - CAS-claimed `existing.cleanup_claimed` (no contention
+        //     since we don't claim it ourselves).
+        //   - Computed `unfilled_g1_block_ids` from OLD state — empty,
+        //     since OLD has empty `local_match_g1_block_ids` and
+        //     empty `remote_slots`.
+        //   - Taken the pre-USAA branch: stashed `pending_failure` on
+        //     OLD state and returned without releasing.
+        //
+        // OLD state is now unreachable via `cd_request_state.get`
+        // (replaced by `updated`), but commit_usaa1 still holds the
+        // OLD Arc via `existing`. Reading `existing.pending_failure`
+        // here observes the stash and lets us replay before spawning
+        // the local-kick + remote-pipeline, which would otherwise be
+        // able to complete successfully and report SUCCESS to vLLM
+        // for a request that was supposed to be failed.
+        //
+        // Cleanups that fire AFTER the insert see `updated` (NEW
+        // state) which has populated `remote_slots`, so they take
+        // the post-USAA branch and emit `mark_failed_onboarding`
+        // directly — no stash, no race.
+        let late_stash = existing.pending_failure.lock().clone();
+        if let Some(reason) = late_stash {
+            let external_g1_ids = updated.unfilled_g1_block_ids();
+            crate::audit!(
+                "commit_usaa1_post_insert_replay",
+                role = "decode",
+                request_id,
+                reason = %reason,
+                num_external_g1_ids = external_g1_ids.len()
+            );
+            tracing::warn!(
+                request_id,
+                reason = %reason,
+                num_external_g1_ids = external_g1_ids.len(),
+                "commit_usaa1: replaying stash that landed between outer re-check and insert"
+            );
+            // Capture the NEW (`updated`) wrapper Arc — that's the
+            // one the DashMap currently holds at this point in
+            // `commit_usaa1`. OLD (`existing`) is no longer
+            // reachable via the map (the insert above replaced it).
+            // Capturing OLD would make the spawn's release no-op
+            // immediately on a single-lifecycle run. Capturing NEW
+            // makes it no-op only if a SUBSEQUENT lifecycle
+            // (recompute reschedule) further replaces the entry —
+            // the cross-lifecycle stale-release semantics we want.
+            let captured_wrapper = Arc::clone(&updated);
+            let captured_coord = self.coordinator.state_for_decode(request_id);
+            let weak_self = self.weak_self.clone();
+            let request_id_owned = request_id.to_string();
+            self.tokio_handle.spawn(async move {
+                if let Some(this) = weak_self.upgrade() {
+                    if let Err(err) = this
+                        .worker_hook
+                        .mark_failed_onboarding(request_id_owned.clone(), external_g1_ids)
+                        .await
+                    {
+                        tracing::error!(
+                            request_id = request_id_owned,
+                            error = %err,
+                            "mark_failed_onboarding failed during post-insert replay"
+                        );
+                    }
+                    this.release_request_if_matches(&request_id_owned, &captured_wrapper);
+                    if let Some(coord) = captured_coord {
+                        this.coordinator
+                            .release_if_matches(&request_id_owned, &coord);
+                    }
+                }
+            });
+            return Ok(());
+        }
 
         crate::audit!(
             "commit_usaa1_state_built",
@@ -1105,6 +2047,201 @@ impl DecodeDisaggLeader {
             });
         }
 
+        // Stage 1: spawn the uncancellable G1→G2 prefix promotion
+        // task. Independent of the local-kick and remote-pipeline
+        // spawns above — it only drives the session's deferred
+        // availability close (`begin_remote_prefill` skipped
+        // `session.finish_availability` because we promised more
+        // blocks would land). The task survives request teardown:
+        // dropping its `JoinHandle` detaches but does not abort.
+        // Even if the session has been closed by the time it
+        // completes, the resulting G2 blocks remain registered in
+        // the cache and benefit future requests.
+        if let Some(plan) = updated.pending_promotion.clone() {
+            // Lookup the coordinator-side state FIRST so we can
+            // skip the spawn entirely when cleanup has already
+            // evicted state — a non-gated promotion task would
+            // race `coordinator.release`'s finalize (no handle to
+            // await means release would proceed unconditionally).
+            // If state is gone, the session is already closing
+            // (cleanup_failed_request → session.close); the
+            // promotion is moot.
+            let coord_state = match self.coordinator.state_for_decode(request_id) {
+                Some(s) => s,
+                None => {
+                    tracing::warn!(
+                        request_id,
+                        "coord state missing at promotion-spawn; cleanup ran first — \
+                         skipping Stage 1 promotion"
+                    );
+                    return Ok(());
+                }
+            };
+            let bits = match coord_state.as_decode() {
+                Some(b) => b,
+                None => {
+                    tracing::error!(
+                        request_id,
+                        "promotion-spawn: coordinator state is not decode-role; \
+                         skipping Stage 1 promotion"
+                    );
+                    return Ok(());
+                }
+            };
+
+            // Acquire the slot's Mutex IMMEDIATELY after the lookup
+            // and hold it across all subsequent work (build source
+            // blocks, call `promote_g1_to_g2`, build task closure,
+            // spawn, store handle, release lock). This closes any
+            // window between "coordinator state is alive with no
+            // pending task" and "pending task is stored" — a
+            // concurrent observer of `DecodeBits.pending_promotion_task`
+            // (e.g., `coordinator.release` via
+            // `CdRequestStatePayload::Drop` on another thread) sees
+            // either None-before-promotion or Some(handle), never an
+            // in-between None state where the gate is missed but a
+            // task is actually in flight.
+            //
+            // All operations under the lock are sync (no awaits):
+            // `promote_g1_to_g2` returns a BoxFuture without
+            // side-effecting the session, the closure is built
+            // without polling it, `tokio_handle.spawn` is sync.
+            // Holding parking_lot across them is safe — the task
+            // body never touches this lock.
+            let mut slot_guard = bits.pending_promotion_task.lock();
+
+            let inner = Arc::clone(&self.inner);
+            let session = updated.session.lock().clone();
+            let request_id_owned = request_id.to_string();
+            let prefix_block_count = plan.prefix_block_count;
+            let prefix_hashes = plan.prefix_hashes.clone();
+            // Tier-dispatched promotion future construction. Both
+            // arms build the same `BoxFuture<Result<Vec<ImmutableBlock<G2>>>>`
+            // shape; the task body below is identical and operates
+            // on the resulting G2 blocks regardless of source tier.
+            //
+            // - G1: pair vLLM's prefix block_ids with the GNMT-time
+            //   prefix hashes into `ExternalBlock<G1>` entries. The
+            //   offload pipeline registers each resulting G2 block
+            //   with the carried sequence_hash.
+            // - G3: pass the prefix hashes directly. The shim
+            //   re-matches G3 internally and stages via
+            //   `kvbm_engine::leader::stage_g3_to_g2`; no vLLM
+            //   block_ids are needed (the source blocks live in
+            //   the connector's own G3 manager).
+            let (tier_label, promotion_fut) = match plan.source_tier {
+                SourceTier::G1 => {
+                    debug_assert_eq!(prefix_g1_block_ids.len(), prefix_block_count);
+                    let source_blocks: Vec<kvbm_engine::offload::ExternalBlock<crate::G1>> =
+                        prefix_g1_block_ids
+                            .iter()
+                            .copied()
+                            .zip(prefix_hashes.iter().copied())
+                            .map(|(bid, h)| {
+                                kvbm_engine::offload::ExternalBlock::<crate::G1>::new(bid, h)
+                            })
+                            .collect();
+                    crate::audit!(
+                        "prefix_g1_to_g2_promotion_enqueued",
+                        role = "decode",
+                        request_id,
+                        prefix_block_count
+                    );
+                    ("g1->g2", inner.promote_g1_to_g2(source_blocks))
+                }
+                SourceTier::G3 => {
+                    crate::audit!(
+                        "prefix_g3_to_g2_promotion_enqueued",
+                        role = "decode",
+                        request_id,
+                        prefix_block_count
+                    );
+                    ("g3->g2", inner.promote_g3_to_g2(prefix_hashes.clone()))
+                }
+            };
+            // Task returns `bool` consumed by `coordinator.release`'s
+            // deferred-finalize path:
+            //
+            //   `true`  — promotion landed cleanly; release MUST call
+            //             `session.finalize` to close streams.
+            //   `false` — task already called `session.close(reason)`;
+            //             release MUST skip finalize (`finalize` on
+            //             a closed session is undefined protocol
+            //             behavior — emits Frame::Finished after the
+            //             close terminators).
+            //
+            // See `DecodeBits.pending_promotion_task` doc.
+            let promotion_task = async move {
+                let Some(session) = session else {
+                    tracing::warn!(
+                        request_id = %request_id_owned,
+                        "promotion task: session unset on per-request state; dropping"
+                    );
+                    // No session to finalize; return true is harmless
+                    // (the deferred-release path has no session either).
+                    return true;
+                };
+                match promotion_fut.await {
+                    Ok(g2_blocks) => {
+                        crate::audit!(
+                            "prefix_g2_promotion_landed",
+                            role = "decode",
+                            request_id = %request_id_owned,
+                            promoted = g2_blocks.len()
+                        );
+                        // `prefix_hashes` were committed up-front in
+                        // `begin_remote_prefill`, and `finish_commits`
+                        // sealed the committed set there too — calling
+                        // `session.commit` here would error per
+                        // CONTRACT §2.3 (commit after finish_commits).
+                        // Drop straight to `make_available`.
+                        let _ = &prefix_hashes;
+                        if let Err(err) = session.make_available(g2_blocks) {
+                            tracing::warn!(
+                                request_id = %request_id_owned,
+                                error = %err,
+                                "promotion task: session.make_available failed; closing session"
+                            );
+                            session.close(Some(format!("make_available: {err}")));
+                            return false;
+                        }
+                        if let Err(err) = session.finish_availability() {
+                            tracing::warn!(
+                                request_id = %request_id_owned,
+                                error = %err,
+                                "promotion task: session.finish_availability failed; closing"
+                            );
+                            session.close(Some(format!("finish_availability: {err}")));
+                            return false;
+                        }
+                        // Success — release should finalize cooperatively.
+                        true
+                    }
+                    Err(err) => {
+                        crate::audit!(
+                            "prefix_g2_promotion_failed",
+                            role = "decode",
+                            request_id = %request_id_owned,
+                            source_tier = tier_label,
+                            error = %err
+                        );
+                        // session.close implies finish_commits +
+                        // finish_availability with `closed_reason`
+                        // set, so the prefill peer observes a
+                        // terminal lifecycle event and bails.
+                        session.close(Some(format!("{tier_label} promotion: {err}")));
+                        false
+                    }
+                }
+            };
+            // `slot_guard` was acquired at the top of this block,
+            // before any of the lookup/build/spawn work — see the
+            // comment there. Store and drop now.
+            let handle = self.tokio_handle.spawn(promotion_task);
+            *slot_guard = Some(handle);
+            drop(slot_guard);
+        }
+
         Ok(())
     }
 
@@ -1125,6 +2262,20 @@ impl DecodeDisaggLeader {
         state: Arc<CdRequestState>,
         session: Arc<dyn Session>,
     ) -> Result<()> {
+        // Per-request lifecycle-driven bail. The coordinator's
+        // CdRequest holds the canonical token; we grab a clone here
+        // so the session awaits below race against velo's
+        // Detached/Failed via the watcher's `cancel.cancel()`. If
+        // the coordinator already evicted state (watcher fired
+        // before this task started running), bail immediately —
+        // there's nothing left to pipeline against.
+        let cancel = self.coordinator.cancel_for(request_id).ok_or_else(|| {
+            anyhow::anyhow!(
+                "run_remote_pipeline: coordinator state already evicted for {}",
+                request_id
+            )
+        })?;
+
         // 1. Drain commits opportunistically. Break as soon as
         //    we've seen all expected remote hashes; if peer signals
         //    Closed before that, treat it as a protocol-level
@@ -1135,7 +2286,31 @@ impl DecodeDisaggLeader {
         let expected_count = state.remote_slots.len();
         let mut commit_seen: HashSet<SequenceHash> = HashSet::new();
         let mut commits = session.commits();
-        while let Some(d) = commits.next().await {
+        loop {
+            let next = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    // Tie tolerance — biased select would spuriously
+                    // fail when cancel + a normal terminator
+                    // (CommitsClosed, or sufficient Added) land in
+                    // the same poll cycle. Synchronously poll once
+                    // more; bail only if nothing is buffered.
+                    match commits.next().now_or_never() {
+                        Some(d) => d,
+                        None => {
+                            anyhow::bail!(
+                                "run_remote_pipeline: session cancelled mid-commits-drain \
+                                 (seen {}/{}) for {}",
+                                commit_seen.len(),
+                                expected_count,
+                                request_id
+                            );
+                        }
+                    }
+                }
+                d = commits.next() => d,
+            };
+            let Some(d) = next else { break };
             match d {
                 CommitDelta::Added(hashes) => {
                     for h in hashes {
@@ -1168,10 +2343,35 @@ impl DecodeDisaggLeader {
         }
         drop(commits);
 
-        // 2. Drain availability and pull each chunk.
+        // 2. Drain availability and pull each chunk. Same cancel
+        //    discipline as the commits drain plus a select around
+        //    the per-chunk pull — velo's `pull` awaits a
+        //    `Frame::PullComplete` from the peer and would
+        //    otherwise pin this task on a hung peer even though
+        //    velo already surfaced Detached/Failed.
         let mut filled: HashSet<SequenceHash> = HashSet::new();
         let mut avail = session.availability();
-        while let Some(d) = avail.next().await {
+        loop {
+            let next = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    // Tie tolerance — see commits-drain comment above.
+                    match avail.next().now_or_never() {
+                        Some(d) => d,
+                        None => {
+                            anyhow::bail!(
+                                "run_remote_pipeline: session cancelled mid-availability-drain \
+                                 ({} of {} filled) for {}",
+                                filled.len(),
+                                state.remote_slots.len(),
+                                request_id
+                            );
+                        }
+                    }
+                }
+                d = avail.next() => d,
+            };
+            let Some(d) = next else { break };
             match d {
                 AvailabilityDelta::Available(blocks) => {
                     // Validate every incoming hash is expected. Any
@@ -1197,13 +2397,26 @@ impl DecodeDisaggLeader {
                         continue;
                     }
                     let chunk_hashes: Vec<SequenceHash> = chunk.iter().map(|b| b.hash).collect();
-                    self.pull_register_onboard_chunk(
-                        request_id,
-                        &state,
-                        chunk_hashes.clone(),
-                        Arc::clone(&session),
-                    )
-                    .await?;
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            anyhow::bail!(
+                                "run_remote_pipeline: session cancelled mid-pull \
+                                 ({} of {} filled) for {}",
+                                filled.len(),
+                                state.remote_slots.len(),
+                                request_id
+                            );
+                        }
+                        r = self.pull_register_onboard_chunk(
+                            request_id,
+                            &state,
+                            chunk_hashes.clone(),
+                            Arc::clone(&session),
+                        ) => {
+                            r?;
+                        }
+                    }
                     filled.extend(chunk_hashes);
                     if filled.len() == state.remote_slots.len() {
                         break;
@@ -1418,6 +2631,16 @@ impl DecodeDisaggLeader {
         else {
             return;
         };
+        // Capture the coordinator-side Arc BEFORE the
+        // `mark_onboarding_complete` await below so the
+        // bottom-of-method `coordinator.release` is identity-
+        // checked. Under `kv_load_failure_policy=recompute` the
+        // await can park unbounded while a recompute reschedule
+        // installs a new lifecycle for the same rid — by-name
+        // release would wipe the new lifecycle. See
+        // `lib/kvbm-connector/CONTRACT.md` §"Cross-lifecycle
+        // stale-release race".
+        let captured_coord = self.coordinator.state_for_decode(request_id);
 
         let local_done = state.local_onboard_complete.load(Ordering::Acquire);
         let remote_done = state.remote_pipeline_complete.load(Ordering::Acquire);
@@ -1469,19 +2692,74 @@ impl DecodeDisaggLeader {
         // — that runs via the `CdRequestStatePayload`'s `Drop` when
         // `process_finished_onboarding` takes the slot's
         // `OnboardingState` on `finished_recving`. Both
-        // `release_request` and `coordinator.release` are idempotent
-        // (DashMap `remove` returns `None` if absent), so the
-        // duplicate Drop is a no-op.
-        self.release_request(request_id);
-        self.coordinator.release(request_id);
+        // `release_request_if_matches` and
+        // `coordinator.release_if_matches` are no-ops if the
+        // captured Arc no longer matches the DashMap entry (the
+        // recompute cross-lifecycle case), and they're also no-ops
+        // if the entry is already absent — so duplicate Drop is
+        // safe.
+        self.release_request_if_matches(request_id, &state);
+        if let Some(coord) = captured_coord.as_ref() {
+            self.coordinator.release_if_matches(request_id, coord);
+        }
     }
 
     async fn cleanup_failed_request(self: &Arc<Self>, request_id: &str, reason: String) {
         tracing::warn!(request_id, reason = %reason, "CD request failed; cleaning up");
-        let unfilled_ids = self
-            .cd_request_state
-            .get(request_id)
-            .map(|e| e.unfilled_g1_block_ids())
+
+        // CAS-guard against parallel cleanup: five connector-spawned
+        // paths can race here for the same request_id — the lifecycle
+        // watcher's failure-sink route, commit_usaa1's local-kick
+        // spawn Err, commit_usaa1's remote-pipeline spawn Err,
+        // commit_usaa1's session-missing branch spawn, and the
+        // enqueue spawn's `mark_failed`. Whichever wins false → true
+        // gathers unfilled_ids and calls `mark_failed_onboarding`;
+        // losers early-return so vLLM is not double-notified for the
+        // same failed G1 window. Mirrors the prefill-side guard on
+        // `CdRequest.cleanup_claimed`.
+        //
+        // If `cd_request_state` is absent (state already evicted by a
+        // prior cleanup's `release_request`), no CAS is needed —
+        // there is nothing to notify or release.
+        //
+        // Also capture the per-lifecycle Arc once at the top so the
+        // release calls at the bottom use identity-checked variants
+        // (`release_request_if_matches` /
+        // `coordinator.release_if_matches`). Under
+        // `kv_load_failure_policy=recompute`, the `mark_failed_onboarding.await`
+        // below can park unbounded while a recompute reschedule
+        // replaces the DashMap entry with a new lifecycle's Arc —
+        // by-name release would wipe the new lifecycle's state. See
+        // `lib/kvbm-connector/CONTRACT.md` §"Cross-lifecycle
+        // stale-release race".
+        let captured_wrapper = match self.cd_request_state.get(request_id) {
+            Some(entry) => {
+                let arc = Arc::clone(entry.value());
+                if arc
+                    .cleanup_claimed
+                    .compare_exchange(
+                        false,
+                        true,
+                        std::sync::atomic::Ordering::AcqRel,
+                        std::sync::atomic::Ordering::Relaxed,
+                    )
+                    .is_err()
+                {
+                    tracing::debug!(
+                        request_id,
+                        "cleanup_failed_request: cleanup already claimed; no-op"
+                    );
+                    return;
+                }
+                Some(arc)
+            }
+            None => None,
+        };
+        let captured_coord = self.coordinator.state_for_decode(request_id);
+
+        let unfilled_ids = captured_wrapper
+            .as_ref()
+            .map(|s| s.unfilled_g1_block_ids())
             .unwrap_or_default();
 
         if unfilled_ids.is_empty() {
@@ -1495,7 +2773,15 @@ impl DecodeDisaggLeader {
             // (e.g. vLLM cancels the request first), the stash is
             // dropped via the slot's RAII payload — no notification
             // is needed.
-            if let Some(state) = self.cd_request_state.get(request_id) {
+            //
+            // Stash on the captured per-lifecycle Arc (not a fresh
+            // `cd_request_state.get`) — if a recompute reschedule
+            // replaced the DashMap entry while this method was
+            // running, we still want the stash to land on THIS
+            // lifecycle's state (USAA for this lifecycle is the
+            // consumer; the new lifecycle gets its own fresh
+            // pending_failure=None).
+            if let Some(state) = captured_wrapper.as_ref() {
                 let mut slot = state.pending_failure.lock();
                 if slot.is_none() {
                     *slot = Some(reason.clone());
@@ -1536,8 +2822,23 @@ impl DecodeDisaggLeader {
             );
         }
 
-        self.release_request(request_id);
-        self.coordinator.release(request_id);
+        // Identity-checked release: if a recompute reschedule
+        // replaced the DashMap entry while `mark_failed_onboarding`
+        // was awaiting, these no-op against the new lifecycle's
+        // state. See `release_request_if_matches` /
+        // `coordinator.release_if_matches` doc-comments.
+        if let Some(wrapper_arc) = captured_wrapper.as_ref() {
+            self.release_request_if_matches(request_id, wrapper_arc);
+        } else {
+            // No prior wrapper-side state — nothing to release.
+            // (Original code unconditionally called
+            // `self.release_request(rid)` here; under the new
+            // identity-checked variant we skip when we never
+            // captured an Arc, which is a no-op equivalent.)
+        }
+        if let Some(coord_arc) = captured_coord.as_ref() {
+            self.coordinator.release_if_matches(request_id, coord_arc);
+        }
     }
 }
 
@@ -1776,5 +3077,75 @@ mod tests {
         let budget = InflightBudget::new(64);
         assert!(budget.try_reserve(0));
         assert_eq!(budget.available(), 64);
+    }
+
+    // --- DecodeTierCache: latest-by-recency (epoch-gated) absolute state ------
+    // These run against the REAL DecodeTierCache (the type GNMT reads), not the
+    // TestTierCache copy in tier_push_integration.rs, so the production
+    // `apply` epoch gate is the code under test.
+
+    use kvbm_protocols::disagg::BreakerTier;
+
+    #[test]
+    fn tier_cache_default_is_calm_epoch_zero() {
+        // A decode that never received a push behaves exactly as today.
+        let cache = DecodeTierCache::default();
+        assert_eq!(cache.tier(), BreakerTier::Calm);
+        assert_eq!(cache.epoch(), 0);
+    }
+
+    #[test]
+    fn tier_cache_higher_epoch_push_applies() {
+        let cache = DecodeTierCache::default();
+        assert!(cache.apply(BreakerTier::Hot, 5), "higher epoch must apply");
+        assert_eq!(cache.tier(), BreakerTier::Hot);
+        assert_eq!(cache.epoch(), 5);
+    }
+
+    #[test]
+    fn tier_cache_lower_epoch_push_leaves_tier_unchanged() {
+        // The latest-by-recency invariant: a stale (strictly-lower-epoch) push
+        // stores NOTHING — neither the tier nor the epoch may regress. NOTE: this
+        // sequential test documents the intended SEMANTICS; it passes on both the
+        // old store-before-CAS code and the fixed store-after-CAS code, because
+        // sequentially the `epoch < cached` early-return fires before any store
+        // either way. The clobber the fix removes is a CONCURRENT interleave (a
+        // stale push reads the old cached epoch, stores its tier, then loses the
+        // CAS — leaving a high epoch paired with a stale tier); a deterministic
+        // unit test can't force that interleave. This guards the absolute-state
+        // contract against the REAL DecodeTierCache (not the TestTierCache copy).
+        let cache = DecodeTierCache::default();
+        assert!(cache.apply(BreakerTier::Hot, 50));
+        assert_eq!(cache.tier(), BreakerTier::Hot);
+        assert_eq!(cache.epoch(), 50);
+
+        // Stale push: CALM @ epoch 10 (< 50) — rejected, tier NOT regressed.
+        assert!(
+            !cache.apply(BreakerTier::Calm, 10),
+            "stale (lower-epoch) push must be rejected"
+        );
+        assert_eq!(
+            cache.tier(),
+            BreakerTier::Hot,
+            "tier must not be clobbered by a recency-rejected push"
+        );
+        assert_eq!(cache.epoch(), 50, "epoch must not regress");
+    }
+
+    #[test]
+    fn tier_cache_equal_epoch_push_is_idempotent_reapply() {
+        // Equal epoch is accepted (keeps the handler ack simple) and re-applies
+        // the tier — an idempotent no-op when the tier matches, and a re-store
+        // of the same epoch's tier when it differs (a benign duplicate).
+        let cache = DecodeTierCache::default();
+        assert!(cache.apply(BreakerTier::Warm, 7));
+        assert_eq!(cache.tier(), BreakerTier::Warm);
+
+        assert!(
+            cache.apply(BreakerTier::Warm, 7),
+            "equal-epoch re-apply is accepted"
+        );
+        assert_eq!(cache.tier(), BreakerTier::Warm);
+        assert_eq!(cache.epoch(), 7);
     }
 }

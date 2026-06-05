@@ -1,0 +1,491 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Prometheus metrics for the conditional-disaggregation (CD) path.
+//!
+//! These are the durable, always-on companions to the `kvbm_audit` tracing
+//! events on the CD path. The audit channel is smoke-test instrumentation
+//! (verbose, log-level dependent, ~hundreds of MB/run) and is meant to be
+//! quieted for long benchmarks; these counters/histograms answer the same
+//! "how many local vs remote, how big, how much computed" questions from the
+//! /metrics endpoint regardless of log level.
+//!
+//! TOKEN-QUANTITY CORRECTNESS (the USAA-1 trap): the CD path has four
+//! confusable token quantities. The metrics below read the EXACT variable:
+//! - local prefill tokens  = `num_prefill_tokens()` = total − num_computed − local_match
+//!   on the passthrough final-local paths; = total − num_computed on the budget-reject
+//!   path (returns None ⇒ the local_match is not onboarded and is recomputed)
+//! - remote prefill tokens = `split.remote_blocks() * block_size` (NOT
+//!   `full_block_external_tokens`, which over-counts by the local-match; NOT
+//!   the wire `num_prefill_tokens` field, which includes the prefix-cache hit).
+//! - prefill-side computed = `expected_outputs.len() * block_size`, which equals
+//!   `remote_blocks()` by construction ⇒ the decode `remote_prefill_tokens` and
+//!   the prefill `prefill_computed_tokens` reconcile 1:1.
+
+use prometheus::{
+    Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts, Registry,
+};
+
+/// Token-count histogram buckets (prompt-scale; Qwen3 native ctx ~40960).
+fn token_buckets() -> Vec<f64> {
+    vec![
+        256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0, 32768.0, 65536.0,
+    ]
+}
+
+/// Conditional-disaggregation metrics. Constructed once per engine process
+/// (decode AND prefill share the struct); each process only increments the
+/// fields relevant to its role, so the non-applicable fields stay at zero.
+#[derive(Clone)]
+pub struct CdMetrics {
+    // --- decode side (Q1/Q2/Q3/Q4) ---
+    /// CD prefill routing decisions, by outcome. label `decision` ∈
+    /// {local, remote, remote_downgraded_zero_block, remote_downgraded_overload,
+    /// remote_rejected_budget, remote_downgraded_breaker_hot,
+    /// remote_downgraded_breaker_warm, remote_admitted_breaker_warm}. Q1 =
+    /// decision="local"; Q2 = decision="remote"; `remote_downgraded_overload` =
+    /// a Remote decision the decode downgraded to a local prefill because the
+    /// inflight budget (hub-prefill-pressure proxy) was exhausted (Approach
+    /// B-GNMT). The `*_breaker_*` values are the three-tier circuit breaker's
+    /// decode-side decisions (P2): `_breaker_hot` = HOT-tier coarse downgrade,
+    /// `_breaker_warm` = WARM-tier per-request deny→Local,
+    /// `remote_admitted_breaker_warm` = WARM-tier per-request admit→Remote.
+    pub prefill_decisions_total: IntCounterVec,
+    /// Q3: tokens the decode itself prefills LOCALLY, counted on EVERY path whose
+    /// FINAL placement is local — a policy-Local decision AND every policy-Remote
+    /// request that filtering downgrades back to local (breaker-HOT, B-GNMT
+    /// overload, zero-block, budget-reject). For the passthrough paths this is
+    /// num_prefill_tokens() = total − num_computed − local_match; for the
+    /// budget-reject path (returns None ⇒ no external match onboarded) it is
+    /// total − num_computed. Paired with [`Self::remote_prefill_tokens_total`]
+    /// these two counters partition the post-policy prefill compute by where it
+    /// actually ran, so a dashboard divides each by its decision count for an avg.
+    pub local_prefill_tokens_total: IntCounter,
+    /// Q4: tokens the decode expects the REMOTE to compute
+    /// (= split.remote_blocks() * block_size), summed.
+    pub remote_prefill_tokens_total: IntCounter,
+    /// Q2 distribution: per-request remote-compute remainder size.
+    pub remote_prefill_tokens: Histogram,
+    /// Interesting: the external WINDOW decode reserves/ships
+    /// (= full_block_external_tokens = remote + local-match, block-floored).
+    pub remote_prefill_window_tokens_total: IntCounter,
+    /// Interesting: vLLM prefix-cache hit size on CD requests (base_offset),
+    /// surfaced explicitly so it is never folded into the remote count.
+    pub prefix_cache_hit_tokens: Histogram,
+    /// Interesting: Remote decisions that did not enqueue, by reason
+    /// {zero_block, budget_exhausted, breaker_hot, breaker_warm_deny}. (The
+    /// first two were 0 in job 2180509; the `breaker_*` reasons are the
+    /// three-tier circuit breaker's decode-side declines, P2.)
+    pub remote_prefill_declined_total: IntCounterVec,
+
+    // --- prefill side (Q6 + reconciliation) ---
+    /// Q6: tokens the prefill worker is actually asked to compute
+    /// (= expected_outputs.len() * block_size), summed.
+    pub prefill_computed_tokens_total: IntCounter,
+    /// Q6 distribution: per-request prefill forward-pass size.
+    pub prefill_computed_tokens: Histogram,
+    /// Interesting: tokens the prefill worker PULLED from decode (the onboarded
+    /// prefix it did NOT compute) — the deliberate complement of Q6. Today this
+    /// is the FULL `[0, DNPT)` prefix window (conservative over-pull).
+    pub prefill_pulled_tokens_total: IntCounter,
+    /// Q7: tokens in decode's committed prefix window that the prefill worker
+    /// ALREADY had cached locally — its own vLLM-**G1** prefix-cache hit
+    /// (`prefill_num_computed_tokens`). These are over-pulled from decode today;
+    /// they are the prefill-side "effective local cache hit" and the size of the
+    /// PNCT over-pull opportunity. The genuine pull SUPPLEMENT (still needed after
+    /// PNCT) = `prefill_pulled_tokens_total` − this. NOTE: this is a LOWER BOUND —
+    /// it counts only the G1 hit; the prefill worker's own G2/G3 local-match (the
+    /// other half of the PNCT search) is not yet folded in.
+    pub prefill_local_hit_tokens_total: IntCounter,
+    /// Reconciliation: per-request finalize outcome of the expected_outputs set,
+    /// by `outcome` ∈ {drained, undrained}. `undrained` = prefill produced fewer
+    /// net-new blocks than decode expected — the within-prefill divergence signal
+    /// that would have surfaced the USAA-1 class as a metric, not a crash.
+    pub prefill_output_residual_total: IntCounterVec,
+
+    // --- hub side (CD prefill-overload circuit breaker) ---
+    /// Current circuit-breaker tier as an integer gauge (0=Calm, 1=Warm,
+    /// 2=Hot). HUB-side metric: set by the breaker-tick task on every tier
+    /// change. Unlike the decode/prefill counters above, this is incremented
+    /// in the hub process; on an engine process it stays at 0 (Calm).
+    pub breaker_tier: IntGauge,
+    /// Circuit-breaker tier transitions, labelled by `from`/`to` tier name
+    /// ({calm, warm, hot}). HUB-side; one increment per transition. The
+    /// trip/clear ratio is visible as the asymmetry between
+    /// `to="hot"`/`to="warm"` (trips) and `to="calm"` (clears).
+    pub breaker_transitions_total: IntCounterVec,
+}
+
+impl CdMetrics {
+    pub fn new() -> Self {
+        Self {
+            prefill_decisions_total: IntCounterVec::new(
+                Opts::new(
+                    "kvbm_cd_prefill_decisions_total",
+                    "CD prefill routing decisions by outcome (local|remote|remote_downgraded_zero_block|remote_downgraded_overload|remote_rejected_budget)",
+                ),
+                &["decision"],
+            )
+            .expect("valid metric"),
+            local_prefill_tokens_total: IntCounter::with_opts(Opts::new(
+                "kvbm_cd_local_prefill_tokens_total",
+                "Tokens the decode prefills locally on every FINAL-local path (Local decision plus breaker/overload/zero-block/budget downgrades)",
+            ))
+            .expect("valid metric"),
+            remote_prefill_tokens_total: IntCounter::with_opts(Opts::new(
+                "kvbm_cd_remote_prefill_tokens_total",
+                "Tokens the decode expects the remote prefill to compute (remote_blocks*block_size)",
+            ))
+            .expect("valid metric"),
+            remote_prefill_tokens: Histogram::with_opts(
+                HistogramOpts::new(
+                    "kvbm_cd_remote_prefill_tokens",
+                    "Distribution of per-request remote-prefill compute size (tokens)",
+                )
+                .buckets(token_buckets()),
+            )
+            .expect("valid metric"),
+            remote_prefill_window_tokens_total: IntCounter::with_opts(Opts::new(
+                "kvbm_cd_remote_prefill_window_tokens_total",
+                "External window the decode reserves/ships for remote prefill (full_block_external_tokens)",
+            ))
+            .expect("valid metric"),
+            prefix_cache_hit_tokens: Histogram::with_opts(
+                HistogramOpts::new(
+                    "kvbm_cd_prefix_cache_hit_tokens",
+                    "Distribution of vLLM prefix-cache hit size (base_offset) on CD requests",
+                )
+                .buckets(token_buckets()),
+            )
+            .expect("valid metric"),
+            remote_prefill_declined_total: IntCounterVec::new(
+                Opts::new(
+                    "kvbm_cd_remote_prefill_declined_total",
+                    "Remote CD decisions that did not enqueue, by reason (zero_block|budget_exhausted)",
+                ),
+                &["reason"],
+            )
+            .expect("valid metric"),
+            prefill_computed_tokens_total: IntCounter::with_opts(Opts::new(
+                "kvbm_cd_prefill_computed_tokens_total",
+                "Tokens the prefill worker is asked to compute (expected_outputs*block_size)",
+            ))
+            .expect("valid metric"),
+            prefill_computed_tokens: Histogram::with_opts(
+                HistogramOpts::new(
+                    "kvbm_cd_prefill_computed_tokens",
+                    "Distribution of per-request prefill forward-pass size (tokens)",
+                )
+                .buckets(token_buckets()),
+            )
+            .expect("valid metric"),
+            prefill_pulled_tokens_total: IntCounter::with_opts(Opts::new(
+                "kvbm_cd_prefill_pulled_tokens_total",
+                "Tokens the prefill worker pulled from decode (onboarded prefix, not computed)",
+            ))
+            .expect("valid metric"),
+            prefill_local_hit_tokens_total: IntCounter::with_opts(Opts::new(
+                "kvbm_cd_prefill_local_hit_tokens_total",
+                "Tokens in decode's prefix window the prefill worker already had in its vLLM-G1 prefix cache (over-pulled today = PNCT opportunity; LOWER BOUND, excludes prefill G2/G3)",
+            ))
+            .expect("valid metric"),
+            prefill_output_residual_total: IntCounterVec::new(
+                Opts::new(
+                    "kvbm_cd_prefill_output_residual_total",
+                    "Prefill finalize outcome of the expected-outputs set, by outcome (drained|undrained)",
+                ),
+                &["outcome"],
+            )
+            .expect("valid metric"),
+            breaker_tier: IntGauge::with_opts(Opts::new(
+                "kvbm_cd_breaker_tier",
+                "CD prefill-overload circuit breaker current tier (0=calm, 1=warm, 2=hot); hub-side",
+            ))
+            .expect("valid metric"),
+            breaker_transitions_total: IntCounterVec::new(
+                Opts::new(
+                    "kvbm_cd_breaker_transitions_total",
+                    "CD circuit breaker tier transitions by from/to tier (calm|warm|hot); hub-side",
+                ),
+                &["from", "to"],
+            )
+            .expect("valid metric"),
+        }
+    }
+
+    pub fn register(&self, registry: &Registry) -> Result<(), prometheus::Error> {
+        registry.register(Box::new(self.prefill_decisions_total.clone()))?;
+        registry.register(Box::new(self.local_prefill_tokens_total.clone()))?;
+        registry.register(Box::new(self.remote_prefill_tokens_total.clone()))?;
+        registry.register(Box::new(self.remote_prefill_tokens.clone()))?;
+        registry.register(Box::new(self.remote_prefill_window_tokens_total.clone()))?;
+        registry.register(Box::new(self.prefix_cache_hit_tokens.clone()))?;
+        registry.register(Box::new(self.remote_prefill_declined_total.clone()))?;
+        registry.register(Box::new(self.prefill_computed_tokens_total.clone()))?;
+        registry.register(Box::new(self.prefill_computed_tokens.clone()))?;
+        registry.register(Box::new(self.prefill_pulled_tokens_total.clone()))?;
+        registry.register(Box::new(self.prefill_local_hit_tokens_total.clone()))?;
+        registry.register(Box::new(self.prefill_output_residual_total.clone()))?;
+        registry.register(Box::new(self.breaker_tier.clone()))?;
+        registry.register(Box::new(self.breaker_transitions_total.clone()))?;
+        Ok(())
+    }
+
+    // --- decode-side recorders ------------------------------------------------
+
+    /// Record one CD decision. `decision` ∈ {local, remote,
+    /// remote_downgraded_zero_block, remote_downgraded_overload,
+    /// remote_rejected_budget}.
+    pub fn record_decision(&self, decision: &'static str) {
+        self.prefill_decisions_total
+            .with_label_values(&[decision])
+            .inc();
+    }
+
+    /// Q3: tokens the decode prefills locally. Call on EVERY final-local path
+    /// (Local decision + breaker/overload/zero-block/budget downgrades) so the
+    /// counter reflects where prefill actually ran after all filtering.
+    pub fn record_local_prefill_tokens(&self, tokens: u64) {
+        self.local_prefill_tokens_total.inc_by(tokens);
+    }
+
+    /// Q4 + Q2-dist: tokens the decode expects the remote to compute
+    /// (`remote_blocks * block_size`). Increments the sum AND observes the
+    /// distribution. Call exactly once per remote request (guard recompute).
+    pub fn record_remote_prefill_tokens(&self, tokens: u64) {
+        self.remote_prefill_tokens_total.inc_by(tokens);
+        self.remote_prefill_tokens.observe(tokens as f64);
+    }
+
+    /// Interesting: the reserved/shipped external window.
+    pub fn record_remote_prefill_window(&self, tokens: u64) {
+        self.remote_prefill_window_tokens_total.inc_by(tokens);
+    }
+
+    /// Interesting: prefix-cache hit size (base_offset) on a CD request.
+    pub fn observe_prefix_cache_hit(&self, tokens: u64) {
+        self.prefix_cache_hit_tokens.observe(tokens as f64);
+    }
+
+    /// Interesting: a Remote decision that did not enqueue. `reason` ∈
+    /// {zero_block, budget_exhausted}.
+    pub fn record_remote_declined(&self, reason: &'static str) {
+        self.remote_prefill_declined_total
+            .with_label_values(&[reason])
+            .inc();
+    }
+
+    // --- prefill-side recorders -----------------------------------------------
+
+    /// Q6 + dist: tokens the prefill worker is asked to compute. Call once per
+    /// remote-prefill request the worker accepts.
+    pub fn record_prefill_computed_tokens(&self, tokens: u64) {
+        self.prefill_computed_tokens_total.inc_by(tokens);
+        self.prefill_computed_tokens.observe(tokens as f64);
+    }
+
+    /// Interesting: tokens pulled from decode (onboarded prefix, not computed).
+    pub fn record_prefill_pulled_tokens(&self, tokens: u64) {
+        self.prefill_pulled_tokens_total.inc_by(tokens);
+    }
+
+    /// Q7: tokens the prefill worker already had cached locally within decode's
+    /// prefix window (its own vLLM prefix-cache hit) — the effective prefill
+    /// cache hit / PNCT over-pull opportunity. Call once per remote-prefill
+    /// request alongside [`Self::record_prefill_pulled_tokens`].
+    pub fn record_prefill_local_hit_tokens(&self, tokens: u64) {
+        self.prefill_local_hit_tokens_total.inc_by(tokens);
+    }
+
+    /// Reconciliation: prefill finalize residual outcome. `outcome` ∈
+    /// {drained, undrained}.
+    pub fn record_prefill_output_residual(&self, outcome: &'static str) {
+        self.prefill_output_residual_total
+            .with_label_values(&[outcome])
+            .inc();
+    }
+
+    // --- hub-side breaker recorders -------------------------------------------
+
+    /// HUB-side: set the breaker tier gauge. `tier` is the integer encoding
+    /// (0=calm, 1=warm, 2=hot). Call on every breaker tier change alongside
+    /// [`Self::record_breaker_transition`].
+    pub fn set_breaker_tier(&self, tier: i64) {
+        self.breaker_tier.set(tier);
+    }
+
+    /// HUB-side: record one breaker tier transition. `from`/`to` are the tier
+    /// names ({calm, warm, hot}).
+    pub fn record_breaker_transition(&self, from: &'static str, to: &'static str) {
+        self.breaker_transitions_total
+            .with_label_values(&[from, to])
+            .inc();
+    }
+}
+
+impl Default for CdMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cd_metric_names_registered() {
+        let cd = CdMetrics::new();
+        let registry = Registry::new();
+        cd.register(&registry).unwrap();
+
+        // Labelled *Vec metrics only appear in gather() once a label set is used,
+        // so touch each (mirrors real usage where they are always recorded).
+        cd.record_decision("local");
+        cd.record_remote_declined("zero_block");
+        cd.record_prefill_output_residual("drained");
+
+        let names: Vec<_> = registry
+            .gather()
+            .iter()
+            .map(|mf| mf.name().to_string())
+            .collect();
+
+        for expected in [
+            "kvbm_cd_prefill_decisions_total",
+            "kvbm_cd_local_prefill_tokens_total",
+            "kvbm_cd_remote_prefill_tokens_total",
+            "kvbm_cd_remote_prefill_tokens",
+            "kvbm_cd_prefill_computed_tokens_total",
+            "kvbm_cd_prefill_output_residual_total",
+        ] {
+            assert!(names.contains(&expected.to_string()), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn test_decision_counter_labels_independent() {
+        let cd = CdMetrics::new();
+        cd.record_decision("local");
+        cd.record_decision("remote");
+        cd.record_decision("remote");
+        cd.record_decision("remote_downgraded_overload");
+        // Three-tier circuit-breaker decode-side decision labels (P2).
+        cd.record_decision("remote_downgraded_breaker_hot");
+        cd.record_decision("remote_downgraded_breaker_warm");
+        cd.record_decision("remote_admitted_breaker_warm");
+        assert_eq!(cd.prefill_decisions_total.with_label_values(&["local"]).get(), 1);
+        assert_eq!(cd.prefill_decisions_total.with_label_values(&["remote"]).get(), 2);
+        assert_eq!(
+            cd.prefill_decisions_total
+                .with_label_values(&["remote_downgraded_overload"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            cd.prefill_decisions_total
+                .with_label_values(&["remote_downgraded_breaker_hot"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            cd.prefill_decisions_total
+                .with_label_values(&["remote_downgraded_breaker_warm"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            cd.prefill_decisions_total
+                .with_label_values(&["remote_admitted_breaker_warm"])
+                .get(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_remote_tokens_sum_and_histogram_move_together() {
+        let cd = CdMetrics::new();
+        cd.record_remote_prefill_tokens(512);
+        cd.record_remote_prefill_tokens(1024);
+        assert_eq!(cd.remote_prefill_tokens_total.get(), 1536);
+        assert_eq!(cd.remote_prefill_tokens.get_sample_count(), 2);
+        assert_eq!(cd.remote_prefill_tokens.get_sample_sum() as u64, 1536);
+    }
+
+    #[test]
+    fn test_breaker_metrics_register_and_record() {
+        let cd = CdMetrics::new();
+        let registry = Registry::new();
+        cd.register(&registry).unwrap();
+
+        cd.set_breaker_tier(2); // hot
+        cd.record_breaker_transition("calm", "warm");
+        cd.record_breaker_transition("warm", "hot");
+
+        assert_eq!(cd.breaker_tier.get(), 2);
+        assert_eq!(
+            cd.breaker_transitions_total
+                .with_label_values(&["calm", "warm"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            cd.breaker_transitions_total
+                .with_label_values(&["warm", "hot"])
+                .get(),
+            1
+        );
+
+        let names: Vec<_> = registry
+            .gather()
+            .iter()
+            .map(|mf| mf.name().to_string())
+            .collect();
+        assert!(names.contains(&"kvbm_cd_breaker_tier".to_string()));
+        assert!(names.contains(&"kvbm_cd_breaker_transitions_total".to_string()));
+    }
+
+    #[test]
+    fn test_prefill_local_hit_decomposes_pulled() {
+        // The prefill-side prefix acquisition partitions as:
+        //   pulled (over-pull window) = local-hit (already cached) + genuine supplement.
+        // Q7 (local-hit) is recorded independently; the supplement is derived.
+        let cd = CdMetrics::new();
+        let registry = Registry::new();
+        cd.register(&registry).unwrap();
+
+        cd.record_prefill_pulled_tokens(9000);
+        cd.record_prefill_local_hit_tokens(4096);
+        cd.record_prefill_computed_tokens(2048);
+
+        assert_eq!(cd.prefill_pulled_tokens_total.get(), 9000);
+        assert_eq!(cd.prefill_local_hit_tokens_total.get(), 4096);
+        // derived genuine pull supplement = pulled − local-hit
+        assert_eq!(
+            cd.prefill_pulled_tokens_total.get() - cd.prefill_local_hit_tokens_total.get(),
+            4904
+        );
+
+        let names: Vec<_> = registry
+            .gather()
+            .iter()
+            .map(|mf| mf.name().to_string())
+            .collect();
+        assert!(names.contains(&"kvbm_cd_prefill_local_hit_tokens_total".to_string()));
+    }
+
+    #[test]
+    fn test_decode_q4_reconciles_with_prefill_q6() {
+        // remote_blocks()*bs (decode Q4) == expected_outputs*bs (prefill Q6) by
+        // construction; the two counter sums must match for a request set.
+        let cd = CdMetrics::new();
+        for n in [512u64, 1024, 5376] {
+            cd.record_remote_prefill_tokens(n); // decode side
+            cd.record_prefill_computed_tokens(n); // prefill side
+        }
+        assert_eq!(
+            cd.remote_prefill_tokens_total.get(),
+            cd.prefill_computed_tokens_total.get()
+        );
+    }
+}

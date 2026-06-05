@@ -56,6 +56,13 @@ COPY --chown=dynamo: --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
 {% endif %}
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
+{% if context[framework].enable_kvbm == "true" and target not in ("dev", "local-dev") %}
+# KVBM Rust bins: kvbm_hub server + kvbmctl CLI. Built --release in wheel_builder.
+# The wheel_builder stage always creates /opt/dynamo/bin/ (with a placeholder) so
+# this COPY succeeds even when --build-arg ENABLE_KVBM=false overrides the default.
+COPY --from=wheel_builder /opt/dynamo/bin/ /usr/local/bin/
+{% endif %}
+
 # Install Python for framework=none runtime (cuda-dl-base doesn't include Python)
 # This is needed to create venv and install dynamo packages
 ARG PYTHON_VERSION

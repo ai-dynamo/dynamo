@@ -102,15 +102,35 @@ impl NumaTopology {
     pub fn is_single_node(&self) -> bool {
         self.num_nodes() == 1
     }
+
+    /// Build a topology directly from a node-to-CPUs map. Test-only;
+    /// production code always reads from sysfs via [`Self::from_sysfs`].
+    #[cfg(test)]
+    pub(crate) fn from_node_cpus(node_to_cpus: HashMap<u32, Vec<usize>>) -> Self {
+        let mut cpu_to_node = HashMap::new();
+        for (node, cpus) in &node_to_cpus {
+            for cpu in cpus {
+                cpu_to_node.insert(*cpu, *node);
+            }
+        }
+        Self {
+            node_to_cpus,
+            cpu_to_node,
+        }
+    }
 }
 
-/// Parse Linux cpulist format.
+/// Parse Linux cpulist format into a sorted, deduplicated `Vec<usize>`.
+///
+/// Accepts the format used by sysfs files like `/sys/devices/system/node/node*/cpulist`
+/// and `/proc/self/status` (`Cpus_allowed_list`). Empty input yields an empty `Vec`
+/// (legal for memory-only NUMA nodes, e.g. GB200 nodes 2-33).
 ///
 /// # Examples
 /// - `"0-15"` -> `[0,1,2,...,15]`
 /// - `"0,4,8"` -> `[0,4,8]`
 /// - `"0-3,8-11"` -> `[0,1,2,3,8,9,10,11]`
-fn parse_cpulist(cpulist: &str) -> Result<Vec<usize>, String> {
+pub fn parse_cpulist(cpulist: &str) -> Result<Vec<usize>, String> {
     let mut cpus = Vec::new();
 
     // Empty cpulist = memory-only NUMA node (no CPUs), valid on Grace/GB200

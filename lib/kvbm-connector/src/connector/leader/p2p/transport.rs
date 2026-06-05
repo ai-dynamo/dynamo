@@ -15,16 +15,18 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
+use futures::FutureExt;
 use futures::future::BoxFuture;
 use kvbm_common::LogicalLayoutHandle;
 use kvbm_engine::leader::InstanceLeader;
+use kvbm_engine::offload::ExternalBlock;
 use kvbm_logical::blocks::{CompleteBlock, ImmutableBlock, MutableBlock};
 use kvbm_physical::TransferOptions;
 use kvbm_protocols::disagg::TransferParams;
 
 use crate::connector::leader::scheduler::{KvConnectorMetadata, SchedulerOutput};
 use crate::connector::leader::{ConnectorLeader, FinishedStatus, Request, SlotMatchSplit};
-use crate::{BlockId, G2, InstanceId};
+use crate::{BlockId, G1, G2, G3, InstanceId, SequenceHash};
 
 /// Transport seam used by the disagg wrapper to drive
 /// local G2→G1 transfers (decode's local-match kick at USAA-1, and
@@ -156,9 +158,26 @@ pub trait InnerLeaderShim: Send + Sync {
     // ---- CD-specific helpers ----
 
     fn block_size(&self) -> usize;
+    /// CD observability metrics (Prometheus), if this leader is backed by a
+    /// runtime registry; `None` for test doubles.
+    fn cd_metrics(&self) -> Option<kvbm_observability::CdMetrics>;
     fn get_slot_total_tokens(&self, request_id: &str) -> Result<usize>;
     fn slot_match_split(&self, request_id: &str) -> Result<SlotMatchSplit>;
+    /// Like [`Self::slot_match_split`] but with the caller supplying the
+    /// authoritative `num_computed_tokens` (the GNMT `base_offset`). The CD
+    /// wrapper uses this at USAA-1: a vLLM prefix-cache hit with zero G2 match
+    /// leaves the slot's onboarding state `None`, so the onboarding-derived
+    /// num_computed would be 0 and `computed_blocks` would under-count the prefix.
+    fn slot_match_split_with_num_computed(
+        &self,
+        request_id: &str,
+        num_computed_tokens: usize,
+    ) -> Result<SlotMatchSplit>;
     fn slot_token_ids(&self, request_id: &str) -> Result<Vec<u32>>;
+    /// Borrow the slot's LoRA adapter name for CD wire propagation.
+    fn slot_lora_name(&self, request_id: &str) -> Result<Option<String>>;
+    /// Borrow the slot's raw salt string for CD wire propagation.
+    fn slot_salt(&self, request_id: &str) -> Result<Option<String>>;
     fn local_instance_id(&self) -> InstanceId;
     fn apply_block_assignments(&self, request_id: &str, block_ids: Vec<BlockId>) -> Result<()>;
     fn take_local_match_g2_blocks(&self, request_id: &str) -> Result<Vec<ImmutableBlock<G2>>>;
@@ -176,12 +195,14 @@ pub trait InnerLeaderShim: Send + Sync {
     ///
     /// Either the full `num_prefix_blocks` G2 blocks (every prefix block
     /// was G2-resident) or an empty Vec (any G2 miss → drop the partial
-    /// hits, advertise no prefix). Partial publication would tell prefill
-    /// "decode has prefix `[0..M)` but not `[M..P)`" while vLLM's G1
-    /// actually holds the full prefix — an inconsistent advertisement.
-    /// The intended recovery for misses is a G1→G2 copy in
-    /// `update_state_after_alloc`, **not yet wired**; the panic stub for
-    /// that arm belongs in USAA, not here.
+    /// hits). Partial publication would tell prefill "decode has prefix
+    /// `[0..M)` but not `[M..P)`" while vLLM's G1 actually holds the
+    /// full prefix — an inconsistent advertisement.
+    ///
+    /// The empty arm is the Stage 1 promotion trigger: the caller
+    /// (`decode_leader.rs::commit_gnmt_remote`) plans a G1→G2
+    /// promotion for the full prefix window and fires the actual
+    /// transfer at USAA via `Self::promote_g1_to_g2`.
     ///
     /// # Errors
     ///
@@ -235,6 +256,88 @@ pub trait InnerLeaderShim: Send + Sync {
         request_id: &str,
         cd_payload: Box<dyn crate::connector::leader::slot::CdOnboardingPayload>,
     ) -> Result<()>;
+
+    /// Promote a set of G1-resident blocks into G2 and return the
+    /// registered `ImmutableBlock<G2>`s once the offload pipeline has
+    /// completed the transfer + register step.
+    ///
+    /// The returned future encapsulates the whole alloc + transfer +
+    /// register flow. The caller is expected to spawn it in a task
+    /// whose lifetime is independent of the originating request — if
+    /// the request is torn down mid-promotion the resulting G2
+    /// blocks remain in cache and benefit future requests.
+    ///
+    /// The sequence hashes carried by `source_blocks` are what the
+    /// offload pipeline registers each resulting G2 block with; the
+    /// future re-queries the G2 manager by those same hashes after
+    /// the transfer completes and errors if any hash is missing
+    /// from the registered set (partial promotion). Passing a
+    /// `source_blocks` entry with a mismatched
+    /// `(block_id, sequence_hash)` pair therefore produces either a
+    /// hash-collision register failure or an "expected hash absent
+    /// after transfer" error from this future — both surface as
+    /// `Err` and are caller-recoverable.
+    ///
+    /// Used by Stage 1 conditional-disagg decode-side G1→G2 prefix
+    /// promotion at USAA. The CD `ConditionalDecodeG2Observer`
+    /// installed at init (for the prefill chunked-output path) also
+    /// observes the same G1→G2 register events for these blocks but
+    /// silently ignores them — its per-request `pending` map has no
+    /// residual hash set for decode-role requests.
+    fn promote_g1_to_g2(
+        &self,
+        source_blocks: Vec<ExternalBlock<G1>>,
+    ) -> BoxFuture<'static, Result<Vec<ImmutableBlock<G2>>>>;
+
+    /// Search G3 (NVMe/SSD tier) for the prefix range
+    /// `sequence_hashes[0..num_prefix_blocks]`. Stage 2 analog of
+    /// [`Self::find_prefix_g2_blocks`].
+    ///
+    /// # Returns — all-or-nothing
+    ///
+    /// Either the full `num_prefix_blocks` sequence hashes (every
+    /// prefix block was G3-resident) or an empty Vec (any G3 miss
+    /// → drop the partial knowledge; the caller falls back to G1
+    /// promotion). Partial G3 advertisement would conflict with
+    /// Invariant A in the same way partial G2 advertisement
+    /// would.
+    ///
+    /// Returns hashes (not pinned blocks). Between this call and
+    /// the USAA-time `promote_g3_to_g2`, the matched G3 blocks
+    /// could be evicted under pressure; that's an accepted small
+    /// eviction window and surfaces as `promote_g3_to_g2` Err
+    /// (which routes through the standard CD failure path).
+    ///
+    /// # Errors
+    ///
+    /// `Err` only on infrastructure failures (slot missing, leader
+    /// not initialized). G3-miss returns `Ok(Vec::new())`. When the
+    /// G3 manager is not configured (no NVMe tier), returns
+    /// `Ok(Vec::new())` — caller falls back to G1 path.
+    fn find_prefix_g3_hashes(
+        &self,
+        request_id: &str,
+        num_prefix_blocks: usize,
+    ) -> Result<Vec<SequenceHash>>;
+
+    /// Stage 2 G3→G2 prefix promotion. Mirrors
+    /// [`Self::promote_g1_to_g2`] but the source tier is G3.
+    ///
+    /// The hashes are re-matched against the G3 manager inside the
+    /// returned future; if any hash is no longer G3-resident
+    /// (evicted between GNMT and USAA), the future errors. On
+    /// match, the future stages G3→G2 via
+    /// `kvbm_engine::leader::staging::stage_g3_to_g2` and returns
+    /// the registered G2 blocks.
+    ///
+    /// The caller (the spawn at `commit_usaa1`) treats Err the
+    /// same as `promote_g1_to_g2` Err — calls `session.close` so
+    /// the prefill peer routes through its cleanup_failed_request
+    /// path and vLLM is notified via `mark_failed_onboarding`.
+    fn promote_g3_to_g2(
+        &self,
+        hashes: Vec<SequenceHash>,
+    ) -> BoxFuture<'static, Result<Vec<ImmutableBlock<G2>>>>;
 }
 
 /// Production [`InnerLeaderShim`] that wraps a concrete `ConnectorLeader`.
@@ -309,6 +412,10 @@ impl InnerLeaderShim for ConnectorLeaderShim {
         self.inner.block_size()
     }
 
+    fn cd_metrics(&self) -> Option<kvbm_observability::CdMetrics> {
+        Some(self.inner.cd_metrics())
+    }
+
     fn get_slot_total_tokens(&self, request_id: &str) -> Result<usize> {
         self.inner.get_slot_total_tokens(request_id)
     }
@@ -317,8 +424,25 @@ impl InnerLeaderShim for ConnectorLeaderShim {
         self.inner.slot_match_split(request_id)
     }
 
+    fn slot_match_split_with_num_computed(
+        &self,
+        request_id: &str,
+        num_computed_tokens: usize,
+    ) -> Result<SlotMatchSplit> {
+        self.inner
+            .slot_match_split_with_num_computed(request_id, num_computed_tokens)
+    }
+
     fn slot_token_ids(&self, request_id: &str) -> Result<Vec<u32>> {
         self.inner.slot_token_ids(request_id)
+    }
+
+    fn slot_lora_name(&self, request_id: &str) -> Result<Option<String>> {
+        self.inner.slot_lora_name(request_id)
+    }
+
+    fn slot_salt(&self, request_id: &str) -> Result<Option<String>> {
+        self.inner.slot_salt(request_id)
     }
 
     fn local_instance_id(&self) -> InstanceId {
@@ -388,5 +512,147 @@ impl InnerLeaderShim for ConnectorLeaderShim {
         let mut slot = shared_slot.lock();
         slot.txn_install_or_attach_cd_payload(cd_payload)
             .map_err(|e| anyhow!("install_cd_onboarding_payload({}): {}", request_id, e))
+    }
+
+    fn promote_g1_to_g2(
+        &self,
+        source_blocks: Vec<ExternalBlock<G1>>,
+    ) -> BoxFuture<'static, Result<Vec<ImmutableBlock<G2>>>> {
+        // The offload pipeline registers each destination G2 block
+        // with the `sequence_hash` carried in its `ExternalBlock`.
+        // Capture those hashes here so we can re-query the G2
+        // manager after the transfer completes — the offload
+        // pipeline's register-observer hands blocks to G2 but does
+        // not return them to the caller of `enqueue_g1_to_g2`.
+        let expected_hashes: Vec<SequenceHash> =
+            source_blocks.iter().map(|b| b.sequence_hash).collect();
+        let inner = Arc::clone(&self.inner);
+        async move {
+            let engine = inner
+                .offload_engine()
+                .ok_or_else(|| anyhow!("offload engine not initialized for promote_g1_to_g2"))?;
+            let mut handle = engine.enqueue_g1_to_g2(source_blocks)?;
+            // Drives the transfer to a terminal TransferStatus. The
+            // pipeline's register step puts blocks into the G2
+            // manager before this resolves.
+            let _result = handle.wait().await?;
+            let leader = inner.instance_leader().ok_or_else(|| {
+                anyhow!("InstanceLeader not initialized for promote_g1_to_g2 re-query")
+            })?;
+            let g2_blocks = leader.g2_manager().match_blocks(&expected_hashes);
+            if g2_blocks.len() != expected_hashes.len() {
+                anyhow::bail!(
+                    "promote_g1_to_g2: registered {}/{} expected hashes after transfer",
+                    g2_blocks.len(),
+                    expected_hashes.len(),
+                );
+            }
+            Ok(g2_blocks)
+        }
+        .boxed()
+    }
+
+    fn find_prefix_g3_hashes(
+        &self,
+        request_id: &str,
+        num_prefix_blocks: usize,
+    ) -> Result<Vec<SequenceHash>> {
+        if num_prefix_blocks == 0 {
+            return Ok(Vec::new());
+        }
+        // Pull the canonical prefix-window hashes off the slot's
+        // PLH chain. Same source of truth as
+        // `find_prefix_g2_blocks` uses for its G2 query.
+        let prefix_hashes: Vec<SequenceHash> = self
+            .inner
+            .slot_match_split(request_id)?
+            .all_sequence_hashes
+            .get(..num_prefix_blocks)
+            .ok_or_else(|| {
+                anyhow!(
+                    "find_prefix_g3_hashes ({}): num_prefix_blocks {} exceeds slot's hashes",
+                    request_id,
+                    num_prefix_blocks
+                )
+            })?
+            .to_vec();
+
+        let leader = self.inner.instance_leader().ok_or_else(|| {
+            anyhow!("InstanceLeader not set; find_prefix_g3_hashes called before initialized")
+        })?;
+
+        let Some(g3_manager) = leader.g3_manager() else {
+            // No NVMe tier configured — caller falls through to
+            // the G1 promotion path.
+            return Ok(Vec::new());
+        };
+
+        // Pin briefly to verify presence, then drop. The hashes
+        // are what we return; the pins are not preserved (Stage 2
+        // accepts the GNMT→USAA eviction window — see trait doc).
+        let matched = g3_manager.match_blocks(&prefix_hashes);
+        if matched.len() != num_prefix_blocks {
+            tracing::debug!(
+                request_id,
+                num_prefix_blocks,
+                hits = matched.len(),
+                "find_prefix_g3_hashes: incomplete G3 backing; falling back to G1 promotion"
+            );
+            crate::audit!(
+                "prefix_g3_incomplete_skip",
+                role = "decode",
+                request_id,
+                num_prefix_blocks,
+                hits = matched.len()
+            );
+            return Ok(Vec::new());
+        }
+        Ok(prefix_hashes)
+    }
+
+    fn promote_g3_to_g2(
+        &self,
+        hashes: Vec<SequenceHash>,
+    ) -> BoxFuture<'static, Result<Vec<ImmutableBlock<G2>>>> {
+        let inner = Arc::clone(&self.inner);
+        async move {
+            let leader = inner
+                .instance_leader()
+                .ok_or_else(|| anyhow!("InstanceLeader not initialized for promote_g3_to_g2"))?;
+            let g3_manager = leader
+                .g3_manager()
+                .ok_or_else(|| {
+                    anyhow!("promote_g3_to_g2: G3 manager not configured (no NVMe tier)")
+                })?
+                .clone();
+            let matched: Vec<ImmutableBlock<G3>> = g3_manager.match_blocks(&hashes);
+            if matched.len() != hashes.len() {
+                anyhow::bail!(
+                    "promote_g3_to_g2: matched {}/{} G3 blocks at USAA \
+                     (evicted between GNMT and USAA?)",
+                    matched.len(),
+                    hashes.len(),
+                );
+            }
+            let parallel_worker = leader
+                .parallel_worker()
+                .ok_or_else(|| anyhow!("promote_g3_to_g2: no parallel worker configured"))?;
+            let holder = kvbm_engine::leader::BlockHolder::new(matched);
+            let result = kvbm_engine::leader::stage_g3_to_g2(
+                &holder,
+                leader.g2_manager(),
+                &*parallel_worker,
+            )
+            .await?;
+            if result.new_g2_blocks.len() != hashes.len() {
+                anyhow::bail!(
+                    "promote_g3_to_g2: stage_g3_to_g2 produced {}/{} G2 blocks",
+                    result.new_g2_blocks.len(),
+                    hashes.len(),
+                );
+            }
+            Ok(result.new_g2_blocks)
+        }
+        .boxed()
     }
 }

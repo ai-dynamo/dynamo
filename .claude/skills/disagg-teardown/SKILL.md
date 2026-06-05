@@ -19,7 +19,14 @@ orphaned processes.
 
 ```bash
 # 1. SIGTERM the api_server processes — they should signal their EngineCore children.
+#    Prefill can launch via three shapes today:
+#      - vanilla vllm (`vllm.entrypoints.openai`)
+#      - kvbm wrapper (`kvbm.vllm.prefill`) — auto-registers with the hub's prefill-router
+#      - dynamo (`dynamo.vllm` with `--disaggregation-mode prefill`)
+#    Kill all three patterns so the wrapper/dynamo paths don't leave zombies.
 pkill -f "vllm.entrypoints.openai" 2>/dev/null
+pkill -f "kvbm.vllm.prefill"        2>/dev/null
+pkill -f "dynamo.vllm"               2>/dev/null
 pkill -f "kvbm_hub" 2>/dev/null
 sleep 3
 

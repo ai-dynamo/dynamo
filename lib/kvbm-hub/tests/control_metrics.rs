@@ -125,6 +125,7 @@ fn install_slow_snapshot(peer: &velo::Velo, delay: Duration) {
                     gathered_at_unix_ms: 0,
                     sessions_inflight: 0,
                     pools: vec![],
+                    cd: None,
                 }))
             },
         )
@@ -197,6 +198,7 @@ fn sample_snapshot() -> MetricsSnapshotResponse {
         gathered_at_unix_ms: 1_700_000_000_000,
         sessions_inflight: 3,
         pools: vec![sample_pool("G2", 4, 5), sample_pool("G3", 1, 2)],
+        cd: None,
     }
 }
 

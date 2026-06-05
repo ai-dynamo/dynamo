@@ -25,11 +25,16 @@ use kvbm_config::overrides::{apply_overrides, deep_merge, validate_extra_config}
 
 /// Feature keys a connector can actually participate in. `ConnectorControl` is
 /// hub infrastructure (no client-side `Feature` payload) so it is never
-/// selectable or rendered into `leader.hub.features`.
+/// selectable or rendered into `leader.hub.features`. `PrefillRouter`
+/// participation is by-advertisement (a prefill worker pushes the payload at
+/// registration if its env vars are set), so it must be rendered into the
+/// effective set whenever the hub offers it — otherwise the connector
+/// handshake in explicit mode drops it and workers never advertise.
 const SELECTABLE: &[FeatureKey] = &[
     FeatureKey::Indexer,
     FeatureKey::P2P,
     FeatureKey::ConditionalDisagg,
+    FeatureKey::PrefillRouter,
 ];
 
 /// CLI-supplied values that are not sourced from the hub aggregate.
@@ -434,6 +439,85 @@ mod tests {
         assert_eq!(
             extra["leader"]["disagg"]["max_inflight_remote_prefill_tokens"],
             json!(7)
+        );
+    }
+
+    #[test]
+    fn prefill_router_in_auto_set_is_emitted() {
+        // The hub advertises prefill_router alongside disagg+p2p. With
+        // no --features (auto), all selectable features the hub offers
+        // must land in leader.hub.features — otherwise the connector
+        // would handshake in explicit mode against the rendered config
+        // with prefill_router missing, the handshake gate would trip,
+        // and workers would never advertise.
+        let agg = aggregate(vec![
+            descriptor(FeatureKey::P2P, vec![]),
+            descriptor(FeatureKey::ConditionalDisagg, vec![FeatureKey::P2P]),
+            descriptor(FeatureKey::PrefillRouter, vec![]),
+        ]);
+        let mut o = opts();
+        o.role = Some("prefill".to_string());
+        let cli = render_vllm_cli(&agg, "http://hub:1337", &o).unwrap();
+        let extra = extract_config(&cli);
+        let feats = extra["leader"]["hub"]["features"].as_array().unwrap();
+        assert!(feats.contains(&json!("prefill_router")));
+        assert!(feats.contains(&json!("disagg")));
+        assert!(feats.contains(&json!("p2p")));
+    }
+
+    #[test]
+    fn prefill_router_can_be_selected_standalone() {
+        // `prefill_router` no longer carries a CD dependency — a
+        // standalone velo `PrefillRouterHandler` registers it without
+        // disagg, so `kvbmctl render --features prefill_router` is a
+        // valid config for the `python -m kvbm.vllm.prefill`
+        // entrypoint.
+        let agg = aggregate(vec![descriptor(FeatureKey::PrefillRouter, vec![])]);
+        let mut o = opts();
+        o.features = vec!["prefill_router".to_string()];
+        let cli = render_vllm_cli(&agg, "http://hub:1337", &o).unwrap();
+        let extra = extract_config(&cli);
+        let feats = extra["leader"]["hub"]["features"].as_array().unwrap();
+        assert!(feats.contains(&json!("prefill_router")));
+    }
+
+    #[test]
+    fn prefill_router_co_selectable_with_disagg() {
+        // Co-selecting with disagg still works for the CD-participant
+        // path; render dep-closes disagg → p2p as before.
+        let agg = aggregate(vec![
+            descriptor(FeatureKey::P2P, vec![]),
+            descriptor(FeatureKey::ConditionalDisagg, vec![FeatureKey::P2P]),
+            descriptor(FeatureKey::PrefillRouter, vec![]),
+        ]);
+        let mut o = opts();
+        o.features = vec!["disagg".to_string(), "prefill_router".to_string()];
+        o.role = Some("prefill".to_string());
+        let cli = render_vllm_cli(&agg, "http://hub:1337", &o).unwrap();
+        let extra = extract_config(&cli);
+        let feats = extra["leader"]["hub"]["features"].as_array().unwrap();
+        assert!(feats.contains(&json!("prefill_router")));
+        assert!(feats.contains(&json!("disagg")));
+        assert!(feats.contains(&json!("p2p")));
+    }
+
+    #[test]
+    fn prefill_router_hub_offer_unsatisfied_dep_still_rejected_for_disagg() {
+        // Render's generic dep-closure stays exercised by disagg → p2p.
+        // Hub offers disagg but not its p2p dep → selecting disagg
+        // hard-fails.
+        let agg = aggregate(vec![descriptor(
+            FeatureKey::ConditionalDisagg,
+            vec![FeatureKey::P2P],
+        )]);
+        let mut o = opts();
+        o.features = vec!["disagg".to_string()];
+        o.role = Some("prefill".to_string());
+        let err = render_vllm_cli(&agg, "http://hub:1337", &o).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("p2p") && msg.contains("not enabled"),
+            "expected dependency error mentioning p2p, got: {msg}"
         );
     }
 

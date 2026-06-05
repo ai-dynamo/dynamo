@@ -61,6 +61,16 @@ pub struct ConditionalDecodeG2Observer {
     /// see registered for this request. Entries removed as
     /// matches land. Empty entry → dropped.
     pending: Mutex<HashMap<String, HashSet<SequenceHash>>>,
+    /// Per-request in-flight commit_fn dispatch counter. Bumped
+    /// under the `pending` lock at the moment `observe` decides to
+    /// dispatch; decremented after each `commit_fn` returns.
+    /// `has_pending` reads BOTH this and `pending` so the gap
+    /// between "pending entry removed" and "commit_fn finished
+    /// session.commit + make_available" doesn't false-negative —
+    /// `on_request_finished`'s drain loop must keep waiting while
+    /// a dispatch is in flight or `session.finalize` could land
+    /// before the final chunked-prefill commits.
+    inflight_dispatches: Mutex<HashMap<String, usize>>,
     /// Closure that forwards matched blocks to the coordinator's
     /// `commit_output_blocks`.  Held as `Arc` so the closure can
     /// capture the coord via `Weak<Self>` without forcing the
@@ -73,6 +83,7 @@ impl ConditionalDecodeG2Observer {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             pending: Mutex::new(HashMap::new()),
+            inflight_dispatches: Mutex::new(HashMap::new()),
             commit_fn: Mutex::new(None),
         })
     }
@@ -117,11 +128,26 @@ impl ConditionalDecodeG2Observer {
     /// entry is absent (already drained by full-match auto-remove,
     /// untracked, or never tracked).
     pub fn has_pending(&self, request_id: &str) -> bool {
-        self.pending
+        let pending_active = self
+            .pending
             .lock()
             .get(request_id)
             .map(|hashes| !hashes.is_empty())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if pending_active {
+            return true;
+        }
+        // Check in-flight dispatches: `observe` removes from `pending`
+        // and releases that lock before calling `commit_fn`. Between
+        // unlock and dispatch return, the residual is "spent" but
+        // `session.commit` / `make_available` haven't landed yet —
+        // `on_request_finished`'s drain must keep waiting.
+        self.inflight_dispatches
+            .lock()
+            .get(request_id)
+            .copied()
+            .unwrap_or(0)
+            > 0
     }
 
     /// Test accessor: snapshot of remaining hashes for `request_id`.
@@ -172,12 +198,32 @@ impl ConditionalDecodeG2Observer {
             for request_id in &empty_after {
                 pending.remove(request_id);
             }
+            // Bump in-flight dispatch counters BEFORE releasing the
+            // pending lock. This closes the window where `has_pending`
+            // would return false between `pending.remove` and the
+            // `commit_fn` dispatch below. Acquire inflight_dispatches
+            // strictly INSIDE the pending guard so the visibility flip
+            // is atomic w.r.t. concurrent has_pending callers.
+            let mut inflight = self.inflight_dispatches.lock();
+            for request_id in by_request.keys() {
+                *inflight.entry(request_id.clone()).or_default() += 1;
+            }
         }
 
         let dispatch = self.commit_fn.lock().clone();
-        if let Some(f) = dispatch {
-            for (request_id, blocks) in by_request {
+        for (request_id, blocks) in by_request {
+            if let Some(f) = dispatch.as_ref() {
                 f(&request_id, blocks);
+            }
+            // Decrement inflight regardless of whether commit_fn was
+            // installed — we incremented unconditionally above so the
+            // counter is always balanced.
+            let mut inflight = self.inflight_dispatches.lock();
+            if let Some(count) = inflight.get_mut(&request_id) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    inflight.remove(&request_id);
+                }
             }
         }
     }

@@ -81,6 +81,14 @@ pub struct Request {
     #[builder(default)]
     pub lora_name: Option<String>,
 
+    /// Raw salt string retained for downstream consumers that need the
+    /// canonical `kv_hashing::Request` input shape (e.g. the CD wire
+    /// rebuilds a `kv_hashing::Request` on the prefill side and must
+    /// supply the same `salt` decode used). Populated by `build(salt)`;
+    /// `None` when the request was built with `salt=None`.
+    #[builder(default, setter(skip))]
+    pub salt: Option<String>,
+
     /// Hash computed from salt and lora_name for prefix cache isolation.
     /// Use the builder's `.salt()` method to set the salt string.
     #[builder(default = "0", setter(skip))]
@@ -174,9 +182,12 @@ impl RequestBuilder {
         let salt_bytes = serde_json::to_vec(&payload).expect("failed to serialize salt payload");
         let salt_hash = compute_hash_v2(&salt_bytes, 0);
 
-        // Build with default salt_hash, then set the computed value
+        // Build with default salt_hash + salt, then set the computed +
+        // retained values. The raw `salt` is retained so the CD wire can
+        // forward it to the prefill side for canonical-hash recomputation.
         let mut request = self.build_internal()?;
         request.salt_hash = salt_hash;
+        request.salt = salt.map(str::to_string);
         Ok(request)
     }
 }
@@ -259,6 +270,7 @@ impl Request {
             request_id: self.request_id.clone(),
             tokens: self.tokens.clone(),
             lora_name: self.lora_name.clone(),
+            salt: self.salt.clone(),
             salt_hash: self.salt_hash,
             min_tokens: self.min_tokens,
             max_tokens: self.max_tokens,

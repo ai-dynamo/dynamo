@@ -13,9 +13,15 @@
 
 pub mod actions;
 pub mod arena;
+#[cfg(target_os = "linux")]
+pub mod hugepage;
+#[cfg(target_os = "linux")]
+pub mod mmap_pinned;
 pub mod nixl;
 #[cfg(target_os = "linux")]
 pub mod numa;
+#[cfg(target_os = "linux")]
+pub mod resources;
 
 /// Offset-based buffer views into underlying storage.
 pub mod offset;
@@ -43,10 +49,16 @@ pub use device::DeviceStorage;
 pub use disk::DiskStorage;
 pub use external::ExternalDeviceMemory;
 #[cfg(target_os = "linux")]
-pub use numa::{NumaNode, is_numa_disabled, is_numa_enabled};
+pub use hugepage::{HugepageInfo, HugepagePool, PerNodeHugepages, ThpMode};
+#[cfg(target_os = "linux")]
+pub use mmap_pinned::{HugepageMode, HugepageTier, MmappedPinnedOptions, MmappedPinnedStorage};
+#[cfg(target_os = "linux")]
+pub use numa::{NumaNode, PciAddress, is_numa_disabled, is_numa_enabled};
 pub use offset::OffsetBuffer;
 pub use pinned::PinnedStorage;
 pub use pool::{CudaMemPool, CudaMemPoolBuilder};
+#[cfg(target_os = "linux")]
+pub use resources::{GpuView, NumaNodeRole, NumaNodeView, Resources, SliceSource, SlicingMode};
 pub use system::SystemStorage;
 pub use tensor::{TensorDescriptor, TensorDescriptorExt};
 

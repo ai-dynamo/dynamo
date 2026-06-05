@@ -8,9 +8,11 @@
 //! engine crate at `kvbm_engine::p2p::session::testing`.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use anyhow::{Result, anyhow};
 use futures::{FutureExt, future::BoxFuture};
+use kvbm_engine::offload::ExternalBlock;
 use kvbm_protocols::disagg::{RemotePrefillRequest, TransferParams};
 use tokio::sync::oneshot;
 
@@ -21,7 +23,7 @@ use kvbm_logical::manager::BlockManager;
 use parking_lot::Mutex;
 
 use super::queue::RemotePrefillQueue;
-use crate::{BlockId, G2, SequenceHash};
+use crate::{BlockId, G1, G2, SequenceHash};
 
 pub const TEST_BLOCK_SIZE: usize = 16;
 
@@ -159,6 +161,20 @@ pub struct FailedCall {
 pub struct MockP2pWorkerHook {
     completed: Mutex<Vec<CompleteCall>>,
     failed: Mutex<Vec<FailedCall>>,
+    /// If non-empty, `mark_failed_onboarding` pushes a oneshot
+    /// receiver here instead of resolving immediately. Tests
+    /// use [`Self::pending_failed_count`] /
+    /// [`Self::resolve_pending_failed`] to release parked awaits
+    /// — needed to reproduce the cross-lifecycle race in
+    /// `cleanup_failed_request` where the await parks while a
+    /// recompute reschedule swaps the DashMap entry.
+    pending_failed_mode: AtomicBool,
+    pending_failed: Mutex<Vec<oneshot::Sender<Result<()>>>>,
+    /// Same shape as `pending_failed` but for
+    /// `mark_onboarding_complete` — needed to reproduce the
+    /// `maybe_complete` cross-lifecycle race.
+    pending_complete_mode: AtomicBool,
+    pending_complete: Mutex<Vec<oneshot::Sender<Result<()>>>>,
 }
 
 impl MockP2pWorkerHook {
@@ -188,11 +204,79 @@ impl MockP2pWorkerHook {
             .find(|call| call.request_id == request_id)
             .cloned()
     }
+
+    /// Switch `mark_failed_onboarding` into pending mode — calls
+    /// record the failure AND park the returned future on a
+    /// oneshot. Tests pull oneshots via
+    /// [`Self::resolve_pending_failed`].
+    pub fn set_pending_failed_mode(&self, enabled: bool) {
+        self.pending_failed_mode
+            .store(enabled, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn pending_failed_count(&self) -> usize {
+        self.pending_failed.lock().len()
+    }
+
+    pub async fn wait_pending_failed_count(&self, n: usize) {
+        wait_until(|| self.pending_failed.lock().len() >= n).await;
+    }
+
+    /// Resolve the pending `mark_failed_onboarding` at `index`
+    /// with `result`. Releases the parked await inside
+    /// `cleanup_failed_request`.
+    pub fn resolve_pending_failed(&self, index: usize, result: Result<()>) {
+        let mut pending = self.pending_failed.lock();
+        let tx = pending
+            .get_mut(index)
+            .expect("pending mark_failed_onboarding not recorded");
+        // Drain by replacing with a dummy sender (oneshot::Sender is move-only).
+        let (dummy_tx, _dummy_rx) = oneshot::channel();
+        let tx = std::mem::replace(tx, dummy_tx);
+        let _ = tx.send(result);
+    }
+
+    /// Switch `mark_onboarding_complete` into pending mode.
+    /// Used by `maybe_complete` cross-lifecycle reproducers.
+    pub fn set_pending_complete_mode(&self, enabled: bool) {
+        self.pending_complete_mode
+            .store(enabled, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn pending_complete_count(&self) -> usize {
+        self.pending_complete.lock().len()
+    }
+
+    pub async fn wait_pending_complete_count(&self, n: usize) {
+        wait_until(|| self.pending_complete.lock().len() >= n).await;
+    }
+
+    pub fn resolve_pending_complete(&self, index: usize, result: Result<()>) {
+        let mut pending = self.pending_complete.lock();
+        let tx = pending
+            .get_mut(index)
+            .expect("pending mark_onboarding_complete not recorded");
+        let (dummy_tx, _dummy_rx) = oneshot::channel();
+        let tx = std::mem::replace(tx, dummy_tx);
+        let _ = tx.send(result);
+    }
 }
 
 impl P2pWorkerHook for MockP2pWorkerHook {
     fn mark_onboarding_complete(&self, request_id: String) -> BoxFuture<'static, Result<()>> {
         self.completed.lock().push(CompleteCall { request_id });
+        if self
+            .pending_complete_mode
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            let (tx, rx) = oneshot::channel();
+            self.pending_complete.lock().push(tx);
+            return async move {
+                rx.await
+                    .map_err(|err| anyhow!("mark_onboarding_complete resolver dropped: {err}"))?
+            }
+            .boxed();
+        }
         async { Ok(()) }.boxed()
     }
 
@@ -205,6 +289,18 @@ impl P2pWorkerHook for MockP2pWorkerHook {
             request_id,
             block_ids,
         });
+        if self
+            .pending_failed_mode
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            let (tx, rx) = oneshot::channel();
+            self.pending_failed.lock().push(tx);
+            return async move {
+                rx.await
+                    .map_err(|err| anyhow!("mark_failed_onboarding resolver dropped: {err}"))?
+            }
+            .boxed();
+        }
         async { Ok(()) }.boxed()
     }
 }
@@ -233,7 +329,11 @@ pub struct MockSlot {
     pub assigned_block_ids: Mutex<Option<Vec<crate::BlockId>>>,
     pub gnmt_result: (Option<usize>, bool),
     pub usaa_passthrough_calls: Mutex<Vec<(Vec<crate::BlockId>, usize)>>,
-    pub transfer_params: Option<TransferParams>,
+    /// Wrapped in a mutex so tests that need to swap transfer params
+    /// post-`install_slot` (e.g. the digest-mismatch verifier reject
+    /// test) can do so without re-installing the whole slot. Production
+    /// inner shims don't share this shape — this is a mock-only choice.
+    pub transfer_params: Mutex<Option<TransferParams>>,
     /// Recorded request_ids for which a CD onboarding payload was
     /// installed via `install_cd_onboarding_payload`. Order
     /// preserved.
@@ -257,11 +357,46 @@ impl Default for MockSlot {
             assigned_block_ids: Mutex::new(None),
             gnmt_result: (None, false),
             usaa_passthrough_calls: Mutex::new(Vec::new()),
-            transfer_params: None,
+            transfer_params: Mutex::new(None),
             installed_cd_payloads: Mutex::new(Vec::new()),
             installed_cd_payload: Mutex::new(None),
         }
     }
+}
+
+/// Per-call record for `promote_g1_to_g2`, recorded in
+/// [`MockInnerLeaderShim::promotions`]. Tests drive completion
+/// (or failure) via [`MockInnerLeaderShim::resolve_promotion`].
+pub struct PendingPromotion {
+    pub source_blocks: Vec<ExternalBlock<G1>>,
+    /// One-shot resolver consumed by the returned future. Taken on
+    /// first `resolve_promotion`; subsequent calls panic.
+    resolver: Option<oneshot::Sender<Result<Vec<ImmutableBlock<G2>>>>>,
+}
+
+impl PendingPromotion {
+    pub fn source_block_ids(&self) -> Vec<BlockId> {
+        self.source_blocks.iter().map(|b| b.block_id).collect()
+    }
+
+    /// The sequence hashes the production offload pipeline would
+    /// register the resulting G2 blocks with — read directly off
+    /// each `ExternalBlock<G1>`. Tests assert on this to verify
+    /// the caller built source blocks with the correct hashes
+    /// (any mismatch would silently mis-register in production).
+    pub fn source_hashes(&self) -> Vec<SequenceHash> {
+        self.source_blocks.iter().map(|b| b.sequence_hash).collect()
+    }
+}
+
+/// Per-call record for `promote_g3_to_g2`, recorded in
+/// [`MockInnerLeaderShim::g3_promotions`]. Tests inspect entries
+/// and resolve them manually via
+/// [`MockInnerLeaderShim::resolve_g3_promotion`].
+pub struct PendingG3Promotion {
+    pub hashes: Vec<SequenceHash>,
+    /// One-shot resolver consumed by the returned future.
+    resolver: Option<oneshot::Sender<Result<Vec<ImmutableBlock<G2>>>>>,
 }
 
 pub struct MockInnerLeaderShim {
@@ -273,6 +408,37 @@ pub struct MockInnerLeaderShim {
     /// Used by idempotency tests to assert the wrapper short-circuits
     /// repeat gnmt calls without re-invoking inner.
     gnmt_call_counts: Mutex<std::collections::HashMap<String, usize>>,
+    /// Test-only hook fired inside `apply_block_assignments`. Lets a
+    /// test inject side effects (e.g., stashing `pending_failure` on
+    /// the wrapper's cd_request_state) at a specific point in
+    /// `commit_usaa1`'s execution — between the outer
+    /// pending_failure re-check and the post-insert re-check. Used
+    /// by the commit_usaa1 post-insert replay reproducer.
+    apply_block_assignments_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// G1→G2 promotion requests recorded by `promote_g1_to_g2`.
+    /// Tests inspect entries and resolve them manually via
+    /// `resolve_promotion(index, Ok(g2_blocks))` to drive the
+    /// returned futures forward.
+    promotions: Mutex<Vec<PendingPromotion>>,
+    /// G3→G2 promotion requests recorded by `promote_g3_to_g2`.
+    /// Tests inspect entries and resolve them via
+    /// `resolve_g3_promotion(index, Ok(g2_blocks))`. Stage 2
+    /// counterpart of `promotions`.
+    g3_promotions: Mutex<Vec<PendingG3Promotion>>,
+    /// Per-slot G3 hash universe used by `find_prefix_g3_hashes`.
+    /// Empty by default — `install_g3_prefix(rid, hashes)` lets
+    /// tests script which hashes the mock "has" in G3. The
+    /// returned set is the prefix slice of the slot's full hash
+    /// chain that matches against this universe.
+    g3_universe: Mutex<std::collections::HashMap<String, Vec<SequenceHash>>>,
+    /// REAL CD observability metrics handed to the decode wrapper via
+    /// [`InnerLeaderShim::cd_metrics`]. The production decode reaches its
+    /// recorders through `self.inner.cd_metrics()`; returning `Some` here (not
+    /// `None`) makes the HOT/WARM/overload decision-label recording in the GNMT
+    /// arm OBSERVABLE to tests. `CdMetrics` is `Clone` and its prometheus
+    /// counters share the underlying atomics across clones, so a test reads the
+    /// recorded counts back off [`Self::cd_metrics_handle`].
+    cd_metrics: kvbm_observability::CdMetrics,
 }
 
 impl MockInnerLeaderShim {
@@ -283,7 +449,115 @@ impl MockInnerLeaderShim {
             g2_manager,
             slots: Mutex::new(std::collections::HashMap::new()),
             gnmt_call_counts: Mutex::new(std::collections::HashMap::new()),
+            apply_block_assignments_hook: Mutex::new(None),
+            promotions: Mutex::new(Vec::new()),
+            g3_promotions: Mutex::new(Vec::new()),
+            g3_universe: Mutex::new(std::collections::HashMap::new()),
+            cd_metrics: kvbm_observability::CdMetrics::new(),
         })
+    }
+
+    pub fn g2_manager(&self) -> &Arc<BlockManager<G2>> {
+        &self.g2_manager
+    }
+
+    /// A clone of the mock's REAL CD metrics. Counters share atomics across
+    /// clones, so a test reads decode-decision / token counts recorded by the
+    /// wrapper's GNMT path (e.g. `remote_downgraded_breaker_hot`) off this.
+    pub fn cd_metrics_handle(&self) -> kvbm_observability::CdMetrics {
+        self.cd_metrics.clone()
+    }
+
+    /// Number of `promote_g1_to_g2` calls observed so far.
+    pub fn promotion_count(&self) -> usize {
+        self.promotions.lock().len()
+    }
+
+    /// Snapshot of recorded promotion requests as
+    /// `(source_block_ids, source_sequence_hashes)`. The hashes are
+    /// taken from the `ExternalBlock<G1>` entries themselves — same
+    /// hashes the production offload pipeline registers the
+    /// resulting G2 blocks with.
+    pub fn snapshot_promotion(&self, index: usize) -> Option<(Vec<BlockId>, Vec<SequenceHash>)> {
+        self.promotions
+            .lock()
+            .get(index)
+            .map(|p| (p.source_block_ids(), p.source_hashes()))
+    }
+
+    /// Resolve a recorded promotion request. Drives the returned
+    /// future forward; the caller is responsible for constructing
+    /// the resolved `Vec<ImmutableBlock<G2>>` via
+    /// `register_g2_blocks` against the shim's `g2_manager` (or
+    /// providing an `Err` to simulate transfer failure).
+    pub fn resolve_promotion(&self, index: usize, result: Result<Vec<ImmutableBlock<G2>>>) {
+        let mut promotions = self.promotions.lock();
+        let pending = promotions
+            .get_mut(index)
+            .expect("promote_g1_to_g2 call not yet recorded");
+        let resolver = pending
+            .resolver
+            .take()
+            .expect("promote_g1_to_g2 call already resolved");
+        let _ = resolver.send(result);
+    }
+
+    /// Async sleep-poll wait until at least `n` promotion requests
+    /// have been recorded.
+    pub async fn wait_promotion_count(&self, n: usize) {
+        wait_until(|| self.promotions.lock().len() >= n).await;
+    }
+
+    /// Number of `promote_g3_to_g2` calls observed so far.
+    pub fn g3_promotion_count(&self) -> usize {
+        self.g3_promotions.lock().len()
+    }
+
+    /// Snapshot of recorded G3 promotion requests as the hashes
+    /// the caller passed in. Tests assert on these to verify the
+    /// caller sourced the right prefix slice.
+    pub fn snapshot_g3_promotion(&self, index: usize) -> Option<Vec<SequenceHash>> {
+        self.g3_promotions
+            .lock()
+            .get(index)
+            .map(|p| p.hashes.clone())
+    }
+
+    /// Resolve a recorded G3 promotion request. Mirrors
+    /// [`Self::resolve_promotion`].
+    pub fn resolve_g3_promotion(&self, index: usize, result: Result<Vec<ImmutableBlock<G2>>>) {
+        let mut promotions = self.g3_promotions.lock();
+        let pending = promotions
+            .get_mut(index)
+            .expect("promote_g3_to_g2 call not yet recorded");
+        let resolver = pending
+            .resolver
+            .take()
+            .expect("promote_g3_to_g2 call already resolved");
+        let _ = resolver.send(result);
+    }
+
+    pub async fn wait_g3_promotion_count(&self, n: usize) {
+        wait_until(|| self.g3_promotions.lock().len() >= n).await;
+    }
+
+    /// Script which prefix hashes the mock's G3 "has." When
+    /// `find_prefix_g3_hashes(rid, n)` is called, the mock
+    /// returns `slot.all_hashes[..n].to_vec()` ONLY if all those
+    /// hashes appear in this universe; otherwise empty. Empty
+    /// universe (the default) returns empty — falls back to the
+    /// G1 promotion path in production code.
+    pub fn install_g3_prefix(&self, request_id: impl Into<String>, hashes: Vec<SequenceHash>) {
+        self.g3_universe.lock().insert(request_id.into(), hashes);
+    }
+
+    /// Install a one-shot side-effect hook that fires synchronously
+    /// inside `apply_block_assignments` after the slot's block_ids
+    /// are recorded but before the function returns. Used by tests
+    /// to inject state mutations at a precise point in
+    /// `commit_usaa1`'s execution.
+    pub fn set_apply_block_assignments_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self.apply_block_assignments_hook.lock() = Some(hook);
     }
 
     /// How many times `get_num_new_matched_tokens` was called for
@@ -372,6 +646,13 @@ impl InnerLeaderShim for MockInnerLeaderShim {
         self.block_size
     }
 
+    fn cd_metrics(&self) -> Option<kvbm_observability::CdMetrics> {
+        // Return a clone of the REAL metrics (not `None`) so the wrapper's
+        // GNMT decision-label recording (`record_decision`, `record_remote_*`)
+        // executes and is observable to tests via `cd_metrics_handle`.
+        Some(self.cd_metrics.clone())
+    }
+
     fn get_slot_total_tokens(&self, request_id: &str) -> Result<usize> {
         let slot = self.require_slot(request_id)?;
         Ok(slot.total_blocks * slot.block_size)
@@ -388,6 +669,24 @@ impl InnerLeaderShim for MockInnerLeaderShim {
         })
     }
 
+    fn slot_match_split_with_num_computed(
+        &self,
+        request_id: &str,
+        num_computed_tokens: usize,
+    ) -> Result<SlotMatchSplit> {
+        // Mirror the production override: computed_blocks derives from the
+        // caller-supplied num_computed (the GNMT base_offset), independent of the
+        // slot's onboarding-derived local match.
+        let slot = self.require_slot(request_id)?;
+        Ok(SlotMatchSplit {
+            block_size: slot.block_size,
+            computed_blocks: num_computed_tokens / slot.block_size,
+            local_match_blocks: slot.local_match_blocks,
+            total_blocks: slot.total_blocks,
+            all_sequence_hashes: slot.all_hashes.clone(),
+        })
+    }
+
     fn slot_token_ids(&self, request_id: &str) -> Result<Vec<u32>> {
         let slot = self.require_slot(request_id)?;
         let mut out = Vec::with_capacity(slot.total_blocks * slot.block_size);
@@ -395,6 +694,16 @@ impl InnerLeaderShim for MockInnerLeaderShim {
             out.extend(tb.tokens().iter().copied());
         }
         Ok(out)
+    }
+
+    fn slot_lora_name(&self, _request_id: &str) -> Result<Option<String>> {
+        // Mock requests have no LoRA — the CD wire's loud-fail guard
+        // depends on these returning None for the assert-None contract.
+        Ok(None)
+    }
+
+    fn slot_salt(&self, _request_id: &str) -> Result<Option<String>> {
+        Ok(None)
     }
 
     fn local_instance_id(&self) -> crate::InstanceId {
@@ -408,6 +717,13 @@ impl InnerLeaderShim for MockInnerLeaderShim {
     ) -> Result<()> {
         let slot = self.require_slot(request_id)?;
         *slot.assigned_block_ids.lock() = Some(block_ids);
+        // Fire the test hook (if installed) AFTER the slot mutation
+        // but before returning. This is the deterministic injection
+        // point used by the commit_usaa1 post-insert replay test.
+        let hook = self.apply_block_assignments_hook.lock().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
         Ok(())
     }
 
@@ -456,7 +772,7 @@ impl InnerLeaderShim for MockInnerLeaderShim {
 
     fn slot_transfer_params(&self, request_id: &str) -> Result<Option<TransferParams>> {
         let slot = self.require_slot(request_id)?;
-        Ok(slot.transfer_params.clone())
+        Ok(slot.transfer_params.lock().clone())
     }
 
     fn allocate_g2_blocks(&self, count: usize) -> Result<Vec<MutableBlock<G2>>> {
@@ -490,5 +806,69 @@ impl InnerLeaderShim for MockInnerLeaderShim {
         // `cd_payloads_dropped` to check Drop behavior.
         slot.installed_cd_payload.lock().replace(cd_payload);
         Ok(())
+    }
+
+    fn promote_g1_to_g2(
+        &self,
+        source_blocks: Vec<ExternalBlock<G1>>,
+    ) -> BoxFuture<'static, Result<Vec<ImmutableBlock<G2>>>> {
+        let (tx, rx) = oneshot::channel();
+        self.promotions.lock().push(PendingPromotion {
+            source_blocks,
+            resolver: Some(tx),
+        });
+        async move {
+            rx.await
+                .map_err(|err| anyhow!("promote_g1_to_g2 resolver dropped: {err}"))?
+        }
+        .boxed()
+    }
+
+    fn find_prefix_g3_hashes(
+        &self,
+        request_id: &str,
+        num_prefix_blocks: usize,
+    ) -> Result<Vec<SequenceHash>> {
+        if num_prefix_blocks == 0 {
+            return Ok(Vec::new());
+        }
+        let slot = self.require_slot(request_id)?;
+        let prefix = slot
+            .all_hashes
+            .get(..num_prefix_blocks)
+            .ok_or_else(|| {
+                anyhow!(
+                    "find_prefix_g3_hashes ({}): num_prefix_blocks {} exceeds slot hashes",
+                    request_id,
+                    num_prefix_blocks
+                )
+            })?
+            .to_vec();
+        let universe = self.g3_universe.lock();
+        let g3 = match universe.get(request_id) {
+            Some(set) => set,
+            None => return Ok(Vec::new()),
+        };
+        if prefix.iter().all(|h| g3.contains(h)) {
+            Ok(prefix)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    fn promote_g3_to_g2(
+        &self,
+        hashes: Vec<SequenceHash>,
+    ) -> BoxFuture<'static, Result<Vec<ImmutableBlock<G2>>>> {
+        let (tx, rx) = oneshot::channel();
+        self.g3_promotions.lock().push(PendingG3Promotion {
+            hashes,
+            resolver: Some(tx),
+        });
+        async move {
+            rx.await
+                .map_err(|err| anyhow!("promote_g3_to_g2 resolver dropped: {err}"))?
+        }
+        .boxed()
     }
 }

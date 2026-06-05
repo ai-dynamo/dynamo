@@ -21,13 +21,14 @@ use kvbm_connector::connector::leader::disagg::testing::{
 };
 use kvbm_connector::connector::leader::disagg::{ConditionalDisaggCoordinator, CoordinatorParts};
 use kvbm_connector::connector::leader::disagg::{ConnectorLeaderApi, PrefillDisaggLeader};
-use kvbm_engine::p2p::session::{CommittedBlock, MockSession, MockSessionFactory};
+use kvbm_engine::p2p::session::{CommittedBlock, LifecycleEvent, MockSession, MockSessionFactory};
 use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
 use kvbm_engine::testing::token_blocks::{create_token_sequence, generate_sequence_hashes};
 use kvbm_logical::blocks::ImmutableBlock;
 use kvbm_logical::manager::BlockManager;
 use kvbm_protocols::disagg::{
-    DISAGG_PROTOCOL_VERSION, RemotePrefillParams, SessionEndpoint, SessionId, TransferParams,
+    DISAGG_PROTOCOL_VERSION, KvHashingRequestEnvelope, RemotePrefillParams, SessionEndpoint,
+    SessionId, TransferParams,
 };
 
 const TOTAL_BLOCKS: usize = 4;
@@ -63,15 +64,29 @@ fn synthetic_decode_endpoint() -> SessionEndpoint {
 fn cd_transfer_params(
     session_id: SessionId,
     initiator_instance_id: kvbm_connector::InstanceId,
-    expected_hashes: Vec<kvbm_logical::SequenceHash>,
+    num_provided_blocks: usize,
+) -> TransferParams {
+    cd_transfer_params_with_digest(session_id, initiator_instance_id, num_provided_blocks, None)
+}
+
+/// Variant that lets a caller pin a specific `expected_hash_digest`. Used
+/// by the digest-mismatch reject test; existing callers use the
+/// `cd_transfer_params` wrapper which defaults to `None` (skip
+/// verification — mock fixtures don't compute the canonical digest).
+fn cd_transfer_params_with_digest(
+    session_id: SessionId,
+    initiator_instance_id: kvbm_connector::InstanceId,
+    num_provided_blocks: usize,
+    expected_hash_digest: Option<u64>,
 ) -> TransferParams {
     TransferParams::remote_prefill(RemotePrefillParams {
         protocol_version: DISAGG_PROTOCOL_VERSION,
         session_id,
         initiator_instance_id,
         decode_endpoint: Some(synthetic_decode_endpoint()),
-        sequence_hashes: expected_hashes,
-        num_computed_tokens: 0,
+        num_provided_tokens: num_provided_blocks * BLOCK_SIZE,
+        request: KvHashingRequestEnvelope::default(),
+        expected_hash_digest,
     })
 }
 
@@ -125,7 +140,7 @@ fn build_harness_with_watchdog(with_transfer_params: bool, watchdog: Duration) -
         Some(cd_transfer_params(
             session_id,
             decode_instance_id,
-            all_hashes.clone(),
+            all_hashes.len(),
         ))
     } else {
         None
@@ -142,7 +157,7 @@ fn build_harness_with_watchdog(with_transfer_params: bool, watchdog: Duration) -
         assigned_block_ids: parking_lot::Mutex::new(None),
         gnmt_result: (Some(7 * BLOCK_SIZE), false),
         usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
-        transfer_params,
+        transfer_params: parking_lot::Mutex::new(transfer_params),
         ..MockSlot::default()
     };
     inner.install_slot("req-1", slot);
@@ -431,14 +446,10 @@ fn build_harness_cd_no_g2_hits(inner_gnmt: (Option<usize>, bool)) -> TestHarness
 
     let session_id = uuid::Uuid::new_v4();
     let decode_instance_id: kvbm_connector::InstanceId = uuid::Uuid::new_v4().into();
-    // CD-bound but with **empty** sequence_hashes — mirrors the
+    // CD-bound but with `num_local_match_blocks = 0` — mirrors the
     // hub dispatcher payload when decode has no local-match cache to
     // forward (the common golden-path case).
-    let transfer_params = Some(cd_transfer_params(
-        session_id,
-        decode_instance_id,
-        Vec::new(),
-    ));
+    let transfer_params = Some(cd_transfer_params(session_id, decode_instance_id, 0));
 
     let slot = MockSlot {
         block_size: BLOCK_SIZE,
@@ -451,7 +462,7 @@ fn build_harness_cd_no_g2_hits(inner_gnmt: (Option<usize>, bool)) -> TestHarness
         assigned_block_ids: parking_lot::Mutex::new(None),
         gnmt_result: inner_gnmt,
         usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
-        transfer_params,
+        transfer_params: parking_lot::Mutex::new(transfer_params),
         ..MockSlot::default()
     };
     inner.install_slot("req-1", slot);
@@ -1422,6 +1433,137 @@ async fn cd_prefill_multiple_observer_commits_before_attach_accumulate() -> Resu
     Ok(())
 }
 
+/// Pins the lifecycle-driven bail contract: when the per-request
+/// CancellationToken fires (the lifecycle watcher's response to
+/// session Detached / Failed), `run_setup`'s drain loops abort
+/// immediately instead of hanging on `commits.next()` /
+/// `avail.next()` forever — those mpsc streams never return None
+/// while run_setup still holds an `Arc<dyn Session>`, so the cancel
+/// is the only viable abort signal. `cleanup_failed_request` then
+/// runs, evicting the request from the coordinator.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_run_setup_bails_on_cancel() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+    let (count, async_flag) = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    assert_eq!(count, Some(NUM_EXTERNAL));
+    assert!(async_flag);
+
+    // Wait for run_setup's `factory.attach` to land. Do NOT inject
+    // peer commits — the commits stream stays legitimately pending
+    // (no Closed, no Added), which is the wedged-peer state we want
+    // to cancel out of.
+    wait_until(|| h.factory.last_attached().is_some()).await;
+    let session = h.factory.last_attached().expect("session attached");
+    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::Attaching)).await;
+    assert_eq!(session.commit_calls().len(), 0);
+
+    // Fire the lifecycle-driven cancel directly. In production this
+    // would come from spawn_lifecycle_watcher's callback after velo
+    // surfaced LifecycleEvent::{Detached,Failed} (peer crash,
+    // Frame::Error, or heartbeat loss — all three converge here).
+    {
+        let state = h
+            .coordinator
+            .state_for_test("req-1")
+            .expect("state should exist after GNMT");
+        state.cancel.cancel();
+    }
+
+    // run_setup's tokio::select! sees the cancel arm fire, bails with
+    // Err, and the spawn-site catches it into cleanup_failed_request.
+    // Because no USAA has run yet, cleanup_failed_request takes the
+    // pre-USAA path: stash the failure on `pending_failure`, close
+    // the session, RETAIN state (so a later `on_usaa` can replay the
+    // failure with the real G1 ids). State eviction happens in
+    // `on_usaa`, not here.
+    let state = h
+        .coordinator
+        .state_for_test("req-1")
+        .expect("state retained for pre-USAA replay");
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_until(|| {
+            state
+                .as_prefill()
+                .and_then(|bits| bits.pending_failure.lock().clone())
+                .is_some()
+        }),
+    )
+    .await
+    .expect("cancel must unblock run_setup and stash pending_failure within 5s");
+    assert_eq!(
+        h.coordinator.active_count(),
+        1,
+        "pre-USAA cancel must retain state for on_usaa replay"
+    );
+
+    Ok(())
+}
+
+/// Pins the DNPT-digest verifier contract: when decode ships an
+/// `expected_hash_digest` and prefill's locally-recomputed digest does
+/// NOT match (e.g. salt/LoRA propagation drift, hasher version skew),
+/// `ensure_started` must fail loud at GNMT — before any pull begins —
+/// with a message naming "CD hash divergence". The check sits at
+/// `coordinator/driver.rs::ensure_started` ~line 1450; this test fires
+/// it via the wrapper's GNMT entry point.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_dnpt_digest_mismatch_rejected() -> Result<()> {
+    // Build a harness whose slot's TransferParams carries an
+    // intentionally-wrong `expected_hash_digest`. Production decode
+    // ships `digest_provided_hashes(&[hash_0, hash_1, ...])`; here we
+    // ship a sentinel that cannot collide with any real digest, so the
+    // verifier always fires.
+    const WRONG_DIGEST: u64 = 0xDEAD_BEEF_DEAD_BEEF;
+
+    let h = build_harness(false);
+    let session_id = uuid::Uuid::new_v4();
+    let decode_instance_id: kvbm_connector::InstanceId = uuid::Uuid::new_v4().into();
+    let bad_transfer_params = cd_transfer_params_with_digest(
+        session_id,
+        decode_instance_id,
+        h.all_hashes.len(),
+        Some(WRONG_DIGEST),
+    );
+
+    // Install the bad params on the mock slot so the wrapper's GNMT
+    // sees them and routes through ensure_started → verifier.
+    {
+        let slot = h.inner.slot("req-1").unwrap();
+        *slot.transfer_params.lock() = Some(bad_transfer_params);
+    }
+
+    h.wrapper.create_slot(make_request())?;
+    let err = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", 0)
+        .expect_err("GNMT must surface the digest mismatch as Err");
+
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("CD hash divergence"),
+        "error must name the contract: {msg}"
+    );
+    assert!(
+        msg.contains(&format!("0x{WRONG_DIGEST:016x}")),
+        "error must include decode_digest in hex: {msg}"
+    );
+    assert!(
+        msg.contains("req-1"),
+        "error must include request_id for triage: {msg}"
+    );
+
+    // No state should have been inserted, no session opened.
+    assert_eq!(
+        h.coordinator.active_count(),
+        0,
+        "verifier must reject before coordinator state is installed"
+    );
+
+    Ok(())
+}
+
 #[allow(dead_code)]
 fn _ensure_used(h: &TestHarness) {
     let _ = (
@@ -1435,4 +1577,213 @@ fn _ensure_used(h: &TestHarness) {
         &h.output_blocks,
         Duration::from_secs(0),
     );
+}
+
+/// P0 #7 — `Frame::Error` / `LifecycleEvent::Failed` during the
+/// post-USAA window must independently drive the prefill cleanup
+/// chain via the lifecycle watcher:
+///
+/// 1. `spawn_lifecycle_watcher` polls the session's lifecycle stream.
+/// 2. On `Failed { reason }`, `Self::lifecycle_failure_reason` returns
+///    `Some(reason)` and the watcher callback routes through
+///    `coord.cleanup_failed_request`.
+/// 3. Post-USAA branch emits `mark_failed_onboarding` with the full
+///    external G1 window and removes `coord.states[rid]`.
+/// 4. `pending_output_commits` drains via the CdRequest Arc drop.
+///
+/// The test gates the lifecycle path in two stages:
+///
+/// - Stage 1: inject ONE `LifecycleEvent::Failed` and wait for
+///   `mark_failed_onboarding`. This call can ONLY come from the
+///   lifecycle watcher route — no other test code touches cleanup
+///   yet. Asserts the wire from session → watcher → cleanup is live.
+/// - Stage 2: fire a second `cleanup_failed_request` after the
+///   lifecycle path already claimed the CAS. The second call must be
+///   a no-op (the CAS guard early-returns). Pins idempotence; the
+///   probe verifies failure when the CAS is disabled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_frame_error_mid_output_triggers_cleanup() -> Result<()> {
+    let h = build_harness(true);
+
+    h.wrapper.create_slot(make_request())?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+
+    let session = drive_setup(&h).await;
+    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::Registered)).await;
+
+    // USAA installs the full G1 window. Required so the post-USAA
+    // branch of cleanup_failed_request fires mark_failed_onboarding
+    // (pre-USAA stashes without notifying).
+    h.wrapper
+        .update_state_after_alloc("req-1", h.g1_block_ids.clone(), NUM_EXTERNAL)?;
+
+    // Stage 1 — lifecycle path is the ONLY trigger.
+    //
+    // Pre-condition: no failure calls yet from any source. If
+    // mark_failed_onboarding fires after this point, it can only have
+    // come from the watcher route — there is no direct cleanup call
+    // anywhere in the test setup.
+    assert!(h.workers.failed_for("req-1").is_none());
+    session.inject_lifecycle(LifecycleEvent::Failed {
+        reason: "induced peer crash mid-output".to_string(),
+    });
+    wait_until(|| h.workers.failed_for("req-1").is_some()).await;
+    let after_lifecycle: Vec<_> = h
+        .workers
+        .failed()
+        .into_iter()
+        .filter(|c| c.request_id == "req-1")
+        .collect();
+    assert_eq!(
+        after_lifecycle.len(),
+        1,
+        "lifecycle Failed event alone must produce ONE mark_failed_onboarding (got {})",
+        after_lifecycle.len(),
+    );
+    assert_eq!(
+        after_lifecycle[0].block_ids, h.g1_block_ids,
+        "post-USAA cleanup must surface the full G1 window for vLLM to abort"
+    );
+    wait_until(|| h.coordinator.active_count() == 0).await;
+    assert!(
+        h.coordinator.state_for_test("req-1").is_none(),
+        "coord.states[rid] must be removed after Failed lifecycle event"
+    );
+
+    // Stage 2 — CAS no-op idempotence.
+    //
+    // A second cleanup_failed_request invocation (the kind of duplicate
+    // a spawn-catch Err path would produce) must NOT re-emit
+    // mark_failed_onboarding. With coord.states[rid] already removed,
+    // the outer get() short-circuits and the CAS is moot — but the
+    // test here is the count invariant after both paths have a chance
+    // to fire.
+    h.coordinator
+        .cleanup_failed_request("req-1", "duplicate via spawn-catch".to_string())
+        .await;
+    let after_dup = h
+        .workers
+        .failed()
+        .into_iter()
+        .filter(|c| c.request_id == "req-1")
+        .count();
+    assert_eq!(
+        after_dup, 1,
+        "duplicate cleanup_failed_request must be a no-op (got {})",
+        after_dup,
+    );
+
+    // mark_onboarding_complete must NOT fire — the request failed.
+    assert!(
+        !h.workers.completed_contains("req-1"),
+        "failed request must not also signal onboarding-complete to vLLM"
+    );
+
+    Ok(())
+}
+
+/// `kick_onboard` must pair its G2→G1 source block_ids with vLLM's
+/// G1 destinations in **absolute-position order**, regardless of
+/// the order `Available` deltas land on the inbound session
+/// stream.
+///
+/// Why this matters: the session API permits availability to
+/// arrive in multiple deltas (CONTRACT §2.7/§2.8 — deltas appear
+/// in the holder's `make_available` call order). Stage 1's
+/// decode-side G1→G2 prefix promotion makes this a documented
+/// path: decode publishes local-match availability synchronously
+/// at GNMT and the promoted prefix availability later from the
+/// promotion task. Without positional sorting, `kick_onboard`
+/// takes the **arrival-order** suffix of `registered_g2` instead
+/// of the position-order suffix and mis-pairs G2 sources with
+/// vLLM-allocated G1 destinations — corrupting prefill's
+/// K/V cache.
+///
+/// The test forges two `Available` deltas (local_match window
+/// first, prefix window second) and asserts the resulting
+/// `local_g2_to_g1` call's source order matches the pull-call
+/// destinations stitched in absolute-position order
+/// (`pull_calls[1].dst ++ pull_calls[0].dst`).
+///
+/// This must FAIL on the pre-fix codebase (arrival order =
+/// `pull_calls[0].dst ++ pull_calls[1].dst`) and PASS after the
+/// position-sort fix lands in `kick_onboard`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_kick_onboard_robust_to_split_delta_availability() -> Result<()> {
+    // Use the same harness as `cd_prefill_happy_path` — same
+    // 4-block prefill request. The split is purely on the wire
+    // (two `Available` deltas vs. one), not in the slot fixture.
+    let h = build_harness(true);
+
+    h.wrapper.create_slot(make_request())?;
+    let (count, async_flag) = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    assert_eq!(count, Some(NUM_EXTERNAL));
+    assert!(async_flag);
+
+    wait_until(|| h.factory.last_attached().is_some()).await;
+    let session = h.factory.last_attached().expect("session");
+
+    // Split point: positions [0..SPLIT) = "prefix" window,
+    // [SPLIT..TOTAL) = "local_match" window. Local_match arrives
+    // FIRST on the wire (mirrors Stage 1: decode publishes
+    // local_match synchronously at GNMT, promoted prefix later
+    // from the promotion task).
+    const SPLIT: usize = 2;
+    const _: () = assert!(SPLIT < TOTAL_BLOCKS);
+
+    session.inject_peer_commit(h.all_hashes.clone());
+    session.inject_peer_finish_commits();
+
+    // Delta 1: positions [SPLIT..TOTAL).
+    let local_match_hashes: Vec<_> = h.all_hashes[SPLIT..].to_vec();
+    let local_match_peer_ids: Vec<_> = h.decode_g2_block_ids[SPLIT..].to_vec();
+    session.inject_peer_available(committed_blocks(&local_match_peer_ids, &local_match_hashes));
+    session.wait_pull_count(1).await;
+    session.resolve_pull(0, Ok(()));
+
+    // Delta 2: positions [0..SPLIT).
+    let prefix_hashes: Vec<_> = h.all_hashes[..SPLIT].to_vec();
+    let prefix_peer_ids: Vec<_> = h.decode_g2_block_ids[..SPLIT].to_vec();
+    session.inject_peer_available(committed_blocks(&prefix_peer_ids, &prefix_hashes));
+    session.wait_pull_count(2).await;
+    session.resolve_pull(1, Ok(()));
+
+    session.inject_peer_drained();
+
+    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::Registered)).await;
+
+    // USAA — drives kick_onboard with the full external window.
+    h.wrapper
+        .update_state_after_alloc("req-1", h.g1_block_ids.clone(), NUM_EXTERNAL)?;
+
+    h.transport.wait_onboard_count(1).await;
+    let onboard = h.transport.onboard_calls()[0].clone();
+    assert_eq!(onboard.dst_g1_block_ids, h.g1_block_ids);
+    assert_eq!(onboard.src_g2_block_ids.len(), TOTAL_BLOCKS);
+
+    // The dst G2 block_ids prefill allocated for each pull (in
+    // arrival order). With split deltas, `pull_calls[0]` carries
+    // the local-match window's allocations and `pull_calls[1]`
+    // carries the prefix window's allocations.
+    let pull_calls = session.pull_calls();
+    assert_eq!(pull_calls.len(), 2);
+    assert_eq!(pull_calls[0].0, local_match_hashes);
+    assert_eq!(pull_calls[1].0, prefix_hashes);
+    let local_match_dst = &pull_calls[0].1;
+    let prefix_dst = &pull_calls[1].1;
+    assert_eq!(local_match_dst.len(), TOTAL_BLOCKS - SPLIT);
+    assert_eq!(prefix_dst.len(), SPLIT);
+
+    // Position-order pairing: positions [0..SPLIT) (prefix)
+    // followed by [SPLIT..TOTAL) (local_match).
+    let mut expected_src = prefix_dst.clone();
+    expected_src.extend(local_match_dst.iter().copied());
+    assert_eq!(
+        onboard.src_g2_block_ids, expected_src,
+        "kick_onboard must pair G2 sources with G1 destinations in absolute-position order, \
+         not arrival order — splitting availability into [local_match, prefix] deltas \
+         (Stage 1 promotion) must not corrupt the staging order"
+    );
+
+    Ok(())
 }

@@ -14,6 +14,7 @@ End-to-end smokes against a live `kvbm-hub` (+ Prefill + Decode topology, for th
 | `two-request-smoke.sh` | **Golden.** Drive R1 + R2 against a single leader. Mints an experiment dir, brings up hub + Prefill + Decode (via `disagg-bringup` scripts), runs the two prompts, prints a validation grep digest, renders `trace.html` via `disagg-trace`. Inherits `KVBM_DISAGG_LEADER` and `KVBM_BLOCK_LAYOUT` from env. |
 | `audit-equiv.sh` | **Golden.** Run the smoke twice (`KVBM_DISAGG_LEADER=legacy` then `=unified`), then run `audit_diff` on per-side `kvbm_audit` streams to assert behavioral equivalence. |
 | `incompat-smoke.sh` | **Failure-scenario.** Hub-only (no vLLM, no GPU). Brings up `kvbm_hub` on alt ports (28337/21337, velo disabled), POSTs crafted P2P + CD register payloads via curl, asserts each layout-mismatch class returns `400` with the expected error substring. Six scenarios: baseline-accept, cross-mode, universal canonical mismatch, operational NHD vs HND, operational page_size mismatch, CD without P2P. ~2s end-to-end. Exits 0 on all-pass, 1 on any failure with the failing scenario named on stderr. Run when the connector/hub gate is touched or as a fast regression check before merging changes to `layout_compat`. |
+| `prefill-router-smoke.sh` | **Golden — new PrefillRouter feature.** Same R1+R2 flow as `two-request-smoke.sh` but with the hub running the new `--prefill-router` feature. Decode stays vanilla `vllm serve`; prefill is one of two variants selected by `KVBM_PREFILL_VARIANT`: `kvbm-wrap` (`python -m kvbm.vllm.prefill`) or `dynamo` (`python -m dynamo.vllm --disaggregation-mode prefill`, requires NATS+etcd running). Both variants auto-attach a `PrefillRouterHandler` and register with the hub as Velo backends; the hub dispatches CD prefill work over velo (not HTTP). Adds three velo-specific assertions on top of the standard R1/R2 audit checks: (1) prefill log contains the auto-wire line, (2) hub `/v1/features/prefill-router/targets` shows exactly one velo target, (3) hub log shows velo backend dispatch. |
 
 ## Running via a subagent (recommended)
 
@@ -37,8 +38,13 @@ Do NOT dump full logs back — return under 300 words.
 
 Steps:
 1. From /home/ryan/repos/dynamo/.claude/worktrees/page-size (or
-   whatever the user's worktree is), tear down any stale processes:
+   whatever the user's worktree is), tear down any stale processes.
+   Prefill launches via three possible shapes (vanilla, kvbm-wrap,
+   dynamo); kill all three patterns so the wrapper/dynamo paths
+   don't leave zombies:
      pkill -f vllm.entrypoints.openai 2>/dev/null
+     pkill -f kvbm.vllm.prefill 2>/dev/null
+     pkill -f dynamo.vllm 2>/dev/null
      pkill -9 -f kvbm_hub 2>/dev/null
      sleep 3
 2. (Optional, if bindings/hub need rebuild) Source env.sh and run

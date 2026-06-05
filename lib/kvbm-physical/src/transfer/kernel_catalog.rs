@@ -83,15 +83,15 @@ pub(crate) struct KernelInvocation {
 pub(crate) fn match_kernel(
     src_kv: KvBlockLayout,
     dst_kv: KvBlockLayout,
-    dtype: TensorDataType,
+    _dtype: TensorDataType,
 ) -> Option<KernelKind> {
     use KvBlockLayout::*;
-    // FP8 has no kernel template specialization today; reject at the
-    // catalog so the launcher never sees an unmappable dtype. When
-    // FP8 kernel support lands this guard goes away.
-    if matches!(dtype, TensorDataType::FP8) {
-        return None;
-    }
+    // Kernel selection is dtype-independent: the permute/transpose kernels are
+    // pure element-wise byte/element moves parameterised only on `sizeof(T)`,
+    // so every supported dtype (including the 1-byte FP8 byte-mover) maps to the
+    // same kernel for a given (src, dst) layout pair. `_dtype` is retained in
+    // the signature because the executor still needs it to select the C++
+    // template at launch (carried on `KernelInvocation::dtype`).
     match (src_kv, dst_kv) {
         // Operational → Universal: universal_from_block kernel.
         // The template selects NHD vs HND from `block_layout` at
@@ -195,6 +195,44 @@ mod tests {
             match_kernel(Universal, OperationalNHD, TensorDataType::F16),
             Some(KernelKind::BlockFromUniversal),
         );
+    }
+
+    /// FP8 (1-byte) now resolves to the SAME kernels as every other dtype
+    /// for the operational↔universal and NHD↔HND pairs. The catalog's old
+    /// FP8 reject guard has been removed now that the CUDA side has a
+    /// 1-byte (uint8_t) byte-mover template specialization. Selection is
+    /// dtype-independent, so FP8 must mirror F16/BF16/F32/F64 exactly.
+    #[test]
+    fn matches_fp8_same_as_other_dtypes() {
+        // Operational → Universal.
+        assert_eq!(
+            match_kernel(OperationalHND, Universal, TensorDataType::FP8),
+            Some(KernelKind::UniversalFromBlock),
+        );
+        assert_eq!(
+            match_kernel(OperationalNHD, Universal, TensorDataType::FP8),
+            Some(KernelKind::UniversalFromBlock),
+        );
+        // Universal → Operational (inverse).
+        assert_eq!(
+            match_kernel(Universal, OperationalHND, TensorDataType::FP8),
+            Some(KernelKind::BlockFromUniversal),
+        );
+        assert_eq!(
+            match_kernel(Universal, OperationalNHD, TensorDataType::FP8),
+            Some(KernelKind::BlockFromUniversal),
+        );
+        // Operational ↔ Operational transpose, both directions.
+        assert_eq!(
+            match_kernel(OperationalNHD, OperationalHND, TensorDataType::FP8),
+            Some(KernelKind::NhdHndTranspose),
+        );
+        assert_eq!(
+            match_kernel(OperationalHND, OperationalNHD, TensorDataType::FP8),
+            Some(KernelKind::NhdHndTranspose),
+        );
+        // Same-layout still returns None for FP8 (no transform needed).
+        assert_eq!(match_kernel(Universal, Universal, TensorDataType::FP8), None);
     }
 
     /// Custom layouts are out of scope for the catalog.

@@ -171,7 +171,7 @@ fn build_harness(request_id: &str, g1_base: usize) -> (Harness, Vec<usize>) {
             assigned_block_ids: parking_lot::Mutex::new(None),
             gnmt_result: (Some(LOCAL_BLOCKS * BLOCK_SIZE), true),
             usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
-            transfer_params: None,
+            transfer_params: parking_lot::Mutex::new(None),
             ..MockSlot::default()
         },
     );
@@ -198,7 +198,7 @@ fn build_harness(request_id: &str, g1_base: usize) -> (Harness, Vec<usize>) {
 
     let cfg = DisaggConfig {
         role: DisaggregationRole::Decode,
-        max_inflight_remote_prefill_tokens: usize::MAX,
+        ..Default::default()
     };
     let wrapper = DecodeDisaggLeader::from_parts(
         inner.clone(),
@@ -211,6 +211,7 @@ fn build_harness(request_id: &str, g1_base: usize) -> (Harness, Vec<usize>) {
             hub: None,
             client: None,
             hub_velo_id: None,
+            tier_cache: None,
         },
     );
 
@@ -477,7 +478,7 @@ async fn concurrent_recompute_sibling_failure_does_not_cascade() -> Result<()> {
             assigned_block_ids: parking_lot::Mutex::new(None),
             gnmt_result: (Some(LOCAL_BLOCKS * BLOCK_SIZE), true),
             usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
-            transfer_params: None,
+            transfer_params: parking_lot::Mutex::new(None),
             ..MockSlot::default()
         },
     );
@@ -494,7 +495,7 @@ async fn concurrent_recompute_sibling_failure_does_not_cascade() -> Result<()> {
             assigned_block_ids: parking_lot::Mutex::new(None),
             gnmt_result: (Some(LOCAL_BLOCKS * BLOCK_SIZE), true),
             usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
-            transfer_params: None,
+            transfer_params: parking_lot::Mutex::new(None),
             ..MockSlot::default()
         },
     );
@@ -520,7 +521,7 @@ async fn concurrent_recompute_sibling_failure_does_not_cascade() -> Result<()> {
     );
     let cfg = DisaggConfig {
         role: DisaggregationRole::Decode,
-        max_inflight_remote_prefill_tokens: usize::MAX,
+        ..Default::default()
     };
     let wrapper = DecodeDisaggLeader::from_parts(
         inner.clone(),
@@ -533,6 +534,7 @@ async fn concurrent_recompute_sibling_failure_does_not_cascade() -> Result<()> {
             hub: None,
             client: None,
             hub_velo_id: None,
+            tier_cache: None,
         },
     );
 

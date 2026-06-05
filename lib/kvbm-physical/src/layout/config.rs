@@ -308,7 +308,7 @@ pub fn validate_dtype_width_bytes(dtype_width_bytes: usize) -> Result<(), Valida
 ///
 /// | width | dtype  | notes |
 /// |-------|--------|-------|
-/// |   1   | `FP8`  | 1-byte float marker. No kernel template today — catalog rejects FP8 transforms at dispatch. |
+/// |   1   | `FP8`  | 1-byte float. Handled by a dtype-agnostic byte-mover (uint8_t kernel template); catalog dispatches FP8 transforms like any other dtype. |
 /// |   2   | `BF16` | Modern default. Permute kernels produce identical bytes for `F16` and `BF16`, so the choice only matters for arithmetic-bearing kernels (none today). |
 /// |   4   | `F32`  | Sole 4-byte type today. |
 /// |   8   | `F64`  | Sole 8-byte type today. |

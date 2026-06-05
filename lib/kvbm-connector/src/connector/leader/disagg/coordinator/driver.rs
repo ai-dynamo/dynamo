@@ -22,12 +22,15 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use dashmap::DashMap;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use kvbm_engine::p2p::session::{
     AvailabilityDelta, CommitDelta, CommittedBlock, Session, SessionFactory,
 };
 use kvbm_logical::blocks::{CompleteBlock, ImmutableBlock};
-use kvbm_protocols::disagg::{DISAGG_PROTOCOL_VERSION, RemotePrefillParams, RemotePrefillRequest};
+use kvbm_protocols::disagg::{
+    DISAGG_PROTOCOL_VERSION, KvHashingRequestEnvelope, RemotePrefillParams, RemotePrefillRequest,
+    digest_provided_hashes,
+};
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
 
@@ -59,6 +62,22 @@ pub struct RemotePrefillStart<'a> {
     pub prefix_g2: Vec<ImmutableBlock<G2>>,
     pub local_match_g2: Vec<ImmutableBlock<G2>>,
     pub prefill_token_ids: Vec<u32>,
+    /// LoRA adapter name from the slot's request (the same value decode
+    /// passed to `kv_hashing::Request`). Forwarded onto the CD wire so
+    /// prefill can rebuild an identical `kv_hashing::Request` and
+    /// recompute matching PLHs locally.
+    pub lora_name: Option<String>,
+    /// Raw salt string from the slot's request. Same purpose as
+    /// `lora_name` — feeds the prefill-side hasher.
+    pub salt: Option<String>,
+    /// Stage 1 planned G1→G2 prefix promotion hashes. When
+    /// non-empty, `begin_remote_prefill` commits these alongside
+    /// `prefix_g2` + `local_match_g2` on the session up-front
+    /// (Monotonic-add per session CONTRACT §3.2) and **defers**
+    /// `session.finish_availability` — the per-request promotion
+    /// task spawned at USAA is responsible for publishing the
+    /// landed G2 blocks and sealing availability.
+    pub pending_promotion_hashes: Vec<SequenceHash>,
 }
 
 /// Shared dependencies every coordinator constructor needs. Bundled so the
@@ -243,6 +262,15 @@ impl ConditionalDisaggCoordinator {
         self.states.get(request_id).map(|e| Arc::clone(e.value()))
     }
 
+    /// Test/integration-only public accessor for the per-request state.
+    /// Production code uses [`Self::state_for_decode`] or role-specific
+    /// helpers; tests need direct access (e.g. to fire the cancel
+    /// token, simulate lifecycle-watcher effects).
+    #[cfg(any(test, feature = "testing"))]
+    pub fn state_for_test(&self, request_id: &str) -> Option<Arc<CdRequest>> {
+        self.state_for(request_id)
+    }
+
     fn arc_self(&self) -> Option<Arc<Self>> {
         self.weak_self.upgrade()
     }
@@ -261,10 +289,21 @@ impl ConditionalDisaggCoordinator {
     /// `run_setup` drains the buffer atomically when it sets
     /// `state.session = Some(...)`.
     ///
-    /// Lock order: acquire `state.session` first, then nest
-    /// `bits.pending_output_commits` inside it. Same order used in
-    /// `run_setup` so observer + attach can't interleave with the
-    /// buffer in an inconsistent state.
+    /// Lock discipline: hold `state.session` across BOTH the
+    /// buffer-or-commit decision AND the dispatch itself (or buffer
+    /// append). Two races this closes:
+    ///
+    /// 1. snapshot=None → attach lands → we then append to the buffer
+    ///    that attach already drained: blocks orphaned.
+    /// 2. snapshot=Some → on_request_finished snapshots session,
+    ///    observes has_pending=false (observer residual already
+    ///    drained), finalizes → our session.commit lands AFTER
+    ///    finalize on the wire.
+    ///
+    /// Holding the guard across dispatch serializes against
+    /// `run_setup`'s attach drain and against `on_request_finished`'s
+    /// short snapshot acquire. Lock order session→pending matches
+    /// `run_setup`.
     pub fn commit_output_blocks(
         &self,
         request_id: &str,
@@ -281,12 +320,8 @@ impl ConditionalDisaggCoordinator {
             )
         })?;
 
-        // Lock the session FIRST; buffer-or-commit decision happens
-        // inside this critical section so a concurrent `run_setup`
-        // attach can't transition session=None → Some between our
-        // check and the buffer append.
-        let session_opt = state.session.lock().clone();
-        match session_opt {
+        let session_guard = state.session.lock();
+        match session_guard.as_ref() {
             None => {
                 let buffered = blocks.len();
                 bits.pending_output_commits.lock().extend(blocks);
@@ -325,6 +360,31 @@ impl ConditionalDisaggCoordinator {
                 return;
             }
         };
+
+        // CAS-guard against parallel cleanup: both the lifecycle
+        // watcher (on Detached/Failed/Watchdog) and the spawn-catch
+        // path (run_setup returns Err) can call this for the same
+        // request. Whichever wins false → true runs the cleanup;
+        // losers early-return so we don't double-call
+        // `mark_failed_onboarding` (would double-notify vLLM of the
+        // failed G1 window) or clobber a pre-USAA stash someone is
+        // mid-installing. Dies with the CdRequest Arc.
+        if state
+            .cleanup_claimed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            tracing::debug!(
+                request_id,
+                "cleanup_failed_request: cleanup already claimed; no-op"
+            );
+            return;
+        }
 
         let g1_ids = state.failed_g1_block_ids();
         let num_g1 = g1_ids.len();
@@ -397,7 +457,17 @@ impl ConditionalDisaggCoordinator {
             session.close(Some(reason));
         }
 
-        self.states.remove(request_id);
+        // Identity-checked remove: under
+        // `kv_load_failure_policy=recompute`, the await above can
+        // park unbounded while a recompute reschedule replaces the
+        // DashMap entry with a new lifecycle's Arc. A by-name
+        // `states.remove` would wipe the new lifecycle's state.
+        // `state` was captured at the top of this method (line ~353);
+        // `remove_if` only fires when the captured Arc still matches
+        // what the DashMap holds. See `lib/kvbm-connector/CONTRACT.md`
+        // §"Cross-lifecycle stale-release race".
+        self.states
+            .remove_if(request_id, |_, v| Arc::ptr_eq(&state, v));
     }
 
     // =========================================================================
@@ -458,36 +528,61 @@ impl ConditionalDisaggCoordinator {
             .session_factory
             .attach(params.session_id, params.initiator_instance_id, endpoint)
             .await?;
-        // Store in the top-level shared session field AND atomically
-        // drain any output blocks the observer buffered while session
-        // was None. The two operations must happen in the same
-        // critical section so a concurrent `commit_output_blocks`
-        // can't see session=Some and still try to append to the
-        // buffer (which would silently lose blocks).
-        let buffered_outputs: Vec<ImmutableBlock<G2>> = {
+        // Store in the top-level shared session field, drain any
+        // output blocks the observer buffered while session was None,
+        // AND dispatch those drained blocks — all under the same
+        // `state.session` guard. Holding the guard across the
+        // dispatch closes two races:
+        //   1. A concurrent `commit_output_blocks` snapshot=Some
+        //      that tries to append to a buffer attach already drained
+        //      (blocks orphaned past the drain).
+        //   2. `on_request_finished` snapshotting session=Some,
+        //      observing has_pending=false (observer residual already
+        //      drained pre-attach), and calling `session.finalize`
+        //      between our take-buffer and our dispatch — finalize
+        //      would land on the wire BEFORE the drained commits.
+        // `session.commit` / `make_available` are sync velo channel
+        // sends, so holding parking_lot guards across them is
+        // bounded. All other `state.session.lock()` callers do
+        // brief snapshot-and-release.
+        {
             let mut session_slot = state.session.lock();
             *session_slot = Some(Arc::clone(&session));
             let mut pending = bits.pending_output_commits.lock();
-            std::mem::take(&mut *pending)
-        };
-        if !buffered_outputs.is_empty() {
-            crate::audit!(
-                "commit_output_blocks_drained",
-                role = "prefill",
-                request_id = %request_id,
-                drained = buffered_outputs.len()
-            );
-            let hashes: Vec<SequenceHash> =
-                buffered_outputs.iter().map(|b| b.sequence_hash()).collect();
-            session
-                .commit(hashes)
-                .context("draining buffered output commits after attach")?;
-            session
-                .make_available(buffered_outputs)
-                .context("draining buffered output availability after attach")?;
+            let buffered_outputs: Vec<ImmutableBlock<G2>> = std::mem::take(&mut *pending);
+            if !buffered_outputs.is_empty() {
+                crate::audit!(
+                    "commit_output_blocks_drained",
+                    role = "prefill",
+                    request_id = %request_id,
+                    drained = buffered_outputs.len()
+                );
+                let hashes: Vec<SequenceHash> =
+                    buffered_outputs.iter().map(|b| b.sequence_hash()).collect();
+                session
+                    .commit(hashes)
+                    .context("draining buffered output commits after attach")?;
+                session
+                    .make_available(buffered_outputs)
+                    .context("draining buffered output availability after attach")?;
+            }
         }
 
         // Spawn lifecycle watcher.
+        //
+        // Two paths:
+        //   - Cooperative terminal (Detached / StreamEnded): the
+        //     request completed normally and the session is finalizing.
+        //     Cancel the token (no-op if `run_setup` already finished)
+        //     and remove the state. on_request_finished may have
+        //     already evicted; if so the remove is a no-op.
+        //   - Failure terminal (Failed / WatchdogTimeout): route
+        //     through `cleanup_failed_request` so vLLM gets
+        //     `mark_failed_onboarding` and pre-USAA stashes survive
+        //     for `on_usaa` replay. The CAS guard on `cleanup_claimed`
+        //     makes this safe against parallel cleanup from the
+        //     spawn-catch path (where `run_setup` returned Err from
+        //     the cancel-induced bail).
         let watcher_coord = self.weak_self.clone();
         let watcher_request_id = request_id.clone();
         spawn_lifecycle_watcher(
@@ -497,9 +592,41 @@ impl ConditionalDisaggCoordinator {
             request_id.clone(),
             params.session_id.to_string(),
             self.lifecycle_watchdog,
-            move |_outcome| async move {
+            move |outcome| async move {
+                let failure_reason = Self::lifecycle_failure_reason(&outcome);
                 if let Some(coord) = watcher_coord.upgrade() {
-                    coord.states.remove(&watcher_request_id);
+                    if let Some(state) = coord.state_for(&watcher_request_id) {
+                        state.cancel.cancel();
+                    }
+                    match failure_reason {
+                        Some(reason) => {
+                            coord
+                                .cleanup_failed_request(&watcher_request_id, reason)
+                                .await;
+                        }
+                        None => {
+                            // Cooperative terminal (normal completion).
+                            // Skip the direct eviction if
+                            // `cleanup_failed_request` already ran — its
+                            // pre-USAA branch retains state on purpose
+                            // so `on_usaa` can read `pending_failure`
+                            // and emit `mark_failed_onboarding` with
+                            // the real G1 ids; a direct
+                            // `states.remove` here would evict the
+                            // stash and silently lose the replay. The
+                            // post-USAA branch already removes state,
+                            // so this guard is a no-op there.
+                            let already_claimed = coord
+                                .state_for(&watcher_request_id)
+                                .map(|s| {
+                                    s.cleanup_claimed.load(std::sync::atomic::Ordering::Acquire)
+                                })
+                                .unwrap_or(false);
+                            if !already_claimed {
+                                coord.states.remove(&watcher_request_id);
+                            }
+                        }
+                    }
                 }
             },
         );
@@ -507,10 +634,48 @@ impl ConditionalDisaggCoordinator {
         tracing::info!("prefill run_setup: attached, draining commits");
 
         // 2. Drain commit stream.
+        //
+        // Each `next().await` is raced against the per-request
+        // CancellationToken so a peer detach / failure surfaced on
+        // the session's lifecycle stream (Detached / Failed) aborts
+        // the drain immediately. Without this, `commits.next()`
+        // stays Poll::Pending forever — the mpsc senders only drop
+        // when every `Arc<VeloSessionInner>` does, and run_setup
+        // itself holds one. Velo heartbeat covers Frame::Error,
+        // explicit detach, AND silent-stuck-peer (heartbeat loss),
+        // so this is the complete bail signal — no wall-clock
+        // timeout needed.
+        let cancel = state.cancel.clone();
         let mut commits = session.commits();
         let mut commit_seen = HashSet::new();
         let expected_count = bits.expected_hashes.len();
-        while let Some(d) = commits.next().await {
+        loop {
+            let next = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    // Tie tolerance: cancel and a normal terminator
+                    // (CommitsClosed, or sufficient Added) can land in
+                    // the same poll cycle. Take ONE synchronous poll —
+                    // if a delta is buffered, prefer it; bail only if
+                    // nothing is ready. The biased select would
+                    // otherwise spuriously fail an otherwise-successful
+                    // drain on the rare same-cycle race.
+                    match commits.next().now_or_never() {
+                        Some(d) => d,
+                        None => {
+                            anyhow::bail!(
+                                "prefill run_setup: session cancelled mid-commits-drain \
+                                 (seen {}/{}) for {}",
+                                commit_seen.len(),
+                                expected_count,
+                                request_id
+                            );
+                        }
+                    }
+                }
+                d = commits.next() => d,
+            };
+            let Some(d) = next else { break };
             match d {
                 CommitDelta::Added(hashes) => {
                     let n = hashes.len();
@@ -539,14 +704,34 @@ impl ConditionalDisaggCoordinator {
         }
         tracing::info!("prefill run_setup: commits drained, draining availability");
 
-        // 3. Drain availability and pull chunks.
+        // 3. Drain availability and pull chunks. Same cancellation
+        // discipline as the commits drain.
         *bits.status.lock() = PrefillStatus::Pulling;
         let mut avail = session.availability();
         let expected_set: HashSet<SequenceHash> = bits.expected_hashes.iter().copied().collect();
         let mut remaining: HashSet<SequenceHash> = expected_set.clone();
         let mut filled_index: usize = 0;
 
-        while let Some(d) = avail.next().await {
+        loop {
+            let next = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    // Tie tolerance — see the commits-drain comment.
+                    match avail.next().now_or_never() {
+                        Some(d) => d,
+                        None => {
+                            anyhow::bail!(
+                                "prefill run_setup: session cancelled mid-availability-drain \
+                                 ({} hash(es) still unavailable) for {}",
+                                remaining.len(),
+                                request_id
+                            );
+                        }
+                    }
+                }
+                d = avail.next() => d,
+            };
+            let Some(d) = next else { break };
             match d {
                 AvailabilityDelta::Available(blocks) => {
                     let chunk: Vec<CommittedBlock> = blocks
@@ -561,8 +746,28 @@ impl ConditionalDisaggCoordinator {
                     if chunk.is_empty() {
                         continue;
                     }
-                    self.pull_and_register_chunk(&request_id, &state, chunk, &mut filled_index)
-                        .await?;
+                    // Race the pull against the cancel. The pull awaits
+                    // `Frame::PullComplete` from the peer (see
+                    // velo.rs::pull); a hung peer that stops responding
+                    // to pull authorizations would otherwise pin the
+                    // setup task here even though the lifecycle stream
+                    // has surfaced Detached/Failed and run the
+                    // watcher's `cancel.cancel()`. Mirror the same
+                    // biased cancel-first shape as the drain loops.
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            anyhow::bail!(
+                                "prefill run_setup: session cancelled mid-pull \
+                                 ({} hash(es) still unavailable) for {}",
+                                remaining.len(),
+                                request_id
+                            );
+                        }
+                        r = self.pull_and_register_chunk(&request_id, &state, chunk, &mut filled_index) => {
+                            r?;
+                        }
+                    }
                     let registered = bits.registered_g2.lock();
                     remaining = expected_set.clone();
                     for b in registered.iter() {
@@ -654,8 +859,15 @@ impl ConditionalDisaggCoordinator {
         indexed.sort_by_key(|(idx, _)| *idx);
 
         // Group into maximal contiguous runs; each run is one
-        // pull/register transaction (positional order required by
-        // `MutableBlock::complete`).
+        // pull/register transaction. The contiguity keeps the
+        // `token_blocks_for_range(abs_start..abs_end)` lookup
+        // dense — without it we'd need to slice tokens
+        // per-block and the zip in
+        // `pull_and_register_contiguous_chunk` no longer aligns
+        // by position. `MutableBlock::complete` itself is
+        // position-agnostic (it just reads
+        // `token_block.kvbm_sequence_hash()`); the positional
+        // requirement is in the dense-range token lookup.
         let mut runs: Vec<Vec<(usize, CommittedBlock)>> = Vec::new();
         for entry in indexed {
             match runs.last_mut() {
@@ -778,6 +990,16 @@ impl ConditionalDisaggCoordinator {
         // external suffix beyond the local-prefix blocks vLLM
         // already has cached). Onboard the SUFFIX of registered_g2
         // matching the external_blocks count.
+        //
+        // `registered_g2` is appended in **arrival order** of the
+        // session's `availability()` stream — which may split into
+        // multiple `Available` deltas per CONTRACT §2.7/§2.8 (Stage 1
+        // decode-side G1→G2 prefix promotion is one documented
+        // source: local_match arrives synchronously at GNMT, the
+        // promoted prefix arrives later from the promotion task).
+        // We must sort by absolute position before taking the
+        // suffix so the pairing with `g1_dst_external` (which is
+        // positional, as handed to us by vLLM) stays correct.
         let registered_count = bits.registered_g2.lock().len();
         let external_blocks = g1_dst_external.len();
         if external_blocks > registered_count {
@@ -790,13 +1012,33 @@ impl ConditionalDisaggCoordinator {
                 bits.expected_hashes.len(),
             );
         }
-        let suffix_start = registered_count - external_blocks;
-        let g2_src_block_ids: Vec<BlockId> = bits
+        let positions: HashMap<SequenceHash, usize> = bits
+            .expected_hashes
+            .iter()
+            .enumerate()
+            .map(|(i, h)| (*h, i))
+            .collect();
+        let mut by_position: Vec<(usize, BlockId)> = bits
             .registered_g2
             .lock()
             .iter()
+            .map(|b| {
+                let hash = b.sequence_hash();
+                let pos = *positions.get(&hash).unwrap_or_else(|| {
+                    panic!(
+                        "kick_onboard: registered G2 block hash {hash:?} not in expected_hashes \
+                         — pull_and_register_chunk filters by expected, so this is unreachable",
+                    )
+                });
+                (pos, b.block_id())
+            })
+            .collect();
+        by_position.sort_by_key(|(pos, _)| *pos);
+        let suffix_start = registered_count - external_blocks;
+        let g2_src_block_ids: Vec<BlockId> = by_position
+            .into_iter()
             .skip(suffix_start)
-            .map(|b| b.block_id())
+            .map(|(_, id)| id)
             .collect();
 
         self.transport
@@ -899,14 +1141,19 @@ impl ConditionalDisaggCoordinator {
         self.states.remove(request_id);
     }
 
-    /// Map a [`LifecycleOutcome`] to a failure reason for the decode-side watcher,
-    /// or `None` for cooperative paths (Detached / StreamEnded).
-    fn decode_failure_reason(outcome: &LifecycleOutcome) -> Option<String> {
+    /// Map a [`LifecycleOutcome`] to a failure reason, or `None` for
+    /// cooperative paths (Detached / StreamEnded). Shared by both
+    /// prefill and decode lifecycle-watcher callbacks: cooperative
+    /// outcomes ride the normal eviction path (on_request_finished /
+    /// states.remove); failure outcomes trigger `cleanup_failed_request`
+    /// so vLLM gets `mark_failed_onboarding` and pre-USAA failures
+    /// stash for replay.
+    fn lifecycle_failure_reason(outcome: &LifecycleOutcome) -> Option<String> {
         match outcome {
             LifecycleOutcome::Detached { .. } | LifecycleOutcome::StreamEnded => None,
             LifecycleOutcome::Failed { reason } => Some(reason.clone()),
             LifecycleOutcome::WatchdogTimeout { watchdog } => Some(format!(
-                "decode lifecycle watchdog fired ({}s) without Detached or Failed",
+                "lifecycle watchdog fired ({}s) without Detached or Failed",
                 watchdog.as_secs()
             )),
         }
@@ -1035,7 +1282,42 @@ impl ConditionalDisaggCoordinator {
             prefix_g2,
             local_match_g2,
             prefill_token_ids,
+            lora_name,
+            salt,
+            pending_promotion_hashes,
         } = start;
+
+        // Loud-fail guards for not-yet-wired CD inputs at the decode
+        // enqueue site. The envelope mirrors `kv_hashing::Request` so
+        // future enablement of LoRA / salt / mm_info is a value change,
+        // not a wire-format change — but until each is exercised end-
+        // to-end, fail loud here so the first user with such a request
+        // gets a clear error instead of an RDMA-pull stall or silent
+        // hash divergence. Multimodal is blocked upstream in
+        // `kvbm/v2/vllm/schedulers/leader.py` (raises on
+        // `mm_features`/`mm_positions`), so `mm_info` is empty by
+        // construction here.
+        //
+        // PC-on (`inputs.num_computed_tokens > 0`) is intentionally NOT
+        // guarded here: decode-side enqueue with a non-zero
+        // already-computed prefix is well-formed. The mismatch surfaces
+        // on the PREFILL side when it tries to recompute absolute-coord
+        // PLHs from its windowed slot — see the matching bail in
+        // `ensure_started`.
+        if lora_name.is_some() {
+            anyhow::bail!(
+                "CD wire: LoRA not yet wired end-to-end for conditional disagg \
+                 (request_id={request_id}); decode-side request carried a LoRA adapter \
+                 but the prefill-side recompute path is not validated"
+            );
+        }
+        if salt.is_some() {
+            anyhow::bail!(
+                "CD wire: cache_salt not yet wired end-to-end for conditional disagg \
+                 (request_id={request_id}); decode-side request carried a cache_salt \
+                 but the prefill-side recompute path is not validated"
+            );
+        }
 
         if self.states.contains_key(request_id) {
             anyhow::bail!(
@@ -1070,9 +1352,22 @@ impl ConditionalDisaggCoordinator {
         // located via hash lookup against the session's available_pins.
         let prefix_hashes: Vec<SequenceHash> =
             prefix_g2.iter().map(|b| b.sequence_hash()).collect();
-        let mut session_hashes: Vec<SequenceHash> =
-            Vec::with_capacity(prefix_hashes.len() + local_match_hashes.len());
+        let promotion_pending = !pending_promotion_hashes.is_empty();
+        let mut session_hashes: Vec<SequenceHash> = Vec::with_capacity(
+            prefix_hashes.len() + pending_promotion_hashes.len() + local_match_hashes.len(),
+        );
+        // Stage 1: the promoted-prefix hashes occupy the same
+        // conceptual `[0, num_prefix_blocks)` slot as `prefix_g2`
+        // — they go BEFORE `local_match_hashes` (which lives at
+        // `[num_prefix_blocks, num_prefix_blocks + local_match)`)
+        // to preserve absolute-position ordering across the
+        // committed set. Including them up-front lets
+        // `finish_commits` seal the full planned set; the
+        // promotion task spawned at USAA will land the
+        // corresponding G2 blocks and call `session.make_available`
+        // + `session.finish_availability` then.
         session_hashes.extend_from_slice(&prefix_hashes);
+        session_hashes.extend_from_slice(&pending_promotion_hashes);
         session_hashes.extend_from_slice(&local_match_hashes);
         let session_g2: Vec<ImmutableBlock<G2>> =
             prefix_g2.into_iter().chain(local_match_g2).collect();
@@ -1080,11 +1375,18 @@ impl ConditionalDisaggCoordinator {
         let session_id = uuid::Uuid::new_v4();
         let session = self.session_factory.open(session_id)?;
 
-        // Holder side: publish commit + availability, then close terminators.
+        // Holder side: publish commit + availability, then close
+        // terminators. `finish_availability` is DEFERRED when a
+        // Stage 1 promotion is pending — the prefill peer drains
+        // availability until the close terminator lands, so we
+        // delay closing until the promotion task has called
+        // `session.make_available` with the promoted G2 blocks.
         session.commit(session_hashes)?;
         session.make_available(session_g2)?;
         session.finish_commits()?;
-        session.finish_availability()?;
+        if !promotion_pending {
+            session.finish_availability()?;
+        }
 
         // Build DecodeBits — remote_slots / remote_slot_index are empty at
         // this point; they get populated at USAA-1 in decode_leader.rs.
@@ -1099,6 +1401,11 @@ impl ConditionalDisaggCoordinator {
             remote_slot_index: HashMap::new(),
             remote_pipeline_complete: std::sync::atomic::AtomicBool::new(false),
             completed: std::sync::atomic::AtomicBool::new(false),
+            // Populated by the wrapper's `commit_usaa1` when a
+            // Stage 1 promotion is planned. `coordinator.release`
+            // takes the handle and defers `session.finalize`
+            // until the task completes.
+            pending_promotion_task: Mutex::new(None),
         };
 
         let state = CdRequest::new_decode(
@@ -1115,13 +1422,25 @@ impl ConditionalDisaggCoordinator {
         // If install fails, roll back coordinator state and close the
         // session — the wrapper has not yet committed to returning
         // (Some(N), true) for this request, so we abort cleanly.
+        //
+        // Order: close session, then remove from `states`. Matches the
+        // canonical `cleanup_failed_request` teardown order
+        // (close → remove); keeps observer semantics uniform across all
+        // rollback paths so any consumer of `states[request_id]` sees
+        // either {live state + live session} or {no state} but never a
+        // {live state + already-removed Arc<Session>} transient.
         if let Err(err) = install_payload(request_id) {
-            self.states.remove(request_id);
             session.close(Some(format!("payload install failed: {err}")));
+            self.states.remove(request_id);
             return Err(err);
         }
 
         // Spawn lifecycle watcher.
+        //
+        // Same cancel-then-evict pattern as the prefill watcher: any
+        // terminal lifecycle outcome cancels the per-request token so
+        // any in-flight decode-side task awaiting on session streams
+        // bails immediately (symmetric with prefill's `run_setup`).
         let watcher_coord = self.weak_self.clone();
         let watcher_request_id = request_id.to_string();
         spawn_lifecycle_watcher(
@@ -1132,8 +1451,11 @@ impl ConditionalDisaggCoordinator {
             session_id.to_string(),
             self.lifecycle_watchdog,
             move |outcome| async move {
-                let failure_reason = Self::decode_failure_reason(&outcome);
+                let failure_reason = Self::lifecycle_failure_reason(&outcome);
                 if let Some(coord) = watcher_coord.upgrade() {
+                    if let Some(state) = coord.state_for(&watcher_request_id) {
+                        state.cancel.cancel();
+                    }
                     if let Some(reason) = failure_reason {
                         coord
                             .invoke_decode_failure_sink_and_evict(&watcher_request_id, reason)
@@ -1147,15 +1469,45 @@ impl ConditionalDisaggCoordinator {
 
         let endpoint = session.endpoint();
 
+        // DNPT = decode's total committed prefix length (in tokens) from
+        // absolute position 0. Folds in the vLLM-decode G1 prefix
+        // (`inputs.num_computed_tokens`) AND the G2 local-match window
+        // decode just resolved (`local_match_hashes.len() * block_size`).
+        // Decode's slot's PLH chain at indices `[0, DNPT/BS)` covers
+        // exactly this range; the digest below pins that slice for the
+        // prefill-side verifier.
+        let block_size = self.inner.block_size();
+        let dnpt_tokens = inputs.num_computed_tokens + local_match_hashes.len() * block_size;
+        let dnpt_blocks = dnpt_tokens / block_size;
+        let provided_hashes: Vec<SequenceHash> = self
+            .inner
+            .slot_match_split(request_id)?
+            .all_sequence_hashes
+            .iter()
+            .take(dnpt_blocks)
+            .copied()
+            .collect();
+        // Defense-in-depth: digest covers the FULL `[0, DNPT/BS)` slice
+        // decode commits to serve. Prefill recomputes the same slice from
+        // its own slot's absolute-coord PLH chain and asserts the digest
+        // matches before accepting the dispatch.
+        let expected_hash_digest = Some(digest_provided_hashes(&provided_hashes));
+        let envelope = KvHashingRequestEnvelope {
+            lora_name,
+            salt,
+            mm_info: Vec::new(),
+        };
+
         let request = RemotePrefillRequest {
             protocol_version: DISAGG_PROTOCOL_VERSION,
             request_id: request_id.to_string(),
             session_id,
             initiator_instance_id,
             decode_endpoint: endpoint,
-            sequence_hashes: local_match_hashes,
             token_ids: prefill_token_ids,
-            num_computed_tokens: inputs.num_computed_tokens,
+            num_provided_tokens: dnpt_tokens,
+            request: envelope,
+            expected_hash_digest,
         };
 
         // Enqueue asynchronously so a slow queue doesn't block the sync caller.
@@ -1189,6 +1541,18 @@ impl ConditionalDisaggCoordinator {
         })
     }
 
+    /// Production-callable clone of the per-request CancellationToken
+    /// for `request_id`. Used by the decode-side remote-pipeline
+    /// spawn to race its session awaits against the lifecycle
+    /// watcher's cancel — same signal the coordinator's prefill
+    /// `run_setup` uses. Returns `None` if the request is no longer
+    /// tracked (e.g., lifecycle watcher already evicted the state).
+    pub fn cancel_for(&self, request_id: &str) -> Option<tokio_util::sync::CancellationToken> {
+        self.states
+            .get(request_id)
+            .map(|e| e.value().cancel.clone())
+    }
+
     pub fn session_for(&self, request_id: &str) -> Option<Arc<dyn Session>> {
         self.states
             .get(request_id)
@@ -1199,13 +1563,98 @@ impl ConditionalDisaggCoordinator {
         // Atomic remove() closes the get()-then-remove() race observed under
         // kv_load_failure_policy=recompute (see commit message for details).
         if let Some((_, state)) = self.states.remove(request_id) {
-            let session_opt = state.session.lock().clone();
-            let mut status = state.status.lock();
-            if *status != CdRequestStatus::Released {
-                *status = CdRequestStatus::Released;
+            self.finalize_released_state(state);
+        }
+    }
+
+    /// Identity-checked variant of [`Self::release`] for callers
+    /// that captured a specific `Arc<CdRequest>` snapshot and want
+    /// to release ONLY if the DashMap still holds that same Arc.
+    ///
+    /// Why this exists: the three spawn-replay paths in
+    /// `DecodeDisaggLeader` (decode_usaa pre-USAA replay,
+    /// commit_usaa1 outer replay, commit_usaa1 post-insert replay)
+    /// each await `mark_failed_onboarding` for unbounded time
+    /// before calling release. Under `kv_load_failure_policy=
+    /// recompute`, vLLM can reschedule the same `request_id` mid-
+    /// await; the spawn's release-by-name would then wipe the new
+    /// lifecycle's freshly-inserted state. Identity-checked release
+    /// (`Arc::ptr_eq` against the captured snapshot) makes the stale
+    /// release a no-op against the new lifecycle.
+    ///
+    /// Returns `true` if the matching state was removed and
+    /// finalize/deferred-finalize was driven; `false` if the
+    /// captured Arc no longer matches what the DashMap holds (a
+    /// new lifecycle replaced it, or it was already released).
+    pub fn release_if_matches(&self, request_id: &str, expected: &Arc<CdRequest>) -> bool {
+        match self
+            .states
+            .remove_if(request_id, |_, v| Arc::ptr_eq(expected, v))
+        {
+            Some((_, state)) => {
+                self.finalize_released_state(state);
+                true
             }
-            drop(status);
-            if let Some(session) = session_opt {
+            None => false,
+        }
+    }
+
+    fn finalize_released_state(&self, state: Arc<CdRequest>) {
+        let session_opt = state.session.lock().clone();
+        let mut status = state.status.lock();
+        if *status != CdRequestStatus::Released {
+            *status = CdRequestStatus::Released;
+        }
+        drop(status);
+
+        // Stage 1: when a Stage 1 G1→G2 promotion task is in
+        // flight, defer `session.finalize` until the task has
+        // landed (or failed). `finalize` implies
+        // `CommitsClosed + Drained` per session CONTRACT §2.13
+        // — sending Drained before the promotion's
+        // `make_available` lands would close the availability
+        // stream on the prefill peer and strand it with
+        // unfillable hashes. Awaiting the JoinHandle here keeps
+        // the finalize ordered after the task's session ops.
+        //
+        // `state` is the Arc<CdRequest> we just removed from
+        // the DashMap; the spawned task moves it in to hold
+        // the Mutex<JoinHandle> alive. The promotion task
+        // itself holds the session Arc independently — even if
+        // the request is torn down, the task runs to completion
+        // and the G2 blocks remain in cache.
+        let promotion_handle = state
+            .as_decode()
+            .and_then(|bits| bits.pending_promotion_task.lock().take());
+
+        if let Some(session) = session_opt {
+            if let Some(promotion) = promotion_handle {
+                self.runtime.spawn(async move {
+                    // The task's bool return signals whether
+                    // finalize is needed (true) or already
+                    // subsumed by an in-task `session.close`
+                    // (false). A panicked / cancelled JoinHandle
+                    // (JoinError) is treated as "skip finalize"
+                    // — we cannot prove the session is still in
+                    // a finalize-able state, and the lifecycle
+                    // watcher will surface the failure path.
+                    match promotion.await {
+                        Ok(true) => {
+                            session.finalize(Some("released after promotion".to_string()));
+                        }
+                        Ok(false) => {
+                            // promotion task called session.close; nothing to do.
+                        }
+                        Err(join_err) => {
+                            tracing::warn!(
+                                error = %join_err,
+                                "promotion task join error in deferred release; \
+                                 skipping finalize"
+                            );
+                        }
+                    }
+                });
+            } else {
                 session.finalize(Some("released".to_string()));
             }
         }
@@ -1309,45 +1758,98 @@ impl ConditionalDisaggCoordinator {
         }
 
         let block_size = self.inner.block_size();
-        // Decode forwarded `params.sequence_hashes` covering positions
-        // [D, D + N*BS) where D = `params.num_computed_tokens` (decode
-        // side). The connector pulls all N hashes into G2 regardless
-        // of `prefill_num_computed_tokens` (P) — this lets retries
-        // with a new P just re-derive the external count without
-        // re-slicing in-flight pulls. The slot-side onboard at USAA
-        // takes the SUFFIX of the pulled blocks corresponding to
-        // [P, D + N*BS).
-        let decode_offset_tokens = params.num_computed_tokens;
-        let total_position_end_tokens =
-            decode_offset_tokens + params.sequence_hashes.len() * block_size;
+        // DNPT = decode's total committed prefix in tokens (folds in
+        // both vLLM-decode's G1 prefix and the G2 local-match window).
+        // Decode sends the FULL prompt `token_ids` on the wire, so
+        // prefill's slot is built from the same full sequence and its
+        // PLH chain is in ABSOLUTE coordinates — bit-identical to
+        // decode's by construction. Decode's slot's PLH chain at
+        // `[0, DNPT/BS)` covers exactly what decode commits to serve.
+        //
+        // Today prefill pulls all of `[0, DNPT/BS)` (conservative —
+        // over-pull instead of under-pull). The future PNCT
+        // optimization will narrow this to `[PNCT/BS, DNPT/BS)` so
+        // prefill skips hashes it already has locally; that requires
+        // computing PNCT from prefill-vLLM's GNMT hint + prefill's own
+        // G2/G3 local-match search.
+        let dnpt_tokens = params.num_provided_tokens;
+        let dnpt_blocks = dnpt_tokens / block_size;
+        let total_position_end_tokens = dnpt_tokens;
         let num_external_tokens =
             total_position_end_tokens.saturating_sub(prefill_num_computed_tokens);
-        let expected_hashes: Vec<SequenceHash> = params.sequence_hashes.clone();
-        // `expected_hashes[i]` lands at absolute token-block index
-        // `D/BS + i`; `pull_and_register_*` uses this to translate to
-        // `token_blocks_for_range`.
-        let computed_blocks_offset = decode_offset_tokens / block_size;
-        if prefill_num_computed_tokens > decode_offset_tokens {
+        // `computed_blocks_offset` is the absolute-coordinate offset
+        // where `expected_hashes` starts. Currently 0 because we pull
+        // the full `[0, DNPT/BS)` range; when PNCT-aware pulls land,
+        // this becomes `PNCT/BS`. `pull_and_register_*` uses it to
+        // translate the local position-i element of `expected_hashes`
+        // to the peer's absolute token-block index `offset + i`.
+        let computed_blocks_offset = 0;
+        if prefill_num_computed_tokens > dnpt_tokens {
             crate::audit!(
-                "prefill_local_prefix_overlap",
+                "prefill_local_prefix_exceeds_decode_commitment",
                 role = "prefill",
                 request_id = %request_id,
-                decode_offset_tokens = decode_offset_tokens,
+                dnpt_tokens = dnpt_tokens,
                 prefill_num_computed_tokens = prefill_num_computed_tokens,
-                total_position_end_tokens = total_position_end_tokens,
                 num_external_tokens = num_external_tokens
             );
         }
 
-        // Compute expected output hashes and install the observer entry.
+        // Slice prefill's locally-computed PLH chain `[0, DNPT/BS)` —
+        // these are the hashes prefill will RDMA-pull from decode.
         let split = self.inner.slot_match_split(request_id)?;
-        let pulled: HashSet<SequenceHash> = params.sequence_hashes.iter().copied().collect();
+        if dnpt_blocks > split.all_sequence_hashes.len() {
+            anyhow::bail!(
+                "CD prefill: DNPT window [0, {dnpt_blocks}) exceeds prefill slot's \
+                 hashed block count {} (request_id={request_id}); prefill slot's \
+                 token_ids must cover at least decode's DNPT range",
+                split.all_sequence_hashes.len()
+            );
+        }
+        let expected_hashes: Vec<SequenceHash> = split.all_sequence_hashes[..dnpt_blocks].to_vec();
+
+        // Defense-in-depth: if decode shipped a digest, assert our
+        // recomputed `[0, DNPT/BS)` slice matches bit-for-bit.
+        // Mismatch means decode and prefill disagree on the hashing
+        // inputs (missed salt/LoRA propagation, hasher version skew,
+        // etc.) — fail loud here so the operator sees the real cause
+        // instead of an RDMA-pull stall.
+        if let Some(expected_digest) = params.expected_hash_digest {
+            let local_digest = digest_provided_hashes(&expected_hashes);
+            if local_digest != expected_digest {
+                anyhow::bail!(
+                    "CD hash divergence (request_id={request_id}): \
+                     decode_digest=0x{expected_digest:016x} \
+                     prefill_digest=0x{local_digest:016x}; \
+                     KvHashingRequestEnvelope inputs do not match across decode/prefill"
+                );
+            }
+        }
+
+        let pulled: HashSet<SequenceHash> = expected_hashes.iter().copied().collect();
         let expected_outputs: HashSet<SequenceHash> = split
             .all_sequence_hashes
             .iter()
             .filter(|h| !pulled.contains(h))
             .copied()
             .collect();
+
+        // Q6 + reconciliation: tokens the prefill worker is asked to forward-pass
+        // (the net-new blocks beyond the decode-provided prefix). Block-aligned,
+        // so it reconciles 1:1 with the decode-side Q4 (remote_compute_tokens).
+        // Also record the complementary pulled-from-decode prefix (PULLED, not
+        // computed) so the two are never conflated. Runs once per request (past
+        // the idempotent-retry early return above).
+        if let Some(cd) = self.inner.cd_metrics() {
+            cd.record_prefill_computed_tokens((expected_outputs.len() * block_size) as u64);
+            cd.record_prefill_pulled_tokens((pulled.len() * block_size) as u64);
+            // Q7: of the pulled prefix, how much the prefill worker already had
+            // cached locally (its vLLM-G1 prefix-cache hit) — over-pulled today;
+            // the genuine pull supplement = pulled − this = num_external_tokens.
+            // LOWER BOUND: excludes prefill's own G2/G3 match (future PNCT work).
+            cd.record_prefill_local_hit_tokens(prefill_num_computed_tokens as u64);
+        }
+
         let observer_handle: ObserverHandle = self
             .observer
             .track(request_id.to_string(), expected_outputs);
@@ -1404,7 +1906,7 @@ impl ConditionalDisaggCoordinator {
             request_id = %request_id_owned,
             session_id = %params.session_id,
             initiator = %params.initiator_instance_id,
-            num_sequence_hashes = params.sequence_hashes.len()
+            num_provided_tokens = params.num_provided_tokens
         );
 
         self.runtime.spawn(async move {
@@ -1580,17 +2082,43 @@ impl ConditionalDisaggCoordinator {
 
         bits.request_finished_seen.store(true, Ordering::Release);
 
-        // Defer finalize until observer residual drains (invariant #16).
+        // Mark the coarse status Released; per-side PrefillStatus is
+        // also set to Released for consistency.
+        *bits.status.lock() = PrefillStatus::Released;
+
+        // Defer finalize + state eviction until observer residual
+        // drains (invariant #16). Critical: the spawn task must hold
+        // a strong `Arc<CdRequest>` for the duration. The state's
+        // `ObserverHandle` RAII-evicts the observer's pending entry
+        // when CdRequest's last Arc drops — if we let `states.remove`
+        // (here or from a concurrent path) drop the last strong
+        // reference, `has_pending(rid)` would short-circuit to false
+        // and the wait loop would exit before forward-pass output
+        // actually drained, dropping the chunked-prefill stream.
+        // Holding the state across the wait keeps the entry live;
+        // we explicitly remove from `coord.states` ONLY after
+        // session.finalize and then drop the state Arc.
+        //
+        // `request_finished` is vLLM's canonical teardown signal —
+        // the remove is unconditional so it closes the prior TOCTOU
+        // race between `cleanup_claimed.load` and
+        // `cleanup_failed_request`'s CAS (concurrent failure +
+        // request_finished could otherwise leak state). DashMap.remove
+        // is idempotent against the other eviction paths.
         let session_opt = state.session.lock().clone();
         let observer = Arc::clone(&self.observer);
         let request_id_owned = request_id.to_string();
         let runtime = self.runtime.clone();
+        let coord_weak = self.weak_self.clone();
+        let state_for_spawn = Arc::clone(&state);
+        let cd = self.inner.cd_metrics();
         runtime.spawn(async move {
             const FINALIZE_WAIT: Duration = Duration::from_secs(10);
             const POLL_INTERVAL: Duration = Duration::from_millis(2);
 
             let deadline = tokio::time::Instant::now() + FINALIZE_WAIT;
             let mut waited_for_observer = false;
+            let mut residual_undrained = false;
             while observer.has_pending(&request_id_owned) {
                 waited_for_observer = true;
                 if tokio::time::Instant::now() >= deadline {
@@ -1606,6 +2134,7 @@ impl ConditionalDisaggCoordinator {
                         request_id = %request_id_owned,
                         wait_secs = FINALIZE_WAIT.as_secs()
                     );
+                    residual_undrained = true;
                     break;
                 }
                 tokio::time::sleep(POLL_INTERVAL).await;
@@ -1617,16 +2146,29 @@ impl ConditionalDisaggCoordinator {
                     request_id = %request_id_owned
                 );
             }
+            // Reconciliation signal: did the prefill produce all the net-new
+            // blocks the decode expected (Q6 set)? `undrained` = under-produced
+            // (the within-prefill divergence that would surface a USAA-1-class
+            // accounting bug as a metric, not a crash). Only recorded for requests
+            // that actually had pending output (genuine remote-prefill work).
+            if let Some(cd) = &cd {
+                if residual_undrained {
+                    cd.record_prefill_output_residual("undrained");
+                } else if waited_for_observer {
+                    cd.record_prefill_output_residual("drained");
+                }
+            }
             if let Some(session) = session_opt {
                 session.finalize(Some("request_finished".to_string()));
             }
+            if let Some(coord) = coord_weak.upgrade() {
+                coord.states.remove(&request_id_owned);
+            }
+            // Explicit drop after `states.remove` so the ObserverHandle
+            // RAII eviction runs deterministically here, not as a side
+            // effect of a different code path racing the same `state`.
+            drop(state_for_spawn);
         });
-
-        // Mark the coarse status Released; per-side PrefillStatus is
-        // also set to Released for consistency.
-        *bits.status.lock() = PrefillStatus::Released;
-        // Note: do NOT remove RequestState here — the lifecycle watcher
-        // removes it on Detach or watchdog.
     }
 }
 

@@ -38,9 +38,10 @@ use kvbm_connector::connector::leader::disagg::testing::{
 };
 use kvbm_connector::connector::leader::disagg::{
     AlwaysRemote, ConditionalDisaggCoordinator, ConnectorLeaderApi, CoordinatorParts,
-    DecodeDisaggLeader, HubWiring,
+    DecodeDisaggLeader, DecodeTierCache, HubWiring,
 };
-use kvbm_engine::p2p::session::{CommittedBlock, MockSessionFactory};
+use kvbm_protocols::disagg::BreakerTier;
+use kvbm_engine::p2p::session::{CommittedBlock, LifecycleEvent, MockSessionFactory};
 use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
 use kvbm_engine::testing::token_blocks::{create_token_sequence, generate_sequence_hashes};
 use kvbm_logical::manager::BlockManager;
@@ -80,9 +81,41 @@ struct TestHarness {
     coordinator: Arc<ConditionalDisaggCoordinator>,
     all_hashes: Vec<kvbm_logical::SequenceHash>,
     g1_block_ids: Vec<usize>,
+    /// P2 CD-breaker tier cache shared with the wrapper. Tests drive the cached
+    /// tier through this (the production write path is the velo TIER_SIGNAL
+    /// handler; the cache + GNMT read are what these tests exercise).
+    tier_cache: Arc<DecodeTierCache>,
 }
 
 fn build_harness() -> TestHarness {
+    // Default: unlimited budget, overload-fallback enabled (matches the
+    // production decode default). Tests that exercise the budget-exhaustion
+    // downgrade use `build_harness_with`.
+    build_harness_with(usize::MAX, true)
+}
+
+/// Parameterized harness builder for the Approach B-GNMT overload-fallback
+/// tests. `max_inflight` sets the inflight token budget (set it `< 96` — the
+/// `full_block_external_tokens` for this layout, `(LOCAL+REMOTE)=6` blocks ×
+/// `BLOCK_SIZE` 16 — to trip the exhaustion branch at the first request).
+/// `local_fallback` sets `DisaggConfig::cd_local_fallback_on_overload`. The
+/// tier cache defaults to Calm (== prior behavior); breaker tests use
+/// [`build_harness_with_tier`] to inject a hotter starting tier.
+fn build_harness_with(max_inflight: usize, local_fallback: bool) -> TestHarness {
+    build_harness_with_tier(max_inflight, local_fallback, BreakerTier::Calm)
+}
+
+/// Like [`build_harness_with`] but seeds the decode's CD-breaker tier cache to
+/// `tier`. The cache is injected via `HubWiring.tier_cache` — the same field
+/// that `None`s into a fresh default in production — so the GNMT read path is
+/// exercised exactly as in production, only the writer (the velo TIER_SIGNAL
+/// handler) is replaced by a direct seed here. `BreakerTier::Calm` reproduces
+/// the pre-breaker behavior bit-for-bit (regression guard).
+fn build_harness_with_tier(
+    max_inflight: usize,
+    local_fallback: bool,
+    tier: BreakerTier,
+) -> TestHarness {
     let g2_manager = build_g2_manager(32);
 
     let token_sequence = create_token_sequence(TOTAL_BLOCKS, BLOCK_SIZE, 100);
@@ -115,7 +148,7 @@ fn build_harness() -> TestHarness {
         assigned_block_ids: parking_lot::Mutex::new(None),
         gnmt_result: (Some(LOCAL_BLOCKS * BLOCK_SIZE), true),
         usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
-        transfer_params: None,
+        transfer_params: parking_lot::Mutex::new(None),
         ..MockSlot::default()
     };
     inner.install_slot("req-1", slot);
@@ -142,8 +175,14 @@ fn build_harness() -> TestHarness {
 
     let cfg = DisaggConfig {
         role: DisaggregationRole::Decode,
-        max_inflight_remote_prefill_tokens: usize::MAX,
+        max_inflight_remote_prefill_tokens: max_inflight,
+        cd_local_fallback_on_overload: local_fallback,
+        ..Default::default()
     };
+    // Seed the injected tier cache (epoch 1 so it is "set"; Calm @ any epoch is
+    // the pre-breaker behavior either way).
+    let tier_cache = Arc::new(DecodeTierCache::default());
+    assert!(tier_cache.apply(tier, 1), "seed tier cache");
     let wrapper = DecodeDisaggLeader::from_parts(
         inner.clone(),
         &cfg,
@@ -155,6 +194,7 @@ fn build_harness() -> TestHarness {
             hub: None,
             client: None,
             hub_velo_id: None,
+            tier_cache: Some(Arc::clone(&tier_cache)),
         },
     );
 
@@ -168,6 +208,7 @@ fn build_harness() -> TestHarness {
         coordinator,
         all_hashes,
         g1_block_ids,
+        tier_cache,
     }
 }
 
@@ -210,22 +251,36 @@ async fn cd_decode_happy_path() -> Result<()> {
     wait_until(|| h.queue.snapshot().len() == 1).await;
     let queued = h.queue.snapshot();
     assert_eq!(queued[0].request_id, "req-1");
-    // sequence_hashes carries the local-match (what prefill will pull
-    // from us), not the remote slice — symmetric-API wire semantics.
-    assert_eq!(queued[0].sequence_hashes, local_match_hashes(&h));
-    // num_computed_tokens carries the decode-side gnmt argument
-    // (decode-already-computed prefix), so prefill knows where the
-    // sequence_hashes blocks live in absolute position.
-    assert_eq!(queued[0].num_computed_tokens, COMPUTED_BLOCKS * BLOCK_SIZE);
-    // token_ids carries only the prefill-window slice — decode keeps
-    // its already-computed prefix and the partial tail block.
+    // num_provided_tokens (DNPT) folds both the vLLM-decode G1 prefix
+    // and the G2 local-match window into a single absolute-tokens
+    // commitment from position 0. PLH values are NOT on the wire —
+    // prefill recomputes them locally from its own slot's full hash
+    // chain over the same token range.
+    assert_eq!(
+        queued[0].num_provided_tokens,
+        (COMPUTED_BLOCKS + local_match_hashes(&h).len()) * BLOCK_SIZE
+    );
+    // token_ids carries the FULL prompt up to the partial tail block —
+    // prefill must build its TokenBlockSequence from the same tokens
+    // decode hashed so the absolute-coord PositionalLineageHash chain
+    // matches. `num_computed_tokens` rides separately on the wire so
+    // prefill skips actually recomputing the prefix portion.
     assert_eq!(
         queued[0].token_ids.len(),
-        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE
+        (COMPUTED_BLOCKS + LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE
     );
 
     let session = h.factory.last_opened().expect("decode opened a session");
-    assert_eq!(session.commit_calls(), vec![local_match_hashes(&h)]);
+    // Stage 1: the GNMT-time commit covers BOTH the planned-promoted
+    // prefix and the local-match window (the prefix is in vLLM's G1
+    // but not yet in decode's G2 — `MockInnerLeaderShim`'s
+    // `find_prefix_g2_blocks` returns empty, which triggers the
+    // promotion planner). `make_available` at GNMT still exposes
+    // only the currently-G2-resident set (local match); the
+    // promotion task lands the prefix G2 blocks at USAA.
+    let mut expected_first_commit = h.all_hashes[..COMPUTED_BLOCKS].to_vec();
+    expected_first_commit.extend(local_match_hashes(&h));
+    assert_eq!(session.commit_calls(), vec![expected_first_commit]);
     assert_eq!(session.make_available_calls(), vec![local_match_hashes(&h)]);
 
     // 2. USAA-1 — local kick spawns; remote pull pipeline subscribes.
@@ -271,19 +326,336 @@ async fn cd_decode_happy_path() -> Result<()> {
     wait_until(|| h.workers.completed_contains("req-1")).await;
     assert_eq!(h.wrapper.inflight_available(), usize::MAX);
     assert!(!h.wrapper.has_active_cd_request("req-1"));
+
+    // Stage 1: with COMPUTED_BLOCKS > 0, the GNMT-time
+    // `find_prefix_g2_blocks` returns empty → a promotion task is
+    // in flight. `coordinator.release` defers `session.finalize`
+    // until the task completes (per session CONTRACT §2.13,
+    // finalize would otherwise emit Drained and pre-empt the
+    // task's make_available). Resolve the promotion here so the
+    // finalize-defer chain can run to completion.
+    h.inner.wait_promotion_count(1).await;
+    let slot = h.inner.slot("req-1").expect("slot installed");
+    let prefix_token_blocks: Vec<_> = slot.token_blocks[..COMPUTED_BLOCKS].to_vec();
+    let mutables = h
+        .inner
+        .g2_manager()
+        .allocate_blocks(COMPUTED_BLOCKS)
+        .expect("allocate prefix G2");
+    let completes: Vec<_> = mutables
+        .into_iter()
+        .zip(prefix_token_blocks.iter())
+        .map(|(m, tb)| m.complete(tb).expect("complete prefix G2"))
+        .collect();
+    let promoted_g2 = h.inner.g2_manager().register_blocks(completes);
+    h.inner.resolve_promotion(0, Ok(promoted_g2));
+
     // Decode now signals cooperative finalize, NOT close().
     // close() is reserved for the abort path; happy-path
     // shutdown goes through finalize() and waits for the
     // peer's symmetric finalize to fire the rendezvous.
-    assert!(
-        session.finished_reason().is_some(),
-        "decode coordinator must signal session.finalize() on cooperative end"
-    );
+    wait_until(|| session.finished_reason().is_some()).await;
     assert!(
         session.closed_reason().is_none(),
         "decode must NOT call session.close() on the happy path"
     );
 
+    Ok(())
+}
+
+// ============================================================================
+// Approach B-GNMT: decode-side prefill downgrade under hub prefill-router
+// overload (proxied by inflight-budget exhaustion).
+//
+// Layout: full_block_external_tokens = (LOCAL + REMOTE) = 6 blocks × 16 = 96.
+// A budget of 64 (< 96) makes `try_reserve(96)` fail on the FIRST request,
+// hitting the exhaustion branch in `decode_gnmt`.
+// ============================================================================
+
+/// Overload + fallback ENABLED ⇒ the Remote decision is DOWNGRADED to a local
+/// prefill: GNMT returns the inner passthrough `(Some(LOCAL*BS), true)` — i.e.
+/// vLLM gets a definite answer (NOT `(None, false)` defer) — AND no CD state is
+/// installed (no queued request, no `cd_request_state`, no budget held). This
+/// is behaviorally identical to a policy-`Local` decision: nothing to unwind,
+/// no new failure path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_overload_fallback_downgrades_remote_to_local() -> Result<()> {
+    let h = build_harness_with(64, true);
+
+    h.wrapper.create_slot(make_request())?;
+
+    // Inner local-match GNMT result is (Some(LOCAL*BS), true); the wrapper
+    // passes that THROUGH on the downgrade (mirroring the zero-block downgrade).
+    let (count, async_flag) = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    assert_eq!(
+        count,
+        Some(LOCAL_BLOCKS * BLOCK_SIZE),
+        "downgrade returns the inner local-match passthrough, not the remote window"
+    );
+    assert!(
+        async_flag,
+        "passthrough preserves the inner async flag (here true) — NOT the (None,false) defer"
+    );
+
+    // No CD state was installed: no remote-prefill was queued, no per-request
+    // state, and the budget was never charged.
+    assert_eq!(
+        h.queue.snapshot().len(),
+        0,
+        "downgrade must NOT enqueue a remote prefill"
+    );
+    assert!(
+        !h.wrapper.has_active_cd_request("req-1"),
+        "downgrade must NOT install cd_request_state"
+    );
+    assert_eq!(
+        h.wrapper.inflight_available(),
+        64,
+        "downgrade reserves nothing — budget is untouched"
+    );
+    assert!(
+        h.factory.last_opened().is_none(),
+        "downgrade must NOT open a CD session"
+    );
+
+    Ok(())
+}
+
+/// Overload + fallback DISABLED ⇒ the prior behavior is preserved: GNMT returns
+/// `(None, false)` (vLLM defers/spins), nothing is queued, no CD state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_overload_no_fallback_defers_as_before() -> Result<()> {
+    let h = build_harness_with(64, false);
+
+    h.wrapper.create_slot(make_request())?;
+
+    let (count, async_flag) = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    assert_eq!(count, None, "fallback disabled ⇒ defer (None)");
+    assert!(!async_flag, "defer is (None, false)");
+
+    assert_eq!(h.queue.snapshot().len(), 0);
+    assert!(!h.wrapper.has_active_cd_request("req-1"));
+    assert_eq!(h.wrapper.inflight_available(), 64);
+    assert!(h.factory.last_opened().is_none());
+
+    Ok(())
+}
+
+/// Sufficient budget (no overload) ⇒ the Remote decision is UNCHANGED whether
+/// or not the fallback is enabled: GNMT queues the remote prefill and returns
+/// the full external window. Confirms the fallback only narrows under overload
+/// and never alters the normal-load Remote path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_no_overload_remote_unchanged_with_fallback_enabled() -> Result<()> {
+    // 96 == full_block_external_tokens for this layout; reservation succeeds.
+    let h = build_harness_with(96, true);
+
+    h.wrapper.create_slot(make_request())?;
+
+    let (count, async_flag) = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    assert_eq!(
+        count,
+        Some((LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE),
+        "with budget, Remote returns the full external window (disaggregates)"
+    );
+    assert!(async_flag);
+
+    wait_until(|| h.queue.snapshot().len() == 1).await;
+    assert_eq!(h.queue.snapshot()[0].request_id, "req-1");
+    assert!(
+        h.wrapper.has_active_cd_request("req-1"),
+        "Remote path installs cd_request_state"
+    );
+    assert_eq!(
+        h.wrapper.inflight_available(),
+        0,
+        "Remote reserved the full 96-token window"
+    );
+
+    Ok(())
+}
+
+// ============================================================================
+// P2: CD prefill-overload circuit breaker — decode-side CALM/HOT GNMT logic.
+//
+// The breaker only ever NARROWS disaggregation. CALM (== default, == breaker
+// disabled) is byte-identical to today; HOT coarsely downgrades a would-be
+// Remote to a local prefill via the EXISTING `inner_result` actuator, with the
+// SAME four post-conditions as the B-GNMT overload downgrade
+// (`cd_decode_overload_fallback_downgrades_remote_to_local`): no queue enqueue,
+// no cd_request_state, budget untouched, no session opened.
+// ============================================================================
+
+/// (a) Regression guard: breaker DISABLED ⇒ a Calm tier cache ⇒ the Remote
+/// GNMT DECISION matches today. This asserts a SUBSET of `cd_decode_happy_path`,
+/// namely the GNMT-time disaggregation decision and its immediate side effects:
+/// the returned `(count, async_flag)`, that one remote-prefill request is
+/// enqueued for `req-1`, that cd_request_state is installed, and that a session
+/// is opened. It does NOT re-assert the wire-payload shape (num_provided_tokens
+/// / token_ids / commit / make_available) or the full USAA-1 → pull → onboard →
+/// completion lifecycle — `cd_decode_happy_path` already covers those, and a
+/// Calm tier reuses that exact code path unchanged. So this is a "same GNMT
+/// decision as today" guard, not a byte-for-byte equivalence over the whole
+/// pipeline. With an unlimited budget the request disaggregates exactly as
+/// before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_breaker_calm_matches_today_gnmt_decision() -> Result<()> {
+    // Calm @ unlimited budget == build_harness() default.
+    let h = build_harness_with_tier(usize::MAX, true, BreakerTier::Calm);
+    assert_eq!(h.tier_cache.tier(), BreakerTier::Calm);
+
+    h.wrapper.create_slot(make_request())?;
+    let (count, async_flag) = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    // Identical to cd_decode_happy_path's GNMT result: the full external window
+    // is disaggregated.
+    assert_eq!(
+        count,
+        Some((LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE),
+        "CALM must disaggregate exactly as today"
+    );
+    assert!(async_flag);
+
+    wait_until(|| h.queue.snapshot().len() == 1).await;
+    assert_eq!(h.queue.snapshot()[0].request_id, "req-1");
+    assert!(
+        h.wrapper.has_active_cd_request("req-1"),
+        "CALM Remote path installs cd_request_state"
+    );
+    assert!(
+        h.factory.last_opened().is_some(),
+        "CALM Remote path opens a session"
+    );
+    Ok(())
+}
+
+/// (c) HOT ⇒ the would-be Remote returns the inner passthrough `(Some(LOCAL*BS),
+/// true)` and installs NO CD state — the SAME four post-conditions as
+/// `cd_decode_overload_fallback_downgrades_remote_to_local`, PLUS the decode
+/// decision label `remote_downgraded_breaker_hot`. Budget is unlimited here, so
+/// the ONLY thing that downgrades is the breaker (not the B-GNMT budget path).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_breaker_hot_downgrades_remote_to_local() -> Result<()> {
+    // Unlimited budget: the B-GNMT overload path is unreachable (try_reserve
+    // always succeeds). Any downgrade is attributable to the breaker alone.
+    let h = build_harness_with_tier(usize::MAX, true, BreakerTier::Hot);
+    assert_eq!(h.tier_cache.tier(), BreakerTier::Hot);
+
+    h.wrapper.create_slot(make_request())?;
+
+    let (count, async_flag) = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    assert_eq!(
+        count,
+        Some(LOCAL_BLOCKS * BLOCK_SIZE),
+        "HOT downgrade returns the inner local-match passthrough, not the remote window"
+    );
+    assert!(
+        async_flag,
+        "HOT downgrade preserves the inner async flag (true) — NOT a (None,false) defer"
+    );
+
+    // The four post-conditions, identical to the overload-fallback downgrade.
+    assert_eq!(
+        h.queue.snapshot().len(),
+        0,
+        "HOT downgrade must NOT enqueue a remote prefill"
+    );
+    assert!(
+        !h.wrapper.has_active_cd_request("req-1"),
+        "HOT downgrade must NOT install cd_request_state"
+    );
+    assert_eq!(
+        h.wrapper.inflight_available(),
+        usize::MAX,
+        "HOT downgrade reserves nothing — budget is untouched"
+    );
+    assert!(
+        h.factory.last_opened().is_none(),
+        "HOT downgrade must NOT open a CD session"
+    );
+
+    // The HOT-downgrade decode-decision metric is recorded (the mock now hands
+    // the wrapper a REAL CdMetrics, so the GNMT `record_decision` is live, not
+    // dead). This is the hot-path decision label asserted end-to-end.
+    let cd = h.inner.cd_metrics_handle();
+    assert_eq!(
+        cd.prefill_decisions_total
+            .with_label_values(&["remote_downgraded_breaker_hot"])
+            .get(),
+        1,
+        "HOT downgrade must record the remote_downgraded_breaker_hot decision"
+    );
+    Ok(())
+}
+
+/// (d) Narrows-only: a HOT breaker can only ever produce LESS Remote than CALM,
+/// never more. Drive the identical request under CALM (disaggregates: queued +
+/// session + budget charged) and under HOT (downgraded: nothing queued, no
+/// session) and assert HOT's Remote footprint is strictly smaller.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_breaker_hot_narrows_only_vs_calm() -> Result<()> {
+    // CALM baseline.
+    let calm = build_harness_with_tier(usize::MAX, true, BreakerTier::Calm);
+    calm.wrapper.create_slot(make_request())?;
+    let _ = calm
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    wait_until(|| calm.queue.snapshot().len() == 1).await;
+    let calm_queued = calm.queue.snapshot().len();
+    let calm_session = calm.factory.last_opened().is_some();
+
+    // HOT.
+    let hot = build_harness_with_tier(usize::MAX, true, BreakerTier::Hot);
+    hot.wrapper.create_slot(make_request())?;
+    let _ = hot
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    // Give any (erroneous) spawn a chance to enqueue before asserting absence.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let hot_queued = hot.queue.snapshot().len();
+    let hot_session = hot.factory.last_opened().is_some();
+
+    assert_eq!(calm_queued, 1, "CALM disaggregates (1 queued)");
+    assert!(calm_session, "CALM opens a session");
+    assert_eq!(hot_queued, 0, "HOT enqueues nothing");
+    assert!(!hot_session, "HOT opens no session");
+    assert!(
+        hot_queued <= calm_queued,
+        "narrows-only: HOT must not produce MORE Remote than CALM"
+    );
+    Ok(())
+}
+
+/// WARM is P3 — in P2 it is treated as CALM (never a downgrade). Confirm a WARM
+/// tier disaggregates exactly like CALM (so narrows-only holds: WARM never
+/// produces more, and in P2 never less, than CALM).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_breaker_warm_treated_as_calm_in_p2() -> Result<()> {
+    let h = build_harness_with_tier(usize::MAX, true, BreakerTier::Warm);
+    assert_eq!(h.tier_cache.tier(), BreakerTier::Warm);
+
+    h.wrapper.create_slot(make_request())?;
+    let (count, async_flag) = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    assert_eq!(
+        count,
+        Some((LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE),
+        "WARM (P2) disaggregates like CALM"
+    );
+    assert!(async_flag);
+    wait_until(|| h.queue.snapshot().len() == 1).await;
+    assert!(h.wrapper.has_active_cd_request("req-1"));
+    assert!(h.factory.last_opened().is_some());
     Ok(())
 }
 
@@ -779,8 +1151,1405 @@ async fn cd_decode_commits_closed_short_fails_request() -> Result<()> {
     Ok(())
 }
 
+/// Concurrent `cleanup_failed_request` must invoke
+/// `mark_failed_onboarding` at most once for the same request_id.
+/// Five connector-spawned paths race here in production: the lifecycle
+/// watcher's failure-sink route, commit_usaa1's local-kick / remote-
+/// pipeline / session-missing spawns, and the enqueue-spawn Err.
+/// Without the `cleanup_claimed` CAS on `CdRequestState`, two paths
+/// can both observe non-empty `unfilled_ids` and both push a
+/// `mark_failed_onboarding` call before either's `release_request`
+/// removes the wrapper entry — vLLM gets double-notified for the
+/// same failed G1 window.
+///
+/// Reproducer-first: with N=8 concurrent spawns on a multi-thread
+/// runtime, the race reliably fires pre-CAS (verified by probing
+/// with the guard temporarily disabled — got 2 calls instead of 1).
+/// With the CAS, no concurrent invocation count produces more than
+/// one `mark_failed_onboarding` call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cd_decode_concurrent_cleanup_marks_failed_once() -> Result<()> {
+    use kvbm_connector::connector::leader::disagg::CdFailureSink;
+
+    let h = build_harness();
+    h.wrapper.create_slot(make_request())?;
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    h.wrapper.update_state_after_alloc(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE,
+    )?;
+
+    const N: usize = 8;
+    let sink: Arc<dyn CdFailureSink> = Arc::clone(&h.wrapper) as Arc<dyn CdFailureSink>;
+    let mut handles = Vec::with_capacity(N);
+    for i in 0..N {
+        let s = Arc::clone(&sink);
+        handles.push(tokio::spawn(async move {
+            s.on_session_failure("req-1".to_string(), format!("race-{i}"))
+                .await
+        }));
+    }
+    for h_ in handles {
+        let _ = h_.await;
+    }
+
+    let calls: Vec<_> = h
+        .workers
+        .failed()
+        .into_iter()
+        .filter(|c| c.request_id == "req-1")
+        .collect();
+    assert_eq!(
+        calls.len(),
+        1,
+        "{N} concurrent cleanup_failed_request invocations must collapse to a single \
+         mark_failed_onboarding call (got {})",
+        calls.len(),
+    );
+
+    let mut got = calls[0].block_ids.clone();
+    got.sort();
+    let mut want: Vec<_> = h.g1_block_ids[COMPUTED_BLOCKS..].to_vec();
+    want.sort();
+    assert_eq!(got, want);
+    assert_eq!(h.wrapper.inflight_available(), usize::MAX);
+
+    Ok(())
+}
+
+/// `commit_usaa1`'s state rebuild must START the new state with
+/// `cleanup_claimed=false`, regardless of the existing state's value.
+///
+/// Bug it prevents: `decode_usaa` reads `pending_failure` once at the
+/// top, then calls `commit_usaa1` which reads it again at rebuild
+/// time. A concurrent `cleanup_failed_request` that fires between
+/// those two reads stashes `pending_failure=Some` AND sets the
+/// existing state's `cleanup_claimed=true`. If commit_usaa1 threads
+/// the flag forward, the new state inherits `cleanup_claimed=true`
+/// while also carrying the freshly-stashed `pending_failure`. The
+/// replay branch in `decode_usaa` was already bypassed, and no
+/// future `cleanup_failed_request` can pass the CAS to surface the
+/// stash — vLLM is never notified of the failure.
+///
+/// This test simulates the race without timing fragility by
+/// directly mutating the existing state's `cleanup_claimed` via a
+/// test-only accessor before driving USAA. Asserts the post-USAA
+/// state's flag is `false` so a subsequent failure can be reported.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_usaa1_rebuild_resets_cleanup_claimed() -> Result<()> {
+    let h = build_harness();
+    h.wrapper.create_slot(make_request())?;
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+
+    // After GNMT, the wrapper has the gnmt-time state with
+    // cleanup_claimed=false. Force it to true to simulate a
+    // concurrent cleanup_failed_request landing between
+    // decode_usaa's pending-failure check and commit_usaa1's
+    // rebuild.
+    assert_eq!(
+        h.wrapper.cleanup_claimed_for_test("req-1"),
+        Some(false),
+        "gnmt-time state must start with cleanup_claimed=false"
+    );
+    assert!(
+        h.wrapper.force_cleanup_claimed_for_test("req-1", true),
+        "force_cleanup_claimed_for_test must find the gnmt-time entry"
+    );
+
+    h.wrapper.update_state_after_alloc(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE,
+    )?;
+
+    // Post-USAA: the new state must start with cleanup_claimed=false
+    // so a future cleanup_failed_request can pass the CAS.
+    assert_eq!(
+        h.wrapper.cleanup_claimed_for_test("req-1"),
+        Some(false),
+        "USAA-1 rebuild must reset cleanup_claimed to false; pre-fix would thread \
+         the existing `true` forward and silently swallow future failures"
+    );
+
+    // Exercise the recovered cleanup path end-to-end: forcing the
+    // local-kick to fail must surface mark_failed_onboarding.
+    h.transport.wait_onboard_count(1).await;
+    h.transport
+        .resolve_onboard(0, Err(anyhow::anyhow!("post-rebuild local kick failure")));
+    wait_until(|| h.workers.failed_for("req-1").is_some()).await;
+    let failed = h.workers.failed_for("req-1").expect("failure surfaced");
+    assert!(
+        !failed.block_ids.is_empty(),
+        "mark_failed_onboarding must be called with the unfilled G1 slice"
+    );
+
+    Ok(())
+}
+
+/// `commit_usaa1` must re-check `pending_failure` after reading the
+/// existing `cd_request_state` entry. Without the re-check, a
+/// concurrent `cleanup_failed_request` that stashed a failure
+/// between `decode_usaa`'s pending-check and `commit_usaa1`'s read
+/// would proceed to apply block assignments, drain
+/// `local_match_g2_pins`, build `remote_slots`, and spawn the
+/// local-kick + remote-pipeline. If those happen to complete
+/// successfully, `maybe_complete` fires `mark_onboarding_complete`
+/// — vLLM is told the load SUCCEEDED for a request that was
+/// supposed to be reported as a failure. The stash is never
+/// surfaced.
+///
+/// Test enters `commit_usaa1` directly via a feature-gated test
+/// helper to bypass `decode_usaa`'s outer pending_failure check —
+/// the production race requires a stash to be observed by
+/// commit_usaa1 but NOT by decode_usaa, which is microsecond
+/// timing-fragile in real production code but trivially simulated
+/// here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_commit_usaa1_replays_late_pending_failure() -> Result<()> {
+    let h = build_harness();
+    h.wrapper.create_slot(make_request())?;
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+
+    // Simulate a racing cleanup_failed_request landing between
+    // decode_usaa's pending-failure check (None) and
+    // commit_usaa1's read.
+    assert!(
+        h.wrapper
+            .force_pending_failure_for_test("req-1", Some("late race failure".to_string())),
+        "test accessor must find the gnmt-time entry"
+    );
+
+    // Enter commit_usaa1 directly — production decode_usaa would
+    // catch the stash and replay there, but we are exercising the
+    // race window inside commit_usaa1 itself.
+    h.wrapper.commit_usaa1_for_test(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE,
+    )?;
+
+    // Post-commit_usaa1: the inner replay path must have emitted
+    // mark_failed_onboarding. The happy-path local-kick must NOT
+    // have spawned — if it had, mark_onboarding_complete could
+    // race the failure and report success.
+    wait_until(|| h.workers.failed_for("req-1").is_some()).await;
+    let failed = h.workers.failed_for("req-1").expect("failure surfaced");
+
+    let mut got = failed.block_ids.clone();
+    got.sort();
+    let mut want: Vec<_> = h.g1_block_ids[COMPUTED_BLOCKS..].to_vec();
+    want.sort();
+    assert_eq!(
+        got, want,
+        "commit_usaa1 replay must report the full external G1 slice as failed"
+    );
+
+    // Confirm the happy path did NOT race to completion: no
+    // mark_onboarding_complete for this request.
+    assert!(
+        !h.workers.completed_contains("req-1"),
+        "mark_onboarding_complete must NOT fire for a stashed-failure request — \
+         pre-fix the local-kick + remote-pipeline would spawn and could race the \
+         failure to report SUCCESS to vLLM",
+    );
+
+    // Budget released.
+    assert_eq!(h.wrapper.inflight_available(), usize::MAX);
+
+    Ok(())
+}
+
+/// `commit_usaa1` must check `existing.pending_failure` AFTER the
+/// insert of the rebuilt state, not just before. A
+/// `cleanup_failed_request` that fires between the outer
+/// pending_failure re-check and the insert stashes a failure on
+/// EXISTING (OLD state, still reachable via `cd_request_state.get`
+/// pre-insert, takes the pre-USAA branch because OLD has empty
+/// remote_slots). After commit_usaa1's insert, OLD is unreachable
+/// via DashMap but commit_usaa1 still holds the OLD Arc via
+/// `existing`. Without the post-insert re-check, that stash is
+/// orphaned, the pipelines spawn against NEW state, may complete
+/// successfully, fire `mark_onboarding_complete`, and vLLM sees
+/// SUCCESS for a failed request.
+///
+/// Test injects the stash via a hook on
+/// `MockInnerLeaderShim::apply_block_assignments`, which is called
+/// inside `commit_usaa1` AFTER the outer re-check and BEFORE the
+/// insert — the exact race window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_commit_usaa1_post_insert_replays_late_stash() -> Result<()> {
+    let h = build_harness();
+    h.wrapper.create_slot(make_request())?;
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+
+    // Install hook: when commit_usaa1 calls
+    // self.inner.apply_block_assignments (between the outer
+    // pending_failure re-check and the rebuild's insert), force a
+    // stash on the wrapper's cd_request_state entry. Models a
+    // cleanup_failed_request landing in that race window.
+    let wrapper_weak = Arc::downgrade(&h.wrapper);
+    h.inner.set_apply_block_assignments_hook(Arc::new(move || {
+        if let Some(wrapper) = wrapper_weak.upgrade() {
+            wrapper.force_pending_failure_for_test(
+                "req-1",
+                Some("race in apply_block_assignments window".to_string()),
+            );
+        }
+    }));
+
+    // Drive commit_usaa1 directly so the outer pending_failure check
+    // sees None (matches the production race semantics — the stash
+    // lands AFTER decode_usaa's outer check).
+    h.wrapper.commit_usaa1_for_test(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE,
+    )?;
+
+    // Post-insert replay must have surfaced the stash to vLLM.
+    wait_until(|| h.workers.failed_for("req-1").is_some()).await;
+    let failed = h.workers.failed_for("req-1").expect("failure surfaced");
+    let mut got = failed.block_ids.clone();
+    got.sort();
+    let mut want: Vec<_> = h.g1_block_ids[COMPUTED_BLOCKS..].to_vec();
+    want.sort();
+    assert_eq!(
+        got, want,
+        "post-insert replay must report the full external G1 slice as failed"
+    );
+
+    // Critical: mark_onboarding_complete must NOT fire. Pre-fix
+    // the pipelines would spawn against the freshly-inserted NEW
+    // state and could race to completion, reporting SUCCESS.
+    assert!(
+        !h.workers.completed_contains("req-1"),
+        "mark_onboarding_complete must NOT fire for a stashed-failure request"
+    );
+
+    assert_eq!(h.wrapper.inflight_available(), usize::MAX);
+    Ok(())
+}
+
+/// P0 #9 — Decode-side mid-output peer failure. When the prefill
+/// peer crashes (or velo surfaces `Frame::Error`) mid-pull, the
+/// decode side observes `LifecycleEvent::Failed` on its session.
+/// The chain that follows:
+///
+/// 1. Decode's lifecycle watcher (`spawn_lifecycle_watcher` with
+///    role="decode") routes Failed through
+///    `invoke_decode_failure_sink_and_evict`.
+/// 2. The failure sink calls
+///    `DecodeDisaggLeader::cleanup_failed_request`.
+/// 3. The wrapper's `cleanup_claimed` CAS (added 8e9fc64a691) holds
+///    against concurrent cleanup callers.
+/// 4. Post-USAA branch emits `mark_failed_onboarding` with the
+///    unfilled external G1 slice; `release_request` removes the
+///    wrapper state + releases the inflight budget;
+///    `coordinator.release` removes coord state + finalizes the
+///    session.
+///
+/// The test gates the lifecycle path in two stages:
+///
+/// - Stage 1: inject ONE `LifecycleEvent::Failed` and wait for
+///   `mark_failed_onboarding`. No other test code touches cleanup yet.
+///   Asserts the outcome contract (peer failure → cleanup) holds.
+///   *Caveat:* on the decode side this outcome is reachable via two
+///   internal paths — (a) the lifecycle-failure-sink route, and
+///   (b) the watcher's cooperative-branch `state.cancel.cancel()`
+///   propagating through `run_remote_pipeline`'s `tokio::select!` →
+///   spawn-catch → `wrapper.cleanup_failed_request`. This test gates
+///   the outcome regardless of which path won. The lifecycle wire
+///   itself (`Self::lifecycle_failure_reason`) is shared with the
+///   prefill watcher and is independently gated by the prefill-side
+///   peer-failure test in `cd_prefill_e2e.rs`.
+/// - Stage 2: fire a second `on_session_failure` after the lifecycle
+///   path already claimed the CAS. The duplicate must be a no-op
+///   (CAS short-circuits OR wrapper state already absent).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_peer_failure_mid_output_cleans_up() -> Result<()> {
+    use kvbm_connector::connector::leader::disagg::CdFailureSink;
+
+    let h = build_harness();
+
+    h.wrapper.create_slot(make_request())?;
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    let session = h.factory.last_opened().expect("decode opened a session");
+
+    // USAA-1 installs the full G1 window. Wait for the local-kick
+    // spawn to land but do NOT resolve it — we want the failure to
+    // fire mid-flight with unfilled G1 ids on both the local-match
+    // slice AND the remote slice.
+    h.wrapper.update_state_after_alloc(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE,
+    )?;
+    h.transport.wait_onboard_count(1).await;
+
+    // Stage 1 — lifecycle path is the ONLY trigger.
+    assert!(h.workers.failed_for("req-1").is_none());
+    session.inject_lifecycle(LifecycleEvent::Failed {
+        reason: "induced prefill peer crash mid-pull".to_string(),
+    });
+    wait_until(|| h.workers.failed_for("req-1").is_some()).await;
+    let after_lifecycle: Vec<_> = h
+        .workers
+        .failed()
+        .into_iter()
+        .filter(|c| c.request_id == "req-1")
+        .collect();
+    assert_eq!(
+        after_lifecycle.len(),
+        1,
+        "lifecycle Failed event alone must produce ONE mark_failed_onboarding (got {})",
+        after_lifecycle.len(),
+    );
+
+    // The unfilled set covers the full external G1 slice (local-match
+    // + remote) because neither local-kick nor remote-pipeline has
+    // completed.
+    let mut got = after_lifecycle[0].block_ids.clone();
+    got.sort();
+    let mut want: Vec<_> = h.g1_block_ids[COMPUTED_BLOCKS..].to_vec();
+    want.sort();
+    assert_eq!(got, want);
+
+    // Wrapper state + budget reclaimed; coordinator state evicted.
+    wait_until(|| !h.wrapper.has_active_cd_request("req-1")).await;
+    assert_eq!(h.wrapper.inflight_available(), usize::MAX);
+    wait_until(|| h.coordinator.active_count() == 0).await;
+
+    // Stage 2 — duplicate cleanup via the failure-sink is a no-op.
+    // After Stage 1, the wrapper's cd_request_state is empty so the
+    // CAS check at the top of cleanup_failed_request short-circuits;
+    // a duplicate call must NOT re-emit mark_failed_onboarding.
+    let sink: Arc<dyn CdFailureSink> = Arc::clone(&h.wrapper) as Arc<dyn CdFailureSink>;
+    sink.on_session_failure("req-1".to_string(), "duplicate via direct sink".to_string())
+        .await;
+    let after_dup = h
+        .workers
+        .failed()
+        .into_iter()
+        .filter(|c| c.request_id == "req-1")
+        .count();
+    assert_eq!(
+        after_dup, 1,
+        "duplicate on_session_failure must be a no-op (got {})",
+        after_dup,
+    );
+
+    // mark_onboarding_complete must NOT fire.
+    assert!(
+        !h.workers.completed_contains("req-1"),
+        "failed request must not also signal onboarding-complete to vLLM"
+    );
+
+    Ok(())
+}
+
+fn prefix_hashes(h: &TestHarness) -> Vec<kvbm_logical::SequenceHash> {
+    h.all_hashes[..COMPUTED_BLOCKS].to_vec()
+}
+
+/// Stage 1: at decode GNMT, when vLLM reports a non-zero
+/// `num_computed_tokens` (vLLM holds the prefix in G1) but the G2
+/// cache has no record of the prefix (the all-or-nothing
+/// `find_prefix_g2_blocks` returned empty), the wrapper must
+/// arrange for the prefix blocks to be promoted G1→G2 at USAA and
+/// the session's committed set must widen to include them.
+///
+/// What this test pins:
+///
+///   1. GNMT-time `session.commit` includes BOTH the local-match
+///      hashes AND the planned-promoted prefix hashes. The
+///      promoted hashes are committed up-front because the
+///      `session.finish_commits` seal is taken later in the same
+///      flow — the prefill peer must see the full promised set
+///      before commits is sealed.
+///   2. GNMT-time `session.make_available` exposes ONLY the
+///      currently-G2-resident blocks (local match here). Promoted
+///      prefix blocks are not yet G2-resident.
+///   3. `session.finish_commits` fires at GNMT (commit set is
+///      locked once we know the planned promotion).
+///   4. `session.finish_availability` is DEFERRED — the prefill
+///      peer would stall if it observed `finish_availability`
+///      before the promoted G2 blocks are exposed.
+///   5. At USAA, the wrapper invokes `promote_g1_to_g2` with the
+///      `(block_id, sequence_hash)` pairs covering the prefix
+///      window — these come from `block_ids[..num_prefix_blocks]`
+///      paired with `all_sequence_hashes[..num_prefix_blocks]`.
+///   6. When the promotion task resolves with the registered G2
+///      blocks, the wrapper calls `session.make_available` with
+///      them and then `session.finish_availability`.
+///
+/// This test is part of the Stage 1 reproducer-first scaffold and
+/// MUST FAIL on the pre-Stage-1 codebase (the wrapper today
+/// advertises an empty prefix on `find_prefix_g2_blocks` miss).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_promotes_g1_prefix_to_g2_at_usaa() -> Result<()> {
+    let h = build_harness();
+
+    h.wrapper.create_slot(make_request())?;
+
+    // 1. GNMT — wrapper opens session.
+    let (count, async_flag) = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    assert_eq!(count, Some((LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE));
+    assert!(async_flag);
+
+    let session = h.factory.last_opened().expect("decode opened a session");
+
+    // The first commit must already carry BOTH the local-match
+    // hashes and the planned-promoted prefix hashes — Stage 1
+    // commits the full planned set up-front so prefill peers can
+    // observe a sealed committed set after `finish_commits`.
+    let mut expected_first_commit = prefix_hashes(&h);
+    expected_first_commit.extend(local_match_hashes(&h));
+    assert_eq!(
+        session.commit_calls(),
+        vec![expected_first_commit],
+        "GNMT must commit planned prefix promotion alongside local match",
+    );
+
+    // make_available at GNMT exposes only the G2-resident set
+    // (local match only — prefix promotion hasn't run yet).
+    assert_eq!(
+        session.make_available_calls(),
+        vec![local_match_hashes(&h)],
+        "GNMT must NOT expose planned-promotion blocks before they land",
+    );
+
+    assert!(
+        session.finish_commits_called(),
+        "GNMT must seal commits once the planned set is committed",
+    );
+    assert!(
+        !session.finish_availability_called(),
+        "GNMT must DEFER finish_availability — promotion has not landed",
+    );
+
+    assert_eq!(
+        h.inner.promotion_count(),
+        0,
+        "promotion is triggered at USAA, not GNMT",
+    );
+
+    // 2. USAA — wrapper kicks the local G2→G1 transfer AND issues
+    //    the G1→G2 prefix promotion request.
+    h.wrapper.update_state_after_alloc(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE,
+    )?;
+
+    // Allow the wrapper's USAA bookkeeping + the promotion-task
+    // spawn to settle.
+    h.inner.wait_promotion_count(1).await;
+
+    let (source_block_ids, expected_hashes) = h
+        .inner
+        .snapshot_promotion(0)
+        .expect("promotion #0 must be recorded");
+    assert_eq!(
+        source_block_ids,
+        h.g1_block_ids[..COMPUTED_BLOCKS].to_vec(),
+        "promotion source block ids must be the prefix slice of vLLM's g1 assignment",
+    );
+    assert_eq!(
+        expected_hashes,
+        prefix_hashes(&h),
+        "promotion expected hashes must be the prefix hash range",
+    );
+
+    // 3. Build genuine G2 ImmutableBlocks for the prefix hashes
+    //    and resolve the promotion. Mirrors what the production
+    //    offload-pipeline's register step would have done.
+    let slot = h.inner.slot("req-1").expect("slot installed");
+    let prefix_token_blocks: Vec<_> = slot.token_blocks[..COMPUTED_BLOCKS].to_vec();
+    let mutables = h
+        .inner
+        .g2_manager()
+        .allocate_blocks(COMPUTED_BLOCKS)
+        .expect("allocate prefix G2");
+    let completes: Vec<_> = mutables
+        .into_iter()
+        .zip(prefix_token_blocks.iter())
+        .map(|(m, tb)| m.complete(tb).expect("complete prefix G2"))
+        .collect();
+    let promoted_g2 = h.inner.g2_manager().register_blocks(completes);
+    assert_eq!(promoted_g2.len(), COMPUTED_BLOCKS);
+
+    h.inner.resolve_promotion(0, Ok(promoted_g2));
+
+    // 4. After the promotion task drives session.make_available +
+    //    session.finish_availability, both must be observable.
+    wait_until(|| session.finish_availability_called()).await;
+
+    // The second make_available call covers the promoted prefix.
+    let make_avail = session.make_available_calls();
+    assert_eq!(
+        make_avail.len(),
+        2,
+        "expected GNMT-time + USAA-promotion make_available; got: {:?}",
+        make_avail,
+    );
+    assert_eq!(
+        make_avail[0],
+        local_match_hashes(&h),
+        "first make_available is local match at GNMT",
+    );
+    assert_eq!(
+        make_avail[1],
+        prefix_hashes(&h),
+        "second make_available is the promoted prefix",
+    );
+
+    Ok(())
+}
+
+/// Stage 1 race: `request_finished` (and the implicit drop chain
+/// `CdRequestStatePayload::Drop → coordinator.release →
+/// session.finalize`) MUST NOT pre-empt an in-flight prefix
+/// promotion task. Per session CONTRACT §2.13, `finalize` sends
+/// `CommitsClosed` + `Drained` if not already sent — which would
+/// arrive on the prefill peer BEFORE the promoted prefix blocks
+/// are exposed via `session.make_available`, stranding prefill
+/// with an unfillable expected_hashes window.
+///
+/// The release path must defer `session.finalize` until the
+/// promotion task has finished (success or failure). This test
+/// pins that ordering.
+///
+/// Scenario:
+///   1. GNMT spawns the promotion task (NOT yet resolved).
+///   2. `request_finished` fires — release_request +
+///      coordinator.release run.
+///   3. Assert `session.finished_reason()` is `None` (finalize
+///      deferred — task is still in flight).
+///   4. Resolve the promotion → task drives make_available +
+///      finish_availability + then triggers the deferred
+///      finalize.
+///   5. Assert `session.finished_reason()` is now `Some` AND
+///      make_available_calls includes the promoted prefix.
+///
+/// Reproducer-first: MUST FAIL on the pre-fix codebase where
+/// coordinator.release calls session.finalize unconditionally.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_finalize_deferred_until_promotion_lands() -> Result<()> {
+    let h = build_harness();
+
+    h.wrapper.create_slot(make_request())?;
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+
+    let session = h.factory.last_opened().expect("decode opened a session");
+
+    h.wrapper.update_state_after_alloc(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE,
+    )?;
+
+    h.inner.wait_promotion_count(1).await;
+
+    // Fire request_finished BEFORE resolving the promotion.
+    // Under the broken (pre-fix) flow this triggers
+    // coordinator.release → session.finalize, which closes
+    // the availability stream before the promotion's
+    // make_available lands.
+    let _ = h.wrapper.request_finished("req-1");
+
+    // Give the runtime a moment to settle the release chain.
+    // session.finalize would have been called synchronously
+    // inside coordinator.release; if the fix is in place it
+    // must be deferred.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        session.finished_reason().is_none(),
+        "session.finalize must NOT fire while promotion task is in flight \
+         (got finished_reason={:?})",
+        session.finished_reason()
+    );
+    assert!(
+        !session.finish_availability_called(),
+        "finish_availability must NOT fire while promotion task is in flight",
+    );
+
+    // Now resolve the promotion. The task should drive
+    // make_available + finish_availability, then the deferred
+    // finalize fires.
+    let slot = h.inner.slot("req-1").expect("slot installed");
+    let prefix_token_blocks: Vec<_> = slot.token_blocks[..COMPUTED_BLOCKS].to_vec();
+    let mutables = h
+        .inner
+        .g2_manager()
+        .allocate_blocks(COMPUTED_BLOCKS)
+        .expect("allocate prefix G2");
+    let completes: Vec<_> = mutables
+        .into_iter()
+        .zip(prefix_token_blocks.iter())
+        .map(|(m, tb)| m.complete(tb).expect("complete prefix G2"))
+        .collect();
+    let promoted_g2 = h.inner.g2_manager().register_blocks(completes);
+    h.inner.resolve_promotion(0, Ok(promoted_g2));
+
+    // After the task lands the promotion AND the deferred
+    // finalize fires, both observables must hold.
+    wait_until(|| session.finished_reason().is_some()).await;
+
+    let make_avail = session.make_available_calls();
+    assert!(
+        make_avail.iter().any(|v| v == &prefix_hashes(&h)),
+        "promoted prefix must be made-available BEFORE the deferred finalize fires; \
+         observed make_available_calls = {make_avail:?}"
+    );
+    assert!(
+        session.finish_availability_called(),
+        "finish_availability must be called by the promotion task before deferred finalize",
+    );
+
+    Ok(())
+}
+
+/// Stage 1 corner: when the promotion task FAILS, it calls
+/// `session.close(reason)` — which per CONTRACT §2.14 implies
+/// `finish_commits + finish_availability` and sends a Detached
+/// lifecycle event. If `request_finished` then fires (or already
+/// fired and the deferred release awaits the failed task), the
+/// deferred-release path MUST NOT also call `session.finalize` —
+/// `finalize` on an already-closed session sends `Frame::Finished`
+/// after the close terminators (undefined protocol behavior;
+/// MockSession surfaces it as `finished_reason=Some` on top of
+/// `closed_reason=Some`, both observable on the same session).
+///
+/// The promotion task must signal to the deferred-release path
+/// whether it closed the session, so the deferred-release path can
+/// skip the redundant finalize.
+///
+/// Scenario:
+///   1. GNMT spawns the promotion task (not yet resolved).
+///   2. `request_finished` fires — deferred release spawns,
+///      awaits the task.
+///   3. Resolve the promotion with `Err` — task calls
+///      `session.close(reason)`. closed_reason becomes Some.
+///   4. Deferred release wakes up after task completion.
+///   5. Assert: `session.finished_reason()` stays None (no
+///      finalize-after-close).
+///
+/// Reproducer-first: MUST FAIL on the current code where the
+/// deferred release calls finalize unconditionally.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_deferred_release_skips_finalize_after_promotion_failure() -> Result<()> {
+    let h = build_harness();
+
+    h.wrapper.create_slot(make_request())?;
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+
+    let session = h.factory.last_opened().expect("decode opened a session");
+
+    h.wrapper.update_state_after_alloc(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE,
+    )?;
+
+    h.inner.wait_promotion_count(1).await;
+
+    // Fire request_finished BEFORE resolving promotion — the
+    // deferred-release path spawns and awaits the task.
+    let _ = h.wrapper.request_finished("req-1");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Resolve promotion with an error — the task calls
+    // session.close(reason), draining both streams.
+    h.inner
+        .resolve_promotion(0, Err(anyhow::anyhow!("simulated promotion failure")));
+
+    // Wait for close to land.
+    wait_until(|| session.closed_reason().is_some()).await;
+    // Give the deferred release a moment to (incorrectly) call
+    // finalize on top of the close. If the fix is in place the
+    // deferred release observes the task's "closed the session"
+    // signal and skips finalize.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert!(
+        session.closed_reason().is_some(),
+        "promotion failure must call session.close"
+    );
+    assert!(
+        session.finished_reason().is_none(),
+        "deferred release must NOT call session.finalize after the promotion task \
+         already closed the session — got finished_reason={:?} alongside \
+         closed_reason={:?}",
+        session.finished_reason(),
+        session.closed_reason(),
+    );
+
+    Ok(())
+}
+
 #[allow(dead_code)]
 fn _ensure_inner_used(h: &TestHarness) {
     let _ = h.inner.local_id();
     let _ = h.coordinator.active_count();
+}
+
+/// Stage 2c: when decode's G3 holds the prefix range that vLLM
+/// reports (`num_computed_tokens > 0`) AND the G2 cache has no
+/// record of it, the wrapper must plan a G3→G2 promotion (not a
+/// G1→G2 one). Producer wiring lives in `commit_gnmt_remote`'s
+/// empty-prefix arm: try `find_prefix_g3_hashes` first, fall
+/// back to G1 promotion only if G3 misses.
+///
+/// What this test pins:
+///   1. `find_prefix_g3_hashes` is called and returns the
+///      prefix slice (the mock is pre-loaded with
+///      `install_g3_prefix`).
+///   2. The recorded `PendingTierPromotion.source_tier` is `G3`
+///      (visible via the `pending_promotion_tier_for_test`
+///      accessor).
+///   3. The session-side commit shape is the same as the G1
+///      path — `session.commit(prefix ∪ local_match)` +
+///      `finish_commits` + deferred `finish_availability`.
+///      Stage 2's promotion source change does not alter the
+///      session-side committed set or sealing.
+///   4. No `promote_g1_to_g2` call fires at this point (G1 path
+///      not taken) and no `promote_g3_to_g2` call fires yet
+///      (Stage 2d wires the USAA-time dispatch).
+///
+/// Discriminating quality: pre-Stage-2c code does not call
+/// `find_prefix_g3_hashes`, so even with `install_g3_prefix`
+/// the planned tier would be `G1` (the only branch in the
+/// arm). The `Some("G3")` assertion fails on pre-2c code and
+/// passes only when the empty-prefix arm consults G3 first.
+///
+/// This test does NOT drive USAA — Stage 2a's guard in
+/// `commit_usaa1` bails on G3 dispatch until Stage 2d wires it.
+/// The Stage 2d test will exercise the USAA path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_plans_g3_to_g2_promotion_when_g3_holds_prefix() -> Result<()> {
+    let h = build_harness();
+
+    // Pre-load the mock's G3 universe with the prefix hashes so
+    // `find_prefix_g3_hashes` returns Some on the GNMT-time query.
+    h.inner.install_g3_prefix("req-1", prefix_hashes(&h));
+
+    h.wrapper.create_slot(make_request())?;
+
+    // GNMT — wrapper opens session, plans G3 promotion in the
+    // empty-prefix arm.
+    let (count, async_flag) = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    assert_eq!(count, Some((LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE));
+    assert!(async_flag);
+
+    // Pin: the planned promotion's source tier is G3 (not G1).
+    assert_eq!(
+        h.wrapper.pending_promotion_tier_for_test("req-1"),
+        Some("G3"),
+        "with G3 pre-loaded, commit_gnmt_remote must plan a G3 promotion",
+    );
+
+    // Pin: session-side shape matches the G1 path. The committed
+    // set is `prefix ∪ local_match`; `finish_commits` is sealed;
+    // `finish_availability` is deferred until the promotion task
+    // (lands in Stage 2d) drives `session.make_available` for the
+    // promoted blocks.
+    let session = h.factory.last_opened().expect("decode opened a session");
+    let mut expected_first_commit = prefix_hashes(&h);
+    expected_first_commit.extend(local_match_hashes(&h));
+    assert_eq!(
+        session.commit_calls(),
+        vec![expected_first_commit],
+        "GNMT must commit prefix ∪ local_match regardless of source tier",
+    );
+    assert_eq!(
+        session.make_available_calls(),
+        vec![local_match_hashes(&h)],
+        "GNMT must NOT expose planned-promotion blocks before they land",
+    );
+    assert!(
+        session.finish_commits_called(),
+        "GNMT must seal commits at the GNMT-time planned set",
+    );
+    assert!(
+        !session.finish_availability_called(),
+        "GNMT must DEFER finish_availability — Stage 2d wires the G3 task",
+    );
+
+    // Pin: no G1 promotion fired at GNMT; no G3 promotion yet
+    // either (USAA-time dispatch lands in Stage 2d).
+    assert_eq!(
+        h.inner.promotion_count(),
+        0,
+        "G1 promotion must NOT fire when G3 path wins the finder race",
+    );
+    assert_eq!(
+        h.inner.g3_promotion_count(),
+        0,
+        "G3 promotion dispatch lands in Stage 2d, not here",
+    );
+
+    Ok(())
+}
+
+/// Stage 2d: end-to-end G3→G2 prefix promotion at decode USAA.
+/// Analog of `cd_decode_promotes_g1_prefix_to_g2_at_usaa` for
+/// the G3-source path. Pre-loads G3 (so 2c plans G3), drives
+/// USAA, asserts `promote_g3_to_g2` fires with the prefix
+/// hashes (no vLLM block_ids needed), and that the promotion
+/// task drives `session.make_available` + `finish_availability`
+/// once the future resolves.
+///
+/// Discriminating quality: pre-Stage-2d code had the match guard
+/// in `commit_usaa1`'s promotion-spawn block that bailed on
+/// `SourceTier::G3` (added in Stage 2a). On pre-2d code, USAA
+/// would return `Err("G3 promotion dispatch not yet wired …")`
+/// and the `update_state_after_alloc` call would error out
+/// before reaching the spawn. Post-2d, the match dispatches to
+/// `promote_g3_to_g2` and the test reaches the assertions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_promotes_g3_prefix_to_g2_at_usaa() -> Result<()> {
+    let h = build_harness();
+    h.inner.install_g3_prefix("req-1", prefix_hashes(&h));
+    h.wrapper.create_slot(make_request())?;
+
+    // GNMT — plans the G3 promotion (Stage 2c).
+    let (count, async_flag) = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    assert_eq!(count, Some((LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE));
+    assert!(async_flag);
+    assert_eq!(
+        h.wrapper.pending_promotion_tier_for_test("req-1"),
+        Some("G3"),
+    );
+
+    let session = h.factory.last_opened().expect("decode opened a session");
+
+    // USAA — must NOT bail on the G3 dispatch (post-2d). Pre-2d
+    // would Err here with the "G3 promotion dispatch not yet
+    // wired" message from the match guard in commit_usaa1.
+    h.wrapper.update_state_after_alloc(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE,
+    )?;
+
+    // Pin: the G3 path dispatched; the G1 path did not.
+    h.inner.wait_g3_promotion_count(1).await;
+    assert_eq!(
+        h.inner.g3_promotion_count(),
+        1,
+        "Stage 2d must dispatch through promote_g3_to_g2 for G3 plans",
+    );
+    assert_eq!(
+        h.inner.promotion_count(),
+        0,
+        "G1 promotion must NOT fire when G3 plan won at GNMT",
+    );
+    let dispatched_hashes = h
+        .inner
+        .snapshot_g3_promotion(0)
+        .expect("g3 promotion #0 recorded");
+    assert_eq!(
+        dispatched_hashes,
+        prefix_hashes(&h),
+        "promote_g3_to_g2 must be called with the GNMT-time prefix hashes",
+    );
+
+    // `finish_availability` is still deferred — the promotion
+    // future hasn't resolved.
+    assert!(
+        !session.finish_availability_called(),
+        "USAA must NOT call finish_availability before promotion lands",
+    );
+
+    // Resolve the G3 promotion with genuine G2 ImmutableBlocks.
+    let slot = h.inner.slot("req-1").expect("slot installed");
+    let prefix_token_blocks: Vec<_> = slot.token_blocks[..COMPUTED_BLOCKS].to_vec();
+    let mutables = h
+        .inner
+        .g2_manager()
+        .allocate_blocks(COMPUTED_BLOCKS)
+        .expect("allocate prefix G2");
+    let completes: Vec<_> = mutables
+        .into_iter()
+        .zip(prefix_token_blocks.iter())
+        .map(|(m, tb)| m.complete(tb).expect("complete prefix G2"))
+        .collect();
+    let promoted_g2 = h.inner.g2_manager().register_blocks(completes);
+    assert_eq!(promoted_g2.len(), COMPUTED_BLOCKS);
+    h.inner.resolve_g3_promotion(0, Ok(promoted_g2));
+
+    // Post-resolution: the task drives make_available + finish_availability.
+    wait_until(|| session.finish_availability_called()).await;
+    let make_avail = session.make_available_calls();
+    assert_eq!(
+        make_avail.len(),
+        2,
+        "expected GNMT-time local_match + USAA-G3-promotion make_available; got: {:?}",
+        make_avail,
+    );
+    assert_eq!(
+        make_avail[0],
+        local_match_hashes(&h),
+        "first make_available is local match at GNMT",
+    );
+    assert_eq!(
+        make_avail[1],
+        prefix_hashes(&h),
+        "second make_available is the G3-promoted prefix",
+    );
+
+    Ok(())
+}
+
+/// Stage 2d failure path: when `promote_g3_to_g2` Errs at USAA
+/// (the documented G3-eviction case + any infrastructure
+/// failure inside the shim), the spawned promotion task must
+/// call `session.close(reason)` with a tier-prefixed reason
+/// string. The prefill peer observes `Detached`/`Failed` and
+/// runs its standard CD failure cleanup; no `make_available`
+/// fires for the promoted prefix (those blocks were never
+/// produced).
+///
+/// Symmetric to the G1 failure handling — same task body, same
+/// `session.close` route — but pinned separately so a regression
+/// in tier-dispatch could not silently swap which arm closes
+/// the session on failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_g3_promotion_failure_closes_session() -> Result<()> {
+    let h = build_harness();
+    h.inner.install_g3_prefix("req-1", prefix_hashes(&h));
+    h.wrapper.create_slot(make_request())?;
+
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    let session = h.factory.last_opened().expect("decode opened a session");
+
+    h.wrapper.update_state_after_alloc(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE,
+    )?;
+
+    h.inner.wait_g3_promotion_count(1).await;
+
+    // Resolve the G3 promotion with Err — models the G3-eviction
+    // case where the GNMT-time pinned hashes no longer match at
+    // USAA, or any infrastructure failure inside
+    // `stage_g3_to_g2`.
+    h.inner
+        .resolve_g3_promotion(0, Err(anyhow::anyhow!("simulated stage_g3_to_g2 failure")));
+
+    // The task must reach `session.close(Some("g3->g2 promotion: …"))`.
+    wait_until(|| session.closed_reason().is_some()).await;
+    let closed = session.closed_reason().expect("session closed");
+    let reason = closed.expect("close reason carried");
+    assert!(
+        reason.contains("g3->g2 promotion"),
+        "close reason must carry the G3 tier prefix; got: {reason:?}",
+    );
+    assert!(
+        reason.contains("simulated stage_g3_to_g2 failure"),
+        "close reason must propagate the underlying error; got: {reason:?}",
+    );
+
+    // No make_available for the promoted prefix — only the GNMT-time
+    // local_match call fired (the failure prevented the second
+    // make_available the task would have driven on success). The
+    // prefill peer therefore sees the prefix hashes committed but
+    // never available — it routes through its cleanup_failed_request
+    // when the close-induced lifecycle terminal arrives.
+    assert_eq!(
+        session.make_available_calls(),
+        vec![local_match_hashes(&h)],
+        "failed G3 promotion must NOT publish prefix availability",
+    );
+    // NOTE: do NOT assert on `finish_availability_called()`. Per
+    // p2p session CONTRACT §2.14, `session.close` IMPLIES
+    // `finish_availability` — the mock observes that implication
+    // and `finish_availability_called()` returns true after close.
+    // The discriminating assertion is the close reason + the
+    // absence of a prefix make_available, both pinned above.
+
+    Ok(())
+}
+
+/// Refresh "req-1"'s slot in the mock so a second GNMT cycle
+/// can run for the same rid. Mirrors `build_harness`'s req-1
+/// install but with fresh G2 blocks. Used by the cross-lifecycle
+/// cleanup reproducer to model a recompute reschedule.
+fn refresh_req1_slot(h: &TestHarness) {
+    let g2_manager = h.inner.g2_manager().clone();
+    let token_sequence = create_token_sequence(TOTAL_BLOCKS, BLOCK_SIZE, 100);
+    let all_hashes = generate_sequence_hashes(&token_sequence);
+    let token_blocks: Vec<_> = token_sequence.blocks().to_vec();
+
+    let mutables = g2_manager
+        .allocate_blocks(LOCAL_BLOCKS)
+        .expect("allocate cycle-2 local match");
+    let completes: Vec<_> = mutables
+        .into_iter()
+        .zip(token_blocks[COMPUTED_BLOCKS..COMPUTED_BLOCKS + LOCAL_BLOCKS].iter())
+        .map(|(mutable, tb)| mutable.complete(tb).expect("complete cycle-2 local match"))
+        .collect();
+    let local_match_g2 = g2_manager.register_blocks(completes);
+
+    let slot = MockSlot {
+        block_size: BLOCK_SIZE,
+        total_blocks: TOTAL_BLOCKS,
+        computed_blocks: COMPUTED_BLOCKS,
+        local_match_blocks: LOCAL_BLOCKS,
+        all_hashes,
+        token_blocks,
+        local_match_g2: parking_lot::Mutex::new(Some(local_match_g2)),
+        assigned_block_ids: parking_lot::Mutex::new(None),
+        gnmt_result: (Some(LOCAL_BLOCKS * BLOCK_SIZE), true),
+        usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
+        transfer_params: parking_lot::Mutex::new(None),
+        ..MockSlot::default()
+    };
+    h.inner.install_slot("req-1", slot);
+}
+
+/// Cross-lifecycle stale-cleanup race for `cleanup_failed_request`.
+///
+/// Reproduces the recompute-policy scenario where the wrapper's
+/// `cleanup_failed_request` parks in `mark_failed_onboarding.await`
+/// for cycle-1 while a recompute reschedule of the same rid
+/// installs a fresh lifecycle's `Arc<CdRequestState>` /
+/// `Arc<CdRequest>`. When the await resolves and the cleanup
+/// proceeds to release, the identity-checked variants
+/// (`release_request_if_matches` /
+/// `coordinator.release_if_matches`) must NOT wipe the new
+/// lifecycle's state.
+///
+/// Sequence:
+///   1. Drive cycle-1 GNMT + USAA at "req-1".
+///   2. Enable pending mode, spawn cleanup_failed_request("req-1").
+///      Task captures cycle-1 Arcs internally, parks on
+///      `mark_failed_onboarding.await`.
+///   3. Manually wipe cycle-1 (via captured-Arc handles) and
+///      refresh the slot.
+///   4. Drive cycle-2 GNMT at "req-1" → fresh Arc at the same key.
+///   5. Resolve the parked await.
+///   6. Assert cycle-2 state survives at "req-1" (post-fix);
+///      pre-fix by-name release would have wiped it.
+///
+/// Discriminating quality verified by probe-revert: temporarily
+/// swapping the cleanup's `_if_matches` calls back to by-name
+/// `release_request` + `coordinator.release` makes step 6's
+/// assertions fail (cycle-2 state is wiped).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cd_decode_cleanup_failed_request_no_ops_against_replaced_lifecycle() -> Result<()> {
+    let h = build_harness();
+
+    // Cycle 1: full GNMT + USAA at "req-1".
+    h.wrapper.create_slot(make_request_for("req-1"))?;
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    h.wrapper.update_state_after_alloc(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE,
+    )?;
+    h.transport.wait_onboard_count(1).await;
+
+    // Capture cycle-1's handles so we can wipe cycle-1 cleanly.
+    let handle_c1_wrapper = h
+        .wrapper
+        .snapshot_cd_state_for_test("req-1")
+        .expect("cycle-1 wrapper state");
+    let coord_c1 = h
+        .coordinator
+        .state_for_test("req-1")
+        .expect("cycle-1 coord state");
+
+    // Park cleanup_failed_request on mark_failed_onboarding.
+    h.workers.set_pending_failed_mode(true);
+    let wrapper_for_cleanup = Arc::clone(&h.wrapper);
+    let cleanup_handle = tokio::spawn(async move {
+        wrapper_for_cleanup
+            .cleanup_failed_request_for_test("req-1", "cycle-1 peer failure".to_string())
+            .await;
+    });
+    h.workers.wait_pending_failed_count(1).await;
+
+    // Recompute reschedule simulation: wipe cycle-1, refresh the
+    // slot, and drive a fresh GNMT for "req-1". Cycle-2's Arcs
+    // now live at the same DashMap key cycle-1 occupied.
+    assert!(
+        h.wrapper
+            .release_request_if_matches_for_test("req-1", &handle_c1_wrapper),
+        "wipe cycle-1 wrapper state",
+    );
+    assert!(
+        h.coordinator.release_if_matches("req-1", &coord_c1),
+        "wipe cycle-1 coord state",
+    );
+    refresh_req1_slot(&h);
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+
+    // Confirm cycle-2 is a fresh Arc at the same key.
+    let handle_c2 = h
+        .wrapper
+        .snapshot_cd_state_for_test("req-1")
+        .expect("cycle-2 wrapper state");
+    assert!(
+        !handle_c1_wrapper.ptr_eq(&handle_c2),
+        "cycle-2 must be a fresh Arc at the same key",
+    );
+
+    // Resolve the parked await. Cleanup_failed_request now
+    // proceeds to its bottom-of-method release with cycle-1's
+    // captured Arcs against cycle-2's DashMap entries.
+    h.workers.resolve_pending_failed(0, Ok(()));
+    cleanup_handle.await?;
+
+    // Cycle-2 MUST survive at "req-1" (the discriminating
+    // assertion). Pre-fix by-name release would have wiped both
+    // wrapper and coord entries here.
+    assert!(
+        h.wrapper.has_active_cd_request("req-1"),
+        "cycle-2 wrapper state must survive stale cleanup release",
+    );
+    assert!(
+        h.coordinator.state_for_test("req-1").is_some(),
+        "cycle-2 coord state must survive stale cleanup release",
+    );
+    let handle_after = h
+        .wrapper
+        .snapshot_cd_state_for_test("req-1")
+        .expect("cycle-2 wrapper still present");
+    assert!(
+        handle_after.ptr_eq(&handle_c2),
+        "post-cleanup wrapper Arc must still be cycle-2 (not removed and re-inserted)",
+    );
+
+    Ok(())
+}
+
+/// Stage 2c: when neither G2 nor G3 holds the prefix, the
+/// wrapper must fall back to the existing Stage 1 G1 promotion
+/// path. This is the existing happy-path behavior; the test
+/// pins it explicitly so a future regression in the G3
+/// short-circuit doesn't silently route G1-only flows through
+/// the wrong branch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_decode_falls_back_to_g1_promotion_when_g3_misses() -> Result<()> {
+    let h = build_harness();
+
+    // NOTE: deliberately NOT calling `install_g3_prefix` — the
+    // mock's G3 universe is empty, so `find_prefix_g3_hashes`
+    // returns empty and `commit_gnmt_remote` falls back to G1.
+
+    h.wrapper.create_slot(make_request())?;
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+
+    assert_eq!(
+        h.wrapper.pending_promotion_tier_for_test("req-1"),
+        Some("G1"),
+        "G3 miss must fall back to G1 promotion (existing Stage 1 path)",
+    );
+
+    Ok(())
+}
+
+/// Install a second slot ("req-2") on an existing harness. Mirrors
+/// `build_harness`'s req-1 setup but with a different token seed so
+/// the two slots have distinct hash chains (and therefore distinct
+/// `Arc<CdRequestState>` / `Arc<CdRequest>` identities after GNMT).
+fn install_second_slot(h: &TestHarness) -> Vec<kvbm_logical::SequenceHash> {
+    let g2_manager = h.inner.g2_manager().clone();
+
+    let token_sequence = create_token_sequence(TOTAL_BLOCKS, BLOCK_SIZE, 200);
+    let all_hashes = generate_sequence_hashes(&token_sequence);
+    let token_blocks: Vec<_> = token_sequence.blocks().to_vec();
+
+    let mutables = g2_manager
+        .allocate_blocks(LOCAL_BLOCKS)
+        .expect("allocate req-2 local match");
+    let completes: Vec<_> = mutables
+        .into_iter()
+        .zip(token_blocks[COMPUTED_BLOCKS..COMPUTED_BLOCKS + LOCAL_BLOCKS].iter())
+        .map(|(mutable, tb)| mutable.complete(tb).expect("complete req-2 local match"))
+        .collect();
+    let local_match_g2 = g2_manager.register_blocks(completes);
+
+    let slot = MockSlot {
+        block_size: BLOCK_SIZE,
+        total_blocks: TOTAL_BLOCKS,
+        computed_blocks: COMPUTED_BLOCKS,
+        local_match_blocks: LOCAL_BLOCKS,
+        all_hashes: all_hashes.clone(),
+        token_blocks,
+        local_match_g2: parking_lot::Mutex::new(Some(local_match_g2)),
+        assigned_block_ids: parking_lot::Mutex::new(None),
+        gnmt_result: (Some(LOCAL_BLOCKS * BLOCK_SIZE), true),
+        usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
+        transfer_params: parking_lot::Mutex::new(None),
+        ..MockSlot::default()
+    };
+    h.inner.install_slot("req-2", slot);
+    all_hashes
+}
+
+fn make_request_for(request_id: &str) -> Request {
+    Request::builder()
+        .request_id(request_id.to_string())
+        .tokens(dynamo_tokens::Tokens::from(Vec::<u32>::new()))
+        .build(None)
+        .expect("build request")
+}
+
+/// Stage 1 hardening: `release_request_if_matches` /
+/// `release_if_matches` MUST refuse to remove a DashMap entry whose
+/// `Arc` identity differs from the caller's captured snapshot. The
+/// production race this guards against is the cross-lifecycle stale
+/// release under `kv_load_failure_policy=recompute` — a spawn-replay
+/// task from a prior lifecycle parked in `mark_failed_onboarding`
+/// for unbounded time MUST NOT wipe the freshly-installed state of
+/// a subsequent lifecycle for the same rid.
+///
+/// This test reproduces the structural failure mode using two
+/// distinct rids ("req-1", "req-2"): cycle-1 captures `handle_a`,
+/// cycle-2 captures `handle_b`, and the cross-handle release calls
+/// must no-op. The Arc-identity predicate inside
+/// `DashMap::remove_if` is the same code path the cross-lifecycle
+/// case exercises — Arc-A captured, Arc-B currently at the key,
+/// `Arc::ptr_eq` is false, remove_if returns None.
+///
+/// Pre-fix code did not expose `release_*_if_matches` at all; the
+/// spawn-replays called `release_request` / `coordinator.release`
+/// by name, which would wipe whatever state currently lived at the
+/// rid regardless of identity. This test asserts both the
+/// negative (stale handle no-ops) and the positive (matching
+/// handle releases) for both wrapper and coordinator.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn release_if_matches_enforces_arc_identity() -> Result<()> {
+    let h = build_harness();
+    install_second_slot(&h);
+
+    // Cycle-A: GNMT for req-1 installs state A in both maps.
+    h.wrapper.create_slot(make_request_for("req-1"))?;
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    let handle_a = h
+        .wrapper
+        .snapshot_cd_state_for_test("req-1")
+        .expect("wrapper state A");
+    let coord_a = h
+        .coordinator
+        .state_for_test("req-1")
+        .expect("coord state A");
+
+    // Cycle-B: GNMT for req-2 installs state B in both maps.
+    h.wrapper.create_slot(make_request_for("req-2"))?;
+    let _ = h
+        .wrapper
+        .get_num_new_matched_tokens("req-2", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    let handle_b = h
+        .wrapper
+        .snapshot_cd_state_for_test("req-2")
+        .expect("wrapper state B");
+    let coord_b = h
+        .coordinator
+        .state_for_test("req-2")
+        .expect("coord state B");
+
+    // Sanity: two distinct lifecycles must hold distinct Arcs.
+    assert!(
+        !handle_a.ptr_eq(&handle_b),
+        "distinct lifecycles must yield distinct wrapper Arcs"
+    );
+    assert!(
+        !Arc::ptr_eq(&coord_a, &coord_b),
+        "distinct lifecycles must yield distinct coordinator Arcs"
+    );
+
+    // Stale-Arc release attempts MUST no-op. Each call looks up the
+    // current entry at the target rid, observes that
+    // `Arc::ptr_eq(captured, current)` is false, and returns false
+    // without touching state.
+    assert!(
+        !h.wrapper
+            .release_request_if_matches_for_test("req-1", &handle_b),
+        "wrapper release with B's handle against req-1 must no-op"
+    );
+    assert!(
+        h.wrapper.has_active_cd_request("req-1"),
+        "req-1 wrapper state must survive stale release"
+    );
+    assert!(
+        !h.coordinator.release_if_matches("req-1", &coord_b),
+        "coordinator release with B's Arc against req-1 must no-op"
+    );
+    assert!(
+        h.coordinator.state_for_test("req-1").is_some(),
+        "req-1 coord state must survive stale release"
+    );
+
+    // Matching-Arc release MUST fire and remove the entry.
+    assert!(
+        h.wrapper
+            .release_request_if_matches_for_test("req-1", &handle_a),
+        "wrapper release with matching A handle must succeed"
+    );
+    assert!(
+        !h.wrapper.has_active_cd_request("req-1"),
+        "req-1 wrapper state must be removed after matching release"
+    );
+    assert!(
+        h.coordinator.release_if_matches("req-1", &coord_a),
+        "coordinator release with matching A Arc must succeed"
+    );
+    assert!(
+        h.coordinator.state_for_test("req-1").is_none(),
+        "req-1 coord state must be removed after matching release"
+    );
+
+    // Re-attempt with the same (now-stale) handles MUST no-op —
+    // the entry is gone, `DashMap::remove_if` returns None without
+    // running the predicate.
+    assert!(
+        !h.wrapper
+            .release_request_if_matches_for_test("req-1", &handle_a),
+        "wrapper release against missing entry must no-op"
+    );
+    assert!(
+        !h.coordinator.release_if_matches("req-1", &coord_a),
+        "coordinator release against missing entry must no-op"
+    );
+
+    // req-2 still alive; nothing has touched it.
+    assert!(h.wrapper.has_active_cd_request("req-2"));
+    assert!(h.coordinator.state_for_test("req-2").is_some());
+
+    Ok(())
 }

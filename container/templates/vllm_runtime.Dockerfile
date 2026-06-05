@@ -36,6 +36,13 @@ COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
 
+{% if context[framework].enable_kvbm == "true" and target not in ("dev", "local-dev") %}
+# KVBM Rust bins: kvbm_hub server + kvbmctl CLI. Built --release in wheel_builder.
+# The wheel_builder stage always creates /opt/dynamo/bin/ (with a placeholder) so
+# this COPY succeeds even when --build-arg ENABLE_KVBM=false overrides the default.
+COPY --from=wheel_builder /opt/dynamo/bin/ /usr/local/bin/
+{% endif %}
+
 # Create dynamo user with group 0 for OpenShift compatibility
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && useradd -m -s /bin/bash -g 0 dynamo \

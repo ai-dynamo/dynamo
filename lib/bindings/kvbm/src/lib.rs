@@ -24,16 +24,22 @@ static LOG_INIT: Once = Once::new();
 /// because importing the `dynamo` runtime initialized logging; the v1 removal
 /// dropped it.) This mirrors that import-time init pattern but stays standalone
 /// — KVBM does not depend on the Dynamo runtime. The filter is read from
-/// `RUST_LOG`, falling back to `DYN_LOG`, then a `warn` default. `Once` +
+/// `RUST_LOG`, falling back to `DYN_LOG`, then an `error` default. `Once` +
 /// `try_init` make it a safe no-op if a subscriber already exists.
 fn init_logging() {
     if std::env::var_os(SKIP_LOG_INIT_ENV).is_some() {
         return;
     }
     LOG_INIT.call_once(|| {
+        // Default ERROR (not warn): the CD execution path emits per-request
+        // tracing::info! (decode_gnmt etc.) plus the kvbm_audit flood at info, so a
+        // higher default floods long runs. Durable observability lives in the
+        // kvbm-observability Prometheus metrics (independent of the log level). An
+        // explicit RUST_LOG/DYN_LOG always overrides (e.g. the harness sets
+        // warn,kvbm_audit=info; raise to info/debug to debug a bringup).
         let filter = EnvFilter::try_from_default_env()
             .or_else(|_| EnvFilter::try_from_env("DYN_LOG"))
-            .unwrap_or_else(|_| EnvFilter::new("warn"));
+            .unwrap_or_else(|_| EnvFilter::new("error"));
         // Strip ANSI escapes by default: the connector logs from a host
         // subprocess whose stdout is redirected to a file, where color codes
         // are just noise that breaks naive log greps.
@@ -51,6 +57,9 @@ fn init_logging() {
 #[cfg(feature = "v2")]
 mod v2;
 
+#[cfg(feature = "hub")]
+mod hub;
+
 /// A Python module implemented in Rust. The name of this function must match
 /// the `lib.name` setting in the `Cargo.toml`, else Python will not be able to
 /// import the module.
@@ -65,6 +74,13 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         let v2 = PyModule::new(m.py(), "v2")?;
         v2::add_to_module(&v2)?;
         m.add_submodule(&v2)?;
+    }
+
+    #[cfg(feature = "hub")]
+    {
+        let hub = PyModule::new(m.py(), "hub")?;
+        hub::add_to_module(&hub)?;
+        m.add_submodule(&hub)?;
     }
 
     // TODO: kernels bindings disabled pending operational_copy API adaptation

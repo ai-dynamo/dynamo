@@ -1,0 +1,122 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package kvbm_service.v1;
+
+// KvbmService is the network-addressable shell around kvbm-engine. In this MVP
+// it accepts a single unique RegistrationKey at a time. Capacity for same-key
+// concurrent registrations is num_cuda_visible_gpus / tp_size. Stream drop on
+// the Register RPC is treated as an ungraceful detach.
+//
+// Future per-rank registration (slot = 1 each) would add a `tp_rank` field to
+// RegistrationKey and change slot accounting; deliberately not modeled here.
+service KvbmService
+{
+  // Server-streaming liveness/attachment RPC. The first event on the stream is
+  // either `Accepted` (registration succeeded) or `Rejected` (validation or
+  // capacity failure) followed by stream close. After acceptance the server
+  // emits `Heartbeat` periodically; stream drop unregisters the client.
+  rpc Register(RegisterRequest) returns (stream Event);
+}
+
+message RegisterRequest
+{
+  // Free-form client identifier surfaced in /v1/registrations and logs.
+  string client_id = 1;
+  // Tagged description of what the client wants to register. The server
+  // computes a stable, opaque RegistrationKey by hashing this message's
+  // active arm; tenancy is enforced on that key (see service docs).
+  RegistrationInstance instance = 2;
+}
+
+// Tagged union of registration instance types. Adding a new instance type is
+// a server-side change: introduce a new variant + its slot-accounting /
+// validation logic in the kvbm-service registry.
+message RegistrationInstance
+{
+  oneof kind
+  {
+    KvbmInstance kvbm = 1;
+  }
+}
+
+// A KVBM tenant: a leader process and its TP-group workers attaching to a
+// service-hosted host-memory pool. The fields here together describe the
+// canonical layout the engine will operate on.
+message KvbmInstance
+{
+  string model_name = 1;
+  LayoutMode layout_mode = 2;
+  // Tensor parallelism size. Must be a power of two, > 0, and <= num_gpus.
+  uint32 tp_size = 3;
+  // Tokens per block (a.k.a. page_size).
+  uint32 block_size = 4;
+  ServiceMode mode = 5;
+}
+
+enum ServiceMode {
+  SERVICE_MODE_KVBM = 0;
+  SERVICE_MODE_SGL = 1;
+}
+
+// Layout mode is part of the unique key. MVP carries the layout shape as an
+// opaque byte blob (bincode-encoded kvbm_physical::LayoutDescriptor); the
+// service does not interpret it, only checks bytewise equality for key match.
+message LayoutMode
+{
+  oneof kind
+  {
+    // tp=1 canonical block layout — full description across all GPUs.
+    bytes universal_tp1_canonical = 1;
+    // Symmetric layout for a single worker (when TP > 1).
+    bytes operational_symmetric = 2;
+    // Not yet supported by kvbm-engine; reserved for future MLA layouts.
+    MlaPlaceholder mla = 3;
+  }
+}
+message MlaPlaceholder {}
+
+// Server-streamed events. The shell sends Accepted + periodic Heartbeat;
+// during graceful shutdown the coordinator sends ServerShutdownInitiated to
+// every connected client and ServerShutdownTimedOut to any straggler whose
+// grace period elapsed. Future variants will deliver engine operations,
+// attach progress, etc.
+message Event
+{
+  oneof kind
+  {
+    Accepted accepted = 1;
+    Heartbeat heartbeat = 2;
+    ServerShutdownInitiated server_shutdown_initiated = 3;
+    ServerShutdownTimedOut server_shutdown_timed_out = 4;
+  }
+}
+
+message Accepted
+{
+  string registration_id = 1;  // opaque server-assigned ID
+  uint32 reserved_slots = 2;   // typically equal to RegistrationKey.tp_size
+}
+
+message Heartbeat
+{
+  uint64 seq = 1;
+}
+
+// Sent once to every connected client when graceful shutdown begins. The
+// client should detach (drop its stream) once it has completed local
+// cleanup. `grace_period_ms == 0` means the server is waiting indefinitely.
+message ServerShutdownInitiated
+{
+  uint64 grace_period_ms = 1;
+}
+
+// Sent to any client that has not detached by the time the grace period
+// elapsed. The server will close the stream immediately after enqueueing
+// this event.
+message ServerShutdownTimedOut
+{
+  uint64 grace_period_ms = 1;
+}

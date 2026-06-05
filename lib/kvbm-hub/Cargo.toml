@@ -25,6 +25,10 @@ velo-ext = { workspace = true }
 # KVBM
 kvbm-common    = { workspace = true }
 kvbm-protocols = { workspace = true, features = ["client"] }
+# Prometheus CdMetrics (leaf crate; only depends on prometheus — acyclic). The
+# hub-process breaker-tick task records the breaker tier gauge + transition
+# counter through this when a metrics surface is wired (P2 push path).
+kvbm-observability = { workspace = true }
 kvbm-logical   = { workspace = true }
 dynamo-tokens  = { workspace = true }
 # Pure config crate (no velo, no CUDA — runtime construction lives in
@@ -40,6 +44,11 @@ dashmap      = { workspace = true }
 rmp-serde    = { workspace = true }
 tmq          = { workspace = true }
 
+# Prefill-router calibration: OLS two-line performance-model fit
+# (TTFT vs ISL, ITL vs sequence position) over per-request traces
+# emitted by the worker bindings' Python calibrate-lambda.
+linregress   = "0.5"
+
 # Async / core
 anyhow       = { workspace = true }
 async-trait  = { workspace = true }
@@ -49,6 +58,11 @@ serde        = { workspace = true }
 serde_json   = { workspace = true }
 thiserror    = { workspace = true }
 tokio        = { workspace = true }
+# TOML reader for --kvbm-config-file (the hub accepts either JSON or TOML;
+# extension drives the dispatch). figment depends on toml transitively for its
+# Toml provider, but we need direct access to parse a path-only TOML blob into
+# a serde_json::Value before forwarding to kvbm-config's overrides path.
+toml         = { version = "0.8" }
 tokio-util   = { workspace = true }
 tracing      = { workspace = true }
 url          = { workspace = true }
