@@ -12,7 +12,7 @@ Covers (after realignment to the merged TRT-LLM PR #13199):
     numQueuedGenRequests`` and ``numPausedKvTokens + numQueuedGenKvTokens``.
   * attentionDpRank from the top level of the stat dict is passed through
     unchanged; missing key defaults to 0.
-  * iterLatencyMS (top-level milliseconds) is converted to wall_time_secs
+  * gpuForwardTimeMS (top-level milliseconds) is converted to wall_time_secs
     (seconds) at the boundary.
   * First-stat schema probe disables the publisher when the nested IBS dict
     is missing or any of the 11 required fields is absent — protecting
@@ -59,7 +59,8 @@ _DEFAULT_IBS = {
 def _build_fake_stat(*, ibs_overrides=None, **top_level_overrides):
     """Construct an IterationStats-shaped dict matching the merged #13199 JSON.
 
-    Top-level keys (``iterLatencyMS``, ``attentionDpRank``, ``kvCacheStats``)
+    Top-level keys (``iterLatencyMS``, ``gpuForwardTimeMS``,
+    ``attentionDpRank``, ``kvCacheStats``)
     are siblings of the nested ``inflightBatchingStats`` object, exactly as
     NLOHMANN serializes the C++ struct.
     """
@@ -68,6 +69,7 @@ def _build_fake_stat(*, ibs_overrides=None, **top_level_overrides):
         ibs.update(ibs_overrides)
     stat = {
         "iterLatencyMS": 25.0,
+        "gpuForwardTimeMS": 7.5,
         "attentionDpRank": 0,
         "kvCacheStats": {"usedNumBlocks": 10, "maxNumBlocks": 100},
         "inflightBatchingStats": ibs,
@@ -100,7 +102,7 @@ def _invoke_handler(stat, fpm_publisher):
         queued_sum_prefill_tokens=int(ibs.get("numQueuedCtxTokens", 0)),
         queued_num_decode_requests=queued_num_decode,
         queued_sum_decode_kv_tokens=queued_sum_decode_kv_tokens,
-        wall_time_secs=float(stat.get("iterLatencyMS", 0.0)) / 1000.0,
+        wall_time_secs=float(stat.get("gpuForwardTimeMS", 0.0)) / 1000.0,
     )
 
 
@@ -123,7 +125,7 @@ def test_handle_stat_maps_fields_single_rank():
         queued_sum_prefill_tokens=512,
         queued_num_decode_requests=2,  # numPausedRequests (1) + numQueuedGenRequests (1)
         queued_sum_decode_kv_tokens=1200,  # numPausedKvTokens (800) + numQueuedGenKvTokens (400)
-        wall_time_secs=0.025,
+        wall_time_secs=0.0075,
     )
 
 
@@ -191,7 +193,7 @@ def test_handle_stat_missing_ibs_dict_emits_zeros():
     upstream should have already disabled the publisher in production),
     the handler must still produce a zeroed call rather than KeyError."""
     fpm = MagicMock()
-    _invoke_handler({"iterLatencyMS": 10.0, "attentionDpRank": 0}, fpm)
+    _invoke_handler({"gpuForwardTimeMS": 10.0, "attentionDpRank": 0}, fpm)
     fpm.publish.assert_called_once_with(
         dp_rank=0,
         scheduled_num_prefill_requests=0,
@@ -207,9 +209,9 @@ def test_handle_stat_missing_ibs_dict_emits_zeros():
     )
 
 
-def test_iter_latency_ms_to_wall_time_secs_conversion():
+def test_gpu_forward_time_ms_to_wall_time_secs_conversion():
     fpm = MagicMock()
-    _invoke_handler(_build_fake_stat(iterLatencyMS=1234.5), fpm)
+    _invoke_handler(_build_fake_stat(gpuForwardTimeMS=1234.5), fpm)
     assert fpm.publish.call_args.kwargs["wall_time_secs"] == 1.2345
 
 
@@ -366,13 +368,27 @@ def test_schema_probe_missing_single_ibs_field_disables_publisher(missing_field)
 
 
 def test_schema_probe_missing_ibs_dict_disables_publisher_legacy_trtllm():
-    """Legacy TRT-LLM case: stat dict has iterLatencyMS + attentionDpRank but
+    """Legacy TRT-LLM case: stat dict has timing + attentionDpRank but
     no inflightBatchingStats nested object (pre-#13199 schema). Must disable
     without error."""
     pub, _ = _build_schema_probe_publisher()
     original_publisher = pub.fpm_publisher
 
-    pub._check_fpm_schema({"iterLatencyMS": 10.0, "attentionDpRank": 0})
+    pub._check_fpm_schema({"gpuForwardTimeMS": 10.0, "attentionDpRank": 0})
+
+    assert pub._fpm_schema_checked is True
+    assert pub.fpm_publisher is None
+    original_publisher.shutdown.assert_called_once()
+
+
+def test_schema_probe_missing_gpu_forward_time_disables_publisher():
+    """Do not fall back to iterLatencyMS for FPM wall_time."""
+    pub, _ = _build_schema_probe_publisher()
+    original_publisher = pub.fpm_publisher
+
+    stat = _build_fake_stat()
+    stat.pop("gpuForwardTimeMS")
+    pub._check_fpm_schema(stat)
 
     assert pub._fpm_schema_checked is True
     assert pub.fpm_publisher is None
@@ -386,7 +402,7 @@ def test_schema_probe_ibs_not_a_dict_disables_publisher():
     pub, _ = _build_schema_probe_publisher()
     original_publisher = pub.fpm_publisher
 
-    pub._check_fpm_schema({"inflightBatchingStats": None})
+    pub._check_fpm_schema({"gpuForwardTimeMS": 10.0, "inflightBatchingStats": None})
 
     assert pub.fpm_publisher is None
     original_publisher.shutdown.assert_called_once()
@@ -446,6 +462,7 @@ def test_schema_probe_field_list_matches_default_ibs_set():
     from dynamo.trtllm import publisher as publisher_mod
 
     assert set(publisher_mod._FPM_REQUIRED_IBS_FIELDS) == set(_DEFAULT_IBS.keys())
+    assert publisher_mod._FPM_REQUIRED_TOP_LEVEL_FIELDS == ("gpuForwardTimeMS",)
 
 
 def test_invoke_handler_matches_publisher_keyword_set():

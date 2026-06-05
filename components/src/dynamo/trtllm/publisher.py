@@ -56,11 +56,12 @@ _KV_EVENTS_MAX_SLEEP_SEC = 0.02
 _KV_EVENTS_BACKOFF_FACTOR = 1.5
 
 # InflightBatchingStats fields the FPM publisher consumes. As of
-# NVIDIA/TensorRT-LLM#13199 (merged 2026-04-27) all 11 fields live nested
-# inside iterationStats["inflightBatchingStats"]. The first-stat schema
-# probe requires the nested dict to be present and to carry every key
-# below; any missing field disables the publisher so we do not emit
-# all-zero snapshots that the Planner would misread as "worker idle".
+# NVIDIA/TensorRT-LLM#13199 (merged 2026-04-27) all 11 scheduler fields live
+# nested inside iterationStats["inflightBatchingStats"]. FPM also requires the
+# top-level gpuForwardTimeMS field for batch-matched wall_time. The first-stat
+# schema probe requires both sets to be present; any missing field disables the
+# publisher so we do not emit all-zero snapshots or overlap-scheduler lifecycle
+# latency that the Planner would misread.
 #
 # Mapping to the Dynamo planner-level fields:
 #   numContextRequests        -> scheduled_num_prefill_requests
@@ -93,6 +94,7 @@ _FPM_REQUIRED_IBS_FIELDS = (
     "numPausedRequests",
     "numPausedKvTokens",
 )
+_FPM_REQUIRED_TOP_LEVEL_FIELDS = ("gpuForwardTimeMS",)
 
 
 def _to_signed_i64(value: int | None) -> int | None:
@@ -416,9 +418,9 @@ class Publisher:
         # 1 s idle heartbeat internally.
         self.fpm_publisher: Optional[FpmDirectPublisher] = None
         # One-shot schema probe gate. The first IterationStats delivered to
-        # handle_stat is checked against _FPM_REQUIRED_STAT_FIELDS; on mismatch
+        # handle_stat is checked against the required FPM schema; on mismatch
         # the publisher is shut down and None'd. Prevents silent planner poison
-        # when running against a TRT-LLM version that predates #13199.
+        # when running against a TRT-LLM version without the FPM fields.
         self._fpm_schema_checked: bool = False
         self.kv_event_publishers: Optional[
             Dict[int, KvEventPublisher]
@@ -587,27 +589,41 @@ class Publisher:
 
     def _check_fpm_schema(self, stat: dict) -> None:
         """One-shot probe: disable FPM publisher if the TRT-LLM IterationStats
-        nested ``inflightBatchingStats`` dict is missing or incomplete.
+        FPM fields are missing or incomplete.
 
         Runs exactly once (gated by ``self._fpm_schema_checked``). Strict: if
-        the nested dict is absent or any field in ``_FPM_REQUIRED_IBS_FIELDS``
-        is missing, the publisher is shut down and set to ``None`` so the
-        subsequent ``if self.fpm_publisher is not None:`` short-circuit
+        the nested dict is absent, any field in ``_FPM_REQUIRED_IBS_FIELDS``
+        is missing, or the batch-matched top-level timing field is missing,
+        the publisher is shut down and set to ``None`` so the subsequent
+        ``if self.fpm_publisher is not None:`` short-circuit
         suppresses all FPM emission for the lifetime of this worker. This
         prevents silent planner poison when running against a TRT-LLM that
-        predates NVIDIA/TensorRT-LLM#13199 — otherwise every field would
-        default to 0 and the emitted snapshot would be byte-identical to the
-        idle heartbeat, making the Planner treat a loaded worker as idle.
+        predates the required FPM fields — otherwise missing fields would
+        default to 0 and the emitted snapshot would either look idle or carry
+        overlap-scheduler lifecycle time instead of true forward-pass time.
         """
         self._fpm_schema_checked = True
         if self.fpm_publisher is None:
+            return
+        missing_top_level = [
+            f for f in _FPM_REQUIRED_TOP_LEVEL_FIELDS if f not in stat
+        ]
+        if missing_top_level:
+            logging.warning(
+                "TRT-LLM IterationStats is missing required top-level FPM "
+                "fields %s; disabling FpmDirectPublisher to prevent planner "
+                "poison. Upgrade TRT-LLM to a build that emits batch-matched "
+                "gpuForwardTimeMS.",
+                missing_top_level,
+            )
+            self._disable_fpm_publisher()
             return
         ibs = stat.get("inflightBatchingStats")
         if not isinstance(ibs, dict):
             logging.warning(
                 "TRT-LLM IterationStats has no 'inflightBatchingStats' dict; "
-                "disabling FpmDirectPublisher. Upgrade TRT-LLM past "
-                "NVIDIA/TensorRT-LLM#13199 to enable FPM."
+                "disabling FpmDirectPublisher. Upgrade TRT-LLM to "
+                "a build with FPM scheduler fields to enable FPM."
             )
             self._disable_fpm_publisher()
             return
@@ -617,7 +633,7 @@ class Publisher:
         logging.warning(
             "TRT-LLM inflightBatchingStats is missing required FPM fields %s; "
             "disabling FpmDirectPublisher to prevent planner poison. "
-            "Upgrade TRT-LLM past NVIDIA/TensorRT-LLM#13199 to enable FPM.",
+            "Upgrade TRT-LLM to a build with FPM scheduler fields to enable FPM.",
             missing,
         )
         self._disable_fpm_publisher()
@@ -683,10 +699,10 @@ class Publisher:
             #
             # The first stat delivered here triggers a one-shot schema probe:
             # if the nested IBS dict is missing or any required field is
-            # absent (e.g. running against a TRT-LLM that predates #13199)
-            # the probe shuts down the publisher, which flips the guard
-            # below to short-circuit FPM emission for the rest of this
-            # worker's lifetime.
+            # absent (e.g. running against a TRT-LLM build without the FPM
+            # scheduler/timing schema) the probe shuts down the publisher,
+            # which flips the guard below to short-circuit FPM emission for
+            # the rest of this worker's lifetime.
             if self.fpm_publisher is not None and not self._fpm_schema_checked:
                 self._check_fpm_schema(stat)
             if self.fpm_publisher is not None:
@@ -718,8 +734,11 @@ class Publisher:
                     queued_sum_decode_kv_tokens = int(
                         ibs.get("numPausedKvTokens", 0)
                     ) + int(ibs.get("numQueuedGenKvTokens", 0))
-                    # iterLatencyMS is ms; the Rust snapshot expects seconds.
-                    wall_time_secs = float(stat.get("iterLatencyMS", 0.0)) / 1000.0
+                    # gpuForwardTimeMS is batch-matched CUDA forward time in
+                    # ms; the Rust snapshot expects seconds. Do not use
+                    # iterLatencyMS here: under TRT-LLM overlap scheduling it
+                    # spans the batch lifecycle across async scheduler loops.
+                    wall_time_secs = float(stat.get("gpuForwardTimeMS", 0.0)) / 1000.0
                     self.fpm_publisher.publish(
                         dp_rank=int(stat.get("attentionDpRank", 0)),
                         scheduled_num_prefill_requests=sched_num_prefill,
