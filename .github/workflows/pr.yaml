@@ -334,7 +334,7 @@ jobs:
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and vllm and (gpu_2 or gpu_4)
+      gpu_test_markers: pre_merge and vllm and gpu_2
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -373,7 +373,7 @@ jobs:
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and sglang and (gpu_2 or gpu_4)
+      gpu_test_markers: pre_merge and sglang and gpu_2
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -412,7 +412,7 @@ jobs:
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and trtllm and (gpu_2 or gpu_4)
+      gpu_test_markers: pre_merge and trtllm and gpu_2
       gpu_test_timeout_minutes: 60
     secrets: inherit
 

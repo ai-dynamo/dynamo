@@ -473,7 +473,8 @@ Runs per framework (vllm, sglang, trtllm). Each framework goes through: **Build*
 | Sanity check | Verify packages are installed in the image | `docker run --rm <image> /workspace/dev/sanity_check.py --runtime-check --no-gpu-check` |
 | CPU-only tests (parallel) | `(pre_merge or post_merge) and <framework> and gpu_0` | `pytest -m "(pre_merge or post_merge) and vllm and gpu_0" -n auto --dist=loadscope -v --tb=short` |
 | Single GPU tests (sequential) | `(pre_merge or post_merge) and <framework> and gpu_1` | `pytest -m "(pre_merge or post_merge) and vllm and gpu_1" -v --tb=short` |
-| Multi-GPU tests (sequential) | `(pre_merge or post_merge) and <framework> and (gpu_2 or gpu_4)` | `pytest -m "(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)" -v --tb=short` |
+| 2-GPU tests (sequential) | `(pre_merge or post_merge) and <framework> and gpu_2` | `pytest -m "(pre_merge or post_merge) and vllm and gpu_2" -v --tb=short` |
+| 4-GPU tests (sequential) | `(pre_merge or post_merge) and vllm and gpu_4` | `pytest -m "(pre_merge or post_merge) and vllm and gpu_4" -v --tb=short` |
 
 ### Nightly (daily at midnight PST)
 
