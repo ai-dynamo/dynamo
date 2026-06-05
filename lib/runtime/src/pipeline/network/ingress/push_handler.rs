@@ -424,7 +424,7 @@ where
                     .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
                     .inc();
             }
-            PipelineError::Generic(format!("Failed to create request stream: {:?}", e))
+            PipelineError::Generic(format!("Failed to create request stream: {e}"))
         })?;
 
         // Forwarder: deserialize raw bytes off the request socket into `T`
@@ -544,7 +544,7 @@ where
                     .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
                     .inc();
             }
-            PipelineError::Generic(format!("Failed to create response stream: {:?}", e,))
+            PipelineError::Generic(format!("Failed to create response stream: {e}"))
         })?;
 
         tracing::trace!("calling generate");
@@ -614,13 +614,11 @@ where
         endpoint: &crate::component::Endpoint,
         metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<()> {
-        // Call the Ingress-specific add_metrics implementation
-        use crate::pipeline::network::Ingress;
+        // Call the inherent `Ingress::add_metrics`, not this trait method.
         Ingress::add_metrics(self, endpoint, metrics_labels)
     }
 
     fn set_endpoint_health_check_notifier(&self, notifier: Arc<tokio::sync::Notify>) -> Result<()> {
-        use crate::pipeline::network::Ingress;
         self.endpoint_health_check_notifier
             .set(notifier)
             .map_err(|_| anyhow::anyhow!("Endpoint health check notifier already set"))?;
@@ -647,7 +645,7 @@ where
         endpoint: &crate::component::Endpoint,
         metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<()> {
-        use crate::pipeline::network::Ingress;
+        // Call the inherent `Ingress::add_metrics`, not this trait method.
         Ingress::add_metrics(self, endpoint, metrics_labels)
     }
 

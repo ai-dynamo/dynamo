@@ -1,19 +1,12 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! End-to-end bidirectional round trip with the full Rust stack: a real
-//! `Ingress<ManyIn<u64>, ManyOut<EchoResponse>>` is registered on the
-//! component, the client builds a `PushRouter`, and a three-frame `ManyIn`
-//! produces three matching response frames. Exercises the
-//! `PushRouter::generate(ManyIn<T>)` → `bidirectional_dispatch` →
-//! `AddressedPushRouter::generate_bidirectional` → request-stream TCP
-//! transport → `Ingress<ManyIn<T>, ManyOut<U>>::handle_payload` → engine
-//! path end to end.
+//! End-to-end bidirectional round trip over the full Rust stack: a real
+//! `Ingress<ManyIn<u64>, ManyOut<EchoResponse>>` worker, a `PushRouter`
+//! client, and a three-frame `ManyIn` producing three response frames.
 //!
-//! Lives in `tests/` (one cargo test binary per file) so the
-//! `GLOBAL_TCP_SERVER` accept loop is spawned on a runtime that lives for
-//! the duration of this binary's process — sidesteps the runtime-lifetime
-//! bug tracked in the followup-global-tcp-server note.
+//! Lives in its own `tests/` binary so the process-global TCP server's
+//! accept loop runs for the whole test process.
 
 use std::sync::Arc;
 

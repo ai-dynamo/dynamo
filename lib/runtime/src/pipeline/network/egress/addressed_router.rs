@@ -167,7 +167,7 @@ where
         None => None,
     };
 
-    let msg = match &data {
+    let msg = match data {
         Some(d) => {
             tracing::trace!(
                 request_id,
@@ -175,7 +175,7 @@ where
                 ctrl.len(),
                 d.len(),
             );
-            TwoPartMessage::from_parts(ctrl.into(), d.clone().into())
+            TwoPartMessage::from_parts(ctrl.into(), d.into())
         }
         None => {
             tracing::trace!(
@@ -415,7 +415,7 @@ impl AddressedPushRouter {
     }
 
     /// Bidirectional generation. Note that it doesn't implement the AsyncEngine trait directly
-    /// becasue there is no trivail way to wrap (instance and address) into ManyIn style.
+    /// because there is no trivial way to wrap (instance and address) into ManyIn style.
     /// May wrap as SingleIn<AddressedStreamRequest<T>> and unwrap here but really just syntax
     /// sugar, so we just do it inline here. Will consider only if we do want to call this from
     /// typed erased AsyncEngine impls.
@@ -526,7 +526,10 @@ impl AddressedPushRouter {
         // `engine.generate()` returns; awaiting it second avoids stalling the
         // request-side handshake on engine setup latency.
         if let Some(stream) = input_stream {
-            let request_stream_provider = send_registered.map(|r| r.into_parts().1);
+            let request_stream_provider = send_registered.map(|r| {
+                let (_conn_info, provider) = r.into_parts();
+                provider
+            });
             spawn_request_stream_forwarder(request_stream_provider, stream, engine_ctx.clone())
                 .await?;
         }
