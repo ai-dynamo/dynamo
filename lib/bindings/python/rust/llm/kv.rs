@@ -313,6 +313,7 @@ impl KvEventPublisher {
         let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
             endpoint: ep,
             topic: zmq_topic.unwrap_or_default(),
+            image_token_id,
         });
 
         if kv_block_size == 0 {
@@ -331,7 +332,6 @@ impl KvEventPublisher {
                 enable_local_indexer,
                 dp_rank,
                 batching_timeout_ms,
-                image_token_id,
             )
             .map_err(to_pyerr)?;
 

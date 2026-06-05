@@ -67,7 +67,14 @@ fn create_kv_stream_name(component: &Component, subject: &str) -> String {
 /// Configure the source of KV events.
 /// Currently, only ZMQ is supported.
 pub enum KvEventSourceConfig {
-    Zmq { endpoint: String, topic: String },
+    Zmq {
+        endpoint: String,
+        topic: String,
+        /// Model image-placeholder token id, used by the normalizer to rewrite
+        /// vLLM BlockStored events to the canonical pad_value scheme. `None`
+        /// for text-only / non-MM deployments (normalization is a no-op).
+        image_token_id: Option<u32>,
+    },
 }
 
 enum KvEventSource {
@@ -77,7 +84,6 @@ enum KvEventSource {
 }
 
 impl KvEventSource {
-    #[allow(clippy::too_many_arguments)]
     fn start(
         component: Component,
         worker_id: WorkerId,
@@ -86,10 +92,13 @@ impl KvEventSource {
         cancellation_token: CancellationToken,
         tx: mpsc::UnboundedSender<PlacementEvent>,
         next_event_id: Arc<AtomicU64>,
-        image_token_id: Option<u32>,
     ) -> Result<Self> {
         match source_config {
-            KvEventSourceConfig::Zmq { endpoint, topic } => {
+            KvEventSourceConfig::Zmq {
+                endpoint,
+                topic,
+                image_token_id,
+            } => {
                 let zmq_handle = component
                     .drt()
                     .runtime()
@@ -168,11 +177,9 @@ impl KvEventPublisher {
             enable_local_indexer,
             dp_rank,
             batching_timeout_ms,
-            None,
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn new_with_local_indexer_and_worker_id(
         component: Component,
         worker_id: Option<WorkerId>,
@@ -181,7 +188,6 @@ impl KvEventPublisher {
         enable_local_indexer: bool,
         dp_rank: DpRank,
         batching_timeout_ms: Option<u64>,
-        image_token_id: Option<u32>,
     ) -> Result<Self> {
         let cancellation_token = CancellationToken::new();
         let batching_timeout_ms = batching_timeout_ms
@@ -225,7 +231,6 @@ impl KvEventPublisher {
                 cancellation_token.clone(),
                 tx.clone(),
                 next_event_id.clone(),
-                image_token_id,
             )?);
         }
 
