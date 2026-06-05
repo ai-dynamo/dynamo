@@ -25,8 +25,9 @@ from tests.utils.engine_process import (
 from tests.utils.payload_builder import (
     make_chat_health_check,
     make_completions_health_check,
+    make_images_health_check,
 )
-from tests.utils.payloads import ChatPayload, CompletionPayload
+from tests.utils.payloads import ChatPayload, CompletionPayload, ImagesPayload
 from tests.utils.port_utils import allocate_port, deallocate_port
 
 DEFAULT_TIMEOUT = 10
@@ -46,6 +47,7 @@ def _tail_logs(content: str, *, lines: int = 80) -> str:
 _ENDPOINT_HEALTH_CHECK_FACTORIES = (
     (CompletionPayload, make_completions_health_check),
     (ChatPayload, make_chat_health_check),
+    (ImagesPayload, make_images_health_check),
 )
 
 
