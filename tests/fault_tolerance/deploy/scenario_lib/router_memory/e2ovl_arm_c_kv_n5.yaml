@@ -1,0 +1,126 @@
+# E2-overload Arm C — KV LOAD-AWARE (recommended), N=5 real-GPU (aws-dev-02).
+#
+# Admission-control ablation, arm 3 of 3 (A=LL-baseline / B=LL-best / C=KV-load-aware).
+# Recommended KV load-aware routing with the FULL admission stack ON:
+#   - mode=kv, events OFF, overlap weight 0.0 -> pure load/queue-aware (no prefix bias).
+#   - replica-sync ON (cross-FE load view), queue threshold 4.0, fcfs.
+#   - DYN_ACTIVE_* thresholds 0.85 -> router excludes near-saturated workers.
+#   - Worker TCP-gate tuned to 128 pool / 5 queue.
+# Measured against arm A (unprotected baseline) under identical 2x bursts.
+#
+# Topology 5 FE + 10 prefill + 5 decode (30 GPU, prod 2:1). steady=82 (0.85xC_max=96),
+# burst=164. 120-min trapezoid, 3x bursts. SLA/timeout/goodput=30s.
+
+kind: router_memory
+name: e2ovl_arm_c_kv_n5
+description: |
+  E2-overload arm C (KV load-aware, recommended). 5/10/5 vllm-disagg, kv router
+  (events off, overlap 0.0, replica-sync) + 0.85 active thresholds + tuned worker
+  TCP-gate (128/5). 120-min trapezoid with 3x 2x-bursts.
+
+labels:
+  purpose: e2_overload_arm
+  arm: e2ovl_arm_c_kv
+  router_mode: kv
+  deployment: disagg
+  backend: vllm
+  cluster: aws-dev-02
+
+deployment:
+  backend: vllm
+  topology: disagg
+  template: disagg_qwen3_30b_unit_e1
+  image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:release-1.2.0-mocker-prefill-pinning-a5c93b3331-neelays
+  model_cache_pvc: shared-model-cache
+  log_pvc: dynamo-ft-logs
+  replicas:
+    Frontend: 5
+    VllmPrefillWorker: 10
+    VllmDecodeWorker: 5
+
+router:
+  mode: kv
+  knobs:
+    DYN_ROUTER_USE_KV_EVENTS: "false"
+    DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT: "0.0"
+    DYN_ROUTER_PREFILL_LOAD_SCALE: "1.0"
+    DYN_ROUTER_QUEUE_THRESHOLD: "4.0"
+    DYN_ROUTER_QUEUE_POLICY: "fcfs"
+    DYN_ROUTER_REPLICA_SYNC: "true"
+    DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD: "0.85"
+    DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC: "0.85"
+    # Event plane explicit (was defaulting to NATS); transport-env → FE + workers.
+    DYN_EVENT_PLANE: "zmq"
+    # Tier-1 run visibility (FE only): admission-gate engage/clear + router-queue backpressure.
+    DYN_LOG: "info,dynamo_llm::discovery::worker_monitor=debug,dynamo_kv_router::scheduling::queue=debug"
+
+admission:
+  knobs:
+    DYN_TCP_WORKER_POOL_SIZE: "128"
+    DYN_TCP_WORK_QUEUE_SIZE: "5"
+    VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "30"
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30"
+
+load:
+  shape:
+    type: partial_prefix
+    num_prefix_prompts: 5
+    prefix_prompt_length: 740
+    seq_dist: "100,20:1;100,80:2;100,130:2;100,180:1;100,200:1;500,20:2;500,80:5;500,130:5;500,180:2;500,200:1;1000,20:3;1000,80:5;1000,130:5;1000,180:3;1000,200:2;1600,20:5;1600,80:8;1600,130:8;1600,180:5;1600,200:3;3400,20:3;3400,80:6;3400,130:6;3400,180:3;3400,200:2;7000,20:2;7000,80:3;7000,130:3;7000,180:2;7000,200:1"
+  rungs:
+    - { name: warmup,   concurrency: 16,  duration_minutes: 2.0 }
+    - { name: ramp,     concurrency: 82,  duration_minutes: 1.0 }
+    - { name: steady-1, concurrency: 82,  duration_minutes: 20.0 }
+    - { name: burst-1,  concurrency: 164, duration_minutes: 12.0 }
+    - { name: steady-2, concurrency: 82,  duration_minutes: 20.0 }
+    - { name: burst-2,  concurrency: 328, duration_minutes: 12.0 }
+    - { name: steady-3, concurrency: 82,  duration_minutes: 20.0 }
+    - { name: burst-3,  concurrency: 164, duration_minutes: 12.0 }
+    - { name: steady-4, concurrency: 82,  duration_minutes: 19.0 }
+    - { name: rampdown, concurrency: 10,  duration_minutes: 2.0 }
+  common:
+    request_timeout_seconds: 30
+    goodput: ["request_latency:30000"]
+    streaming: true
+    ignore_eos: true
+    connection_reuse_strategy: never
+
+events:
+  - { kind: WaitForModelReady, timeout: 2400 }
+  - kind: ResourcePoller
+    services: [Frontend, VllmPrefillWorker, VllmDecodeWorker]
+    interval_s: 5
+  - { kind: StartLoad, load_ref: warmup }
+  - { kind: WaitForLoadCompletion, name: warmup }
+  - { kind: StartLoad, load_ref: ramp }
+  - { kind: WaitForLoadCompletion, name: ramp }
+  - { kind: StartLoad, load_ref: steady-1 }
+  - { kind: WaitForLoadCompletion, name: steady-1 }
+  - { kind: CaptureMetrics, suffix: ".baseline" }
+  - { kind: StartLoad, load_ref: burst-1 }
+  - { kind: WaitForLoadCompletion, name: burst-1 }
+  - { kind: CaptureMetrics, suffix: ".post-burst1" }
+  - { kind: StartLoad, load_ref: steady-2 }
+  - { kind: WaitForLoadCompletion, name: steady-2 }
+  - { kind: StartLoad, load_ref: burst-2 }
+  - { kind: WaitForLoadCompletion, name: burst-2 }
+  - { kind: CaptureMetrics, suffix: ".post-burst2" }
+  - { kind: StartLoad, load_ref: steady-3 }
+  - { kind: WaitForLoadCompletion, name: steady-3 }
+  - { kind: StartLoad, load_ref: burst-3 }
+  - { kind: WaitForLoadCompletion, name: burst-3 }
+  - { kind: CaptureMetrics, suffix: ".post-burst3" }
+  - { kind: StartLoad, load_ref: steady-4 }
+  - { kind: WaitForLoadCompletion, name: steady-4 }
+  - { kind: CaptureMetrics, suffix: ".final" }
+  - { kind: StartLoad, load_ref: rampdown }
+  - { kind: WaitForLoadCompletion, name: rampdown }
+
+reports:
+  - PerWorkerLatencyReport
+  - ErrorBreakdownReport
+
+checks:
+  - { kind: LoadApplied, load_name: burst-2, min_requests: 2000 }
+  - { kind: WorkerPanics, services: [Frontend, VllmPrefillWorker, VllmDecodeWorker], acceptable: true }
+  - { kind: RestartCountIncreased, services: [Frontend, VllmPrefillWorker, VllmDecodeWorker], expect_min_increment: 0 }

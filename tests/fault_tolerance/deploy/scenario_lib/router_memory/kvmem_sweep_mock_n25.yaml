@@ -1,0 +1,80 @@
+# KV-leak scale study — Stage-0 saturation sweep, N=25 mocker (nebius SHAKEOUT).
+#
+# Shakeout before N=50: validates that the full pipeline stands up at scale on
+# nebius — 25 FE + 50 prefill + 25 decode (100 pods, 100-pod kai gang, 75 worker
+# discovery CRs, ZMQ event plane, load-gen) — AND measures the aggregate C_max
+# for the KV load-aware (recommended) config at the 15s mocker SLA. If this is
+# clean, N=50 follows.
+#
+# Router = KV load-aware (recommended): same config as the eventual N=50 leak arm
+# (mode=kv, events off, overlap 0.0, replica-sync, queue-thresh 4.0, fcfs,
+# 0.85 active thresholds). speedup-ratio=1.0 (bundled mocker disagg.yaml).
+# Consumed via --sat-deploy-scenario kvmem_sweep_mock_n25 (test_saturation_discovery
+# drives its own --search-space; the load block below is an ignored placeholder).
+
+kind: router_memory
+name: kvmem_sweep_mock_n25
+
+labels:
+  purpose: kvmem_scale_sweep
+  arm: kvmem_sweep_mock_n25
+  router_mode: kv
+  deployment: disagg
+  backend: mocker
+  cluster: nebius-2
+
+deployment:
+  backend: mocker
+  topology: disagg
+  image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:release-1.2.0-mocker-prefill-pinning-a5c93b3331-neelays
+  log_pvc: dynamo-ft-logs
+  # Measured peak mocker RSS over a full 120-min run is ~1.0GB/pod (FE 0.5,
+  # prefill/decode 1.0 — see arm-A/C pod_memory_growth.tsv). The template's
+  # 3Gi *request* is a 3x over-reservation: the n=25 OOM was nodes filling with
+  # 3Gi RESERVATIONS (admission), not real memory. 1.5Gi (peak + 50% headroom)
+  # fits n=25 (150Gi) AND n=50 (300Gi) in the ~326Gi-free cpu-pool. Limit stays
+  # 10Gi for burst headroom.
+  memory_request: 1.5Gi
+  replicas:
+    Frontend: 25
+    prefill: 50
+    decode: 25
+
+router:
+  mode: kv
+  knobs:
+    DYN_ROUTER_USE_KV_EVENTS: "false"
+    DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT: "0.0"
+    DYN_ROUTER_PREFILL_LOAD_SCALE: "1.0"
+    DYN_ROUTER_QUEUE_THRESHOLD: "4.0"
+    DYN_ROUTER_QUEUE_POLICY: "fcfs"
+    DYN_ROUTER_REPLICA_SYNC: "true"
+    DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD: "0.85"
+    DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC: "0.85"
+    DYN_EVENT_PLANE: "zmq"
+    DYN_DISCOVERY_BACKEND: "kubernetes"
+    DYN_STORE_KV: "mem"
+
+admission:
+  knobs:
+    DYN_TCP_WORKER_POOL_SIZE: "128"
+    DYN_TCP_WORK_QUEUE_SIZE: "5"
+    VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "30"
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30"
+
+# Ignored placeholder — the sweep supplies its own --search-space.
+load:
+  shape:
+    type: partial_prefix
+    num_prefix_prompts: 5
+    prefix_prompt_length: 740
+    seq_dist: "100,20:1;100,80:2;100,130:2;100,180:1;100,200:1;500,20:2;500,80:5;500,130:5;500,180:2;500,200:1;1000,20:3;1000,80:5;1000,130:5;1000,180:3;1000,200:2;1600,20:5;1600,80:8;1600,130:8;1600,180:5;1600,200:3;3400,20:3;3400,80:6;3400,130:6;3400,180:3;3400,200:2;7000,20:2;7000,80:3;7000,130:3;7000,180:2;7000,200:1"
+  rungs:
+    - name: unused_sweep_supplies_own_load
+      concurrency: 16
+      duration_minutes: 1.0
+  common:
+    request_timeout_seconds: 86400
+    streaming: true
+    ignore_eos: true
+    connection_reuse_strategy: never

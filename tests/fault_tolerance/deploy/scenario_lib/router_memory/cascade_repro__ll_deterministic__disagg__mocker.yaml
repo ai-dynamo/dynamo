@@ -1,0 +1,150 @@
+# Cascade-overload reproduction — 15-unit mocker, LL routing, DETERMINISTIC tie-break.
+#
+# Image carries the full stranded-KV + admission capability set:
+#   the mocker prefill-KV-residency + KV-transfer abort-timeout behavior (prefill-KV-pinning),
+#   the combined sequence+block admission gate, and prefill-KV-residency forensic logging,
+#   together with the DYN_ROUTER_LL_DETERMINISTIC_TIES knob, per-worker LL exclusion, and
+#   worker inhibition under backpressure.
+#
+# Load = fast-ramp -> steady -> spike -> steady -> spike(cascade) -> steady -> ramp-down.
+# Goal: drive decode KV toward 100%, observe the 3-stage cascade (decode KV 100% ->
+#   prefill KV -> throughput collapse), OR confirm the stranded-KV/admission stack holds
+#   at the seq+block gate (both are valid findings — see checks).
+# Decode seq cap = 8 max-num-seqs x 15 decode = 120 concurrent decode seqs; spike-2 @ 240
+#   = 2x that. num-gpu-blocks-override=1024/worker (framework mocker defaults).
+
+kind: router_memory
+name: cascade_repro__ll_deterministic__disagg__mocker
+description: |
+  15F+30P+15D mocker-disagg, LL routing with DETERMINISTIC tie-break. Trapezoid with
+  double spike (~46 min). Forces decode KV toward 100% to reproduce (or refute) the
+  3-stage KV cascade on the full stranded-KV + admission image.
+
+labels:
+  purpose: cascade_overload_repro
+  router_mode: least_loaded_deterministic_ties
+  deployment: disagg
+  backend: mocker
+  image_label: mocker-prefill-pinning-a5c93b3331
+  cluster: nscale-dev-cluster
+
+deployment:
+  backend: mocker
+  topology: disagg
+  image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:release-1.2.0-mocker-prefill-pinning-a5c93b3331-neelays
+  replicas:
+    Frontend: 15
+    prefill: 30
+    decode: 15
+
+router:
+  mode: least-loaded
+  knobs:
+    # THE STARTING POINT: revert reservoir-sample tie-breaks (#9516) to deterministic
+    # ordering (v1.1.1 behavior) — worst-case sticky-concentration routing.
+    DYN_ROUTER_LL_DETERMINISTIC_TIES: "1"
+    DYN_ROUTER_USE_KV_EVENTS: "false"
+    # Defensive thresholds present so we can observe whether per-worker LL exclusion /
+    # worker inhibition under backpressure engage under saturation (at lower loads they never fire).
+    DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD: "0.85"
+    DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC: "0.85"
+    DYN_EVENT_PLANE: "zmq"
+    DYN_DISCOVERY_BACKEND: "kubernetes"
+    DYN_STORE_KV: "mem"
+    DYN_LOG: "info,dynamo_llm::discovery::worker_monitor=debug"
+
+admission:
+  knobs:
+    DYN_TCP_WORKER_POOL_SIZE: "128"
+    DYN_TCP_WORK_QUEUE_SIZE: "5"
+    VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "30"
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30"
+
+load:
+  shape:
+    type: partial_prefix
+    num_prefix_prompts: 5
+    prefix_prompt_length: 740
+    seq_dist: "100,20:1;100,80:2;100,130:2;100,180:1;100,200:1;500,20:2;500,80:5;500,130:5;500,180:2;500,200:1;1000,20:3;1000,80:5;1000,130:5;1000,180:3;1000,200:2;1600,20:5;1600,80:8;1600,130:8;1600,180:5;1600,200:3;3400,20:3;3400,80:6;3400,130:6;3400,180:3;3400,200:2;7000,20:2;7000,80:3;7000,130:3;7000,180:2;7000,200:1"
+  rungs:
+    - { name: warmup,   concurrency: 10,  duration_minutes: 5.0 }
+    - { name: ramp,     concurrency: 80,  duration_minutes: 1.0 }
+    - { name: steady-1, concurrency: 80,  duration_minutes: 12.0 }
+    - { name: spike-1,  concurrency: 180, duration_minutes: 12.0 }
+    - { name: steady-2, concurrency: 80,  duration_minutes: 12.0 }
+    - { name: spike-2,  concurrency: 240, duration_minutes: 28.0 }
+    - { name: steady-3, concurrency: 80,  duration_minutes: 15.0 }
+    - { name: rampdown, concurrency: 10,  duration_minutes: 5.0 }
+  common:
+    request_timeout_seconds: 30
+    streaming: true
+    ignore_eos: true
+    connection_reuse_strategy: never
+
+events:
+  - { kind: WaitForModelReady, timeout: 1800 }
+  - kind: ResourcePoller
+    services: [Frontend, prefill, decode]
+    interval_s: 5
+  - { kind: StartLoad, load_ref: warmup }
+  - { kind: WaitForLoadCompletion, name: warmup }
+  - { kind: StartLoad, load_ref: ramp }
+  - { kind: WaitForLoadCompletion, name: ramp }
+  - { kind: StartLoad, load_ref: steady-1 }
+  - { kind: WaitForLoadCompletion, name: steady-1 }
+  - { kind: CaptureMetrics, suffix: ".pre-spike1" }
+  - { kind: StartLoad, load_ref: spike-1 }
+  - { kind: WaitForLoadCompletion, name: spike-1 }
+  - { kind: CaptureMetrics, suffix: ".post-spike1" }
+  - { kind: StartLoad, load_ref: steady-2 }
+  - { kind: WaitForLoadCompletion, name: steady-2 }
+  - { kind: CaptureMetrics, suffix: ".pre-spike2" }
+  - { kind: StartLoad, load_ref: spike-2 }
+  - { kind: WaitForLoadCompletion, name: spike-2 }
+  - { kind: CaptureMetrics, suffix: ".post-spike2" }
+  - { kind: StartLoad, load_ref: steady-3 }
+  - { kind: WaitForLoadCompletion, name: steady-3 }
+  - { kind: StartLoad, load_ref: rampdown }
+  - { kind: WaitForLoadCompletion, name: rampdown }
+
+reports:
+  - PerWorkerLatencyReport
+  - ErrorBreakdownReport
+
+checks:
+  # Sanity: the spike actually reached the cluster.
+  - { kind: LoadApplied, load_name: spike-2, min_requests: 2000 }
+
+  # --- CASCADE-REPRODUCED evidence: decode KV pegs first, then prefill ---
+  - kind: KvCacheUsagePeak
+    services: [decode]
+    threshold: 0.99
+    within_seconds: 300
+    load_name: spike-2
+  - kind: KvCacheUsagePeak
+    services: [prefill]
+    threshold: 0.95
+    within_seconds: 600
+    load_name: spike-2
+  - kind: WaitingForKVTransferExceeds
+    services: [decode]
+    threshold: 100
+    load_name: spike-2
+  - kind: GenerationThroughputDropped
+    services: [decode]
+    min_drop_frac: 0.30
+    warmup_seconds: 300
+    cliff_window_seconds: 300
+    cliff_load_name: spike-2
+  - kind: NixlXferTimeMultiplied
+    services: [decode]
+    min_multiplier: 3.0
+    warmup_seconds: 300
+    cliff_load_name: spike-2
+  - kind: RequestsRunningPeak
+    threshold: 200
+    sustained_seconds: 30
+
+  # --- Hygiene: distinguish a true cascade from a pod crash ---
+  - { kind: WorkerPanics, services: [Frontend, prefill, decode], acceptable: true }
+  - { kind: RestartCountIncreased, services: [Frontend, prefill, decode], expect_min_increment: 0 }
