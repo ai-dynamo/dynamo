@@ -1062,6 +1062,16 @@ class ManagedDeployment:
 
     _custom_api: Optional[client.CustomObjectsApi] = None
     _core_api: Optional[client.CoreV1Api] = None
+    # The single kubernetes_asyncio ApiClient shared by all API objects below.
+    # Stored so __aexit__ can close it — otherwise its aiohttp session leaks
+    # ("Unclosed connector") on teardown.
+    _api_client: Optional[client.ApiClient] = None
+    # The task running the ``async with`` body. A loop-scheduled signal handler
+    # cancels exactly this task so teardown runs deterministically (see
+    # __aenter__). ``_cancelling`` makes the cancel one-shot.
+    _main_task: Optional[Any] = None
+    _cancelling: bool = False
+    _loop_signal_handlers_installed: bool = False
     _in_cluster: bool = False
     _logger: logging.Logger = logging.getLogger()
     _port_forward: Optional[Any] = None
@@ -1120,9 +1130,12 @@ class ManagedDeployment:
                 self._logger.info("Successfully loaded default kubeconfig")
 
         k8s_client = client.ApiClient()
+        self._api_client = k8s_client
         self._custom_api = client.CustomObjectsApi(k8s_client)
         self._core_api = client.CoreV1Api(k8s_client)
-        self._apps_v1 = client.AppsV1Api()
+        # Share the one ApiClient so closing it in __aexit__ tears down every
+        # API object's aiohttp session (no leaked "Unclosed connector").
+        self._apps_v1 = client.AppsV1Api(k8s_client)
 
     async def _wait_for_pods(self, label, expected, timeout=300):
         for _ in range(timeout):
@@ -2239,16 +2252,33 @@ class ManagedDeployment:
             logging.getLogger("httpx").setLevel(logging.WARNING)
             await self._init_kubernetes()
 
-            # Convert SIGTERM / SIGINT into KeyboardInterrupt so a plain
-            # `kill <pytest-pid>` (or Ctrl-C, or a runner that sends
-            # SIGTERM on cancel) lands in our `except:` branch below
-            # AND in __aexit__'s _cleanup. Without this, a SIGTERM
-            # bypasses both and leaves orphan DGDs + PVCs + pods in
-            # the namespace. The standalone scripts/clean-test-ns.sh
-            # is the backup for cases this can't catch — SIGKILL,
-            # OOM-kill, or a wedged process holding the GIL.
-            self._prev_sigterm = signal.signal(signal.SIGTERM, self._signal_to_kbi)
-            self._prev_sigint = signal.signal(signal.SIGINT, self._signal_to_kbi)
+            # Make a plain `kill <pytest-pid>` (or Ctrl-C, or a runner that
+            # SIGTERMs on cancel) tear the deployment down via __aexit__
+            # instead of stranding orphan DGDs + PVCs + pods. The standalone
+            # scripts/clean-test-ns.sh is the backup for what this can't catch
+            # (SIGKILL, OOM-kill, a wedged process holding the GIL).
+            #
+            # Prefer loop.add_signal_handler over signal.signal(...raise
+            # KeyboardInterrupt): a synchronous raise from the C signal callback
+            # can surface inside the event loop's own machinery (e.g. while it's
+            # blocked in epoll during a warmup poll) rather than inside our
+            # coroutine, abandoning the task with the loop already closing — so
+            # __aexit__ never runs and the run is stranded. A loop-scheduled
+            # task.cancel() always surfaces as CancelledError *inside* the
+            # awaited coroutine, so __aexit__ runs deterministically.
+            self._main_task = asyncio.current_task()
+            self._cancelling = False
+            try:
+                loop = asyncio.get_running_loop()
+                for sig in (signal.SIGTERM, signal.SIGINT):
+                    loop.add_signal_handler(sig, self._on_cancel_signal, sig)
+                self._loop_signal_handlers_installed = True
+            except (NotImplementedError, RuntimeError):
+                # add_signal_handler is Unix + main-thread-loop only; fall back
+                # to the synchronous KeyboardInterrupt converter.
+                self._loop_signal_handlers_installed = False
+                self._prev_sigterm = signal.signal(signal.SIGTERM, self._signal_to_kbi)
+                self._prev_sigint = signal.signal(signal.SIGINT, self._signal_to_kbi)
 
             # Scrub the namespace clean of any state left over from prior
             # runs (failed-mid-test deployments, orphan PVCs, stale load
@@ -2283,9 +2313,47 @@ class ManagedDeployment:
         try:
             await self._cleanup()
         finally:
-            # Restore prior signal handlers so a subsequent test in the
-            # same pytest session (or pytest's own SIGINT handler) is
-            # not stuck with our converter.
+            self._teardown_signal_handlers()
+            # Close the shared kubernetes_asyncio ApiClient (aiohttp session)
+            # so teardown doesn't leak an "Unclosed connector". Done after
+            # cleanup, which still needs the client for extract + delete.
+            if self._api_client is not None:
+                try:
+                    await self._api_client.close()
+                except Exception:
+                    pass
+                self._api_client = None
+
+    def _on_cancel_signal(self, signum):
+        """Loop-scheduled signal handler: cancel the task running this
+        ``async with`` exactly once so __aexit__ cleanup runs, then no-op on
+        repeats so a second signal can't abort the in-flight teardown (or trip
+        the default SIGTERM terminate-the-process action)."""
+        if self._cancelling:
+            self._logger.warning(
+                f"signal {signum} during teardown — ignoring (cleanup in progress)"
+            )
+            return
+        self._cancelling = True
+        self._logger.warning(
+            f"received signal {signum}; cancelling for graceful teardown"
+        )
+        if self._main_task is not None:
+            self._main_task.cancel()
+
+    def _teardown_signal_handlers(self):
+        """Undo whichever signal mechanism __aenter__ installed, so a later
+        test in the same session (or pytest's own SIGINT handler) isn't stuck
+        with ours."""
+        if getattr(self, "_loop_signal_handlers_installed", False):
+            try:
+                loop = asyncio.get_running_loop()
+                for sig in (signal.SIGTERM, signal.SIGINT):
+                    loop.remove_signal_handler(sig)
+            except (RuntimeError, ValueError, NotImplementedError):
+                pass
+            self._loop_signal_handlers_installed = False
+        else:
             for sig, prev in (
                 (signal.SIGTERM, getattr(self, "_prev_sigterm", None)),
                 (signal.SIGINT, getattr(self, "_prev_sigint", None)),
@@ -2294,10 +2362,9 @@ class ManagedDeployment:
                     try:
                         signal.signal(sig, prev)
                     except (ValueError, OSError):
-                        # signal.signal raises ValueError outside the
-                        # main thread; OSError on some platforms. Best
-                        # effort — handlers will be replaced anyway by
-                        # the next __aenter__ or by interpreter exit.
+                        # signal.signal raises ValueError off the main thread;
+                        # OSError on some platforms. Best effort — replaced by
+                        # the next __aenter__ or interpreter exit anyway.
                         pass
 
     @staticmethod
