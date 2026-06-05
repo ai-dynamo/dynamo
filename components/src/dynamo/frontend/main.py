@@ -51,9 +51,8 @@ logger = logging.getLogger(__name__)
 
 MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
 
-# Strong references to fire-and-forget tasks. The event loop only holds weak
-# references to tasks, so a task that isn't retained can be garbage-collected
-# mid-execution — worst case, the shutdown task vanishes during shutdown.
+# Retain fire-and-forget tasks; the loop only weakly references them, so an
+# unretained task can be GC'd mid-run.
 _background_tasks: set["asyncio.Task[Any]"] = set()
 
 

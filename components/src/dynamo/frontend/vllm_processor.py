@@ -694,11 +694,7 @@ class VllmProcessor:
                     yield dynamo_out
             _nvtx.end_range(rng_stream)
         except DynamoException:
-            # Preserve typed Dynamo errors (ConnectionTimeout, Disconnected,
-            # EngineShutdown, ...) so the serving layer can classify them instead
-            # of flattening every failure into a generic internal_error chunk.
-            # The finally below still runs to abort registered requests.
-            raise
+            raise  # let typed errors propagate, not flatten to internal_error
         except Exception as e:
             logger.exception("Error generating response for request %s", request_id)
             yield make_internal_error(request_id, str(e))

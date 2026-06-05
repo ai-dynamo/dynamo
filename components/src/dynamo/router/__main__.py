@@ -53,18 +53,14 @@ class StandaloneRouterHandler:
         self.aic_perf_config = aic_perf_config
         self.kv_router: Optional[KvRouter] = None
         self.worker_client: Optional[Client] = None
-        # When > 0, bound the wait on each worker call. For streaming this
-        # bounds the gap *between* chunks (not total generation time), so a
-        # hung worker raises ConnectionTimeout instead of stalling forever
-        # while legitimately long generations are unaffected. 0 = disabled.
+        # >0 bounds each worker call; for streaming, the gap between chunks (not
+        # total gen time). 0 = disabled.
         self.worker_timeout_secs = worker_timeout_secs
 
     async def _await_worker(self, awaitable):
-        """Await a worker call, optionally bounding the wait (see __init__).
+        """Await a worker call, optionally timing out (raises ConnectionTimeout).
 
-        Raises ConnectionTimeout (a typed DynamoException) on stall so the
-        serving layer can classify it. StopAsyncIteration passes through
-        untouched so streaming callers can detect end-of-stream normally.
+        StopAsyncIteration passes through so stream callers detect end-of-stream.
         """
         if not self.worker_timeout_secs or self.worker_timeout_secs <= 0:
             return await awaitable
@@ -144,8 +140,7 @@ class StandaloneRouterHandler:
             "mm_processor_kwargs": request.get("mm_processor_kwargs"),
         }
 
-        # Iterate manually so each chunk's wait can be bounded by
-        # _await_worker (a hung worker mid-stream must not stall forever).
+        # Iterate manually so each chunk's wait is bounded by _await_worker.
         stream = await self._await_worker(
             self.kv_router.generate_from_request(
                 preprocessed_request  # type: ignore[arg-type]
@@ -249,8 +244,7 @@ async def worker(runtime: DistributedRuntime):
     kv_router_config = build_kv_router_config(config)
     aic_perf_config = build_aic_perf_config(config)
 
-    # Optional per-call worker timeout (seconds). Default 0 = disabled, so
-    # behavior is unchanged unless an operator opts in.
+    # Optional per-call worker timeout (seconds); 0 = disabled.
     try:
         worker_timeout_secs = float(os.getenv("DYN_ROUTER_WORKER_TIMEOUT_SECS", "0"))
     except ValueError:
@@ -280,12 +274,9 @@ async def worker(runtime: DistributedRuntime):
 
     logger.debug("Starting to serve endpoints...")
 
-    # Serve all endpoints concurrently with fail-fast semantics: if any one
-    # exits or raises, cancel the siblings instead of leaving orphaned servers
-    # holding sockets. Plain asyncio.gather() does NOT cancel its peers when one
-    # task raises. asyncio.TaskGroup gives this for free but is 3.11+; the
-    # minimum supported runtime is 3.10 (see pyproject requires-python), so we
-    # build the structured-concurrency scope manually.
+    # Fail-fast: if one endpoint exits/raises, cancel the siblings (plain gather
+    # leaves them running, orphaning sockets). TaskGroup would do this but is
+    # 3.11+; min supported is 3.10, so build the scope manually.
     serve_tasks = [
         asyncio.ensure_future(coro)
         for coro in (
@@ -319,9 +310,8 @@ async def worker(runtime: DistributedRuntime):
                 logger.error(f"Failed to serve endpoint: {exc}")
                 raise exc
     finally:
-        # Cancel any still-running siblings — whether we got here from a peer
-        # failure, a normal endpoint exit, or the worker itself being cancelled
-        # during graceful shutdown — and let the cancellations settle.
+        # Cancel any still-running siblings (peer failure, normal exit, or
+        # graceful-shutdown cancellation) and let them settle.
         for task in serve_tasks:
             task.cancel()
         await asyncio.gather(*serve_tasks, return_exceptions=True)

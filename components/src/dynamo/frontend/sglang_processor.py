@@ -291,11 +291,8 @@ class SglangProcessor:
         self.stream_interval = stream_interval
         self.preprocess_pool = preprocess_pool
         if preprocess_pool is not None:
-            # asyncio.wrap_future cancellation cannot interrupt an already
-            # running pool job — the worker runs to completion. The +2 buffer
-            # absorbs cancelled-but-still-running jobs (whose semaphore slot is
-            # released the moment the awaiting frame is cancelled) so they don't
-            # oversubscribe the pool. See _generator_inner_pool.
+            # +2 buffer absorbs cancelled-but-still-running pool jobs (a cancelled
+            # await frees its slot, but the worker runs to completion).
             self._worker_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
                 preprocess_workers + 2
             )
@@ -303,12 +300,7 @@ class SglangProcessor:
             self._worker_semaphore = None
 
     def shutdown(self) -> None:
-        """Tear down the preprocess worker pool, if any. Idempotent.
-
-        The pool spawns child processes that must be reaped on exit; relying on
-        GC leaves them dangling. Registered with atexit by the factory and safe
-        to call directly from a runtime teardown hook.
-        """
+        """Tear down the preprocess worker pool, if any. Idempotent."""
         if self.preprocess_pool is not None:
             self.preprocess_pool.shutdown(wait=False, cancel_futures=True)
             self.preprocess_pool = None
@@ -387,10 +379,7 @@ class SglangProcessor:
                 pre.tool_call_parser,
             )
         except DynamoException:
-            # Preserve typed Dynamo errors (InvalidArgument, ConnectionTimeout,
-            # Disconnected, EngineShutdown, ...) instead of masking them as
-            # Unknown — callers classify on the concrete type.
-            raise
+            raise  # keep typed errors classifiable; don't mask as Unknown
         except Exception as exc:
             logger.exception("SGLang preprocessing failed for request %s", request_id)
             raise Unknown(f"Preprocessing error ({type(exc).__name__}): {exc}") from exc
@@ -428,10 +417,9 @@ class SglangProcessor:
                     request["model"],
                     self.eos_token_id,
                 )
-                # If this await is cancelled (client disconnect), the submitted
-                # job keeps running to completion — a process-pool task is not
-                # interruptible. The semaphore slot is freed here on cancel; the
-                # +2 buffer (see __init__) keeps such orphans from oversubscribing.
+                # Cancelling this await won't stop the submitted job — pool tasks
+                # aren't interruptible; it runs to completion. (+2 buffer in
+                # __init__ covers the freed-slot overlap.)
                 preproc_result: SglangPreprocessWorkerResult = (
                     await asyncio.wrap_future(future)
                 )
@@ -731,9 +719,9 @@ class SglangEngineFactory:
             self.config.exclude_tools_when_tool_choice_none
         )
 
-        # Guarantee the worker pool is reaped on interpreter exit. gen.shutdown
-        # is idempotent, so an explicit runtime teardown hook can also call it.
+        # Reap the pool at exit. Capture only preprocess_pool (not gen) so the
+        # handler doesn't pin the processor/tokenizer/engine across model reloads.
         if preprocess_pool is not None:
-            atexit.register(gen.shutdown)
+            atexit.register(preprocess_pool.shutdown, wait=False, cancel_futures=True)
 
         return PythonAsyncEngine(gen.generator, loop)

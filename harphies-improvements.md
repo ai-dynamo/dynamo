@@ -129,6 +129,15 @@ process/memory buildup (*Release It!* — resource exhaustion). `shutdown()` is
 idempotent so a future runtime teardown hook can call it directly without
 racing the `atexit` handler.
 
+> Review refinement (CodeRabbit): the `atexit` callback captures **only
+> `preprocess_pool`**, not `gen`. Registering the bound `gen.shutdown` would pin
+> the whole `SglangProcessor` (and its tokenizer / routed engine) until
+> interpreter exit, so processors from earlier model reloads couldn't be GC'd.
+> Capturing the pool directly (`preprocess_pool.shutdown(wait=False,
+> cancel_futures=True)`) still guarantees exit-time reaping while leaving the
+> processor collectible. A weakref-only callback was rejected: it would let the
+> processor be GC'd before exit and skip pool shutdown entirely.
+
 ## 7. Non-interruptible pool cancellation, documented and bounded
 
 **Change.** Comments on the semaphore and in `_generator_inner_pool` now state
