@@ -486,6 +486,14 @@ The kit asserts:
   post-start-failure path. Failures here surface as
   `CleanupWithoutStartFailed`.
 
+For raw media engines, `testing::run_raw_conformance(factory)` is the
+`RawEngine` analog. Raw responses are opaque JSON (no `finish_reason`,
+no token bookkeeping, no `kv_event_sources`), so it pins the
+modality-neutral contract only: `start()` returns a non-empty model and
+leaves `EngineConfig.llm` `None`; `generate()` yields a non-empty all-`Ok`
+stream; 8 interleaved calls complete; cancellation terminates the stream
+within the deadline; and `cleanup()` is idempotent + safe before start.
+
 Also available: `testing::mock_context()` and
 `testing::cancelling_context(after)` for hand-written tests.
 
