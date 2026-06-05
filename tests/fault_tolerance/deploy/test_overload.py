@@ -58,8 +58,9 @@ dgd = "disagg_qwen3_30b_unit_prod"
 
 _DEFAULT_IMAGE = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1"
 
-# Production-shaped traffic distribution (ISL/OSL pairs with realistic
-# long-tail mix). Same distribution as the n3 routing-threshold test.
+# Realistic long-tail traffic distribution (ISL/OSL pairs with a
+# realistic long-tail mix). Same distribution as the n3
+# routing-threshold test.
 _PROD_SEQ_DIST = "100,200:5;500,200:15;1000,200:20;1600,200:30;3400,200:20;7000,200:10"
 _NUM_PREFIX_PROMPTS = 15
 _PREFIX_PROMPT_LENGTH = 600
@@ -85,8 +86,9 @@ def add_cli_options(parser):
         "--units",
         type=int,
         default=3,
-        help="Convenience: scale frontend/prefill/decode together (prod-unit "
-        "replicas). Default 3 (3F : 6P : 3D = 18 GPUs).",
+        help="Convenience: scale frontend/prefill/decode together (per-unit "
+        "replicas at the 2:1 prefill:decode ratio). Default 3 "
+        "(3F : 6P : 3D = 18 GPUs).",
     )
     g.addoption(
         "--frontend-replicas",
@@ -166,7 +168,7 @@ def _apply_topology(spec, units, fe, pf, dec):
 def _apply_recommended_kv_router_config(spec) -> None:
     """Apply the canonical A4 "recommended KV-aware" Frontend config.
 
-    This is the **prescribed production config** from the prior
+    This is the **prescribed recommended config** from the prior
     KV-pressure cascade analysis (§A4 — `Recommendations —
     Without code change`). Pure-load steering with cross-FE visibility:
     KV-aware routing mode + zeroed prefix-cache scoring + cross-FE
@@ -210,7 +212,7 @@ def _apply_recommended_kv_router_config(spec) -> None:
     fe.set_env_var("DYN_ROUTER_USE_KV_EVENTS", "false")
     # **Critical**: cross-FE replica sync. v1.1.1 default is False, which
     # leaves each FE blind to its peers' routing decisions — the exact
-    # mechanism that caused the the cross-FE cascade propagation.
+    # mechanism that caused the cross-FE cascade propagation.
     fe.set_env_var("DYN_ROUTER_REPLICA_SYNC", "true")
     # Deterministic argmin (no softmax-sampling exploration). Default 0,
     # set explicitly for clarity.
@@ -243,8 +245,8 @@ def _apply_router_config(
 ) -> None:
     """Apply the final-recommended router config to the Frontend spec.
 
-    Defaults match the recipe from the prior cascade-reproducer doc
-    (and the joint thread close-out): per-worker admission thresholds
+    Defaults match the recommended cascade-mitigation recipe:
+    per-worker admission thresholds
     enabled at 0.85, KV-aware routing with prefix-cache weight zeroed,
     deterministic argmin selection, no KV events. The same config is
     applied to every comparison arm — the diff between arms is purely
@@ -306,8 +308,7 @@ def _apply_cluster_portability(spec):
         spec[svc].set_env_var("DYN_TEST_MEMLOCK_UNLIMITED", "1")
 
     # Pod-level fsGroup=1000 on every service + Frontend runAsUser=0.
-    # The prior working DGD (dynamo-observe/.../2026-05-03-cascade-repro-
-    # results/) set BOTH. Reasoning:
+    # A prior working DGD set BOTH. Reasoning:
     #   - fsGroup=1000 makes k8s recursively chown the mounted volume to
     #     gid 1000 (dynamo user's group) and SGID-bit the dirs — but
     #     that's only group membership; write is still owner-only under
@@ -329,8 +330,9 @@ def _apply_cluster_portability(spec):
     )
     fe_main.setdefault("securityContext", {})["runAsUser"] = 0
 
-    # Prod runs A100-40GB; both shared clusters above run 80GB cards.
-    # Halve gpu-memory-utilization to match prod KV envelope.
+    # The target deployment runs A100-40GB; both shared clusters above
+    # run 80GB cards. Halve gpu-memory-utilization to match the 40GB
+    # KV envelope.
     for svc in ("VllmPrefillWorker", "VllmDecodeWorker"):
         spec[svc].set_arg("--gpu-memory-utilization", "0.5")
 
@@ -399,7 +401,7 @@ class _PerPodKvImbalanceGap(Check):
 @pytest.mark.weekly
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 async def test_decode_overload(runtime_env, request):
-    """Drive prod-shaped load past sustainable concurrency; observe
+    """Drive realistically-shaped load past sustainable concurrency; observe
     per-pod KV imbalance and goodput collapse on the decode pool.
 
     No fault injection — this is the natural-cascade scenario. Same
@@ -492,9 +494,7 @@ async def test_decode_overload(runtime_env, request):
 
 # ─── Cascade-repro scenarios (cascade reproduction) ─────────────────────────
 # These tests reproduce the cascade-failure regime on a
-# small dev pool. Source spec lives in GitLab `neelays/dynamo-observe`
-# under the cascade-small-pool reproducer scenarios/
-# (FRAMEWORK_TASK.md + PLAN.md).
+# small dev pool.
 #
 # Reuses the existing disagg_qwen3_30b_unit_prod template. The only
 # cascade-specific deltas are applied via _apply_cascade_dgd below
@@ -524,7 +524,7 @@ def _apply_cascade_dgd(
     ``vllm_extra_args``: optional list of vLLM CLI args (e.g.
     ``["--max-num-seqs", "128"]``) appended to BOTH ``VllmPrefillWorker``
     and ``VllmDecodeWorker``'s ``extraPodSpec.mainContainer.args``. Used
-    by the cascade fail-fast S2 / S3 experiments (2026-05-26 handoff) to
+    by the cascade fail-fast S2 / S3 experiments to
     cap engine running-batch size and starve the cascade at the source.
     Existing args are left untouched; if a flag is already present, the
     helper overwrites its value (via ``ServiceSpec.set_arg``).
@@ -545,9 +545,9 @@ def _apply_cascade_dgd(
         spec[svc].set_env_var("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", str(abort_timeout_s))
 
     # Per-test admission-control knobs. Set via env at launch time so a
-    # single test function can drive the cascade matrix from observe's
-    # 5-hr-burst handoff (DIS-2105 needs DYN_TCP_WORK_QUEUE_SIZE, PR #9858
-    # needs DYN_VLLM_REJECT_QUEUE_THRESHOLD; baseline gets neither).
+    # single test function can drive the cascade matrix under a sustained
+    # burst (the TCP work-queue rejection path needs DYN_TCP_WORK_QUEUE_SIZE,
+    # PR #9858 needs DYN_VLLM_REJECT_QUEUE_THRESHOLD; baseline gets neither).
     # Format: semicolon-separated KEY=VALUE list. Empty → no overrides.
     # Example: DYN_TEST_WORKER_KNOBS="DYN_TCP_WORK_QUEUE_SIZE=256;DYN_VLLM_REJECT_QUEUE_THRESHOLD=80"
     knob_source = (
@@ -601,17 +601,16 @@ def _cascade_load(
 ) -> LoadConfig:
     """LoadConfig shared by the cascade scenarios.
 
-    Defaults match the FRAMEWORK_TASK §3.1 spec: no warmup-requests, fresh
+    Defaults: no warmup-requests, fresh
     sockets per request (so any disconnect actually closes the underlying
     TCP), goodput SLO at 20s e2e latency. ISL/OSL default to a
-    steady-state production-shape pair; override per-scenario.
+    steady-state, realistic ISL/OSL pair; override per-scenario.
 
     ``request_cancellation_rate`` (0.0-1.0, optional): pass to AIPerf so a
     fraction of requests get mid-flight client disconnects. Used by S1's
     cliff rung to exercise the ``_DeferredAbort`` path + 480-s NIXL abort
     timer — without cancellations to feed the path, the timer never fires
-    and we can't claim production-parity recovery behaviour. Per observe-
-    agent NEXT_STEPS_FOR_TEST_AGENT P0.2 (sanity-suite work).
+    and we can't claim realistic recovery behaviour.
     """
     return LoadConfig(
         model_name=served_model,
@@ -624,7 +623,7 @@ def _cascade_load(
         prefix_prompt_length=512,
         concurrency=concurrency,
         duration_minutes=duration_minutes,
-        # 40s per observe NEXT_STEPS — last cycle's cliff p99 was ~21s and
+        # 40s — an earlier cycle's cliff p99 was ~21s and
         # the old 20s timeout truncated slow-but-real 503 responses, making
         # it impossible to tell "rejection fired slowly" from "didn't fire".
         request_timeout_seconds=40,
@@ -917,17 +916,18 @@ async def test_overload_cascade_sanity_natural(
     )
 
 
-# ─── Cascade fail-fast spike (S1 of 2026-05-26 fail-fast handoff) ──────
+# ─── Cascade fail-fast spike (S1) ──────────────────────────────────────
 #
-# Goal: prove the DIS-2105 TCP `work_tx.try_send()` rejection path
+# Goal: prove the TCP work-queue rejection path (`work_tx.try_send()`)
 # actually surfaces an HTTP 503 (or `TrySendError::Full` worker log
-# line) under a c=300 instant burst, no warmup. The prior cycle ran
+# line) under a c=300 instant burst, no warmup. A prior cycle ran
 # POOL=128 / QUEUE=32 and saw zero 503s in any log — inflight pegged at
 # 128, suggesting the cap engaged silently. This test asserts the
 # observable side of the cap.
 #
-# Launcher MUST pass the DIS-2105 patched image:
-#   --image nvcr.io/nvidian/dynamo-dev/<...>/vllm-runtime:dis-2105-v1.1.1-<sha>-...
+# Launcher MUST pass an image carrying the TCP work-queue rejection /
+# backpressure path:
+#   --image nvcr.io/nvidian/dynamo-dev/<...>/vllm-runtime:<...>
 # (Hardcoding the image would couple the test to a specific build; the
 # fallback ``_DEFAULT_IMAGE`` is stock 1.1.1 and will pass-fail this
 # test as a control arm.)
@@ -946,19 +946,20 @@ async def test_overload_cascade_sanity_natural(
     ],
 )
 async def test_overload_cascade_spike(runtime_env, request, concurrency, duration_min):
-    """Cascade fail-fast S1 spike — DIS-2105 rejection-path surfacing.
+    """Cascade fail-fast S1 spike — TCP work-queue rejection-path surfacing.
 
     N=2 disagg topology, c=300 instant burst with no warmup. The TCP
     worker pool defaults (overrideable via ``DYN_TEST_WORKER_KNOBS``)
-    are ``DYN_TCP_WORKER_POOL_SIZE=128, DYN_TCP_WORK_QUEUE_SIZE=32`` —
-    matching the handoff's S1 row. Pass if ANY 503-rejection signal
+    are ``DYN_TCP_WORKER_POOL_SIZE=128, DYN_TCP_WORK_QUEUE_SIZE=32``.
+    Pass if ANY 503-rejection signal
     fires during the burst (AIPerf 503 OR worker
     ``TrySendError::Full`` log line OR Frontend ``Status code: 503``
     filtered to the load window).
 
-    The launcher is responsible for passing the DIS-2105 patched image
-    via ``--image``. Without it, ``RejectionFired`` will fail — by
-    design, since that's the whole point of the experiment.
+    The launcher is responsible for passing an image carrying the TCP
+    work-queue rejection / backpressure path via ``--image``. Without
+    it, ``RejectionFired`` will fail — by design, since that's the
+    whole point of the experiment.
     """
     cfg = request.config
     image = cfg.getoption("--image") or _CASCADE_IMAGE
@@ -1051,22 +1052,21 @@ async def test_overload_cascade_spike(runtime_env, request, concurrency, duratio
 @pytest.mark.parametrize(
     "units,concurrency,duration_min,abort_timeout,vllm_max_num_seqs,override_worker_knobs",
     [
-        # Default: production-mirror — N=3, c=216, 45-min hold, 480s NIXL timer.
+        # Default: realistic-shape mirror — N=3, c=216, 45-min hold, 480s NIXL timer.
         (3, 216, 45, 480, None, None),
-        # S2 (2026-05-26 cascade fail-fast handoff): cap engine running-batch
-        # at 128 via vLLM CLI. No DIS-2105 image required — stock 1.1.1
-        # plus --max-num-seqs=128 alone is the lever. Pass if goodput
-        # holds ≥ 50% of pre-cliff OR KV peak < 0.95 (assertions live on
-        # the existing cascade-signature checks; the row exercises the
-        # cap).
+        # S2: cap engine running-batch
+        # at 128 via vLLM CLI. No work-queue-rejection image required —
+        # stock 1.1.1 plus --max-num-seqs=128 alone is the lever. Pass if
+        # goodput holds ≥ 50% of pre-cliff OR KV peak < 0.95 (assertions
+        # live on the existing cascade-signature checks; the row exercises
+        # the cap).
         (3, 216, 45, 480, 128, None),
-        # S3 combo: DIS-2105 image + --max-num-seqs=128 + smaller
-        # POOL/QUEUE knobs (64/16, half the S1-spike values) so the TCP
-        # rejection path engages alongside the engine-side cap. Per the
-        # handoff: launcher MUST pass --image
-        #   nvcr.io/.../vllm-runtime:dis-2105-v1.1.1-...
-        # for this row to do anything meaningful — the parametrize
-        # itself only carries the knob deltas, not the image.
+        # S3 combo: an image carrying the TCP work-queue rejection path +
+        # --max-num-seqs=128 + smaller POOL/QUEUE knobs (64/16, half the
+        # S1-spike values) so the TCP rejection path engages alongside the
+        # engine-side cap. Launcher MUST pass an image carrying that path
+        # via --image for this row to do anything meaningful — the
+        # parametrize itself only carries the knob deltas, not the image.
         (
             3,
             216,
@@ -1093,14 +1093,14 @@ async def test_overload_cascade(
 ):
     """S1 — full cascade demonstration under natural LeastLoaded routing.
 
-    Drives sustained load past the per-pod cliff on a production-shape N=3
+    Drives sustained load past the per-pod cliff on a realistic-shape N=3
     topology and asserts the full cascade signature: KV peg →
     WaitingForKVTransfer pool explosion → NIXL xfer_time blow-up →
     generation throughput collapse → cliff propagates to a second decode
     pod within the run window.
 
     Admission thresholds are deliberately UNSET so the FE inherits
-    v1.1.1's permissive-sentinel defaults (matches production). Setting
+    v1.1.1's permissive-sentinel defaults. Setting
     them is the mitigation tested in S3 (future row); this scenario is
     the unmitigated baseline.
 
@@ -1155,8 +1155,8 @@ async def test_overload_cascade(
         # cancellations feed the `_DeferredAbort` path so the 480-s NIXL
         # abort timer actually fires during the 45-min hold. Without
         # these, no requests cancel → no stranded prefill blocks → the
-        # primary production-recovery mechanism never exercises in dev.
-        # Per observe-agent NEXT_STEPS P0.2 (sanity-suite work).
+        # primary KV-transfer-abort recovery mechanism never exercises in
+        # dev.
         StartLoad(
             load_config=_cascade_load(
                 served_model=served_model,
@@ -1250,12 +1250,12 @@ async def test_overload_cascade(
         # teardown ≈ 40 min wall.
         #
         # Three router configs run head-to-head — same workload, same
-        # topology, same image, only routing differs. Lets the observe
-        # agent compare per-pod memory slopes side-by-side.
+        # topology, same image, only routing differs. Lets an analyst
+        # compare per-pod memory slopes side-by-side.
         ("a4-recommended", 2, 2.0, 3.0, 18.0, 3.0, 2.0),
         ("least-loaded-baseline", 2, 2.0, 3.0, 18.0, 3.0, 2.0),
-        # Round-2 P0.1: A4 minus replica-sync. Single-variable
-        # isolation of today's leak hypothesis. If FE slope drops to
+        # A4 minus replica-sync. Single-variable
+        # isolation of the leak hypothesis. If FE slope drops to
         # LL territory (~2.6 MB/min) under this arm, replica-sync's
         # request-lifecycle accumulation (ActiveSequencesMultiWorker)
         # is confirmed as the dominant retention path.
@@ -1276,8 +1276,8 @@ async def test_kv_router_memory_stability(
     """Memory-stability test for the recommended A4 KV-router config.
 
     Drives a U-shape concurrency ramp (12 → 24 → 48 → 24 → 12) under the
-    canonical "recommended A4" Frontend config from the the cascade reproduction
-    cascade analysis. Asserts that per-pod working-set memory
+    canonical "recommended A4" Frontend config from the prior cascade
+    analysis. Asserts that per-pod working-set memory
     grows at most ``ceiling`` MB/min over the run — i.e. that the
     recommended config does NOT leak.
 
@@ -1288,7 +1288,7 @@ async def test_kv_router_memory_stability(
     aggregate-throughput report makes the steady-state shape visible
     for review.
 
-    Workload: production-shaped ``_PROD_SEQ_DIST`` (long-tail ISL/OSL
+    Workload: long-tail ``_PROD_SEQ_DIST`` (realistic ISL/OSL mix
     with prefix overlap) so the KV-router actually exercises its
     sequence-state plumbing under realistic prefill / decode mix.
     """
@@ -1303,7 +1303,7 @@ async def test_kv_router_memory_stability(
 
     # Branch on the parametrize axis: A4 recommended (KV-aware + cross-FE
     # sync + admission shedding at 0.85) vs LeastLoaded baseline (the
-    # unmitigated production arm — same admission thresholds so the only
+    # unmitigated baseline arm — same admission thresholds so the only
     # variable is the routing-mode-derived load model).
     if router_config == "a4-recommended":
         _apply_recommended_kv_router_config(spec)
@@ -1320,14 +1320,13 @@ async def test_kv_router_memory_stability(
         # replica-sync flipped off. Everything else identical to the
         # "a4-recommended" arm so the slope delta cleanly attributes
         # to ActiveSequencesMultiWorker's request-lifecycle accounting.
-        # Per observe-agent NEXT_STEPS round-2 P0.1.
         _apply_recommended_kv_router_config(spec)
         spec["Frontend"].set_env_var("DYN_ROUTER_REPLICA_SYNC", "false")
     else:
         raise ValueError(f"unknown router_config: {router_config!r}")
 
     # Per-launch FE env-var override. Mirrors the cascade-side
-    # DYN_TEST_WORKER_KNOBS pattern but for Frontend so observe's R2
+    # DYN_TEST_WORKER_KNOBS pattern but for Frontend so a
     # toggle-sweep can drive single-knob isolations from the launch
     # env without forking the test function per toggle. Format:
     # semicolon-separated KEY=VALUE list, empty → no overrides.
@@ -1348,7 +1347,7 @@ async def test_kv_router_memory_stability(
     served_model = spec["VllmDecodeWorker"].model
 
     def _steady_load(concurrency: float, duration_minutes: float, name: str):
-        """Prod-mix LoadConfig for a single rung of the U-shape."""
+        """Realistic-mix LoadConfig for a single rung of the U-shape."""
         return LoadConfig(
             model_name=served_model,
             tokenizer=served_model,
@@ -1458,7 +1457,7 @@ async def test_kv_router_memory_stability(
         # min — that pair will cliff. Concurrent Load B is natural-
         # routing c=32 ISL=2000 for 10 min — exercises peers, MAY split
         # some traffic onto the saturated decode#0 if the routing layer
-        # is blind to its overload (the the cross-FE blind spot).
+        # is blind to its overload (the cross-FE blind spot).
         (2, 64, 6000, 10.0, 32, 10.0),
     ],
 )
@@ -1504,14 +1503,15 @@ async def test_overload_cascade_pinned_with_bg(
     _apply_cluster_portability(spec)
 
     # LeastLoaded routing with NO admission shedding — the unmitigated
-    # baseline that matches the production arm. The cross-FE blind-spot
+    # baseline arm. The cross-FE blind-spot
     # only manifests in this config. To probe the recommended-A4
     # remediation, swap to `_apply_recommended_kv_router_config(spec)`
     # in a future parametrize row.
     spec["Frontend"].set_env_var("DYN_ROUTER_MODE", "least-loaded")
     spec["Frontend"].set_env_var("DYN_ROUTER_USE_KV_EVENTS", "false")
 
-    # NIXL abort timer: 30s mitigation (default 480 implicated in prior outage).
+    # NIXL abort timer: 30s mitigation (the 480 default lets stranded
+    # KV transfers accumulate during a cascade).
     for svc in ("VllmPrefillWorker", "VllmDecodeWorker"):
         spec[svc].set_env_var("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "30")
 
@@ -1566,8 +1566,8 @@ async def test_overload_cascade_pinned_with_bg(
         LoadCompleted(name="cliff"),
         LoadCompleted(name="bg"),
         # Sanity that the pin actually concentrated load on decode#0
-        # (KV peg = pin worked + cluster is in the cliff regime). The
-        # observe agent reads per-pod KV / W4RK / NIXL from the JSONL
+        # (KV peg = pin worked + cluster is in the cliff regime). An
+        # analyst reads per-pod KV / W4RK / NIXL from the JSONL
         # for both loads to classify whether the cliff stayed contained
         # or propagated to the peer decode.
         KvCacheUsagePeak(
@@ -1603,13 +1603,14 @@ async def test_overload_cascade_pinned_with_bg(
 # ─── N=3 cascade-prevention chain-phased 4-arm demo ────────────────────
 #
 # 4 arms × 57-min cliff (cold-spike + imbalance + extended steady for memory).
-# Per the 2026-05-26-n3-cascade-prevention-demo-handoff.md (revised). All
-# arms use the prod-shape N=3 disagg topology (3 FE + 6 prefill + 3 decode).
+# All arms use the realistic-shape N=3 disagg topology
+# (3 FE + 6 prefill + 3 decode).
 #
-#   A — LL no admission           v1.1.1 stock                 LeastLoaded, no admission knobs
-#   B — LL + DIS-2105 rejection   v1.1.1 + 06a9efb537           LeastLoaded + pool=32, queue=8
-#   C — KV no replica-sync        release/1.2.0                 KV zero-weight + queue=4.0, no replica sync
-#   D — KV + replica-sync         release/1.2.0                 same as C + DYN_ROUTER_REPLICA_SYNC=true
+#   A — LL no admission           v1.1.1 stock     LeastLoaded, no admission knobs
+#   B — LL + TCP work-queue       v1.1.1 + work-   LeastLoaded + pool=32, queue=8
+#       rejection                 queue-rejection
+#   C — KV no replica-sync        release/1.2.0    KV zero-weight + queue=4.0, no replica sync
+#   D — KV + replica-sync         release/1.2.0    same as C + DYN_ROUTER_REPLICA_SYNC=true
 #
 # Launch via scripts/launch-n3-cascade-prevention-demo.sh which fans out
 # to 4 namespaces and supplies per-arm --image.
@@ -1621,13 +1622,13 @@ async def test_overload_cascade_pinned_with_bg(
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 @pytest.mark.parametrize(
     "arm_label",
-    ["A-LL", "B-LL-DIS2105", "C-KV-no-sync", "D-KV-sync"],
+    ["A-LL", "B-LL-reject", "C-KV-no-sync", "D-KV-sync"],
 )
 async def test_overload_cascade_chain_phased(runtime_env, request, arm_label):
     """N=3 cluster-resilience demo across four admission strategies.
 
     Workload (57 min total):
-      P-spike   1 min  idle → c=150 sudden  cold-onset (production-shape)
+      P-spike   1 min  idle → c=150 sudden  cold-onset (realistic shape)
       P-recov   2 min  idle                  reset
       P0        2 min  c=24 unpinned         baseline + memory anchor
       P1        4 min  c=80 pinned to dec#0  imbalance under cap
@@ -1659,9 +1660,9 @@ async def test_overload_cascade_chain_phased(runtime_env, request, arm_label):
             "DYN_ROUTER_MODE": "least-loaded",
             "DYN_ROUTER_USE_KV_EVENTS": "false",
         }
-    elif arm_label == "B-LL-DIS2105":
-        # LL + worker-side rejection (DIS-2105 fix). Image must be the
-        # 06a9efb537-built v1.1.1 base.
+    elif arm_label == "B-LL-reject":
+        # LL + worker-side TCP work-queue rejection. Image must carry the
+        # work-queue rejection / backpressure path on a v1.1.1 base.
         os.environ[
             "DYN_TEST_WORKER_KNOBS"
         ] = "DYN_TCP_WORKER_POOL_SIZE=32;DYN_TCP_WORK_QUEUE_SIZE=8"
@@ -1686,7 +1687,7 @@ async def test_overload_cascade_chain_phased(runtime_env, request, arm_label):
             "DYN_ROUTER_QUEUE_THRESHOLD": "4.0",
         }
     elif arm_label == "D-KV-sync":
-        # Same as C but WITH replica-sync — the production-proposed config.
+        # Same as C but WITH replica-sync — the recommended config.
         os.environ["DYN_TEST_WORKER_KNOBS"] = ""
         fe_knobs = {
             "DYN_ROUTER_MODE": "kv",
@@ -1707,7 +1708,7 @@ async def test_overload_cascade_chain_phased(runtime_env, request, arm_label):
         spec,
         image=image,
         units=3,  # N=3 disagg
-        abort_timeout_s=30,  # mitigation (default 480 implicated in prior outage)
+        abort_timeout_s=30,  # mitigation (480 default lets stranded KV transfers accumulate)
         vllm_extra_args=vllm_extra_args,
     )
     _apply_cluster_portability(spec)
@@ -1722,7 +1723,7 @@ async def test_overload_cascade_chain_phased(runtime_env, request, arm_label):
 
     served_model = spec["VllmDecodeWorker"].model
 
-    # Phase durations (minutes) per the 2026-05-26 handoff (revised)
+    # Phase durations (minutes)
     PSPIKE_MIN = 1.0
     PRECOV_MIN = 2.0
     P0_MIN = 2.0
@@ -1833,8 +1834,8 @@ async def test_overload_cascade_chain_phased(runtime_env, request, arm_label):
         WaitForLoadCompletion(name="p4-recovery"),
     ]
 
-    # Framework-health asserts only. The per-arm A/B/C/D comparison per
-    # the handoff is post-hoc — per-phase goodput, per-pod KV containment,
+    # Framework-health asserts only. The per-arm A/B/C/D comparison is
+    # post-hoc — per-phase goodput, per-pod KV containment,
     # 503/Timeout/504 accounting, FE memory slope.
     checks = [
         LoadApplied(load_name="p0-warmup", min_requests=50),
@@ -1882,7 +1883,7 @@ async def test_overload_cascade_chain_phased(runtime_env, request, arm_label):
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 @pytest.mark.parametrize(
     "arm_label",
-    ["A-LL", "B-LL-DIS2105", "C-KV-no-sync", "D-KV-sync"],
+    ["A-LL", "B-LL-reject", "C-KV-no-sync", "D-KV-sync"],
 )
 async def test_overload_natural_overload(runtime_env, request, arm_label):
     """N=3 routing-balance demo across 4 arms — NO pinning.
@@ -1907,7 +1908,7 @@ async def test_overload_natural_overload(runtime_env, request, arm_label):
             "DYN_ROUTER_MODE": "least-loaded",
             "DYN_ROUTER_USE_KV_EVENTS": "false",
         }
-    elif arm_label == "B-LL-DIS2105":
+    elif arm_label == "B-LL-reject":
         os.environ[
             "DYN_TEST_WORKER_KNOBS"
         ] = "DYN_TCP_WORKER_POOL_SIZE=32;DYN_TCP_WORK_QUEUE_SIZE=8"
@@ -1951,7 +1952,7 @@ async def test_overload_natural_overload(runtime_env, request, arm_label):
         spec,
         image=image,
         units=3,
-        abort_timeout_s=30,  # mitigation (default 480 implicated in prior outage)
+        abort_timeout_s=30,  # mitigation (480 default lets stranded KV transfers accumulate)
         vllm_extra_args=vllm_extra_args,
     )
     _apply_cluster_portability(spec)
@@ -2080,16 +2081,12 @@ async def test_overload_natural_overload(runtime_env, request, arm_label):
     )
 
 
-# ─── 3-arm 2-hour A/B vs production-current baseline ───────────────────
+# ─── 3-arm 2-hour A/B vs current-release baseline ──────────────────────
 #
-# Per the 2026-05-27 proposal for observe review:
-#   ~/dynamo-dev/dgh-703-cascade-repro-tests/findings/
-#       2026-05-27-3arm-test-proposal-for-observe.md
-#
-# Goal: compare production-current (v1.1.1 + LL) against the cascade-test
-# image in two routing modes (LL with the full DIS-2105 / 7d8eaa70a9 /
+# Goal: compare the current release (v1.1.1 + LL) against the cascade-test
+# image in two routing modes (LL with the full TCP work-queue rejection /
 # 30s-NIXL stack, and KV-pure-load with the same stack). 10-phase 2-hour
-# workload from observe's 2026-05-27 handoff: warmup → light → spike →
+# workload: warmup → light → spike →
 # moderate → wave → spike → heavy → clustered-spikes → recovery →
 # cooldown.
 #
@@ -2139,10 +2136,10 @@ def _common_fe_knobs(router_mode: str) -> dict[str, str]:
     ["A0-true-baseline", "A4-LL-prod", "R-KV-recommended", "A4-tight-pool"],
 )
 async def test_overload_2hr_realistic(runtime_env, request, arm_label):
-    """2-hour A/B/R — production-current v1.1.1 vs cascade-test image in LL
+    """2-hour A/B/R — current-release v1.1.1 vs cascade-test image in LL
     and KV-pure-load modes, under a realistic 10-phase varying workload.
 
-    Workload (120 min total, per observe 2026-05-27 handoff):
+    Workload (120 min total):
       P0 — warmup            5 min   ramp 0 → 80
       P1 — light steady     25 min   c=80 (low safe band)
       P2 — first spike       3 min   80 → 220 → 80 (above-cliff #1)
@@ -2156,9 +2153,9 @@ async def test_overload_2hr_realistic(runtime_env, request, arm_label):
 
     Per-arm differences are only in (image, router-mode, 503-gate presence);
     every other env / arg is identical across arms to isolate those three
-    variables. See the proposal doc for the full configuration table.
+    variables.
 
-    Pass criteria for R (per observe): goodput ≥ 95 %, decode CV < 0.05,
+    Pass criteria for R: goodput ≥ 95 %, decode CV < 0.05,
     0 pods at KV ≥ 99 % for > 30 s, NIXL kv_expired_reqs < 500, FE memory
     slope < 5 MB/min, 0 pod restarts. A0 is expected to fail several of
     these — it's the comparison reference. A4 measured against the same
@@ -2185,12 +2182,12 @@ async def test_overload_2hr_realistic(runtime_env, request, arm_label):
         fe_knobs = _common_fe_knobs(router_mode="kv")
     elif arm_label == "A4-tight-pool":
         # Same as A4-LL-prod but with tightened admission gate to prevent
-        # the NIXL-stall cascade observed at Event 24/40 in the
-        # 2026-05-27 3-arm run (pool=256 == max-num-seqs filled engine,
-        # ~256 stranded sequences blocked forward progress).
+        # the NIXL-stall cascade observed when pool=256 == max-num-seqs
+        # filled the engine (~256 stranded sequences blocked forward
+        # progress).
         #
-        # Sizing rationale (cycle 11 empirical: ~35 inflight per pod at
-        # c=104 steady): pool=64 ≈ 2× steady, leaves 192 of forward-progress
+        # Sizing rationale (empirically ~35 inflight per pod at c=104
+        # steady): pool=64 ≈ 2× steady, leaves 192 of forward-progress
         # headroom in the engine. Threshold lowered to 0.75 so mitigation 1
         # fires before NIXL stall fills the cache.
         image = _CASCADE_TEST_IMAGE
@@ -2229,10 +2226,9 @@ async def test_overload_2hr_realistic(runtime_env, request, arm_label):
 
     served_model = spec["VllmDecodeWorker"].model
 
-    # Production-shape ISL/OSL distribution (matches observe handoff
-    # _PROD_SEQ_DIST: p50 ~1600, p99 ~7000, OSL ~200). 6 buckets with the
-    # lognormal-ish shape production traffic actually follows. Reuses the
-    # module-level constant defined above.
+    # Realistic ISL/OSL distribution (_PROD_SEQ_DIST: p50 ~1600,
+    # p99 ~7000, OSL ~200). 6 buckets with a lognormal-ish long-tail
+    # shape. Reuses the module-level constant defined above.
     def _load(
         name,
         concurrency,
@@ -2242,7 +2238,7 @@ async def test_overload_2hr_realistic(runtime_env, request, arm_label):
         ramp_seconds=None,
         bursty=False,
     ):
-        """LoadConfig with production-shape seq_dist and optional ramp /
+        """LoadConfig with realistic-shape seq_dist and optional ramp /
         bursty-arrival shaping. Wraps `_cascade_load` then overrides
         seq_dist + ramp fields."""
         cfg = _cascade_load(
@@ -2288,7 +2284,7 @@ async def test_overload_2hr_realistic(runtime_env, request, arm_label):
         ),
         WaitForLoadCompletion(name="p1-light-steady"),
         # P2 — first spike: 3 min at c=220 with bursty arrivals
-        # (production cliff events are bursty, not uniform).
+        # (real cliff events are bursty, not uniform).
         StartLoad(
             load_config=_load("p2-first-spike", 220, 3.0, bursty=True),
             name="p2-first-spike",
@@ -2359,14 +2355,14 @@ async def test_overload_2hr_realistic(runtime_env, request, arm_label):
         WaitForLoadCompletion(name="p9-cooldown"),
     ]
 
-    # Pass criteria — observe's full set for R; A4 measured against same;
+    # Pass criteria — the full set for R; A4 measured against same;
     # A0 captures all metrics but expected-to-fail (no gates).
     checks = [
         # Framework health
         LoadApplied(load_name="p1-light-steady", min_requests=200),
         LoadApplied(load_name="p3-moderate-steady", min_requests=500),
         LoadApplied(load_name="p6-heavy-steady", min_requests=500),
-        # Cascade signature gates (informational; observe analyses post-hoc)
+        # Cascade signature gates (informational; analysed post-hoc)
         WorkerPanics(
             services=["VllmDecodeWorker", "VllmPrefillWorker", "Frontend"],
             acceptable=True,
@@ -2399,7 +2395,7 @@ async def test_overload_2hr_realistic(runtime_env, request, arm_label):
 #   - PV-rebind binding works
 #   - AIPerf job sequencing works for all 10 phase types (warmup-ramp,
 #     steady, spike, wave-segment, clustered-spike, recovery, cooldown)
-#   - Production-shape seq_dist + bursty arrivals + concurrency-ramp all
+#   - Realistic seq_dist + bursty arrivals + concurrency-ramp all
 #     produce data
 #   - Extracts complete (every load dir gets aiperf data)
 #   - Reports generate
@@ -2557,13 +2553,12 @@ async def test_overload_2hr_sanity(runtime_env, request):
 
 # ── 30-min compressed prod-config A/B/R test ────────────────────────────
 #
-# Per observe 2026-05-27-final-prod-config-test handoff (compressed from
-# their 40 min cliff to 30 min for cert-budget). Tests whether restoring
+# Compressed to 30 min for cert-budget. Tests whether restoring
 # the prefix-scoring router signal on the 1.2 cascade-test image
-# reintroduces the cycle-6 FE memory leak. A0 is the true baseline.
+# reintroduces the earlier FE memory-growth path. A0 is the true baseline.
 #
-# Workload: production-shape ISL/OSL (_PROD_SEQ_DIST close to prod
-# p50=2000/p95=7500) with above/below-steady stress:
+# Workload: realistic long-tail ISL/OSL (_PROD_SEQ_DIST,
+# p50~2000/p95~7500) with above/below-steady stress:
 #   P0 warmup 2m → P1 c=80 4m (BELOW) → P2 c=220 bursty 1m (ABOVE cliff)
 #   → P3 c=130 4m (MID) → P4 wave 80↔200 4m → P5 c=260 bursty 1m
 #   (HARDER) → P6 c=170 6m (HIGH sub-cliff) → P7 3× c=280 spikes on

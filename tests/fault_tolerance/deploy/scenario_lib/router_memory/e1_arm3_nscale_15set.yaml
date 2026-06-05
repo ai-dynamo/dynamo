@@ -11,7 +11,7 @@ kind: router_memory
 name: e1_arm3_nscale_15set
 description: |
   E1 Arm 3 (LL best, cascade-test): 15F+30P+15D mocker, LL routing.
-  cascade-test image (Task #70/#75 quarantine fix). Isolates 1.1.1→1.2 stack delta vs arm1.
+  cascade-test image (carries the worker-quarantine fix). Isolates 1.1.1→1.2 stack delta vs arm1.
 
 labels:
   purpose: e1_imbalance_attribution

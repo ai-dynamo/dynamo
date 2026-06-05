@@ -1,7 +1,7 @@
 # E2 Memory Leak — Arm 1 (v1.1.1 KV-default) — NSCALE 15-set
 #
-# Reproduces the production FE memory leak (~28.6 MB/min documented in cascade
-# RCA) on the deployed-today image with KV-aware routing at default knobs:
+# Exercises a steady FE memory-growth path (~28.6 MB/min) on the v1.1.1 image
+# with KV-aware routing at default knobs:
 # KV events ON, overlap-score-credit=1.0, prefill-load-scale=1.0.
 #
 # Same units + same load + same seq_dist as the E1 imbalance arms (15F+30P+15D,
@@ -17,7 +17,7 @@ kind: router_memory
 name: e2_arm1_nscale_15set
 description: |
   E2 Arm 1 (v1.1.1 KV-default): 15F+30P+15D mocker, KV routing, default leak knobs
-  (KV events ON, overlap=1.0, prefill-load=1.0). Reproduces the prod FE memory leak.
+  (KV events ON, overlap=1.0, prefill-load=1.0). Exercises a steady FE memory-growth path.
 
 labels:
   purpose: e2_memory_leak

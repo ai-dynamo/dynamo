@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Cascade fail-fast rejection check (Track B of the 2026-05-26 cascade
-# fail-fast handoff). Subclassed Check rather than added inline to
+# Cascade fail-fast rejection check. Subclassed Check rather than added inline to
 # checks.py to keep the cascade-rejection signal sources (AIPerf 503
 # tally + worker ``TrySendError::Full`` + Frontend ``Status code: 503``)
 # co-located in one file the next round can iterate on without churning
@@ -89,7 +88,8 @@ class RejectionFired(Check):
           plus a fall-back tally of ``error_summary`` entries in
           ``profile_export_aiperf.json``.
       (b) Worker log line ``TrySendError::Full`` — emitted by the
-          DIS-2105 patch's ``work_tx.try_send()`` rejection path. Scans
+          worker-side TCP work-queue rejection / backpressure path's
+          ``work_tx.try_send()`` rejection path. Scans
           every ``VllmPrefillWorker`` / ``VllmDecodeWorker`` log file.
       (c) Frontend log line ``Status code: 503``, **filtered to the
           load's wall-clock window** (``StartLoad.started_at`` →

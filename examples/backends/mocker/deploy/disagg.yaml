@@ -116,15 +116,15 @@ spec:
             - --model-name
             - Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
             - --speedup-ratio
-            - "5.0"
+            - "1.0"
             - --planner-profile-data
             - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
             - --disaggregation-mode
             - prefill
-            # DIS-2147 flags removed from this template — they're only recognized
-            # by the mocker-binding-fix-dis2147 branch's mocker binary. The
-            # cascade-test branch (used for backpressure-fix builds) doesn't have
-            # DIS-2147. Re-add for E2/E3 when running on a mocker-branch image.
+            # prefill-KV-pinning flags removed from this template — they're only
+            # recognized by the mocker-binding-fix branch's mocker binary. The
+            # backpressure-fix mocker image doesn't carry the prefill-KV-pinning
+            # knob. Re-add for E2/E3 when running on a mocker-branch image.
     decode:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -179,18 +179,18 @@ spec:
             - --model-name
             - Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
             - --speedup-ratio
-            - "5.0"
+            - "1.0"
             - --planner-profile-data
             - /workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D
             - --disaggregation-mode
             - decode
-            # Tight decode batch — forces saturation under c=50 single-set load
-            # (Run 2 DIS-2147 fidelity). c=50 requests → 8-slot decode = guaranteed
-            # saturation → DIS-2147 prefill-stranding triggers.
+            # Tight decode batch — forces saturation under c=50 single-set load.
+            # c=50 requests → 8-slot decode = guaranteed saturation →
+            # prefill-KV-residency / KV-transfer abort-timeout behavior triggers.
             - --max-num-seqs
             - "8"
             # Lower KV pool to tighten DECODE_BLOCKS gauge (0.85 of 1024 = 871);
             # default 16384 is too large for the gauge to reflect saturation.
             - --num-gpu-blocks-override
             - "1024"
-            # DIS-2147 flag stripped — only mocker-branch images recognize it.
+            # prefill-KV-pinning flag stripped — only mocker-branch images recognize it.

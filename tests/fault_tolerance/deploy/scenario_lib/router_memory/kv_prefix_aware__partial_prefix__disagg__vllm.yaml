@@ -1,13 +1,13 @@
-# Leak-POSITIVE cell. KV-aware routing with prefix scoring AT PRODUCTION
-# DEFAULT (OVERLAP_SCORE_WEIGHT=1.0). This is the gpt-oss-120b production
+# Leak-POSITIVE cell. KV-aware routing with prefix scoring at the
+# OVERLAP_SCORE_WEIGHT=1.0 default. This is a gpt-oss-120b-class KV-aware
 # configuration; measured slope ≈ 27 MB/min on 2026-05-22.
 
 kind: router_memory
 name: kv_prefix_aware__partial_prefix__disagg__vllm
 description: |
-  KV-aware load steering + prefix scoring at production default.
-  The leak-POSITIVE case. Matches gpt-oss-120b production config and
-  reproduces the INFH-157 ~25 MB/min leak rate.
+  KV-aware load steering + prefix scoring at the OVERLAP_SCORE_WEIGHT=1.0
+  default. The leak-POSITIVE case. A gpt-oss-120b-class KV-aware
+  configuration that exercises a steady FE memory-growth path (~25 MB/min).
 
 labels:
   router_mode: kv_prefix_aware
@@ -15,7 +15,7 @@ labels:
   deployment: disagg
   backend: vllm
   leak_signal: positive
-  matches_production: gpt-oss-120b
+  reference_config: gpt-oss-120b
 
 deployment:
   backend: vllm
@@ -28,7 +28,7 @@ router:
   mode: kv
   knobs:
     DYN_ROUTER_USE_KV_EVENTS: "false"
-    DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT: "1.0"     # production default — flips prefix scoring ON
+    DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT: "1.0"     # default weight — flips prefix scoring ON
     DYN_ROUTER_ASSUME_KV_REUSE: "false"
     DYN_ROUTER_REPLICA_SYNC: "true"
     DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD: "0.85"
@@ -71,8 +71,9 @@ expectations:
     expected_range: [22, 32]
     notes: |
       Binary on/off behaviour: any non-zero OVERLAP_SCORE_WEIGHT produces
-      ~27 MB/min (not scale-dependent). Matches INFH-157 ~25 MB/min in prod.
+      ~27 MB/min (not scale-dependent). A steady FE memory-growth signal
+      (~25 MB/min).
     observed_history:
-      - {date: "2026-05-22", value: 27.31, run_id: "vllm-q3-prod-units-1779499076-2719", knob_value: "1.0"}
-      - {date: "2026-05-22", value: 27.45, run_id: "vllm-q3-prod-units-1779408862-2841", knob_value: "2.0"}
+      - {date: "2026-05-22", value: 27.31, run_id: "vllm-q3-units-1779499076-2719", knob_value: "1.0"}
+      - {date: "2026-05-22", value: 27.45, run_id: "vllm-q3-units-1779408862-2841", knob_value: "2.0"}
       - {date: "2026-05-22", value: 28.78, run_id: "earlier-overlap-2.0", knob_value: "2.0"}
