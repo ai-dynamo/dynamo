@@ -157,11 +157,21 @@ impl LLMMetricAnnotation {
     pub fn from_annotation<T>(
         annotation: &Annotated<T>,
     ) -> Result<Option<LLMMetricAnnotation>, Box<dyn std::error::Error>> {
-        if annotation.event.is_none() {
-            return Ok(None);
-        }
-        if annotation.event.as_ref().unwrap() != ANNOTATION_LLM_METRICS {
-            return Ok(None);
+        if let Some(event) = &annotation.event {
+            if event != ANNOTATION_LLM_METRICS {
+                return Ok(None);
+            }
+        } else {
+            let Some(comments) = annotation.comment.as_ref() else {
+                return Ok(None);
+            };
+            if comments.len() != 1 {
+                return Ok(None);
+            }
+            return match serde_json::from_str(&comments[0]) {
+                Ok(metrics) => Ok(Some(metrics)),
+                Err(_) => Ok(None),
+            };
         }
         let comments = annotation
             .comment
@@ -2896,9 +2906,9 @@ impl
         let request_id = context.id().to_string();
         let original_stream_flag = request.inner.stream.unwrap_or(false);
 
-        // Build audit handle (None if no DYN_AUDIT_SINKS). Publish the request
-        // record immediately, before worker dispatch — this lets downstream
-        // observers see hung or canceled requests that never produce a response.
+        // Build audit handle (None if no DYN_AUDIT_SINKS). The request record
+        // emit is scheduled before worker dispatch, so downstream observers can
+        // see hung or canceled requests that never produce a response.
         let audit_http_headers = if crate::audit::config::otel_sink_capture_enabled() {
             context
                 .get::<crate::audit::handle::AuditHttpRequestHeaders>(
@@ -2911,7 +2921,7 @@ impl
         let audit_handle =
             crate::audit::handle::create_handle(&request, &request_id, audit_http_headers);
 
-        // Publish request-side audit records on a detached task so audit bus
+        // Schedule request-side audit records on a detached task so audit bus
         // fan-out and sink wakeups do not delay worker dispatch.
         if let Some(h) = audit_handle.clone() {
             let audit_request = std::sync::Arc::new(request.clone());
@@ -3017,8 +3027,8 @@ impl
 
             // Spawn the response-side audit task. The future resolves to None on
             // client cancel or aggregation failure; in that case the request
-            // record (already published above) stands alone and we skip the
-            // response emit.
+            // record (scheduled above) stands alone and we skip the response
+            // emit.
             tokio::spawn(async move {
                 match agg_fut.await {
                     Some(final_resp) => audit.emit_response(Arc::new(final_resp)),
@@ -3309,6 +3319,67 @@ mod tests {
             (Some(0.0), Some(7), Some(-3))
         );
         assert_eq!(routing_priorities(None), (None, None, None));
+    }
+
+    fn test_llm_metrics_annotation() -> LLMMetricAnnotation {
+        LLMMetricAnnotation {
+            input_tokens: 10,
+            output_tokens: 20,
+            chunk_tokens: 3,
+            cached_tokens: Some(4),
+            prefill_worker_id: Some(1),
+            prefill_dp_rank: Some(2),
+            prefill_worker_type: Some("prefill".to_string()),
+            decode_worker_id: Some(3),
+            decode_dp_rank: Some(4),
+            decode_worker_type: Some("decode".to_string()),
+            tokenize_latency: Some(Duration::from_millis(5)),
+            detokenize_total_latency: Some(Duration::from_micros(50)),
+            detokenize_count: Some(6),
+        }
+    }
+
+    #[test]
+    fn llm_metrics_from_annotation_accepts_comment_only_metrics() {
+        let event_annotation = test_llm_metrics_annotation()
+            .to_annotation::<()>()
+            .expect("metrics annotation serializes");
+        let comment_only = Annotated::<()> {
+            id: None,
+            data: None,
+            event: None,
+            comment: event_annotation.comment,
+            error: None,
+        };
+
+        let metrics = LLMMetricAnnotation::from_annotation(&comment_only)
+            .expect("comment-only annotation parses")
+            .expect("comment-only metrics are recognized");
+
+        assert_eq!(metrics.input_tokens, 10);
+        assert_eq!(metrics.output_tokens, 20);
+        assert_eq!(metrics.chunk_tokens, 3);
+        assert_eq!(metrics.cached_tokens, Some(4));
+        assert_eq!(metrics.prefill_worker_id, Some(1));
+        assert_eq!(metrics.decode_worker_id, Some(3));
+        assert_eq!(metrics.detokenize_count, Some(6));
+    }
+
+    #[test]
+    fn llm_metrics_from_annotation_ignores_non_metrics_comment_only_chunks() {
+        let annotated = Annotated::<()> {
+            id: None,
+            data: None,
+            event: None,
+            comment: Some(vec!["not metrics".to_string()]),
+            error: None,
+        };
+
+        assert!(
+            LLMMetricAnnotation::from_annotation(&annotated)
+                .expect("non-metrics comment is not an error")
+                .is_none()
+        );
     }
 
     /// PRE.1 — `skip_special_tokens` default. See `lib/llm/PREPROCESSOR_CASES.md`.

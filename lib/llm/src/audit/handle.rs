@@ -31,9 +31,9 @@ impl AuditHttpRequestHeaders {
 /// Distinguishes the two record types emitted per chat completion.
 ///
 /// Request and response are published as separate `AuditRecord`s sharing the same
-/// `request_id`. Downstream consumers correlate by `request_id`; the request record
-/// is emitted before the worker dispatches, the response record is emitted after the
-/// response stream completes successfully. On client cancel mid-stream (or
+/// `request_id`. Downstream consumers correlate by `request_id`; the request emit
+/// is scheduled before the worker dispatches, the response record is emitted after
+/// the response stream completes successfully. On client cancel mid-stream (or
 /// aggregation failure) only the request record is emitted.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -74,9 +74,10 @@ impl AuditHandle {
         &self.request_id
     }
 
-    /// Publish a `Request` event record on the audit bus. Call once, as soon as the
-    /// request is captured and before worker dispatch — this lets downstream
-    /// observers see hung / canceled requests that never produce a response record.
+    /// Publish a `Request` event record on the audit bus. Call once after the
+    /// request is captured. The preprocessor schedules this before worker
+    /// dispatch so downstream observers can see hung / canceled requests that
+    /// never produce a response record.
     pub fn emit_request(&self, request: Arc<NvCreateChatCompletionRequest>) {
         let rec = AuditRecord {
             schema_version: 1,
@@ -201,18 +202,37 @@ mod tests {
         serde_json::from_value(json).expect("Failed to create test response")
     }
 
+    struct AuditPolicyResetGuard;
+
+    impl Drop for AuditPolicyResetGuard {
+        fn drop(&mut self) {
+            crate::audit::config::clear_policy_override_for_test();
+        }
+    }
+
     /// Test that DYN_AUDIT_FORCE_LOGGING=true bypasses store=false
     /// When force logging is enabled, audit handle should be created even when store=false
     #[test]
+    #[serial_test::serial]
     fn test_force_logging_bypasses_store() {
-        // Inject enabled + force_logging directly rather than mutating global
-        // env / capture state, so the test is hermetic and parallel-safe.
-        let request = create_test_request("test-model", false);
-        let handle = create_handle_with_config(&request, "test-id", true, true, None);
+        temp_env::with_vars(
+            [
+                ("DYN_AUDIT_SINKS", Some("stderr")),
+                ("DYN_AUDIT_FORCE_LOGGING", Some("true")),
+            ],
+            || {
+                crate::audit::config::override_policy_from_env_for_test();
+                crate::audit::config::mark_capture_active();
+                let _reset_guard = AuditPolicyResetGuard;
 
-        assert!(
-            handle.is_some(),
-            "force logging should create a handle even with store=false"
+                let request = create_test_request("test-model", false);
+                let handle = create_handle(&request, "test-id", None);
+
+                assert!(
+                    handle.is_some(),
+                    "When DYN_AUDIT_FORCE_LOGGING=true, handle should be created even with store=false"
+                );
+            },
         );
     }
 

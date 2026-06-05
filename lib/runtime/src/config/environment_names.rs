@@ -61,7 +61,7 @@ pub mod logging {
         pub const OTEL_EXPORTER_OTLP_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
 
         /// OTLP exporter endpoint URL for traces
-        /// Spec: https://opentelemetry.io/docs/specs/otel/protocol/exporter/
+        /// Spec: <https://opentelemetry.io/docs/specs/otel/protocol/exporter/>
         pub const OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT";
 
         /// OTLP exporter endpoint URL for logs. Falls back to OTEL_EXPORTER_OTLP_ENDPOINT or the protocol default when unset.
@@ -797,6 +797,7 @@ mod tests {
 
         // OpenTelemetry vars should start with OTEL_
         assert!(logging::otlp::OTEL_EXPORT_ENABLED.starts_with("OTEL_"));
+        assert!(logging::otlp::OTEL_EXPORTER_OTLP_ENDPOINT.starts_with("OTEL_"));
         assert!(logging::otlp::OTEL_SERVICE_NAME.starts_with("OTEL_"));
     }
 }

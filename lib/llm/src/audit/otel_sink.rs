@@ -5,7 +5,9 @@
 //!
 //! Emits exactly one OTLP `LogRecord` per `AuditRecord`. The exporter is
 //! constructed once at sink init (not per emit). Network I/O happens on the
-//! SDK's internal batch processor; `emit()` is non-blocking enqueue.
+//! SDK's internal batch processor; `emit()` is non-blocking enqueue. The audit
+//! worker calls `force_flush()` after draining on shutdown, but abrupt process
+//! teardown can still lose buffered OTLP records.
 //!
 //! Transport follows `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL` with
 //! `OTEL_EXPORTER_OTLP_PROTOCOL` as fallback. Supported values are
@@ -22,6 +24,7 @@ use axum::http::HeaderValue;
 use dynamo_runtime::config::environment_names::{
     llm::audit as env_audit, logging::otlp as env_otlp,
 };
+use opentelemetry::Context;
 use opentelemetry::logs::{AnyValue, LogRecord, Logger, LoggerProvider, Severity};
 use opentelemetry_otlp::{Protocol, WithExportConfig};
 use opentelemetry_sdk::Resource;
@@ -79,11 +82,8 @@ const AUDIT_INSTRUMENTATION_SCOPE: &str = "dynamo.payload";
 const DEFAULT_SERVICE_NAME: &str = "dynamo";
 
 pub struct OtelSink {
-    /// Held so the SDK's batch processor flushes when the sink is dropped on
-    /// audit-bus shutdown. The field is never read directly — its job is to
-    /// keep the provider alive for the sink's lifetime. TODO(phase D): wire
-    /// an explicit `force_flush` hook on the worker cancellation path so
-    /// records aren't lost if the runtime is torn down before Drop runs.
+    /// Held so the SDK's batch processor stays alive for the sink's lifetime
+    /// and can be force-flushed when the audit worker shuts down.
     #[allow(dead_code)]
     provider: SdkLoggerProvider,
     logger: SdkLogger,
@@ -173,6 +173,24 @@ impl OtlpLogsProtocol {
             Self::Grpc => DEFAULT_OTLP_GRPC_ENDPOINT,
         }
     }
+}
+
+fn logs_endpoint_from_env(protocol: OtlpLogsProtocol) -> String {
+    if let Ok(endpoint) = std::env::var(env_otlp::OTEL_EXPORTER_OTLP_LOGS_ENDPOINT) {
+        return endpoint;
+    }
+
+    if let Ok(endpoint) = std::env::var(env_otlp::OTEL_EXPORTER_OTLP_ENDPOINT) {
+        return match protocol {
+            OtlpLogsProtocol::HttpProtobuf => {
+                let trimmed = endpoint.trim_end_matches('/');
+                format!("{trimmed}/v1/logs")
+            }
+            OtlpLogsProtocol::Grpc => endpoint,
+        };
+    }
+
+    protocol.default_endpoint().to_string()
 }
 
 fn render_header_value(name: &str, value: &HeaderValue, policy: &OtelHeaderPolicy) -> String {
@@ -267,9 +285,7 @@ impl OtelSink {
 
     pub async fn from_policy(policy: &AuditPolicy) -> Result<Self> {
         let protocol = OtlpLogsProtocol::from_env();
-        let endpoint = std::env::var(env_otlp::OTEL_EXPORTER_OTLP_LOGS_ENDPOINT)
-            .or_else(|_| std::env::var(env_otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT))
-            .unwrap_or_else(|_| protocol.default_endpoint().to_string());
+        let endpoint = logs_endpoint_from_env(protocol);
 
         let exporter = match protocol {
             OtlpLogsProtocol::HttpProtobuf => opentelemetry_otlp::LogExporter::builder()
@@ -468,7 +484,22 @@ impl AuditSink for OtelSink {
             record.add_attribute("audit_drop_reason", AnyValue::String(reason.into()));
         }
         record.add_attribute("payload", AnyValue::String(payload.into()));
+
+        // Audit OTLP export is an explicit sink, not telemetry generated while
+        // exporting telemetry. Use a fresh context so a globally suppressed
+        // tracing bridge cannot cause the direct LogRecord emit to be skipped.
+        let _guard = Context::new().attach();
         self.logger.emit(record);
+    }
+
+    async fn shutdown(&self) {
+        if let Err(err) = self.provider.force_flush() {
+            tracing::warn!(
+                target: "dynamo_llm::audit",
+                error = %err,
+                "audit otel: force_flush failed during shutdown"
+            );
+        }
     }
 }
 
@@ -813,6 +844,61 @@ mod tests {
                 (env_otlp::OTEL_EXPORTER_OTLP_PROTOCOL, Some("http/protobuf")),
             ],
             || assert_eq!(OtlpLogsProtocol::from_env(), OtlpLogsProtocol::Grpc),
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn logs_endpoint_uses_signal_specific_endpoint_first() {
+        temp_env::with_vars(
+            [
+                (
+                    env_otlp::OTEL_EXPORTER_OTLP_LOGS_ENDPOINT,
+                    Some("http://collector:9999/custom/logs"),
+                ),
+                (
+                    env_otlp::OTEL_EXPORTER_OTLP_ENDPOINT,
+                    Some("http://collector:4318"),
+                ),
+                (
+                    env_otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
+                    Some("http://collector:4317/v1/traces"),
+                ),
+            ],
+            || {
+                assert_eq!(
+                    logs_endpoint_from_env(OtlpLogsProtocol::HttpProtobuf),
+                    "http://collector:9999/custom/logs"
+                );
+            },
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn logs_endpoint_falls_back_to_generic_endpoint_not_traces_endpoint() {
+        temp_env::with_vars(
+            [
+                (env_otlp::OTEL_EXPORTER_OTLP_LOGS_ENDPOINT, None::<&str>),
+                (
+                    env_otlp::OTEL_EXPORTER_OTLP_ENDPOINT,
+                    Some("http://collector:4318"),
+                ),
+                (
+                    env_otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
+                    Some("http://collector:4317/v1/traces"),
+                ),
+            ],
+            || {
+                assert_eq!(
+                    logs_endpoint_from_env(OtlpLogsProtocol::HttpProtobuf),
+                    "http://collector:4318/v1/logs"
+                );
+                assert_eq!(
+                    logs_endpoint_from_env(OtlpLogsProtocol::Grpc),
+                    "http://collector:4318"
+                );
+            },
         );
     }
 }

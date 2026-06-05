@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::io::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,6 +27,7 @@ use super::{
 pub trait AuditSink: Send + Sync {
     fn name(&self) -> &'static str;
     async fn emit(&self, rec: &AuditRecord);
+    async fn shutdown(&self) {}
 }
 
 pub struct StderrSink;
@@ -37,7 +39,9 @@ impl AuditSink for StderrSink {
     async fn emit(&self, rec: &AuditRecord) {
         match serde_json::to_string(rec) {
             Ok(js) => {
-                tracing::info!(target="dynamo_llm::audit", log_type="audit", record=%js, "audit")
+                if let Err(e) = writeln!(std::io::stderr(), "{js}") {
+                    tracing::warn!("audit: stderr write failed: {e}");
+                }
             }
             Err(e) => tracing::warn!("audit: serialize failed: {e}"),
         }
@@ -236,6 +240,7 @@ pub async fn spawn_workers_from_env(shutdown: CancellationToken) -> anyhow::Resu
                                 ) => break,
                             }
                         }
+                        sink.shutdown().await;
                         return;
                     }
                     msg = rx.recv() => {
@@ -251,6 +256,7 @@ pub async fn spawn_workers_from_env(shutdown: CancellationToken) -> anyhow::Resu
                     }
                 }
             }
+            sink.shutdown().await;
         });
     }
     tracing::info!(sinks = sink_count, "Audit sinks ready");

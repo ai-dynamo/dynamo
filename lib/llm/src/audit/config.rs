@@ -4,6 +4,9 @@
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+#[cfg(test)]
+use std::sync::Mutex;
+
 use dynamo_runtime::config::environment_names::llm::audit as env_audit;
 
 use crate::telemetry::parse_sink_names;
@@ -34,6 +37,9 @@ pub struct AuditPolicy {
 
 static POLICY: OnceLock<AuditPolicy> = OnceLock::new();
 static CAPTURE_STATE: AtomicU8 = AtomicU8::new(CAPTURE_UNINITIALIZED);
+
+#[cfg(test)]
+static TEST_POLICY_OVERRIDE: Mutex<Option<&'static AuditPolicy>> = Mutex::new(None);
 
 /// Audit is enabled if we have at least one sink
 fn load_from_env() -> AuditPolicy {
@@ -91,7 +97,31 @@ fn load_from_env() -> AuditPolicy {
 }
 
 pub fn policy() -> &'static AuditPolicy {
+    #[cfg(test)]
+    if let Some(policy) = *TEST_POLICY_OVERRIDE
+        .lock()
+        .expect("test policy lock poisoned")
+    {
+        return policy;
+    }
+
     POLICY.get_or_init(load_from_env)
+}
+
+#[cfg(test)]
+pub(crate) fn override_policy_from_env_for_test() {
+    let policy = Box::leak(Box::new(load_from_env()));
+    *TEST_POLICY_OVERRIDE
+        .lock()
+        .expect("test policy lock poisoned") = Some(policy);
+}
+
+#[cfg(test)]
+pub(crate) fn clear_policy_override_for_test() {
+    *TEST_POLICY_OVERRIDE
+        .lock()
+        .expect("test policy lock poisoned") = None;
+    mark_capture_inactive();
 }
 
 pub(crate) fn mark_capture_active() {
@@ -102,7 +132,7 @@ pub(crate) fn mark_capture_inactive() {
     CAPTURE_STATE.store(CAPTURE_INACTIVE, Ordering::Release);
 }
 
-pub fn capture_enabled() -> bool {
+pub(crate) fn capture_enabled() -> bool {
     // Require the explicit ACTIVE transition so that publishes happening before
     // `init_from_env_with_shutdown` finishes — i.e. while the bus is still
     // uninitialized — are skipped at the `create_handle` gate rather than
@@ -114,7 +144,7 @@ pub fn capture_enabled() -> bool {
     policy.enabled && CAPTURE_STATE.load(Ordering::Acquire) == CAPTURE_ACTIVE
 }
 
-pub fn otel_sink_capture_enabled() -> bool {
+pub(crate) fn otel_sink_capture_enabled() -> bool {
     let policy = policy();
     policy.enabled
         && CAPTURE_STATE.load(Ordering::Acquire) == CAPTURE_ACTIVE
