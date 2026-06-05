@@ -131,6 +131,52 @@ class TickDiagnostics:
     throughput_decision_reason_prefill: Optional[str] = None
     throughput_decision_reason_decode: Optional[str] = None
 
+    # Plugin-era fields below. Orchestrator path populates these; PSM
+    # path leaves them empty. Numeric fields above are the opposite —
+    # PSM populates them, orchestrator emits the same data as plugin-
+    # owned Prometheus metrics instead. Downstream readers must treat
+    # "empty" as "not available on this path".
+
+    # PROPOSE/RECONCILE/CONSTRAIN overrides contributed this tick.
+    # Tuple: (plugin_id, stage, override_type, component_key, value).
+    # override_type ∈ {"SET", "AT_LEAST", "AT_MOST", "REJECT"};
+    # component_key = ``sub_component_type`` (one bucket per type in this
+    # PR — multi-pool addressing is deferred to the hierarchical planner
+    # PR); value = replica target (``-1`` for REJECT).
+    plugin_overrides: list[tuple[str, str, str, str, int]] = field(default_factory=list)
+
+    # Per-component reconcile reason.  Keyed by ``component_key`` as
+    # above; value is a short audit string such as
+    # ``"set_by_<plugin_id>"``, ``"clamped_to_floor"``,
+    # ``"clamped_to_ceiling"``, or ``"passthrough"``.
+    reconcile_reasons: dict[str, str] = field(default_factory=dict)
+
+    # plugin_id list of HOLD_LAST cache replays this tick (plugin was
+    # skipped because its execution_interval hadn't elapsed, and its
+    # previous output is being reused).
+    held_over_plugins: list[str] = field(default_factory=list)
+
+    # Pipeline execute_action — one of ``"apply"``,
+    # ``"skip_short_circuit"``, ``"skip_no_targets"``,
+    # ``"skip_tick_timeout"``.  Mirrors
+    # ``PipelineOutcome.execute_action``.  ``None`` on the PSM path
+    # (no pipeline).  Same information is also emitted as Prometheus
+    # ``tick_skip_reasons_total`` etc., but exposing it on
+    # ``PlannerEffects.diagnostics`` lets in-process consumers (replay
+    # adapter, diagnostics recorder) see the action without scraping
+    # metrics.
+    execute_action: Optional[str] = None
+
+    # Why a tick short-circuited (e.g. ``"propose: my-plugin: ..."``).
+    # Populated when ``execute_action == "skip_short_circuit"``; empty
+    # otherwise.  Mirrors ``PipelineOutcome.short_circuit_reason``.
+    short_circuit_reason: str = ""
+
+    # Audit-quality breadcrumbs emitted by the pipeline (chain-augment
+    # warnings, CONSTRAIN SET drops, etc.).  Mirrors
+    # ``PipelineOutcome.audit_events``.  Empty list on the PSM path.
+    audit_events: list[str] = field(default_factory=list)
+
 
 @dataclass
 class PlannerEffects:

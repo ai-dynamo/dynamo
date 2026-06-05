@@ -326,3 +326,151 @@ fn inactive_cached_prefix_not_discounted_keeps_request_waiting() {
     );
     assert_eq!(max_preemptions, 0, "GUARANTEED_NO_EVICT must never preempt");
 }
+
+/// An oversized request whose to-completion footprint can never fit the whole
+/// KV pool (even when empty) must be terminally rejected at the admission gate,
+/// not left stalling the FIFO head. Without rejection the no-evict gate halts at
+/// the oversized head (FIFO, no skip-ahead), so the valid follower behind it
+/// never runs — which is what hangs offline (`in_flight`) and live (`waiter`)
+/// replay.
+#[test]
+fn oversized_request_is_rejected_so_followers_run() {
+    let mut core = VllmCore::new(capacity_args()); // 4 blocks * 4 = 16-token cap
+    let oversized = Uuid::from_u128(1);
+    let valid = Uuid::from_u128(2);
+    // oversized: 20-token prompt = 5 blocks > 4-block pool, so
+    //   ceil((20 + max_output) / 4) always exceeds the pool — unschedulable.
+    receive(&mut core, oversized, 0..20, 8);
+    // valid: 4-token prompt + 4 output = 2 blocks, fits comfortably.
+    receive(&mut core, valid, 100..104, 4);
+
+    let mut collector = crate::replay::TraceCollector::default();
+    let mut now_ms = 0.0;
+    let mut valid_completed = false;
+    for _ in 0..100 {
+        if core.state().requests.is_empty() {
+            break;
+        }
+        let pass = core.execute_pass(&mut collector, now_ms);
+        now_ms = pass.end_ms.max(now_ms + 1.0);
+        if pass
+            .output_signals
+            .iter()
+            .any(|signal| signal.uuid == valid && signal.completed)
+        {
+            valid_completed = true;
+        }
+        assert_eq!(
+            pass.mocker_metrics.vllm_preemptions_total, 0,
+            "no-evict policy must never preempt"
+        );
+    }
+
+    assert!(
+        !core.state().requests.contains_key(&oversized),
+        "oversized request must be terminally rejected, not stall the FIFO head"
+    );
+    assert!(
+        valid_completed,
+        "the valid follower must run to completion once the oversized head is rejected"
+    );
+    assert!(core.state().requests.is_empty(), "queue fully drains");
+}
+
+/// The rejection is an EXPLICIT terminal outcome: the oversized request's
+/// terminal signal carries `rejected = true` (so replay drivers free and advance
+/// without counting it as a real completion), while the valid request's terminal
+/// signal is an ordinary completion (`rejected = false`).
+#[test]
+fn rejection_emits_explicit_terminal_signal() {
+    let mut core = VllmCore::new(capacity_args());
+    let oversized = Uuid::from_u128(1);
+    let valid = Uuid::from_u128(2);
+    receive(&mut core, oversized, 0..20, 8);
+    receive(&mut core, valid, 100..104, 4);
+
+    let mut collector = crate::replay::TraceCollector::default();
+    let mut now_ms = 0.0;
+    let mut oversized_rejected = false;
+    let mut valid_completed_cleanly = false;
+    for _ in 0..100 {
+        if core.state().requests.is_empty() {
+            break;
+        }
+        let pass = core.execute_pass(&mut collector, now_ms);
+        now_ms = pass.end_ms.max(now_ms + 1.0);
+        for signal in &pass.output_signals {
+            if signal.uuid == oversized && signal.completed && signal.rejected {
+                oversized_rejected = true;
+            }
+            if signal.uuid == valid && signal.completed && !signal.rejected {
+                valid_completed_cleanly = true;
+            }
+        }
+    }
+
+    assert!(
+        oversized_rejected,
+        "oversized request must emit a terminal rejection signal (completed + rejected)"
+    );
+    assert!(
+        valid_completed_cleanly,
+        "valid request must emit an ordinary completion (completed, not rejected)"
+    );
+}
+
+/// Terminal rejection must be decided on the UNDISCOUNTED full footprint, not the
+/// prefix-discounted `needed`. A request reusing a running holder's active prefix
+/// gets its `needed` discounted (a "can admit now" quantity), but the reused
+/// blocks are still physically resident — so its true footprint can exceed the
+/// whole pool and it can never run. Discounting would leave it stalling the FIFO
+/// head until the holder frees; the undiscounted footprint rejects it outright.
+#[test]
+fn active_prefix_reuse_oversized_request_rejected_on_full_footprint() {
+    // 8 GPU blocks * block_size 4, prefix caching on so the active reuse is modeled.
+    let args = MockEngineArgs::builder()
+        .engine_type(EngineType::Trtllm)
+        .block_size(4)
+        .num_gpu_blocks(8)
+        .max_num_batched_tokens(Some(64))
+        .max_num_seqs(Some(8))
+        .enable_chunked_prefill(true)
+        .enable_prefix_caching(true)
+        .speedup_ratio(0.0)
+        .build()
+        .unwrap();
+    let mut core = VllmCore::new(args);
+    let holder = Uuid::from_u128(1);
+    let reuser = Uuid::from_u128(2);
+    // holder: 2-block prefix (0..8) + output 8 -> full = ceil(16/4) = 4, fits the
+    //   8-block pool and runs, keeping the 0..8 prefix ACTIVE.
+    receive(&mut core, holder, 0..8, 8);
+    // reuser: shares the holder's 0..8 prefix, full footprint = ceil((32+8)/4) = 10
+    //   > 8-block pool. Reusing the active prefix discounts `needed` to 10-2 = 8,
+    //   which is NOT > 8 — so the discounted check would let it stall — but its
+    //   physical footprint (10) can never fit, so it must be terminally rejected.
+    receive(&mut core, reuser, 0..32, 8);
+
+    let mut collector = crate::replay::TraceCollector::default();
+    let pass = core.execute_pass(&mut collector, 0.0);
+
+    assert!(
+        core.state().running.contains(&holder),
+        "holder fits its footprint and is admitted"
+    );
+    assert!(
+        pass.output_signals
+            .iter()
+            .any(|signal| signal.uuid == reuser && signal.completed && signal.rejected),
+        "reuser's 10-block footprint can never fit the 8-block pool (reused prefix is still \
+         resident), so it must emit a terminal rejection even while reusing the active prefix"
+    );
+    assert!(
+        !core.state().requests.contains_key(&reuser),
+        "reuser must be rejected, not left stalling the FIFO head behind the holder"
+    );
+    assert_eq!(
+        pass.mocker_metrics.vllm_preemptions_total, 0,
+        "no-evict policy must never preempt"
+    );
+}

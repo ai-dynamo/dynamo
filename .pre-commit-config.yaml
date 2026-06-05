@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-exclude: ^(src/grpc_generated|.*\.patch$|.*/connect/.*\.py)
+exclude: ^(src/grpc_generated|.*\.patch$|.*/connect/.*\.py|components/src/dynamo/planner/plugins/proto/v1/plugin_pb2(_grpc)?\.pyi?$)
 repos:
 - repo: https://github.com/timothycrosley/isort
   rev: 5.12.0
