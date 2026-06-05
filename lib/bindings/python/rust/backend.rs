@@ -3,11 +3,12 @@
 
 //! PyO3 bridge for `dynamo_backend_common::Worker`.
 //!
-//! Lets a Python `LLMEngine` ABC subclass plug into the Rust `Worker`
-//! through a thin `PyLLMEngine` adapter. All lifecycle work — signal
-//! handling, discovery unregister, grace period, drain, cleanup, and
-//! 3-phase runtime shutdown — lives in Rust; Python only owns engine
-//! semantics.
+//! Lets a Python `BaseEngine` ABC subclass plug into the Rust `Worker`
+//! through a thin adapter: `PyLLMEngine` for token engines, `PyRawEngine`
+//! for raw-media engines, both composing the shared `PyEngineCore`. All
+//! lifecycle work — signal handling, discovery unregister, grace period,
+//! drain, cleanup, and 3-phase runtime shutdown — lives in Rust; Python
+//! only owns engine semantics.
 //!
 //! Exposed under `dynamo._core.backend` as `Worker`, `WorkerConfig`,
 //! `EngineConfig`, and `RuntimeConfig`.
@@ -588,10 +589,17 @@ impl Worker {
 }
 
 // ---------------------------------------------------------------------------
-// PyLLMEngine — the actual bridge. Not a `#[pyclass]`; lives only in Rust.
+// PyEngineCore — the shared Python-bridge lifecycle. Both `PyLLMEngine` (token
+// pipeline) and `PyRawEngine` (raw media) compose one. It owns the engine
+// handle, event loop, per-request trace/metadata state, and every lifecycle
+// method that does not depend on the request modality (start/abort/drain/
+// cleanup/setup_metrics/health_check_payload) plus the modality-neutral
+// `dispatch_generate`. The modality-specific `generate` shaping and
+// `kv_event_sources` live on the two wrappers, not here. Not a `#[pyclass]`;
+// lives only in Rust.
 // ---------------------------------------------------------------------------
 
-struct PyLLMEngine {
+struct PyEngineCore {
     // Wrapped in `Arc` so we can clone refcount-style without acquiring
     // the GIL — `PyObject::clone` would otherwise need to bump Python's
     // own refcount, which requires the GIL. Same pattern as
@@ -602,7 +610,7 @@ struct PyLLMEngine {
     request_metadata: Arc<StdMutex<HashMap<String, BTreeMap<String, String>>>>,
 }
 
-impl PyLLMEngine {
+impl PyEngineCore {
     fn new(engine: Arc<PyObject>, event_loop: Arc<PyObject>) -> Self {
         Self {
             engine,
@@ -689,7 +697,7 @@ impl PyLLMEngine {
         debug_assert_eq!(
             tracing::Span::current().metadata().map(|m| m.name()),
             Some("engine.generate"),
-            "Span::current() must be engine.generate at PyLLMEngine boundary; \
+            "Span::current() must be engine.generate at PyEngineCore boundary; \
              a dispatch refactor likely broke the capture point"
         );
         let engine_span = tracing::Span::current();
@@ -752,8 +760,7 @@ impl Drop for RequestStateGuard {
     }
 }
 
-#[async_trait]
-impl LLMEngine for PyLLMEngine {
+impl PyEngineCore {
     async fn start(&self, worker_id: u64) -> Result<RsEngineConfig, DynamoError> {
         let engine = self.engine.clone();
         let event_loop = self.event_loop.clone();
@@ -814,68 +821,6 @@ impl LLMEngine for PyLLMEngine {
             })
         })
         .map_err(py_err_to_dynamo)
-    }
-
-    async fn generate(
-        &self,
-        request: PreprocessedRequest,
-        ctx: dynamo_backend_common::GenerateContext,
-    ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
-        let (stream, request_state_guard) = self.dispatch_generate(request, ctx).await?;
-
-        let mapped = async_stream::stream! {
-            let _request_state_guard = request_state_guard;
-            let mut inner = std::pin::pin!(stream);
-            while let Some(item) = inner.next().await {
-                let py_obj = match item {
-                    Ok(obj) => obj,
-                    Err(e) => {
-                        yield Err(py_err_to_dynamo(e));
-                        return;
-                    }
-                };
-
-                // Depythonize the chunk dict on a blocking thread — same
-                // GIL-contention rationale as the request side.
-                let parsed = tokio::task::spawn_blocking(move || {
-                    Python::with_gil(|py| -> PyResult<LLMEngineOutput> {
-                        let bound = py_obj.into_bound(py);
-                        let mut out: LLMEngineOutput = depythonize(&bound).map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                                "invalid chunk shape: {e}"
-                            ))
-                        })?;
-                        // Match the Python `Worker.generate` default of
-                        // `index = 0` for single-choice streams so the
-                        // OpenAI frontend keeps choices stable.
-                        if out.index.is_none() {
-                            out.index = Some(0);
-                        }
-                        Ok(out)
-                    })
-                })
-                .await;
-
-                match parsed {
-                    Ok(Ok(chunk)) => yield Ok(chunk),
-                    Ok(Err(e)) => {
-                        tracing::error!(error = %e, "failed to parse chunk from python engine");
-                        yield Err(py_err_to_dynamo(e));
-                        return;
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "chunk parse offload error");
-                        yield Err(DynamoError::builder()
-                            .error_type(ErrorType::Backend(BackendError::Unknown))
-                            .message(format!("chunk parse offload error: {e}"))
-                            .build());
-                        return;
-                    }
-                }
-            }
-        };
-
-        Ok(Box::pin(mapped))
     }
 
     async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
@@ -960,23 +905,6 @@ impl LLMEngine for PyLLMEngine {
         .map_err(py_err_to_dynamo)
     }
 
-    async fn kv_event_sources(&self) -> Result<Vec<RsKvEventSource>, DynamoError> {
-        let py_list = self
-            .call_method0_async("kv_event_sources")
-            .await
-            .map_err(py_err_to_dynamo)?;
-        Python::with_gil(|py| -> PyResult<Vec<RsKvEventSource>> {
-            let bound = py_list.bind(py);
-            let list = bound.downcast::<pyo3::types::PyList>()?;
-            let mut sources = Vec::with_capacity(list.len());
-            for item in list.iter() {
-                sources.push(depythonize_kv_source(&item)?);
-            }
-            Ok(sources)
-        })
-        .map_err(py_err_to_dynamo)
-    }
-
     async fn setup_metrics(&self, _ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
         // Step 1: call Python's `register_prometheus` for vendor-registry
         // bridging (side effect on ctx.metrics; nothing flows back). Engines
@@ -1017,7 +945,7 @@ impl LLMEngine for PyLLMEngine {
     }
 }
 
-impl PyLLMEngine {
+impl PyEngineCore {
     async fn call_python_register_prometheus(
         &self,
         metrics: &dynamo_backend_common::EngineMetrics,
@@ -1074,23 +1002,148 @@ impl PyLLMEngine {
 }
 
 // ---------------------------------------------------------------------------
+// PyLLMEngine — the token-pipeline bridge. Composes `PyEngineCore` for the
+// shared lifecycle and adds the token `generate` (chunks → `LLMEngineOutput`)
+// and `kv_event_sources`. Not a `#[pyclass]`; lives only in Rust.
+// ---------------------------------------------------------------------------
+
+struct PyLLMEngine {
+    core: PyEngineCore,
+}
+
+impl PyLLMEngine {
+    fn new(engine: Arc<PyObject>, event_loop: Arc<PyObject>) -> Self {
+        Self {
+            core: PyEngineCore::new(engine, event_loop),
+        }
+    }
+}
+
+#[async_trait]
+impl LLMEngine for PyLLMEngine {
+    async fn start(&self, worker_id: u64) -> Result<RsEngineConfig, DynamoError> {
+        self.core.start(worker_id).await
+    }
+
+    async fn generate(
+        &self,
+        request: PreprocessedRequest,
+        ctx: dynamo_backend_common::GenerateContext,
+    ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
+        let (stream, request_state_guard) = self.core.dispatch_generate(request, ctx).await?;
+
+        let mapped = async_stream::stream! {
+            let _request_state_guard = request_state_guard;
+            let mut inner = std::pin::pin!(stream);
+            while let Some(item) = inner.next().await {
+                let py_obj = match item {
+                    Ok(obj) => obj,
+                    Err(e) => {
+                        yield Err(py_err_to_dynamo(e));
+                        return;
+                    }
+                };
+
+                // Depythonize the chunk dict on a blocking thread — same
+                // GIL-contention rationale as the request side.
+                let parsed = tokio::task::spawn_blocking(move || {
+                    Python::with_gil(|py| -> PyResult<LLMEngineOutput> {
+                        let bound = py_obj.into_bound(py);
+                        let mut out: LLMEngineOutput = depythonize(&bound).map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "invalid chunk shape: {e}"
+                            ))
+                        })?;
+                        // Match the Python `Worker.generate` default of
+                        // `index = 0` for single-choice streams so the
+                        // OpenAI frontend keeps choices stable.
+                        if out.index.is_none() {
+                            out.index = Some(0);
+                        }
+                        Ok(out)
+                    })
+                })
+                .await;
+
+                match parsed {
+                    Ok(Ok(chunk)) => yield Ok(chunk),
+                    Ok(Err(e)) => {
+                        tracing::error!(error = %e, "failed to parse chunk from python engine");
+                        yield Err(py_err_to_dynamo(e));
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "chunk parse offload error");
+                        yield Err(DynamoError::builder()
+                            .error_type(ErrorType::Backend(BackendError::Unknown))
+                            .message(format!("chunk parse offload error: {e}"))
+                            .build());
+                        return;
+                    }
+                }
+            }
+        };
+
+        Ok(Box::pin(mapped))
+    }
+
+    async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
+        self.core.abort(ctx).await
+    }
+
+    async fn drain(&self) -> Result<(), DynamoError> {
+        self.core.drain().await
+    }
+
+    async fn cleanup(&self) -> Result<(), DynamoError> {
+        self.core.cleanup().await
+    }
+
+    async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
+        self.core.health_check_payload().await
+    }
+
+    async fn kv_event_sources(&self) -> Result<Vec<RsKvEventSource>, DynamoError> {
+        let py_list = self
+            .core
+            .call_method0_async("kv_event_sources")
+            .await
+            .map_err(py_err_to_dynamo)?;
+        Python::with_gil(|py| -> PyResult<Vec<RsKvEventSource>> {
+            let bound = py_list.bind(py);
+            let list = bound.downcast::<pyo3::types::PyList>()?;
+            let mut sources = Vec::with_capacity(list.len());
+            for item in list.iter() {
+                sources.push(depythonize_kv_source(&item)?);
+            }
+            Ok(sources)
+        })
+        .map_err(py_err_to_dynamo)
+    }
+
+    async fn setup_metrics(&self, ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
+        self.core.setup_metrics(ctx).await
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PyRawEngine — the bridge for Python `DiffusionEngine` (raw media pipeline).
 //
-// Wraps a `PyLLMEngine` so the identical lifecycle methods
-// (start/abort/drain/cleanup/setup_metrics/health_check_payload) are shared
-// verbatim. Only `generate` differs: it pythonizes the request as a raw JSON
+// Composes the same `PyEngineCore` as `PyLLMEngine`, so the modality-neutral
+// lifecycle (start/abort/drain/cleanup/setup_metrics/health_check_payload) is
+// shared. Only `generate` differs: it pythonizes the request as a raw JSON
 // object and maps each yielded Python dict back to `serde_json::Value`, with
 // no token/`LLMEngineOutput` shaping. Not a `#[pyclass]`; lives only in Rust.
 // ---------------------------------------------------------------------------
 
 struct PyRawEngine {
-    inner: PyLLMEngine,
+    core: PyEngineCore,
 }
 
 impl PyRawEngine {
     fn new(engine: Arc<PyObject>, event_loop: Arc<PyObject>) -> Self {
         Self {
-            inner: PyLLMEngine::new(engine, event_loop),
+            core: PyEngineCore::new(engine, event_loop),
         }
     }
 }
@@ -1098,7 +1151,7 @@ impl PyRawEngine {
 #[async_trait]
 impl RawEngine for PyRawEngine {
     async fn start(&self, worker_id: u64) -> Result<RsEngineConfig, DynamoError> {
-        self.inner.start(worker_id).await
+        self.core.start(worker_id).await
     }
 
     async fn generate(
@@ -1106,7 +1159,7 @@ impl RawEngine for PyRawEngine {
         request: serde_json::Value,
         ctx: dynamo_backend_common::GenerateContext,
     ) -> Result<BoxStream<'static, Result<serde_json::Value, DynamoError>>, DynamoError> {
-        let (stream, request_state_guard) = self.inner.dispatch_generate(request, ctx).await?;
+        let (stream, request_state_guard) = self.core.dispatch_generate(request, ctx).await?;
 
         let mapped = async_stream::stream! {
             let _request_state_guard = request_state_guard;
@@ -1159,23 +1212,23 @@ impl RawEngine for PyRawEngine {
     }
 
     async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
-        self.inner.abort(ctx).await
+        self.core.abort(ctx).await
     }
 
     async fn drain(&self) -> Result<(), DynamoError> {
-        self.inner.drain().await
+        self.core.drain().await
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
-        self.inner.cleanup().await
+        self.core.cleanup().await
     }
 
     async fn setup_metrics(&self, ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
-        self.inner.setup_metrics(ctx).await
+        self.core.setup_metrics(ctx).await
     }
 
     async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
-        self.inner.health_check_payload().await
+        self.core.health_check_payload().await
     }
 }
 
