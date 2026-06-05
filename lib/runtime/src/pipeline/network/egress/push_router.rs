@@ -1078,7 +1078,21 @@ where
                     "Direct routing should not call generate on PushRouter directly; use DirectRoutingRouter wrapper"
                 );
             }
-            _ => {}
+            // These modes drive `select_next_worker()` to `None` — they rely on
+            // the occupancy/load-aware selection the bidirectional path does not
+            // wire yet, which would otherwise surface as a misleading "no
+            // instances available" error below. Reject them explicitly until
+            // bidirectional support lands; tracked in
+            // https://github.com/ai-dynamo/dynamo/issues/10320.
+            RouterMode::PowerOfTwoChoices
+            | RouterMode::LeastLoaded
+            | RouterMode::DeviceAwareWeighted => {
+                anyhow::bail!(
+                    "{:?} routing is not yet supported for bidirectional dispatch",
+                    self.router_mode
+                );
+            }
+            RouterMode::RoundRobin | RouterMode::Random => {}
         }
 
         let instance_id = self
@@ -1377,6 +1391,43 @@ mod tests {
             err_msg.contains("Direct") || err_msg.contains("direct"),
             "error should mention Direct: got {err_msg}"
         );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn bidirectional_generate_rejects_unsupported_load_aware_modes() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_bidi_load_aware".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+
+        for mode in [
+            RouterMode::PowerOfTwoChoices,
+            RouterMode::LeastLoaded,
+            RouterMode::DeviceAwareWeighted,
+        ] {
+            let endpoint = component.endpoint("test_endpoint".to_string());
+            let client = endpoint.client().await.unwrap();
+            let router = PushRouter::<u64, TestResponse>::from_client(client, mode)
+                .await
+                .unwrap();
+
+            let input: ManyIn<u64> =
+                Context::new(RequestStream::new(Box::pin(tokio_stream::iter(vec![1u64]))));
+            let result = router.generate(input).await;
+            assert!(
+                result.is_err(),
+                "bidirectional generate must reject {mode:?} (not yet supported)"
+            );
+            let err_msg = format!("{:?}", result.unwrap_err());
+            assert!(
+                err_msg.contains("not yet supported for bidirectional dispatch"),
+                "error should explain the mode is unsupported, not 'no instances': got {err_msg}"
+            );
+        }
 
         rt.shutdown();
     }
