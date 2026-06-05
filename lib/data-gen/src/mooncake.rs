@@ -17,9 +17,10 @@
 
 use anyhow::{Context, Result, bail};
 use dynamo_kv_hashing::Request;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHasher};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
@@ -152,9 +153,10 @@ impl RollingHashIdMapper {
     /// Hash a sequence of tokens into Mooncake `hash_ids`.
     ///
     /// Tokens are chunked by `block_size`; each complete block contributes one
-    /// compact id derived from Dynamo's shared KV-hashing contract. Identical
-    /// prefixes across requests resolve to identical leading `hash_ids` once
-    /// the mapper has seen them.
+    /// compact id derived from Dynamo's shared KV-hashing contract. A trailing
+    /// partial block also contributes one compact id so replay capacity still
+    /// covers the full prompt length. Identical prefixes across requests
+    /// resolve to identical leading `hash_ids` once the mapper has seen them.
     pub fn hash_token_blocks(&mut self, tokens: &[u32]) -> Vec<u64> {
         hash_token_blocks(self, tokens)
     }
@@ -175,9 +177,10 @@ impl RollingHashIdMapper {
 
 /// Token-block hashing helper for the Mooncake replay schema.
 ///
-/// Splits `tokens` into complete chunks of `mapper.block_size()`, derives
-/// sequence-aware hashes through `dynamo-kv-hashing`, and returns the compact
-/// ids assigned by `mapper`. Mirrors
+/// Splits `tokens` into chunks of `mapper.block_size()`, derives sequence-aware
+/// hashes for complete blocks through `dynamo-kv-hashing`, appends a stable
+/// synthetic key for a trailing partial block when present, and returns the
+/// compact ids assigned by `mapper`. Mirrors
 /// [`RollingHashIdMapper::hash_token_blocks`] as a free function so callers
 /// that already hold a mutable mapper reference can invoke it without
 /// re-borrowing.
@@ -189,7 +192,7 @@ pub fn hash_token_blocks(mapper: &mut RollingHashIdMapper, tokens: &[u32]) -> Ve
 /// invalid block-size or request-shape errors.
 pub fn try_hash_token_blocks(mapper: &mut RollingHashIdMapper, tokens: &[u32]) -> Result<Vec<u64>> {
     require_positive("block size", mapper.block_size)?;
-    let sequence_hashes = Request::builder()
+    let mut sequence_hashes = Request::builder()
         .tokens(tokens.to_vec())
         .build()?
         .sequence_hashes(
@@ -198,7 +201,31 @@ pub fn try_hash_token_blocks(mapper: &mut RollingHashIdMapper, tokens: &[u32]) -
                 .try_into()
                 .context("block_size does not fit u32")?,
         )?;
+    if let Some(partial_hash) = trailing_partial_sequence_hash(mapper, tokens, &sequence_hashes) {
+        sequence_hashes.push(partial_hash);
+    }
     Ok(ids_for_sequence_hashes(mapper, &sequence_hashes))
+}
+
+fn trailing_partial_sequence_hash(
+    mapper: &RollingHashIdMapper,
+    tokens: &[u32],
+    complete_sequence_hashes: &[u64],
+) -> Option<u64> {
+    let tail_len = tokens.len() % mapper.block_size;
+    if tail_len == 0 {
+        return None;
+    }
+
+    let tail = &tokens[tokens.len() - tail_len..];
+    let parent = complete_sequence_hashes.last().copied();
+    let mut hasher = FxHasher::default();
+    "mooncake-partial-v1".hash(&mut hasher);
+    mapper.block_size.hash(&mut hasher);
+    complete_sequence_hashes.len().hash(&mut hasher);
+    parent.hash(&mut hasher);
+    tail.hash(&mut hasher);
+    Some(hasher.finish())
 }
 
 /// Map stable sequence hashes to compact Mooncake IDs with a shared mapper.
@@ -416,11 +443,22 @@ mod tests {
     }
 
     #[test]
-    fn trailing_partial_block_is_not_mapped() {
+    fn trailing_partial_block_preserves_replay_capacity() {
         let mut mapper = RollingHashIdMapper::new(4);
 
-        assert_eq!(mapper.hash_token_blocks(&[1, 2, 3]), Vec::<u64>::new());
-        assert_eq!(mapper.hash_token_blocks(&[1, 2, 3, 4, 5, 6]), vec![0]);
+        assert_eq!(mapper.hash_token_blocks(&[1, 2, 3]), vec![0]);
+        assert_eq!(mapper.hash_token_blocks(&[1, 2, 3, 4, 5, 6]), vec![1, 2]);
+    }
+
+    #[test]
+    fn exact_block_boundary_does_not_add_partial_hash_id() {
+        let mut mapper = RollingHashIdMapper::new(4);
+
+        assert_eq!(mapper.hash_token_blocks(&[1, 2, 3, 4]), vec![0]);
+        assert_eq!(
+            mapper.hash_token_blocks(&[1, 2, 3, 4, 5, 6, 7, 8]),
+            vec![0, 1]
+        );
     }
 
     #[test]
