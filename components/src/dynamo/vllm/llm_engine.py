@@ -25,6 +25,7 @@ from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 from dynamo._core import Context
+from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend import telemetry
 from dynamo.common.backend.disagg import require_prefill_result
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
@@ -327,6 +328,15 @@ class VllmLLMEngine(LLMEngine):
         )
 
         is_prefill = self.disaggregation_mode == DisaggregationMode.PREFILL
+        tokenizer = getattr(self.engine_client, "tokenizer", None)
+        # vLLM emits a selected-token logprob dict even at `logprobs=0`,
+        # so the top-k suppression happens below, not at the engine.
+        (
+            requested_logprobs_count,
+            requested_prompt_logprobs_count,
+        ) = _shared_logprobs.parse_logprob_options(
+            request.get("output_options", {}) or {}
+        )
 
         total_output_tokens_by_index: dict[int, int] = {}
         async for res in gen:
@@ -348,16 +358,46 @@ class VllmLLMEngine(LLMEngine):
                 finish_reason = getattr(output, "finish_reason", None)
                 if not token_ids and not finish_reason:
                     continue
-                prepared_outputs.append((output_idx, token_ids, finish_reason))
+                prepared_outputs.append((output, output_idx, token_ids, finish_reason))
 
-            for output_idx, token_ids, finish_reason in prepared_outputs:
+            for output, output_idx, token_ids, finish_reason in prepared_outputs:
                 out: GenerateChunk = {
                     "index": output_idx,
                     "token_ids": token_ids,
                 }
 
+                # `build_sampling_params` forces DELTA output → offset 0.
+                # `fallback_to_first_on_missing=True` matches legacy
+                # vLLM handler: always emit when vLLM returned a dict.
+                (
+                    log_probs,
+                    top_logprobs,
+                ) = _shared_logprobs.extract_from_completion_output(
+                    output,
+                    0,
+                    tokenizer=tokenizer,
+                    fallback_to_first_on_missing=True,
+                    include_bytes=True,
+                )
+                if log_probs is not None:
+                    out["log_probs"] = log_probs
+                if (
+                    top_logprobs is not None
+                    and requested_logprobs_count is not None
+                    and requested_logprobs_count > 0
+                ):
+                    out["top_logprobs"] = top_logprobs
+
                 if finish_reason:
                     out["finish_reason"] = str(finish_reason)
+                    # vLLM hangs prompt_logprobs off `RequestOutput`, not
+                    # `CompletionOutput` — read from `res`.
+                    if requested_prompt_logprobs_count is not None:
+                        prompt_payload = _shared_logprobs.extract_prompt_logprobs_from_completion_output(
+                            res, tokenizer=tokenizer
+                        )
+                        if prompt_payload is not None:
+                            out["engine_data"] = {"prompt_logprobs": prompt_payload}
                     prompt_tokens = (
                         len(res.prompt_token_ids) if res.prompt_token_ids else 0
                     )
