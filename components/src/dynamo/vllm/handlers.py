@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 from abc import ABC, abstractmethod
+from collections import deque
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Dict, Final, Generic, Iterator, Optional, TypeVar
 
@@ -453,13 +454,15 @@ def _flatten_logprobs(
     if not isinstance(log_probs, list):
         return None
     out: list[float] = []
-    pending = list(log_probs)
+    # deque + popleft/extendleft avoids the O(n^2) of list.pop(0)/front-splice
+    # on long RL/TITO logprob payloads. reversed() keeps original token order.
+    pending: deque = deque(log_probs)
     while pending:
-        item = pending.pop(0)
+        item = pending.popleft()
         if isinstance(item, (int, float)):
             out.append(float(item))
         elif isinstance(item, list):
-            pending[0:0] = item
+            pending.extendleft(reversed(item))
         elif isinstance(item, dict) and "logprob" in item:
             try:
                 out.append(float(item["logprob"]))
