@@ -257,15 +257,24 @@ jobs:
         run: |
           set -euo pipefail
 
+          OUTPUT_DIR="${RUNNER_TEMP}/frontend-perf-pr-guard"
+          mkdir -p "${OUTPUT_DIR}"
+
           if ! command -v aiperf >/dev/null 2>&1 && ! python3 -c "import aiperf" >/dev/null 2>&1; then
+            AIPERF_VENV="${RUNNER_TEMP}/frontend-perf-tools"
             if command -v uv >/dev/null 2>&1; then
-              uv pip install --requirement container/deps/requirements.benchmark.txt
+              uv venv "${AIPERF_VENV}" --python "$(command -v python3)"
+              UV_CACHE_DIR="${RUNNER_TEMP}/uv-cache" uv pip install \
+                --python "${AIPERF_VENV}/bin/python" \
+                --requirement container/deps/requirements.benchmark.txt
             else
-              python3 -m pip install --requirement container/deps/requirements.benchmark.txt
+              python3 -m venv "${AIPERF_VENV}"
+              "${AIPERF_VENV}/bin/python" -m pip install \
+                --requirement container/deps/requirements.benchmark.txt
             fi
+            export PATH="${AIPERF_VENV}/bin:${PATH}"
           fi
 
-          OUTPUT_DIR="${RUNNER_TEMP}/frontend-perf-pr-guard"
           BASELINE_ARGS=()
           if [[ -n "${{ inputs.frontend_perf_guard_baseline }}" ]]; then
             BASELINE_ARGS=(--baseline "${{ inputs.frontend_perf_guard_baseline }}")
