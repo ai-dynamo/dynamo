@@ -117,30 +117,42 @@ RUN --mount=type=bind,source=./container/deps/vllm/patches/v0.22.0/ultra,target=
 {% endif %}
 
 # The upstream vllm/vllm-openai base image ships a GPL/GPL-3.0 ffmpeg built
-# against libx264/libx265/libmp3lame. Purge that entire apt codec stack and
-# replace it with the LGPL-only in-tree ffmpeg built in wheel_builder
-# (--disable-gpl --disable-nonfree; H.264 via NVENC, VP9 via libvpx). PyAV,
-# torchaudio, torchvision, soundfile and Pillow all bundle their own libraries
-# and do not link the system ffmpeg/codecs, so removing them is safe. dpkg-query
-# keeps the purge robust across base-image/arch version suffixes (e.g.
-# libavcodec58 vs 60), and autoremove then sweeps the now-orphaned media deps.
+# against libx264/libx265/libmp3lame. Purge ONLY the explicitly-named ffmpeg +
+# codec packages and replace them with the LGPL-only in-tree ffmpeg built in
+# wheel_builder (--disable-gpl --disable-nonfree; H.264 via NVENC, VP9 via
+# libvpx). PyAV, torchaudio, torchvision, soundfile and Pillow all bundle their
+# own libraries and do not link the system ffmpeg/codecs, so removing them is
+# safe. dpkg-query keeps the match robust across base-image/arch version
+# suffixes (e.g. libavcodec58 vs 60).
 #
-# CRITICAL: the base image marks the CUDA math libs (libcublas/libcusolver/
-# libcusparse) auto-installed, and the torch wheels here ship NO bundled cublas
-# — torch loads the system copies. A bare autoremove would delete them and break
-# GPU inference, so pin every CUDA/NVIDIA lib as manually-installed first.
+# This grep is the COMPLETE, auditable set of what leaves the image: there is
+# deliberately NO apt-get autoremove, so the removal can never cascade into
+# unrelated auto-installed packages. That matters because the base image marks
+# both the gcc/g++/make toolchain (which torch.inductor/Triton JIT shell out to
+# at runtime) and the CUDA math libs (libcublas/libcusolver/libcusparse — the
+# torch wheels here ship no bundled cublas and load the system copies) as
+# auto-installed. A bare `autoremove --purge` sweeps all of those as "orphaned",
+# which is what broke runtime JIT (missing C compiler) in the 1.3.0 rc image.
+# Any LGPL/BSD media libs left orphaned by the named purge (libva, libvdpau,
+# ...) are license-clean dead weight, not a compliance issue.
 RUN set -eux; \
-    keep=$(dpkg-query -W -f='${Package}\n' 2>/dev/null \
-        | grep -E '^(libcu|libnv|libnccl|cuda)' || true); \
-    if [ -n "$keep" ]; then apt-mark manual $keep >/dev/null; fi; \
     purge=$(dpkg-query -W -f='${Package}\n' 2>/dev/null \
         | grep -E '^(ffmpeg|libav[a-z]|libsw[a-z]|libpostproc|libx264|libx265|libmp3lame|libaom|libdav1d|libvpx|libtheora|libvorbis|libopus|libsoxr)' \
         || true); \
     if [ -n "$purge" ]; then \
         DEBIAN_FRONTEND=noninteractive apt-get purge -y $purge; \
     fi; \
-    DEBIAN_FRONTEND=noninteractive apt-get autoremove -y --purge; \
     rm -rf /var/lib/apt/lists/*
+
+{% if device == "cuda" %}
+# Regression guard for the codec purge above: torch.inductor/Triton JIT shell
+# out to a host C/C++ compiler at runtime, so a missing toolchain only surfaces
+# on the first compile in production. Reproduce that compile path at build time
+# (CPU-only, the same minimal probe QA runs) so a missing compiler aborts the
+# build instead of shipping.
+RUN --mount=type=bind,source=./container/deps/vllm/validate_torch_compile_smoke.py,target=/tmp/validate_torch_compile_smoke.py,readonly \
+    python3 /tmp/validate_torch_compile_smoke.py
+{% endif %}
 
 # Copy the LGPL ffmpeg from wheel_builder: versioned shared libs (libav*.so*,
 # libsw*.so*) plus the LGPL CLI binary that imageio/diffusers target via
