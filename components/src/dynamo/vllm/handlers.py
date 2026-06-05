@@ -643,17 +643,16 @@ def build_sampling_params(
             sampling_params.thinking_token_budget = value
 
     # Apply output_options (logprobs, prompt_logprobs, etc.)
-    logprobs, prompt_logprobs = _shared_logprobs.parse_logprob_options(
-        request.get("output_options", {}) or {}
-    )
+    output_options = request.get("output_options", {}) or {}
+    logprobs, prompt_logprobs = _shared_logprobs.parse_logprob_options(output_options)
     if logprobs is not None:
         sampling_params.logprobs = logprobs
     if prompt_logprobs is not None:
         sampling_params.prompt_logprobs = prompt_logprobs
 
-        skip_special_tokens_value = output_options.get("skip_special_tokens")
-        if skip_special_tokens_value is not None:
-            sampling_params.skip_special_tokens = bool(skip_special_tokens_value)
+    skip_special_tokens_value = output_options.get("skip_special_tokens")
+    if skip_special_tokens_value is not None:
+        sampling_params.skip_special_tokens = bool(skip_special_tokens_value)
 
     # If max_tokens wasn't provided (None or missing), compute a dynamic default
     provided_max_tokens = request.get("stop_conditions", {}).get("max_tokens", None)
