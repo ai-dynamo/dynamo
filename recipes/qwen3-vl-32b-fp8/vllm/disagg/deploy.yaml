@@ -185,3 +185,4 @@ spec:
           resources:
             claims:
               - name: gpu-rdma-resource
+
