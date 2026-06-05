@@ -94,21 +94,22 @@ def active_field(body: dict[str, Any], field: str) -> bool:
     return value not in (None, False, [], {})
 
 
-def text_content(content: Any) -> str:
+def text_content(role: str, content: Any) -> str:
     if isinstance(content, str):
         return content
     if not isinstance(content, list):
         raise GatewayError(400, "message content must be text")
 
+    expected_type = "output_text" if role == "assistant" else "input_text"
     parts = []
     for part in content:
         if (
             not isinstance(part, dict)
-            or part.get("type") != "input_text"
+            or part.get("type") != expected_type
             or not isinstance(part.get("text"), str)
         ):
             raise GatewayError(
-                400, "message content must contain only input_text items"
+                400, f"message content must contain only {expected_type} items"
             )
         parts.append(part["text"])
     return "".join(parts)
@@ -154,7 +155,9 @@ def normalize_messages(body: dict[str, Any]) -> list[dict[str, str]]:
         role = item.get("role")
         if role not in {"system", "user", "assistant"}:
             raise GatewayError(400, "message role must be system, user, or assistant")
-        messages.append({"role": role, "content": text_content(item.get("content"))})
+        messages.append(
+            {"role": role, "content": text_content(role, item.get("content"))}
+        )
 
     if messages[-1]["role"] != "user":
         raise GatewayError(400, "the final input message must have role=user")
@@ -303,19 +306,32 @@ async def select_and_add(
             ),
         )
         new_isl_tokens = max(len(token_ids) - selected.gpu_overlap_tokens, 0)
-        add_status, add_body = await post_json(
-            session,
-            f"{config.slot_tracker_url}/add",
-            {
-                "model_name": config.model,
-                "tenant_id": TENANT_ID,
-                "request_id": request_id,
-                "worker_id": selected.worker.worker_id,
-                "dp_rank": selected.worker.dp_rank,
-                "sequence_hashes": sequence_hashes,
-                "new_isl_tokens": new_isl_tokens,
-            },
+        add_task = asyncio.create_task(
+            post_json(
+                session,
+                f"{config.slot_tracker_url}/add",
+                {
+                    "model_name": config.model,
+                    "tenant_id": TENANT_ID,
+                    "request_id": request_id,
+                    "worker_id": selected.worker.worker_id,
+                    "dp_rank": selected.worker.dp_rank,
+                    "sequence_hashes": sequence_hashes,
+                    "new_isl_tokens": new_isl_tokens,
+                },
+            )
         )
+        try:
+            add_status, add_body = await asyncio.shield(add_task)
+        except asyncio.CancelledError:
+            try:
+                add_status, _ = await add_task
+            except GatewayError:
+                pass
+            else:
+                if add_status == 201:
+                    await shielded_lifecycle_write(config, session, "free", request_id)
+            raise
         log_event(logging.DEBUG, "slot_add", request_id=request_id, status=add_status)
         if add_status == 201:
             log_event(
