@@ -669,6 +669,7 @@ class VllmProcessor:
                     pass
 
                 choices = []
+                postprocess_error = False
                 if vllm_out.request_outputs:
                     for output in vllm_out.request_outputs[0].outputs:
                         post = post_processors.get(output.index)
@@ -682,10 +683,14 @@ class VllmProcessor:
                                     "type": "internal_error",
                                 }
                             }
+                            postprocess_error = True
                             break
                         choice = post.process_output(output)
                         if choice:
                             choices.append(choice)
+
+                if postprocess_error:
+                    continue
 
                 # One envelope per iteration carries both data and metrics so
                 # client cancellation can't drop the annotation between yields.
