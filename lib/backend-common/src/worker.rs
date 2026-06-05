@@ -1006,10 +1006,7 @@ fn engine_control_callback(
     })
 }
 
-fn engine_update_callback(
-    update_name: String,
-    engine: Arc<dyn LLMEngine>,
-) -> EngineRouteCallback {
+fn engine_update_callback(update_name: String, engine: Arc<dyn LLMEngine>) -> EngineRouteCallback {
     Arc::new(move |body| {
         let engine = engine.clone();
         let update_name = update_name.clone();

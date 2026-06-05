@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 pytest.importorskip("vllm.lora.request")
+pytest.importorskip("vllm.usage.usage_lib")
 pytest.importorskip("vllm.v1.engine.async_llm")
 
 from dynamo.common.constants import DisaggregationMode  # noqa: E402

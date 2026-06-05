@@ -593,6 +593,8 @@ class VllmLLMEngine(LLMEngine):
         one load operation happens.
         """
         request = body or {}
+        if self.engine_client is None:
+            return {"status": "error", "message": "Engine is not running"}
         try:
             lora_name = request.get("lora_name")
             if not lora_name:
@@ -759,6 +761,8 @@ class VllmLLMEngine(LLMEngine):
         Request body: ``{"lora_name": str}``.
         """
         request = body or {}
+        if self.engine_client is None:
+            return {"status": "error", "message": "Engine is not running"}
         try:
             lora_name = request.get("lora_name")
             if not lora_name:
