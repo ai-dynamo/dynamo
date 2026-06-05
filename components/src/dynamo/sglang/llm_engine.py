@@ -23,9 +23,17 @@ import zmq
 import zmq.asyncio
 from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
+from sglang.srt.managers.io_struct import (
+    UpdateWeightFromDiskReqInput,
+    UpdateWeightsFromDistributedReqInput,
+    UpdateWeightsFromIPCReqInput,
+    UpdateWeightsFromTensorReqInput,
+    UpdateWeightVersionReqInput,
+)
 from sglang.srt.utils.network import get_local_ip_auto, get_zmq_socket
 
 from dynamo._core import Context
+from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend import telemetry
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
@@ -58,6 +66,7 @@ from dynamo.sglang.capacity import (
     local_dp_rank_bounds,
     runtime_capacity,
 )
+from dynamo.sglang.pause import SGLangEnginePauseController
 from dynamo.sglang.publisher import format_zmq_endpoint
 
 if TYPE_CHECKING:
@@ -122,6 +131,8 @@ class SglangLLMEngine(LLMEngine):
         # `dp_rank` against this node's range before forwarding to SGLang.
         self._dp_start: int = 0
         self._dp_size: int = 1
+        self._pause_controller: SGLangEnginePauseController | None = None
+        self._pause_lock = asyncio.Lock()
 
     @classmethod
     async def from_args(
@@ -149,6 +160,7 @@ class SglangLLMEngine(LLMEngine):
         del worker_id  # SGLang bootstrap uses host/port/room triples
 
         self.engine = sgl.Engine(server_args=self.server_args)
+        self._pause_controller = SGLangEnginePauseController(self.engine)
 
         tokenizer = (
             self.engine.tokenizer_manager.tokenizer
@@ -271,6 +283,20 @@ class SglangLLMEngine(LLMEngine):
 
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
+        # Prefill discards engine output (it only yields bootstrap info) —
+        # asking SGLang to compute logprobs there would be wasted work,
+        # especially with prompt_logprobs which forces a full prompt pass.
+        logprob_kwargs = (
+            {}
+            if self.serving_mode == DisaggregationMode.PREFILL
+            else _shared_logprobs.build_sglang_logprob_kwargs(
+                request.get("output_options", {}) or {},
+                allow_top_logprobs=_shared_logprobs.sglang_top_logprobs_allowed(),
+            )
+        )
+        return_tokens_as_token_ids = bool(
+            (request.get("output_options") or {}).get("return_tokens_as_token_ids")
+        )
 
         # SGLang disagg keys NIXL transport on a (host, port, room) triple
         # exchanged between prefill and decode peers.
@@ -301,6 +327,7 @@ class SglangLLMEngine(LLMEngine):
                 enabled=self.enable_trace,
             ),
             **bootstrap_kwargs,
+            **logprob_kwargs,
         )
 
         # ORDER MATTERS: async_generate must register the room (the await
@@ -351,6 +378,10 @@ class SglangLLMEngine(LLMEngine):
             task.add_done_callback(self._prefill_consume_tasks.discard)
             return
 
+        # SGLang's logprob arrays are cumulative per choice and `n > 1`
+        # requests interleave choices on the stream, so the offset is
+        # keyed by `output_idx`, not a single scalar.
+        num_logprobs_per_choice: dict[int, int] = {}
         async for res in stream:
             # SGLang sets index when n>1; default to 0 otherwise.
             output_idx = res.get("index") or 0
@@ -359,6 +390,22 @@ class SglangLLMEngine(LLMEngine):
             finish_reason = meta_info["finish_reason"]
 
             output_ids = res.get("output_ids", [])
+            if output_ids or finish_reason:
+                (
+                    log_probs,
+                    top_logprobs,
+                    next_total,
+                ) = _shared_logprobs.extract_from_sglang_meta(
+                    meta_info,
+                    num_logprobs_per_choice.get(output_idx, 0),
+                    return_tokens_as_token_ids=return_tokens_as_token_ids,
+                )
+                num_logprobs_per_choice[output_idx] = next_total
+                if log_probs is not None:
+                    out["log_probs"] = log_probs
+                if top_logprobs is not None:
+                    out["top_logprobs"] = top_logprobs
+
             if not output_ids and not finish_reason:
                 if context.is_stopped():
                     prompt_tokens = meta_info.get("prompt_tokens", 0)
@@ -387,23 +434,189 @@ class SglangLLMEngine(LLMEngine):
                     "completion_tokens": completion_tokens,
                     "total_tokens": prompt_tokens + completion_tokens,
                 }
+                prompt_payload = (
+                    _shared_logprobs.extract_prompt_logprobs_from_sglang_meta(meta_info)
+                )
+                if prompt_payload is not None:
+                    out["engine_data"] = {"prompt_logprobs": prompt_payload}
 
             if context.is_stopped():
+                # Mutate `out` instead of building a fresh dict so any
+                # logprobs we already extracted for this chunk's tokens
+                # ride along with the cancellation terminal.
                 prompt_tokens = meta_info.get("prompt_tokens", 0)
                 completion_tokens = meta_info.get("completion_tokens", 0)
-                yield {
-                    "token_ids": output_ids,
-                    "index": output_idx,
-                    "finish_reason": "cancelled",
-                    "completion_usage": {
-                        "prompt_tokens": prompt_tokens,
-                        "completion_tokens": completion_tokens,
-                        "total_tokens": prompt_tokens + completion_tokens,
-                    },
+                out["finish_reason"] = "cancelled"
+                out["completion_usage"] = {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
                 }
+                yield out
                 break
 
             yield out
+
+    def supported_controls(self) -> set[str]:
+        return {
+            "start_profile",
+            "stop_profile",
+            "release_memory_occupation",
+            "resume_memory_occupation",
+            "update_weights_from_disk",
+            "update_weights_from_tensor",
+            "update_weights_from_distributed",
+            "update_weights_from_ipc",
+            "update_weight_version",
+        }
+
+    async def engine_control(self, control: str, body: dict) -> dict:
+        handlers = {
+            "start_profile": self.start_profile,
+            "stop_profile": self.stop_profile,
+            "release_memory_occupation": self.release_memory_occupation,
+            "resume_memory_occupation": self.resume_memory_occupation,
+            "update_weights_from_disk": self.update_weights_from_disk,
+            "update_weights_from_tensor": self.update_weights_from_tensor,
+            "update_weights_from_distributed": self.update_weights_from_distributed,
+            "update_weights_from_ipc": self.update_weights_from_ipc,
+            "update_weight_version": self.update_weight_version,
+        }
+        handler = handlers.get(control)
+        if handler is None:
+            return {
+                "status": "error",
+                "message": f"unsupported engine control: {control}",
+            }
+        return await handler(body or {})
+
+    async def release_memory_occupation(self, body: dict) -> dict:
+        controller = self._pause_controller
+        if controller is None:
+            return {
+                "status": "error",
+                "message": "memory control not supported on this worker",
+            }
+
+        body = body or {}
+        tags = body.get("tags")
+        async with self._pause_lock:
+            if controller.is_paused:
+                return {"status": "ok", "message": "Memory already released"}
+            if controller.needs_resume_recovery:
+                return {
+                    "status": "error",
+                    "message": "resume_memory_occupation required before retrying release",
+                }
+            try:
+                await controller.pause(tags)
+                return {
+                    "status": "ok",
+                    "message": (
+                        f"Memory released for tags: {tags}"
+                        if tags is not None
+                        else "Memory released"
+                    ),
+                }
+            except Exception as e:
+                logger.warning("Failed to release memory occupation: %s", e)
+                return {"status": "error", "message": str(e)}
+
+    async def resume_memory_occupation(self, body: dict) -> dict:
+        controller = self._pause_controller
+        if controller is None:
+            return {
+                "status": "error",
+                "message": "memory control not supported on this worker",
+            }
+
+        body = body or {}
+        tags = body.get("tags")
+        async with self._pause_lock:
+            needs_recovery = controller.needs_resume_recovery
+            if not controller.is_paused and not needs_recovery:
+                return {"status": "ok", "message": "Memory already resumed"}
+            try:
+                await controller.resume(tags)
+                controller.mark_resumed()
+                return {
+                    "status": "ok",
+                    "message": (
+                        f"Memory resumed for tags: {tags}"
+                        if tags is not None
+                        else "Memory resumed"
+                    ),
+                }
+            except Exception as e:
+                logger.warning("Failed to resume memory occupation: %s", e)
+                return {"status": "error", "message": str(e)}
+
+    async def start_profile(self, body: dict) -> dict:
+        assert self.engine is not None, "Engine not initialized"
+        body = body or {}
+        await self.engine.tokenizer_manager.start_profile(**body)
+        return {"status": "ok", "message": "Profiling started"}
+
+    async def stop_profile(self, body: dict) -> dict:
+        assert self.engine is not None, "Engine not initialized"
+        await self.engine.tokenizer_manager.stop_profile()
+        return {"status": "ok", "message": "Profiling stopped"}
+
+    async def update_weights_from_disk(self, body: dict) -> dict:
+        assert self.engine is not None, "Engine not initialized"
+        req = UpdateWeightFromDiskReqInput(**(body or {}))
+        (
+            success,
+            message,
+            num_paused_requests,
+        ) = await self.engine.tokenizer_manager.update_weights_from_disk(req, None)
+        return {
+            "success": success,
+            "message": message,
+            "num_paused_requests": num_paused_requests,
+        }
+
+    async def update_weights_from_tensor(self, body: dict) -> dict:
+        assert self.engine is not None, "Engine not initialized"
+        req = UpdateWeightsFromTensorReqInput(**(body or {}))
+        (
+            success,
+            message,
+        ) = await self.engine.tokenizer_manager.update_weights_from_tensor(req, None)
+        return {"success": success, "message": message}
+
+    async def update_weights_from_distributed(self, body: dict) -> dict:
+        assert self.engine is not None, "Engine not initialized"
+        req = UpdateWeightsFromDistributedReqInput(**(body or {}))
+        (
+            success,
+            message,
+        ) = await self.engine.tokenizer_manager.update_weights_from_distributed(
+            req, None
+        )
+        return {"success": success, "message": message}
+
+    async def update_weights_from_ipc(self, body: dict) -> dict:
+        assert self.engine is not None, "Engine not initialized"
+        req = UpdateWeightsFromIPCReqInput(**(body or {}))
+        success, message = await self.engine.tokenizer_manager.update_weights_from_ipc(
+            req, None
+        )
+        if success and not self.engine.tokenizer_manager.initial_weights_loaded:
+            self.engine.tokenizer_manager.initial_weights_loaded = True
+        return {"success": success, "message": message}
+
+    async def update_weight_version(self, body: dict) -> dict:
+        assert self.engine is not None, "Engine not initialized"
+        req = UpdateWeightVersionReqInput(**(body or {}))
+        if req.abort_all_requests:
+            self.engine.tokenizer_manager.abort_request(abort_all=True)
+        self.engine.tokenizer_manager.server_args.weight_version = req.new_version
+        return {
+            "success": True,
+            "message": f"Weight version updated to {req.new_version}",
+            "new_version": req.new_version,
+        }
 
     async def abort(self, context: Context) -> None:
         rid = context.trace_id
@@ -466,6 +679,7 @@ class SglangLLMEngine(LLMEngine):
             except Exception:
                 pass
             self._metrics_zmq_ctx = None
+        self._pause_controller = None
         if self.engine is not None:
             self.engine.shutdown()
             logger.info("SGLang engine shutdown")

@@ -936,6 +936,11 @@ impl ModelDeploymentCard {
     ///   tokenizations at special-token boundaries (massive speed-up for shared chat
     ///   prefixes; default off, zero cost when unset)
     /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — L1 cache byte budget (default 50 MB)
+    /// - `DYN_TOKENIZER_CACHE_EXTEND=0` — disable partial-hit extension. By default
+    ///   (when the cache is enabled) a partial hit also caches the new suffix so each
+    ///   turn of a growing multi-turn conversation hits deeper than the last, keeping
+    ///   per-turn tokenization cost flat instead of growing with history. Set to `0` to
+    ///   fall back to the original hit-without-insert behavior.
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
         let use_fast = match std::env::var("DYN_TOKENIZER") {
             Ok(v) if v == "fastokens" => true,
@@ -958,6 +963,11 @@ impl ModelDeploymentCard {
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(50 * 1024 * 1024);
+        // Partial-hit extension is on by default; disable with DYN_TOKENIZER_CACHE_EXTEND=0.
+        let cache_extend = !matches!(
+            std::env::var("DYN_TOKENIZER_CACHE_EXTEND").ok().as_deref(),
+            Some("0")
+        );
 
         let inner: Arc<dyn crate::tokenizers::traits::Tokenizer> = match &self.tokenizer {
             Some(TokenizerKind::HfTokenizerJson(checked_file)) => {
@@ -969,7 +979,7 @@ impl ModelDeploymentCard {
                 // extracting special-token strings. `FastTokenizer` does not re-expose
                 // `get_added_tokens_decoder`, so we must capture specials from the raw
                 // HF tokenizer before any swap.
-                let hf = HfTokenizer::from_file(p)
+                let mut hf = HfTokenizer::from_file(p)
                     .inspect_err(|err| {
                         if let Some(serde_err) = err.downcast_ref::<serde_json::Error>()
                             && let Ok(contents) = std::fs::read_to_string(p)
@@ -979,13 +989,26 @@ impl ModelDeploymentCard {
                     })
                     .map_err(anyhow::Error::msg)
                     .with_context(|| p.display().to_string())?;
-
+                // Apply the tokenizer_config.json special-token merge eagerly so
+                // `extract_hf_special_tokens` below sees the same specials the
+                // wrapped tokenizer will use. Without this the L1 prefix cache's
+                // boundary list would diverge from the actual tokenizer
+                // (e.g. Qwen2-VL's `<|image_pad|>` would be in the tokenizer
+                // but missing from the cache specials), letting chat prefixes
+                // straddle a special-token boundary and reducing hit rate.
+                if let Some(model_dir) = p.parent() {
+                    crate::tokenizers::hf::merge_special_tokens_from_config(&mut hf, model_dir);
+                }
                 // Hold onto specials before any move of `hf`.
                 let specials: Vec<String> = if cache_enabled {
                     extract_hf_special_tokens(&hf)
                 } else {
                     Vec::new()
                 };
+
+                // Merge already applied above; just wrap.
+                let wrap_hf =
+                    |hf: HfTokenizer| crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf);
 
                 // Pick the inner backend.
                 let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = if use_fast {
@@ -1000,9 +1023,7 @@ impl ModelDeploymentCard {
                                     %e,
                                     "Failed to load fastokens, falling back to HuggingFace"
                                 );
-                                Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(
-                                    hf,
-                                ))
+                                Arc::new(wrap_hf(hf))
                             }
                         }
                     } else {
@@ -1010,20 +1031,22 @@ impl ModelDeploymentCard {
                             path = %p.display(),
                             "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
                         );
-                        Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf))
+                        Arc::new(wrap_hf(hf))
                     }
                 } else {
-                    Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf))
+                    Arc::new(wrap_hf(hf))
                 };
 
                 if cache_enabled {
                     tracing::info!(
                         cache_bytes,
+                        cache_extend,
                         specials = specials.len(),
                         "wrapping tokenizer in L1 prefix cache",
                     );
                     Arc::new(
                         crate::tokenizers::CachedTokenizer::new(raw, specials, cache_bytes)
+                            .with_extend(cache_extend)
                             .with_observer(
                                 Arc::new(|| {
                                     dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL
@@ -1061,6 +1084,7 @@ impl ModelDeploymentCard {
                     );
                     Arc::new(
                         crate::tokenizers::CachedTokenizer::new(raw, Vec::new(), cache_bytes)
+                            .with_extend(cache_extend)
                             .with_observer(
                                 Arc::new(|| {
                                     dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL
@@ -2254,7 +2278,7 @@ mod tests {
         assert!(!dest.exists(), "dest must not exist after cancel");
     }
 
-    /// Brings in the sibling that `lightseek-mm` needs.
+    /// Brings in the sibling that `mm-routing` needs.
     #[test]
     fn harvest_brings_in_non_weight_siblings() -> anyhow::Result<()> {
         let snap = tempfile::tempdir()?;

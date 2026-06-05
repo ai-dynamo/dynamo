@@ -115,7 +115,7 @@ def _tag_kind_and_name(inner: str) -> tuple[str | None, str, str | None]:
     """Classify `<...>` tag inner text into an open/close/singleton kind.
 
     Returns (kind, pair_id, color_override):
-      * kind: 'open' | 'close' | 'singleton' | None
+      * kind: 'open' | 'close' | 'singleton' | 'toggle' | None
       * pair_id: name used to match open against close on the stack
       * color_override: when set, the paired span uses this name for the
         color class instead of pair_id (lets `<|start|>...<|call|>` color
@@ -149,6 +149,14 @@ def _tag_kind_and_name(inner: str) -> tuple[str | None, str, str | None]:
             return ("close", "__harmony_turn", f"__harmony_pair_{middle}")
         if middle in _HARMONY_SECTION_MARKERS:
             return ("singleton", "__harmony_section", None)
+        # gemma4 string delimiter `<|"|>` is a self-paired quote token: the
+        # same literal both opens and closes the string. Classify it as
+        # `toggle` so a matched `<|"|>value<|"|>` pair colors like any other
+        # pair, while a dangling (truncated) delimiter still falls through to
+        # orphan/red. The open-vs-close decision is made by the stack at use
+        # site, since the literal alone cannot say which it is.
+        if middle == '"':
+            return ("toggle", "__gemma_quote", None)
         return (None, "", None)
     if starts_pipe and inner[:1] == "|":
         return ("open", _name_of(inner[1:]), None)
@@ -184,6 +192,28 @@ def _colorize_xml(text: str) -> str:
         elif kind == "singleton":
             cls = _singleton_class_for(pair_id)
             pieces.append(f'<span class="{cls}">{esc}</span>')
+        elif kind == "toggle":
+            # Self-paired delimiter: close the nearest matching open if one is
+            # on the stack, otherwise treat this as the open. A leftover open
+            # is orphaned by the end-of-loop cleanup.
+            match_at = -1
+            for i in range(len(stack) - 1, -1, -1):
+                if stack[i][0] == pair_id:
+                    match_at = i
+                    break
+            if match_at >= 0:
+                for _, unmatched_idx in stack[match_at + 1 :]:
+                    pieces[
+                        unmatched_idx
+                    ] = f'<span class="tt-orphan">{pieces[unmatched_idx]}</span>'
+                open_idx = stack[match_at][1]
+                cls = _next_color_class()
+                pieces[open_idx] = f'<span class="{cls}">{pieces[open_idx]}</span>'
+                pieces.append(f'<span class="{cls}">{esc}</span>')
+                del stack[match_at:]
+            else:
+                pieces.append(esc)
+                stack.append((pair_id, len(pieces) - 1))
         elif kind == "close":
             match_at = -1
             for i in range(len(stack) - 1, -1, -1):
@@ -231,6 +261,21 @@ def _xml_token_intervals(text: str) -> list[dict[str, Any]]:
             intervals[idx]["class"] = "tt-orphan"
         elif kind == "singleton":
             intervals[idx]["class"] = _singleton_class_for(pair_id)
+        elif kind == "toggle":
+            match_at = -1
+            for i in range(len(stack) - 1, -1, -1):
+                if stack[i][0] == pair_id:
+                    match_at = i
+                    break
+            if match_at >= 0:
+                for _, unmatched_idx in stack[match_at + 1 :]:
+                    intervals[unmatched_idx]["class"] = "tt-orphan"
+                cls = _next_color_class()
+                intervals[stack[match_at][1]]["class"] = cls
+                intervals[idx]["class"] = cls
+                del stack[match_at:]
+            else:
+                stack.append((pair_id, idx))
         elif kind == "close":
             match_at = -1
             for i in range(len(stack) - 1, -1, -1):

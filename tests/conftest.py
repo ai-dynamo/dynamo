@@ -613,11 +613,38 @@ def _item_has_marker(item, marker_name):
     return False
 
 
+def _check_sglang_mm_hashes_present(items) -> None:
+    """Log whether the installed sglang has the mm_hashes interop hook
+    (sgl-project/sglang#25300). The dynamo sglang image bakes this patch
+    in at build time (`container/deps/sglang/patches/<ver>/`); this check
+    is just for diagnostic clarity when the strong-gate MM-routing
+    assertion later trips on an unpatched image."""
+    if not any("test_sglang" in i.nodeid and "mm_" in i.nodeid for i in items):
+        return
+    try:
+        import sglang
+
+        io_struct = Path(sglang.__file__).parent / "srt/managers/io_struct.py"
+        present = "mm_hashes:" in io_struct.read_text()
+    except Exception as exc:
+        _logger.warning("sglang mm_hashes interop probe failed: %s", exc)
+        return
+    _logger.info(
+        "sglang mm_hashes interop: %s",
+        "present"
+        if present
+        else "MISSING — image was built without the "
+        "vendored sgl-project/sglang#25300 patch; MM-aware routing tests "
+        "will degrade to text-prefix fallback.",
+    )
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config, items):
     """
     This function is called to modify the list of tests to run.
     """
+    _check_sglang_mm_hashes_present(items)
     # Auto-skip tests marked with a framework marker when the framework is not installed
     framework_markers = {
         "trtllm": "tensorrt_llm",
