@@ -4,30 +4,30 @@
 title: DGDR Reference
 ---
 
-A `DynamoGraphDeploymentRequest` (DGDR) is Dynamo's **deploy-by-intent** API.
-You describe what you want to run and your performance targets; the profiler
-determines the optimal configuration and creates the live deployment.
+A `DynamoGraphDeploymentRequest` (DGDR) is Dynamo's deploy-by-intent generator
+for [`DynamoGraphDeployment`](api-reference.md#dynamographdeployment) (DGD)
+resources. You describe what you want to run and your performance targets; the
+profiler determines a configuration and produces the DGD that serves traffic.
 
-For a step-by-step walkthrough of deploying your model — including strategy
-selection, model caching, planner setup, and common pitfalls — see the
-[Model Deployment Guide](model-deployment-guide.md).
+For the full deployment mental model — including DGD, DCD, DGDR, recipes,
+strategy selection, model caching, planner setup, and common pitfalls — see the
+[Deployment Overview](model-deployment-guide.md).
 
-## DGDR vs DGD
+## DGDR, DGD, and Recipes
 
 Dynamo provides two Custom Resources for deploying inference graphs:
 
-| | DGDR (recommended) | DGD (manual) |
+| | DGD (canonical live deployment) | DGDR (generator/profiler) |
 |---|---|---|
-| **You provide** | Model + optional SLA targets | Full deployment spec (parallelism, replicas, resource limits, etc.) |
-| **Profiling** | Automated — sweeps configurations to find optimal setup | None — you bring your own config |
-| **Hardware portability** | Adapts to whatever GPUs are in your cluster | Tied to the hardware you configured for |
-| **Best for** | Most deployments, SLA-driven optimization | Known-good configs, pinned recipes |
+| **You provide** | Full deployment spec (services, parallelism, replicas, resource limits, etc.) | Model, backend, workload, hardware, and optional SLA targets |
+| **What happens** | The operator reconciles the DGD into `DynamoComponentDeployment` resources and pods | The profiler generates a DGD; with `autoApply: true`, the operator creates it |
+| **Best for** | Known-good configs, tuned recipes, or full manual control | New model/hardware combinations, SLA-driven sizing, or generated DGD YAML |
+| **Persistence** | Persists and serves traffic | Reaches a terminal state after generation/deploy |
 
-**When to use DGD instead**: Use DGD when you have a hand-crafted configuration
-for a specific model/hardware combination (e.g., from `recipes/`). These configs
-may be more optimal for known setups but require understanding of what
-parallelism parameters (TP, PP, EP) are appropriate and don't generalize across
-different hardware.
+Use DGD directly when you have a hand-crafted configuration for a specific
+model/hardware combination. Most
+[recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes) are tuned DGD
+manifests. Use DGDR when you want Dynamo to generate the DGD for you.
 
 For DGD deployment details, see [Creating Deployments](deployment/create-deployment.md).
 
@@ -42,7 +42,7 @@ metadata:
   name: my-model
 spec:
   model: Qwen/Qwen3-0.6B
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.0.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 ### Field Reference
@@ -52,7 +52,7 @@ spec:
 | `model` | Yes | — | HuggingFace model ID (e.g. `Qwen/Qwen3-0.6B`) |
 | `image` | No | — | Container image for the profiling job. Dynamo >= 1.1.0: use `dynamo-planner`; earlier versions: use `dynamo-frontend`. |
 | `backend` | No | `auto` | Inference engine: `auto`, `vllm`, `sglang`, `trtllm` |
-| `searchStrategy` | No | `rapid` | Profiling depth: `rapid` (AIC simulation, ~30s) or `thorough` (real GPU, 2–4h) |
+| `searchStrategy` | No | `rapid` | Profiling depth: `rapid` (AIC-backed DynoSim-style modeling, ~30s) or `thorough` (real GPU, 2–4h) |
 | `autoApply` | No | `true` | Automatically deploy the profiler's recommended config |
 | `sla.ttft` | No | — | Target time to first token (ms) |
 | `sla.itl` | No | — | Target inter-token latency (ms) |
@@ -70,12 +70,66 @@ spec:
 | `modelCache.pvcName` | No | — | Name of a `ReadWriteMany` PVC containing cached model weights |
 | `modelCache.pvcModelPath` | No | — | Path to the model directory inside the PVC |
 | `modelCache.pvcMountPath` | No | `/opt/model-cache` | Mount path inside containers |
-| `features.planner` | No | disabled | Enable the SLA-aware Planner (raw JSON config) |
+| `features.planner` | No | disabled | Enable the SLA-aware Planner; the generated DGD includes Planner service/configuration |
 | `features.mocker` | No | disabled | Enable mocker mode for testing |
 | `overrides.profilingJob` | No | — | `batchv1.JobSpec` overrides for the profiling job (e.g., tolerations) |
 | `overrides.dgd` | No | — | Raw DGD override base applied to the generated deployment |
 
 For the complete CRD spec, see the [API Reference](api-reference.md).
+
+> [!NOTE]
+> DGDR does not currently expose a `features.kvRouter` field. To configure
+> router mode or KV-aware routing details, use a direct DGD, a tuned recipe, or
+> `overrides.dgd` when you still want DGDR to generate the base deployment.
+
+### Generated DGD Overrides
+
+Use `spec.overrides.dgd` when the generated `DynamoGraphDeployment` needs a
+field that DGDR does not expose directly. The value is a partial
+`nvidia.com/v1alpha1` DGD object that is merged into the profiler-generated
+deployment after Dynamo selects a configuration.
+
+For example, to inject an environment variable into every generated service:
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-sglang
+spec:
+  model: Qwen/Qwen3-30B-A3B
+  backend: sglang
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1alpha1
+      kind: DynamoGraphDeployment
+      spec:
+        envs:
+          - name: TRITON_PTXAS_PATH
+            value: /usr/local/cuda/bin/ptxas
+```
+
+Use `spec.envs` for variables that should apply to all generated services. To
+target a single service, override that service's `envs` entry instead:
+
+```yaml
+spec:
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1alpha1
+      kind: DynamoGraphDeployment
+      spec:
+        services:
+          decode:  # replace with the generated service name
+            envs:
+              - name: CUSTOM_WORKER_ENV
+                value: "enabled"
+```
+
+> [!NOTE]
+> `overrides.profilingJob` only customizes the profiling Job. Use
+> `overrides.dgd` for settings that must appear on the deployed worker pods.
 
 ### SKU Format
 
@@ -175,7 +229,7 @@ kubectl get dgdr my-model -n $NAMESPACE \
 
 ## Further Reading
 
-- [Model Deployment Guide](model-deployment-guide.md) — How to deploy your model, strategy selection, pitfalls, examples
+- [Deployment Overview](model-deployment-guide.md) — DGD, DCD, DGDR, recipes, strategy selection, and common pitfalls
 - [Profiler Guide](../components/profiler/profiler-guide.md) — Profiling algorithms, picking modes, gate checks
 - [Profiler Examples](../components/profiler/profiler-examples.md) — Ready-to-use YAML for SLA targets, private models, MoE, overrides
 - [Planner Guide](../components/planner/planner-guide.md) — Scaling modes, PlannerConfig reference

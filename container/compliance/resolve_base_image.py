@@ -7,9 +7,9 @@
 Prints the resolved image URI to stdout so it can be captured in shell scripts.
 
 Usage:
-    python resolve_base_image.py --framework vllm --cuda-version 12.9
+    python resolve_base_image.py --framework vllm --cuda-version 13.0
     python resolve_base_image.py --framework dynamo --target frontend
-    python resolve_base_image.py --framework sglang --cuda-version 13.0
+    python resolve_base_image.py --framework sglang --cuda-version 12.9
 """
 
 import argparse

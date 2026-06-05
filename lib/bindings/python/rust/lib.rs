@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::local_model::LocalModel;
+use dynamo_runtime::discovery::EventTransportKind;
 use dynamo_runtime::distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode};
 use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
-use pyo3::exceptions::PyStopAsyncIteration;
+use pyo3::exceptions::{PyStopAsyncIteration, PyTimeoutError, PyValueError};
 use pyo3::types::PyCapsule;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{exceptions::PyException, prelude::*};
@@ -39,7 +40,7 @@ use dynamo_llm::{self as llm_rs};
 
 use crate::llm::entrypoint::RouterConfig as PyRouterConfig;
 
-use crate::llm::local_model::ModelRuntimeConfig;
+use crate::llm::local_model::{ModelRuntimeConfig, RoutingConstraints};
 use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 
 #[pyclass(eq, eq_int)]
@@ -121,7 +122,11 @@ fn create_request_context(
     match parent_ctx {
         // If there is a parent context, link the request as a child context of it
         Some(parent_ctx) => {
-            let child_ctx = RsContext::with_id(request, parent_ctx.inner().id().to_string());
+            let child_ctx = RsContext::with_id_and_metadata(
+                request,
+                parent_ctx.inner().id().to_string(),
+                parent_ctx.metadata_snapshot(),
+            );
             parent_ctx.inner().link_child(child_ctx.context());
             if parent_ctx.inner().is_stopped() || parent_ctx.inner().is_killed() {
                 // Let the server handle the cancellation for now since not all backends are
@@ -152,11 +157,14 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(lora_name_to_id, m)?)?;
+    #[cfg(feature = "mm-routing")]
+    m.add_function(wrap_pyfunction!(resolve_routing_image_token_id, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_model, m)?)?;
     m.add_function(wrap_pyfunction!(unregister_model, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_model, m)?)?;
     m.add_function(wrap_pyfunction!(run_kv_indexer, m)?)?;
+    m.add_function(wrap_pyfunction!(run_slot_tracker, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::replay::run_mocker_trace_replay, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -178,11 +186,23 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::entrypoint::KvRouterConfig>()?;
     m.add_class::<llm::replay::ReasoningConfig>()?;
     m.add_class::<llm::replay::SglangArgs>()?;
+    m.add_class::<llm::replay::TrtllmArgs>()?;
     m.add_class::<llm::replay::MockEngineArgs>()?;
+    #[cfg(feature = "aic-forward-pass")]
+    {
+        m.add_class::<llm::engine_perf::AicEngineConfig>()?;
+        m.add_class::<llm::engine_perf::EngineCapacity>()?;
+        m.add_class::<llm::engine_perf::EngineCapacityRequest>()?;
+        m.add_class::<llm::engine_perf::EnginePerfLimits>()?;
+        m.add_class::<llm::engine_perf::OptimizationTarget>()?;
+        m.add_class::<llm::engine_perf::RustEnginePerfModel>()?;
+        m.add_class::<llm::engine_perf::RustEnginePerfOptions>()?;
+    }
     m.add_class::<llm::replay::PlannerReplayBridge>()?;
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
     m.add_class::<llm::model_card::ModelDeploymentCard>()?; // Internal: only in _internal, not public API
     m.add_class::<llm::local_model::ModelRuntimeConfig>()?;
+    m.add_class::<RoutingConstraints>()?;
     m.add_class::<llm::preprocessor::MediaDecoder>()?;
     m.add_class::<llm::preprocessor::MediaFetcher>()?;
     m.add_class::<llm::kv::OverlapScores>()?;
@@ -195,9 +215,13 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
     m.add_class::<context::Context>()?;
+    m.add_class::<context::ContextMetadata>()?;
+    m.add_class::<context::SpanProxy>()?;
     m.add_class::<ModelType>()?;
     m.add_class::<ModelInput>()?;
+    m.add_class::<WorkerType>()?;
     m.add_class::<llm::kv::KvRouter>()?;
+    m.add_class::<llm::routed_engine::RoutedEngine>()?;
     m.add_class::<RouterMode>()?;
     m.add_class::<kserve_grpc::KserveGrpcService>()?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -211,9 +235,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     backend::add_to_module(m)?;
 
     m.add_class::<prometheus_metrics::RuntimeMetrics>()?;
-    let prometheus_metrics = PyModule::new(m.py(), "prometheus_metrics")?;
-    prometheus_metrics::add_to_module(&prometheus_metrics)?;
-    m.add_submodule(&prometheus_metrics)?;
 
     Ok(())
 }
@@ -225,8 +246,8 @@ where
     PyException::new_err(format!("{}", err))
 }
 
-fn kv_indexer_to_pyerr(err: anyhow::Error) -> PyErr {
-    #[cfg(feature = "kv-indexer")]
+fn standalone_to_pyerr(err: anyhow::Error) -> PyErr {
+    #[cfg(any(feature = "kv-indexer", feature = "slot-tracker"))]
     if let Some(clap_error) = err.downcast_ref::<clap::Error>() {
         let _ = clap_error.print();
         return pyo3::exceptions::PySystemExit::new_err(clap_error.exit_code());
@@ -235,12 +256,34 @@ fn kv_indexer_to_pyerr(err: anyhow::Error) -> PyErr {
     to_pyerr(err)
 }
 
+fn resolve_event_transport_kind(
+    discovery_backend: &DiscoveryBackend,
+    event_plane: Option<&str>,
+) -> PyResult<EventTransportKind> {
+    match event_plane {
+        Some("nats") => Ok(EventTransportKind::Nats),
+        Some("zmq") => Ok(EventTransportKind::Zmq),
+        Some("") | None => Ok(discovery_backend.resolve_event_transport_kind()),
+        Some(other) => Err(PyValueError::new_err(format!(
+            "Invalid event_plane value '{other}'. Valid values: 'nats', 'zmq'"
+        ))),
+    }
+}
+
 #[pyfunction(name = "run_kv_indexer")]
 #[pyo3(signature = (argv=None))]
 fn run_kv_indexer(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let argv = argv.unwrap_or_default();
     py.allow_threads(move || llm::kv::run_kv_indexer_cli(argv))
-        .map_err(kv_indexer_to_pyerr)
+        .map_err(standalone_to_pyerr)
+}
+
+#[pyfunction(name = "run_slot_tracker")]
+#[pyo3(signature = (argv=None))]
+fn run_slot_tracker(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
+    let argv = argv.unwrap_or_default();
+    py.allow_threads(move || llm::kv::run_slot_tracker_cli(argv))
+        .map_err(standalone_to_pyerr)
 }
 
 /// Log a message from Python with file and line info
@@ -257,6 +300,24 @@ fn lora_name_to_id(lora_name: &str) -> i32 {
     llm_rs::utils::lora_name_to_id(lora_name)
 }
 
+/// Resolve the routing-side image-placeholder token id for a model using the
+/// same per-family logic the frontend's MM-aware KV routing uses (lightseek
+/// `resolve_routing_tokens`). Returns `chat_placeholder_token_id` — the exact
+/// id `OpenAIPreprocessor` substitutes `pad_value` over — so the vLLM worker's
+/// KV-event normalizer keys on the identical token (no cross-process drift).
+///
+/// `model_id` is the HF id (used for registry matching); `model_dir` is the
+/// local directory holding `config.json`/`tokenizer.json`. Returns `None` when
+/// the model isn't in the MM-routing registry or its config can't be read.
+#[cfg(feature = "mm-routing")]
+#[pyfunction]
+#[pyo3(text_signature = "(model_id, model_dir)")]
+fn resolve_routing_image_token_id(model_id: &str, model_dir: &str) -> Option<u32> {
+    let dir = std::path::Path::new(model_dir);
+    llm_rs::preprocessor::lightseek_mm::resolve_routing_tokens(model_id, dir)
+        .chat_placeholder_token_id
+}
+
 /// Create an engine and attach it to an endpoint to make it visible to the frontend.
 /// This is the main way you create a Dynamo worker / backend.
 ///
@@ -267,7 +328,7 @@ fn lora_name_to_id(lora_name: &str) -> i32 {
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, self_host_metadata=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_model<'p>(
     py: Python<'p>,
@@ -286,6 +347,8 @@ fn register_model<'p>(
     media_fetcher: Option<MediaFetcher>,
     lora_name: Option<&str>,
     base_model_path: Option<&str>,
+    worker_type: Option<WorkerType>,
+    needs: Option<Vec<Vec<WorkerType>>>,
     self_host_metadata: Option<bool>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Validate Prefill model type requirements
@@ -308,6 +371,18 @@ fn register_model<'p>(
     let is_videos = model_type.inner.supports_videos();
 
     let model_type_obj = model_type.inner;
+
+    // Normalize the topology readiness fields `worker_type` and `needs` for
+    // the MDC. `worker_type = None` and `needs = []` is the pre-strict
+    // default — readers apply the missing-field shim. Backends are expected
+    // to pass explicit values (one of the four `WorkerType` variants and a
+    // DNF `needs` list); enforced strictly in a follow-up.
+    let worker_type_value: Option<llm_rs::worker_type::WorkerType> = worker_type.map(|w| w.into());
+    let needs_value: Vec<Vec<llm_rs::worker_type::WorkerType>> = needs
+        .unwrap_or_default()
+        .into_iter()
+        .map(|alt| alt.into_iter().map(|w| w.into()).collect())
+        .collect();
 
     let inner_path = model_path.to_string();
     let model_name = model_name.map(|n| n.to_string());
@@ -355,6 +430,10 @@ fn register_model<'p>(
         .or(model_name)
         .or_else(|| Some(source_path.clone()));
 
+    if let Some(cfg) = &runtime_config {
+        cfg.validate_config()?;
+    }
+
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         // For TensorBased, Images, and Videos models, skip HuggingFace downloads and register directly
         // These model types handle model loading internally, no tokenizer extraction needed
@@ -363,6 +442,8 @@ fn register_model<'p>(
             let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
             card.model_type = model_type_obj;
             card.model_input = model_input;
+            card.worker_type = worker_type_value;
+            card.needs = needs_value.clone();
             card.user_data = user_data_json;
 
             if let Some(cfg) = runtime_config {
@@ -384,11 +465,17 @@ fn register_model<'p>(
             return Ok(());
         }
 
-        // For non-TensorBased models, resolve the model path (local or fetch from HuggingFace)
+        // For non-TensorBased models, resolve the model path (local or fetch from HuggingFace).
+        // Pass ignore_weights=true: register_model only consumes metadata (config.json,
+        // tokenizer*, generation_config.json, chat template) when building the MDC, so any
+        // weight files would be downloaded and discarded. Engines load weights independently
+        // before register_model runs — SGLang and vLLM via an explicit fetch_model pre-flight,
+        // TRT-LLM via a pre-staged local path (which takes the fs::exists branch above) or
+        // via its own runtime resolving the HF repo.
         let model_path = if fs::exists(&source_path)? {
             PathBuf::from(&source_path)
         } else {
-            LocalModel::fetch(&source_path, false)
+            LocalModel::fetch(&source_path, true)
                 .await
                 .map_err(to_pyerr)?
         };
@@ -426,7 +513,14 @@ fn register_model<'p>(
             });
 
         local_model
-            .attach(&endpoint.inner, model_type_obj, model_input, lora_info)
+            .attach(
+                &endpoint.inner,
+                model_type_obj,
+                model_input,
+                lora_info,
+                worker_type_value,
+                needs_value,
+            )
             .await
             .map_err(to_pyerr)?;
 
@@ -528,6 +622,7 @@ struct ModelCardInstanceId {
 #[derive(Clone)]
 struct Client {
     router: rs::pipeline::PushRouter<serde_json::Value, RsAnnotated<serde_json::Value>>,
+    endpoint: rs::component::Endpoint,
 }
 
 #[pyclass]
@@ -571,6 +666,10 @@ impl ModelType {
     const Videos: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Videos,
     };
+    #[classattr]
+    const Realtime: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Realtime,
+    };
 
     fn supports_chat(&self) -> bool {
         self.inner.supports_chat()
@@ -595,15 +694,70 @@ enum ModelInput {
     Tensor = 3,
 }
 
+/// Processing stage a worker handles.
+///
+/// Each worker has exactly one role; values are not combinable. To express
+/// "an encode worker needs Prefill+Decode OR Aggregated", `register_model`
+/// takes `needs` in DNF form (a list of alternative AND-sets). See the Rust
+/// `WorkerType` enum in `lib/llm/src/worker_type.rs` and
+/// `docs/proposals/health-disagg-readiness.md`.
+#[pyclass(eq, eq_int)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum WorkerType {
+    Prefill = 1,
+    Decode = 2,
+    Encode = 3,
+    Aggregated = 4,
+}
+
+#[pymethods]
+impl WorkerType {
+    fn __str__(&self) -> &'static str {
+        match self {
+            WorkerType::Prefill => "prefill",
+            WorkerType::Decode => "decode",
+            WorkerType::Encode => "encode",
+            WorkerType::Aggregated => "aggregated",
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("WorkerType.{:?}", self)
+    }
+}
+
+impl From<WorkerType> for llm_rs::worker_type::WorkerType {
+    fn from(w: WorkerType) -> Self {
+        match w {
+            WorkerType::Prefill => llm_rs::worker_type::WorkerType::Prefill,
+            WorkerType::Decode => llm_rs::worker_type::WorkerType::Decode,
+            WorkerType::Encode => llm_rs::worker_type::WorkerType::Encode,
+            WorkerType::Aggregated => llm_rs::worker_type::WorkerType::Aggregated,
+        }
+    }
+}
+
+impl From<llm_rs::worker_type::WorkerType> for WorkerType {
+    fn from(w: llm_rs::worker_type::WorkerType) -> Self {
+        match w {
+            llm_rs::worker_type::WorkerType::Prefill => WorkerType::Prefill,
+            llm_rs::worker_type::WorkerType::Decode => WorkerType::Decode,
+            llm_rs::worker_type::WorkerType::Encode => WorkerType::Encode,
+            llm_rs::worker_type::WorkerType::Aggregated => WorkerType::Aggregated,
+        }
+    }
+}
+
 #[pymethods]
 impl DistributedRuntime {
     #[new]
-    #[pyo3(signature = (event_loop, discovery_backend, request_plane, enable_nats=None))]
+    #[pyo3(signature = (event_loop, discovery_backend, request_plane, enable_nats=None, *, event_plane=None))]
     fn new(
         event_loop: PyObject,
         discovery_backend: String,
         request_plane: String,
         enable_nats: Option<bool>,
+        event_plane: Option<String>,
     ) -> PyResult<Self> {
         if enable_nats.is_some() {
             Python::with_gil(|py| {
@@ -627,6 +781,9 @@ impl DistributedRuntime {
             }
         };
         let request_plane: RequestPlaneMode = request_plane.parse().map_err(to_pyerr)?;
+        let explicit_event_plane = event_plane.as_deref().filter(|value| !value.is_empty());
+        let event_transport_kind =
+            resolve_event_transport_kind(&discovery_backend_config, event_plane.as_deref())?;
 
         // Try to get existing runtime first, create new Worker only if needed
         // This allows multiple DistributedRuntime instances to share the same tokio runtime
@@ -656,14 +813,13 @@ impl DistributedRuntime {
             });
         }
 
-        let event_transport_kind = discovery_backend_config.resolve_event_transport_kind();
-
         let nats_enabled = request_plane.is_nats()
-            || std::env::var(config::environment_names::nats::NATS_SERVER).is_ok()
             || matches!(
                 event_transport_kind,
                 dynamo_runtime::discovery::EventTransportKind::Nats
-            );
+            )
+            || (explicit_event_plane.is_none()
+                && std::env::var(config::environment_names::nats::NATS_SERVER).is_ok());
 
         let runtime_config = DistributedConfig {
             discovery_backend: discovery_backend_config,
@@ -922,6 +1078,7 @@ impl Endpoint {
             .map_err(to_pyerr)?;
             Ok(Client {
                 router: push_router,
+                endpoint: inner,
             })
         })
     }
@@ -998,6 +1155,76 @@ impl Client {
                 .await
                 .map(|v| v.into_iter().map(|cei| cei.id()).collect::<Vec<u64>>())
                 .map_err(to_pyerr)
+        })
+    }
+
+    /// Wait for exactly one ready endpoint instance whose MDC runtime_data contains
+    /// the requested JSON string value.
+    #[pyo3(signature = (key, value, timeout_s=None))]
+    fn wait_for_instance_by_runtime_data<'p>(
+        &self,
+        py: Python<'p>,
+        key: String,
+        value: String,
+        timeout_s: Option<f64>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let endpoint = self.endpoint.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let last_matches = Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
+            let wait_state = last_matches.clone();
+            let error_key = key.clone();
+            let error_value = value.clone();
+            let wait = async move {
+                let mut rx = llm_rs::discovery::runtime_config_watch(&endpoint)
+                    .await
+                    .map_err(to_pyerr)?;
+
+                loop {
+                    let matches: Vec<u64> = rx
+                        .borrow_and_update()
+                        .iter()
+                        .filter_map(|(worker_id, runtime_config)| {
+                            let matched = runtime_config
+                                .runtime_data
+                                .get(&key)
+                                .and_then(|value| value.as_str())
+                                == Some(value.as_str());
+                            matched.then_some(*worker_id)
+                        })
+                        .collect();
+
+                    if let Ok(mut last) = wait_state.lock() {
+                        *last = matches.clone();
+                    }
+
+                    if let [worker_id] = matches.as_slice() {
+                        return Ok(*worker_id);
+                    }
+
+                    rx.changed().await.map_err(to_pyerr)?;
+                }
+            };
+
+            if let Some(timeout_s) = timeout_s {
+                if !timeout_s.is_finite() || timeout_s < 0.0 {
+                    return Err(PyValueError::new_err(
+                        "timeout_s must be a finite non-negative number",
+                    ));
+                }
+                let timeout = std::time::Duration::from_secs_f64(timeout_s);
+                tokio::time::timeout(timeout, wait).await.map_err(|_| {
+                    let matches = last_matches
+                        .lock()
+                        .map(|matches| matches.clone())
+                        .unwrap_or_default();
+                    PyTimeoutError::new_err(format!(
+                        "Timed out waiting for one endpoint instance with runtime_data[{error_key:?}] == {error_value:?}; last_match_count={}, matching_ids={matches:?}",
+                        matches.len(),
+                    ))
+                })?
+            } else {
+                wait.await
+            }
         })
     }
 

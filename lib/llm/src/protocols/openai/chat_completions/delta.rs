@@ -311,12 +311,17 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         // `NvExtResponseFieldSelection` (see `nvext.rs`). Both chat and
         // completions delta generators go through the same helper so the gating
         // rules stay in one place.
+        let prompt_logprobs_payload =
+            common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref());
+        let completion_token_ids_slice: &[u32] = &delta.token_ids;
         if let Some(nvext_response) = self.options.response_fields.build_response_nvext(
             Some(&self.tracker),
             delta.disaggregated_params.as_ref(),
             finish_reason.is_some(),
             delta.engine_data,
             stop_reason,
+            Some(completion_token_ids_slice),
+            prompt_logprobs_payload,
         ) && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
         {
             stream_response.nvext = Some(nvext_json);
@@ -330,6 +335,12 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             if let Some(ref tokens) = nvext_response.token_ids {
                 tracing::debug!(
                     "Injected token_ids into chat completion nvext: {} tokens",
+                    tokens.len()
+                );
+            }
+            if let Some(ref tokens) = nvext_response.completion_token_ids {
+                tracing::debug!(
+                    "Injected completion_token_ids into chat completion nvext: {} tokens",
                     tokens.len()
                 );
             }
@@ -392,6 +403,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -458,7 +470,9 @@ mod tests {
                 "token_ids": [11, 22, 33],
                 "routed_experts": {"layer_0": [1, 3]}
             })),
+            worker_trace_link: None,
             engine_data: None,
+            routing_data: None,
         }
     }
 
@@ -486,6 +500,7 @@ mod tests {
                     .unwrap(),
             ),
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -506,11 +521,13 @@ mod tests {
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            worker_trace_link: None,
             engine_data: Some(serde_json::json!({
                 "kv_transfer_time_ms": 12.3,
                 "disaggregated_kv_transfer_time_ms": 8.1,
                 "prefill_compute_time_ms": 45.6
             })),
+            routing_data: None,
         }
     }
 
@@ -714,7 +731,9 @@ mod tests {
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            worker_trace_link: None,
             engine_data: None, // engine didn't provide any data
+            routing_data: None,
         };
 
         let response = generator

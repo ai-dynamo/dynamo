@@ -11,47 +11,13 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func buildCheckpointWorkerDefaultEnv(
-	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
-	podTemplate *corev1.PodTemplateSpec,
-) []corev1.EnvVar {
-	componentType := consts.ComponentTypeWorker
-	dynamoNamespace := consts.GlobalDynamoNamespace
-	parentGraphDeploymentName := podTemplate.Labels[consts.KubeLabelDynamoGraphDeploymentName]
-	workerHashSuffix := podTemplate.Labels[consts.KubeLabelDynamoWorkerHash]
-	discoveryBackend := configv1alpha1.DiscoveryBackendKubernetes
-
-	if podTemplate.Labels[consts.KubeLabelDynamoNamespace] != "" {
-		dynamoNamespace = podTemplate.Labels[consts.KubeLabelDynamoNamespace]
-	}
-	if podTemplate.Labels[consts.KubeLabelDynamoComponentType] != "" &&
-		dynamo.IsWorkerComponent(podTemplate.Labels[consts.KubeLabelDynamoComponentType]) {
-		componentType = podTemplate.Labels[consts.KubeLabelDynamoComponentType]
-	}
-
-	defaultContainer, _ := dynamo.NewWorkerDefaults().GetBaseContainer(dynamo.ComponentContext{
-		ComponentType:                  componentType,
-		DynamoNamespace:                dynamoNamespace,
-		ParentGraphDeploymentName:      parentGraphDeploymentName,
-		ParentGraphDeploymentNamespace: ckpt.Namespace,
-		Discovery: dynamo.DiscoveryContext{
-			Backend: discoveryBackend,
-			Mode:    configv1alpha1.KubeDiscoveryModePod,
-		},
-		WorkerHashSuffix: workerHashSuffix,
-	})
-	return defaultContainer.Env
-}
-
+//nolint:gocyclo
 func buildCheckpointJob(
 	ctx context.Context,
 	kubeClient ctrlclient.Client,
@@ -60,12 +26,15 @@ func buildCheckpointJob(
 	jobName string,
 ) (*batchv1.Job, error) {
 	podTemplate := ckpt.Spec.Job.PodTemplateSpec.DeepCopy()
-	hash := ckpt.Status.IdentityHash
+	hash := ckpt.Status.CheckpointID
+	if hash == "" {
+		hash = ckpt.Status.IdentityHash
+	}
 	if hash == "" {
 		var err error
-		hash, err = checkpoint.ComputeIdentityHash(ckpt.Spec.Identity)
+		hash, err = checkpoint.CheckpointID(ckpt)
 		if err != nil {
-			return nil, fmt.Errorf("failed to compute identity hash: %w", err)
+			return nil, fmt.Errorf("failed to resolve checkpoint ID: %w", err)
 		}
 	}
 
@@ -75,32 +44,29 @@ func buildCheckpointJob(
 	if podTemplate.Annotations == nil {
 		podTemplate.Annotations = make(map[string]string)
 	}
-	// Checkpoint Jobs always capture exactly the main container. Other
-	// containers in the pod template (e.g. GMS saver sidecars the operator
-	// adds below) are preserved but not checkpointed. The annotation is
-	// the contract the snapshot-agent reads.
-	podTemplate.Annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers([]string{consts.MainContainerName})
-	if podTemplate.Spec.ServiceAccountName == "" {
-		podTemplate.Spec.ServiceAccountName = discovery.GetK8sDiscoveryServiceAccountName(ckpt.Name)
+	targetContainerName := ckpt.Spec.Job.TargetContainerName
+	if targetContainerName == "" {
+		targetContainerName = consts.MainContainerName
 	}
+	podTemplate.Annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers([]string{targetContainerName})
 
 	checkpoint.EnsurePodInfoVolume(&podTemplate.Spec)
 
 	if len(podTemplate.Spec.Containers) == 0 {
 		return nil, fmt.Errorf("checkpoint job requires at least one container")
 	}
-	mainContainer, err := checkpoint.RequireMainContainer(&podTemplate.Spec)
-	if err != nil {
-		return nil, fmt.Errorf("checkpoint job pod template: %w", err)
+	var targetContainer *corev1.Container
+	for i := range podTemplate.Spec.Containers {
+		if podTemplate.Spec.Containers[i].Name == targetContainerName {
+			targetContainer = &podTemplate.Spec.Containers[i]
+			break
+		}
 	}
-	mainContainer.Env = dynamo.MergeEnvs(
-		buildCheckpointWorkerDefaultEnv(ckpt, podTemplate),
-		mainContainer.Env,
-	)
-	dynamo.AddStandardEnvVars(mainContainer, config)
-
-	checkpoint.EnsurePodInfoMount(mainContainer)
-	dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, mainContainer, dynamo.ToBetaSharedMemorySize(ckpt.Spec.Job.SharedMemory))
+	if targetContainer == nil {
+		return nil, fmt.Errorf("checkpoint job pod template: pod spec has no container named %q", targetContainerName)
+	}
+	checkpoint.EnsurePodInfoMount(targetContainer)
+	checkpoint.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, targetContainer, ckpt.Spec.Job.SharedMemory)
 	// NewCheckpointJob handles control volume + readiness probe from the
 	// snapshot contract.
 
@@ -111,32 +77,11 @@ func buildCheckpointJob(
 		return nil, err
 	} else if ok {
 		snapshotprotocol.InjectCheckpointVolume(&podTemplate.Spec, storage.PVCName)
-		snapshotprotocol.InjectCheckpointVolumeMount(mainContainer, storage.BasePath)
+		snapshotprotocol.InjectCheckpointVolumeMount(targetContainer, storage.BasePath)
 		if podTemplate.Annotations == nil {
 			podTemplate.Annotations = map[string]string{}
 		}
 		snapshotprotocol.ApplyCheckpointStorageMetadata(podTemplate.Annotations, storage)
-	}
-
-	if ckpt.Spec.GPUMemoryService != nil && ckpt.Spec.GPUMemoryService.Enabled {
-		claimTemplateName := dra.ResourceClaimTemplateName("checkpoint-"+hash, "worker")
-		if err := dra.ApplyClaim(&podTemplate.Spec, claimTemplateName); err != nil {
-			return nil, fmt.Errorf("failed to apply DRA claim for GMS checkpoint: %w", err)
-		}
-		storage, err := checkpoint.ResolveStorage(
-			ctx,
-			kubeClient,
-			ckpt.Namespace,
-			hash,
-			ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation],
-			config.Checkpoint.Storage,
-		)
-		if err != nil {
-			return nil, err
-		}
-		if err := checkpoint.EnsureGMSCheckpointJobSidecars(&podTemplate.Spec, mainContainer, storage); err != nil {
-			return nil, err
-		}
 	}
 
 	activeDeadlineSeconds := ckpt.Spec.Job.ActiveDeadlineSeconds
@@ -145,9 +90,9 @@ func buildCheckpointJob(
 		activeDeadlineSeconds = &defaultDeadline
 	}
 
-	// Wrap with cuda-checkpoint --launch-job for multi-GPU jobs (TP*PP > 1).
-	// Use checkpoint identity (not container limits) because DRA may have
-	// already removed nvidia.com/gpu from the template.
+	// Wrap with cuda-checkpoint --launch-job for multi-GPU jobs.
+	// Use checkpoint identity (not container limits) because prepared templates
+	// may already have DRA/GMS wiring that removes scalar GPU resources.
 	tp := ckpt.Spec.Identity.TensorParallelSize
 	pp := ckpt.Spec.Identity.PipelineParallelSize
 	if tp == 0 {

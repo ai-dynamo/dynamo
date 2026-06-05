@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "Dynamo Day 0 support for TokenSpeed"
-subtitle: "A short launch note for running TokenSpeed with Dynamo"
+subtitle: "A short launch note for running TokenSpeed with Dynamo — May 2026"
 description: "Dynamo adds day-0 TokenSpeed support with the Dynamo frontend for Kimi K2.5."
 keywords: TokenSpeed, Dynamo, LightSeek, Kimi K2.5, disaggregated serving, KV cache routing, LLM inference
 last-updated: May 6, 2026

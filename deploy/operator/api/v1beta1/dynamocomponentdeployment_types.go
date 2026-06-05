@@ -186,10 +186,9 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// In v1beta1 this block holds `gpuMemoryService` and `failover` (which
 	// remain tightly coupled -- failover requires GMS -- and are expected to
 	// evolve together as the DRA-based GPU sharing story matures), and
-	// `checkpoint` (whose interaction with the standalone DynamoCheckpoint
-	// resource and identity-hash computation is still settling). Fields here
-	// are explicitly NOT covered by the normal v1beta1 deprecation policy;
-	// do not depend on them for production workloads.
+	// `checkpoint` (whose API shape is still settling). Fields here are
+	// explicitly NOT covered by the normal v1beta1 deprecation policy; do not
+	// depend on them for production workloads.
 	// +optional
 	Experimental *ExperimentalSpec `json:"experimental,omitempty"`
 }
@@ -253,8 +252,11 @@ func init() {
 	SchemeBuilder.Register(&DynamoComponentDeployment{}, &DynamoComponentDeploymentList{})
 }
 
-// IsReady returns true if the component is `Available`.
+// IsReady returns true if the component has processed its latest spec and is `Available`.
 func (s *DynamoComponentDeployment) IsReady() (bool, string) {
+	if s.Status.ObservedGeneration < s.Generation {
+		return false, fmt.Sprintf("spec not yet processed: generation=%d, observedGeneration=%d", s.Generation, s.Status.ObservedGeneration)
+	}
 	return s.Status.IsReady()
 }
 

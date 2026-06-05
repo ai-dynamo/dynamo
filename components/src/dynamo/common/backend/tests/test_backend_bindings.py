@@ -33,9 +33,15 @@ backend = pytest.importorskip(
 
 
 def test_module_exposes_expected_classes():
-    """The four binding classes must all be importable as top-level
+    """The five binding classes must all be importable as top-level
     attributes of ``dynamo._core.backend``."""
-    for name in ("Worker", "WorkerConfig", "EngineConfig", "RuntimeConfig"):
+    for name in (
+        "Worker",
+        "WorkerConfig",
+        "EngineConfig",
+        "RuntimeConfig",
+        "EngineMetrics",
+    ):
         assert hasattr(backend, name), f"missing {name} on dynamo._core.backend"
 
 
@@ -69,6 +75,7 @@ def test_engine_config_full_kwargs_round_trip_through_getters():
         total_kv_blocks=1000,
         max_num_seqs=64,
         max_num_batched_tokens=2048,
+        runtime_data={"sglang_worker_group_id": "group-a"},
     )
     assert cfg.model == "m2"
     assert cfg.served_model_name == "m2-serving"
@@ -77,6 +84,7 @@ def test_engine_config_full_kwargs_round_trip_through_getters():
     assert cfg.total_kv_blocks == 1000
     assert cfg.max_num_seqs == 64
     assert cfg.max_num_batched_tokens == 2048
+    assert cfg.runtime_data == {"sglang_worker_group_id": "group-a"}
 
 
 def test_worker_config_minimum_args():
@@ -137,6 +145,9 @@ def test_python_worker_config_from_runtime_config_copies_parser_settings():
     runtime_cfg.dyn_reasoning_parser = "kimi_k25"
     runtime_cfg.exclude_tools_when_tool_choice_none = False
     runtime_cfg.enable_local_indexer = False
+    runtime_cfg.dyn_enable_structural_tag = True
+    runtime_cfg.dyn_structural_tag_scope = "always"
+    runtime_cfg.dyn_structural_tag_schema = "strict"
     # MagicMock auto-attrs would be rejected as a foreign type by the
     # strict coercer; pin them to None.
     runtime_cfg.disaggregation_mode = None
@@ -148,6 +159,9 @@ def test_python_worker_config_from_runtime_config_copies_parser_settings():
     assert config.reasoning_parser == "kimi_k25"
     assert config.exclude_tools_when_tool_choice_none is False
     assert config.enable_local_indexer is False
+    assert config.structural_tag_mode == "on"
+    assert config.structural_tag_scope == "always"
+    assert config.structural_tag_schema == "strict"
 
 
 @pytest.mark.unified
@@ -167,6 +181,9 @@ def test_python_worker_config_from_runtime_config_applies_defaults_when_fields_a
     assert cfg.endpoint_types == "chat,completions"
     assert cfg.use_kv_events is False
     assert cfg.custom_jinja_template is None
+    assert cfg.structural_tag_mode == "off"
+    assert cfg.structural_tag_scope == "auto"
+    assert cfg.structural_tag_schema == "auto"
 
 
 @pytest.mark.unified

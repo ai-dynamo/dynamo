@@ -258,7 +258,7 @@ def test_request_cancellation_trtllm_aggregated(
                 verify_runtime_cancellation_metrics(
                     worker_system_port=worker.system_port,
                     expected_count=idx + 1,
-                    component="tensorrt_llm",
+                    component="backend",
                 )
 
 
@@ -354,7 +354,7 @@ def test_request_cancellation_trtllm_decode_cancel(
                 verify_runtime_cancellation_metrics(
                     worker_system_port=decode_worker.system_port,
                     expected_count=1,
-                    component="tensorrt_llm",
+                    component="backend",
                 )
                 verify_runtime_cancellation_metrics(
                     worker_system_port=prefill_worker.system_port,
@@ -464,7 +464,7 @@ def test_request_cancellation_trtllm_prefill_cancel(
                 verify_runtime_cancellation_metrics(
                     worker_system_port=decode_worker.system_port,
                     expected_count=0,
-                    component="tensorrt_llm",
+                    component="backend",
                 )
                 verify_runtime_cancellation_metrics(
                     worker_system_port=prefill_worker.system_port,
@@ -581,7 +581,7 @@ def test_request_cancellation_trtllm_kv_transfer_cancel(
                 verify_runtime_cancellation_metrics(
                     worker_system_port=decode_worker.system_port,
                     expected_count=1,
-                    component="tensorrt_llm",
+                    component="backend",
                 )
                 verify_runtime_cancellation_metrics(
                     worker_system_port=prefill_worker.system_port,

@@ -543,3 +543,35 @@ def test_connector_get_actual_worker_counts_out_of_cluster_fallback(connector_ru
         )
 
     assert counts == (0, 0, True)
+
+
+def test_connector_get_worker_runtime_namespace_delegates_to_local_k8s(
+    connector_runtime,
+):
+    """GlobalPlannerConnector should resolve the pool-local worker namespace."""
+    c = GlobalPlannerConnector(connector_runtime, "ns", "gns", "GP", model_name="test")
+    fake_local = MagicMock()
+    fake_local.get_worker_runtime_namespace = MagicMock(return_value="ns-hash")
+    c._local_k8s_connector = fake_local
+    c._local_k8s_init_attempted = True
+
+    namespace = c.get_worker_runtime_namespace("ns")
+
+    assert namespace == "ns-hash"
+    fake_local.get_worker_runtime_namespace.assert_called_once_with("ns")
+
+
+def test_connector_get_worker_runtime_namespace_out_of_cluster_fallback(
+    connector_runtime,
+):
+    """Fallback to base namespace when no pool-local KubernetesConnector exists."""
+    with patch(
+        "dynamo.planner.connectors.global_planner.KubernetesConnector",
+        side_effect=DeploymentValidationError(["forced test failure"]),
+    ):
+        c = GlobalPlannerConnector(
+            connector_runtime, "ns", "gns", "GP", model_name="test"
+        )
+        namespace = c.get_worker_runtime_namespace("ns")
+
+    assert namespace == "ns"
