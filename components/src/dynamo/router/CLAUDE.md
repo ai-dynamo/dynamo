@@ -101,7 +101,8 @@ logic but do not share the same serialization, RPC, or process boundaries.
 | `__main__.py` | Standalone Python router service |
 | `../thunderagent_router/__main__.py` | Custom registered router facade |
 | `../../../../lib/llm/src/entrypoint/input/common.rs` | Builds embedded Rust routing pipelines |
-| `../../../../lib/llm/src/kv_router/push_router.rs` | Worker selection and router-side tracker updates |
+| `../../../../lib/llm/src/kv_router/push_router.rs` | Routed-generation orchestration and router-side tracker updates |
+| `../../../../lib/llm/src/kv_router/push_router/selection.rs` | Worker selection, pinned routing, and sticky-worker validation |
 | `../../../../lib/llm/src/protocols/common/preprocessor.rs` | `PreprocessedRequest`; tracker is `#[serde(skip)]` |
 | `../../../../lib/bindings/python/rust/llm/routed_engine.rs` | Python processor -> embedded Rust pipeline bridge |
 | `../../../../lib/bindings/python/rust/llm/kv.rs` | Binding-level router used by standalone/custom Python routers |

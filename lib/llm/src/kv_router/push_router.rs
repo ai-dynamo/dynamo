@@ -330,8 +330,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         .await??;
         // direct() succeeded — mark dispatched so record_metrics() fires.
         // If direct() returned Err above, guard drops here with dispatched=false
-        // → RequestGuard::Drop fires → chooser.free() + deferred_close.execute()
-        //   but record_metrics() is suppressed (no backend work was done).
+        // and suppresses metrics; its nested RequestCleanup then frees scheduler
+        // state and executes the deferred close action.
         guard.mark_dispatched();
         let stream_context = response_stream.context();
         let context_for_monitoring = stream_context.clone();
