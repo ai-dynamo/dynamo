@@ -430,9 +430,9 @@ impl AddressedPushRouter {
         U: Data + for<'de> Deserialize<'de> + MaybeError,
     {
         let (request_stream, context) = input.into_parts();
-        let input_stream = request_stream
-            .take()
-            .expect("RequestStream::take called twice on bidirectional dispatch input");
+        let input_stream = request_stream.take().ok_or_else(|| {
+            anyhow::anyhow!("RequestStream::take called twice on bidirectional dispatch input")
+        })?;
 
         self.dispatch_and_finalize::<T, U>(
             &context,
@@ -478,8 +478,10 @@ impl AddressedPushRouter {
         // watcher (instance dropped), so no cleanup is owed.
         let (send_registered, recv_registered) = self
             .register_streams(engine_ctx.clone(), enable_request_stream, true)
-            .await;
-        let recv_registered = recv_registered.expect("response stream always registered");
+            .await?;
+        let recv_registered = recv_registered.ok_or_else(|| {
+            anyhow::anyhow!("response stream registration missing despite enable_response_stream")
+        })?;
 
         // Tombstone check: if discovery already removed the worker, fail fast
         // with a migratable error rather than writing to the request plane.
@@ -588,32 +590,37 @@ impl AddressedPushRouter {
         engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
         enable_request_stream: bool,
         enable_response_stream: bool,
-    ) -> (
-        Option<RegisteredStream<StreamSender>>,
-        Option<RegisteredStream<StreamReceiver>>,
-    ) {
+    ) -> Result<
+        (
+            Option<RegisteredStream<StreamSender>>,
+            Option<RegisteredStream<StreamReceiver>>,
+        ),
+        Error,
+    > {
         let options = StreamOptions::builder()
             .context(engine_ctx)
             .enable_request_stream(enable_request_stream)
             .enable_response_stream(enable_response_stream)
-            .build()
-            .unwrap();
+            .build()?;
 
         let pending: PendingConnections = self.resp_transport.register(options).await;
         let (send_stream, recv_stream) = pending.into_parts();
 
-        assert_eq!(
+        // Transport-layer invariant: the data plane produces exactly the halves
+        // we requested. A mismatch is a bug in the transport, not a runtime
+        // error path, so assert only in debug builds rather than panicking prod.
+        debug_assert_eq!(
             send_stream.is_some(),
             enable_request_stream,
             "data-plane registration: request-stream presence does not match request"
         );
-        assert_eq!(
+        debug_assert_eq!(
             recv_stream.is_some(),
             enable_response_stream,
             "data-plane registration: response-stream presence does not match request"
         );
 
-        (send_stream, recv_stream)
+        Ok((send_stream, recv_stream))
     }
 
     /// Build standard request-plane headers (trace propagation, request-id,

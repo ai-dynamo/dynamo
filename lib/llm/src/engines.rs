@@ -157,9 +157,9 @@ impl AsyncEngine<ManyIn<RealtimeClientEvent>, ManyOut<Annotated<RealtimeServerEv
         let session_id = ctx.id().to_string();
         let ctx_for_stream = ctx.clone();
         let (request_stream, _ctx_unit) = incoming.into_parts();
-        let mut incoming = request_stream
-            .take()
-            .expect("RequestStream::take called twice on bidirectional input");
+        let mut incoming = request_stream.take().ok_or_else(|| {
+            anyhow::anyhow!("RequestStream::take called twice on bidirectional input")
+        })?;
 
         let output = stream! {
             let ctx = ctx_for_stream;
