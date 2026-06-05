@@ -235,6 +235,56 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
             }
         }
     }
+
+    /// Decode the wire envelope into its [`RequestControlMessage`] and the
+    /// optional data payload, shared by every [`IngressDispatch`] shape:
+    ///   - `HeaderAndData` → `(control, Some(data))` — the unary wire shape,
+    ///     where the request body travels in the data half.
+    ///   - `HeaderOnly` → `(control, None)` — the bidirectional wire shape,
+    ///     where request frames flow on the request-stream socket instead.
+    ///
+    /// The caller decides whether its path expects the data payload. The
+    /// deserialization and invalid-message error counters are incremented
+    /// here so every shape reports them consistently.
+    fn decode_control_message(
+        &self,
+        payload: Bytes,
+    ) -> Result<(RequestControlMessage, Option<Bytes>), PipelineError> {
+        let msg = TwoPartCodec::default()
+            .decode_message(payload)?
+            .into_message_type();
+
+        let (header, data) = match msg {
+            TwoPartMessageType::HeaderAndData(header, data) => (header, Some(data)),
+            TwoPartMessageType::HeaderOnly(header) => (header, None),
+            _ => {
+                if let Some(m) = self.metrics() {
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::INVALID_MESSAGE])
+                        .inc();
+                }
+                return Err(PipelineError::Generic(String::from(
+                    "Unexpected message from work queue; expected a header-only or header-and-data TwoPartMessage",
+                )));
+            }
+        };
+
+        let control_msg: RequestControlMessage =
+            serde_json::from_slice(&header).map_err(|err| {
+                if let Some(m) = self.metrics() {
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::DESERIALIZATION])
+                        .inc();
+                }
+                let json_str = String::from_utf8_lossy(&header);
+                PipelineError::DeserializationError(format!(
+                    "Failed deserializing to RequestControlMessage. err={err}, json_str={json_str}, header_len={}",
+                    header.len(),
+                ))
+            })?;
+
+        Ok((control_msg, data))
+    }
 }
 /// The output of [`IngressDispatch::parse_and_build_request`]: the typed
 /// request the engine consumes, plus the bits of the on-wire control
@@ -274,50 +324,22 @@ where
         &self,
         payload: Bytes,
     ) -> Result<ParsedRequest<SingleIn<T>>, PipelineError> {
-        // decode the control message and the request
-        let msg = TwoPartCodec::default()
-            .decode_message(payload)?
-            .into_message_type();
+        let (control_msg, data) = self.decode_control_message(payload)?;
 
-        // we must have a header and a body
-        let (control_msg, request_t) = match msg {
-            TwoPartMessageType::HeaderAndData(header, data) => {
-                tracing::trace!(
-                    "received two part message with ctrl: {} bytes, data: {} bytes",
-                    header.len(),
-                    data.len()
-                );
-                let control_msg: RequestControlMessage = match serde_json::from_slice(&header) {
-                    Ok(cm) => cm,
-                    Err(err) => {
-                        let json_str = String::from_utf8_lossy(&header);
-                        if let Some(m) = self.metrics() {
-                            m.error_counter
-                                .with_label_values(&[work_handler::error_types::DESERIALIZATION])
-                                .inc();
-                        }
-                        return Err(PipelineError::DeserializationError(format!(
-                            "Failed deserializing to RequestControlMessage. err={err}, json_str={json_str}, header_len={}",
-                            header.len(),
-                        )));
-                    }
-                };
-                let request_t: T = serde_json::from_slice(&data)?;
-                (control_msg, request_t)
+        // The unary path carries the request body in the data half; a
+        // header-only envelope means the sender used the bidirectional shape.
+        let data = data.ok_or_else(|| {
+            if let Some(m) = self.metrics() {
+                m.error_counter
+                    .with_label_values(&[work_handler::error_types::INVALID_MESSAGE])
+                    .inc();
             }
-            _ => {
-                if let Some(m) = self.metrics() {
-                    m.error_counter
-                        .with_label_values(&[work_handler::error_types::INVALID_MESSAGE])
-                        .inc();
-                }
-                return Err(PipelineError::Generic(String::from(
-                    "Unexpected message from work queue; unable extract a TwoPartMessage with a header and data",
-                )));
-            }
-        };
+            PipelineError::Generic(String::from(
+                "unary engine received a header-only envelope; expected a request payload",
+            ))
+        })?;
+        let request_t: T = serde_json::from_slice(&data)?;
 
-        // extend request with context
         tracing::trace!(
             request_id = %control_msg.id,
             metadata_entries = control_msg.metadata.len(),
@@ -348,37 +370,22 @@ where
         &self,
         payload: Bytes,
     ) -> Result<ParsedRequest<ManyIn<T>>, PipelineError> {
-        // Bidirectional envelopes are header-only — all request frames
-        // (including the first) flow on the request-stream socket once
-        // it's dialed in. A HeaderAndData payload here would mean the
-        // sender used the unary wire shape; reject it.
-        let msg = TwoPartCodec::default()
-            .decode_message(payload)?
-            .into_message_type();
+        let (control_msg, data) = self.decode_control_message(payload)?;
 
-        let control_msg = match msg {
-            TwoPartMessageType::HeaderOnly(header) => serde_json::from_slice::<RequestControlMessage>(&header).map_err(|err| {
-                let json_str = String::from_utf8_lossy(&header);
-                if let Some(m) = self.metrics() {
-                    m.error_counter
-                        .with_label_values(&[work_handler::error_types::DESERIALIZATION])
-                        .inc();
-                }
-                PipelineError::DeserializationError(format!(
-                    "Failed deserializing to RequestControlMessage. err={err}, json_str={json_str}"
-                ))
-            })?,
-            _ => {
-                if let Some(m) = self.metrics() {
-                    m.error_counter
-                        .with_label_values(&[work_handler::error_types::INVALID_MESSAGE])
-                        .inc();
-                }
-                return Err(PipelineError::Generic(String::from(
-                    "bidirectional engine received a non-header-only envelope",
-                )));
+        // Bidirectional envelopes are header-only — all request frames
+        // (including the first) flow on the request-stream socket once it's
+        // dialed in. A data payload means the sender used the unary wire
+        // shape; reject it.
+        if data.is_some() {
+            if let Some(m) = self.metrics() {
+                m.error_counter
+                    .with_label_values(&[work_handler::error_types::INVALID_MESSAGE])
+                    .inc();
             }
-        };
+            return Err(PipelineError::Generic(String::from(
+                "bidirectional engine received a non-header-only envelope",
+            )));
+        }
 
         if !matches!(control_msg.request_type, RequestType::ManyIn) {
             if let Some(m) = self.metrics() {
