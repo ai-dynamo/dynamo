@@ -577,7 +577,7 @@ mod tests {
     #[test]
     fn from_args_auto_forwards_python_flags_without_separator() {
         let (engine, config) = VllmBackend::from_args(Some(vec![
-            "dynamo-vllm-backend".to_string(),
+            "dynamo-vllm-rs-backend".to_string(),
             "Qwen/Qwen3-0.6B".to_string(),
             "--namespace".to_string(),
             "ns".to_string(),
@@ -624,7 +624,7 @@ mod tests {
     #[test]
     fn engine_ready_timeout_arg_is_parsed_on_rust_side() {
         let (engine, _config) = VllmBackend::from_args(Some(vec![
-            "dynamo-vllm-backend".to_string(),
+            "dynamo-vllm-rs-backend".to_string(),
             "Qwen/Qwen3-0.6B".to_string(),
             "--engine-ready-timeout-secs".to_string(),
             "42".to_string(),
@@ -638,7 +638,7 @@ mod tests {
     #[test]
     fn extra_args_are_forwarded_to_python() {
         let (engine, _config) = VllmBackend::from_args(Some(vec![
-            "dynamo-vllm-backend".to_string(),
+            "dynamo-vllm-rs-backend".to_string(),
             "Qwen/Qwen3-0.6B".to_string(),
             "--block-size".to_string(),
             "32".to_string(),
@@ -668,7 +668,7 @@ mod tests {
     #[tokio::test]
     async fn health_check_payload_matches_python_token_canary_shape() {
         let (engine, _config) = VllmBackend::from_args(Some(vec![
-            "dynamo-vllm-backend".to_string(),
+            "dynamo-vllm-rs-backend".to_string(),
             "Qwen/Qwen3-0.6B".to_string(),
         ]))
         .unwrap();
@@ -687,7 +687,7 @@ mod tests {
     #[tokio::test]
     async fn decode_health_check_is_disabled_until_pd_wiring_exists() {
         let (engine, _config) = VllmBackend::from_args(Some(vec![
-            "dynamo-vllm-backend".to_string(),
+            "dynamo-vllm-rs-backend".to_string(),
             "Qwen/Qwen3-0.6B".to_string(),
             "--disaggregation-mode".to_string(),
             "decode".to_string(),
@@ -703,12 +703,12 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires a configured Python vLLM engine and model"]
-    async fn vllm_backend_passes_conformance() {
+    async fn vllm_rs_backend_passes_conformance() {
         let model = std::env::var("DYNAMO_VLLM_BACKEND_CONFORMANCE_MODEL")
             .expect("set DYNAMO_VLLM_BACKEND_CONFORMANCE_MODEL to run this test");
         dynamo_backend_common::testing::run_conformance(move || {
             let (engine, _config) = VllmBackend::from_args(Some(vec![
-                "dynamo-vllm-backend".to_string(),
+                "dynamo-vllm-rs-backend".to_string(),
                 model.clone(),
             ]))
             .unwrap();

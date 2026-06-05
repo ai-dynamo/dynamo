@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "dynamo-vllm-backend"
+name = "dynamo-vllm-rs-backend"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -12,7 +12,7 @@ repository.workspace = true
 description = "Dynamo Rust backend for vLLM engine-core integration."
 
 [[bin]]
-name = "dynamo-vllm-backend"
+name = "dynamo-vllm-rs-backend"
 path = "src/main.rs"
 
 [dependencies]

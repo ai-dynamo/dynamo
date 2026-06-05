@@ -109,7 +109,7 @@ python -m dynamo.frontend --http-port 8000
 ```
 
 ```bash
-DYN_SYSTEM_PORT=8081 cargo run -p dynamo-vllm-backend -- Qwen/Qwen3-0.6B -- \
+DYN_SYSTEM_PORT=8081 cargo run -p dynamo-vllm-rs-backend -- Qwen/Qwen3-0.6B -- \
   --enforce-eager \
   --max-model-len 4096
 ```

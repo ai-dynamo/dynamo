@@ -149,7 +149,7 @@ mod tests {
     #[tokio::test]
     async fn supported_controls_advertise_typed_engine_core_controls() {
         let (engine, _config) = VllmBackend::from_args(Some(vec![
-            "dynamo-vllm-backend".to_string(),
+            "dynamo-vllm-rs-backend".to_string(),
             "Qwen/Qwen3-0.6B".to_string(),
         ]))
         .unwrap();
@@ -164,7 +164,7 @@ mod tests {
     #[tokio::test]
     async fn unsupported_engine_control_returns_json_error() {
         let (engine, _config) = VllmBackend::from_args(Some(vec![
-            "dynamo-vllm-backend".to_string(),
+            "dynamo-vllm-rs-backend".to_string(),
             "Qwen/Qwen3-0.6B".to_string(),
         ]))
         .unwrap();
