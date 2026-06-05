@@ -116,6 +116,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                             ["green"],
                             require_rust_processor_init=True,
                             min_avg_kv_hit_rate=0.9,
+                            vary_image_url=MULTIMODAL_IMG_ALT_URL,
                         )
                     )
                 ],
@@ -222,6 +223,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                             ["green"],
                             require_rust_processor_init=True,
                             min_avg_kv_hit_rate=0.9,
+                            vary_image_url=MULTIMODAL_IMG_ALT_URL,
                         )
                     )
                 ],
@@ -245,6 +247,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                             ["green"],
                             require_rust_processor_init=True,
                             min_avg_kv_hit_rate=0.9,
+                            vary_image_url=MULTIMODAL_IMG_ALT_URL,
                         )
                     )
                 ],
@@ -402,6 +405,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                             ["green"],
                             require_rust_processor_init=True,
                             min_avg_kv_hit_rate=0.9,
+                            vary_image_url=MULTIMODAL_IMG_ALT_URL,
                         )
                     )
                 ],
@@ -528,6 +532,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                             ["green"],
                             require_rust_processor_init=True,
                             min_avg_kv_hit_rate=0.9,
+                            vary_image_url=MULTIMODAL_IMG_ALT_URL,
                         )
                     )
                 ],
