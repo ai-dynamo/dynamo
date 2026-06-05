@@ -106,10 +106,8 @@ spec:
       resources:
         requests:
           gpu: "8"
-          vpc.amazonaws.com/efa: "8"
         limits:
           gpu: "8"
-          vpc.amazonaws.com/efa: "8"
 
     VllmDecodeWorker:
       componentType: worker
@@ -172,7 +170,5 @@ spec:
       resources:
         requests:
           gpu: "8"
-          vpc.amazonaws.com/efa: "8"
         limits:
           gpu: "8"
-          vpc.amazonaws.com/efa: "8"
