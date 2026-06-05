@@ -34,7 +34,11 @@ jobs:
         env:
           HF_HOME: /scratch/hf
         run: |
-          cd /workspace
+          # Run from the checkout (on the writable ci-local-nvme work PVC), NOT
+          # /workspace: the determinism tests write t8.shakespeare.txt to the CWD
+          # via a relative path, and /workspace is owned by image UID 1000 while
+          # the job pod runs as UID 1001 -> PermissionError.
+          cd "$GITHUB_WORKSPACE"
           python -m pytest \
             tests/kvbm_integration/test_consolidator_router_e2e.py \
             tests/kvbm_integration/test_determinism_agg.py \
