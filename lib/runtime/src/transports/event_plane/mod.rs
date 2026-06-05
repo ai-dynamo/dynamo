@@ -498,6 +498,7 @@ impl EventPublisher {
             published_at: current_timestamp_ms(),
             topic: self.topic.clone(),
             payload: Bytes::from(bytes),
+            published_at_ns: current_timestamp_ns(),
         };
 
         let envelope_bytes = self.codec.encode_envelope(&envelope)?;
@@ -789,6 +790,24 @@ fn current_timestamp_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Get a monotonic nanosecond timestamp (`CLOCK_MONOTONIC`).
+///
+/// Used to stamp [`EventEnvelope::published_at_ns`] for DIS-2172 latency
+/// benchmarking. `CLOCK_MONOTONIC` is system-wide on Linux, so the value is
+/// comparable across the publisher and subscriber processes on one host and is
+/// immune to NTP / wall-clock jumps (unlike `CLOCK_REALTIME`). This is NOT a
+/// Unix epoch — only recv-minus-published deltas are meaningful, same-host.
+fn current_timestamp_ns() -> u64 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: `ts` is a valid timespec; CLOCK_MONOTONIC is always available on Linux.
+    unsafe {
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+    }
+    (ts.tv_sec as u64)
+        .wrapping_mul(1_000_000_000)
+        .wrapping_add(ts.tv_nsec as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -844,6 +863,7 @@ mod tests {
             published_at: 1700000000000,
             topic: "test-topic".to_string(),
             payload: Bytes::from("test data"),
+            published_at_ns: 1_700_000_000_000_000_000,
         };
 
         let json = serde_json::to_string(&envelope).expect("serialize");

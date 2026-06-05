@@ -105,6 +105,7 @@ mod tests {
             published_at: 1700000000000,
             topic: "test-topic".to_string(),
             payload: Bytes::from("test payload"),
+            published_at_ns: 1_700_000_000_000_000_000,
         };
 
         let encoded = codec.encode_envelope(&envelope).unwrap();

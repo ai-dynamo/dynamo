@@ -22,6 +22,15 @@ pub struct EventEnvelope {
     /// The serialized event payload
     #[serde(with = "bytes_serde")]
     pub payload: Bytes,
+    /// Monotonic (`CLOCK_MONOTONIC`) nanosecond send-timestamp.
+    ///
+    /// Added for DIS-2172 event-plane latency benchmarking. `published_at` (ms,
+    /// wall-clock) is too coarse and not monotonic; this field is system-wide
+    /// `CLOCK_MONOTONIC` ns, comparable across publisher/subscriber processes on
+    /// one host (NOT a Unix epoch). `#[serde(default)]` keeps the msgpack wire
+    /// format backward-compatible: older publishers decode with `0`.
+    #[serde(default)]
+    pub published_at_ns: u64,
 }
 
 /// Serde helper for Bytes serialization with MessagePack
@@ -63,6 +72,7 @@ mod tests {
             published_at: 1700000000000,
             topic: "test-topic".to_string(),
             payload: Bytes::from("test payload"),
+            published_at_ns: 1_700_000_000_000_000_000,
         };
 
         let msgpack = rmp_serde::to_vec(&envelope).unwrap();

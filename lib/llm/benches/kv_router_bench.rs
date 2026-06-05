@@ -73,6 +73,10 @@ fn encode_event_with_envelope<T: Serialize>(event: &T, topic: &str) -> Result<Ve
             .unwrap_or(0),
         topic: topic.to_string(),
         payload: Bytes::from(payload),
+        published_at_ns: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0),
     };
 
     // Encode the envelope with msgpack

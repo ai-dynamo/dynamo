@@ -328,6 +328,69 @@ impl ZmqSubTransport {
             tracing::info!("ZMQ socket pump task terminated");
         })
     }
+
+    /// Connect a SUB socket and pump decoded envelope payloads directly into `tx`,
+    /// bypassing the broadcast channel and the per-endpoint forwarding task. Used by
+    /// DynamicSubscriber direct mode (one consumer per socket) to cut two tokio hops
+    /// off the hot path. DIS-2172 latency optimization; broker mode keeps using
+    /// connect()/subscribe() with broadcast fan-out.
+    pub async fn connect_direct(
+        endpoint: &str,
+        topic: &str,
+        tx: tokio::sync::mpsc::UnboundedSender<Bytes>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        let ctx = Context::new();
+        let mut socket = configure_subscribe_builder(subscribe(&ctx))
+            .connect(endpoint)?
+            .subscribe(topic.as_bytes())?;
+
+        tracing::info!(
+            endpoint = %endpoint,
+            topic = %topic,
+            rcvhwm = ZMQ_RCVHWM,
+            "ZMQ SUB direct-pump connected (no broadcast hop)"
+        );
+
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    tracing::info!(endpoint = %endpoint, "ZMQ direct-pump cancelled");
+                    break;
+                }
+                next = socket.next() => {
+                    let Some(result) = next else {
+                        tracing::info!("ZMQ socket stream ended (direct pump)");
+                        break;
+                    };
+                    let frames = match result {
+                        Ok(frames) => multipart_message(frames),
+                        Err(error) => {
+                            tracing::error!(error = %error, "ZMQ receive error (direct pump)");
+                            break;
+                        }
+                    };
+                    if frames.len() != 4 {
+                        tracing::warn!(frame_count = frames.len(), "Unexpected frame count (direct pump)");
+                        continue;
+                    }
+                    let frame_bytes = Bytes::from(frames[3].clone());
+                    match Frame::decode(frame_bytes) {
+                        Ok(frame) => {
+                            if tx.send(frame.payload).is_err() {
+                                tracing::info!(endpoint = %endpoint, "Merge channel closed, stopping direct pump");
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(error = %error, "Failed to decode ZMQ frame (direct pump)");
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -394,6 +457,7 @@ mod tests {
             published_at: 1700000000000,
             topic: topic.to_string(),
             payload: Bytes::from("test payload"),
+            published_at_ns: 1_700_000_000_000_000_000,
         };
 
         let envelope_bytes = codec.encode_envelope(&envelope).unwrap();
@@ -432,6 +496,7 @@ mod tests {
                 published_at: 1700000000000 + i,
                 topic: topic.to_string(),
                 payload: Bytes::from(format!("message {i}")),
+                published_at_ns: 1_700_000_000_000_000_000 + i,
             };
 
             let bytes = codec.encode_envelope(&envelope).unwrap();

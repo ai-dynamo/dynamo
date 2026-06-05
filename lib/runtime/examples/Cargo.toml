@@ -3,6 +3,7 @@
 
 [workspace]
 members = [
+    "event_plane_bench",
     "hello_world",
     "service_metrics",
     "system_metrics",
