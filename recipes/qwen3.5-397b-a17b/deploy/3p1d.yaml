@@ -1,0 +1,187 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Qwen3.5-397B-A17B-FP8 — 3P1D disagg (3 prefill + 1 decode, 4 nodes total).
+#
+# Uses EFA RDMA for NIXL KV + GDN-conv-state transfer. Without EFA, NIXL
+# silently falls back to TCP (~100× worse TTFT). The EFA image must be built
+# with render.py --make-efa + docker build --target aws.
+#
+# privileged:true required: IPC_LOCK alone fails on every EFA NIC (fi_mr_reg
+# must pin VRAM). See docs/kubernetes/cloud-providers/eks/efa.md.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen35-3p1d
+  labels:
+    app.kubernetes.io/name: qwen3.5-397b-a17b
+    app.kubernetes.io/component: 3p1d
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  backendFramework: vllm
+  pvcs:
+    - create: false
+      name: shared-model-cache
+  services:
+    Frontend:
+      componentType: frontend
+      envs:
+        - name: HF_HOME
+          value: /home/dynamo/.cache/huggingface
+        - name: DYN_REQUEST_PLANE
+          value: tcp
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /home/dynamo/.cache/huggingface
+      extraPodSpec:
+        nodeSelector: ${HW_NODE_SELECTOR}
+        tolerations: ${HW_TOLERATIONS}
+        mainContainer:
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+      replicas: 1
+      resources:
+        requests:
+          cpu: "4"
+          memory: 16Gi
+        limits:
+          cpu: "8"
+          memory: 32Gi
+      subComponentType: null
+
+    VllmPrefillWorker:
+      componentType: worker
+      subComponentType: prefill
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /home/dynamo/.cache/huggingface
+      sharedMemory:
+        size: 120Gi
+      extraPodSpec:
+        nodeSelector: ${HW_NODE_SELECTOR}
+        tolerations: ${HW_TOLERATIONS}
+        mainContainer:
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              ulimit -l unlimited
+              python3 -m dynamo.vllm \
+                --model "${MODEL_NAME}" \
+                --tensor-parallel-size 8 \
+                --data-parallel-size 1 \
+                --disaggregation-mode prefill \
+                --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}' \
+                --gpu-memory-utilization 0.90 \
+                --max-model-len 16384 \
+                --no-enable-prefix-caching \
+                --block-size 128 \
+                --no-enable-log-requests
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MODEL_NAME
+              value: "Qwen/Qwen3.5-397B-A17B-FP8"
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: DYN_REQUEST_PLANE
+              value: tcp
+            - name: VLLM_SSM_CONV_STATE_LAYOUT
+              value: DS
+            - name: FI_PROVIDER
+              value: efa
+            - name: FI_EFA_USE_DEVICE_RDMA
+              value: "1"
+            - name: FI_EFA_ENABLE_SHM_TRANSFER
+              value: "0"
+            - name: FI_HMEM
+              value: cuda
+            - name: FI_HMEM_CUDA_ENABLE_XFER
+              value: "1"
+            - name: LD_LIBRARY_PATH
+              value: /opt/amazon/efa/lib:/usr/local/lib
+            # If decode hangs with no first token, pin the side-channel NIC:
+            # - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+            #   value: <pod-IP-or-routable-host>
+          workingDir: /workspace
+          securityContext:
+            privileged: true
+      replicas: 3
+      resources:
+        requests:
+          gpu: "8"
+          vpc.amazonaws.com/efa: "8"
+        limits:
+          gpu: "8"
+          vpc.amazonaws.com/efa: "8"
+
+    VllmDecodeWorker:
+      componentType: worker
+      subComponentType: decode
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /home/dynamo/.cache/huggingface
+      sharedMemory:
+        size: 120Gi
+      extraPodSpec:
+        nodeSelector: ${HW_NODE_SELECTOR}
+        tolerations: ${HW_TOLERATIONS}
+        mainContainer:
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              ulimit -l unlimited
+              python3 -m dynamo.vllm \
+                --model "${MODEL_NAME}" \
+                --tensor-parallel-size 8 \
+                --data-parallel-size 1 \
+                --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}' \
+                --gpu-memory-utilization 0.90 \
+                --max-model-len 16384 \
+                --no-enable-prefix-caching \
+                --block-size 128 \
+                --no-enable-log-requests
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MODEL_NAME
+              value: "Qwen/Qwen3.5-397B-A17B-FP8"
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: DYN_REQUEST_PLANE
+              value: tcp
+            - name: VLLM_SSM_CONV_STATE_LAYOUT
+              value: DS
+            - name: FI_PROVIDER
+              value: efa
+            - name: FI_EFA_USE_DEVICE_RDMA
+              value: "1"
+            - name: FI_EFA_ENABLE_SHM_TRANSFER
+              value: "0"
+            - name: FI_HMEM
+              value: cuda
+            - name: FI_HMEM_CUDA_ENABLE_XFER
+              value: "1"
+            - name: LD_LIBRARY_PATH
+              value: /opt/amazon/efa/lib:/usr/local/lib
+          workingDir: /workspace
+          securityContext:
+            privileged: true
+      replicas: 1
+      resources:
+        requests:
+          gpu: "8"
+          vpc.amazonaws.com/efa: "8"
+        limits:
+          gpu: "8"
+          vpc.amazonaws.com/efa: "8"

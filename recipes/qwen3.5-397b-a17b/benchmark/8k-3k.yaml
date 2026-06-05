@@ -59,39 +59,41 @@ spec:
           done
           echo "Model '${MODEL_NAME}' is ready."
 
-          RUN_DIR="${ARTIFACT_BASE_DIR}/${RUN_LABEL}"
-          mkdir -p "${RUN_DIR}"
-          echo "Running benchmark; artifacts -> ${RUN_DIR}"
-
           # Synthetic text prompts at fixed ISL/OSL. ignore_eos + min==max
           # tokens make every request produce exactly OSL_MEAN output tokens
           # so the decode-side cost is uniform across requests.
-          aiperf profile \
-            --model "${MODEL_NAME}" \
-            --tokenizer "${MODEL_NAME}" \
-            --url "http://${FRONTEND}:8000" \
-            --endpoint-type chat \
-            --streaming \
-            --ui-type none \
-            --synthetic-input-tokens-mean "${ISL_MEAN}" \
-            --synthetic-input-tokens-stddev 0 \
-            --output-tokens-mean "${OSL_MEAN}" \
-            --output-tokens-stddev 0 \
-            --request-count "${REQUEST_COUNT}" \
-            --concurrency "${CONCURRENCY}" \
-            --request-rate-mode constant \
-            --warmup-request-count "${WARMUP_REQUEST_COUNT}" \
-            --artifact-dir "${RUN_DIR}" \
-            --extra-inputs "max_tokens:${OSL_MEAN}" \
-            --extra-inputs "min_tokens:${OSL_MEAN}" \
-            --extra-inputs "ignore_eos:true"
+          for CONC in ${CONCURRENCIES}; do
+            RUN_DIR="${ARTIFACT_BASE_DIR}/${RUN_LABEL}/conc_${CONC}"
+            mkdir -p "${RUN_DIR}"
+            echo "=== conc=${CONC} -> ${RUN_DIR} ==="
+            aiperf profile \
+              --model "${MODEL_NAME}" \
+              --tokenizer "${MODEL_NAME}" \
+              --url "http://${FRONTEND}:8000" \
+              --endpoint-type chat \
+              --streaming \
+              --ui-type none \
+              --synthetic-input-tokens-mean "${ISL_MEAN}" \
+              --synthetic-input-tokens-stddev 0 \
+              --output-tokens-mean "${OSL_MEAN}" \
+              --output-tokens-stddev 0 \
+              --request-count "${REQUEST_COUNT}" \
+              --concurrency "${CONC}" \
+              --request-rate-mode constant \
+              --warmup-request-count "${WARMUP_REQUEST_COUNT}" \
+              --artifact-dir "${RUN_DIR}" \
+              --extra-inputs "max_tokens:${OSL_MEAN}" \
+              --extra-inputs "min_tokens:${OSL_MEAN}" \
+              --extra-inputs "ignore_eos:true"
 
-          # inputs.json is a regenerable debug artifact; drop by default.
-          if [[ "${KEEP_INPUTS_JSON:-}" != "1" ]]; then
-            rm -fv "${RUN_DIR}/inputs.json" || true
-          fi
+            # inputs.json is a regenerable debug artifact; drop by default.
+            if [[ "${KEEP_INPUTS_JSON:-}" != "1" ]]; then
+              rm -fv "${RUN_DIR}/inputs.json" || true
+            fi
+            echo "=== conc=${CONC} done ==="
+          done
 
-          echo "Run complete. Artifacts in ${RUN_DIR}"
+          echo "All concurrencies done. Artifacts in ${ARTIFACT_BASE_DIR}/${RUN_LABEL}/"
           sleep 3600
       env:
         - name: MODEL_NAME
@@ -106,8 +108,8 @@ spec:
           value: "3000"
         - name: REQUEST_COUNT
           value: "200"
-        - name: CONCURRENCY
-          value: "20"
+        - name: CONCURRENCIES
+          value: "20 60 160"
         - name: WARMUP_REQUEST_COUNT
           value: "4"
         - name: ARTIFACT_BASE_DIR
