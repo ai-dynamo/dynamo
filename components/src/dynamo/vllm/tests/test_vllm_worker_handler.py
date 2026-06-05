@@ -305,11 +305,14 @@ class TestReasoningParserForwarding:
                 prompt_token_ids=[1, 2],
                 prompt_logprobs=None,
             )
+            # DELTA output_kind: each chunk carries only its own new token(s),
+            # and generate_tokens passes output.token_ids through verbatim — so
+            # the second chunk is the delta [12], not the cumulative [11, 12].
             yield SimpleNamespace(
                 outputs=[
                     SimpleNamespace(
                         index=0,
-                        token_ids=[11, 12],
+                        token_ids=[12],
                         routed_experts=routed_experts,
                         finish_reason="stop",
                         stop_reason=None,

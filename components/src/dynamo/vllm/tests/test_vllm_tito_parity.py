@@ -308,4 +308,7 @@ class TestSkipSpecialTokens:
         sp = build_sampling_params(req, {})
         assert sp.allowed_token_ids == [10, 11]
         assert sp.bad_words_token_ids == [[12, 13]]
-        assert sp.detokenize is True
+        # The internal token path detokenizes downstream in Dynamo, so
+        # build_sampling_params forces detokenize=False even when the request
+        # asks for True.
+        assert sp.detokenize is False
