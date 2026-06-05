@@ -134,6 +134,117 @@ make info # Check image tag
 | `make all` | Build Dynamo lib + Docker image + load locally |
 | `make all-push` | Build Dynamo lib + Docker image + push to registry |
 
+### 4b. Build Rust EPP image (Optional — experimental)
+
+A pure-Rust EPP implementation is available as an alternative to the Go-based EPP.
+It replaces the Go EPP + CGO bridge with a single native Rust binary that implements
+the Envoy ext_proc gRPC service and uses Dynamo's KV-aware router directly — no FFI
+boundary, no Go runtime.
+
+```bash
+cd deploy/inference-gateway/ext-proc
+
+# Build and load Docker image locally
+make image-load
+# Creates: dynamo/dynamo-rust-epp:<git-tag>
+
+# Or build and push to a registry
+export DOCKER_SERVER=ghcr.io/nvidia/dynamo
+make image-push
+```
+
+To build the binary locally without Docker:
+
+```bash
+cd deploy/inference-gateway/ext-proc
+make build
+# Binary at: <repo-root>/target/release/dynamo-ext-proc
+```
+
+#### Rust EPP Makefile Targets
+
+| Target | Description |
+|--------|-------------|
+| `make build` | Build the Rust EPP binary locally via cargo |
+| `make image-load` | Build Docker image and load locally |
+| `make image-push` | Build and push Docker image to registry |
+| `make image-kind` | Build and load into a kind cluster |
+| `make image-multiarch-push` | Build and push multi-arch image |
+| `make fmt` / `make clippy` / `make test` | Development checks |
+| `make info` | Show image tag and build configuration |
+
+#### Rust EPP Configuration
+
+The Rust EPP uses the same environment variables as the Go EPP for namespace
+resolution and router configuration:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DYN_NAMESPACE_PREFIX` | *(unset)* | Dynamo discovery namespace (highest priority) |
+| `DYN_NAMESPACE` | `vllm-agg` | Dynamo discovery namespace (fallback) |
+| `DYN_COMPONENT_NAME` | `backend` | Dynamo component name |
+| `DYN_ENFORCE_DISAGG` | `false` | Enforce disaggregated prefill/decode routing |
+| `RUST_LOG` | `info` | Tracing log level filter |
+
+The gRPC port is hardcoded to `9002` (matching the operator's `EPPGRPCPort` constant).
+
+Namespace resolution follows the same logic as the Go EPP plugin:
+`DYN_NAMESPACE_PREFIX` > `DYN_NAMESPACE` > `"vllm-agg"` (default).
+
+The Rust EPP also respects the standard Dynamo router environment variables
+(`DYN_OVERLAP_SCORE_WEIGHT`, `DYN_ROUTER_TEMPERATURE`, `DYN_USE_KV_EVENTS`, etc.)
+documented in the Configuration section below.
+
+> [!NOTE]
+> The Rust EPP is experimental. It uses Dynamo's native discovery system
+> (`DistributedRuntime`) instead of the GAIE Kubernetes controllers, so it
+> does not require `InferencePool` or `InferenceModel` CRDs for endpoint
+> discovery. It discovers workers through Dynamo's own registration mechanism.
+
+#### `InferencePool` and the data plane (Istio, kGateway, Agentgateway)
+
+Although the Rust EPP does not consult `InferencePool` for worker discovery,
+the CRD is still required by the gateway **data plane**. Gateway
+implementations (Istio, kGateway, Agentgateway) read `InferencePool` to:
+
+1. Attach the `ext_proc` filter pointing at the EPP service.
+2. Enable the `override_host` LB policy so the EPP's
+   `x-gateway-destination-endpoint` header / dynamic-metadata is honored.
+3. Scope which pods are eligible to receive traffic — the pool's selector
+   becomes the `envoy.lb.subset_hint` metadata that the EPP intersects with
+   its own discovered workers before picking one.
+
+The Dynamo operator **auto-generates the `InferencePool`** for every
+`DynamoGraphDeployment` ([`deploy/operator/internal/dynamo/epp/inference_pool.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/dynamo/epp/inference_pool.go)).
+Its `Selector` matches the operator's worker-pod labels and its
+`EndpointPickerRef` points at the EPP service on `9002`, so Dynamo's
+discovery and the pool's pod set stay in sync automatically — users do not
+hand-craft the pool.
+
+**Using Istio instead of kGateway:**
+
+- The only Istio-specific step is creating an Istio `Gateway` / `HTTPRoute`
+  that references the operator-generated `InferencePool` as its `backendRef`.
+  The DGD, the generated pool, and the Rust EPP image are all unchanged.
+- The operator targets the stable `inference.networking.k8s.io/v1` API group,
+  supported in Istio ≥ 1.27. Older Istio versions used the experimental
+  `inference.networking.x-k8s.io` group and are not compatible.
+- **mTLS to the EPP.** Istio expects mTLS between the gateway and the EPP
+  service. The Rust EPP serves self-signed TLS on `9002` by default
+  (`DYN_SECURE_SERVING=true`). See *Service Mesh Integration (Istio)* below
+  for the `DestinationRule` the Dynamo Helm chart can generate so Istio
+  terminates the EPP's TLS correctly.
+
+> [!IMPORTANT]
+> Model card discovery, worker liveness, KV-aware routing, and bookkeeping
+> remain entirely in Dynamo's control. The `InferencePool` provides the
+> data-plane envelope (which pods, which port, which EPP); Dynamo's
+> discovery and the Rust EPP provide the routing intelligence inside that
+> envelope. Customizing the pool selector by hand is supported but requires
+> keeping it consistent with the operator's worker-pod labels — otherwise
+> pods discovered by Dynamo will fail subset filtering and the EPP will
+> return `RoutingFailed`.
+
 ### 5. Deploy
 
 We provide an example for the Qwen vLLM below.
