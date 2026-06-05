@@ -137,6 +137,17 @@ class TestCacheSaltWiring:
         assert prefill_prompt["cache_salt"] == "step_43"
         assert decode_prompt["cache_salt"] == "step_43"
 
+    def test_cache_salt_from_top_level_nvext(self):
+        """cache_salt under the raw request["nvext"] shape is also honored,
+        matching _nvext_extra_field_requested/_is_token_in_request (tzulingk)."""
+        from dynamo.vllm.handlers import _apply_nvext_cache_salt
+
+        req = {"token_ids": [1, 2, 3], "nvext": {"cache_salt": "top_level"}}
+        prompt = {"prompt_token_ids": req["token_ids"]}
+        _apply_nvext_cache_salt(req, prompt)
+
+        assert prompt["cache_salt"] == "top_level"
+
 
 class TestTokenInSamplingDefaults:
     @staticmethod
