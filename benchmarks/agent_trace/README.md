@@ -55,6 +55,11 @@ absolute `timestamp` from Dynamo's request-arrival time and no `session_id`.
 Stable trace `input_sequence_hashes` are compacted to Mooncake `hash_ids`
 during conversion.
 
+The same CLI also accepts context-free `dynamo.request.trace.v1` files emitted
+by `DYN_REQUEST_TRACE=1`. Request traces can be converted to ordinary Mooncake
+rows, but are rejected with `--agentic` because they intentionally omit agent
+context and tool events.
+
 Mooncake replay intentionally ignores non-replay request fields such as
 `finish_reason_metadata`. Use the Perfetto converter when you want to inspect
 whether a request stopped for tool calls, hit a backend stop reason, or emitted
