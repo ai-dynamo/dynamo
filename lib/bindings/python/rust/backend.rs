@@ -792,6 +792,10 @@ impl PyEngineCore {
             }
             // Token-pipeline metadata lives in the optional `.llm` sub-record
             // (LlmRegistration). LLMEngines set it; RawEngines leave it None.
+            // A missing `llm` / `runtime_data` attr is the documented
+            // duck-typed case (pre-split or raw engines) → default. Any OTHER
+            // getattr failure is a real engine bug; propagate it instead of
+            // silently dropping KV/DP/bootstrap hints or runtime data.
             let llm = match bound.getattr("llm") {
                 Ok(v) if !v.is_none() => Some(RsLlmRegistration {
                     context_length: opt_attr::<u32>(&v, "context_length")?,
@@ -804,14 +808,20 @@ impl PyEngineCore {
                     bootstrap_host: opt_attr::<String>(&v, "bootstrap_host")?,
                     bootstrap_port: opt_attr::<u16>(&v, "bootstrap_port")?,
                 }),
-                _ => None,
+                Ok(_) => None,
+                Err(e) if e.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) => None,
+                Err(e) => return Err(e),
             };
             Ok(RsEngineConfig {
                 model: bound.getattr("model")?.extract()?,
                 served_model_name: opt_attr::<String>(bound, "served_model_name")?,
                 runtime_data: match bound.getattr("runtime_data") {
                     Ok(value) if !value.is_none() => depythonize(&value).map_err(to_pyerr)?,
-                    _ => HashMap::new(),
+                    Ok(_) => HashMap::new(),
+                    Err(e) if e.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) => {
+                        HashMap::new()
+                    }
+                    Err(e) => return Err(e),
                 },
                 llm,
             })

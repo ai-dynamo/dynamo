@@ -82,7 +82,8 @@ Python engine authors keep the split API.)
   `LLMEngine` and `RawEngine` subclass it and differ *only* in the `generate`
   contract (token vs. raw media). Do not add per-engine mixins or intermediate
   bases between a modality ABC and its concrete backend (e.g. `VllmLLMEngine`).
-  A new modality is a new `BaseEngine` subclass, not a new lifecycle.
+  A new media modality is a new `RawEngine` implementation, not a new
+  engine trait or lifecycle.
 
 - **`from_args()` returns `(engine, WorkerConfig)`.**  The tuple return
   makes the contract statically checkable -- a subclass that forgets to

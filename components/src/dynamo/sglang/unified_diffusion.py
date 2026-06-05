@@ -78,6 +78,11 @@ class SglangDiffusionEngine(DiffusionEngine):
         dynamo_args = config.dynamo_args
         server_args = config.server_args
 
+        if dynamo_args.image_diffusion_worker and dynamo_args.video_generation_worker:
+            raise ValueError(
+                "SglangDiffusionEngine accepts only one of --image-diffusion-worker "
+                "or --video-generation-worker, not both."
+            )
         if dynamo_args.image_diffusion_worker:
             modality = _IMAGE
         elif dynamo_args.video_generation_worker:

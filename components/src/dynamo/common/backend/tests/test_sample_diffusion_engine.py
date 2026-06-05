@@ -82,14 +82,15 @@ async def test_generate_defaults_missing_n_to_one():
     assert len(chunks[0]["data"]) == 1
 
 
-async def test_generate_treats_n_zero_literally_not_as_missing():
-    """Regression guard for the falsy-zero handling (``n = 1 if n is None else
-    n``): an explicit ``n=0`` must yield zero images, not be coerced to 1."""
+async def test_generate_rejects_out_of_range_n():
+    """``n`` is validated to the OpenAI 1..10 range — out-of-range values
+    (including a falsy ``0``) raise rather than silently coercing to 1."""
     engine = SampleDiffusionEngine(delay=0.0)
-    chunks = await _collect(
-        engine, {"prompt": "x", "n": 0, "response_format": "b64_json"}
-    )
-    assert chunks[0]["data"] == []
+    for bad_n in (0, 11):
+        with pytest.raises(ValueError, match="between 1 and 10"):
+            await _collect(
+                engine, {"prompt": "x", "n": bad_n, "response_format": "b64_json"}
+            )
 
 
 async def test_response_format_b64_json_returns_base64_data():

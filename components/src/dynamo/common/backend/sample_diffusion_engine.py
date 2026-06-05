@@ -94,8 +94,13 @@ class SampleDiffusionEngine(DiffusionEngine):
     ) -> AsyncGenerator[dict[str, Any], None]:
         del context  # sample engine ignores cancellation (single short step)
 
-        n = request.get("n")
-        n = 1 if n is None else n
+        raw_n = request.get("n", 1)
+        try:
+            n = int(raw_n)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("`n` must be an integer") from exc
+        if n < 1 or n > 10:
+            raise ValueError("`n` must be between 1 and 10")
         response_format = request.get("response_format") or "url"
 
         # Simulate a single denoising step.

@@ -181,8 +181,9 @@ class Worker:
     """Drive the Rust ``Worker`` for a single engine instance.
 
     Accepts any :class:`BaseEngine` — an :class:`LLMEngine` (token pipeline)
-    or a :class:`DiffusionEngine` (raw media pipeline). The Rust ``Worker``
-    selects the request adapter from ``WorkerConfig.model_input``."""
+    or a :class:`DiffusionEngine` (raw media pipeline). The request adapter is
+    selected from the engine kind (``raw=isinstance(engine, RawEngine)``);
+    ``WorkerConfig.model_input`` is validated against that kind."""
 
     def __init__(self, engine: BaseEngine, config: WorkerConfig):
         self.engine = engine
