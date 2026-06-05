@@ -21,3 +21,7 @@
 # Served by Netlify and intermittently fails from GitHub runners.
 ^https://etcd\.io/?$
 ^https://etcd\.io/docs/v3\.5/install/?$
+
+# Helm repository endpoint; Helm reads /index.yaml, but the base URL returns
+# 403 to generic HTTP link checkers.
+^https://charts\.bitnami\.com/bitnami/?$
