@@ -139,19 +139,24 @@ fn substitute_pad_values(token_ids: &[u32], image_token_id: u32, mm_objects: &[u
     let mut obj_idx = 0usize;
     let mut in_run = false;
     let mut runs = 0usize;
+    // pad_value for the current run, computed once on entry and reused for the
+    // rest of the run (one mm_hash per run, so it's constant within a run).
+    let mut run_pad = 0u32;
     for &t in token_ids {
         if t == image_token_id {
             if !in_run {
                 in_run = true;
                 runs += 1;
+                // Safety: the sole caller (`create_stored_block_from_parts`)
+                // only reaches here with a non-empty `mm_objects`, so `last()`
+                // is `Some`.
+                let mm_hash = mm_objects
+                    .get(obj_idx)
+                    .copied()
+                    .unwrap_or_else(|| *mm_objects.last().unwrap());
+                run_pad = crate::protocols::pad_value_for_mm_hash(mm_hash);
             }
-            // Safety: the sole caller (`create_stored_block_from_parts`) only
-            // reaches here with a non-empty `mm_objects`, so `last()` is `Some`.
-            let mm_hash = mm_objects
-                .get(obj_idx)
-                .copied()
-                .unwrap_or_else(|| *mm_objects.last().unwrap());
-            out.push(crate::protocols::pad_value_for_mm_hash(mm_hash));
+            out.push(run_pad);
         } else {
             if in_run {
                 in_run = false;
