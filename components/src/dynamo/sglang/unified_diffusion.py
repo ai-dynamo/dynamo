@@ -129,9 +129,7 @@ class SglangDiffusionEngine(DiffusionEngine):
             dist_timeout=getattr(server_args, "dist_timeout", None),
         )
         fs = get_fs(self.config.dynamo_args.media_output_fs_url)
-        self._handler = _make_handler(
-            self.modality, self._generator, self.config, fs
-        )
+        self._handler = _make_handler(self.modality, self._generator, self.config, fs)
         logger.info("SglangDiffusionEngine ready (serving %s)", self.modality)
 
         return EngineConfig(

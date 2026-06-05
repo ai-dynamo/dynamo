@@ -41,9 +41,7 @@ def _params_without_model_mark(configs):
     The sample diffusion engine registers name-only (no Hugging Face model),
     so a ``model`` marker would make ``predownload_models`` try to fetch
     ``sample-diffusion-model`` from the Hub and fail."""
-    return [
-        pytest.param(name, marks=list(cfg.marks)) for name, cfg in configs.items()
-    ]
+    return [pytest.param(name, marks=list(cfg.marks)) for name, cfg in configs.items()]
 
 
 @pytest.fixture(params=_params_without_model_mark(sample_diffusion_configs))

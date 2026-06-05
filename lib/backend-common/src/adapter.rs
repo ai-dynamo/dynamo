@@ -515,8 +515,7 @@ impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Valu
 
         // No first-token signal: raw media engines are aggregated-only, never
         // a disagg decode peer.
-        let gen_ctx =
-            GenerateContext::with_metadata(ctx.clone(), None, handle.metadata().clone());
+        let gen_ctx = GenerateContext::with_metadata(ctx.clone(), None, handle.metadata().clone());
         let chunks = self
             .engine
             .generate(request, gen_ctx)
@@ -1826,7 +1825,10 @@ mod tests {
             while stream.next().await.is_some() {}
         })
         .await;
-        assert!(drained.is_ok(), "stream did not terminate after cancellation");
+        assert!(
+            drained.is_ok(),
+            "stream did not terminate after cancellation"
+        );
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert_eq!(

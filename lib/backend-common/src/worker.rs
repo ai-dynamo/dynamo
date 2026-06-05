@@ -841,14 +841,12 @@ impl Worker {
             // up a `LocalAsyncEngine` for this endpoint name. Register the
             // modality's JSON-shaped probe engine so the probe exercises the
             // same `generate()` path as real traffic.
-            builder = builder
-                .register_local_engine(probe_engine)
-                .map_err(|e| {
-                    err(
-                        ErrorType::Backend(BackendError::Unknown),
-                        format!("register_local_engine: {e}"),
-                    )
-                })?;
+            builder = builder.register_local_engine(probe_engine).map_err(|e| {
+                err(
+                    ErrorType::Backend(BackendError::Unknown),
+                    format!("register_local_engine: {e}"),
+                )
+            })?;
         }
         let serve_fut = builder.start();
         tokio::pin!(serve_fut);
@@ -1080,10 +1078,7 @@ fn control_request_body_error(body: &serde_json::Value) -> Option<serde_json::Va
     }
 }
 
-fn engine_control_callback(
-    control_name: String,
-    engine: EngineKind,
-) -> EngineRouteCallback {
+fn engine_control_callback(control_name: String, engine: EngineKind) -> EngineRouteCallback {
     Arc::new(move |body| {
         let engine = engine.clone();
         let control_name = control_name.clone();
@@ -1307,8 +1302,7 @@ async fn build_local_model(
     // reads this from `model_manager.get_disaggregated_endpoint(...)` to
     // take its optimised "Bootstrap path" (route decode concurrent with
     // prefill instead of waiting for prefill to drain).
-    let disaggregated_endpoint = match (&llm.bootstrap_host, llm.bootstrap_port)
-    {
+    let disaggregated_endpoint = match (&llm.bootstrap_host, llm.bootstrap_port) {
         (Some(host), Some(port)) => {
             tracing::info!(
                 bootstrap_host = %host,
@@ -1599,7 +1593,9 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config, false).await.unwrap();
+        let local_model = build_local_model(&config, &engine_config, false)
+            .await
+            .unwrap();
         let runtime_config = local_model.runtime_config();
 
         assert_eq!(runtime_config.total_kv_blocks, Some(100));
@@ -1690,7 +1686,9 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config, false).await.unwrap();
+        let local_model = build_local_model(&config, &engine_config, false)
+            .await
+            .unwrap();
         // Decode workers cannot host the local indexer endpoint, so the
         // worker forces it off even when the operator-supplied flag is true.
         assert!(!local_model.runtime_config().enable_local_indexer);
@@ -1708,7 +1706,9 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config, false).await.unwrap();
+        let local_model = build_local_model(&config, &engine_config, false)
+            .await
+            .unwrap();
         assert!(local_model.runtime_config().enable_local_indexer);
     }
 
@@ -1732,7 +1732,9 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config, false).await.unwrap();
+        let local_model = build_local_model(&config, &engine_config, false)
+            .await
+            .unwrap();
         let endpoint = local_model
             .runtime_config()
             .disaggregated_endpoint
@@ -1754,7 +1756,9 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config, false).await.unwrap();
+        let local_model = build_local_model(&config, &engine_config, false)
+            .await
+            .unwrap();
         assert!(
             local_model
                 .runtime_config()

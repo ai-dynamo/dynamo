@@ -693,7 +693,9 @@ mod tests {
         let engine = test_engine();
         let cfg = engine.start(0).await.unwrap();
         assert_eq!(cfg.model, "mocker-model");
-        let llm = cfg.llm.expect("LLM engine advertises registration metadata");
+        let llm = cfg
+            .llm
+            .expect("LLM engine advertises registration metadata");
         assert_eq!(llm.kv_cache_block_size, Some(64));
         assert_eq!(llm.total_kv_blocks, Some(16384));
         assert_eq!(llm.max_num_seqs, Some(256));

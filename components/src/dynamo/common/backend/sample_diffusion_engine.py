@@ -111,9 +111,7 @@ class SampleDiffusionEngine(DiffusionEngine):
         data: list[dict[str, Any]] = []
         for _ in range(n):
             if response_format == "b64_json":
-                data.append(
-                    {"b64_json": base64.b64encode(image_bytes).decode("utf-8")}
-                )
+                data.append({"b64_json": base64.b64encode(image_bytes).decode("utf-8")})
             else:
                 # No object store in the sample engine; return a data URL so
                 # "url" responses are still self-contained.
