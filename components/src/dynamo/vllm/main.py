@@ -287,22 +287,44 @@ def setup_metrics_collection(
             )
 
 
-def _resolve_image_token_id(vllm_config: VllmConfig) -> Optional[int]:
-    """Image placeholder token id from the model's HF config (None if absent).
+def _resolve_image_token_id(config: Config) -> Optional[int]:
+    """Routing-side image-placeholder token id for the served model.
 
-    The KV publisher's router-side normalizer uses it to map vLLM BlockStored
-    events onto the canonical pad_value MM-routing scheme; None leaves events
-    unchanged (graceful degrade for text-only models).
+    Resolved via the SAME Rust logic the frontend uses
+    (`dynamo._core.resolve_routing_image_token_id` ->
+    `lightseek_mm::resolve_routing_tokens`), returning `chat_placeholder_token_id`
+    so the KV-event normalizer keys on the identical token the frontend
+    substitutes `pad_value` over — no per-family drift between the two.
+
+    Returns None when the bindings lack the `mm-routing` feature, the local
+    model dir can't be located, or the model isn't in the MM-routing registry.
+    In all of those the frontend also skips MM routing, so a worker-side no-op
+    is consistent (events pass through unchanged).
     """
     try:
-        hf_config = vllm_config.model_config.hf_config
-    except AttributeError:
+        from dynamo._core import resolve_routing_image_token_id
+    except ImportError:
         return None
-    for attr in ("image_token_id", "image_token_index"):
-        val = getattr(hf_config, attr, None)
-        if isinstance(val, int):
-            return val
-    return None
+
+    model_dir = config.model
+    if not os.path.isdir(model_dir):
+        # config.model is an HF id; the model is already in the local cache
+        # (fetch_model ran before engine init), so resolve the snapshot dir
+        # without hitting the network.
+        try:
+            from huggingface_hub import snapshot_download
+
+            model_dir = snapshot_download(config.model, local_files_only=True)
+        except Exception as e:
+            logging.warning(
+                "mm-routing: could not locate local dir for %s (%s); "
+                "KV-event normalization disabled",
+                config.model,
+                e,
+            )
+            return None
+
+    return resolve_routing_image_token_id(config.model, model_dir)
 
 
 def setup_kv_event_publisher(
@@ -349,12 +371,12 @@ def setup_kv_event_publisher(
     dp_start, dp_size = get_dp_range_for_worker(vllm_config)
     kv_publishers = []
     kv_event_block_size = get_configured_kv_event_block_size(vllm_config)
-    # The image placeholder token id vLLM emits at image positions in its
-    # BlockStored events. Passed to the KV publisher so the router-side
-    # normalizer can rewrite those runs to the canonical pad_value scheme that
-    # the Rust frontend uses for MM-aware routing. None (text-only models or
-    # unknown config) leaves events unchanged.
-    image_token_id = _resolve_image_token_id(vllm_config)
+    # The image-placeholder token id the frontend substitutes pad_value over.
+    # Passed to the KV publisher so the router-side normalizer rewrites those
+    # runs in vLLM BlockStored events to the same canonical pad_value scheme.
+    # None (no mm-routing, model not in registry, text-only) leaves events
+    # unchanged — consistent with the frontend also skipping MM routing.
+    image_token_id = _resolve_image_token_id(config)
 
     for dp_rank in range(dp_start, dp_start + dp_size):
         if consolidator_enabled:

@@ -157,6 +157,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(lora_name_to_id, m)?)?;
+    #[cfg(feature = "mm-routing")]
+    m.add_function(wrap_pyfunction!(resolve_routing_image_token_id, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_model, m)?)?;
     m.add_function(wrap_pyfunction!(unregister_model, m)?)?;
@@ -296,6 +298,24 @@ fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) 
 #[pyo3(text_signature = "(lora_name)")]
 fn lora_name_to_id(lora_name: &str) -> i32 {
     llm_rs::utils::lora_name_to_id(lora_name)
+}
+
+/// Resolve the routing-side image-placeholder token id for a model using the
+/// same per-family logic the frontend's MM-aware KV routing uses (lightseek
+/// `resolve_routing_tokens`). Returns `chat_placeholder_token_id` — the exact
+/// id `OpenAIPreprocessor` substitutes `pad_value` over — so the vLLM worker's
+/// KV-event normalizer keys on the identical token (no cross-process drift).
+///
+/// `model_id` is the HF id (used for registry matching); `model_dir` is the
+/// local directory holding `config.json`/`tokenizer.json`. Returns `None` when
+/// the model isn't in the MM-routing registry or its config can't be read.
+#[cfg(feature = "mm-routing")]
+#[pyfunction]
+#[pyo3(text_signature = "(model_id, model_dir)")]
+fn resolve_routing_image_token_id(model_id: &str, model_dir: &str) -> Option<u32> {
+    let dir = std::path::Path::new(model_dir);
+    llm_rs::preprocessor::lightseek_mm::resolve_routing_tokens(model_id, dir)
+        .chat_placeholder_token_id
 }
 
 /// Create an engine and attach it to an endpoint to make it visible to the frontend.
