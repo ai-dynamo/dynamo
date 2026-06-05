@@ -100,7 +100,7 @@ Most inference engines optimize a single GPU or a single node. Dynamo is the **o
 
 ### New in 1.0
 
-- **Zero-config deploy ([DGDR](https://docs.nvidia.com/dynamo/kubernetes-deployment/deployment-guide/dgdr-reference))** *(beta):* Specify model, HW, and SLA in one YAML — AIConfigurator auto-profiles the workload, Planner optimizes the topology, and Dynamo deploys
+- **Zero-config deploy ([DGDR](https://docs.nvidia.com/dynamo/kubernetes-deployment/deploy-models/dgdr-reference))** *(beta):* Specify model, HW, and SLA in one YAML — AIConfigurator auto-profiles the workload, Planner optimizes the topology, and Dynamo deploys
 - **Agentic inference:** Per-request hints for latency priority, expected output length, and cache pinning TTL. [LangChain](https://docs.langchain.com/oss/python/integrations/chat/nvidia_ai_endpoints#use-with-nvidia-dynamo) + [NeMo Agent Toolkit](https://github.com/NVIDIA/NeMo-Agent-Toolkit) integrations
 - **Multimodal E/P/D:** Disaggregated encode/prefill/decode with embedding cache — 30% faster TTFT on image workloads
 - **Video generation:** Native [FastVideo](https://github.com/hao-ai-lab/FastVideo) + [SGLang Diffusion](https://lmsys.org/blog/2026-02-16-sglang-diffusion-advanced-optimizations/) support — real-time 1080p on single B200
@@ -156,7 +156,7 @@ Then start the frontend and a worker as shown above. See the [full installation 
 
 ### Option C: Kubernetes (recommended)
 
-For production multi-node clusters, install the [Dynamo Platform](https://docs.nvidia.com/dynamo/kubernetes-deployment/deployment-guide) and deploy with a single manifest:
+For production multi-node clusters, install the [Dynamo Platform](https://docs.nvidia.com/dynamo/kubernetes-deployment/start-here/installation-guide) and deploy with a single manifest:
 
 ```yaml
 # Zero-config deploy: specify model + SLA, Dynamo handles the rest
@@ -275,7 +275,7 @@ To quickly setup both: `docker compose -f dev/docker-compose.yml up -d`
 - **[Support Matrix](https://docs.nvidia.com/dynamo/resources/support-matrix)** — Hardware, OS, CUDA, and backend versions
 - **[Feature Matrix](https://docs.nvidia.com/dynamo/resources/feature-matrix)** — Detailed backend compatibility
 - **[Release Artifacts](https://docs.nvidia.com/dynamo/resources/release-artifacts)** — Containers, wheels, Helm charts
-- **[Service Discovery](https://docs.nvidia.com/dynamo/kubernetes-deployment/deployment-guide/service-discovery)** — K8s-native vs etcd vs file-based discovery
+- **[Service Discovery](https://docs.nvidia.com/dynamo/kubernetes-deployment/advanced-platform/service-discovery)** — K8s-native vs etcd vs file-based discovery
 - **[Benchmarking Guide](https://docs.nvidia.com/dynamo/user-guides/benchmarking)** — Compare deployment topologies with AIPerf
 
 <!-- Reference links for Feature Compatibility Matrix -->
