@@ -68,9 +68,6 @@ events:
   - kind: ResourcePoller
     services: [Frontend, VllmPrefillWorker, VllmDecodeWorker]
     interval_s: 5
-  - kind: ResourcePoller
-    services: [Frontend, VllmPrefillWorker, VllmDecodeWorker]
-    interval_s: 5
   - kind: StartLoad
     load_ref: warmup
   - kind: WaitForLoadCompletion

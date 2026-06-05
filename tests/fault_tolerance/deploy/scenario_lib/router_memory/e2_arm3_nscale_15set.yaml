@@ -86,9 +86,6 @@ events:
   - kind: ResourcePoller
     services: [Frontend, prefill, decode]
     interval_s: 5
-  - kind: ResourcePoller
-    services: [Frontend, prefill, decode]
-    interval_s: 5
   - kind: StartLoad
     load_ref: ramp-up
   - kind: WaitForLoadCompletion
