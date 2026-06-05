@@ -722,7 +722,17 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                     .map(|m| match m {
                         ChatCompletionRequestMessage::System(s) => match &s.content {
                             ChatCompletionRequestSystemMessageContent::Text(t) => t.as_str(),
-                            _ => "",
+                            // Today this converter only ever builds `Text` system
+                            // content, so the merge is lossless.  Log loudly if a
+                            // non-text variant (e.g. `Array`, should async-openai
+                            // start emitting it) reaches here so the dropped
+                            // content is diagnosable instead of silently lost.
+                            other => {
+                                tracing::debug!(
+                                    "dropping non-text system message content during leading-system merge: {other:?}"
+                                );
+                                ""
+                            }
                         },
                         _ => unreachable!(),
                     })
