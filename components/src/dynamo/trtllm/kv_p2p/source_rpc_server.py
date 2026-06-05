@@ -47,6 +47,7 @@ class _ZmqReqWrapper:
         import zmq
 
         self._socket_path = socket_path
+        self._timeout_ms = timeout_ms
         self._ctx = zmq.Context.instance()
         self._socket = self._ctx.socket(zmq.REQ)
         self._socket.RCVTIMEO = timeout_ms
@@ -55,18 +56,42 @@ class _ZmqReqWrapper:
         self._socket.connect(f"ipc://{socket_path}")
         self._lock = threading.Lock()
 
-    def request(self, method: str, payload: dict) -> dict:
-        """Synchronously round-trip a single RPC. Returns the response dict.
+    def _reset_socket(self) -> None:
+        """Close and recreate the REQ socket. Must be called under self._lock."""
+        import zmq
+        try:
+            self._socket.close(linger=0)
+        except Exception:
+            pass
+        self._socket = self._ctx.socket(zmq.REQ)
+        self._socket.RCVTIMEO = self._timeout_ms
+        self._socket.SNDTIMEO = self._timeout_ms
+        self._socket.connect(f"ipc://{self._socket_path}")
 
-        Always grabs the lock. Wire format mirrors what the REP loop in
-        the engine subprocess expects: pickle-encoded
-        ``{"method": ..., "payload": ...}`` request, pickle-encoded
-        ``{"ok": bool, "result"|"error": ...}`` response.
+    def request(self, method: str, payload: dict, _max_retries: int = 3) -> dict:
+        """Synchronously round-trip a single RPC with retry on timeout.
+
+        On socket error, resets the socket and retries up to _max_retries
+        times with backoff. Prevents the EFSM deadlock where a single
+        timeout permanently kills the REQ socket.
         """
         with self._lock:
-            self._socket.send(pickle.dumps({"method": method, "payload": payload}))
-            raw = self._socket.recv()
-        return pickle.loads(raw)
+            last_exc: Optional[Exception] = None
+            for _attempt in range(_max_retries):
+                try:
+                    self._socket.send(pickle.dumps({"method": method, "payload": payload}))
+                    raw = self._socket.recv()
+                    return pickle.loads(raw)
+                except Exception as exc:
+                    last_exc = exc
+                    logging.warning(
+                        "remote_g2: ZMQ request failed (attempt %d/%d): %s — resetting socket",
+                        _attempt + 1, _max_retries, exc,
+                    )
+                    self._reset_socket()
+                    if _attempt < _max_retries - 1:
+                        time.sleep(0.5 * (_attempt + 1))
+            raise last_exc  # type: ignore[misc]
 
 
 def _make_resolve_handler(req_wrapper: _ZmqReqWrapper):
