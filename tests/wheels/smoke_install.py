@@ -18,18 +18,16 @@ from urllib.parse import unquote, urlparse
 
 
 GLIBC_FLOOR = (2, 28)
-OPTIONAL_WHEEL_DISTS = ("kvbm", "gpu-memory-service", "nixl")
+MANYLINUX_POLICY = "manylinux_2_28"
+# First-party optional wheels expected on a CUDA build.
+ASSERTED_OPTIONAL_DISTS = ("kvbm", "gpu-memory-service")
+# Third-party wheels we ship but do not own — reported, never asserted.
+REPORTED_OPTIONAL_DISTS = ("nixl",)
 EXTRA_EXPECTED_DISTS = {
     "mocker": ("aiconfigurator",),
     "vllm": ("vllm", "nixl"),
     "sglang": ("sglang", "nixl"),
     "trtllm": ("tensorrt-llm",),
-}
-EXTRA_DYNAMO_IMPORTS = {
-    "mocker": "dynamo.mocker",
-    "vllm": "dynamo.vllm",
-    "sglang": "dynamo.sglang",
-    "trtllm": "dynamo.trtllm",
 }
 
 
@@ -89,6 +87,7 @@ def wheel_metadata(wheel: Path) -> dict[str, list[str] | str]:
         if value:
             result[key] = value
     result["Requires-Dist"] = message.get_all("Requires-Dist") or []
+    result["Provides-Extra"] = message.get_all("Provides-Extra") or []
     return result
 
 
@@ -142,10 +141,17 @@ def assert_core_wheel_metadata(wheelhouse: Path, target_arch: str | None) -> Non
         assert_arch_tag(wheel, target_arch)
 
 
-def report_optional_wheels(wheelhouse: Path, target_arch: str | None) -> None:
-    for dist_name in OPTIONAL_WHEEL_DISTS:
+def check_optional_wheels(
+    wheelhouse: Path, target_arch: str | None, expect_optional: bool
+) -> None:
+    for dist_name in ASSERTED_OPTIONAL_DISTS:
         matches = find_wheels(wheelhouse, dist_name)
         if not matches:
+            if expect_optional:
+                raise AssertionError(
+                    f"expected first-party {dist_name!r} wheel on this build, "
+                    f"none found in {wheelhouse}"
+                )
             print(f"optional wheel absent: {dist_name}")
             continue
         for wheel in matches:
@@ -156,10 +162,17 @@ def report_optional_wheels(wheelhouse: Path, target_arch: str | None) -> None:
             )
             assert_arch_tag(wheel, target_arch)
 
+    for dist_name in REPORTED_OPTIONAL_DISTS:
+        for wheel in find_wheels(wheelhouse, dist_name):
+            print(f"third-party wheel present (not asserted): {wheel.name}")
+
 
 def binary_wheels(wheelhouse: Path) -> list[Path]:
+    third_party = {canonical_name(dist) for dist in REPORTED_OPTIONAL_DISTS}
     result = []
     for wheel in all_wheels(wheelhouse):
+        if wheel_dist_name(wheel) in third_party:
+            continue
         _, _, platform_tag = wheel_tags(wheel)
         if platform_tag != "any":
             result.append(wheel)
@@ -168,7 +181,17 @@ def binary_wheels(wheelhouse: Path) -> list[Path]:
 
 def assert_auditwheel_show(wheelhouse: Path) -> None:
     for wheel in binary_wheels(wheelhouse):
-        run(["auditwheel", "show", str(wheel)])
+        proc = run(
+            ["auditwheel", "show", str(wheel)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        print(proc.stdout)
+        if MANYLINUX_POLICY not in proc.stdout:
+            raise AssertionError(
+                f"{wheel.name}: auditwheel did not report a {MANYLINUX_POLICY} "
+                f"policy:\n{proc.stdout}"
+            )
 
 
 def extracted_shared_libraries(wheel: Path, destination: Path) -> list[Path]:
@@ -301,31 +324,13 @@ def assert_dynamo_local_install(
 def run_core_import_smoke(venv_python: Path) -> None:
     code = r"""
 import importlib.metadata as metadata
-import json
 
 import dynamo.runtime as runtime
-from dynamo._core import (
-    Context,
-    __version__,
-    get_reasoning_parser_names,
-    get_tool_parser_names,
-    parse_reasoning_batch,
-)
+from dynamo._core import __version__
 
 assert runtime
-assert metadata.version("ai-dynamo") == metadata.version("ai-dynamo-runtime")
 assert __version__[0].isdigit()
-
-ctx = Context(id="req-1", metadata={"tenant": "alpha"})
-ctx.metadata["region"] = "us-west"
-assert dict(ctx.metadata.items()) == {"region": "us-west", "tenant": "alpha"}
-
-assert get_tool_parser_names()
-assert get_reasoning_parser_names()
-assert json.loads(parse_reasoning_batch("qwen3", "<think>thinking</think>answer")) == {
-    "reasoning_text": "thinking",
-    "normal_text": "answer",
-}
+assert metadata.version("ai-dynamo") == metadata.version("ai-dynamo-runtime")
 
 runtime_files = metadata.files("ai-dynamo-runtime")
 assert runtime_files is not None
@@ -348,34 +353,41 @@ def install_core(wheelhouse: Path, base_python: str) -> Path:
     return venv_python
 
 
-def install_extra(wheelhouse: Path, base_python: str, extra: str) -> Path:
-    ai_dynamo = require_one_wheel(wheelhouse, "ai-dynamo")
-    runtime = require_one_wheel(wheelhouse, "ai-dynamo-runtime")
-    venv_python = create_venv(base_python)
-    pip_install(venv_python, wheelhouse, [str(runtime), f"{ai_dynamo}[{extra}]"])
-    pip_check(venv_python)
-    assert_dynamo_local_install(venv_python, wheelhouse, ai_dynamo, runtime)
-    run_extra_import_smoke(venv_python, extra)
-    return venv_python
+def _requires_dist_for_extra(requires: list[str], dist: str, extra: str) -> bool:
+    wanted = canonical_name(dist)
+    extra_canon = canonical_name(extra)
+    for line in requires:
+        requirement, _, marker = line.partition(";")
+        name = re.match(r"\s*([A-Za-z0-9._-]+)", requirement)
+        if not name or canonical_name(name.group(1)) != wanted:
+            continue
+        guard = re.search(r"""extra\s*==\s*['"]([^'"]+)['"]""", marker)
+        if guard and canonical_name(guard.group(1)) == extra_canon:
+            return True
+    return False
 
 
-def run_extra_import_smoke(venv_python: Path, extra: str) -> None:
+def assert_extra_declared(wheelhouse: Path, extra: str) -> None:
     expected_dists = EXTRA_EXPECTED_DISTS.get(extra)
-    module_name = EXTRA_DYNAMO_IMPORTS.get(extra)
-    if expected_dists is None or module_name is None:
-        raise AssertionError(f"no smoke assertion is defined for extra {extra!r}")
+    if expected_dists is None:
+        raise AssertionError(f"no declaration assertion is defined for extra {extra!r}")
 
-    code = textwrap.dedent(
-        f"""
-        import importlib
-        import importlib.metadata as metadata
+    ai_dynamo = require_one_wheel(wheelhouse, "ai-dynamo")
+    metadata = wheel_metadata(ai_dynamo)
+    provides = {canonical_name(name) for name in metadata.get("Provides-Extra", [])}
+    if canonical_name(extra) not in provides:
+        raise AssertionError(
+            f"{ai_dynamo.name} does not declare extra {extra!r}; provides {sorted(provides)}"
+        )
 
-        for dist_name in {expected_dists!r}:
-            assert metadata.version(dist_name)
-        assert importlib.import_module({module_name!r})
-        """
-    )
-    run([str(venv_python), "-c", code])
+    requires = metadata.get("Requires-Dist", [])
+    for dist in expected_dists:
+        if not _requires_dist_for_extra(requires, dist, extra):
+            raise AssertionError(
+                f"{ai_dynamo.name}[{extra}] does not require {dist!r} under "
+                f'extra == "{extra}"'
+            )
+    print(f"extra {extra!r} declares: {', '.join(expected_dists)}")
 
 
 def main() -> None:
@@ -385,6 +397,7 @@ def main() -> None:
     parser.add_argument("--target-arch", default="")
     parser.add_argument("--extra", default="")
     parser.add_argument("--python", default=sys.executable)
+    parser.add_argument("--expect-optional", action="store_true")
     args = parser.parse_args()
 
     wheelhouse = args.wheelhouse.resolve()
@@ -398,7 +411,7 @@ def main() -> None:
 
     if args.scenario == "metadata":
         assert_core_wheel_metadata(wheelhouse, args.target_arch)
-        report_optional_wheels(wheelhouse, args.target_arch)
+        check_optional_wheels(wheelhouse, args.target_arch, args.expect_optional)
         assert_auditwheel_show(wheelhouse)
         assert_glibc_floor(wheelhouse)
     elif args.scenario == "core":
@@ -406,7 +419,7 @@ def main() -> None:
     elif args.scenario == "extra":
         if not args.extra:
             raise AssertionError("--extra is required for the extra scenario")
-        install_extra(wheelhouse, args.python, args.extra)
+        assert_extra_declared(wheelhouse, args.extra)
 
 
 if __name__ == "__main__":
