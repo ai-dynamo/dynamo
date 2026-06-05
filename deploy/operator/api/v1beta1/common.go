@@ -283,6 +283,35 @@ const (
 	CheckpointModeManual CheckpointMode = "Manual"
 )
 
+// CheckpointStartupPolicy defines when worker pods should wait for a checkpoint.
+// +kubebuilder:validation:Enum=Immediate;WaitForCheckpoint
+type CheckpointStartupPolicy string
+
+const (
+	// CheckpointStartupPolicyImmediate starts workers immediately. The checkpoint
+	// job runs in the background, and only pods created after the checkpoint is
+	// Ready are restore-shaped by the pod-create mutating webhook.
+	CheckpointStartupPolicyImmediate CheckpointStartupPolicy = "Immediate"
+	// CheckpointStartupPolicyWaitForCheckpoint gates worker replicas until the
+	// component's checkpoint is Ready, then starts them from the checkpoint.
+	CheckpointStartupPolicyWaitForCheckpoint CheckpointStartupPolicy = "WaitForCheckpoint"
+)
+
+// CheckpointDeletionPolicy defines what happens to DGD-managed automatic
+// checkpoint resources when the owning DGD is deleted.
+// +kubebuilder:validation:Enum=Delete;Retain
+type CheckpointDeletionPolicy string
+
+const (
+	// CheckpointDeletionPolicyDelete deletes DGD-managed automatic checkpoint
+	// CRs and artifacts when the owning DGD is deleted.
+	CheckpointDeletionPolicyDelete CheckpointDeletionPolicy = "Delete"
+	// CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs
+	// and artifacts after the owning DGD is deleted. Users can reference the
+	// retained checkpoint with checkpointRef if they accept compatibility risk.
+	CheckpointDeletionPolicyRetain CheckpointDeletionPolicy = "Retain"
+)
+
 // ComponentCheckpointConfig configures checkpointing for a DGD component.
 // +kubebuilder:validation:XValidation:rule="!has(self.job) || !has(self.checkpointRef) || size(self.checkpointRef) == 0",message="checkpoint.job cannot be set when checkpointRef is specified"
 // +kubebuilder:validation:XValidation:rule="!has(self.job) || !has(self.mode) || self.mode == 'Auto'",message="checkpoint.job can only be set in Auto mode"
@@ -293,6 +322,23 @@ type ComponentCheckpointConfig struct {
 	// +optional
 	// +kubebuilder:default=Auto
 	Mode CheckpointMode `json:"mode,omitempty"`
+
+	// startupPolicy defines when normal worker replicas are started relative to
+	// automatic checkpoint readiness.
+	// `Immediate` (default): start workers cold immediately; later Pods restore
+	// from the checkpoint once it is Ready.
+	// `WaitForCheckpoint`: keep worker replicas at zero until the checkpoint is
+	// Ready, then start them from the checkpoint.
+	// +optional
+	// +kubebuilder:default=Immediate
+	StartupPolicy CheckpointStartupPolicy `json:"startupPolicy,omitempty"`
+
+	// DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and
+	// artifact are deleted or retained when the owning DGD is deleted.
+	// Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
+	// +optional
+	// +kubebuilder:default=Delete
+	DeletionPolicy CheckpointDeletionPolicy `json:"deletionPolicy,omitempty"`
 
 	// checkpointRef references an existing DynamoCheckpoint CR by `metadata.name`.
 	// When set, this component's `identity` is ignored and the referenced

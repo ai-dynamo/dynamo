@@ -394,7 +394,7 @@ def _run_planner_replay(
     # planner's linear regression. The default polynomial model cannot
     # feed the throughput regression (its decode formula is quadratic in
     # utilization ratio, causing negative regression coefficients).
-    if not adapter._sm._is_easy:
+    if not adapter._is_easy_mode():
         ref_args = extra_engine_args or prefill_engine_args or MockEngineArgs()
         aic_backend = ref_args.aic_backend
         if (
@@ -476,14 +476,14 @@ def _run_planner_replay(
                     # have variance.
                     agg_fpms = prefill_fpms + decode_fpms
                     if agg_fpms:
-                        adapter._sm.load_benchmark_fpms(agg_fpms=agg_fpms)
+                        adapter.install_benchmark_fpms(agg_fpms=agg_fpms)
                     else:
                         sys.stderr.write(
                             "Warning: AIC produced no agg benchmark FPMs\n"
                         )
                 else:
                     if prefill_fpms and decode_fpms:
-                        adapter._sm.load_benchmark_fpms(
+                        adapter.install_benchmark_fpms(
                             prefill_fpms=prefill_fpms, decode_fpms=decode_fpms
                         )
                     else:

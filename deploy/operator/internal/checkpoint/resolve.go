@@ -36,6 +36,7 @@ type CheckpointInfo struct {
 	ArtifactVersion  string
 	CheckpointName   string
 	Ready            bool
+	StartupPolicy    nvidiacomv1alpha1.CheckpointStartupPolicy
 	// Empty means the restore pod targets the default main container.
 	RestoreTargetContainers []string
 }
@@ -71,6 +72,10 @@ func ResolveCheckpointForService(
 	namespace string,
 	config *nvidiacomv1alpha1.ServiceCheckpointConfig,
 ) (*CheckpointInfo, error) {
+	startupPolicy := nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
+	if config != nil && config.StartupPolicy != "" {
+		startupPolicy = config.StartupPolicy
+	}
 	switch {
 	case config == nil || !config.Enabled:
 		return &CheckpointInfo{Enabled: false}, nil
@@ -93,6 +98,7 @@ func ResolveCheckpointForService(
 		if config.TargetContainerName != "" {
 			info.RestoreTargetContainers = []string{config.TargetContainerName}
 		}
+		info.StartupPolicy = startupPolicy
 		return info, nil
 	case config.Identity == nil:
 		// Manual mode with neither checkpointRef nor identity cannot resolve or
@@ -105,7 +111,8 @@ func ResolveCheckpointForService(
 				"checkpoint Manual mode requires checkpointRef or identity to be set")
 		}
 		return &CheckpointInfo{
-			Enabled: true,
+			Enabled:       true,
+			StartupPolicy: startupPolicy,
 		}, nil
 	}
 
@@ -120,9 +127,10 @@ func ResolveCheckpointForService(
 	}
 	if existing == nil {
 		return &CheckpointInfo{
-			Enabled:  true,
-			Identity: config.Identity,
-			Hash:     hash,
+			Enabled:       true,
+			Identity:      config.Identity,
+			Hash:          hash,
+			StartupPolicy: startupPolicy,
 		}, nil
 	}
 
@@ -137,6 +145,7 @@ func ResolveCheckpointForService(
 	if config.TargetContainerName != "" {
 		info.RestoreTargetContainers = []string{config.TargetContainerName}
 	}
+	info.StartupPolicy = startupPolicy
 	return info, nil
 }
 

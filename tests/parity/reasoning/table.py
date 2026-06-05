@@ -72,7 +72,7 @@ CASE_GROUPS = [
         ("stream.1.a", "stream.1.b"),
     ),
     ("Reasoning extraction", ("stream.2.a",)),
-    ("Multi-span", ("stream.2.b",)),
+    ("Multi-span", ("stream.2.b", "stream.2.c")),
     ("Chunk boundaries", ("stream.3.a", "stream.3.b", "stream.3.c")),
 ]
 _CASE_GROUP_BY_CASE = {
@@ -145,9 +145,9 @@ _FAMILY_METADATA = {
     },
     "nemotron_deci": {
         "models": [
-            "Nemotron-Super / -Ultra / -Deci",
+            "Nemotron-Super-v1 / Nemotron-Ultra-v1 / Nemotron-Deci-v1",
             "Llama-Nemotron",
-            "GLM-4.5 / GLM-4.7 via glm45 alias",
+            "GLM-4.5 / GLM-4.6 via glm45 alias",
         ],
         "rust_enum": "ReasoningParserType::NemotronDeci",
         "implementation": "BasicReasoningParser `<think>` / `</think>`",

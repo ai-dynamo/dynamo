@@ -24,6 +24,21 @@ use super::registry::{IndexerKey, ListenerControlError, WorkerRegistry};
 /// We need to fit one million tokens as JSON text, this should do it.
 const QUERY_REQUEST_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
+/// Gates the listener-control test endpoints; unset in production, set by the
+/// e2e harness. Accepts `1`/`true`/`yes`/`on`.
+const DYN_KV_INDEXER_TEST_ENDPOINTS: &str = "DYN_KV_INDEXER_TEST_ENDPOINTS";
+
+fn test_endpoints_enabled() -> bool {
+    matches!(
+        std::env::var(DYN_KV_INDEXER_TEST_ENDPOINTS)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 pub struct AppState {
     pub registry: Arc<WorkerRegistry>,
     #[cfg(feature = "metrics")]
@@ -521,6 +536,12 @@ async fn handle_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
+    build_router(state, test_endpoints_enabled())
+}
+
+/// Mounts the listener-control test endpoints only when `test_endpoints` is
+/// true; the explicit parameter lets tests exercise both states.
+fn build_router(state: Arc<AppState>, test_endpoints: bool) -> Router {
     let router = Router::new()
         .route("/register", post(register))
         .route("/unregister", post(unregister))
@@ -536,10 +557,18 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/peers", get(list_peers))
         .route("/health", get(handle_health));
 
-    let router = router
-        .route("/test/pause_listener", post(test_pause_listener))
-        .route("/test/resume_listener", post(test_resume_listener))
-        .with_state(state.clone());
+    let mut router = router;
+    if test_endpoints {
+        tracing::warn!(
+            "Mounting listener-control test endpoints (/test/pause_listener, \
+             /test/resume_listener). These manipulate worker listener state and must never be \
+             enabled in production."
+        );
+        router = router
+            .route("/test/pause_listener", post(test_pause_listener))
+            .route("/test/resume_listener", post(test_resume_listener));
+    }
+    let router = router.with_state(state.clone());
 
     #[cfg(feature = "metrics")]
     let router = {
@@ -708,6 +737,66 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    fn empty_indexer_router(test_endpoints: bool) -> Router {
+        build_router(
+            Arc::new(AppState {
+                registry: Arc::new(WorkerRegistry::new(1)),
+                #[cfg(feature = "metrics")]
+                prom_registry: prometheus::Registry::new(),
+            }),
+            test_endpoints,
+        )
+    }
+
+    /// Malformed body so the states are distinguishable: an unmounted route
+    /// 404s before parsing, a mounted handler rejects it with a non-404. (A
+    /// valid body would 404 via `WorkerNotFound` either way.)
+    async fn post_malformed(app: &Router, uri: &str) -> StatusCode {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("not json"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    const LISTENER_CONTROL_ROUTES: [&str; 2] = ["/test/pause_listener", "/test/resume_listener"];
+
+    #[tokio::test]
+    async fn listener_control_endpoints_are_not_mounted_by_default() {
+        let app = empty_indexer_router(false);
+        for uri in LISTENER_CONTROL_ROUTES {
+            assert_eq!(
+                post_malformed(&app, uri).await,
+                StatusCode::NOT_FOUND,
+                "{uri} must not be mounted unless test endpoints are explicitly enabled"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn listener_control_endpoints_are_mounted_when_enabled() {
+        let app = empty_indexer_router(true);
+        for uri in LISTENER_CONTROL_ROUTES {
+            let status = post_malformed(&app, uri).await;
+            assert_ne!(
+                status,
+                StatusCode::NOT_FOUND,
+                "{uri} should be mounted and reject the malformed body, not 404"
+            );
+            assert!(
+                status.is_client_error(),
+                "{uri} should reject the malformed body with a 4xx, got {status}"
+            );
+        }
     }
 
     // ── /workers endpoint tests ───────────────────────────────────────────────

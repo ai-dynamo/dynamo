@@ -2003,7 +2003,12 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	}
 
 	// GMS weight servers load weights fresh from disk and are not CRIU targets.
-	if p.operatorConfig.Checkpoint.Enabled && p.r.Role != RoleGMS {
+	shouldUseAdmissionRestore := p.operatorConfig.Checkpoint.Enabled &&
+		p.r.Role != RoleGMS &&
+		p.checkpointInfo != nil &&
+		(p.checkpointInfo.StartupPolicy == "" ||
+			p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyImmediate)
+	if p.operatorConfig.Checkpoint.Enabled && p.r.Role != RoleGMS && !shouldUseAdmissionRestore {
 		if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
 			p.ctx, p.kubeClient, p.dynamoDeployment.Namespace, podSpec, p.checkpointInfo,
 			p.operatorConfig.Checkpoint.Storage,
@@ -2045,12 +2050,21 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	if p.isMultinode && !p.isInterPodFailover {
 		minAvailable = p.r.Replicas
 	}
+	replicas := p.r.Replicas
+	if p.r.Role != RoleGMS &&
+		p.checkpointInfo != nil &&
+		p.checkpointInfo.Enabled &&
+		p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
+		!p.checkpointInfo.Ready {
+		replicas = 0
+		minAvailable = 0
+	}
 
 	clique := &grovev1alpha1.PodCliqueTemplateSpec{
 		Name: strings.ToLower(p.r.Name),
 		Spec: grovev1alpha1.PodCliqueSpec{
 			RoleName:     strings.ToLower(p.r.Name),
-			Replicas:     p.r.Replicas,
+			Replicas:     replicas,
 			MinAvailable: ptr.To(minAvailable),
 			PodSpec:      *podSpec,
 		},
@@ -2089,8 +2103,14 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		annotations[commonconsts.KubeAnnotationTopologyLabelKey] = p.dynamoDeployment.Spec.Experimental.KvTransferPolicy.LabelKey
 	}
 	if p.r.Role != RoleGMS {
-		if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(labels, annotations, p.checkpointInfo, p.operatorConfig.Checkpoint.Storage); err != nil {
-			return nil, fmt.Errorf("failed to apply checkpoint metadata for role %s: %w", p.r.Name, err)
+		if shouldUseAdmissionRestore {
+			if err := checkpoint.ApplyRestoreCandidateMetadata(labels, annotations, p.checkpointInfo); err != nil {
+				return nil, fmt.Errorf("failed to apply checkpoint candidate metadata for role %s: %w", p.r.Name, err)
+			}
+		} else {
+			if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(labels, annotations, p.checkpointInfo, p.operatorConfig.Checkpoint.Storage); err != nil {
+				return nil, fmt.Errorf("failed to apply checkpoint metadata for role %s: %w", p.r.Name, err)
+			}
 		}
 	}
 	annotations = applyRestartAnnotation(annotations, p.componentName, p.restartState, p.existingRestartAnnotations)
@@ -2243,11 +2263,20 @@ func GenerateGrovePodCliqueSet(
 		}
 
 		if usesPCSG {
+			replicas := component.Replicas
+			minAvailable := ptr.To(int32(1))
+			if checkpointInfo != nil &&
+				checkpointInfo.Enabled &&
+				checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
+				!checkpointInfo.Ready {
+				replicas = ptr.To(int32(0))
+				minAvailable = ptr.To(int32(0))
+			}
 			pcsg := grovev1alpha1.PodCliqueScalingGroupConfig{
 				Name:               strings.ToLower(componentName),
 				CliqueNames:        cliqueNames,
-				Replicas:           component.Replicas,
-				MinAvailable:       ptr.To(int32(1)),
+				Replicas:           replicas,
+				MinAvailable:       minAvailable,
 				TopologyConstraint: toGroveTopologyConstraint(component.TopologyConstraint),
 			}
 			if isInterPodGMS {
