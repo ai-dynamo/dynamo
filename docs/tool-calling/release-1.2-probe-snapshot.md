@@ -1,12 +1,9 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-
-# Tool Calling Probe Snapshot for Dynamo 1.2
-
-Static release snapshot of tool-calling probe results across supported model
-families.
+---
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Tool Calling Probe Snapshot for Dynamo 1.2"
+subtitle: Static release snapshot of tool-calling probe results across supported model families
+---
 
 This page captures a one-time Dynamo 1.2.0 release snapshot from the
 tool-calling probe harness generated on 2026-06-05 at 07:24 UTC. It is not a
