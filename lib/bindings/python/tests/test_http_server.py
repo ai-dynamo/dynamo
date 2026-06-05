@@ -39,6 +39,7 @@ class _StatusLikeError(Exception):
         self.status = status
         self.message = message
 
+
 pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
