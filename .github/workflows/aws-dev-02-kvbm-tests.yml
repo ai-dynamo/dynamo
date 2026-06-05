@@ -1,0 +1,42 @@
+name: aws-dev-02 kvbm tests
+# Runs the KVBM integration tests that are NOT selected by any upstream CI job
+# (they lack a framework marker, so pr/post-merge/nightly selectors skip them) on
+# the aws-dev-02 H100 self-hosted runners. This validates both that the tests pass
+# on these nodes and that the runner flow works end to end: runner-coordinator pod
+# -> ARC k8s container-hook job pod -> per-runner work PVC on ci-local-nvme -> 2x
+# H100 GPU allocation -> shared-model-cache mount. Scoped to a dedicated test
+# branch so it never runs on normal PRs.
+on:
+  push:
+    branches: [test/aws-dev-02-runner-smoke]
+  workflow_dispatch:
+
+jobs:
+  kvbm-tests:
+    runs-on: aws-dev-02-tester-amd-gpu-v2
+    container:
+      # Pin to an already-built image so we don't trigger a full image build. This
+      # vllm-runtime-test image has the kvbm module built in, so the kvbm-marked
+      # tests are not auto-skipped by tests/conftest.py.
+      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:0dfe187b04d2af5a4b6366a4e8e348ba1045d124-vllm-runtime-test
+      env:
+        # Required: dynamo image user is UID 1000, runner job pod runs as UID 1001.
+        HOME: /__w/dynamo/dynamo
+        USER: dynamo
+    steps:
+      - uses: actions/checkout@v4
+      - name: Environment
+        run: |
+          id
+          nvidia-smi -L
+          df -h "$GITHUB_WORKSPACE"
+      - name: KVBM integration tests (currently disabled in upstream CI)
+        env:
+          HF_HOME: /scratch/hf
+        run: |
+          cd /workspace
+          python -m pytest \
+            tests/kvbm_integration/test_consolidator_router_e2e.py \
+            tests/kvbm_integration/test_determinism_agg.py \
+            -m "kvbm or kvbm_concurrency" \
+            -v -s -p no:cacheprovider
