@@ -92,7 +92,7 @@ load:
 events:
   - kind: WaitForModelReady
     timeout: 900
-  - kind: PodMemoryPoller
+  - kind: ResourcePoller
     services: [Frontend, prefill, decode]
     interval_s: 5
   - kind: StartLoad

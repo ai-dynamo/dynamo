@@ -64,11 +64,6 @@ def _build_registry(base: type) -> dict[str, type]:
 
 
 EVENT_REGISTRY = _build_registry(Event)
-# Retired pollers: PodMemoryPoller / PodMemoryPoller2 are now aliases of
-# ResourcePoller (events.py). Map the old ``kind:`` strings so existing scenario
-# YAMLs need no edits (field signatures are identical: services + interval_s).
-EVENT_REGISTRY["PodMemoryPoller"] = EVENT_REGISTRY["ResourcePoller"]
-EVENT_REGISTRY["PodMemoryPoller2"] = EVENT_REGISTRY["ResourcePoller"]
 REPORT_REGISTRY = _build_registry(Report)
 CHECK_REGISTRY = _build_registry(Check)
 
@@ -425,7 +420,7 @@ def build_scenario_events(scenario: Scenario, served_model: str) -> list[Event]:
 
     Otherwise generate the canonical sequence from scenario.load.rungs:
       1. WaitForModelReady(timeout=2400)
-      2. PodMemoryPoller(services=[Frontend, VllmPrefillWorker, VllmDecodeWorker], interval_s=10)
+      2. ResourcePoller(services=[Frontend, VllmPrefillWorker, VllmDecodeWorker], interval_s=10)
       3. For each rung: StartLoad + WaitForLoadCompletion
     """
     if scenario.events:
@@ -452,12 +447,12 @@ def _generate_default_events(scenario: Scenario, served_model: str) -> list[Even
         )
     # Use the registry to construct so dataclass field-validation runs.
     WaitForModelReady = EVENT_REGISTRY["WaitForModelReady"]
-    PodMemoryPoller = EVENT_REGISTRY["PodMemoryPoller"]
+    ResourcePoller = EVENT_REGISTRY["ResourcePoller"]
     WaitForLoadCompletion = EVENT_REGISTRY["WaitForLoadCompletion"]
 
     events: list[Event] = [
         WaitForModelReady(timeout=2400),
-        PodMemoryPoller(
+        ResourcePoller(
             services=["Frontend", "VllmPrefillWorker", "VllmDecodeWorker"],
             interval_s=10,
         ),

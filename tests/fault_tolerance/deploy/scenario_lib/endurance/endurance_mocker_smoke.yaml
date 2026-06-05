@@ -56,7 +56,7 @@ load:
 events:
   - kind: WaitForModelReady
     timeout: 1800
-  - kind: PodMemoryPoller
+  - kind: ResourcePoller
     services: [Frontend, decode]
     interval_s: 10
   - kind: PeriodicSnapshot

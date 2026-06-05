@@ -98,7 +98,7 @@ load:
 events:
   - kind: WaitForModelReady
     timeout: 2400
-  - kind: PodMemoryPoller
+  - kind: ResourcePoller
     services: [Frontend, VllmPrefillWorker, VllmDecodeWorker]
     interval_s: 5
   - kind: StartLoad

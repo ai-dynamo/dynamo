@@ -44,10 +44,7 @@ __all__ = [
     "PrintProcessTree",
     "RstInjection",
     "RstFromInsidePod",
-    "PodMemoryPoller",
-    "PodMemoryPoller2",
     "ResourcePoller",
-    "synthesize_pod_memory_growth_tsv",
     "PeriodicSnapshot",
     "RANDOM",
     "ALL",
@@ -2280,21 +2277,6 @@ class RstFromInsidePod(Event):
         )
 
 
-# =============================================================================
-# PodMemoryPoller — records BOTH cgroup container memory (metrics.k8s.io,
-# same source kubelet uses for OOMKill decisions) AND per-process RSS
-# of pid 1 (/proc/1/status:VmRSS, via pod.exec) for each pod, on every
-# poll. Two columns let PodMemoryGrowth assert on the right signal:
-#
-#   - working_set_bytes: what kubelet sees → OOMKill-relevant.
-#   - pid1_rss_bytes: what the main binary actually maps → attribution.
-#
-# The two are usually close on single-process containers like the
-# Dynamo frontend, but diverge when child processes are large (e.g.
-# vLLM workers).
-# =============================================================================
-
-
 def _parse_k8s_quantity(s: str) -> int:
     """Parse a k8s resource quantity like '123Mi', '12345Ki', '1Gi' to bytes."""
     if not s:
@@ -2331,8 +2313,8 @@ def _load_respoller_source() -> str:
 
 @dataclass
 class ResourcePoller(Event):
-    """In-pod per-process resource sampler — successor to :class:`PodMemoryPoller`
-    (host-side) and :class:`PodMemoryPoller2` (in-pod, pid1-only). Launches one
+    """In-pod per-process resource sampler — the single memory/cpu/gpu poller
+    (it replaced the earlier pid1-only host-side and in-pod pollers). Launches one
     detached python sampler (``_respoller.py``) per pod that, every
     ``interval_s``, writes two TSVs to the pod's ``$DYN_LOG_DIR`` (carried back by
     the existing extractor):
@@ -2367,10 +2349,10 @@ class ResourcePoller(Event):
         launch = (
             (
                 "set -e; "
-                # Idempotent per pod: a scenario may declare two pollers (e.g. the
-                # legacy PodMemoryPoller + PodMemoryPoller2, both now aliased to
-                # ResourcePoller) — only the first launch per pod runs; the rest
-                # no-op so they don't truncate the TSV or spawn a second daemon.
+                # Idempotent per pod: a scenario may declare two ResourcePoller
+                # events (e.g. one migrated from the old dual memory pollers) —
+                # only the first launch per pod runs; the rest no-op so they don't
+                # truncate the TSV or spawn a second daemon.
                 "if [ -f /tmp/.respoller.started ]; then "
                 'echo "respoller already started on $(hostname), skipping"; exit 0; fi; '
                 'OUTDIR="${DYN_LOG_DIR:-/tmp/service_logs}"; mkdir -p "$OUTDIR"; '
@@ -2429,73 +2411,6 @@ class ResourcePoller(Event):
         )
 
 
-# ── PodMemoryPoller / PodMemoryPoller2 retired -> ResourcePoller ─────────────
-# The pid1-only host-side (PMP1) and in-pod (PMP2) pollers are superseded by
-# ResourcePoller (per-process mem+cpu+gpu, in-pod). The old names are kept as
-# aliases so existing Python imports + ``kind:`` references resolve to
-# ResourcePoller — field signatures are identical (services + interval_s). The
-# YAML registry also maps the old kinds (scenario_lib/_runtime.py).
-PodMemoryPoller = ResourcePoller
-PodMemoryPoller2 = ResourcePoller
-
-
-def synthesize_pod_memory_growth_tsv(log_dir: str) -> str | None:
-    """Build PMP1's legacy ``pod_memory_growth.tsv`` (v3 format) from the per-pod
-    ``<role>/<pod>.resources.agg.tsv`` files ResourcePoller writes, so the
-    ``PodMemoryGrowth`` check + ``PeriodicSnapshot`` keep working now that PMP1
-    (which produced the union file host-side) is retired. Per-GPU rows are
-    deduped (working_set / pid1_rss are pod-level, repeated per GPU row of a
-    tick). ``service`` is the role dir name (lower-case) — the check matches
-    services case-insensitively. Returns the written path, or None if no agg
-    files were found."""
-    agg_files = sorted(glob.glob(os.path.join(log_dir, "*", "*.resources.agg.tsv")))
-    if not agg_files:
-        return None
-    rows = []
-    for f in agg_files:
-        service = os.path.basename(os.path.dirname(f))
-        header = None
-        seen = set()
-        try:
-            with open(f) as fh:
-                for ln in fh:
-                    ln = ln.rstrip("\n")
-                    if not ln or ln.startswith("#"):
-                        continue
-                    cols = ln.split("\t")
-                    if header is None and cols[:1] == ["epoch_s"]:
-                        header = cols
-                        continue
-                    if header is None:
-                        continue
-                    r = dict(zip(header, cols))
-                    epoch = r.get("epoch_s", "")
-                    if epoch in seen:  # dedup per-GPU rows of one tick
-                        continue
-                    seen.add(epoch)
-                    rows.append(
-                        (
-                            epoch,
-                            service,
-                            r.get("pod", ""),
-                            "main",
-                            r.get("working_set", "-1"),
-                            r.get("pid1_rss", "-1"),
-                        )
-                    )
-        except OSError:
-            continue
-    rows.sort(key=lambda x: (x[1], x[2], x[0]))
-    out_path = os.path.join(log_dir, "pod_memory_growth.tsv")
-    with open(out_path, "w") as out:
-        out.write(
-            "epoch_s\tservice\tpod\tcontainer\tworking_set_bytes\tpid1_rss_bytes\n"
-        )
-        for r in rows:
-            out.write("\t".join(str(x) for x in r) + "\n")
-    return out_path
-
-
 @dataclass
 class PeriodicSnapshot(Event):
     """Background event that, on a fixed interval, copies key artifacts
@@ -2539,7 +2454,6 @@ class PeriodicSnapshot(Event):
     _stop: object = field(default=None, init=False, repr=False)
 
     async def execute(self, ctx: "ScenarioContext") -> None:
-        import glob
         import os
         import shutil
         import time

@@ -741,47 +741,55 @@ class PodMemoryGrowth(Check):
 
     def validate(self, ctx) -> None:
         log_dir = getattr(ctx, "log_dir", None)
-        path = _os.path.join(log_dir, self.tsv_filename) if log_dir else None
-        if not path or not _os.path.isfile(path):
-            assert False, (
-                f"PodMemoryGrowth: {self.tsv_filename} not found at "
-                f"{path!r}; the test must install a MemoryPoller event "
-                f"before running the scenario."
+        # Read ResourcePoller's native per-pod TSVs directly:
+        #   <log_dir>/<role>/<pod>.resources.agg.tsv
+        # columns: epoch_s, pod, working_set, cgroup_current, all_pids_rss,
+        #   pid1_rss, gpu_idx, gpu_util, gpu_mem_used, gpu_mem_total
+        # ``source`` ("working_set"|"pid1_rss") picks the column; the per-GPU rows
+        # (one per device per tick) are deduped by epoch. The role dir is
+        # lower-case ("vllmdecodeworker") so services match case-insensitively.
+        files = (
+            sorted(
+                _glob(_os.path.join(_glob_escape(log_dir), "*", "*.resources.agg.tsv"))
             )
-        # TSV columns:
-        #   v3 (current, 6 fields): epoch_s, svc, pod, container,
-        #       working_set_bytes, pid1_rss_bytes
-        #   v2 (5 fields): epoch_s, svc, pod, container, working_set_bytes
-        #   v1 (4 fields): epoch_s, svc, pod, vm_rss_kb (legacy)
-        # self.source ("working_set"|"pid1_rss") picks the column.
+            if log_dir
+            else []
+        )
+        assert files, (
+            f"PodMemoryGrowth: no *.resources.agg.tsv found under {log_dir!r}; "
+            f"the test must install a ResourcePoller event before the scenario."
+        )
+        col = "pid1_rss" if self.source == "pid1_rss" else "working_set"
+        want_svcs = {s.lower() for s in self.services}
         per_pod = {}
-        with open(path) as fh:
-            for line in fh:
-                parts = line.strip().split("\t")
-                if not parts or parts[0] == "epoch_s":
-                    continue
-                try:
-                    t = float(parts[0])
-                    svc = parts[1]
-                    pod = parts[2]
-                    if len(parts) >= 6:
-                        bytes_ = float(
-                            parts[5] if self.source == "pid1_rss" else parts[4]
-                        )
-                    elif len(parts) >= 5:
-                        bytes_ = float(parts[4])
-                    elif len(parts) >= 4:
-                        bytes_ = float(parts[3]) * 1024.0
-                    else:
+        for f in files:
+            svc = _os.path.basename(_os.path.dirname(f))
+            if svc.lower() not in want_svcs:
+                continue
+            header = None
+            seen = set()
+            with open(f) as fh:
+                for line in fh:
+                    line = line.rstrip("\n")
+                    if not line or line.startswith("#"):
                         continue
-                except ValueError:
-                    continue
-                # Case-insensitive: ResourcePoller's synthesized pod_memory_growth.tsv
-                # uses the lower-case role dir name (e.g. "vllmdecodeworker") while
-                # scenarios list services in CamelCase ("VllmDecodeWorker").
-                if svc.lower() not in {s.lower() for s in self.services}:
-                    continue
-                per_pod.setdefault(pod, []).append((t, bytes_))
+                    cells = line.split("\t")
+                    if header is None and cells[:1] == ["epoch_s"]:
+                        header = cells
+                        continue
+                    if header is None:
+                        continue
+                    row = dict(zip(header, cells))
+                    ep = row.get("epoch_s", "")
+                    if ep in seen:  # dedup the per-GPU rows of one tick
+                        continue
+                    seen.add(ep)
+                    try:
+                        t = float(ep)
+                        bytes_ = float(row.get(col, "-1"))
+                    except ValueError:
+                        continue
+                    per_pod.setdefault(row.get("pod", ""), []).append((t, bytes_))
 
         max_rate_pod = None
         max_rate = 0.0

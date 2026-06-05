@@ -35,7 +35,7 @@ from tests.fault_tolerance.deploy.checks import (
     _iter_server_metric,
 )
 from tests.fault_tolerance.deploy.events import (
-    PodMemoryPoller,
+    ResourcePoller,
     StartLoad,
     Wait,
     WaitForLoadCompletion,
@@ -1371,7 +1371,7 @@ async def test_kv_router_memory_stability(
         # pick up loader/init memory in the slope. interval_s=10 gives
         # ~180 samples over a 30-min steady window — smooth slope, low
         # kubectl-exec overhead.
-        PodMemoryPoller(
+        ResourcePoller(
             services=["Frontend", "VllmPrefillWorker", "VllmDecodeWorker"],
             interval_s=10,
         ),
@@ -1637,7 +1637,7 @@ async def test_overload_cascade_chain_phased(runtime_env, request, arm_label):
       P4        4 min  drop pin + c=24       recovery + final memory
 
     The pinned long load spans P1..P3 (48 min). Unpinned loads start/stop
-    per phase. PodMemoryPoller captures pod_memory_growth.tsv at 10s.
+    per phase. ResourcePoller captures pod_memory_growth.tsv at 10s.
 
     Per-arm knobs differ only in routing strategy + admission. Image
     selected via CLI ``--image`` at launch time (no per-arm hard-coded
@@ -1745,7 +1745,7 @@ async def test_overload_cascade_chain_phased(runtime_env, request, arm_label):
     events = [
         WaitForModelReady(timeout=2400),
         # Continuous FE memory polling for the full 57-min run
-        PodMemoryPoller(
+        ResourcePoller(
             services=["Frontend", "VllmPrefillWorker", "VllmDecodeWorker"],
             interval_s=10,
         ),
@@ -1972,7 +1972,7 @@ async def test_overload_natural_overload(runtime_env, request, arm_label):
     # NOTE: identical to chain_phased except worker_pin=None below.
     events = [
         WaitForModelReady(timeout=2400),
-        PodMemoryPoller(
+        ResourcePoller(
             services=["Frontend", "VllmPrefillWorker", "VllmDecodeWorker"],
             interval_s=10,
         ),
@@ -2265,7 +2265,7 @@ async def test_overload_2hr_realistic(runtime_env, request, arm_label):
     # pairs. AIPerf has ~15-30 s setup per Job, factored into total wall.
     events = [
         WaitForModelReady(timeout=2400),
-        PodMemoryPoller(
+        ResourcePoller(
             services=["Frontend", "VllmPrefillWorker", "VllmDecodeWorker"],
             interval_s=10,
         ),
@@ -2482,7 +2482,7 @@ async def test_overload_2hr_sanity(runtime_env, request):
     #              + 1 (recovery) + 1 (cooldown) ≈ 14.5 min + AIPerf overhead.
     events = [
         WaitForModelReady(timeout=2400),
-        PodMemoryPoller(
+        ResourcePoller(
             services=["Frontend", "VllmPrefillWorker", "VllmDecodeWorker"],
             interval_s=10,
         ),
@@ -2675,7 +2675,7 @@ async def test_overload_30min_prod_config(runtime_env, request, arm_label):
 
     events = [
         WaitForModelReady(timeout=2400),
-        PodMemoryPoller(
+        ResourcePoller(
             services=["Frontend", "VllmPrefillWorker", "VllmDecodeWorker"],
             interval_s=10,
         ),
