@@ -57,7 +57,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/frontend:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.0
   - name: VllmDecodeWorker
     type: decode
     replicas: 1
