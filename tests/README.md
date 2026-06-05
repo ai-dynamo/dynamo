@@ -119,7 +119,7 @@ Markers are required for all tests. They are used for test selection in CI and l
 |-------------------------|------------------------------------------------------------------|------------------------------------|
 | Lifecycle [required]    | pre_merge, post_merge, nightly                                   | When the test should run. Aggregate pipeline budgets: pre_merge < 30 min, post_merge < 1 hr, nightly < 3 hr. See [Pipeline Time Budgets](#pipeline-time-budgets). |
 | Test Type [required]    | unit, integration, e2e, benchmark, performance, stress | Nature of the test               |
-| Hardware [required]     | gpu_0, gpu_1, gpu_2, gpu_4, gpu_8, h100                         | Number/type of GPUs required       |
+| Hardware [required]     | gpu_0, gpu_1, gpu_2, gpu_3, gpu_4, gpu_8, h100                  | Number/type of GPUs required       |
 | VRAM (profiled)         | profiled_vram_gib(N)                                                         | Actual peak VRAM observed by nvidia-smi during profiling (includes CUDA overhead). Used for `--max-vram-gib=N` filtering and GPU-parallel scheduler budget tracking. |
 | vLLM KV cache bytes     | requested_vllm_kv_cache_bytes(N)                                             | (vLLM only) Exact KV cache bytes. Sets `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES` → `--kv-cache-memory-bytes`. Deterministic, parallel-safe. |
 | SGLang KV tokens        | requested_sglang_kv_tokens(N)                                                          | (SGLang only) Max KV cache tokens. Sets `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` → `--max-total-tokens`. Deterministic, parallel-safe. |
@@ -474,7 +474,7 @@ Runs per framework (vllm, sglang, trtllm). Each framework goes through: **Build*
 | CPU-only tests (parallel) | `(pre_merge or post_merge) and <framework> and gpu_0` | `pytest -m "(pre_merge or post_merge) and vllm and gpu_0" -n auto --dist=loadscope -v --tb=short` |
 | Single GPU tests (sequential) | `(pre_merge or post_merge) and <framework> and gpu_1` | `pytest -m "(pre_merge or post_merge) and vllm and gpu_1" -v --tb=short` |
 | 2-GPU tests (sequential) | `(pre_merge or post_merge) and <framework> and gpu_2` | `pytest -m "(pre_merge or post_merge) and vllm and gpu_2" -v --tb=short` |
-| 4-GPU tests (sequential) | `(pre_merge or post_merge) and vllm and gpu_4` | `pytest -m "(pre_merge or post_merge) and vllm and gpu_4" -v --tb=short` |
+| 3-GPU vLLM tests (sequential) | `(pre_merge or post_merge) and vllm and gpu_3` | `pytest -m "(pre_merge or post_merge) and vllm and gpu_3" -v --tb=short` |
 
 ### Nightly (daily at midnight PST)
 

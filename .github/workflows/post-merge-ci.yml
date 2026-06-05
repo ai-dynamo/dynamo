@@ -357,19 +357,19 @@ jobs:
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
-  vllm-multi-gpu-4-test:
+  vllm-multi-gpu-3-test:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [vllm-build]
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
-      test_type: Multi-GPU Test (gpu_4)
-      amd_runner: prod-tester-amd-gpu-4-v3
+      test_type: Multi-GPU Test (gpu_3)
+      amd_runner: prod-tester-amd-gpu-3-v3
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_4'
+      gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_3'
       gpu_test_timeout_minutes: 60
     secrets: inherit
 

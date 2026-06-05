@@ -428,9 +428,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 # Moved to post_merge: same LLaVA-1.5 flake as e_pd above.
                 marks=[pytest.mark.post_merge],
                 timeout_s=600,
-                gpu_marker="gpu_4",
-                # Default 3-GPU layout: encode → GPU 0, prefill → GPU 1,
-                # decode → GPU 2. Each worker has its own GPU; per-GPU peak
+                gpu_marker="gpu_3",
+                # Default 3-GPU layout: encode on GPU 0, prefill on GPU 1,
+                # decode on GPU 2. Each worker has its own GPU; per-GPU peak
                 # ~14-18 GB (single worker + weights + KV). Fits on 24 GB L4
                 # tier.
                 #

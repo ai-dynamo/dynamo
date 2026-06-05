@@ -63,7 +63,7 @@ Marks attached to each EngineConfig are layered, in this order
 (later wins on conflicts that pytest cares about — pytest just
 collects all marks):
 
-1. GPU marker (`gpu_1` / `gpu_2` / `gpu_4`) — from `topology.gpu_marker`
+1. GPU marker (`gpu_1` / `gpu_2` / `gpu_3` / `gpu_4`) — from `topology.gpu_marker`
    or falling back to `profile.gpu_marker`
 2. `pytest.mark.timeout(...)` — from `case.timeout_s` if set, else
    `topology.timeout_s`

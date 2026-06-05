@@ -60,6 +60,7 @@ REQUIRED_CATEGORIES: Dict[str, Set[str]] = {
         "gpu_0",
         "gpu_1",
         "gpu_2",
+        "gpu_3",
         "gpu_4",
         "gpu_8",
         "h100",
