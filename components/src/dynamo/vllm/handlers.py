@@ -507,7 +507,21 @@ def _accumulate_engine_data(
         }
     )
     if logprob_accumulator:
-        engine_data["completion_logprobs"] = list(logprob_accumulator)
+        # completion_logprobs must stay positionally aligned 1:1 with
+        # completion_token_ids — the trainer indexes them together. A dropped or
+        # None logprob on any chunk shifts every later logprob onto the wrong
+        # token, so emit them only when the counts match; otherwise omit (a
+        # silently misaligned list corrupts the off-policy correction).
+        if len(logprob_accumulator) == len(token_accumulator):
+            engine_data["completion_logprobs"] = list(logprob_accumulator)
+        else:
+            logger.warning(
+                "Dropping completion_logprobs for output index %d: logprob "
+                "count %d != token count %d (misaligned)",
+                output_index,
+                len(logprob_accumulator),
+                len(token_accumulator),
+            )
     if request_prompt_token_ids:
         engine_data["prompt_token_ids"] = list(request_prompt_token_ids)
     tok["engine_data"] = engine_data
