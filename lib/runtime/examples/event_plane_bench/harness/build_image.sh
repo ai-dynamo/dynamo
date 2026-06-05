@@ -44,16 +44,24 @@ python3 container/render.py --framework dynamo --device cuda --cuda-version 13.0
 # 3) Build (BuildKit). ~20-40 min cold; layer-cached on a pinned host after.
 DOCKER_BUILDKIT=1 docker build -f container/rendered.Dockerfile -t "$IMAGE" .
 
-# 4) Add event_plane_bench_sub on PATH (built INSIDE the image -> ABI-consistent).
-#    examples are a SEPARATE cargo workspace, so the main build doesn't include it.
+# 4) Restore the python `dynamo` package AND add event_plane_bench_sub — both built
+#    INSIDE the image (ABI-consistent). NOTE: the `dev` target deliberately runs
+#    `uv pip uninstall ai-dynamo ai-dynamo-runtime kvbm` and never builds the
+#    `dynamo._core` extension, so `python -m dynamo.mocker/.frontend` is BROKEN out of
+#    the box. Rebuilding the bindings + reinstalling restores mocker/frontend. The image
+#    presets VIRTUAL_ENV=/opt/dynamo/venv and CARGO_TARGET_DIR=/workspace/target.
 cat > /tmp/Dockerfile.bench <<DOCKER
 FROM $IMAGE
 USER root
-RUN cargo build --release \
-      --manifest-path /workspace/lib/runtime/examples/event_plane_bench/Cargo.toml \
- && install -m755 \
-      /workspace/lib/runtime/examples/event_plane_bench/target/release/event_plane_bench_sub \
-      /usr/local/bin/event_plane_bench_sub
+RUN cd /workspace/lib/bindings/python \\
+ && maturin build --release --out /tmp/dynamo-wheels \\
+ && uv pip install --no-deps /tmp/dynamo-wheels/ai_dynamo_runtime-*.whl \\
+ && uv pip install --no-deps /workspace \\
+ && rm -rf /tmp/dynamo-wheels
+RUN cargo build --release \\
+      --manifest-path /workspace/lib/runtime/examples/event_plane_bench/Cargo.toml -p event_plane_bench \\
+ && BIN="\$(find /workspace/target -type f -name event_plane_bench_sub -path '*/release/*' | head -1)" \\
+ && test -n "\$BIN" && install -m755 "\$BIN" /usr/local/bin/event_plane_bench_sub
 DOCKER
 docker build -f /tmp/Dockerfile.bench -t "$IMAGE" "$WORKDIR"
 

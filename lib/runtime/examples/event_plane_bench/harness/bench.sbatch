@@ -30,9 +30,9 @@ NODE0=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -1)
 # ============================================================================
 # CONTAINER + PATHS
 # ============================================================================
-: "${DYN_BENCH_IMAGE:?set DYN_BENCH_IMAGE to the pushed image (see build_image.sh)}"
-# In-container paths (override if your image differs — build_image.sh prints them):
-export DYN_BENCH_IMAGE
+# Default = the DIS-2172 instrumented image pushed by build_image.sh (commit bf0be57).
+export DYN_BENCH_IMAGE="${DYN_BENCH_IMAGE:-gitlab-master.nvidia.com:5005/zhongdaor/workplace/dynamo:dis2172-bf0be57-dev}"
+# In-container paths (verified against the built image):
 export DYN_BENCH_PY="${DYN_BENCH_PY:-/opt/dynamo/venv/bin/python}"
 export DYN_BENCH_SUB_BIN="${DYN_BENCH_SUB_BIN:-/usr/local/bin/event_plane_bench_sub}"
 export DYN_BENCH_MODEL="${DYN_BENCH_MODEL:-Qwen/Qwen2.5-0.5B}"
