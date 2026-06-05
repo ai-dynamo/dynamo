@@ -111,7 +111,6 @@ core:
   - '*.py'
   - '*.rs'
   - 'scripts/report_pytest_markers.py'
-  - 'scripts/dco_check.py'
   # Negation patterns MUST come after positive patterns — micromatch processes
   # patterns left-to-right, so negations only filter matches accumulated by
   # preceding patterns. Placing them first has no effect.
