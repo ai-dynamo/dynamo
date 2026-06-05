@@ -590,6 +590,15 @@ def build_sampling_params(
         if key == "guided_decoding":
             continue
         if key == "bad_words_token_ids" and value is not None:
+            # vLLM has no public setter for token-id bad words; we write the
+            # private field directly. Guard so a vLLM upgrade that renames it
+            # fails loudly here instead of silently dropping the constraint.
+            if not hasattr(sampling_params, "_bad_words_token_ids"):
+                raise AttributeError(
+                    "vLLM SamplingParams._bad_words_token_ids missing; TITO "
+                    "bad_words_token_ids passthrough needs updating for this "
+                    "vLLM version"
+                )
             sampling_params._bad_words_token_ids = value
             continue
         if value is not None and hasattr(sampling_params, key):
