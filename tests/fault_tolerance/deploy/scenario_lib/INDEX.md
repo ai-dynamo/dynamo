@@ -25,7 +25,7 @@ A scenario YAML carries `deployment`, `router`, `admission`, `load`,
 YAML, builds a DeploymentSpec from the templated DGD, applies router
 and admission knobs as env-vars on the right services, then either uses
 the explicit `events:` block or generates the default
-`WaitForModelReady → PodMemoryPoller → for-each-rung(StartLoad +
+`WaitForModelReady → ResourcePoller → for-each-rung(StartLoad +
 WaitForLoadCompletion)` sequence. Event/Report/Check classes are
 auto-discovered by walking `Event.__subclasses__()` /
 `Report.__subclasses__()` / `Check.__subclasses__()` at import time —

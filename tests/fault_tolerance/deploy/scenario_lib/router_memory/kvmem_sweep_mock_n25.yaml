@@ -29,7 +29,7 @@ deployment:
   image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:release-1.2.0-mocker-prefill-pinning-a5c93b3331-neelays
   log_pvc: dynamo-ft-logs
   # Measured peak mocker RSS over a full 120-min run is ~1.0GB/pod (FE 0.5,
-  # prefill/decode 1.0 — see arm-A/C pod_memory_growth.tsv). The template's
+  # prefill/decode 1.0 — see arm-A/C resources.agg.tsv). The template's
   # 3Gi *request* is a 3x over-reservation: the n=25 OOM was nodes filling with
   # 3Gi RESERVATIONS (admission), not real memory. 1.5Gi (peak + 50% headroom)
   # fits n=25 (150Gi) AND n=50 (300Gi) in the ~326Gi-free cpu-pool. Limit stays

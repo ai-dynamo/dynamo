@@ -11,7 +11,7 @@
 # short for a clean least-squares MB/min fit.
 #
 # Headline metric: least-squares slope of mean per-FE RSS (MB/min) over the
-# steady-leak rung. Collected by PodMemoryPoller @ 5s on all 15 FE pods.
+# steady-leak rung. Collected by ResourcePoller @ 5s on all 15 FE pods.
 
 kind: router_memory
 name: e2_arm1_nscale_15set

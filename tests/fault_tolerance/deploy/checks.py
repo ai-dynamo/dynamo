@@ -708,25 +708,24 @@ class KvCacheUsagePeak(Check):
 
 @dataclass
 class PodMemoryGrowth(Check):
-    """Assert at least one pod's ``/proc/1/status:VmRSS`` grows by
-    ``growth_bytes_per_min`` over a ``window_seconds`` window during the
-    scenario.
+    """Assert per-pod memory growth (or boundedness) over the scenario,
+    from the ``ResourcePoller`` per-pod TSVs.
 
-    Implementation: a background asyncio task started by the check at
-    scenario-start exec's `cat /proc/1/status` on each pod every
-    ``poll_interval_s``, parses VmRSS, and writes a TSV to
-    ``ctx.log_dir/pod_memory_growth.tsv``. validate() reads the TSV.
+    Implementation: ``validate()`` reads ResourcePoller's native
+    ``<log_dir>/<role>/<pod>.resources.agg.tsv`` files, picks the
+    ``working_set`` (kubelet cgroup) or ``pid1_rss`` column per
+    ``source``, and computes the max sliding-window growth rate over
+    ``window_seconds``. ``assert_mode`` ("min"/"max") decides whether
+    that rate must exceed (leak detection) or stay under (bounded-growth)
+    ``growth_bytes_per_min``.
 
-    The background-task plumbing is in the test file (StartLoad event
-    can't host it cleanly); this check class is the assertion only.
-    Tests that need it install a ``MemoryPoller`` event into the
-    scenario events list before calling run_scenario.
+    Requires a ``ResourcePoller`` event in the scenario before the load
+    rungs so the per-pod TSVs exist at validate time.
     """
 
     services: list
     growth_bytes_per_min: float = 1_000_000_000.0
     window_seconds: float = 600.0
-    tsv_filename: str = "pod_memory_growth.tsv"
     # Which column to assert on. "working_set" = kubelet cgroup view
     # (OOMKill-correlated). "pid1_rss" = per-process attribution.
     # Default to working_set since that's the kubelet-side signal.

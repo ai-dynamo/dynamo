@@ -10,7 +10,7 @@
 # Purpose:
 #   1. Confirm 20-mocker-pod deployment lands clean on the cluster
 #   2. Confirm per-pod /metrics scrape returns valid data for every pod
-#   3. Confirm PodMemoryPoller writes per-pod TSV at 5s cadence
+#   3. Confirm ResourcePoller writes per-pod TSV at 5s cadence
 #   4. Confirm ZMQ events flow (FE active_decode_blocks gauge populated)
 #   5. Confirm aiperf load Job hits the FE service and gets non-zero throughput
 #   6. Confirm error breakdown report + per-worker latency report generate

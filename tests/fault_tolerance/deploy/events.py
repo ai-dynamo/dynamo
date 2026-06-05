@@ -2425,8 +2425,9 @@ class PeriodicSnapshot(Event):
     sorts naturally; the ISO suffix is human-readable.
 
     What gets copied each tick (best-effort; missing files are skipped):
-      - ``pod_memory_growth.tsv`` — full snapshot of the PodMemoryPoller
-        TSV up to that moment
+      - ``<role>/<pod>.resources.{agg,procs}.tsv`` — the per-pod
+        ResourcePoller TSVs (cgroup working_set / RSS / GPU series) up
+        to that moment
       - ``load/load-*/profile_export*.{json,jsonl}`` — any in-progress
         AIPerf metrics files
       - ``load/load-*/server_metrics_export.jsonl``
@@ -2439,7 +2440,7 @@ class PeriodicSnapshot(Event):
       - Each tick is wrapped in try/except; a copy failure on one
         artifact doesn't abort the loop
       - Stops cleanly on scenario teardown via the same Event ``stop()``
-        pattern as PodMemoryPoller
+        pattern as ResourcePoller
 
     Hard ceiling: honors ``DYN_ENDURANCE_MAX_HOURS`` env var (default 8).
     After that wall-time the snapshot loop stops emitting new dirs but
@@ -2475,15 +2476,17 @@ class PeriodicSnapshot(Event):
         def _snapshot_once(snapshot_dir: str) -> None:
             os.makedirs(snapshot_dir, exist_ok=True)
 
-            # 1. pod_memory_growth.tsv
-            pmg = os.path.join(log_dir, "pod_memory_growth.tsv")
-            if os.path.exists(pmg):
+            # 1. ResourcePoller per-pod TSVs: <role>/<pod>.resources.{agg,procs}.tsv
+            for src in glob.glob(
+                os.path.join(log_dir, "*", "*.resources.agg.tsv")
+            ) + glob.glob(os.path.join(log_dir, "*", "*.resources.procs.tsv")):
+                rel = os.path.relpath(src, log_dir)
+                dst = os.path.join(snapshot_dir, rel)
                 try:
-                    shutil.copy2(
-                        pmg, os.path.join(snapshot_dir, "pod_memory_growth.tsv")
-                    )
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    shutil.copy2(src, dst)
                 except Exception as e:
-                    ctx.logger.warning(f"PeriodicSnapshot: copy pmg failed: {e}")
+                    ctx.logger.warning(f"PeriodicSnapshot: copy {src} failed: {e}")
 
             # 2. in-progress AIPerf metrics
             for src in glob.glob(

@@ -1638,7 +1638,7 @@ async def test_overload_cascade_chain_phased(runtime_env, request, arm_label):
       P4        4 min  drop pin + c=24       recovery + final memory
 
     The pinned long load spans P1..P3 (48 min). Unpinned loads start/stop
-    per phase. ResourcePoller captures pod_memory_growth.tsv at 10s.
+    per phase. ResourcePoller captures per-pod resources.agg.tsv at 10s.
 
     Per-arm knobs differ only in routing strategy + admission. Image
     selected via CLI ``--image`` at launch time (no per-arm hard-coded
