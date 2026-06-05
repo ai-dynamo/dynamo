@@ -589,14 +589,10 @@ impl Worker {
 }
 
 // ---------------------------------------------------------------------------
-// PyEngineCore — the shared Python-bridge lifecycle. Both `PyLLMEngine` (token
-// pipeline) and `PyRawEngine` (raw media) compose one. It owns the engine
-// handle, event loop, per-request trace/metadata state, and every lifecycle
-// method that does not depend on the request modality (start/abort/drain/
-// cleanup/setup_metrics/health_check_payload) plus the modality-neutral
-// `dispatch_generate`. The modality-specific `generate` shaping and
-// `kv_event_sources` live on the two wrappers, not here. Not a `#[pyclass]`;
-// lives only in Rust.
+// PyEngineCore — the Python-bridge state and lifecycle shared by both wrappers
+// (`PyLLMEngine`, `PyRawEngine`): everything that doesn't depend on the request
+// modality. The modality-specific `generate` shaping and `kv_event_sources`
+// live on the wrappers. Not a `#[pyclass]`; Rust-only.
 // ---------------------------------------------------------------------------
 
 struct PyEngineCore {
@@ -1002,9 +998,8 @@ impl PyEngineCore {
 }
 
 // ---------------------------------------------------------------------------
-// PyLLMEngine — the token-pipeline bridge. Composes `PyEngineCore` for the
-// shared lifecycle and adds the token `generate` (chunks → `LLMEngineOutput`)
-// and `kv_event_sources`. Not a `#[pyclass]`; lives only in Rust.
+// PyLLMEngine — token-pipeline bridge: `PyEngineCore` plus the token `generate`
+// (chunks → `LLMEngineOutput`) and `kv_event_sources`.
 // ---------------------------------------------------------------------------
 
 struct PyLLMEngine {
@@ -1127,13 +1122,9 @@ impl LLMEngine for PyLLMEngine {
 }
 
 // ---------------------------------------------------------------------------
-// PyRawEngine — the bridge for Python `DiffusionEngine` (raw media pipeline).
-//
-// Composes the same `PyEngineCore` as `PyLLMEngine`, so the modality-neutral
-// lifecycle (start/abort/drain/cleanup/setup_metrics/health_check_payload) is
-// shared. Only `generate` differs: it pythonizes the request as a raw JSON
-// object and maps each yielded Python dict back to `serde_json::Value`, with
-// no token/`LLMEngineOutput` shaping. Not a `#[pyclass]`; lives only in Rust.
+// PyRawEngine — raw-media bridge for Python `DiffusionEngine`: `PyEngineCore`
+// plus a `generate` that passes the request/response through as
+// `serde_json::Value` (no token/`LLMEngineOutput` shaping).
 // ---------------------------------------------------------------------------
 
 struct PyRawEngine {
