@@ -233,4 +233,4 @@ For version-specific artifact details, installation commands, and release histor
   - [dynamo-mocker](https://crates.io/crates/dynamo-mocker/) *(New in v1.0.0)*
   - [dynamo-kv-router](https://crates.io/crates/dynamo-kv-router/) *(New in v1.0.0)*
 
-Once you've confirmed that your platform and architecture are compatible, you can install **Dynamo** by following the [Local Quick Start](https://docs.nvidia.com/dynamo/getting-started/quickstart) in the docs.
+Once you've confirmed that your platform and architecture are compatible, you can install **Dynamo** by following the [Quickstart](https://docs.nvidia.com/dynamo/getting-started/quickstart) in the docs.
