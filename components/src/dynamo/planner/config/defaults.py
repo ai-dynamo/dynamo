@@ -82,14 +82,13 @@ class SLAPlannerDefaults(BasePlannerDefaults):
 
     # Load-based scaling settings
     load_adjustment_interval_seconds = (
-        5  # also controls FPM regression update frequency for throughput scaling
+        5  # also controls live FPM tuning frequency for throughput scaling
     )
-    max_num_fpm_samples = 64  # max retained FPM observations for regression
+    max_num_fpm_samples = 64  # max retained FPM observations for tuning/fallback
     fpm_sample_bucket_size = (
         16  # must be a perfect square; total buckets across input axes
     )
     load_scaling_down_sensitivity = 80  # 0-100
-    load_metric_samples = 10  # number of samples per interval
     load_min_observations = 5  # cold start threshold
     prefill_scale_up_queue_tokens = None
     prefill_scale_down_queue_tokens = None

@@ -49,6 +49,7 @@ from .cache_info import get_configured_kv_event_block_size
 from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
+from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 from .snapshot import prepare_snapshot_engine
 
@@ -286,6 +287,29 @@ def setup_metrics_collection(
             )
 
 
+def _resolve_image_token_id(config: Config, vllm_config: VllmConfig) -> Optional[int]:
+    """Routing-side image-placeholder token id for the served model.
+
+    Resolved via the SAME Rust logic the frontend uses
+    (`dynamo._core.resolve_routing_image_token_id` ->
+    `lightseek_mm::resolve_routing_tokens`), returning `chat_placeholder_token_id`
+    so the KV-event normalizer keys on the identical token the frontend
+    substitutes `pad_value` over — no per-family drift between the two.
+
+    Returns None when the bindings lack the `mm-routing` feature or the model
+    isn't in the MM-routing registry — in both cases the frontend also skips MM
+    routing, so a worker-side no-op is consistent (events pass through).
+    """
+    try:
+        from dynamo._core import resolve_routing_image_token_id
+    except ImportError:
+        return None
+
+    # vLLM has already resolved the model to a local dir (config.json +
+    # tokenizer.json on disk) during engine init; read from there.
+    return resolve_routing_image_token_id(config.model, vllm_config.model_config.model)
+
+
 def setup_kv_event_publisher(
     config: Config,
     generate_endpoint: Endpoint,
@@ -330,6 +354,12 @@ def setup_kv_event_publisher(
     dp_start, dp_size = get_dp_range_for_worker(vllm_config)
     kv_publishers = []
     kv_event_block_size = get_configured_kv_event_block_size(vllm_config)
+    # The image-placeholder token id the frontend substitutes pad_value over.
+    # Passed to the KV publisher so the router-side normalizer rewrites those
+    # runs in vLLM BlockStored events to the same canonical pad_value scheme.
+    # None (no mm-routing, model not in registry, text-only) leaves events
+    # unchanged — consistent with the frontend also skipping MM routing.
+    image_token_id = _resolve_image_token_id(config, vllm_config)
 
     for dp_rank in range(dp_start, dp_start + dp_size):
         if consolidator_enabled:
@@ -355,6 +385,7 @@ def setup_kv_event_publisher(
             zmq_topic="",
             enable_local_indexer=config.enable_local_indexer,
             dp_rank=dp_rank,
+            image_token_id=image_token_id,
         )
         kv_publishers.append(kv_publisher)
 
@@ -557,16 +588,19 @@ def setup_vllm_engine(
     # dataclass fields; monkey-patching attributes onto VllmConfig is no longer safe).
     vllm_config.additional_config["consolidator_endpoints"] = consolidator_endpoints
 
-    # Pass worker identity to InstrumentedScheduler via additional_config.
+    # Pass runtime-only worker identity to InstrumentedScheduler via the
+    # environment so it does not perturb vLLM's config hash.
     if fpm_worker_id is not None:
-        vllm_config.additional_config["fpm_worker_id"] = fpm_worker_id
+        os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
 
     # Pass benchmark config to InstrumentedScheduler via additional_config.
     if hasattr(config, "_benchmark_additional_config"):
         bench = config._benchmark_additional_config
         if fpm_worker_id and bench["output_path"] == "/tmp/benchmark_results.json":
             short_id = fpm_worker_id[-8:]
-            bench["output_path"] = f"/tmp/benchmark_results_{short_id}.json"
+            os.environ[
+                ENV_FPM_BENCHMARK_OUTPUT_PATH
+            ] = f"/tmp/benchmark_results_{short_id}.json"
         vllm_config.additional_config["benchmark"] = bench
         logger.info("Benchmark config injected into additional_config")
 

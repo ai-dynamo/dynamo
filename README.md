@@ -33,9 +33,10 @@ limitations under the License.
 
 # Dynamo
 
-<!-- TEMPORARY BANNER: remove once V4 recipes mature. -->
+<!-- TEMPORARY BANNER: remove once Nemotron Ultra 3 recipes mature. -->
 > [!NOTE]
-> **Day-0 DeepSeek-V4 recipes available.** Tested Kubernetes deployment paths for [DeepSeek-V4-Pro](recipes/deepseek-v4/deepseek-v4-pro/) and [DeepSeek-V4-Flash](recipes/deepseek-v4/deepseek-v4-flash/) are merged to main on both **vLLM** and **SGLang**, with a prebuilt SGLang container image published on NGC.
+> **Day-0 Nemotron 3 Ultra recipes available.** Tested and performance optimized Kubernetes deployment paths for [Nemotron 3 Ultra](recipes/nemotron-3-ultra/) are merged to main for **vLLM**, with a prebuilt container image published on NGC.\
+> Recipes include KV-aware routing, multi-token prediction (MTP), and disaggregated prefill/decode
 
 **The open-source, datacenter-scale inference stack.** Dynamo is the orchestration layer above inference engines — it doesn't replace SGLang, TensorRT-LLM, or vLLM, it turns them into a coordinated multi-node inference system. Disaggregated serving, intelligent routing, multi-tier KV caching, and automatic scaling work together to maximize throughput and minimize latency for LLM, reasoning, multimodal, and video generation workloads.
 
@@ -100,12 +101,25 @@ Most inference engines optimize a single GPU or a single node. Dynamo is the **o
 
 ### New in 1.0
 
-- **Zero-config deploy ([DGDR](https://docs.nvidia.com/dynamo/kubernetes-deployment/deployment-guide/dgdr-reference))** *(beta):* Specify model, HW, and SLA in one YAML — AIConfigurator auto-profiles the workload, Planner optimizes the topology, and Dynamo deploys
+- **Zero-config deploy ([DGDR](https://docs.nvidia.com/dynamo/kubernetes-deployment/deploy-models/dgdr-reference))** *(beta):* Specify model, HW, and SLA in one YAML — AIConfigurator auto-profiles the workload, Planner optimizes the topology, and Dynamo deploys
 - **Agentic inference:** Per-request hints for latency priority, expected output length, and cache pinning TTL. [LangChain](https://docs.langchain.com/oss/python/integrations/chat/nvidia_ai_endpoints#use-with-nvidia-dynamo) + [NeMo Agent Toolkit](https://github.com/NVIDIA/NeMo-Agent-Toolkit) integrations
 - **Multimodal E/P/D:** Disaggregated encode/prefill/decode with embedding cache — 30% faster TTFT on image workloads
 - **Video generation:** Native [FastVideo](https://github.com/hao-ai-lab/FastVideo) + [SGLang Diffusion](https://lmsys.org/blog/2026-02-16-sglang-diffusion-advanced-optimizations/) support — real-time 1080p on single B200
 - **K8s Inference Gateway plugin:** KV-aware routing inside the standard Kubernetes gateway
 - **Storage-tier KV offload:** S3/Azure blob support + global KV events for cluster-wide cache visibility
+
+## Deployment Modes
+
+Dynamo can run in two deployment modes. Both expose an OpenAI-compatible API and support the same backends, disaggregated serving, and KV-aware routing.
+
+| Mode | What it is | When to use |
+|------|------------|-------------|
+| **Standalone** *(default)* | Dynamo's own Frontend serves HTTP and the integrated Dynamo Router makes KV-aware routing decisions. No external gateway required. | Local development, single-cluster deployments, and any environment where you want Dynamo to own the request entry point end to end. |
+| **Gateway (GAIE)** | Dynamo runs behind a Kubernetes [Gateway API Inference Extension](https://gateway-api-inference-extension.sigs.k8s.io/) gateway. KV-aware routing is performed at the gateway layer by the Dynamo Endpoint Picker Plugin (EPP); the Frontend runs as a sidecar in `--router-mode direct` and respects the EPP's per-request worker selection. | Production Kubernetes platforms that already standardize on the Inference Gateway, mixed-tenant clusters, or when you need gateway-level policy (auth, rate limiting, observability) co-located with KV-aware routing. |
+
+In **standalone** mode, request flow is `client → Frontend → Router → workers`. In **gateway** mode, request flow is `client → Inference Gateway → EPP (KV-aware routing) → Frontend sidecar (direct) → workers`.
+
+See the [Inference Gateway (GAIE) guide](docs/kubernetes/inference-gateway.md) for the full setup, supported features, and configuration of gateway mode.
 
 ## Quick Start
 
@@ -143,7 +157,7 @@ Then start the frontend and a worker as shown above. See the [full installation 
 
 ### Option C: Kubernetes (recommended)
 
-For production multi-node clusters, install the [Dynamo Platform](https://docs.nvidia.com/dynamo/kubernetes-deployment/deployment-guide) and deploy with a single manifest:
+For production multi-node clusters, install the [Dynamo Platform](https://docs.nvidia.com/dynamo/kubernetes-deployment/start-here/installation-guide) and deploy with a single manifest:
 
 ```yaml
 # Zero-config deploy: specify model + SLA, Dynamo handles the rest
@@ -262,7 +276,7 @@ To quickly setup both: `docker compose -f dev/docker-compose.yml up -d`
 - **[Support Matrix](https://docs.nvidia.com/dynamo/resources/support-matrix)** — Hardware, OS, CUDA, and backend versions
 - **[Feature Matrix](https://docs.nvidia.com/dynamo/resources/feature-matrix)** — Detailed backend compatibility
 - **[Release Artifacts](https://docs.nvidia.com/dynamo/resources/release-artifacts)** — Containers, wheels, Helm charts
-- **[Service Discovery](https://docs.nvidia.com/dynamo/kubernetes-deployment/deployment-guide/service-discovery)** — K8s-native vs etcd vs file-based discovery
+- **[Service Discovery](https://docs.nvidia.com/dynamo/kubernetes-deployment/advanced-platform/service-discovery)** — K8s-native vs etcd vs file-based discovery
 - **[Benchmarking Guide](https://docs.nvidia.com/dynamo/user-guides/benchmarking)** — Compare deployment topologies with AIPerf
 
 <!-- Reference links for Feature Compatibility Matrix -->

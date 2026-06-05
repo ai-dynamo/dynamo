@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 family: nemotron_deci
-model_label: Nemotron Deci / GLM 4.5
+model_label: Nemotron Deci v1 / GLM 4.5
 mode: batch
 refs:
   upstream: &upstream_ref 'inspired by vLLM GLM/Nemotron think-tag reasoning tests: https://github.com/vllm-project/vllm/blob/39910f2b25aacc09f5e7f166cdf0030b19f8b9e8/tests/reasoning/test_glm4_moe_reasoning_parser.py and https://github.com/vllm-project/vllm/blob/39910f2b25aacc09f5e7f166cdf0030b19f8b9e8/tests/reasoning/test_nemotron_v3_reasoning_parser.py; local taxonomy: lib/parsers/REASONING_CASES.md'
@@ -150,3 +150,19 @@ cases:
         reasoning_text: first
         normal_text: ' middle <think>second</think> done'
         reason: Dynamo extracts every complete reasoning span and concatenates them; SGLang exits reasoning at the first end marker and leaves the later span, with its literal markers, in normal_text.
+  REASONING.batch.6.b:
+    description: Stray end marker after a complete reasoning span(unbalanced-tag)
+    ref: dynamo
+    spec_ref: tests/parity/README.md
+    model_text: '<think>preamble</think>body</think>answer'
+    expected:
+      dynamo:
+        reasoning_text: preamble
+        normal_text: 'bodyanswer'
+        reason: 'Lossless split: when a stray close marker appears outside any reasoning block, it is stripped (parser-owned syntax must not appear in normal_text). Reasoning is captured from the first <open>...<close> pair only; subsequent stray closes are discarded.'
+      vllm:
+        reasoning_text: 'preamble'
+        normal_text: 'body</think>answer'
+      sglang:
+        reasoning_text: 'preamble'
+        normal_text: 'body</think>answer'
