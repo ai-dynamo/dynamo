@@ -218,12 +218,19 @@ def evaluate(
     for key, row in candidate.items():
         if row.get("status") != "ok":
             issues.append(f"{key}: run status is {row.get('status')!r}")
-        for metric in ("req_per_sec", "output_tok_per_sec", "ttft_p50_ms"):
+        for metric in (
+            "req_per_sec",
+            "output_tok_per_sec",
+            "ttft_p50_ms",
+            "ttft_p99_ms",
+            "itl_p50_ms",
+            "itl_p99_ms",
+        ):
             if to_float(row.get(metric)) <= 0:
                 issues.append(f"{key}: {metric} is missing or non-positive")
 
     baseline: dict[str, dict[str, object]] = {}
-    if baseline_path:
+    if baseline_path is not None:
         if baseline_path.exists():
             baseline = load_points(baseline_path)
         elif require_baseline:
@@ -319,7 +326,7 @@ def markdown_report(report: dict[str, object]) -> str:
     lines = ["# Frontend Perf PR Guard", ""]
     lines.append(f"Result: {'PASS' if report['ok'] else 'FAIL'}")
     lines.append(f"Results CSV: `{report['result_csv']}`")
-    if report.get("baseline"):
+    if report.get("baseline") is not None:
         lines.append(f"Baseline: `{report['baseline']}`")
     lines.append("")
 
@@ -382,12 +389,12 @@ def write_reports(args: argparse.Namespace, report: dict[str, object]) -> None:
         args.report_json.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
 
     markdown = markdown_report(report)
-    if args.summary_file:
+    if args.summary_file is not None:
         args.summary_file.parent.mkdir(parents=True, exist_ok=True)
         args.summary_file.write_text(markdown)
 
     step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
-    if step_summary:
+    if step_summary is not None and step_summary != "":
         with open(step_summary, "a") as f:
             f.write(markdown)
 

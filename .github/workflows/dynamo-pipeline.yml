@@ -254,6 +254,8 @@ jobs:
       - name: Run CPU-pinned frontend perf guard
         working-directory: /workspace
         shell: bash
+        env:
+          FRONTEND_PERF_GUARD_BASELINE: ${{ inputs.frontend_perf_guard_baseline }}
         run: |
           set -euo pipefail
 
@@ -280,8 +282,8 @@ jobs:
           fi
 
           BASELINE_ARGS=()
-          if [[ -n "${{ inputs.frontend_perf_guard_baseline }}" ]]; then
-            BASELINE_ARGS=(--baseline "${{ inputs.frontend_perf_guard_baseline }}")
+          if [[ -n "${FRONTEND_PERF_GUARD_BASELINE}" ]]; then
+            BASELINE_ARGS=(--baseline "${FRONTEND_PERF_GUARD_BASELINE}")
           fi
 
           "${DYNAMO_PYTHON}" benchmarks/frontend/scripts/ci/frontend_perf_pr_guard.py run \
