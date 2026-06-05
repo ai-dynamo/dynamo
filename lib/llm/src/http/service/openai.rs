@@ -2379,13 +2379,23 @@ pub fn list_models_router(
     let retrieve_path = format!("{}/{{*model_id}}", openai_path);
     let doc_for_openai = RouteDoc::new(axum::http::Method::GET, &openai_path);
     let doc_for_retrieve = RouteDoc::new(axum::http::Method::GET, &retrieve_path);
+    // Doc-only: the readiness sub-resource is served by `get_model_openai` via
+    // the catch-all retrieve route above (a wildcard must be the terminal
+    // segment, so it can't be its own axum route). Advertised for discovery.
+    let doc_for_readiness = RouteDoc::new(
+        axum::http::Method::GET,
+        format!("{}/{{model_id}}/readiness", openai_path),
+    );
 
     let router = Router::new()
         .route(&openai_path, get(list_models_openai))
         .route(&retrieve_path, get(get_model_openai))
         .with_state(state);
 
-    (vec![doc_for_openai, doc_for_retrieve], router)
+    (
+        vec![doc_for_openai, doc_for_retrieve, doc_for_readiness],
+        router,
+    )
 }
 
 /// Retrieve a single model by ID (OpenAI format).
@@ -2401,13 +2411,37 @@ async fn get_model_openai(
     let model_id = model_id.strip_prefix('/').unwrap_or(&model_id);
 
     let models: HashSet<String> = state.manager().model_display_names();
-    if !models.contains(model_id) {
-        return Err(ErrorMessage::model_not_found());
+
+    // The retrieve route (`/v1/models/{*model_id}`) is a catch-all, so model
+    // IDs can contain '/' — and may even end in '/readiness'. We therefore
+    // dispatch by precedence: an *exact* model match always wins, and only when
+    // there is no such model do we treat a trailing `/readiness` as the
+    // per-model readiness sub-resource (Mechanism 4). This means a model
+    // literally named `foo/readiness` is still retrievable and never shadowed.
+    if models.contains(model_id) {
+        return get_model_retrieve(&state, model_id);
     }
 
-    // GET /v1/models/{model} reports the model only if it is ready to
-    // serve. Mirrors the filter applied in list_models_openai.
-    check_model_serving_ready(&state, model_id)?;
+    // Readiness sub-resource. Resolve against ALL registered models via
+    // `get_model` — NOT `model_display_names()`, which filters to displayable
+    // (ready) models. The whole point of this endpoint is to diagnose models
+    // that are registered but not yet ready, so it must find them too.
+    if let Some(base) = model_id.strip_suffix("/readiness") {
+        if state.manager().get_model(base).is_some() {
+            return get_model_readiness(&state, base);
+        }
+    }
+
+    Err(ErrorMessage::model_not_found())
+}
+
+/// `GET /v1/models/{model}` — the OpenAI retrieve-model object. Reports the
+/// model only if it is ready to serve (mirrors the `list_models_openai` filter).
+fn get_model_retrieve(
+    state: &Arc<service_v2::State>,
+    model_id: &str,
+) -> Result<Response, ErrorResponse> {
+    check_model_serving_ready(state, model_id)?;
 
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2436,6 +2470,21 @@ async fn get_model_openai(
         max_output_tokens,
     })
     .into_response())
+}
+
+/// `GET /v1/models/{model}/readiness` — structured per-namespace topology
+/// readiness detail (Mechanism 4). Deliberately *not* topology-gated: it exists
+/// to diagnose models that are not yet ready, so it returns 200 with the full
+/// breakdown regardless of whether the model would be served.
+fn get_model_readiness(
+    state: &Arc<service_v2::State>,
+    model_id: &str,
+) -> Result<Response, ErrorResponse> {
+    let model = state
+        .manager()
+        .get_model(model_id)
+        .ok_or_else(ErrorMessage::model_not_found)?;
+    Ok(Json(model.namespace_topology()).into_response())
 }
 
 /// Create an Axum [`Router`] for the OpenAI API Responses endpoint

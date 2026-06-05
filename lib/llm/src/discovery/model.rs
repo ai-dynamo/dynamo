@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use rand::Rng;
+use serde::Serialize;
 
 use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
@@ -44,6 +45,38 @@ fn warn_legacy_readiness_once(model: &str, namespace: &str) {
              future release."
         );
     });
+}
+
+/// Per-role detail within a namespace: how many workers of this role are live
+/// and what peer roles it depends on (DNF — a list of alternative AND-sets).
+#[derive(Debug, Clone, Serialize)]
+pub struct RoleReadiness {
+    pub workers: usize,
+    pub needs: Vec<Vec<String>>,
+}
+
+/// Topology readiness for one namespace (one deployment) of a model.
+#[derive(Debug, Clone, Serialize)]
+pub struct NamespaceReadiness {
+    pub ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Role name (lowercase `worker_type`) → detail. Legacy workers with no
+    /// declared `worker_type` are not keyed here; see `reason`.
+    pub roles: std::collections::BTreeMap<String, RoleReadiness>,
+    pub present: Vec<String>,
+    pub missing_worker_types: Vec<String>,
+}
+
+/// Structured topology readiness for a model across all its namespaces — the
+/// response body of `GET /v1/models/{model}/readiness`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelReadiness {
+    pub model: String,
+    pub ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub namespaces: std::collections::BTreeMap<String, NamespaceReadiness>,
 }
 
 /// A named model backed by one or more WorkerSets.
@@ -315,6 +348,135 @@ impl Model {
     /// ready to serve traffic.
     pub fn has_ready_workers(&self) -> bool {
         self.first_ready_workers().is_some()
+    }
+
+    /// Structured per-namespace topology readiness for this model — the data
+    /// behind the `GET /v1/models/{model}/readiness` observability endpoint.
+    ///
+    /// Reuses [`Self::is_workers_ready`] for each namespace's `ready` flag so
+    /// the endpoint can never disagree with the gate, and decomposes the same
+    /// inputs (present roles, DNF `needs`, missing peers) for display.
+    pub fn namespace_topology(&self) -> ModelReadiness {
+        let mut namespaces = std::collections::BTreeMap::new();
+
+        for ns in self.distinct_namespaces_sorted() {
+            let mut roles: std::collections::BTreeMap<String, RoleReadiness> =
+                std::collections::BTreeMap::new();
+            let mut present: std::collections::HashSet<crate::worker_type::WorkerType> =
+                std::collections::HashSet::new();
+            let mut has_legacy = false;
+            let mut legacy_live_workers = 0usize;
+
+            // Collect the (worker_type, needs) per WorkerSet in this namespace.
+            let mut wsets: Vec<(
+                Option<crate::worker_type::WorkerType>,
+                Vec<Vec<crate::worker_type::WorkerType>>,
+                usize,
+            )> = Vec::new();
+            for entry in self.worker_sets.iter() {
+                let ws = entry.value();
+                if ws.namespace() != ns {
+                    continue;
+                }
+                let card = ws.card();
+                let count = ws.worker_count();
+                match card.worker_type {
+                    Some(wt) => {
+                        if count > 0 {
+                            present.insert(wt);
+                        }
+                        let role = roles
+                            .entry(wt.as_str().to_string())
+                            .or_insert(RoleReadiness {
+                                workers: 0,
+                                needs: card
+                                    .needs
+                                    .iter()
+                                    .map(|alt| alt.iter().map(|t| t.as_str().to_string()).collect())
+                                    .collect(),
+                            });
+                        role.workers += count;
+                        wsets.push((Some(wt), card.needs.clone(), count));
+                    }
+                    None => {
+                        has_legacy = true;
+                        legacy_live_workers += count;
+                        wsets.push((None, Vec::new(), count));
+                    }
+                }
+            }
+
+            let ready = self.is_workers_ready(&ns);
+
+            // Worker types referenced by a live role's unsatisfied `needs` that
+            // aren't present — the actionable "what's missing" hint.
+            let mut missing: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            if !has_legacy {
+                for (wt, needs, count) in &wsets {
+                    let Some(_wt) = wt else { continue };
+                    if *count == 0 || needs.is_empty() {
+                        continue;
+                    }
+                    let satisfied = needs
+                        .iter()
+                        .any(|alt| alt.iter().all(|t| present.contains(t)));
+                    if !satisfied {
+                        for alt in needs {
+                            for t in alt {
+                                if !present.contains(t) {
+                                    missing.insert(t.as_str().to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut present_vec: Vec<String> =
+                present.iter().map(|wt| wt.as_str().to_string()).collect();
+            present_vec.sort();
+
+            let reason = if ready {
+                if has_legacy {
+                    Some(format!(
+                        "legacy worker(s) present (no worker_type); topology gating bypassed \
+                         (ready while {legacy_live_workers} worker(s) live) — compat window only"
+                    ))
+                } else {
+                    None
+                }
+            } else if has_legacy {
+                Some("legacy worker(s) present but no live worker".to_string())
+            } else {
+                Some(format!(
+                    "missing worker types: {}",
+                    missing.iter().cloned().collect::<Vec<_>>().join(", ")
+                ))
+            };
+
+            namespaces.insert(
+                ns.clone(),
+                NamespaceReadiness {
+                    ready,
+                    reason,
+                    roles,
+                    present: present_vec,
+                    missing_worker_types: missing.into_iter().collect(),
+                },
+            );
+        }
+
+        let ready = namespaces.values().any(|n| n.ready);
+        ModelReadiness {
+            model: self.name.clone(),
+            ready,
+            reason: if ready {
+                None
+            } else {
+                Some("no namespace has complete topology".to_string())
+            },
+            namespaces,
+        }
     }
 
     /// Whether this model can serve at least one inference request right now.
@@ -1216,6 +1378,135 @@ mod tests {
         assert!(
             model.is_workers_ready("dynamo"),
             "a namespace with a legacy card must use the compat (live) path"
+        );
+    }
+
+    // -- namespace_topology() (GET /v1/models/{model}/readiness) --
+
+    #[test]
+    fn topology_pd_pair_ready() {
+        let model = Model::new("llama".to_string());
+        let (p, _tp) = ws_with_role(
+            "ns1",
+            "mdc-p",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![1],
+        );
+        let (d, _td) = ws_with_role(
+            "ns1",
+            "mdc-d",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![2],
+        );
+        model.add_worker_set("ns1:prefill".to_string(), p);
+        model.add_worker_set("ns1".to_string(), d);
+
+        let topo = model.namespace_topology();
+        assert!(topo.ready);
+        assert_eq!(topo.reason, None);
+        let ns = &topo.namespaces["ns1"];
+        assert!(ns.ready);
+        assert_eq!(
+            ns.present,
+            vec!["decode".to_string(), "prefill".to_string()]
+        );
+        assert!(ns.missing_worker_types.is_empty());
+        assert_eq!(ns.roles["decode"].workers, 1);
+        assert_eq!(ns.roles["prefill"].workers, 1);
+        assert_eq!(ns.roles["decode"].needs, vec![vec!["prefill".to_string()]]);
+        // Endpoint must agree with the gate.
+        assert_eq!(ns.ready, model.is_workers_ready("ns1"));
+    }
+
+    #[test]
+    fn topology_decode_only_reports_missing_prefill() {
+        let model = Model::new("llama".to_string());
+        let (d, _td) = ws_with_role(
+            "ns1",
+            "mdc-d",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![2],
+        );
+        model.add_worker_set("ns1".to_string(), d);
+
+        let topo = model.namespace_topology();
+        assert!(!topo.ready);
+        assert_eq!(
+            topo.reason.as_deref(),
+            Some("no namespace has complete topology")
+        );
+        let ns = &topo.namespaces["ns1"];
+        assert!(!ns.ready);
+        assert_eq!(ns.present, vec!["decode".to_string()]);
+        assert_eq!(ns.missing_worker_types, vec!["prefill".to_string()]);
+        assert_eq!(ns.reason.as_deref(), Some("missing worker types: prefill"));
+    }
+
+    #[test]
+    fn topology_multi_namespace_one_ready_one_partial() {
+        let model = Model::new("llama".to_string());
+        // ns-old: complete P/D pair.
+        let (p, _tp) = ws_with_role(
+            "ns-old",
+            "mdc-p",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![1],
+        );
+        let (d, _td) = ws_with_role(
+            "ns-old",
+            "mdc-d",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![2],
+        );
+        // ns-new: decode only (partial).
+        let (d2, _td2) = ws_with_role(
+            "ns-new",
+            "mdc-d2",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![3],
+        );
+        model.add_worker_set("ns-old:prefill".to_string(), p);
+        model.add_worker_set("ns-old".to_string(), d);
+        model.add_worker_set("ns-new".to_string(), d2);
+
+        let topo = model.namespace_topology();
+        // Model is ready overall because at least one namespace is complete.
+        assert!(topo.ready);
+        assert!(topo.namespaces["ns-old"].ready);
+        assert!(!topo.namespaces["ns-new"].ready);
+        assert_eq!(
+            topo.namespaces["ns-new"].missing_worker_types,
+            vec!["prefill".to_string()]
+        );
+    }
+
+    #[test]
+    fn topology_legacy_namespace_notes_bypass() {
+        let model = Model::new("llama".to_string());
+        let (legacy, _tl) = make_worker_set_with_count("ns1", "mdc-legacy", vec![1]);
+        model.add_worker_set("ns1".to_string(), legacy);
+
+        let topo = model.namespace_topology();
+        assert!(topo.ready);
+        let ns = &topo.namespaces["ns1"];
+        assert!(ns.ready);
+        // Legacy card has no worker_type → not keyed under roles; reason flags
+        // the compat bypass.
+        assert!(ns.roles.is_empty());
+        assert!(ns.missing_worker_types.is_empty());
+        assert!(
+            ns.reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("topology gating bypassed"),
+            "legacy namespace reason should note the bypass, got {:?}",
+            ns.reason
         );
     }
 
