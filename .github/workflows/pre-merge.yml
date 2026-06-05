@@ -165,6 +165,13 @@ jobs:
         restore-keys: ${{ runner.os }}-cargo-
     - name: Set up Rust Toolchain Components
       run: rustup component add rustfmt
+    - name: Configure Datadog Test Visibility
+      continue-on-error: true
+      uses: datadog/test-visibility-github-action@4e7afb05b464fd349275e41e65a7f4de83e7f46b  # v2.10.0
+      with:
+        languages: rust
+        api_key: ${{ secrets.DD_API_KEY }}
+        site: us3.datadoghq.com
     - name: Verify Code Formatting
       working-directory: ${{ matrix.dir }}
       run: cargo fmt -- --check
@@ -182,12 +189,12 @@ jobs:
       run: cargo doc --no-deps && cargo test --locked --doc
     - name: Run Unit Tests
       working-directory: ${{ matrix.dir }}
-      # NOTE: --all-targets doesn't run doc tests
-      run: cargo test --locked --all-targets
+      # NOTE: cargo nextest does not run doc tests; those are covered by the step above.
+      run: cargo nextest run --locked
     - name: Run KVBM offload Mooncake trace test
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
-      run: cargo test --locked -p dynamo-bench --test mooncake_trace --features mocker-kvbm-offload -- --nocapture
+      run: cargo nextest run --locked -p dynamo-bench --test mooncake_trace --features mocker-kvbm-offload
 
   rust-clippy:
     needs: changed-files

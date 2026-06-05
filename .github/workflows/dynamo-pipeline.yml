@@ -118,6 +118,13 @@ jobs:
           # include_bytes!; without lfs:true the checkout has 132-byte pointer files and
           # the image-decoder tests panic with "image format could not be determined".
           lfs: true
+      - name: Configure Datadog Test Visibility
+        continue-on-error: true
+        uses: datadog/test-visibility-github-action@4e7afb05b464fd349275e41e65a7f4de83e7f46b  # v2.10.0
+        with:
+          languages: rust
+          api_key: ${{ secrets.DD_API_KEY }}
+          site: us3.datadoghq.com
       - name: Select cargo target dir (prefer NVMe scratch)
         shell: bash
         run: |
@@ -146,9 +153,9 @@ jobs:
           rustup component add rustfmt clippy
           cargo fmt -- --check
           cargo clippy --features block-manager,media-ffmpeg,testing-nixl,integration --no-deps --all-targets -- -D warnings
-          cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl,integration -- --nocapture
+          cargo nextest run --locked --features=block-manager,media-ffmpeg,testing-nixl,integration
           cargo clippy -p kvbm-physical --no-deps --all-targets -- -D warnings
-          cargo test --locked -p kvbm-physical --features testing-kvbm -- --nocapture --test-threads=4
+          cargo nextest run --locked -p kvbm-physical --features testing-kvbm -j 4
           /workspace/container/use-sccache.sh show-stats "Rust Checks"
 
   mypy:

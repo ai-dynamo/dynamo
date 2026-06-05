@@ -496,17 +496,23 @@ jobs:
       run: rustup component add llvm-tools-preview
     - name: Install cargo-llvm-cov
       run: cargo-llvm-cov --version 2>/dev/null || cargo install cargo-llvm-cov --locked
+    - name: Configure Datadog Test Visibility
+      continue-on-error: true
+      uses: datadog/test-visibility-github-action@4e7afb05b464fd349275e41e65a7f4de83e7f46b  # v2.10.0
+      with:
+        languages: rust
+        api_key: ${{ secrets.DD_API_KEY }}
+        site: us3.datadoghq.com
     # Have an explicit step to build tests first to separate time spent on build vs execution.
     - name: Compile Tests
       working-directory: ${{ matrix.dir }}
       run: cargo test --locked --no-run
     - name: Run Unit Tests with Coverage
       working-directory: ${{ matrix.dir }}
-      # NOTE: --all-targets doesn't run doc tests.
-      # cargo llvm-cov is a drop-in for cargo test; --no-report defers output
+      # NOTE: cargo nextest does not run doc tests; --no-report defers output
       # so we can generate multiple formats without re-running the tests.
       run: |
-        cargo llvm-cov --locked --all-targets --no-report
+        cargo llvm-cov nextest run --locked --no-report
         cargo llvm-cov report --output-path coverage-rust.txt
         cargo llvm-cov report --lcov --output-path coverage-rust.lcov
         echo "Coverage summary:"
