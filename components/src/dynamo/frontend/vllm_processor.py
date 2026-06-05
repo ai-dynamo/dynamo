@@ -771,11 +771,8 @@ class EngineFactory:
             )
         loop = asyncio.get_running_loop()
 
-        # download_config has already resolved every MDC file into
-        # mdc.local_dir() with blake3-verified copies (and harvested
-        # extra siblings — preprocessor_config.json, special_tokens_map.json,
-        # …). Point native-preprocessor mode at that dir directly.
-        source_path = mdc.local_dir()
+        # download_config already populated mdc.local_dir(); no refetch.
+        local_dir = mdc.local_dir()
 
         tokenizer_mode = getattr(self.flags, "tokenizer_mode", None) or "auto"
         config_format = getattr(self.flags, "config_format", None) or "auto"
@@ -784,7 +781,7 @@ class EngineFactory:
         enable_auto_tool_choice = getattr(self.flags, "enable_auto_tool_choice", False)
 
         model_config = ModelConfig(
-            model=source_path,
+            model=local_dir,
             tokenizer_mode=tokenizer_mode,
             config_format=config_format,
             trust_remote_code=trust_remote_code,
@@ -819,7 +816,7 @@ class EngineFactory:
         # vLLM's renderer skips its AutoProcessor fallback when tools are present,
         # so tool calls crash unless tokenizer.chat_template is set; load from disk.
         if tokenizer.chat_template is None:
-            tokenizer.chat_template = resolve_chat_template(source_path)
+            tokenizer.chat_template = resolve_chat_template(local_dir)
 
         # --chat-template overrides; load_chat_template accepts either a file path
         # or an inline Jinja template string.

@@ -709,9 +709,8 @@ class ModelDeploymentCard:
         ...
 
     def local_dir(self) -> str:
-        """Return the on-disk directory where this card's resolved metadata files
-        live (post-`download_config`). Use this in engine factories instead of
-        re-running `fetch_model` on the worker URI."""
+        """Resolved metadata directory (post-`download_config`). Raises
+        ValueError if the path contains non-UTF-8 bytes."""
         ...
 
     def runtime_config(self) -> Any:

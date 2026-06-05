@@ -3,6 +3,7 @@
 
 use super::*;
 use llm_rs::model_card::ModelDeploymentCard as RsModelDeploymentCard;
+use pyo3::exceptions::PyValueError;
 
 #[pyclass]
 #[derive(Clone)]
@@ -35,12 +36,17 @@ impl ModelDeploymentCard {
         self.inner.source_path()
     }
 
-    /// On-disk directory where the frontend's `download_config` pipeline
-    /// has resolved every typed file + harvested extra_file. Use this in
-    /// engine factories instead of re-running `fetch_model` against the
-    /// worker URI — the cache already has blake3-verified copies.
-    fn local_dir(&self) -> String {
-        self.inner.local_dir().to_string_lossy().into_owned()
+    /// Resolved metadata directory (post-`download_config`).
+    fn local_dir(&self) -> PyResult<String> {
+        self.inner
+            .local_dir()
+            .into_os_string()
+            .into_string()
+            .map_err(|os| {
+                PyValueError::new_err(format!(
+                    "MDC local_dir contains non-UTF-8 bytes: {os:?}"
+                ))
+            })
     }
 
     fn name(&self) -> &str {

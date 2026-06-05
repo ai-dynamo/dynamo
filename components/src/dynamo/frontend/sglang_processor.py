@@ -623,14 +623,11 @@ class SglangEngineFactory:
             )
         loop = asyncio.get_running_loop()
 
-        # download_config has already resolved every MDC file into
-        # mdc.local_dir() with blake3-verified copies (and harvested
-        # extra siblings — preprocessor_config.json, special_tokens_map.json,
-        # …). Point native-preprocessor mode at that dir directly.
-        source_path = mdc.local_dir()
+        # download_config already populated mdc.local_dir(); no refetch.
+        local_dir = mdc.local_dir()
 
-        logger.info("Loading SGLang tokenizer from %s", source_path)
-        tokenizer = _load_tokenizer(source_path, self.trust_remote_code)
+        logger.info("Loading SGLang tokenizer from %s", local_dir)
+        tokenizer = _load_tokenizer(local_dir, self.trust_remote_code)
 
         eos_token_id = getattr(tokenizer, "eos_token_id", None)
 
@@ -661,13 +658,13 @@ class SglangEngineFactory:
             logger.info(
                 "Creating SGLang preprocess worker pool with %d workers for %s",
                 preprocess_workers,
-                source_path,
+                local_dir,
             )
             preprocess_pool = ProcessPoolExecutor(
                 max_workers=preprocess_workers,
                 initializer=_init_worker,
                 initargs=(
-                    source_path,
+                    local_dir,
                     tool_call_parser_name,
                     reasoning_parser_name,
                     self.config.exclude_tools_when_tool_choice_none,
