@@ -187,7 +187,8 @@ def test_build_sampling_params_forwards_repetition_controls_for_token_requests()
     assert sampling_params["top_p"] == 0.95
     assert sampling_params["top_k"] == 40
     assert sampling_params["min_p"] == 0.01
-    assert sampling_params["seed"] == 1234
+    assert sampling_params["sampling_seed"] == 1234
+    assert "seed" not in sampling_params
 
 
 def test_build_sampling_params_passes_n_for_sglang_tokenizer_requests():
@@ -233,7 +234,8 @@ def test_build_sampling_params_forwards_repetition_controls_for_openai_requests(
     assert sampling_params["top_p"] == 0.95
     assert sampling_params["top_k"] == 40
     assert sampling_params["min_p"] == 0.01
-    assert sampling_params["seed"] == 1234
+    assert sampling_params["sampling_seed"] == 1234
+    assert "seed" not in sampling_params
 
 
 def test_build_logprob_kwargs_allows_chosen_token_logprobs(monkeypatch):

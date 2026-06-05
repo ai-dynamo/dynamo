@@ -57,7 +57,7 @@ type DynamoGraphDeploymentValidator struct {
 }
 
 // NewDynamoGraphDeploymentValidator creates a new validator for DynamoGraphDeployment.
-// groveEnabled should reflect the operator's runtime config (global.grove.enabled).
+// groveEnabled should reflect the operator's runtime Grove configuration.
 func NewDynamoGraphDeploymentValidator(deployment *nvidiacomv1alpha1.DynamoGraphDeployment, groveEnabled bool) *DynamoGraphDeploymentValidator {
 	return &DynamoGraphDeploymentValidator{
 		deployment:   deployment,
@@ -96,6 +96,11 @@ func (v *DynamoGraphDeploymentValidator) Validate(ctx context.Context) (admissio
 
 	// Validate restart
 	if err := v.validateRestart(); err != nil {
+		return nil, err
+	}
+
+	// Validate priority class pass-through
+	if err := v.validatePriorityClassName(); err != nil {
 		return nil, err
 	}
 
@@ -333,15 +338,9 @@ func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, se
 	// templates are all wired at the PodCliqueScalingGroup level, which only
 	// the Grove renderer produces.
 	if service.IsInterPodGMSEnabled() && !v.isGrovePathway() {
-		if !v.groveEnabled {
-			return nil, fmt.Errorf(
-				"spec.services[%s]: gpuMemoryService.mode=%q requires the Grove pathway, but Grove is disabled at the operator level (global.grove.enabled=false)",
-				serviceName, nvidiacomv1alpha1.GMSModeInterPod)
-		}
-		return nil, fmt.Errorf(
-			"spec.services[%s]: gpuMemoryService.mode=%q requires the Grove pathway; remove or unset the %q annotation (currently %q)",
-			serviceName, nvidiacomv1alpha1.GMSModeInterPod,
-			consts.KubeAnnotationEnableGrove, v.deployment.Annotations[consts.KubeAnnotationEnableGrove])
+		return nil, v.grovePathwayRequiredError(fmt.Sprintf(
+			"spec.services[%s]: gpuMemoryService.mode=%q",
+			serviceName, nvidiacomv1alpha1.GMSModeInterPod))
 	}
 
 	// The inter-pod GMS layout is currently implemented only for vLLM (the
@@ -466,8 +465,8 @@ func (v *DynamoGraphDeploymentValidator) validateServiceNameLength(serviceName s
 }
 
 // isGrovePathway determines if Grove pathway may be used for this deployment.
-// Grove requires both operator-level enablement (global.grove.enabled) and the
-// per-DGD annotation not being explicitly set to "false".
+// Grove requires both operator-level enablement and the per-DGD annotation not
+// being explicitly set to "false".
 func (v *DynamoGraphDeploymentValidator) isGrovePathway() bool {
 	if !v.groveEnabled {
 		return false
@@ -558,6 +557,21 @@ func (v *DynamoGraphDeploymentValidator) validateRestartStrategyOrder() error {
 	}
 
 	return err
+}
+
+func (v *DynamoGraphDeploymentValidator) validatePriorityClassName() error {
+	if v.deployment.Spec.PriorityClassName == "" || v.isGrovePathway() {
+		return nil
+	}
+	return v.grovePathwayRequiredError("spec.priorityClassName")
+}
+
+func (v *DynamoGraphDeploymentValidator) grovePathwayRequiredError(subject string) error {
+	if !v.groveEnabled {
+		return fmt.Errorf("%s requires the Grove pathway, but Grove is disabled in the operator configuration", subject)
+	}
+	return fmt.Errorf("%s requires the Grove pathway; remove or unset the %q annotation (currently %q)",
+		subject, consts.KubeAnnotationEnableGrove, v.deployment.Annotations[consts.KubeAnnotationEnableGrove])
 }
 
 // validateAnnotations validates known DGD annotations have valid values.

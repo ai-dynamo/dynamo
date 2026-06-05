@@ -38,7 +38,7 @@ from prometheus_client import CollectorRegistry
 from dynamo.common.utils.prometheus import LLMBackendMetrics
 from dynamo.llm import FpmDirectPublisher, KvEventPublisher, WorkerMetricsPublisher
 
-logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 # Create a dedicated registry for dynamo_component metrics
 # This ensures these metrics are isolated and can be exposed via their own callback
@@ -321,6 +321,7 @@ class ManagedThread(threading.Thread):
                     )
                     if self.error_queue is not None:
                         self.error_queue.put(e)
+                    break
         finally:
             try:
                 loop.run_until_complete(loop.shutdown_asyncgens())
@@ -380,6 +381,8 @@ class Publisher:
         kv_block_size: int,
         metrics_labels: Any,
         component_gauges: LLMBackendMetrics,
+        additional_metrics: Any = None,
+        event_buffer_max_size: int = 0,
         zmq_endpoint: Optional[str] = None,
         enable_local_indexer: bool = False,
         metrics_collector: Any = None,
@@ -391,6 +394,9 @@ class Publisher:
         self.max_window_size = None
         self.metrics_labels = metrics_labels
         self.component_gauges = component_gauges
+        self.additional_metrics = additional_metrics
+        if self.additional_metrics is not None:
+            self.additional_metrics.set_kv_event_buffer_capacity(event_buffer_max_size)
         self.enable_local_indexer = enable_local_indexer
         self.metrics_collector = metrics_collector
         self.attention_dp_size = engine.get_attention_dp_size()
@@ -433,8 +439,9 @@ class Publisher:
         self.partial_block_hashes: set[int] = set()
         self.error_queue: Queue = Queue()
         self._stop_event = threading.Event()
-        # Track the last engine event_id to assert consecutive event IDs from the engine
-        self._last_engine_event_id: Optional[int] = None
+        # Track the last engine event_id per attention-DP rank. TRT-LLM emits
+        # independent rank-local sequences before gathering them on rank 0.
+        self._last_engine_event_id_by_rank: dict[int, int] = {}
 
         # Initialize ZMQ publisher if endpoint is provided (consolidator enabled)
         if zmq_endpoint:
@@ -569,18 +576,25 @@ class Publisher:
         min_sleep: float,
         max_sleep: float,
         backoff_factor: float,
+        batch_size_handler_fn=None,
     ):
         sleep_s = min_sleep
         while not self._stop_event.is_set():
             had_data = False
+            batch_size = 0
             try:
                 async for item in fetch_fn():
                     had_data = True
+                    batch_size += 1
                     handler_fn(item)
             except (asyncio.TimeoutError, TimeoutError, asyncio.QueueEmpty):
                 pass
             except Exception as e:
                 logging.warning(f"Publisher polling loop error: {e}", exc_info=True)
+                raise
+
+            if batch_size and batch_size_handler_fn is not None:
+                batch_size_handler_fn(batch_size)
 
             if not had_data:
                 await asyncio.sleep(sleep_s)
@@ -776,25 +790,37 @@ class Publisher:
             _KV_EVENTS_MIN_SLEEP_SEC,
             _KV_EVENTS_MAX_SLEEP_SEC,
             _KV_EVENTS_BACKOFF_FACTOR,
+            self._record_kv_event_drain_batch,
         )
         return True
 
+    def _record_kv_event_drain_batch(self, batch_size: int) -> None:
+        if self.additional_metrics is not None:
+            self.additional_metrics.record_kv_event_drain_batch(batch_size)
+
     def _handle_kv_event(self, event):
-        logging.debug(f"KV cache event received: {event}")
+        event_id = event["event_id"]
+        attention_dp_rank = event.get("attention_dp_rank", 0)
+
+        # Check the raw engine stream before filtering non-global-attention
+        # events so expected filtering does not look like queue loss.
+        last_event_id = self._last_engine_event_id_by_rank.get(attention_dp_rank)
+        if last_event_id is not None:
+            expected_id = last_event_id + 1
+            if event_id != expected_id:
+                logging.warning(
+                    f"Non-consecutive engine event_id on rank={attention_dp_rank}: "
+                    f"expected {expected_id}, got {event_id}"
+                )
+                if self.additional_metrics is not None:
+                    self.additional_metrics.record_kv_event_id_gap(
+                        max(0, event_id - expected_id)
+                    )
+        self._last_engine_event_id_by_rank[attention_dp_rank] = event_id
+
         # drop the events that is not emitted from the global attention layer.
         if self.should_drop_event(event):
             return
-
-        event_id = event["event_id"]
-
-        # Check for consecutive event IDs from the engine
-        if self._last_engine_event_id is not None:
-            expected_id = self._last_engine_event_id + 1
-            if event_id != expected_id:
-                logging.warning(
-                    f"Non-consecutive engine event_id: expected {expected_id}, got {event_id}"
-                )
-        self._last_engine_event_id = event_id
 
         data = event["data"]
         if data["type"] == "stored":
@@ -858,12 +884,16 @@ class Publisher:
 
             lora_name = data.get("lora_name")
 
-            # Get attention_dp_rank from event (TRT-LLM includes this in KVCacheEvent)
-            # Default to 0 for backwards compatibility with older TRT-LLM versions
-            attention_dp_rank = event.get("attention_dp_rank", 0)
-
-            logging.debug(
-                f"publish stored event: engine_event_id: {event_id}, attention_dp_rank: {attention_dp_rank}, token_ids: {token_ids}, num_block_tokens: {num_block_tokens}, block_hashes: {block_hashes}, lora_name: {lora_name}, parent_hash: {parent_hash}"
+            logger.debug(
+                "Publishing stored KV event: engine_event_id=%s "
+                "attention_dp_rank=%s blocks=%s tokens=%s lora_name=%s "
+                "has_parent=%s",
+                event_id,
+                attention_dp_rank,
+                len(block_hashes),
+                len(token_ids),
+                lora_name,
+                parent_hash is not None,
             )
             # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
             # Note: event_id is managed internally by the publisher (monotonic counter per dp_rank)
@@ -899,24 +929,28 @@ class Publisher:
         elif data["type"] == "removed":
             self.processing_initial_created_events = False
             removed_block_hashes: list[int] = []
+            skipped_partial_blocks = 0
             for block_hash in data["block_hashes"]:
                 block_hash = _to_signed_i64(block_hash)
                 if block_hash is None:
                     continue
                 if block_hash in self.partial_block_hashes:
-                    logging.debug(
-                        f"Skipping removing block hash {block_hash} since it is a partial block"
-                    )
                     self.partial_block_hashes.remove(block_hash)
+                    skipped_partial_blocks += 1
                     continue
                 removed_block_hashes.append(block_hash)
 
-            # Get attention_dp_rank from event (TRT-LLM includes this in KVCacheEvent)
-            attention_dp_rank = event.get("attention_dp_rank", 0)
-
-            logging.debug(
-                f"publish removed event: engine_event_id: {event_id}, attention_dp_rank: {attention_dp_rank}, block_hashes: {removed_block_hashes}"
+            logger.debug(
+                "Publishing removed KV event: engine_event_id=%s "
+                "attention_dp_rank=%s blocks=%s skipped_partial_blocks=%s",
+                event_id,
+                attention_dp_rank,
+                len(removed_block_hashes),
+                skipped_partial_blocks,
             )
+            if not removed_block_hashes:
+                return
+
             # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
             # Note: event_id is managed internally by the publisher (monotonic counter per dp_rank)
             if self.zmq_kv_event_publisher:
@@ -1040,6 +1074,8 @@ async def get_publisher(
     kv_block_size: int,
     metrics_labels: Any,
     component_gauges: LLMBackendMetrics,
+    additional_metrics: Any = None,
+    event_buffer_max_size: int = 0,
     zmq_endpoint: Optional[str] = None,
     enable_local_indexer: bool = False,
     metrics_collector: Any = None,
@@ -1051,6 +1087,8 @@ async def get_publisher(
         kv_block_size,
         metrics_labels,
         component_gauges=component_gauges,
+        additional_metrics=additional_metrics,
+        event_buffer_max_size=event_buffer_max_size,
         zmq_endpoint=zmq_endpoint,
         enable_local_indexer=enable_local_indexer,
         metrics_collector=metrics_collector,

@@ -519,7 +519,7 @@ impl Worker {
         let registry = endpoint.drt().engine_routes();
         let control_count = controls.len();
         // Serialize discovery-mutating controls so a concurrent resume cannot
-        // re-register the endpoint between a quiesce control's unregister and
+        // re-register the endpoint between a pause control's unregister and
         // its engine-state mutation (and vice versa).
         let control_lock = Arc::new(tokio::sync::Mutex::new(()));
         for control_name in controls {
@@ -913,13 +913,13 @@ enum EngineControlPolicy {
 fn engine_control_policy(control: &str) -> EngineControlPolicy {
     // This policy only governs discovery (un)registration ordering. Draining
     // in-flight work before memory is freed is delegated to each backend's
-    // quiesce controller: vLLM and SGLang call the engine-native
-    // pause_generation() before sleep/release_memory_occupation, while TRT-LLM
-    // rejects new requests and waits for inflight requests to finish. The
+    // pause controller: vLLM calls pause_generation() before native sleep(),
+    // SGLang calls pause_generation() before release_memory_occupation(), and
+    // TRT-LLM rejects new requests and waits for inflight requests to finish. The
     // UnregisterBefore step here is an additional guard (stop new routing), not
     // the drain itself.
     match control {
-        // Quiesce controls make the engine unsafe for new requests, so remove
+        // Pause controls make the engine unsafe for new requests, so remove
         // the endpoint before they mutate engine state. Resume controls make
         // the engine serving-safe again, so advertise it only after success.
         "sleep" | "release_memory_occupation" => EngineControlPolicy::UnregisterBefore,
@@ -1020,7 +1020,7 @@ fn wrap_engine_control_callback(
                     }
                 }
                 EngineControlPolicy::RegisterAfter => {
-                    // Hold across callback + register so a concurrent quiesce
+                    // Hold across callback + register so a concurrent pause
                     // cannot unregister between them.
                     let _guard = control_lock.lock().await;
 
@@ -1028,11 +1028,11 @@ fn wrap_engine_control_callback(
                     if !control_response_is_error(&response)
                         && let Err(e) = endpoint.register_endpoint_instance().await
                     {
-                        // The engine is awake but absent from discovery. The
+                        // The engine is serving-safe but absent from discovery. The
                         // operation is idempotent: retrying /engine/{control_name}
-                        // re-registers without re-waking the engine (the controller
-                        // short-circuits "already awake"), so surface that it is
-                        // safe to retry.
+                        // re-registers without repeating the wake/resume work (the
+                        // controller short-circuits "already awake/resumed"), so surface
+                        // that it is safe to retry.
                         return Ok(control_error_response(format!(
                             "engine resumed but re-registration failed after /engine/{control_name}: {e}; retry /engine/{control_name} to rejoin discovery"
                         )));

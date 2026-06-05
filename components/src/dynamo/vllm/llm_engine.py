@@ -25,6 +25,7 @@ from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 from dynamo._core import Context
+from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend import telemetry
 from dynamo.common.backend.disagg import require_prefill_result
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
@@ -54,7 +55,7 @@ from dynamo.vllm.cache_info import (
 from dynamo.vllm.capacity import per_rank_kv_blocks
 
 from .handlers import (
-    VllmEngineQuiesceController,
+    VllmEnginePauseController,
     build_sampling_params,
     get_dp_range_for_worker,
 )
@@ -155,8 +156,8 @@ class VllmLLMEngine(LLMEngine):
         # factory call sees a valid object. `num_gpu_blocks` is patched
         # after KV profiling finishes.
         self._stat_logger_factory: Optional[_UnifiedStatLoggerFactory] = None
-        self._quiesce_controller: VllmEngineQuiesceController | None = None
-        self._quiesce_lock = asyncio.Lock()
+        self._pause_controller: VllmEnginePauseController | None = None
+        self._pause_lock = asyncio.Lock()
         self._scale_ep_lock = asyncio.Lock()
         self._scale_ep_in_progress = False
 
@@ -220,7 +221,7 @@ class VllmLLMEngine(LLMEngine):
             usage_context=UsageContext.OPENAI_API_SERVER,
             stat_loggers=[self._stat_logger_factory],
         )
-        self._quiesce_controller = VllmEngineQuiesceController(self.engine_client)
+        self._pause_controller = VllmEnginePauseController(self.engine_client)
         num_gpu_blocks = self.engine_client.vllm_config.cache_config.num_gpu_blocks or 0
         per_rank_num_gpu_blocks = per_rank_kv_blocks(num_gpu_blocks, self._dp_range[1])
         if per_rank_num_gpu_blocks is None:
@@ -327,6 +328,15 @@ class VllmLLMEngine(LLMEngine):
         )
 
         is_prefill = self.disaggregation_mode == DisaggregationMode.PREFILL
+        tokenizer = getattr(self.engine_client, "tokenizer", None)
+        # vLLM emits a selected-token logprob dict even at `logprobs=0`,
+        # so the top-k suppression happens below, not at the engine.
+        (
+            requested_logprobs_count,
+            requested_prompt_logprobs_count,
+        ) = _shared_logprobs.parse_logprob_options(
+            request.get("output_options", {}) or {}
+        )
 
         total_output_tokens_by_index: dict[int, int] = {}
         async for res in gen:
@@ -348,16 +358,46 @@ class VllmLLMEngine(LLMEngine):
                 finish_reason = getattr(output, "finish_reason", None)
                 if not token_ids and not finish_reason:
                     continue
-                prepared_outputs.append((output_idx, token_ids, finish_reason))
+                prepared_outputs.append((output, output_idx, token_ids, finish_reason))
 
-            for output_idx, token_ids, finish_reason in prepared_outputs:
+            for output, output_idx, token_ids, finish_reason in prepared_outputs:
                 out: GenerateChunk = {
                     "index": output_idx,
                     "token_ids": token_ids,
                 }
 
+                # `build_sampling_params` forces DELTA output → offset 0.
+                # `fallback_to_first_on_missing=True` matches legacy
+                # vLLM handler: always emit when vLLM returned a dict.
+                (
+                    log_probs,
+                    top_logprobs,
+                ) = _shared_logprobs.extract_from_completion_output(
+                    output,
+                    0,
+                    tokenizer=tokenizer,
+                    fallback_to_first_on_missing=True,
+                    include_bytes=True,
+                )
+                if log_probs is not None:
+                    out["log_probs"] = log_probs
+                if (
+                    top_logprobs is not None
+                    and requested_logprobs_count is not None
+                    and requested_logprobs_count > 0
+                ):
+                    out["top_logprobs"] = top_logprobs
+
                 if finish_reason:
                     out["finish_reason"] = str(finish_reason)
+                    # vLLM hangs prompt_logprobs off `RequestOutput`, not
+                    # `CompletionOutput` — read from `res`.
+                    if requested_prompt_logprobs_count is not None:
+                        prompt_payload = _shared_logprobs.extract_prompt_logprobs_from_completion_output(
+                            res, tokenizer=tokenizer
+                        )
+                        if prompt_payload is not None:
+                            out["engine_data"] = {"prompt_logprobs": prompt_payload}
                     prompt_tokens = (
                         len(res.prompt_token_ids) if res.prompt_token_ids else 0
                     )
@@ -465,12 +505,12 @@ class VllmLLMEngine(LLMEngine):
     async def sleep(self, body: dict) -> dict:
         body = body or {}
         level = body.get("level", 1)
-        controller = self._quiesce_controller
+        controller = self._pause_controller
         if controller is None:
             return {"status": "error", "message": "engine is not initialized"}
 
-        async with self._quiesce_lock:
-            if controller.is_quiesced:
+        async with self._pause_lock:
+            if controller.is_paused:
                 return {"status": "ok", "message": "Engine already sleeping"}
             if controller.needs_resume_recovery:
                 return {
@@ -478,7 +518,7 @@ class VllmLLMEngine(LLMEngine):
                     "message": "wake_up required before retrying sleep",
                 }
             try:
-                if not await controller.quiesce(level):
+                if not await controller.pause(level):
                     return {"status": "ok", "message": "Engine already sleeping"}
                 return {"status": "ok", "message": f"Engine slept (level={level})"}
             except Exception as e:
@@ -488,13 +528,13 @@ class VllmLLMEngine(LLMEngine):
     async def wake_up(self, body: dict) -> dict:
         body = body or {}
         tags = body.get("tags")
-        controller = self._quiesce_controller
+        controller = self._pause_controller
         if controller is None:
             return {"status": "error", "message": "engine is not initialized"}
 
-        async with self._quiesce_lock:
+        async with self._pause_lock:
             needs_recovery = controller.needs_resume_recovery
-            if not controller.is_quiesced and not needs_recovery:
+            if not controller.is_paused and not needs_recovery:
                 return {"status": "ok", "message": "Engine already awake"}
             try:
                 await controller.resume(tags)
@@ -614,7 +654,7 @@ class VllmLLMEngine(LLMEngine):
                 self.engine_client.shutdown()
         finally:
             self.engine_client = None
-            self._quiesce_controller = None
+            self._pause_controller = None
             if self._prometheus_temp_dir is not None:
                 if (
                     os.environ.get("PROMETHEUS_MULTIPROC_DIR")

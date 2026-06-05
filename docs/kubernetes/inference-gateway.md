@@ -1,14 +1,12 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Inference Gateway (GAIE)
+title: Gateway API Inference Extension (GAIE)
 ---
 
-## Inference Gateway Setup with Dynamo
+## Gateway API Inference Extension Setup with Dynamo
 
-# Inference Gateway (GAIE)
-
-Integrate Dynamo with the Gateway API Inference Extension for intelligent KV-aware request routing at the gateway layer.
+Integrate Dynamo with the Gateway API Inference Extension, also known as Inference Gateway, for intelligent KV-aware request routing at the gateway layer.
 
 ## Features
 
@@ -20,7 +18,7 @@ Integrate Dynamo with the Gateway API Inference Extension for intelligent KV-awa
 
 - If you want to use LoRA deploy Dynamo without the Inference Gateway.
 
-- These setups use [agentgateway](https://agentgateway.dev/) as the Inference Gateway implementation.
+- These setups use [agentgateway](https://agentgateway.dev/) as the Inference Gateway implementation. For the Istio Inference Gateway, check out [`recipes/qwen3-0.6b/vllm/agg/gaie`](../../recipes/qwen3-0.6b/vllm/agg/gaie).
 
 ## Prerequisites
 
@@ -32,7 +30,7 @@ Integrate Dynamo with the Gateway API Inference Extension for intelligent KV-awa
 ### 1. Install Dynamo Platform ###
 
 [See Quickstart Guide](./README.md) to install Dynamo Kubernetes Platform.
-If you are installing from the source tree rather than a release chart, follow [Path B: Custom Build from Source](./installation-guide.md#path-b-custom-build-from-source) and run `helm dep build ./platform/` before `helm install` so the vendored subcharts match the local chart contents.
+If you are installing from the source tree rather than a release chart, follow [Advanced: Build from Source](./installation-guide.md#advanced-build-from-source) and run `helm dep build ./platform/` before `helm install` so the vendored subcharts match the local chart contents.
 
 ### 2. Deploy Inference Gateway ###
 
@@ -45,7 +43,7 @@ export NAMESPACE=my-model # You can put the inference gateway into another names
 ```
 This script installs the Gateway API CRDs, the GAIE CRDs, agentgateway into `agentgateway-system`, and a `Gateway` named `inference-gateway` into `${NAMESPACE}`.
 
-#### f. Verify the Gateway is running
+#### Verify the Gateway is running
 
 ```bash
 kubectl get gateway inference-gateway -n ${NAMESPACE}
@@ -55,6 +53,37 @@ kubectl get gateway inference-gateway -n ${NAMESPACE}
 # inference-gateway   agentgateway   <none>   True         1m
 ```
 
+
+### 2b. Istio Gateway (Alternative) ###
+
+If you are using Istio as your gateway implementation,
+the EPP uses secure serving (TLS) by default. The gateway proxy needs an
+Istio `DestinationRule` to talk to the EPP service; without it the Istio
+`ext_proc` filter fails with `connection termination` errors.
+
+The Dynamo operator can create this `DestinationRule` for you. Install or
+upgrade the platform Helm chart with `dynamo.serviceMesh.enabled=true`
+(see [Service Mesh Integration (Istio)](#service-mesh-integration-istio)
+below). When that is set, you can skip the rest of this section.
+
+If you are not using the operator's Helm chart, or have left
+`dynamo.serviceMesh.enabled=false`, apply a `DestinationRule` manually for
+each EPP service:
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: <dgd-name>-epp
+spec:
+  host: <dgd-name>-epp.<namespace>.svc.cluster.local
+  trafficPolicy:
+    tls:
+      insecureSkipVerify: true
+      mode: SIMPLE
+```
+
+Replace `<dgd-name>` with your DynamoGraphDeployment name and `<namespace>` with the namespace where the EPP is deployed. See [`recipes/qwen3-0.6b/vllm/agg/gaie/dr.yaml`](../../recipes/qwen3-0.6b/vllm/agg/gaie/dr.yaml) for an example.
 
 ### 3. Setup secrets ###
 

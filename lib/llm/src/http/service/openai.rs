@@ -152,6 +152,28 @@ fn find_dynamo_error_in_chain<'a>(
     None
 }
 
+/// Match `InvalidArgument` at top-level OR under `Backend()`.
+/// `py_err_to_dynamo` wraps Python `ValueError`/`TypeError` as
+/// `Backend(InvalidArgument)`; both variants are 400-worthy.
+fn find_invalid_argument_in_chain<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a dynamo_runtime::error::DynamoError> {
+    use dynamo_runtime::error::{BackendError, ErrorType};
+    let mut current = Some(err);
+    while let Some(e) = current {
+        if let Some(dynamo_err) = e.downcast_ref::<dynamo_runtime::error::DynamoError>()
+            && matches!(
+                dynamo_err.error_type(),
+                ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
+            )
+        {
+            return Some(dynamo_err);
+        }
+        current = e.source();
+    }
+    None
+}
+
 impl ErrorMessage {
     /// Not Found Error
     pub fn model_not_found() -> ErrorResponse {
@@ -277,15 +299,8 @@ impl ErrorMessage {
             );
         }
 
-        // Check for DynamoError with InvalidArgument anywhere in the chain → HTTP 400.
-        // This matches *any* nested InvalidArgument DynamoError, not only the NATS
-        // oversized-payload case, so previously-opaque nested InvalidArgument errors
-        // now surface as 400 instead of 500. Intentional: 400 is the correct class
-        // for a malformed/invalid request.
-        if let Some(dynamo_err) = find_dynamo_error_in_chain(
-            err.as_ref(),
-            dynamo_runtime::error::ErrorType::InvalidArgument,
-        ) {
+        // InvalidArgument (top-level OR Backend) → 400.
+        if let Some(dynamo_err) = find_invalid_argument_in_chain(err.as_ref()) {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorMessage {
@@ -1437,11 +1452,7 @@ async fn chat_completions(
         &request_id,
     );
 
-    if let Err(err) = request.normalize_reasoning_template_args() {
-        let err_response = ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: VALIDATION_PREFIX.to_string() + &err.to_string(),
-        });
+    if let Err(err_response) = normalize_chat_reasoning_template_args(&mut request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
     }
@@ -1661,6 +1672,18 @@ pub fn validate_chat_completion_unsupported_fields(
     }
 
     Ok(())
+}
+
+/// Normalizes OpenAI-style reasoning controls before chat completion validation.
+fn normalize_chat_reasoning_template_args(
+    request: &mut NvCreateChatCompletionRequest,
+) -> Result<(), ErrorResponse> {
+    request.normalize_reasoning_template_args().map_err(|e| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: VALIDATION_PREFIX.to_string() + &e.to_string(),
+        })
+    })
 }
 
 /// Validates that required fields are present and valid in the chat completion request
@@ -1893,11 +1916,7 @@ async fn responses(
     // that the stream converter needs for faithful response reconstruction.
     let responses_ctx = unified_request.responses_context().cloned();
     let mut chat_request = unified_request.into_inner();
-    if let Err(err) = chat_request.normalize_reasoning_template_args() {
-        let err_response = ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: VALIDATION_PREFIX.to_string() + &err.to_string(),
-        });
+    if let Err(err_response) = normalize_chat_reasoning_template_args(&mut chat_request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
     }
@@ -3025,6 +3044,26 @@ mod tests {
     }
 
     #[test]
+    fn test_backend_invalid_argument_surfaces_as_400() {
+        // `Backend(InvalidArgument)` is what `py_err_to_dynamo` produces
+        // for Python `ValueError` / `TypeError` raised inside an engine's
+        // `generate()` — must map to 400, not 500.
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+
+        let err: anyhow::Error = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("Dynamo's SGLang backend does not currently support logprobs >= 1")
+            .build()
+            .into();
+
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.code, StatusCode::BAD_REQUEST.as_u16());
+        assert!(response.1.message.contains("does not currently support"));
+    }
+
+    #[test]
     fn test_cancelled_error_response_from_anyhow() {
         use dynamo_runtime::error::{DynamoError, ErrorType};
 
@@ -3201,6 +3240,27 @@ mod tests {
         };
         let result = validate_chat_completion_required_fields(&request);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_normalize_chat_reasoning_template_args_error_response() {
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "thinking": {"type": "auto"}
+            }))
+            .unwrap();
+
+        let result = normalize_chat_reasoning_template_args(&mut request);
+        assert!(result.is_err());
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                error_response.1.message,
+                format!("{VALIDATION_PREFIX}`thinking.type` must be `enabled` or `disabled`")
+            );
+        }
     }
 
     #[test]
