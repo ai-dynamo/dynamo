@@ -287,7 +287,7 @@ def setup_metrics_collection(
             )
 
 
-def _resolve_image_token_id(config: Config) -> Optional[int]:
+def _resolve_image_token_id(config: Config, vllm_config: VllmConfig) -> Optional[int]:
     """Routing-side image-placeholder token id for the served model.
 
     Resolved via the SAME Rust logic the frontend uses
@@ -296,35 +296,18 @@ def _resolve_image_token_id(config: Config) -> Optional[int]:
     so the KV-event normalizer keys on the identical token the frontend
     substitutes `pad_value` over — no per-family drift between the two.
 
-    Returns None when the bindings lack the `mm-routing` feature, the local
-    model dir can't be located, or the model isn't in the MM-routing registry.
-    In all of those the frontend also skips MM routing, so a worker-side no-op
-    is consistent (events pass through unchanged).
+    Returns None when the bindings lack the `mm-routing` feature or the model
+    isn't in the MM-routing registry — in both cases the frontend also skips MM
+    routing, so a worker-side no-op is consistent (events pass through).
     """
     try:
         from dynamo._core import resolve_routing_image_token_id
     except ImportError:
         return None
 
-    model_dir = config.model
-    if not os.path.isdir(model_dir):
-        # config.model is an HF id; the model is already in the local cache
-        # (fetch_model ran before engine init), so resolve the snapshot dir
-        # without hitting the network.
-        try:
-            from huggingface_hub import snapshot_download
-
-            model_dir = snapshot_download(config.model, local_files_only=True)
-        except Exception as e:
-            logging.warning(
-                "mm-routing: could not locate local dir for %s (%s); "
-                "KV-event normalization disabled",
-                config.model,
-                e,
-            )
-            return None
-
-    return resolve_routing_image_token_id(config.model, model_dir)
+    # vLLM has already resolved the model to a local dir (config.json +
+    # tokenizer.json on disk) during engine init; read from there.
+    return resolve_routing_image_token_id(config.model, vllm_config.model_config.model)
 
 
 def setup_kv_event_publisher(
@@ -376,7 +359,7 @@ def setup_kv_event_publisher(
     # runs in vLLM BlockStored events to the same canonical pad_value scheme.
     # None (no mm-routing, model not in registry, text-only) leaves events
     # unchanged — consistent with the frontend also skipping MM routing.
-    image_token_id = _resolve_image_token_id(config)
+    image_token_id = _resolve_image_token_id(config, vllm_config)
 
     for dp_rank in range(dp_start, dp_start + dp_size):
         if consolidator_enabled:

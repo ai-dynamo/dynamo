@@ -127,20 +127,11 @@ pub fn convert_event(
     ))
 }
 
-/// Replace each run of `image_token_id` in `token_ids` with the canonical
-/// `pad_value(mm_hash)`, assigning one mm_hash per run in order. This mirrors
-/// the frontend's pad_value expansion so the recomputed `tokens_hash` matches:
-/// vLLM publishes `image_token_id` at image positions + the mm_hash via
-/// extra_keys, while the frontend folds mm identity into the tokens as
-/// pad_value with no side channel.
-///
-/// Exact whenever images are separated by at least one non-image token — the
-/// Qwen2/2.5/3-VL families wrap each image in vision-start/end tokens, so that
-/// always holds. It degrades only for back-to-back images with no separator:
-/// vLLM emits one merged run, we assign it a single mm_hash, and that block's
-/// hash diverges from the frontend (which filled pad(A) then pad(B)). The
-/// run-vs-mm_object count mismatch is logged below so the lossy case is
-/// observable rather than silent.
+/// Rewrite each `image_token_id` run in `token_ids` to `pad_value(mm_hash)`,
+/// one mm_hash per run in order, so the recomputed `tokens_hash` matches the
+/// frontend's pad_value expansion. Exact when images are separated by a
+/// non-image token (true for Qwen2/2.5/3-VL); a run-vs-mm_object count mismatch
+/// (adjacent images, no separator) is logged below rather than silent.
 fn substitute_pad_values(token_ids: &[u32], image_token_id: u32, mm_objects: &[u64]) -> Vec<u32> {
     let mut out = Vec::with_capacity(token_ids.len());
     // `obj_idx` advances once per completed run, so run N fills with
