@@ -2970,5 +2970,6 @@ class backend:
             engine: Any,
             config: "backend.WorkerConfig",
             event_loop: Any,
+            raw: bool = False,
         ) -> None: ...
         def run(self) -> Awaitable[None]: ...
