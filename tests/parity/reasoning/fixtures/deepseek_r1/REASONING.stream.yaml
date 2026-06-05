@@ -54,6 +54,7 @@ cases:
       sglang:
         reasoning_text: first
         normal_text: ' middle <think>second</think> done'
+        reason: Dynamo re-enters reasoning on each open marker across chunks and concatenates all spans; SGLang exits at the first end marker and does not re-enter, leaving the later span in normal_text.
   REASONING.stream.3.a:
     description: Start marker split across chunks
     ref: *upstream_ref
@@ -88,6 +89,7 @@ cases:
       sglang:
         reasoning_text: thinking</think>answer
         normal_text: ''
+        reason: Dynamo buffers an end marker split across chunk boundaries and resumes normal_text after it; SGLang streams the partial delimiter as reasoning, so the split marker is never reassembled and the answer stays in reasoning_text.
   REASONING.stream.3.c:
     description: Partial start-marker prefix later resolves as force-reasoning text
     ref: *upstream_ref
@@ -112,3 +114,22 @@ cases:
         normal_text: ''
       vllm: *d_s4
       sglang: *d_s4
+  REASONING.stream.2.c:
+    description: Stray end marker after a complete reasoning span, across chunks(unbalanced-tag)
+    ref: dynamo
+    spec_ref: tests/parity/README.md
+    chunks:
+    - '<think>preamble</think>'
+    - 'body</think>'
+    - 'answer'
+    expected:
+      dynamo:
+        reasoning_text: preamble
+        normal_text: 'bodyanswer'
+        reason: 'Lossless split: when a stray close marker appears outside any reasoning block, it is stripped (parser-owned syntax must not appear in normal_text). Reasoning is captured from the first <open>...<close> pair only; subsequent stray closes are discarded.'
+      vllm:
+        reasoning_text: 'preamble'
+        normal_text: 'body</think>answer'
+      sglang:
+        reasoning_text: 'preamble'
+        normal_text: 'body</think>answer'

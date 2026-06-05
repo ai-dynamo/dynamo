@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 from uuid import uuid4
 
-import torch
 from gpu_memory_service.common.cuda_utils import (
     align_to_granularity,
     cuda_ensure_initialized,
@@ -21,6 +20,7 @@ from gpu_memory_service.common.cuda_utils import (
     cumem_export_to_shareable_handle,
     cumem_get_allocation_granularity,
     cumem_release,
+    device_memory_info,
 )
 
 logger = logging.getLogger(__name__)
@@ -128,13 +128,15 @@ class GMSAllocationManager:
             # Visibility while retrying. Logged every iteration with elapsed
             # time + free GPU memory, so a stuck retry loop is observable
             # rather than silent.
+            free_b, total_b = -1, -1
             try:
-                free_b, total_b = torch.cuda.mem_get_info(self._device)
-            except RuntimeError:
+                free_b, total_b = device_memory_info(self._device)
+            except Exception:
                 logger.debug(
-                    "torch.cuda.mem_get_info(%d) failed", self._device, exc_info=True
+                    "NVML memory info failed for device %d",
+                    self._device,
+                    exc_info=True,
                 )
-                free_b, total_b = -1, -1
             elapsed = time.monotonic() - started_at
             logger.warning(
                 "cuMemCreate OOM for aligned_size=%d bytes, tag=%s, "

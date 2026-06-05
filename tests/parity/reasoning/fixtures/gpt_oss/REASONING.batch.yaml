@@ -195,3 +195,15 @@ cases:
     description: Open analysis channel interrupted by downstream tool-call text is not configured for Harmony
     ref: *upstream_ref
     reason: Harmony tool calls require a commentary channel envelope; the closed analysis to commentary handoff is covered by REASONING.batch.3.a.
+  REASONING.batch.6.b:
+    description: Stray end marker after a complete reasoning span(unbalanced-tag)
+    ref: dynamo
+    spec_ref: tests/parity/README.md
+    model_text: ''
+    expected:
+      dynamo:
+        unavailable: 'Pattern not applicable: gpt_oss does not use paired open/close markers, so the 1-open + 2-close unbalanced-tag shape has no direct analog.'
+      vllm:
+        unavailable: 'Pattern not applicable: gpt_oss does not use paired open/close markers, so the 1-open + 2-close unbalanced-tag shape has no direct analog.'
+      sglang:
+        unavailable: 'Pattern not applicable: gpt_oss does not use paired open/close markers, so the 1-open + 2-close unbalanced-tag shape has no direct analog.'

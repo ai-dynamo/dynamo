@@ -108,6 +108,10 @@ def run_kv_indexer(args: List[str]) -> None:
     """Run the KV indexer with the given arguments."""
     ...
 
+def run_slot_tracker(args: List[str]) -> None:
+    """Run the KV router slot tracker with the given arguments."""
+    ...
+
 # Any Python object that can be serialized to JSON (dict, list, str, int, etc.)
 JsonLike = Any
 
@@ -674,6 +678,7 @@ class ModelRuntimeConfig:
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
     reasoning_parser: str | None
+    backend_framework: str | None
     exclude_tools_when_tool_choice_none: bool
     data_parallel_start_rank: int
     data_parallel_size: int
@@ -1481,7 +1486,167 @@ class AicPerfConfig:
         aic_moe_tp_size: Optional[int] = None,
         aic_moe_ep_size: Optional[int] = None,
         aic_attention_dp_size: Optional[int] = None,
+        aic_nextn: Optional[int] = None,
+        aic_nextn_accept_rates: Optional[str] = None,
     ) -> None:
+        ...
+
+class AicEngineConfig:
+    """AIC model/backend identity used by native forward-pass estimates."""
+
+    def __init__(
+        self,
+        model_name: str,
+        backend: str,
+        system_name: str = "h200_sxm",
+        backend_version: Optional[str] = None,
+        tp_size: int = 1,
+        pp_size: int = 1,
+        moe_tp_size: Optional[int] = None,
+        moe_ep_size: Optional[int] = None,
+        attention_dp_size: Optional[int] = None,
+        model_arch: Optional[str] = None,
+        weight_dtype: Optional[str] = None,
+        moe_dtype: Optional[str] = None,
+        activation_dtype: Optional[str] = None,
+        kv_cache_dtype: Optional[str] = None,
+        kv_block_size: Optional[int] = None,
+        extra: Optional[dict[str, str]] = None,
+    ) -> None:
+        ...
+
+class EnginePerfLimits:
+    """Engine limits used by engine-level helper queries and default correction bounds."""
+
+    max_num_batched_tokens: int
+    max_num_seqs: int
+    max_kv_tokens: int
+
+    def __init__(
+        self,
+        max_num_batched_tokens: int = 8192,
+        max_num_seqs: int = 512,
+        max_kv_tokens: int = 2000000,
+    ) -> None:
+        ...
+
+class RustEnginePerfOptions:
+    """Online tuning options for RustEnginePerfModel."""
+
+    def __init__(
+        self,
+        max_observations: int = 64,
+        min_observations: int = 5,
+        bucket_count: int = 16,
+        max_num_tokens: int = 8192,
+        max_batch_size: int = 512,
+        max_kv_tokens: int = 2000000,
+    ) -> None:
+        ...
+
+class OptimizationTarget:
+    Throughput: "OptimizationTarget"
+    Latency: "OptimizationTarget"
+
+class EngineCapacityRequest:
+    """Request shape and SLA policy for find_engine_capacity_rps."""
+
+    def __init__(
+        self,
+        isl: int,
+        osl: int,
+        ttft_sla_ms: Optional[float] = None,
+        itl_sla_ms: Optional[float] = None,
+        e2e_latency_sla_ms: Optional[float] = None,
+        kv_hit_rate: Optional[float] = None,
+        optimization_target: OptimizationTarget = OptimizationTarget.Throughput,
+    ) -> None:
+        ...
+
+class EngineCapacity:
+    """Per-engine capacity result."""
+
+    rps: float
+    ttft_ms: Optional[float]
+    itl_ms: Optional[float]
+    e2e_latency_ms: Optional[float]
+    eligible: bool
+
+class RustEnginePerfModel:
+    """Engine-level performance model backed by AIC forward-pass modeling."""
+
+    @staticmethod
+    def best_available(
+        *,
+        engine_args: Optional["MockEngineArgs"] = None,
+        aic_config: Optional[AicEngineConfig] = None,
+        worker_type: Optional[str] = None,
+        limits: Optional[EnginePerfLimits] = None,
+        options: Optional[RustEnginePerfOptions] = None,
+        bootstrap_fpms: Optional[Any] = None,
+    ) -> "RustEnginePerfModel":
+        """Build from all available inputs; explicit AIC config is preferred, then engine args, then regression-only."""
+        ...
+
+    @staticmethod
+    def from_regression(
+        *,
+        worker_type: str,
+        limits: EnginePerfLimits,
+        options: Optional[RustEnginePerfOptions] = None,
+        bootstrap_fpms: Optional[Any] = None,
+    ) -> "RustEnginePerfModel":
+        """Build a regression-only model that learns from observed FPM wall times."""
+        ...
+
+    @staticmethod
+    def from_native(
+        *,
+        aic_config: AicEngineConfig,
+        worker_type: str,
+        limits: EnginePerfLimits,
+        options: Optional[RustEnginePerfOptions] = None,
+        bootstrap_fpms: Optional[Any] = None,
+    ) -> "RustEnginePerfModel":
+        """Build a strict native AIC model; unsupported AIC configs raise an error."""
+        ...
+
+    def estimate_forward_pass_time(self, metrics_by_rank: Any) -> Optional[float]:
+        """Estimate one scheduled forward-pass iteration in seconds from current-version FPMs."""
+        ...
+
+    def tune_with_fpms(self, iterations: Any) -> None:
+        """Tune with current-version observed FPMs: outer list is iterations, inner list is attention-DP ranks."""
+        ...
+
+    def diagnostics(self) -> str:
+        """Return AIC diagnostics as a JSON string."""
+        ...
+
+    def get_min_correction_factor(self) -> Optional[float]:
+        """Return the minimum ready native correction factor, or None if no factor is ready."""
+        ...
+
+    def get_max_correction_factor(self) -> Optional[float]:
+        """Return the maximum ready native correction factor, or None if no factor is ready."""
+        ...
+
+    def get_avg_correction_factor(self) -> Optional[float]:
+        """Return the average ready native correction factor, or None if no factor is ready."""
+        ...
+
+    def get_queued_prefill_time(self, metrics_by_rank: Any) -> Optional[float]:
+        """Estimate queued prefill drain time; adjust queued tokens outside the shim for KV reuse."""
+        ...
+
+    def get_scheduled_decode_itl(self, metrics_by_rank: Any) -> Optional[float]:
+        """Estimate scheduled decode ITL in seconds; aggregated workers include scheduled or learned average prefill load."""
+        ...
+
+    def find_engine_capacity_rps(
+        self, request: EngineCapacityRequest
+    ) -> Optional[EngineCapacity]:
+        """Search sustainable per-engine RPS; inspect eligible to see whether eligible SLA metrics passed."""
         ...
 
 class KvRouterConfig:
@@ -1631,6 +1796,13 @@ class SglangArgs:
     ) -> None:
         ...
 
+class TrtllmArgs:
+    def __init__(
+        self,
+        capacity_scheduler_policy: Optional[str] = None,
+    ) -> None:
+        ...
+
 class MockEngineArgs:
     def __init__(
         self,
@@ -1655,8 +1827,11 @@ class MockEngineArgs:
         aic_moe_tp_size: Optional[int] = None,
         aic_moe_ep_size: Optional[int] = None,
         aic_attention_dp_size: Optional[int] = None,
+        aic_nextn: Optional[int] = None,
+        aic_nextn_accept_rates: Optional[str] = None,
         gpu_memory_utilization: Optional[float] = None,
         mem_fraction_static: Optional[float] = None,
+        free_gpu_memory_fraction: Optional[float] = None,
         enable_local_indexer: bool = False,
         bootstrap_port: Optional[int] = None,
         kv_bytes_per_token: Optional[int] = None,
@@ -1667,6 +1842,7 @@ class MockEngineArgs:
         preemption_mode: str = "lifo",
         router_queue_policy: Optional[str] = None,
         sglang: Optional[SglangArgs] = None,
+        trtllm: Optional[TrtllmArgs] = None,
         num_g2_blocks: Optional[int] = None,
         num_g3_blocks: Optional[int] = None,
         offload_batch_size: Optional[int] = None,
@@ -1795,6 +1971,18 @@ class MockEngineArgs:
     def aic_attention_dp_size(self, value: Optional[int]) -> None: ...
 
     @property
+    def aic_nextn(self) -> Optional[int]: ...
+
+    @aic_nextn.setter
+    def aic_nextn(self, value: Optional[int]) -> None: ...
+
+    @property
+    def aic_nextn_accept_rates(self) -> Optional[str]: ...
+
+    @aic_nextn_accept_rates.setter
+    def aic_nextn_accept_rates(self, value: Optional[str]) -> None: ...
+
+    @property
     def gpu_memory_utilization(self) -> Optional[float]: ...
 
     @gpu_memory_utilization.setter
@@ -1805,6 +1993,12 @@ class MockEngineArgs:
 
     @mem_fraction_static.setter
     def mem_fraction_static(self, value: Optional[float]) -> None: ...
+
+    @property
+    def free_gpu_memory_fraction(self) -> Optional[float]: ...
+
+    @free_gpu_memory_fraction.setter
+    def free_gpu_memory_fraction(self, value: Optional[float]) -> None: ...
 
     @property
     def worker_type(self) -> str: ...
@@ -1831,8 +2025,11 @@ class MockEngineArgs:
         aic_moe_tp_size: Optional[int] = None,
         aic_moe_ep_size: Optional[int] = None,
         aic_attention_dp_size: Optional[int] = None,
+        aic_nextn: Optional[int] = None,
+        aic_nextn_accept_rates: Optional[str] = None,
         gpu_memory_utilization: Optional[float] = None,
         mem_fraction_static: Optional[float] = None,
+        free_gpu_memory_fraction: Optional[float] = None,
         enable_prefix_caching: Optional[bool] = None,
         worker_type: Optional[str] = None,
     ) -> "MockEngineArgs": ...

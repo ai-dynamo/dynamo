@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from dynamo.llm import MockEngineArgs
+from dynamo.mocker import MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay
 
 AIC_PARITY_MODEL = "Qwen/Qwen3-32B"

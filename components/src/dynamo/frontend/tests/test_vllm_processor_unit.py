@@ -25,6 +25,7 @@ pytestmark = [
     pytest.mark.xpu_1,
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
+    pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
 ]
 
 MODEL = "Qwen/Qwen3-0.6B"

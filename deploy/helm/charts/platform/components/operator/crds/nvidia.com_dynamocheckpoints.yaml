@@ -33,9 +33,9 @@ spec:
           jsonPath: .status.phase
           name: Phase
           type: string
-        - description: Identity hash of the checkpoint
-          jsonPath: .status.identityHash
-          name: Hash
+        - description: Artifact ID of the checkpoint
+          jsonPath: .status.checkpointID
+          name: CheckpointID
           type: string
         - jsonPath: .metadata.creationTimestamp
           name: Age
@@ -69,9 +69,14 @@ spec:
               properties:
                 gpuMemoryService:
                   description: |-
-                    GPUMemoryService enables checkpoint-time GPU Memory Service wiring.
-                    It is intentionally outside spec.identity, so it does not affect the
-                    checkpoint identity hash or deduplication.
+                    GPUMemoryService records checkpoint-time GPU Memory Service metadata for
+                    a prepared checkpoint Job pod. The DynamoCheckpoint controller does not
+                    inject GMS/DRA resources; auto-created checkpoints from
+                    DynamoGraphDeployment prepare the pod template before creating this object.
+                    Manual GMS-enabled checkpoints must provide the prepared pod template; the
+                    controller fails the checkpoint if the required GMS/DRA wiring is missing.
+                    This field is intentionally outside spec.identity, so it does not affect
+                    the checkpoint identity hash or deduplication.
                   properties:
                     deviceClassName:
                       default: gpu.nvidia.com
@@ -86,9 +91,11 @@ spec:
                       description: |-
                         ExtraClientContainers lists additional user-declared containers that should
                         be wired as GMS clients in pods rendered from the enclosing spec.
-                        DGD/DCD services apply this to service pods; DynamoCheckpoint applies this
-                        to checkpoint Job pods. In each rendered pod, only matching container
-                        names are wired; absent names are ignored.
+                        DGD/DCD services apply this to service pods. Auto-created checkpoints
+                        apply checkpoint job clients before creating the DynamoCheckpoint; manual
+                        DynamoCheckpoint users must provide an already-prepared pod template.
+                        In each rendered pod, only matching container names are wired; absent
+                        names are ignored.
                       items:
                         maxLength: 63
                         minLength: 1
@@ -139,7 +146,9 @@ spec:
                     - message: extraClientPods is reserved for inter-pod GMS and is not implemented yet
                       rule: '!has(self.extraClientPods) || size(self.extraClientPods) == 0'
                 identity:
-                  description: Identity defines the inputs that determine checkpoint equivalence
+                  description: |-
+                    Identity is legacy compatibility metadata. DGD-managed automatic
+                    checkpoints use an operator-owned checkpoint ID instead.
                   properties:
                     backendFramework:
                       description: BackendFramework is the runtime framework (vllm, sglang, trtllm)
@@ -149,23 +158,31 @@ spec:
                         - trtllm
                       type: string
                     dtype:
-                      description: Dtype is the data type (fp16, bf16, fp8, etc.)
+                      description: |-
+                        Dtype is the data type (fp16, bf16, fp8, etc.).
+                        Deprecated for DGD-managed automatic checkpoints; it only participates in
+                        the legacy identity hash fallback for standalone objects.
                       type: string
                     dynamoVersion:
                       description: |-
-                        DynamoVersion is the Dynamo platform version (optional)
-                        If not specified, version is not included in identity hash
-                        This ensures checkpoint compatibility across Dynamo releases
+                        DynamoVersion is the Dynamo platform version (optional).
+                        Deprecated for DGD-managed automatic checkpoints; it only participates in
+                        the legacy identity hash fallback for standalone objects.
                       type: string
                     extraParameters:
                       additionalProperties:
                         type: string
                       description: |-
-                        ExtraParameters are additional parameters that affect the checkpoint hash
-                        Use for any framework-specific or custom parameters not covered above
+                        ExtraParameters are additional parameters that affect the checkpoint hash.
+                        Use for any framework-specific or custom parameters not covered above.
+                        Deprecated for DGD-managed automatic checkpoints; it only participates in
+                        the legacy identity hash fallback for standalone objects.
                       type: object
                     maxModelLen:
-                      description: MaxModelLen is the maximum sequence length
+                      description: |-
+                        MaxModelLen is the maximum sequence length.
+                        Deprecated for DGD-managed automatic checkpoints; it only participates in
+                        the legacy identity hash fallback for standalone objects.
                       format: int32
                       minimum: 1
                       type: integer
@@ -174,13 +191,19 @@ spec:
                       type: string
                     pipelineParallelSize:
                       default: 1
-                      description: PipelineParallelSize is the pipeline parallel configuration
+                      description: |-
+                        PipelineParallelSize is the pipeline parallel configuration.
+                        Deprecated for DGD-managed automatic checkpoints; it only participates in
+                        the legacy identity hash fallback for standalone objects.
                       format: int32
                       minimum: 1
                       type: integer
                     tensorParallelSize:
                       default: 1
-                      description: TensorParallelSize is the tensor parallel configuration
+                      description: |-
+                        TensorParallelSize is the tensor parallel configuration.
+                        Deprecated for DGD-managed automatic checkpoints; it only participates in
+                        the legacy identity hash fallback for standalone objects.
                       format: int32
                       minimum: 1
                       type: integer
@@ -206,6 +229,9 @@ spec:
                       description: |-
                         PodTemplateSpec allows customizing the checkpoint Job pod
                         This should include the container that runs the workload to be checkpointed
+                        and any workload/runtime env, service account, GMS, or DRA wiring needed
+                        by that container. Auto-created checkpoints from DynamoGraphDeployment
+                        render Dynamo defaults before creating the DynamoCheckpoint.
                       properties:
                         metadata:
                           description: |-
@@ -8306,6 +8332,9 @@ spec:
             status:
               description: DynamoCheckpointStatus defines the observed state of DynamoCheckpoint
               properties:
+                checkpointID:
+                  description: CheckpointID is the artifact ID used by the snapshot protocol.
+                  type: string
                 conditions:
                   description: 'DEPRECATED: Conditions are deprecated. Use status.phase instead.'
                   items:
@@ -8368,8 +8397,9 @@ spec:
                   type: string
                 identityHash:
                   description: |-
-                    IdentityHash is the computed hash of the checkpoint identity
-                    This hash is used to identify equivalent checkpoints
+                    IdentityHash is the computed hash of the checkpoint identity.
+                    Deprecated: use CheckpointID. This field is retained for compatibility
+                    with older status consumers.
                   type: string
                 jobName:
                   description: JobName is the name of the checkpoint creation Job

@@ -6,15 +6,16 @@ from __future__ import annotations
 import base64
 import json
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 from gpu_memory_service.common import cuda_utils
+from gpu_memory_service.common.protocol.messages import GetAllocationResponse
 from gpu_memory_service.snapshot.backends.pinned_host import (
     PINNED_COPY_CHUNK_SIZE,
     close_pinned_copy_slots,
     make_pinned_copy_slots,
 )
-from gpu_memory_service.snapshot.model import SaveManifest
+from gpu_memory_service.snapshot.model import AllocationEntry, SaveManifest
 
 _SAVE_COPY_BUFFERS = 1
 
@@ -133,27 +134,16 @@ class DeviceToFileWriter:
         self.close()
 
 
-def decode_metadata(raw_meta: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    return {
-        key: {
-            "allocation_id": entry["allocation_id"],
-            "offset_bytes": int(entry["offset_bytes"]),
-            "value": base64.b64decode(entry["value"]),
-        }
-        for key, entry in raw_meta.items()
-    }
-
-
 def plan_shard_layout(
-    allocations_info: List[Dict[str, Any]],
+    allocations_info: Sequence[GetAllocationResponse],
     shard_size_bytes: int,
-) -> List[Tuple[int, int]]:
-    result: List[Tuple[int, int]] = []
+) -> list[Tuple[int, int]]:
+    result: list[Tuple[int, int]] = []
     shard_idx = -1
     current_offset = 0
     started = False
     for alloc in allocations_info:
-        size = int(alloc["aligned_size"])
+        size = int(alloc.aligned_size)
         if not started or (
             current_offset > 0 and current_offset + size > shard_size_bytes
         ):
@@ -170,7 +160,16 @@ def load_manifest_and_metadata(
 ) -> Tuple[SaveManifest, Dict[str, Dict[str, Any]]]:
     manifest_path = os.path.join(input_dir, "manifest.json")
     with open(manifest_path, encoding="utf-8") as handle:
-        manifest = SaveManifest.from_dict(json.load(handle))
+        manifest_payload = json.load(handle)
+    manifest = SaveManifest(
+        timestamp=manifest_payload["timestamp"],
+        layout_hash=manifest_payload["layout_hash"],
+        device=manifest_payload["device"],
+        allocations=[
+            AllocationEntry(**allocation)
+            for allocation in manifest_payload.get("allocations", [])
+        ],
+    )
 
     metadata_path = os.path.join(input_dir, "gms_metadata.json")
     raw_meta: Dict[str, Any] = {}
@@ -178,4 +177,12 @@ def load_manifest_and_metadata(
         with open(metadata_path, encoding="utf-8") as handle:
             raw_meta = json.load(handle)
 
-    return manifest, decode_metadata(raw_meta)
+    metadata = {
+        key: {
+            "allocation_id": entry["allocation_id"],
+            "offset_bytes": int(entry["offset_bytes"]),
+            "value": base64.b64decode(entry["value"]),
+        }
+        for key, entry in raw_meta.items()
+    }
+    return manifest, metadata
