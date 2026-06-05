@@ -2392,8 +2392,20 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
             total_output_tokens_by_index: dict[int, int] = {}
             routed_experts_by_output: dict[int, Dict[str, Any]] = {}
+            # vLLM surfaces prompt_logprobs once (at end-of-prefill) and clears
+            # them on subsequent chunks, so the generation-finish chunk often
+            # carries None. Capture the first non-None payload and attach it to
+            # the final chunk instead of reading res.prompt_logprobs there.
+            prompt_logprobs_payload: Optional[list] = None
             async for res in gen:
                 # res is vllm's RequestOutput
+                if (
+                    prompt_logprobs_payload is None
+                    and getattr(res, "prompt_logprobs", None) is not None
+                ):
+                    prompt_logprobs_payload = _serialize_prompt_logprobs(
+                        res.prompt_logprobs
+                    )
 
                 if not res.outputs:
                     self._log_with_lora_context(
@@ -2461,9 +2473,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             embedding_sequence_length=embedding_sequence_length,
                             completion_token_counts=total_output_tokens_by_index,
                         )
-                        if res.prompt_logprobs is not None:
+                        if prompt_logprobs_payload is not None:
                             _attach_prompt_logprobs_engine_data(
-                                out, _serialize_prompt_logprobs(res.prompt_logprobs)
+                                out, prompt_logprobs_payload
                             )
                         routed_experts = routed_experts_by_output.get(output_idx)
                         if routed_experts is not None:
