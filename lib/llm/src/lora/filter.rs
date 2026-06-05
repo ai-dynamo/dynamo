@@ -35,7 +35,7 @@ impl LoraFilter {
     /// - `lora_name` is None: return all workers (base model request)
     /// - Active entry: prefer loaded workers in replica set, fall back to full replica set
     /// - Inactive entry: return single HRW-pinned worker (cold-start determinism)
-    /// - Not in routing table: return all workers (fallback)
+    /// - Not in routing table: prefer known-loaded workers, fall back to all workers
     pub fn filter_worker_ids_for_lora(
         &self,
         lora_name: Option<&str>,
