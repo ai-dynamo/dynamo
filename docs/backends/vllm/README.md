@@ -89,6 +89,36 @@ bash launch/agg.sh
 >
 > Then run the launch script. Without these, workers register but the frontend cannot discover them and requests hang.
 
+### Rust Backend Preview
+
+The Python vLLM backend remains the recommended entry point for production
+deployments and examples. The Rust backend is a development preview for
+validating the Rust `LLMEngine` integration with vLLM's engine-core client.
+Use it when working on the Rust backend contract, cancellation, metrics,
+or P/D wiring; use `python -m dynamo.vllm` or
+`python -m dynamo.vllm.unified_main` for the most complete vLLM feature
+coverage.
+
+To run the Rust backend locally, start the same infrastructure services and
+frontend, then launch the Rust worker in another terminal:
+
+```bash
+docker compose -f dev/docker-compose.yml up -d
+
+python -m dynamo.frontend --http-port 8000
+```
+
+```bash
+DYN_SYSTEM_PORT=8081 cargo run -p dynamo-vllm-backend -- Qwen/Qwen3-0.6B -- \
+  --enforce-eager \
+  --max-model-len 4096
+```
+
+The Rust worker starts a managed vLLM engine-core process and registers with
+the Dynamo frontend using the same discovery path as the Python unified
+backend. The Rust backend is expected to become the default only after it
+reaches feature and operational parity with the Python vLLM backend.
+
 ## Next Steps
 
 - **[Reference Guide](vllm-reference-guide.md)**: Configuration, arguments, and operational details
