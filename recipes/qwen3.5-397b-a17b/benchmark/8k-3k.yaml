@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# The 8K-ISL / 1K-OSL aiperf benchmark — the single benchmark for this
+# The 8K-ISL / 3K-OSL aiperf benchmark — the single benchmark for this
 # recipe, used for both configs (disagg, agg). Source hw/<hw>.env, export the
 # per-config values, and render with envsubst before kubectl apply (see
 # README -> Usage):
@@ -10,13 +10,13 @@
 #   export BENCH_POD=qwen35-disagg-bench BENCH_FRONTEND=qwen35-disagg-frontend \
 #          BENCH_RUN_LABEL=disagg
 #   envsubst '$HW_NODE_SELECTOR $HW_TOLERATIONS $BENCH_POD $BENCH_FRONTEND $BENCH_RUN_LABEL' \
-#     < benchmark/8k-1k.yaml | kubectl -n <ns> apply -f -
+#     < benchmark/8k-3k.yaml | kubectl -n <ns> apply -f -
 #
 # The restricted envsubst allow-list keeps the in-pod ${FRONTEND} /
 # ${RUN_LABEL} / ${MODEL_NAME} shell refs literal (resolved from the pod env
 # at runtime, not at apply time).
 #
-# TEXT workload: synthetic 8K ISL / 1K OSL (no dataset file, no images), so
+# TEXT workload: synthetic 8K ISL / 3K OSL (no dataset file, no images), so
 # the disagg run exercises the prefill->decode KV + GDN-conv-state transfer
 # over NIXL without a data-gen dependency. Tune ISL_MEAN / OSL_MEAN /
 # CONCURRENCY / REQUEST_COUNT via the env block below.
@@ -103,7 +103,7 @@ spec:
         - name: ISL_MEAN
           value: "8000"
         - name: OSL_MEAN
-          value: "1024"
+          value: "3000"
         - name: REQUEST_COUNT
           value: "200"
         - name: CONCURRENCY

@@ -90,11 +90,11 @@ kubectl -n <ns> wait --for=condition=Ready pod \
   --timeout=2400s
 ```
 
-**3. Benchmark** (8K ISL / 1K OSL):
+**3. Benchmark** (8K ISL / 3K OSL):
 ```bash
 export BENCH_POD=qwen35-disagg-bench BENCH_FRONTEND=qwen35-disagg-frontend BENCH_RUN_LABEL=disagg
 envsubst '$HW_NODE_SELECTOR $HW_TOLERATIONS $BENCH_POD $BENCH_FRONTEND $BENCH_RUN_LABEL' \
-  < benchmark/8k-1k.yaml | kubectl -n <ns> apply -f -
+  < benchmark/8k-3k.yaml | kubectl -n <ns> apply -f -
 kubectl -n <ns> logs -f qwen35-disagg-bench    # aiperf table prints at the end
 ```
 
@@ -150,10 +150,10 @@ needed.
 | Knob | Default | Notes |
 |------|---------|-------|
 | `--gpu-memory-utilization` | `0.90` | 397B FP8 is tight — drop to `0.85` if OOM at load |
-| `--max-model-len` | `16384` | must exceed ISL+OSL (8K+1K); smaller = more KV headroom |
+| `--max-model-len` | `16384` | must exceed ISL+OSL (8K+3K); smaller = more KV headroom |
 | `--block-size` + `--no-enable-prefix-caching` | `128`, off (disagg) | conservative hybrid/NIXL path (keeps `mamba_cache_mode=none`); agg uses prefix caching ON |
 | `--enable-expert-parallel` | off | TP8 already shards the A17B experts; EP is a later throughput experiment — add to both workers |
-| `benchmark/8k-1k.yaml` `ISL_MEAN`/`OSL_MEAN`/`CONCURRENCY`/`REQUEST_COUNT` | 8000/1024/20/200 | aiperf synthetic text load (8K ISL / 1K OSL) |
+| `benchmark/8k-3k.yaml` `ISL_MEAN`/`OSL_MEAN`/`CONCURRENCY`/`REQUEST_COUNT` | 8000/3000/20/200 | aiperf synthetic text load (8K ISL / 3K OSL) |
 | `hw/h100.env` `VLLM_IMAGE` / `HW_NODE_SELECTOR` / `IMAGE_PULL_SECRET` | nvstaging tag / `{}` / `ngc-pull-secret` | image, node placement, pull secret |
 
 ## Files
@@ -167,7 +167,7 @@ qwen3.5-397b-a17b/
 │   ├── disagg.yaml             # DGD: Frontend + Prefill(TP8) + Decode(TP8)
 │   └── agg.yaml                # DGD: Frontend + Worker(TP8)
 ├── benchmark/
-│   └── 8k-1k.yaml              # aiperf bench Pod (synthetic 8K ISL / 1K OSL)
+│   └── 8k-3k.yaml              # aiperf bench Pod (synthetic 8K ISL / 3K OSL)
 ├── accuracy-job.yaml           # GSM8K canary Pod
 └── model-cache/
     └── model-download.yaml
