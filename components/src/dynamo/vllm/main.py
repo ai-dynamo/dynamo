@@ -627,8 +627,10 @@ async def register_vllm_model(
     Args:
         model_input: Input type for the model (e.g., ModelInput.Tokens)
         model_type: OpenAI surface this card exposes (e.g., ModelType.Chat).
-            Prefill workers pass `ModelType.Empty` — they have no OpenAI surface,
-            their role is carried by `worker_type=WorkerType.Prefill`.
+            Prefill workers have no OpenAI surface — their role is carried by
+            `worker_type=WorkerType.Prefill` — but pass the legacy
+            `ModelType.Prefill` marker bit (not a surface) so an old frontend
+            still detects them during the cross-version rollout.
         generate_endpoint: Endpoint to register
         config: Configuration object
         engine_client: vLLM engine client

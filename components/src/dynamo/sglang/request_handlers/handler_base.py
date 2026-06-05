@@ -385,12 +385,14 @@ class LoraMixin:
                             # Match the base-model registration topology so the
                             # prefill router activates for the LoRA model name
                             # the same way it does for the base model. The prefill
-                            # role is carried by `worker_type=Prefill` with
-                            # `model_type=ModelType.Empty`. Non-prefill workers
-                            # honor --endpoint-types so the LoRA is exposed on
-                            # the same endpoints as the base model.
+                            # role is carried by `worker_type=Prefill`; we register
+                            # the legacy `ModelType.Prefill` marker bit (not a
+                            # surface) so an old frontend still detects it during
+                            # the cross-version rollout. Non-prefill workers honor
+                            # --endpoint-types so the LoRA is exposed on the same
+                            # endpoints as the base model.
                             if self.config.serving_mode == DisaggregationMode.PREFILL:
-                                lora_model_type = ModelType.Empty
+                                lora_model_type = ModelType.Prefill
                                 lora_worker_type = WorkerType.Prefill
                                 lora_needs: list[list[WorkerType]] = [
                                     [WorkerType.Decode]

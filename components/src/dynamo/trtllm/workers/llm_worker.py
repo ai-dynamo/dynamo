@@ -399,12 +399,16 @@ async def init_llm_worker(
     model_input = ModelInput.Tokens
 
     # Set model type based on disaggregation mode. Prefill and encode workers
-    # carry no OpenAI surface — their role is declared via `worker_type`, and
-    # `model_type` is empty.
-    if config.disaggregation_mode in (
-        DisaggregationMode.PREFILL,
-        DisaggregationMode.ENCODE,
-    ):
+    # carry no OpenAI surface — their role is declared via `worker_type`.
+    if config.disaggregation_mode == DisaggregationMode.PREFILL:
+        # Prefill registers the legacy `ModelType.Prefill` marker bit (not a
+        # surface) so an OLD frontend, which detects prefill via that bit,
+        # still routes disaggregated traffic during the cross-version rollout. A new
+        # frontend ignores it and dispatches off `worker_type`.
+        model_type = ModelType.Prefill
+    elif config.disaggregation_mode == DisaggregationMode.ENCODE:
+        # Encode helpers expose no surface and (unlike prefill) had no legacy
+        # marker bit, so they stay Empty.
         model_type = ModelType.Empty
     else:
         model_type = parse_endpoint_types(config.endpoint_types)

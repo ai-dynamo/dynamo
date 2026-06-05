@@ -103,8 +103,11 @@ async def _serve_disagg(
     await register_model(
         model_input=ModelInput.Tokens,
         # Prefill workers have no OpenAI surface; the role is declared via
-        # `worker_type=Prefill`.
-        model_type=ModelType.Empty,
+        # `worker_type=Prefill`. We register the legacy `ModelType.Prefill`
+        # marker bit (not a surface) so an OLD frontend, which detects prefill
+        # via that bit, still routes disaggregated traffic during the
+        # cross-version rollout. A new frontend ignores it and dispatches off `worker_type`.
+        model_type=ModelType.Prefill,
         endpoint=prefill_endpoint,
         model_path=config.model_name,
         model_name=config.model_name,

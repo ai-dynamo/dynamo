@@ -1280,16 +1280,17 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             # worker_factory.py _create_decode_worker /
                             # _create_prefill_worker) so the router activates for the
                             # LoRA model name the same way it does for the base model.
-                            # A prefill worker carries its role via worker_type=Prefill
-                            # with model_type=Empty (no OpenAI surface); decode and
-                            # aggregated workers expose the LoRA on the same
-                            # chat/completions surface. --route-to-encoder adds Encode
-                            # to the AND-set of required peers.
+                            # A prefill worker carries its role via worker_type=Prefill;
+                            # we register the legacy ModelType.Prefill marker bit (not a
+                            # surface) so an old frontend still detects it during the
+                            # cross-version rollout. Decode and aggregated workers expose the
+                            # LoRA on the same chat/completions surface.
+                            # --route-to-encoder adds Encode to the AND-set of peers.
                             if (
                                 self.config.disaggregation_mode
                                 == DisaggregationMode.PREFILL
                             ):
-                                lora_model_type = ModelType.Empty
+                                lora_model_type = ModelType.Prefill
                                 lora_worker_type = WorkerType.Prefill
                                 lora_needs_set: list[WorkerType] = [WorkerType.Decode]
                             elif (

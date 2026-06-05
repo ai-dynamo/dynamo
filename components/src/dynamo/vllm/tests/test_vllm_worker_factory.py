@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from dynamo.llm import ModelInput, WorkerType
+from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.worker_factory import EngineSetupResult, WorkerFactory
 
@@ -189,6 +189,7 @@ class TestPrefillRegistrationContract:
             needs,
         ) -> None:
             captured["model_input"] = model_input
+            captured["model_type"] = model_type
             captured["worker_type"] = worker_type
             captured["needs"] = needs
             raise stop_after_register
@@ -255,6 +256,9 @@ class TestPrefillRegistrationContract:
 
         assert captured["model_input"] == ModelInput.Tokens
         assert captured["worker_type"] == WorkerType.Prefill
+        # Dual-emit: prefill registers the legacy ModelType.Prefill marker bit
+        # (no OpenAI surface) so an old frontend still detects it.
+        assert captured["model_type"] == ModelType.Prefill
         expected_needs_set = [WorkerType.Decode]
         if route_to_encoder:
             expected_needs_set.append(WorkerType.Encode)

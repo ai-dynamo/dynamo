@@ -766,8 +766,12 @@ class WorkerFactory:
         )
         shutdown_endpoints[:] = [generate_endpoint, clear_endpoint, perf_endpoint]
 
-        # Prefill workers register with empty ModelType (no OpenAI surface —
-        # the prefill role is carried by `worker_type=Prefill`). When
+        # Prefill workers expose no OpenAI surface — the role is carried by
+        # `worker_type=Prefill`. We register the legacy `ModelType.Prefill`
+        # marker bit (not a surface) so an OLD frontend, which detects prefill
+        # via that bit, still routes disaggregated traffic to this worker
+        # during the cross-version rollout. A new frontend ignores the bit and
+        # dispatches off `worker_type`. When
         # --route-to-encoder is set, Encode joins the AND-set of needs.
         # ModelInput here is the inter-worker contract, not an engine-local
         # tokenization preference: prefill only ever receives token IDs from
@@ -779,7 +783,7 @@ class WorkerFactory:
             prefill_needs_set.append(WorkerType.Encode)
         await self.register_vllm_model(
             ModelInput.Tokens,
-            ModelType.Empty,
+            ModelType.Prefill,
             generate_endpoint,
             config,
             engine_client,

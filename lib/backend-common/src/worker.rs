@@ -137,9 +137,10 @@ pub struct WorkerConfig {
     /// Disaggregation role for this worker.
     ///
     /// `Aggregated` (default) registers the model with the parsed
-    /// `endpoint_types`. `Prefill` registers with `ModelType::empty()` and
-    /// `WorkerType::Prefill`, so the frontend's prefill router targets it via
-    /// `worker_type`. `Decode` keeps `endpoint_types` but force-disables the
+    /// `endpoint_types`. `Prefill` registers with the legacy `ModelType::Prefill`
+    /// marker bit (no OpenAI surface — dual-emitted for cross-version compat)
+    /// and `WorkerType::Prefill`, so the frontend's prefill router targets it
+    /// via `worker_type`. `Decode` keeps `endpoint_types` but force-disables the
     /// local KV indexer because decode workers do not host the indexer
     /// endpoint.
     pub disaggregation_mode: DisaggregationMode,
@@ -1067,12 +1068,15 @@ fn resolve_served_name(config: &WorkerConfig, engine_config: &EngineConfig) -> O
 }
 
 /// Pick the `ModelType` to register with based on the worker's disaggregation
-/// role. The prefill role is carried by `worker_type`, so prefill workers
-/// register with `ModelType::empty()` — no OpenAI surface exposed. Everything
-/// else falls back to the parsed `endpoint_types`.
+/// role. The prefill role is carried by `worker_type`; prefill workers expose
+/// no OpenAI surface. They register the legacy `ModelType::Prefill` *marker*
+/// bit (not a surface) so an OLD frontend, which detects prefill via that bit,
+/// still routes disaggregated traffic during the cross-version rollout. A new
+/// frontend ignores it and dispatches off `worker_type`. Everything else falls
+/// back to the parsed `endpoint_types`.
 fn resolve_model_type(config: &WorkerConfig) -> Result<ModelType, DynamoError> {
     if config.disaggregation_mode.is_prefill() {
-        return Ok(ModelType::empty());
+        return Ok(ModelType::Prefill);
     }
     parse_endpoint_types(&config.endpoint_types)
 }
@@ -1445,17 +1449,23 @@ mod tests {
     }
 
     #[test]
-    fn resolve_model_type_prefill_uses_empty_model_type() {
+    fn resolve_model_type_prefill_uses_prefill_marker() {
         // The operator may have left endpoint_types at the default
         // "chat,completions"; --disaggregation-mode prefill forces the
-        // ModelType to empty (no OpenAI surface) — the prefill role is
-        // declared on `worker_type` instead.
+        // ModelType to the legacy Prefill marker bit (no OpenAI surface) — the
+        // prefill role is declared on `worker_type`, and the marker is
+        // dual-emitted so an old frontend still detects it. It must expose no
+        // OpenAI surface.
         let config = WorkerConfig {
             endpoint_types: "chat,completions".to_string(),
             disaggregation_mode: DisaggregationMode::Prefill,
             ..WorkerConfig::default()
         };
-        assert_eq!(resolve_model_type(&config).unwrap(), ModelType::empty());
+        let mt = resolve_model_type(&config).unwrap();
+        assert_eq!(mt, ModelType::Prefill);
+        assert!(mt.supports_prefill());
+        assert!(!mt.supports_chat());
+        assert!(!mt.supports_completions());
     }
 
     #[tokio::test]

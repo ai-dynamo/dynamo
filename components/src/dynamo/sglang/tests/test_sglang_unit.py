@@ -478,9 +478,10 @@ def test_prefill_health_check_payload_is_disagg_compatible_alias():
 @pytest.mark.parametrize(
     "serving_mode, endpoint_types, expected_model_type_str, expected_worker_type",
     [
-        # Prefill workers register with empty ModelType (no OpenAI surface)
-        # and worker_type=Prefill.
-        ("prefill", "chat,completions", "", "prefill"),
+        # Prefill workers register the legacy ModelType.Prefill marker bit
+        # (no OpenAI surface, dual-emitted for old-frontend compat) and
+        # worker_type=Prefill.
+        ("prefill", "chat,completions", "prefill", "prefill"),
         ("decode", "chat,completions", "chat,completions", "decode"),
         ("agg", "chat,completions", "chat,completions", "aggregated"),
         ("decode", "completions", "completions", "decode"),
@@ -496,10 +497,11 @@ async def test_lora_registration_model_type_gate(
 ):
     """LoraMixin.load_lora must select (model_type, worker_type) based on serving_mode.
 
-    PREFILL → (ModelType.Empty, WorkerType.Prefill). The prefill router
-    activates off worker_type; ModelType is empty because prefill exposes no
-    OpenAI surface. Otherwise model_type follows parse_endpoint_types and
-    worker_type follows the serving mode.
+    PREFILL → (ModelType.Prefill, WorkerType.Prefill). The prefill router
+    activates off worker_type; ModelType carries the legacy Prefill marker bit
+    (no OpenAI surface, dual-emitted for old-frontend compat). Otherwise
+    model_type follows parse_endpoint_types and worker_type follows the serving
+    mode.
     """
     from unittest.mock import AsyncMock, MagicMock
 

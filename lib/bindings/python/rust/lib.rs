@@ -347,19 +347,27 @@ fn register_model<'p>(
     }
 
     // Prefill workers never expose an OpenAI surface — they are reached only
-    // through the dedicated prefill router, never by the frontend — so they
-    // must register with an empty `ModelType`. Encode workers MAY carry a
-    // surface: an sglang multimodal encode worker is the OpenAI front door
-    // that delegates generation to an internal worker, whereas a vLLM-style
-    // encode helper registers Empty. Serving is driven by `ModelType` (the
-    // OpenAI surface); the topology role is carried by `worker_type`.
-    if matches!(worker_type_unwrapped, WorkerType::Prefill) && !model_type.inner.is_empty() {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-            "register_model: worker_type={:?} requires model_type=ModelType.Empty \
-             (the prefill role is carried by worker_type; ModelType only describes \
-             the OpenAI surface, which prefill workers don't expose)",
-            worker_type_unwrapped
-        )));
+    // through the dedicated prefill router, never by the frontend. They MAY,
+    // however, carry the legacy `ModelType.Prefill` *marker* bit, which new
+    // prefill workers dual-emit so an old frontend still detects them during
+    // the cross-version rollout (see `ModelType::Prefill`). So the only thing we
+    // reject here is a genuine OpenAI *surface* on a prefill card. Encode
+    // workers MAY carry a surface: an sglang multimodal encode worker is the
+    // OpenAI front door that delegates generation to an internal worker,
+    // whereas a vLLM-style encode helper registers Empty. Serving is driven by
+    // `ModelType` (the OpenAI surface); the topology role is by `worker_type`.
+    if matches!(worker_type_unwrapped, WorkerType::Prefill) {
+        // Strip the allowed Prefill marker bit; whatever remains is a surface.
+        let surface = model_type.inner - llm_rs::model_type::ModelType::Prefill;
+        if !surface.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "register_model: worker_type={:?} must not expose an OpenAI surface \
+                 (got model_type={:?}). Use ModelType.Empty or ModelType.Prefill; \
+                 the prefill role is carried by worker_type, and ModelType only \
+                 describes the OpenAI surface, which prefill workers don't expose.",
+                worker_type_unwrapped, model_type.inner
+            )));
+        }
     }
 
     let model_input = match model_input {
@@ -680,8 +688,14 @@ impl ModelType {
     const TensorBased: Self = ModelType {
         inner: llm_rs::model_type::ModelType::TensorBased,
     };
-    // The prefill role is expressed via `WorkerType::Prefill`. `ModelType`
-    // only describes the OpenAI surface a model exposes.
+    /// Legacy prefill marker (no OpenAI surface). The prefill role is
+    /// expressed via `WorkerType::Prefill`; this bit is dual-emitted by new
+    /// prefill workers for cross-version compatibility so an old frontend
+    /// still detects them. Retained only for the cross-version compatibility window.
+    #[classattr]
+    const Prefill: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Prefill,
+    };
     #[classattr]
     const Images: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Images,

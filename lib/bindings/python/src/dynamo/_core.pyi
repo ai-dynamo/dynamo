@@ -1422,6 +1422,10 @@ class ModelType:
     Completions: ModelType
     Embedding: ModelType
     TensorBased: ModelType
+    # Legacy prefill marker (no OpenAI surface). Dual-emitted by new prefill
+    # workers for cross-version compat so an old frontend still detects them;
+    # the role is otherwise carried by WorkerType.Prefill. Compat window only.
+    Prefill: ModelType
     Images: ModelType
     Audios: ModelType
     Videos: ModelType

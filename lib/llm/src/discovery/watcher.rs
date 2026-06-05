@@ -71,18 +71,42 @@ use crate::namespace::NamespaceFilter;
 ///
 /// `worker_type` arrives as `Option<WorkerType>` because the
 /// serving-readiness fields on the MDC are still optional at the type
-/// level; the compat shim renders missing values as `aggregated` in the
-/// key so legacy cards don't collide with new ones.
+/// level; the compat shim renders missing values via
+/// [`effective_worker_type`] so legacy cards bucket and route correctly.
 fn worker_set_key(
     namespace: &str,
     model_type: ModelType,
     worker_type: Option<WorkerType>,
 ) -> String {
     let mt = model_type.as_vec().join("|");
-    let wt = worker_type
-        .map(|w| w.as_str())
-        .unwrap_or(WorkerType::Aggregated.as_str());
+    let wt = effective_worker_type(worker_type, model_type).as_str();
     format!("{}:{}:{}", namespace, mt, wt)
+}
+
+/// Resolve the effective [`WorkerType`] for a card during the
+/// cross-version rollout.
+///
+/// A card from a **new** worker carries an explicit `worker_type`, used
+/// verbatim. A card from an **old** (legacy) worker has no `worker_type`;
+/// we reconstruct its role from the signal an old frontend itself used — the
+/// legacy `ModelType::Prefill` marker bit:
+///
+/// - legacy prefill card (`ModelType::Prefill` set, no `worker_type`) → `Prefill`
+/// - any other legacy card → `Aggregated`
+///
+/// This lets a new frontend activate the prefill router for, and correctly
+/// bucket, an old prefill worker. (Old *decode* workers are indistinguishable
+/// from old *aggregated* workers on the wire, so they resolve to `Aggregated`;
+/// the readiness path handles that by not topology-gating namespaces that
+/// still contain legacy cards — see `Model::is_workers_ready`.)
+fn effective_worker_type(worker_type: Option<WorkerType>, model_type: ModelType) -> WorkerType {
+    worker_type.unwrap_or_else(|| {
+        if model_type.supports_prefill() {
+            WorkerType::Prefill
+        } else {
+            WorkerType::Aggregated
+        }
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -769,7 +793,12 @@ impl ModelWatcher {
         // is registered for serving-readiness only (see the `is_empty()` arm at
         // the end of the chain). The role is carried by `worker_type`; serving
         // is driven by `model_type`.
-        if card.worker_type == Some(WorkerType::Prefill) {
+        //
+        // `effective_worker_type` also resolves a legacy prefill card (the
+        // `ModelType::Prefill` marker bit with no `worker_type`, from an old
+        // worker registering against a new frontend) to `Prefill` here, so it
+        // activates the prefill router just like a new prefill worker.
+        if effective_worker_type(card.worker_type, card.model_type) == WorkerType::Prefill {
             // Guardrail: prefill workers still expect Tokens input downstream.
             if card.model_input != ModelInput::Tokens {
                 anyhow::bail!(
@@ -1342,6 +1371,47 @@ mod tests {
         // which renders it as `aggregated` in the key.
         let legacy = worker_set_key("ns1", ModelType::Chat | ModelType::Completions, None);
         assert_eq!(legacy, "ns1:chat|completions:aggregated");
+    }
+
+    #[test]
+    fn ws_key_new_and_legacy_prefill_share_a_bucket() {
+        // A NEW prefill worker dual-emits ModelType::Prefill + worker_type=Prefill.
+        let new_prefill = worker_set_key("ns1", ModelType::Prefill, Some(WorkerType::Prefill));
+        assert_eq!(new_prefill, "ns1:prefill:prefill");
+
+        // A LEGACY prefill card (ModelType::Prefill marker bit, no worker_type)
+        // must resolve to the SAME bucket via effective_worker_type, so old and
+        // new prefill workers in one namespace don't split into two buckets.
+        let legacy_prefill = worker_set_key("ns1", ModelType::Prefill, None);
+        assert_eq!(legacy_prefill, "ns1:prefill:prefill");
+        assert_eq!(new_prefill, legacy_prefill);
+    }
+
+    #[test]
+    fn effective_worker_type_resolution() {
+        // Explicit worker_type is used verbatim.
+        assert_eq!(
+            effective_worker_type(Some(WorkerType::Decode), ModelType::Chat),
+            WorkerType::Decode
+        );
+        assert_eq!(
+            effective_worker_type(Some(WorkerType::Prefill), ModelType::Prefill),
+            WorkerType::Prefill
+        );
+        // Legacy prefill card (Prefill marker bit, no worker_type) → Prefill.
+        assert_eq!(
+            effective_worker_type(None, ModelType::Prefill),
+            WorkerType::Prefill
+        );
+        // Any other legacy card → Aggregated.
+        assert_eq!(
+            effective_worker_type(None, ModelType::Chat | ModelType::Completions),
+            WorkerType::Aggregated
+        );
+        assert_eq!(
+            effective_worker_type(None, ModelType::empty()),
+            WorkerType::Aggregated
+        );
     }
 
     #[test]
