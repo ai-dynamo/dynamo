@@ -1,9 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Shared aiperf benchmark Job template — one file, both configs (agg / disagg).
+# run-benchmark.sh exports per-config knobs via envsubst:
+#   ${BENCH_NAME}     — Job + label name (qwen3-vl-32b-fp8-agg-perf / ...-disagg-perf)
+#   ${BENCH_ENDPOINT} — Service:port the bench hits (e.g. qwen3-vl-32b-fp8-vllm-agg-frontend:8000)
+#
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: qwen3-vl-32b-fp8-disagg-perf
+  name: ${BENCH_NAME}
 spec:
   backoffLimit: 1
   completions: 1
@@ -11,7 +17,7 @@ spec:
   template:
     metadata:
       labels:
-        app: qwen3-vl-32b-fp8-disagg-perf
+        app: ${BENCH_NAME}
     spec:
       restartPolicy: Never
       containers:
@@ -42,7 +48,7 @@ spec:
               echo "[$(date '+%H:%M:%S')] Not ready, retrying in 5s..."
               sleep 5
             done
-            echo "✅ Model '$TARGET_MODEL' is ready"
+            echo "Model '$TARGET_MODEL' is ready"
             curl -s "http://$ENDPOINT/v1/models" | jq .
           }
 
@@ -55,7 +61,7 @@ spec:
             local key="qps_${qps}_isl_128_osl_256_con_${concurrency}_req_${req_count}"
             local ARTIFACT_DIR="${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}/${key}"
             mkdir -p "$ARTIFACT_DIR"
-            echo "─────────────────────────────────────────────────────────────"
+            echo "-------------------------------------------------------------"
             echo "Running: QPS=$qps  ISL=128  OSL=256  Concurrency=$concurrency  Requests=$req_count  images=20  res=854x480"
             echo "ARTIFACT_DIR: $ARTIFACT_DIR"
 
@@ -89,7 +95,7 @@ spec:
               --ui simple \
               2>&1 | tee "${ARTIFACT_DIR}/aiperf_qps${qps}_con${concurrency}.txt"
 
-            echo "✅ Done: $key"
+            echo "Done: $key"
             ls -la "$ARTIFACT_DIR"
           }
 
@@ -133,13 +139,13 @@ spec:
             eval "NP_$i=$np"
           done
 
-          echo "═══════════════════════════════════════════════════════════════"
-          echo "Running grouped sweep: 10 configurations"
+          echo "==============================================================="
+          echo "Running grouped sweep: $total configurations"
           echo "QPS:          $QPS_GROUP"
           echo "Num prompts:  $PROMPTS_GROUP"
           echo "ISL=128, OSL=256 (fixed)"
           echo "Concurrency:  32(qps=0.1), 64(qps=0.25), 128(rest)"
-          echo "═══════════════════════════════════════════════════════════════"
+          echo "==============================================================="
 
           i=1
           while [ $i -le $total ]; do
@@ -158,7 +164,7 @@ spec:
           done
 
           echo ""
-          echo "✅ All grouped sweep runs complete."
+          echo "All grouped sweep runs complete."
           echo "Results in: $RUN_DIR"
         env:
         - name: TARGET_MODEL
@@ -166,7 +172,7 @@ spec:
         - name: TOKENIZER_PATH
           value: /root/.cache/huggingface/Qwen/Qwen3-VL-32B-Instruct-FP8
         - name: ENDPOINT
-          value: qwen3-vl-32b-fp8-vllm-disagg-frontend:8000
+          value: ${BENCH_ENDPOINT}
         - name: AIPERF_HTTP_CONNECTION_LIMIT
           value: "200"
         - name: JOB_NAME
