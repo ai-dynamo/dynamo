@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 Supported manifests and cluster templates for the EKS deployment guide.
 
-**Full guide:** [docs/kubernetes/cloud-providers/eks/eks.md](../../../docs/kubernetes/cloud-providers/eks/eks.md) (published at [docs.nvidia.com/dynamo](https://docs.nvidia.com/dynamo/kubernetes/cloud-providers/eks/eks))
+**Full guide:** [docs/kubernetes/cloud-providers/eks/eks.md](../../../docs/kubernetes/cloud-providers/eks/eks.md)
 
 **Related guides:**
 

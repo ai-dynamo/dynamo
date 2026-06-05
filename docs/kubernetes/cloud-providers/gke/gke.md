@@ -117,7 +117,7 @@ export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
 /sbin/ldconfig
 ```
 
-For example, refer to [`examples/deployments/GKE/vllm/v1beta1/disagg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/GKE/vllm/v1beta1/disagg.yaml):
+For example, refer to [`examples/deployments/GKE/vllm/v1beta1/disagg.yaml`](../../../../examples/deployments/GKE/vllm/v1beta1/disagg.yaml):
 
 ```yaml
 metadata:
@@ -144,7 +144,7 @@ spec:
 ## Deploy the model
 
 ```bash
-cd dynamo/examples/deployments/GKE/vllm
+cd examples/deployments/GKE/vllm/v1beta1
 
 kubectl apply -f disagg.yaml -n ${NAMESPACE}
 ```

@@ -2,7 +2,7 @@
 
 Supported Helm values for AKS deployments.
 
-**Full guide:** [docs/kubernetes/cloud-providers/aks/aks.md](../../../docs/kubernetes/cloud-providers/aks/aks.md) (published at [docs.nvidia.com/dynamo](https://docs.nvidia.com/dynamo/kubernetes/cloud-providers/aks/aks))
+**Full guide:** [docs/kubernetes/cloud-providers/aks/aks.md](../../../docs/kubernetes/cloud-providers/aks/aks.md)
 
 **Related guides:**
 

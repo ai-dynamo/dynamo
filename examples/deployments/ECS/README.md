@@ -2,7 +2,7 @@
 
 Task definition JSON files for the ECS deployment guide.
 
-**Full guide:** [docs/kubernetes/cloud-providers/ecs/ecs.md](../../../docs/kubernetes/cloud-providers/ecs/ecs.md) (published at [docs.nvidia.com/dynamo](https://docs.nvidia.com/dynamo/kubernetes/cloud-providers/ecs/ecs))
+**Full guide:** [docs/kubernetes/cloud-providers/ecs/ecs.md](../../../docs/kubernetes/cloud-providers/ecs/ecs.md)
 
 ## Contents
 

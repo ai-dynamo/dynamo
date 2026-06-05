@@ -2,7 +2,7 @@
 
 Supported manifests for the GKE deployment guide.
 
-**Full guide:** [docs/kubernetes/cloud-providers/gke/gke.md](../../../docs/kubernetes/cloud-providers/gke/gke.md) (published at [docs.nvidia.com/dynamo](https://docs.nvidia.com/dynamo/kubernetes/cloud-providers/gke/gke))
+**Full guide:** [docs/kubernetes/cloud-providers/gke/gke.md](../../../docs/kubernetes/cloud-providers/gke/gke.md)
 
 ## Contents
 
