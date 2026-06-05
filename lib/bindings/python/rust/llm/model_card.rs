@@ -38,15 +38,9 @@ impl ModelDeploymentCard {
 
     /// Resolved metadata directory (post-`download_config`).
     fn local_dir(&self) -> PyResult<String> {
-        self.inner
-            .local_dir()
-            .into_os_string()
-            .into_string()
-            .map_err(|os| {
-                PyValueError::new_err(format!(
-                    "MDC local_dir contains non-UTF-8 bytes: {os:?}"
-                ))
-            })
+        self.inner.local_dir().into_os_string().into_string().map_err(|os| {
+            PyValueError::new_err(format!("MDC local_dir contains non-UTF-8 bytes: {os:?}"))
+        })
     }
 
     fn name(&self) -> &str {
