@@ -1414,7 +1414,7 @@ class ModelInput:
 
 
 class ModelType:
-    """What type of request this model needs: Chat, Completions, Embedding, Tensor, Images, Videos, Realtime, or Empty (no OpenAI surface)"""
+    """What type of request this model supports: Chat, Completions, Embedding, Tensor, Images, Videos, Realtime, or Empty (no OpenAI surface)"""
     # No OpenAI surface — used by prefill / encode workers whose role is
     # carried by WorkerType. Symmetric with the other ModelType.Foo members.
     Empty: ModelType
