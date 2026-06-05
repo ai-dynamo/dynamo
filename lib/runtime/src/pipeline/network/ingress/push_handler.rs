@@ -436,7 +436,11 @@ where
         tokio::spawn(async move {
             let mut rx = request_stream_recv.rx;
             while let Some(bytes) = rx.recv().await {
-                if forwarder_ctx.is_killed() {
+                // Stop forwarding on either kill or soft-stop, matching the
+                // send-side `spawn_request_stream_forwarder`. Without the
+                // `stopped()` check, a `stop_generating()` would leave this
+                // task pumping frames into a channel the engine has abandoned.
+                if forwarder_ctx.is_killed() || forwarder_ctx.is_stopped() {
                     break;
                 }
                 match serde_json::from_slice::<T>(&bytes) {
