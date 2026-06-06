@@ -62,6 +62,7 @@ from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
+    WorkerType,
     lora_name_to_id,
     register_model,
     unregister_model,
@@ -284,6 +285,17 @@ class VllmEnginePauseController:
     def mark_resumed(self) -> None:
         self._is_paused = False
         self._generation_paused = False
+
+
+def _pad_mm_hashes_to_64(mm_hashes: list[str]) -> list[str]:
+    """Pad the frontend's canonical 16-char hex hashes to vLLM's 64-char
+    BlockStored form. The router's parse_mm_hash_from_extra_key keys on the
+    64-char length to distinguish MM hashes from other extra_keys, so vLLM
+    must publish 64 chars. Already-64-char values pass through unchanged.
+    """
+    return [
+        h.ljust(64, "0") if isinstance(h, str) and len(h) < 64 else h for h in mm_hashes
+    ]
 
 
 def _compute_mm_uuids(
@@ -1250,10 +1262,44 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 self.config.dyn_reasoning_parser
                             )
 
+                            # Match the base-model registration topology (see
+                            # worker_factory.py _create_decode_worker /
+                            # _create_prefill_worker) so the router activates for the
+                            # LoRA model name the same way it does for the base model.
+                            # A prefill worker carries its role via worker_type=Prefill;
+                            # we register the legacy ModelType.Prefill marker bit (not a
+                            # surface) so an old frontend still detects it during the
+                            # cross-version rollout. Decode and aggregated workers expose the
+                            # LoRA on the same chat/completions surface.
+                            # --route-to-encoder adds Encode to the AND-set of peers.
+                            if (
+                                self.config.disaggregation_mode
+                                == DisaggregationMode.PREFILL
+                            ):
+                                lora_model_type = ModelType.Prefill
+                                lora_worker_type = WorkerType.Prefill
+                                lora_needs_set: list[WorkerType] = [WorkerType.Decode]
+                            elif (
+                                self.config.disaggregation_mode
+                                == DisaggregationMode.DECODE
+                            ):
+                                lora_model_type = ModelType.Chat | ModelType.Completions
+                                lora_worker_type = WorkerType.Decode
+                                lora_needs_set = [WorkerType.Prefill]
+                            else:  # AGGREGATED
+                                lora_model_type = ModelType.Chat | ModelType.Completions
+                                lora_worker_type = WorkerType.Aggregated
+                                lora_needs_set = []
+                            if self.config.route_to_encoder:
+                                lora_needs_set.append(WorkerType.Encode)
+                            lora_needs: list[list[WorkerType]] = (
+                                [lora_needs_set] if lora_needs_set else []
+                            )
+
                             # Publish with format: v1/mdc/dynamo/backend/generate/{instance_id}/{lora_slug}
                             await register_model(
                                 model_input=ModelInput.Tokens,
-                                model_type=ModelType.Chat | ModelType.Completions,
+                                model_type=lora_model_type,
                                 endpoint=self.generate_endpoint,
                                 model_path=self.config.model,
                                 kv_cache_block_size=self.config.engine_args.block_size,
@@ -1261,6 +1307,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 user_data=user_data,
                                 lora_name=lora_name,
                                 base_model_path=self.config.model,
+                                worker_type=lora_worker_type,
+                                needs=lora_needs,
                             )
                             logger.info(
                                 f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
@@ -1590,6 +1638,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     transport,
                 )
                 return None
+            mm_hashes = _pad_mm_hashes_to_64(mm_hashes)
 
             # Receive pickled kwargs items (NVTX wrap is owned by the receiver).
             results = await receiver.receive(metadata)
@@ -1922,6 +1971,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         forwarded_hashes = extra_args.get("mm_hashes")
         mm_uuids: dict[str, Any] | None = None
         if forwarded_hashes:
+            forwarded_hashes = _pad_mm_hashes_to_64(forwarded_hashes)
             # vLLM binds multi_modal_uuids by modality key string match.
             # For models with use_unified_vision_chunk=True (e.g. Kimi-K2.5)
             # images live under `vision_chunk`, not `image`; hardcoding

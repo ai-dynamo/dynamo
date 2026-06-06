@@ -131,8 +131,10 @@ callers unchanged.
 
 What the **runtime** does with the mode (Rust `Worker` in `lib/backend-common`):
 
-- `Prefill` → register with `ModelType::Prefill` so the frontend's
-  `PrefillRouter` targets this worker, regardless of `endpoint_types`.
+- `Prefill` → register with `ModelType.Prefill` (legacy marker bit, no
+  OpenAI surface — dual-emitted for cross-version compat) and
+  `WorkerType.Prefill` regardless of `endpoint_types`, so the frontend's
+  `PrefillRouter` targets this worker via `worker_type`.
 - `Decode` → keep `endpoint_types`, but force-disable
   `enable_local_indexer` (decode workers don't host the indexer endpoint).
 - `Aggregated` → register with the parsed `endpoint_types`.

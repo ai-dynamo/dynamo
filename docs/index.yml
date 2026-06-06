@@ -195,6 +195,8 @@ navigation:
             path: tool-calling/engine-fallback.md
           - page: Parser Configuration
             path: tool-calling/parser-configuration.md
+          - page: Tool Calling Probe Snapshot for Dynamo 1.2
+            path: tool-calling/release-1.2-probe-snapshot.md
           - page: Troubleshooting Tool Calls
             path: tool-calling/troubleshooting.md
       - section: Fault Tolerance

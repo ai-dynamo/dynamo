@@ -9,7 +9,13 @@
 import tritonclient.grpc.model_config_pb2 as mc
 import uvloop
 
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
+from dynamo.llm import (
+    ModelInput,
+    ModelRuntimeConfig,
+    ModelType,
+    WorkerType,
+    register_model,
+)
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 
@@ -59,6 +65,7 @@ async def echo_tensor_worker(runtime: DistributedRuntime):
         endpoint,
         "echo",  # model_path (used as display name for tensor-based models)
         runtime_config=runtime_config,
+        worker_type=WorkerType.Aggregated,
     )
 
     await endpoint.serve_endpoint(generate)
