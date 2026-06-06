@@ -2524,8 +2524,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             raw_routed_experts_by_output.get(output_idx)
                         )
                         if routed_experts is not None:
-                            disaggregated_params = dict(
-                                out.get("disaggregated_params") or {}
+                            existing = out.get("disaggregated_params")
+                            disaggregated_params: Dict[str, Any] = (
+                                dict(existing) if isinstance(existing, dict) else {}
                             )
                             disaggregated_params["routed_experts"] = routed_experts
                             out["disaggregated_params"] = disaggregated_params
