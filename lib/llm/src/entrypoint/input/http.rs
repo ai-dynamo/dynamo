@@ -179,6 +179,14 @@ async fn run_watcher(
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
     local_model_path: Option<PathBuf>,
 ) -> anyhow::Result<()> {
+    // Start the LoRA allocation controller when LoRA serving is enabled. The
+    // controller itself is additionally gated on the allocation config
+    // (DYN_LORA_ALLOCATION_ENABLED) inside `start_lora_controller`.
+    if crate::lora::lora_serving_enabled() {
+        let cancel_token = runtime.primary_token();
+        let _controller_handle = model_manager.start_lora_controller(cancel_token);
+    }
+
     let mut watch_obj = ModelWatcher::new(
         runtime.clone(),
         model_manager,

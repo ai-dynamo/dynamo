@@ -34,3 +34,13 @@ pub use routing::{
 };
 pub use source::{LoRASource, LocalLoRASource, S3LoRASource};
 pub use state_tracker::LoraStateTracker;
+
+/// Returns true when LoRA serving is enabled via the `DYN_LORA_ENABLED` env var
+/// (`true`/`1`/`yes`, case-insensitive). This gates the request-time LoRA filter on
+/// both the KV and non-KV routing paths, so non-LoRA deployments keep the unmodified
+/// routing path with zero added overhead.
+pub fn lora_serving_enabled() -> bool {
+    std::env::var(dynamo_runtime::config::environment_names::llm::DYN_LORA_ENABLED)
+        .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes"))
+        .unwrap_or(false)
+}

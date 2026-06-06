@@ -176,6 +176,8 @@ async def init_decode(
                 readiness_gate=ready_event,
                 worker_type=decode_worker_type,
                 needs=decode_needs,
+                # Decode workers serve the LoRA load endpoints, so they may advertise capacity.
+                serves_lora_load=True,
             ),
         ]
         if getattr(server_args, "enable_streaming_session", False):
@@ -317,6 +319,9 @@ async def init_prefill(
                 readiness_gate=ready_event,
                 worker_type=WorkerType.Prefill,
                 needs=[[WorkerType.Decode]],
+                # Prefill workers also serve the LoRA load endpoints (init_prefill), so they may
+                # advertise capacity.
+                serves_lora_load=True,
             ),
         )
     except Exception as e:
