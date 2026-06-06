@@ -606,7 +606,6 @@ def build_sampling_params(
         sampling_params = SamplingParams()
     else:
         sampling_params = SamplingParams(**default_sampling_params)
-    sampling_params.detokenize = False
 
     # Handle guided_decoding - convert to StructuredOutputsParams
     sampling_options = dict(request.get("sampling_options") or {})
