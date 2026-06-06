@@ -385,8 +385,7 @@ pub async fn parse_tool_calls_harmony_complete(
         // A `to=functions.NAME` recipient is the definitive signal of a tool
         // call, regardless of channel label. The model emits tool calls on both
         // `commentary` (canonical) and `analysis` (malformed-but-common) channels.
-        let is_tool_channel =
-            channel == Some("commentary") || channel == Some("analysis");
+        let is_tool_channel = channel == Some("commentary") || channel == Some("analysis");
         if is_tool_channel && recipient.starts_with("functions.") {
             if !has_tool_call_stop {
                 continue;
@@ -998,15 +997,15 @@ mod detect_parser_tests {
     #[tokio::test]
     async fn test_parse_harmony_analysis_code_tool_call_recovered() {
         // Exact form emitted by the gpt-oss-120b worker: channel=analysis, constraint=code.
-        let text = r#"<|channel|>analysis to=functions.grep code<|message|>{"pattern":"foo"}<|call|>"#;
+        let text =
+            r#"<|channel|>analysis to=functions.grep code<|message|>{"pattern":"foo"}<|call|>"#;
         let (calls, normal) =
             parse_tool_calls_harmony_complete(text, &JsonParserConfig::default(), None)
                 .await
                 .expect("parser should not error");
         assert_eq!(calls.len(), 1, "analysis/code tool call must be recovered");
         assert_eq!(calls[0].function.name, "grep");
-        let args: serde_json::Value =
-            serde_json::from_str(&calls[0].function.arguments).unwrap();
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
         assert_eq!(args["pattern"], "foo");
         assert_eq!(
             normal,
@@ -1018,13 +1017,16 @@ mod detect_parser_tests {
     #[tokio::test]
     async fn test_parse_harmony_analysis_no_constraint_tool_call_recovered() {
         // analysis channel with no constraint marker at all.
-        let text =
-            r#"<|channel|>analysis to=functions.bash<|message|>{"command":"ls"}<|call|>"#;
+        let text = r#"<|channel|>analysis to=functions.bash<|message|>{"command":"ls"}<|call|>"#;
         let (calls, _normal) =
             parse_tool_calls_harmony_complete(text, &JsonParserConfig::default(), None)
                 .await
                 .expect("parser should not error");
-        assert_eq!(calls.len(), 1, "analysis tool call without constraint must be recovered");
+        assert_eq!(
+            calls.len(),
+            1,
+            "analysis tool call without constraint must be recovered"
+        );
         assert_eq!(calls[0].function.name, "bash");
     }
 
@@ -1037,7 +1039,10 @@ mod detect_parser_tests {
             parse_tool_calls_harmony_complete(text, &JsonParserConfig::default(), None)
                 .await
                 .expect("parser should not error");
-        assert!(calls.is_empty(), "recipientless analysis must not produce a tool call");
+        assert!(
+            calls.is_empty(),
+            "recipientless analysis must not produce a tool call"
+        );
         assert_eq!(
             normal,
             Some("Done.".to_string()),
