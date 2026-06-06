@@ -679,9 +679,10 @@ def build_sampling_params(
     if prompt_logprobs is not None:
         sampling_params.prompt_logprobs = prompt_logprobs
 
-    skip_special_tokens_value = output_options.get("skip_special_tokens")
-    if skip_special_tokens_value is not None:
-        sampling_params.skip_special_tokens = bool(skip_special_tokens_value)
+    # skip_special_tokens is intentionally NOT forwarded to vLLM here: this path
+    # forces detokenize=False (below), so vLLM never detokenizes and ignores it.
+    # Dynamo detokenizes in the Rust backend, which reads skip_special_tokens
+    # directly from the request output_options (lib/llm/src/backend.rs).
 
     # If max_tokens wasn't provided (None or missing), compute a dynamic default
     provided_max_tokens = request.get("stop_conditions", {}).get("max_tokens", None)

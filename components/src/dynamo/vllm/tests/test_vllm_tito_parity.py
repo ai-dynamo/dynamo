@@ -266,7 +266,9 @@ class TestEngineDataAccumulation:
 
 
 class TestSkipSpecialTokens:
-    """Verify skip_special_tokens from output_options flows to SamplingParams."""
+    """skip_special_tokens is handled by Dynamo's Rust backend (which reads it
+    from the request output_options), NOT forwarded to vLLM SamplingParams: the
+    internal token path forces detokenize=False, so vLLM never reads it."""
 
     @staticmethod
     def _build(output_options=None):
@@ -280,27 +282,21 @@ class TestSkipSpecialTokens:
         }
         return build_sampling_params(req, {})
 
-    def test_skip_special_tokens_true(self):
-        sp = self._build(output_options={"skip_special_tokens": True})
-        assert sp.skip_special_tokens is True
-
-    def test_skip_special_tokens_false(self):
+    def test_skip_special_tokens_not_forwarded(self):
+        # detokenize is forced off so vLLM ignores skip_special_tokens; it must
+        # be left at the vLLM default rather than overridden from output_options.
         sp = self._build(output_options={"skip_special_tokens": False})
-        assert sp.skip_special_tokens is False
+        assert sp.detokenize is False
+        assert sp.skip_special_tokens is True  # vLLM default, not overridden
 
-    def test_skip_special_tokens_absent(self):
-        """When not provided, build_sampling_params hardcodes detokenize=False
-        and SamplingParams default for skip_special_tokens should be unchanged."""
+    def test_detokenize_forced_off(self):
         sp = self._build(output_options={})
         assert sp.detokenize is False
 
     def test_prompt_logprobs_still_works(self):
-        """Regression: prompt_logprobs should still be wired alongside skip_special_tokens."""
-        sp = self._build(
-            output_options={"prompt_logprobs": 5, "skip_special_tokens": True}
-        )
+        """Regression: prompt_logprobs is still wired through output_options."""
+        sp = self._build(output_options={"prompt_logprobs": 5})
         assert sp.prompt_logprobs == 5
-        assert sp.skip_special_tokens is True
 
     def test_token_id_constraints(self):
         from dynamo.vllm.handlers import build_sampling_params
