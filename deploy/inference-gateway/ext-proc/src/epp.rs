@@ -29,6 +29,47 @@ use crate::replica_sync::ReplicaPublisher;
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Disaggregation role discovery, driven by a Kubernetes pod label (no Dynamo
+/// runtime required). Configurable so operators can point at their existing
+/// labels; defaults to the Dynamo-native convention
+/// (`nvidia.com/dynamo-component-type` with values `prefill`/`decode`).
+struct RoleConfig {
+    label: String,
+    prefill: HashSet<String>,
+    decode: HashSet<String>,
+    both: HashSet<String>,
+}
+
+/// Parse the role-discovery config from env once.
+fn role_config() -> &'static RoleConfig {
+    static CFG: std::sync::OnceLock<RoleConfig> = std::sync::OnceLock::new();
+    CFG.get_or_init(|| {
+        let values = |key: &str, default: &str| -> HashSet<String> {
+            std::env::var(key)
+                .unwrap_or_else(|_| default.to_string())
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+        let cfg = RoleConfig {
+            label: std::env::var("DYN_EPP_ROLE_LABEL")
+                .unwrap_or_else(|_| "nvidia.com/dynamo-component-type".to_string()),
+            prefill: values("DYN_EPP_PREFILL_ROLE_VALUES", "prefill"),
+            decode: values("DYN_EPP_DECODE_ROLE_VALUES", "decode"),
+            both: values("DYN_EPP_BOTH_ROLE_VALUES", "both"),
+        };
+        tracing::info!(
+            role_label = %cfg.label,
+            prefill = ?cfg.prefill,
+            decode = ?cfg.decode,
+            both = ?cfg.both,
+            "Disaggregation role discovery (K8s label) configured"
+        );
+        cfg
+    })
+}
+
 /// Name of the inference-serving HTTP port on a Dynamo worker pod.
 ///
 /// Mirrors `commonconsts.DynamoContainerPortName` in
@@ -198,7 +239,21 @@ impl Router {
             enable_eagle,
         );
 
-        spawn_prefill_discovery_watcher(drt.clone(), actual_namespace.clone(), prefill_tx);
+        if external_mode {
+            // K8s-native disaggregation (no Dynamo runtime): activate the prefill
+            // router eagerly with a synthetic endpoint. Prefill workers are then
+            // registered from the pod reflector by Dynamo role label (see
+            // `route_prefill`). The chooser is built via `kv_chooser_for` — the
+            // same path the decode router above uses, which already works without
+            // Dynamo-registered workers. Dynamo-worker mode keeps discovering
+            // prefill via the published model card.
+            let prefill_endpoint = component_handle.endpoint("prefill");
+            if prefill_tx.send(prefill_endpoint).is_err() {
+                tracing::warn!("prefill router activation receiver dropped");
+            }
+        } else {
+            spawn_prefill_discovery_watcher(drt.clone(), actual_namespace.clone(), prefill_tx);
+        }
 
         // Endpoint discovery. External (GIE) mode scans the referenced
         // InferencePool for its selector + targetPort; dynamo-worker mode uses
@@ -422,6 +477,51 @@ impl Router {
             }
         }
         ids
+    }
+
+    /// Partition an allowed worker set into (prefill, decode) by the Dynamo
+    /// role label (`role_config`). A pod whose role is in the `prefill` set goes
+    /// to prefill; `both` goes to both; everything else — including the common
+    /// case of an unlabeled aggregated pool — goes to decode, so existing
+    /// (non-disaggregated) deployments are unaffected. Reading the role from a
+    /// Kubernetes label is what lets the EPP do disaggregated routing without
+    /// the Dynamo runtime.
+    fn partition_worker_roles(&self, allowed: &HashSet<u64>) -> (HashSet<u64>, HashSet<u64>) {
+        let cfg = role_config();
+        let mut prefill = HashSet::new();
+        let mut decode = HashSet::new();
+        for pod in self.pod_store.state() {
+            let Some(pod_name) = pod.metadata.name.as_deref() else {
+                continue;
+            };
+            let wid = hash_pod_name(pod_name);
+            if !allowed.contains(&wid) {
+                continue;
+            }
+            let role = pod
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|l| l.get(cfg.label.as_str()))
+                .map(|s| s.as_str());
+            match role {
+                Some(r) if cfg.both.contains(r) => {
+                    prefill.insert(wid);
+                    decode.insert(wid);
+                }
+                Some(r) if cfg.prefill.contains(r) => {
+                    prefill.insert(wid);
+                }
+                Some(r) if cfg.decode.contains(r) => {
+                    decode.insert(wid);
+                }
+                // Unlabeled / unknown role: treat as decode (aggregated default).
+                _ => {
+                    decode.insert(wid);
+                }
+            }
+        }
+        (prefill, decode)
     }
 
     /// Route a prefill request. Returns (worker_id, dp_rank).
@@ -1569,9 +1669,24 @@ impl EndpointPicker for Router {
         // * `enforce_disagg = true`: surface the error to Envoy and let the
         //   request fail. Silently downgrading to aggregated would defeat
         //   the operator's explicit "strict disagg" policy.
-        let prefill_result = self
-            .route_prefill(&tokens, priority_jump, allowed_worker_ids.clone())
-            .await;
+        // Partition candidates into prefill/decode workers by the Dynamo role
+        // label (K8s-native disaggregation, no runtime). An unlabeled or
+        // aggregated pool yields an empty prefill set, so prefill routing is
+        // skipped and we serve aggregated — unchanged behavior.
+        let (prefill_ids, decode_ids) = {
+            let base = match &allowed_worker_ids {
+                Some(ids) => ids.clone(),
+                None => self.all_ready_worker_ids(),
+            };
+            self.partition_worker_roles(&base)
+        };
+
+        let prefill_result = if prefill_ids.is_empty() {
+            Err(anyhow::anyhow!("no prefill-role workers in candidate set"))
+        } else {
+            self.route_prefill(&tokens, priority_jump, Some(prefill_ids))
+                .await
+        };
 
         let is_disaggregated = match &prefill_result {
             Ok(_) => true,
@@ -1595,7 +1710,7 @@ impl EndpointPicker for Router {
         };
 
         let (decode_worker, _overlap) = self
-            .route_decode(&tokens, is_disaggregated, priority_jump, allowed_worker_ids)
+            .route_decode(&tokens, is_disaggregated, priority_jump, Some(decode_ids))
             .await
             .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
 
