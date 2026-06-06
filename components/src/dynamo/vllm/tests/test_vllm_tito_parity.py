@@ -167,11 +167,17 @@ class TestTokenInSamplingDefaults:
         return build_sampling_params(req, {"top_p": 0.5}, enable_rl=enable_rl)
 
     def test_metadata_extra_fields_keep_generation_defaults(self):
-        sp = self._build({"nvext": {"extra_fields": ["timing", "worker_id"]}})
+        # enable_rl=True so the gate is ACTIVE: a metadata-only extra_fields
+        # request is not a token-in request, so generation defaults are kept.
+        sp = self._build(
+            {"nvext": {"extra_fields": ["timing", "worker_id"]}}, enable_rl=True
+        )
         assert sp.top_p == pytest.approx(0.5)
 
     def test_engine_data_extra_field_keeps_generation_defaults(self):
-        sp = self._build({"nvext": {"extra_fields": ["engine_data"]}})
+        # engine_data is a response opt-in, not a token-in marker; with RL on it
+        # must still keep generation defaults.
+        sp = self._build({"nvext": {"extra_fields": ["engine_data"]}}, enable_rl=True)
         assert sp.top_p == pytest.approx(0.5)
 
     def test_token_in_marker_skips_generation_defaults(self):
