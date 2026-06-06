@@ -273,6 +273,73 @@ impl LoadEstimator {
         }
     }
 
+    /// Replace the full estimator config at runtime (rate window, bucket granularity,
+    /// predictor type/alpha).
+    ///
+    /// Rebuilds EXISTING per-LoRA counters under the new bucket geometry when `rate_window` or
+    /// `buckets_per_second` changes, and clears predictors when the geometry or the predictor
+    /// type/alpha changes. The load-feed path can create counters BEFORE the controller applies
+    /// its config (e.g. a KV active-sequence event arriving before `start_lora_controller` runs),
+    /// so without this rebuild those early counters would keep the default bucketing forever.
+    /// `active_count` (in-flight requests) is preserved; the windowed arrival history is restarted
+    /// because it was measured against the old window. (Mirrors `set_rate_window`, but covers the
+    /// full config.)
+    pub fn set_config(&self, config: LoadEstimatorConfig) {
+        let mut cfg = self.config.write();
+        let old = cfg.clone();
+        let geometry_changed = old.rate_window != config.rate_window
+            || old.buckets_per_second != config.buckets_per_second;
+        let predictor_changed = old.predictor_type != config.predictor_type
+            || (old.ema_alpha - config.ema_alpha).abs() > f64::EPSILON;
+        *cfg = config;
+        let num_buckets = cfg.num_buckets();
+        let bucket_duration = cfg.bucket_duration();
+        drop(cfg);
+
+        if geometry_changed {
+            let now = Instant::now();
+            for mut entry in self.data.iter_mut() {
+                let old_active = entry.value().active_count.load(Ordering::Relaxed);
+                *entry.value_mut() = LoraLoadData {
+                    active_count: AtomicUsize::new(old_active),
+                    rate_counter: BucketedRateCounter::new(num_buckets, bucket_duration, now),
+                };
+            }
+        }
+        // Predictors built under the old window/params are meaningless once the geometry or the
+        // predictor type/alpha changes; clear them so smoothing restarts from scratch.
+        if geometry_changed || predictor_changed {
+            self.predictors
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+        }
+
+        tracing::info!(
+            num_buckets,
+            geometry_changed,
+            predictor_changed,
+            "LoadEstimator config updated"
+        );
+    }
+
+    /// Prune tracking data (and predictors) for any LoRA not in `known`. Bounds memory
+    /// against unloaded adapters and unknown/typo request names that never get allocated.
+    pub fn retain_known(&self, known: &std::collections::HashSet<&str>) {
+        // Keep an entry if it is known OR still has in-flight requests. Pruning a LoRA with a
+        // nonzero active_count (e.g. one whose arrival raced this controller tick, before its MDC
+        // reached the state tracker) would drop live tracking and make the matching LoadGuard /
+        // Free-event decrement a silent no-op, losing that arrival. Unknown/typo names with no
+        // in-flight requests are still pruned, so memory stays bounded.
+        self.data.retain(|name, data| {
+            known.contains(name.as_str()) || data.active_count.load(Ordering::Relaxed) > 0
+        });
+        self.predictors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|name, _| known.contains(name.as_str()) || self.data.contains_key(name));
+    }
+
     /// Update the rate window at runtime.
     pub fn set_rate_window(&self, window: Duration) {
         let mut cfg = self.config.write();
@@ -349,16 +416,37 @@ impl LoadEstimator {
         self: Arc<Self>,
         component: Component,
     ) -> tokio::task::JoinHandle<()> {
+        let cancel_token = component.drt().child_token();
         tokio::spawn(async move {
-            if let Err(e) = self.subscribe_to_events(component).await {
-                tracing::error!("Error in LORA load event subscription: {}", e);
+            // Durable feed: reconnect on transient errors / stream end with capped backoff,
+            // stopping only on cancellation. A failed subscribe must not silently disable KV
+            // load tracking for the lifetime of the process.
+            let mut backoff = Duration::from_secs(1);
+            while !cancel_token.is_cancelled() {
+                match self.subscribe_to_events(&component, &cancel_token).await {
+                    Ok(()) => break, // cancelled cleanly
+                    Err(e) => {
+                        tracing::warn!(
+                            "LORA load event subscription error: {e}; reconnecting in {backoff:?}"
+                        );
+                        tokio::select! {
+                            _ = cancel_token.cancelled() => break,
+                            _ = tokio::time::sleep(backoff) => {}
+                        }
+                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                    }
+                }
             }
+            tracing::debug!("LORA load event subscription task exiting");
         })
     }
 
-    async fn subscribe_to_events(&self, component: Component) -> anyhow::Result<()> {
-        let cancel_token = component.drt().child_token();
-        let mut subscriber = EventSubscriber::for_component(&component, ACTIVE_SEQUENCES_SUBJECT)
+    async fn subscribe_to_events(
+        &self,
+        component: &Component,
+        cancel_token: &tokio_util::sync::CancellationToken,
+    ) -> anyhow::Result<()> {
+        let mut subscriber = EventSubscriber::for_component(component, ACTIVE_SEQUENCES_SUBJECT)
             .await?
             .typed::<ActiveSequenceEvent>();
 
@@ -366,10 +454,7 @@ impl LoadEstimator {
 
         loop {
             tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    tracing::debug!("LORA load event subscription cancelled");
-                    break;
-                }
+                _ = cancel_token.cancelled() => return Ok(()),
                 result = subscriber.next() => {
                     match result {
                         Some(Ok((_envelope, event))) => {
@@ -378,16 +463,11 @@ impl LoadEstimator {
                         Some(Err(e)) => {
                             tracing::warn!("Error receiving LORA load event: {}", e);
                         }
-                        None => {
-                            tracing::warn!("LORA load event stream ended");
-                            break;
-                        }
+                        None => anyhow::bail!("LORA load event stream ended"),
                     }
                 }
             }
         }
-
-        Ok(())
     }
 
     fn handle_event(&self, event: ActiveSequenceEvent) {
@@ -451,6 +531,17 @@ impl LoadEstimator {
                     Some(v.saturating_sub(1))
                 })
                 .ok();
+        }
+    }
+
+    /// Remove all tracking data for a LoRA. After this call the LoRA will no
+    /// longer appear in [`get_current_load`] results. Useful when a LoRA is
+    /// permanently unloaded and its stale rate-counter / predictor entries
+    /// should be purged.
+    pub fn remove_lora(&self, lora_name: &str) {
+        self.data.remove(lora_name);
+        if let Ok(mut predictors) = self.predictors.lock() {
+            predictors.remove(lora_name);
         }
     }
 
@@ -602,6 +693,40 @@ impl Default for LoadEstimator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_config_rebuilds_existing_counter_geometry() {
+        // The load-feed path can create a counter before the controller applies its config, so
+        // set_config must rebuild EXISTING counters under the new bucket geometry (preserving the
+        // in-flight active_count), not only counters created afterward.
+        let est = LoadEstimator::with_config(LoadEstimatorConfig {
+            rate_window: Duration::from_secs(10),
+            buckets_per_second: 1,
+            ..Default::default()
+        });
+        // Counter for "lora-a" created under the OLD geometry (10s @ 1/s = 10 buckets), with one
+        // in-flight request.
+        est.increment_load("lora-a");
+        assert_eq!(est.data.get("lora-a").unwrap().rate_counter.num_buckets, 10);
+
+        // Apply a finer bucket geometry at runtime.
+        est.set_config(LoadEstimatorConfig {
+            rate_window: Duration::from_secs(10),
+            buckets_per_second: 4,
+            ..Default::default()
+        });
+
+        let entry = est.data.get("lora-a").unwrap();
+        assert_eq!(
+            entry.rate_counter.num_buckets, 40,
+            "existing counter must adopt the new geometry (10s @ 4/s = 40 buckets)"
+        );
+        assert_eq!(
+            entry.active_count.load(Ordering::Relaxed),
+            1,
+            "in-flight active_count must survive the rebuild"
+        );
+    }
 
     #[test]
     fn test_bucketed_rate_counter_basic() {
