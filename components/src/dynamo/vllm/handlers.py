@@ -515,14 +515,22 @@ def _accumulate_engine_data(
     if flat_lp:
         logprob_accumulator.extend(flat_lp)
 
-    if tok.get("finish_reason") is None:
+    finish_reason = tok.get("finish_reason")
+    if finish_reason is None:
         return
+
+    # An engine error is delivered as a finish_reason like "error: ..."; do not
+    # report it to the RL client as a clean finish (which would look like a
+    # successful empty completion).
+    finished = not (
+        isinstance(finish_reason, str) and finish_reason.startswith("error")
+    )
 
     engine_data: Dict[str, Any] = dict(tok.get("engine_data") or {})
     engine_data.update(
         {
             "completion_token_ids": list(token_accumulator),
-            "finished": True,
+            "finished": finished,
         }
     )
     if logprob_accumulator:
