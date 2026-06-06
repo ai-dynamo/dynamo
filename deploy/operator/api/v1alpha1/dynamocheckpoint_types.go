@@ -43,8 +43,9 @@ const (
 // +kubebuilder:validation:Enum=pvc;s3;oci
 type DynamoCheckpointStorageType string
 
-// DynamoCheckpointIdentity defines the inputs that determine checkpoint equivalence
-// Two checkpoints with the same identity hash are considered equivalent
+// DynamoCheckpointIdentity is legacy compatibility metadata for standalone
+// DynamoCheckpoint objects. DGD-managed automatic checkpoints do not use this
+// shape as a reuse boundary; they use an operator-owned checkpoint ID instead.
 type DynamoCheckpointIdentity struct {
 	// Model is the model identifier (e.g., "meta-llama/Llama-3-70B")
 	// +kubebuilder:validation:Required
@@ -55,35 +56,45 @@ type DynamoCheckpointIdentity struct {
 	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
 	BackendFramework string `json:"backendFramework"`
 
-	// DynamoVersion is the Dynamo platform version (optional)
-	// If not specified, version is not included in identity hash
-	// This ensures checkpoint compatibility across Dynamo releases
+	// DynamoVersion is the Dynamo platform version (optional).
+	// Deprecated for DGD-managed automatic checkpoints; it only participates in
+	// the legacy identity hash fallback for standalone objects.
 	// +optional
 	DynamoVersion string `json:"dynamoVersion,omitempty"`
 
-	// TensorParallelSize is the tensor parallel configuration
+	// TensorParallelSize is the tensor parallel configuration.
+	// Deprecated for DGD-managed automatic checkpoints; it only participates in
+	// the legacy identity hash fallback for standalone objects.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=1
 	TensorParallelSize int32 `json:"tensorParallelSize,omitempty"`
 
-	// PipelineParallelSize is the pipeline parallel configuration
+	// PipelineParallelSize is the pipeline parallel configuration.
+	// Deprecated for DGD-managed automatic checkpoints; it only participates in
+	// the legacy identity hash fallback for standalone objects.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=1
 	PipelineParallelSize int32 `json:"pipelineParallelSize,omitempty"`
 
-	// Dtype is the data type (fp16, bf16, fp8, etc.)
+	// Dtype is the data type (fp16, bf16, fp8, etc.).
+	// Deprecated for DGD-managed automatic checkpoints; it only participates in
+	// the legacy identity hash fallback for standalone objects.
 	// +optional
 	Dtype string `json:"dtype,omitempty"`
 
-	// MaxModelLen is the maximum sequence length
+	// MaxModelLen is the maximum sequence length.
+	// Deprecated for DGD-managed automatic checkpoints; it only participates in
+	// the legacy identity hash fallback for standalone objects.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	MaxModelLen int32 `json:"maxModelLen,omitempty"`
 
-	// ExtraParameters are additional parameters that affect the checkpoint hash
-	// Use for any framework-specific or custom parameters not covered above
+	// ExtraParameters are additional parameters that affect the checkpoint hash.
+	// Use for any framework-specific or custom parameters not covered above.
+	// Deprecated for DGD-managed automatic checkpoints; it only participates in
+	// the legacy identity hash fallback for standalone objects.
 	// +optional
 	ExtraParameters map[string]string `json:"extraParameters,omitempty"`
 }
@@ -131,7 +142,8 @@ type DynamoCheckpointJobConfig struct {
 
 // DynamoCheckpointSpec defines the desired state of DynamoCheckpoint
 type DynamoCheckpointSpec struct {
-	// Identity defines the inputs that determine checkpoint equivalence
+	// Identity is legacy compatibility metadata. DGD-managed automatic
+	// checkpoints use an operator-owned checkpoint ID instead.
 	// +kubebuilder:validation:Required
 	Identity DynamoCheckpointIdentity `json:"identity"`
 
@@ -167,8 +179,13 @@ type DynamoCheckpointStatus struct {
 	// +optional
 	Phase DynamoCheckpointPhase `json:"phase,omitempty"`
 
-	// IdentityHash is the computed hash of the checkpoint identity
-	// This hash is used to identify equivalent checkpoints
+	// CheckpointID is the artifact ID used by the snapshot protocol.
+	// +optional
+	CheckpointID string `json:"checkpointID,omitempty"`
+
+	// IdentityHash is the computed hash of the checkpoint identity.
+	// Deprecated: use CheckpointID. This field is retained for compatibility
+	// with older status consumers.
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
 
@@ -205,7 +222,7 @@ type DynamoCheckpointStatus struct {
 // +kubebuilder:printcolumn:name="Model",type="string",JSONPath=".spec.identity.model",description="Model identifier"
 // +kubebuilder:printcolumn:name="Backend",type="string",JSONPath=".spec.identity.backendFramework",description="Backend framework"
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase",description="Current phase of the checkpoint"
-// +kubebuilder:printcolumn:name="Hash",type="string",JSONPath=".status.identityHash",description="Identity hash of the checkpoint"
+// +kubebuilder:printcolumn:name="CheckpointID",type="string",JSONPath=".status.checkpointID",description="Artifact ID of the checkpoint"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.spec.identity) || self.spec.identity == oldSelf.spec.identity",message="spec.identity is immutable after creation"
 

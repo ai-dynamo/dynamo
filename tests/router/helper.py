@@ -38,6 +38,14 @@ def get_kv_indexer_command() -> list[str]:
     return [sys.executable, "-m", "dynamo.indexer"]
 
 
+def get_kv_indexer_test_env() -> Dict[str, str]:
+    """Indexer launch env that enables the listener-control test endpoints
+    (gated off by default; used by the ZMQ replay scenario)."""
+    env = os.environ.copy()
+    env["DYN_KV_INDEXER_TEST_ENDPOINTS"] = "1"
+    return env
+
+
 def assert_event_dumps_equal(
     expected: list[dict],
     actual: list[dict],

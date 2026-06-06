@@ -387,14 +387,9 @@ class GMSWorker(Worker):
                 ensure_scratch_disabled(kv_cache_manager)
             kv_cache_manager.reallocate_all_handles(tag="kv_cache")
             kv_cache_manager.remap_all_vas()
+            self.model_runner.post_kv_cache_wake_up()
             if was_scratch:
                 self._register_kv_caches_with_nixl()
-
-            # Reinitialize FP8 KV scales if needed
-            if self.cache_config.cache_dtype.startswith("fp8") and hasattr(
-                self.model_runner, "init_fp8_kv_scales"
-            ):
-                self.model_runner.init_fp8_kv_scales()
 
     def _register_kv_caches_with_nixl(self) -> None:
         """Fire the NixlConnector KV-cache registration after deferred KV swap.

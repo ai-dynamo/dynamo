@@ -5,9 +5,6 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 use anyhow::{Context, Result, anyhow, bail};
-use dynamo_kv_router::protocols::{
-    BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
-};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
@@ -97,17 +94,6 @@ pub struct WorkloadDriver {
     agentic_remaining_dependencies: Vec<usize>,
     agentic_ready_after_ms: Vec<f64>,
     agentic_dependents: FxHashMap<String, Vec<usize>>,
-}
-
-fn replay_hashes_from_tokens(tokens: &[u32], engine_block_size: u32) -> ReplayRequestHashes {
-    let local_block_hashes =
-        compute_block_hash_for_seq(tokens, engine_block_size, BlockHashOptions::default());
-    let sequence_hashes = compute_seq_hash_for_block(&local_block_hashes);
-
-    ReplayRequestHashes {
-        local_block_hashes,
-        sequence_hashes,
-    }
 }
 
 impl WorkloadDriver {
@@ -395,7 +381,7 @@ impl WorkloadDriver {
                     session.cumulative_tokens.extend_from_slice(&turn.tokens);
                     let request_tokens = session.cumulative_tokens.clone();
                     let replay_hashes =
-                        replay_hashes_from_tokens(&request_tokens, self.engine_block_size);
+                        ReplayRequestHashes::from_tokens(&request_tokens, self.engine_block_size);
                     (request_tokens, replay_hashes)
                 }
             };
