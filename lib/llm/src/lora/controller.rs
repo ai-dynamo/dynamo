@@ -113,7 +113,27 @@ impl LoraController {
                         break;
                     }
                     _ = interval.tick() => {
-                        controller.recompute_allocations();
+                        // A panic inside recompute must not silently kill the controller loop —
+                        // that would freeze all LoRA allocation for the process lifetime with no
+                        // restart and no alert. Catch it, log, and continue; the next tick
+                        // recomputes fresh from current cluster state (a partially-updated table
+                        // self-heals). `&mut controller` across the unwind boundary needs
+                        // AssertUnwindSafe.
+                        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            controller.recompute_allocations();
+                        }));
+                        if let Err(panic) = outcome {
+                            let msg = panic
+                                .downcast_ref::<&str>()
+                                .map(|s| s.to_string())
+                                .or_else(|| panic.downcast_ref::<String>().cloned())
+                                .unwrap_or_else(|| "unknown panic".to_string());
+                            tracing::error!(
+                                tick = controller.tick,
+                                panic = %msg,
+                                "LoRA allocation recompute panicked; skipping this tick and continuing"
+                            );
+                        }
                     }
                 }
             }
