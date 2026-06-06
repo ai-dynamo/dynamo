@@ -863,6 +863,18 @@ class TestConsolidatorRouterE2E:
                 )
 
                 if not worker_registered:
+                    # The registration poll only sees the frontend health
+                    # endpoint, not why the worker never appeared. Surface the
+                    # worker's (and frontend's) own log tail so the init error is
+                    # visible directly in the captured pytest output.
+                    for label, lp in (("WORKER", worker_log), ("FRONTEND", frontend_log)):
+                        try:
+                            tail = "".join(
+                                open(lp, encoding="utf-8", errors="ignore").readlines()[-60:]
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            tail = f"(could not read {lp}: {exc})"
+                        logger.error("===== %s LOG TAIL (%s) =====\n%s", label, lp, tail)
                     pytest.fail(
                         f"{engine.upper()} worker failed to register with frontend"
                     )
