@@ -6,6 +6,11 @@ name: aws-dev-02 kvbm tests
 # -> ARC k8s container-hook job pod -> per-runner work PVC on ci-local-nvme -> 2x
 # H100 GPU allocation -> shared-model-cache mount. Scoped to a dedicated test
 # branch so it never runs on normal PRs.
+#
+# Each matrix entry runs in its OWN job pod (fresh GPUs / fresh /scratch), so a
+# heavy test cannot starve a later one of VRAM or disk, and the jobs run
+# concurrently (maxRunners 8). Splitting also isolates a real test failure from a
+# flaky one.
 on:
   push:
     branches: [test/aws-dev-02-runner-smoke]
@@ -13,6 +18,17 @@ on:
 
 jobs:
   kvbm-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: consolidator
+            pytest_args: tests/kvbm_integration/test_consolidator_router_e2e.py
+          - name: determinism-cache-reset
+            pytest_args: tests/kvbm_integration/test_determinism_agg.py -m kvbm
+          - name: determinism-concurrency
+            pytest_args: tests/kvbm_integration/test_determinism_agg.py -m kvbm_concurrency
+    name: kvbm-tests (${{ matrix.name }})
     runs-on: aws-dev-02-tester-amd-gpu-v2
     container:
       # Pin to an already-built image so we don't trigger a full image build. This
@@ -30,7 +46,7 @@ jobs:
           id
           nvidia-smi -L
           df -h "$GITHUB_WORKSPACE"
-      - name: KVBM integration tests (currently disabled in upstream CI)
+      - name: KVBM integration test (${{ matrix.name }})
         env:
           HF_HOME: /scratch/hf
         run: |
@@ -39,8 +55,4 @@ jobs:
           # via a relative path, and /workspace is owned by image UID 1000 while
           # the job pod runs as UID 1001 -> PermissionError.
           cd "$GITHUB_WORKSPACE"
-          python -m pytest \
-            tests/kvbm_integration/test_consolidator_router_e2e.py \
-            tests/kvbm_integration/test_determinism_agg.py \
-            -m "kvbm or kvbm_concurrency" \
-            -v -s -p no:cacheprovider
+          python -m pytest ${{ matrix.pytest_args }} -v -s -p no:cacheprovider
