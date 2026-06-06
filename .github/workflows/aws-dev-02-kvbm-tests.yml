@@ -56,3 +56,19 @@ jobs:
           # the job pod runs as UID 1001 -> PermissionError.
           cd "$GITHUB_WORKSPACE"
           python -m pytest ${{ matrix.pytest_args }} -v -s -p no:cacheprovider
+      - name: Dump per-process test logs
+        # The tests run dynamo.frontend / dynamo.vllm as subprocesses and write
+        # their stderr to <test_output>/<role>/<cmd>.log.txt; pytest only prints
+        # "worker failed to register", not the worker's own init error. Surface
+        # those logs so a registration/startup failure can be root-caused. Runs on
+        # success too (cheap) so passing runs show what a healthy startup looks like.
+        if: always()
+        run: |
+          root="${DYN_TEST_OUTPUT_PATH:-/tmp/dynamo_tests}"
+          echo "Scanning $root for *.log.txt"
+          find "$root" -type f \( -name '*.log.txt' -o -name '*.log' \) 2>/dev/null \
+            | while read -r f; do
+                echo ""
+                echo "========================= $f ========================="
+                cat "$f"
+              done || true
