@@ -8,7 +8,8 @@ use futures::StreamExt;
 use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 
-use dynamo_kv_router::protocols::{BlockExtraInfo, RoutingConstraints, WorkerId};
+use dynamo_kv_router::protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank};
+use dynamo_kv_router::{SequenceRequest, SequenceSubscriber, config::RouterConfigOverride};
 use dynamo_runtime::{pipeline::SingleIn, protocols::maybe_error::MaybeError};
 
 use super::{
@@ -414,6 +415,62 @@ impl PrefillRouter {
     pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
         if let Some(InnerPrefillRouter::KvRouter(r)) = self.prefill_router.get() {
             r.chooser.register_workers(worker_ids);
+        }
+    }
+
+    /// Book a request on the prefill router's slot tracker (load tracking) and
+    /// return the booked [`SequenceRequest`] so a caller can mirror it to peer
+    /// replicas at full fidelity. Returns `None` unless the prefill router is in
+    /// KV mode. Delegates to the inner [`KvRouter`](crate::kv_router::KvRouter).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_request(
+        &self,
+        request_id: String,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        cached_tokens: usize,
+        expected_output_tokens: Option<u32>,
+        worker: WorkerWithDpRank,
+        lora_name: Option<String>,
+        router_config_override: Option<&RouterConfigOverride>,
+    ) -> Option<SequenceRequest> {
+        match self.prefill_router.get() {
+            Some(InnerPrefillRouter::KvRouter(r)) => {
+                r.chooser
+                    .add_request(
+                        request_id,
+                        tokens,
+                        block_mm_infos,
+                        cached_tokens,
+                        expected_output_tokens,
+                        worker,
+                        lora_name,
+                        router_config_override,
+                    )
+                    .await
+            }
+            _ => None,
+        }
+    }
+
+    /// Free a request from the prefill router's slot tracker. Quiet no-op for
+    /// requests that were never booked (e.g. aggregated requests).
+    pub async fn free(&self, request_id: &str) {
+        if let Some(InnerPrefillRouter::KvRouter(r)) = self.prefill_router.get()
+            && let Err(e) = r.chooser.free(request_id).await
+        {
+            tracing::trace!(request_id, "prefill free (likely not booked): {e}");
+        }
+    }
+
+    /// Drive cross-replica sequence sync for the prefill router's slot tracker
+    /// from an externally-supplied subscriber. No-op unless in KV mode.
+    pub fn start_replica_sync<S>(&self, subscriber: S, cancel_token: tokio_util::sync::CancellationToken)
+    where
+        S: SequenceSubscriber + 'static,
+    {
+        if let Some(InnerPrefillRouter::KvRouter(r)) = self.prefill_router.get() {
+            r.chooser.start_replica_sync(subscriber, cancel_token);
         }
     }
 

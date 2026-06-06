@@ -65,10 +65,14 @@ pub struct Router {
     tokenize_url: Option<String>,
     pod_store: kube::runtime::reflector::Store<k8s_openapi::api::core::v1::Pod>,
     pod_store_ready: Arc<AtomicBool>,
-    /// Publisher for cross-replica load sync; `None` when `DYN_EPP_REPLICA_SYNC`
-    /// is disabled. Active-sequence events for booked/freed requests are
-    /// mirrored to peer EPP replicas via this handle.
+    /// Publisher for cross-replica DECODE load sync; `None` when
+    /// `DYN_EPP_REPLICA_SYNC` is disabled. Active-sequence events for
+    /// booked/freed decode requests are mirrored to peer EPP replicas.
     replica_publisher: Option<Arc<ReplicaPublisher>>,
+    /// Publisher for cross-replica PREFILL load sync (disagg); `None` when
+    /// replica sync is disabled. Prefill bookings are freed on first response
+    /// token (prefill complete) and mirrored to peers on a second channel.
+    prefill_publisher: Option<Arc<ReplicaPublisher>>,
 }
 
 impl Router {
@@ -233,16 +237,16 @@ impl Router {
         // Spawned background tasks clone what they need, so this survives `drt`
         // being dropped at the end of this scope (same pattern as the
         // reflectors above).
-        let replica_publisher = if parse_replica_sync_enabled() {
-            match spawn_replica_sync(&drt, &decode_router).await {
-                Ok(publisher) => Some(publisher),
+        let (replica_publisher, prefill_publisher) = if parse_replica_sync_enabled() {
+            match spawn_replica_sync(&drt, &decode_router, &prefill_router).await {
+                Ok((decode_pub, prefill_pub)) => (Some(decode_pub), Some(prefill_pub)),
                 Err(e) => {
                     tracing::error!(error = %e, "cross-replica load sync disabled (setup failed)");
-                    None
+                    (None, None)
                 }
             }
         } else {
-            None
+            (None, None)
         };
 
         // `model_manager` and `drt` are intentionally not stored on the
@@ -282,6 +286,7 @@ impl Router {
             pod_store,
             pod_store_ready,
             replica_publisher,
+            prefill_publisher,
         })
     }
 
@@ -585,10 +590,52 @@ impl Router {
         .map_err(|_| anyhow::anyhow!("add_request timed out"))?
     }
 
+    /// Book prefill load on the prefill router (disagg) and mirror it to peer
+    /// replicas. No-op unless cross-replica sync is enabled and the prefill
+    /// router is in KV mode. The booking is released on prefill completion
+    /// (first response token) in `mark_prefill_complete`.
+    async fn book_prefill(&self, request_id: &str, tokens: &[u32], worker_id: u64, dp_rank: u32) {
+        let Some(publisher) = self.prefill_publisher.clone() else {
+            return;
+        };
+        let prefill_router = self.prefill_router.clone();
+        let request_id = request_id.to_owned();
+        let tokens = tokens.to_vec();
+        let _ = tokio::time::timeout(BOOKKEEPING_TIMEOUT, async move {
+            let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+            // Track prefill-token load. Prefix-cache crediting on the prefill
+            // worker is left to its own KV events; cached_tokens = 0 here is a
+            // conservative upper bound on prefill cost.
+            let router_config_override = RouterConfigOverride {
+                track_prefill_tokens: Some(true),
+                assume_kv_reuse: Some(false),
+                ..Default::default()
+            };
+            let booked = prefill_router
+                .add_request(
+                    request_id,
+                    &tokens,
+                    None,
+                    0,
+                    None,
+                    worker,
+                    None,
+                    Some(&router_config_override),
+                )
+                .await;
+            if let Some(req) = &booked {
+                publisher.on_add(req).await;
+            }
+        })
+        .await;
+    }
+
     /// Mark prefill as completed for a request.
     pub async fn mark_prefill_complete(&self, request_id: &str) -> Result<()> {
         let decode_router = self.decode_router.clone();
         let publisher = self.replica_publisher.clone();
+        let prefill_router = self.prefill_router.clone();
+        let prefill_publisher = self.prefill_publisher.clone();
         let request_id = request_id.to_owned();
 
         tokio::time::timeout(BOOKKEEPING_TIMEOUT, async {
@@ -598,6 +645,12 @@ impl Router {
                 .map_err(|e| anyhow::anyhow!("mark_prefill_completed failed: {e}"))?;
             if let Some(publisher) = &publisher {
                 publisher.on_mark_prefill(&request_id).await;
+            }
+            // Disagg: the prefill worker is done once decode emits its first
+            // token — release the prefill booking and mirror the free to peers.
+            if let Some(prefill_publisher) = &prefill_publisher {
+                prefill_router.free(&request_id).await;
+                prefill_publisher.on_free(&request_id).await;
             }
             Ok(())
         })
@@ -651,13 +704,19 @@ fn parse_replica_sync_enabled() -> bool {
 }
 
 /// Set up EPP-managed (NATS-free, CRD-free) cross-replica load sync: bind the
-/// ZMQ PUB, start EndpointSlice peer discovery plus the SUB pump, and feed peer
-/// events into the decode router. Returns the publisher used to mirror this
-/// replica's own bookings. See ai-dynamo/dynamo#10384.
+/// ZMQ PUBs, start EndpointSlice peer discovery plus the SUB pumps, and feed
+/// peer events into the decode and prefill routers. Returns the (decode,
+/// prefill) publishers used to mirror this replica's own bookings.
+///
+/// Two independent channels share the EndpointSlice-discovered peer set: decode
+/// on `DYN_EPP_REPLICA_SYNC_PORT` (default 9100) and prefill on the next port
+/// (9101). Both are direct pod-IP ZMQ connects, so no extra Service/port config
+/// is needed. See ai-dynamo/dynamo#10384.
 async fn spawn_replica_sync(
     drt: &DistributedRuntime,
     decode_router: &Arc<KvRouter>,
-) -> Result<Arc<ReplicaPublisher>> {
+    prefill_router: &Arc<PrefillRouter>,
+) -> Result<(Arc<ReplicaPublisher>, Arc<ReplicaPublisher>)> {
     let port: u16 = std::env::var("DYN_EPP_REPLICA_SYNC_PORT")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -672,28 +731,64 @@ async fn spawn_replica_sync(
         .map_err(|_| anyhow::anyhow!("POD_NAMESPACE not set (downward API)"))?;
     let self_pod_ip = std::env::var("POD_IP")
         .map_err(|_| anyhow::anyhow!("POD_IP not set (downward API)"))?;
+    let prefill_port = port + 1;
 
-    // Must match the decode router's own id so peers apply these events and
-    // this replica never re-applies its own.
+    // Must match the routers' own id so peers apply these events and this
+    // replica never re-applies its own. Both routers share this drt's id.
     let router_id = drt.discovery().instance_id();
 
     // Process-scoped lifetime, matching the reflectors; intentionally not tied
     // to `drt`, which is dropped at the end of `from_discovery`.
     let cancel = CancellationToken::new();
 
-    let publisher = Arc::new(ReplicaPublisher::bind(port, router_id).await?);
-    let subscriber = crate::replica_sync::spawn_peer_sync(
-        service,
-        namespace,
-        self_pod_ip,
+    // --- decode channel (eager: decode_router always exists) ---
+    let decode_pub = Arc::new(ReplicaPublisher::bind(port, router_id).await?);
+    let decode_sub = crate::replica_sync::spawn_peer_sync(
+        service.clone(),
+        namespace.clone(),
+        self_pod_ip.clone(),
         port,
         cancel.clone(),
     )
     .await?;
-    decode_router.start_replica_sync(subscriber, cancel);
+    decode_router.start_replica_sync(decode_sub, cancel.clone());
 
-    tracing::info!(port, router_id, "EPP cross-replica load sync enabled");
-    Ok(publisher)
+    // --- prefill channel (disagg) ---
+    // The prefill router is activated lazily once prefill workers are
+    // discovered, so its subscriber is wired after activation. The SUB pump
+    // runs immediately and buffers peer events until then (empty in aggregated
+    // mode, where no peer publishes prefill events).
+    let prefill_pub = Arc::new(ReplicaPublisher::bind(prefill_port, router_id).await?);
+    let prefill_sub = crate::replica_sync::spawn_peer_sync(
+        service,
+        namespace,
+        self_pod_ip,
+        prefill_port,
+        cancel.clone(),
+    )
+    .await?;
+    {
+        let prefill_router = prefill_router.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            while !prefill_router.is_activated() {
+                if cancel.is_cancelled() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            prefill_router.start_replica_sync(prefill_sub, cancel);
+            tracing::info!("EPP prefill cross-replica load sync wired (router activated)");
+        });
+    }
+
+    tracing::info!(
+        port,
+        prefill_port,
+        router_id,
+        "EPP cross-replica load sync enabled (decode + prefill)"
+    );
+    Ok((decode_pub, prefill_pub))
 }
 
 /// Extract the router queue `priority_jump` from a chat completion request's
@@ -1544,6 +1639,21 @@ impl EndpointPicker for Router {
                 error = %e,
                 "Failed to register request with router bookkeeping"
             );
+        }
+
+        // Disagg: also book prefill load on the selected prefill worker so peer
+        // replicas see it (released on prefill completion). No-op unless
+        // replica sync is enabled and the prefill router is in KV mode.
+        if let Ok((prefill_worker_id, prefill_dp_rank)) = &prefill_result
+            && !req.request_id.is_empty()
+        {
+            self.book_prefill(
+                &req.request_id,
+                &tokens,
+                *prefill_worker_id,
+                prefill_dp_rank.unwrap_or(0),
+            )
+            .await;
         }
 
         // Build routing headers matching the Go EPP's disagg plugin:
