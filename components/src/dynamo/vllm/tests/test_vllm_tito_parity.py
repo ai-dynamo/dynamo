@@ -224,7 +224,9 @@ class TestNonFiniteLogprobs:
     def test_flatten_logprobs_clamps_inf_and_drops_bool(self):
         from dynamo.vllm.handlers import _MIN_FINITE_LOGPROB, _flatten_logprobs
 
-        assert _flatten_logprobs([float("-inf"), -0.5, [{"logprob": float("nan")}]]) == [
+        assert _flatten_logprobs(
+            [float("-inf"), -0.5, [{"logprob": float("nan")}]]
+        ) == [
             _MIN_FINITE_LOGPROB,
             pytest.approx(-0.5),
             _MIN_FINITE_LOGPROB,
