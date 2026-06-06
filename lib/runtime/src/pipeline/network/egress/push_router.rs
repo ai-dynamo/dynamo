@@ -580,10 +580,18 @@ where
         };
 
         if !found {
-            return Err(anyhow::anyhow!(
-                "instance_id={instance_id} not found for endpoint {}",
-                self.client.endpoint.id()
-            ));
+            if self.fault_detection_enabled {
+                self.client.report_instance_down(instance_id);
+            }
+
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::CannotConnect)
+                .message(format!(
+                    "instance_id={instance_id} not found for endpoint {}",
+                    self.client.endpoint.id()
+                ))
+                .build()
+                .into());
         }
 
         self.generate_with_fault_detection(instance_id, request)
@@ -1678,6 +1686,39 @@ mod tests {
 
         assert_eq!(router.select_next_worker(), None);
         assert_eq!(router.peek_next_worker(), None);
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn direct_missing_instance_returns_migratable_cannot_connect() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_direct_missing_instance".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+
+        let err = router.direct(SingleIn::new(42u64), 7).await.unwrap_err();
+        let dynamo_err = err
+            .chain()
+            .find_map(|err| err.downcast_ref::<DynamoError>())
+            .expect("missing instance error should carry DynamoError");
+
+        assert_eq!(dynamo_err.error_type(), ErrorType::CannotConnect);
+        assert!(match_error_chain(
+            err.as_ref(),
+            &[ErrorType::CannotConnect],
+            &[]
+        ));
+        assert!(err.to_string().contains("instance_id=7 not found"));
 
         rt.shutdown();
     }
