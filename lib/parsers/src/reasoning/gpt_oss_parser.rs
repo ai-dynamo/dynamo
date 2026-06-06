@@ -217,14 +217,19 @@ impl ReasoningParser for GptOssReasoningParser {
                 // `final`/`analysis` chunks immediately; commentary is reconstructed in the
                 // fallback path below because it needs the stripped metadata.
                 let current_recipient = parser.current_recipient();
+                let is_functions_recipient = current_recipient
+                    .as_deref()
+                    .is_some_and(|r| r.starts_with("functions."));
                 match channel.as_str() {
                     "final" => normal_delta.push_str(&delta),
-                    // Recipientless analysis is reasoning. Analysis WITH a
-                    // functions recipient is a (malformed) tool call — defer it
-                    // to the reconstruction path below (like commentary) so its
-                    // payload reaches the tool parser instead of polluting
-                    // reasoning_content.
-                    "analysis" if current_recipient.is_none() => reasoning_delta.push_str(&delta),
+                    // Analysis is reasoning UNLESS it carries a `functions.*`
+                    // recipient — that is a (malformed) directed tool call, which
+                    // we defer to the reconstruction path below (like commentary)
+                    // so its payload reaches the tool parser. Recipientless
+                    // analysis AND analysis directed at non-functions recipients
+                    // (e.g. `to=python`/`to=browser.*` built-in tools) are kept as
+                    // reasoning_content rather than dropped.
+                    "analysis" if !is_functions_recipient => reasoning_delta.push_str(&delta),
                     "analysis" => {}
                     "commentary" => {}
                     _ => {}
