@@ -1802,6 +1802,16 @@ impl EndpointPicker for Router {
                 "x-prefill-instance-id".to_string(),
                 format!("{}", prefill_worker_id),
             ));
+            // Dialable prefill endpoint (host:port) for a decode-side P/D
+            // routing sidecar co-located with the decode pod, which reads
+            // `x-prefiller-host-port` and runs vLLM's prefill->decode handshake.
+            // This is additive: dynamo-mode DecodeWorkers resolve the
+            // instance-id above via discovery and do the handshake natively;
+            // vanilla vLLM + sidecar use this host:port instead. One EPP, both
+            // disagg paths.
+            if let Some(prefill_ep) = self.resolve_worker_endpoint(*prefill_worker_id) {
+                headers.push(("x-prefiller-host-port".to_string(), prefill_ep));
+            }
             if let Some(rank) = prefill_dp_rank {
                 headers.push(("x-prefill-dp-rank".to_string(), rank.to_string()));
             }
