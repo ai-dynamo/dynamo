@@ -2609,12 +2609,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Firstly extract disaggregated params from prefill result if available
         prefill_result = request.get("prefill_result")
         if prefill_result and isinstance(prefill_result, dict):
-            kv_params = prefill_result.get("disaggregated_params", {}).get(
-                "kv_transfer_params"
-            )
-            embedding_params = prefill_result.get("disaggregated_params", {}).get(
-                "embedding_params"
-            )
+            # `disaggregated_params` may be explicitly None (prefill error path,
+            # or _build_disaggregated_params returning None when empty), so use
+            # `or {}` rather than a .get default — the default only applies when
+            # the key is absent, not when it is present-but-None.
+            disaggregated_params = prefill_result.get("disaggregated_params") or {}
+            kv_params = disaggregated_params.get("kv_transfer_params")
+            embedding_params = disaggregated_params.get("embedding_params")
             # Normalize embedding_params to None if it is an empty dict
             if not embedding_params:
                 embedding_params = None
