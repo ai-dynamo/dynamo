@@ -164,6 +164,8 @@ class TrtllmDiffusionEngine(DiffusionEngine):
     async def generate(
         self, request: dict[str, Any], context: Context
     ) -> AsyncGenerator[dict[str, Any], None]:
+        if self._handler is None:
+            raise RuntimeError("generate() called before start() completed")
         # The handler's generate() already matches the DiffusionEngine
         # contract (raw request dict in, response dict out).
         async for chunk in self._handler.generate(request, context):

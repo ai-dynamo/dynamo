@@ -133,6 +133,8 @@ class VllmOmniEngine(RawEngine):
     async def generate(
         self, request: dict[str, Any], context: Context
     ) -> AsyncGenerator[dict[str, Any], None]:
+        if self._handler is None:
+            raise RuntimeError("generate() called before start() completed")
         # OmniHandler.generate already matches the RawEngine contract
         # (raw request dict in, response dict out).
         async for chunk in self._handler.generate(request, context):
