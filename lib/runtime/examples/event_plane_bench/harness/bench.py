@@ -43,6 +43,19 @@ MODEL = os.environ.get("DYN_BENCH_MODEL", "Qwen/Qwen2.5-0.5B")
 HTTP_PORT = 8000
 NS_SCOPED_TOPICS = {"kv_metrics", "prefill_events"}  # namespace-scoped subjects
 
+# How long to wait for the frontend to register the model. The first srun into a
+# pyxis container may have to extract the 24GB .sqsh rootfs, which can exceed the
+# old hardcoded ~120s; default 300s, override with DYN_BENCH_MODEL_WAIT.
+MODEL_WAIT = int(os.environ.get("DYN_BENCH_MODEL_WAIT", "300"))
+# Extra slack (seconds) folded into the subscriber-wait timeout AND the loadgen
+# --duration/wait, so a still-extracting container doesn't get its sub/loadgen
+# killed before it has even started. Override with DYN_BENCH_EXTRACT_PAD.
+EXTRACT_PAD = int(os.environ.get("DYN_BENCH_EXTRACT_PAD", "220"))
+# Persistent pyxis container name: extract the image ONCE per node into this
+# named container, then reuse it for every subsequent srun (avoids re-extracting
+# the 24GB squashfs per task). Override / disable via DYN_BENCH_CONTAINER_NAME.
+CONTAINER_NAME = os.environ.get("DYN_BENCH_CONTAINER_NAME", "dis2172bench")
+
 
 # --------------------------------------------------------------------------- #
 # Launchers: the ONLY thing that differs between single-node and multi-node.
@@ -88,13 +101,53 @@ class SlurmLauncher(Launcher):
         self.nodes = subprocess.check_output(
             ["scontrol", "show", "hostnames", nl], text=True).split()
         print(f"[slurm] {len(self.nodes)} nodes: {self.nodes}", flush=True)
+        # Whether the image has been extracted into the persistent named
+        # container on each node yet (set by prepare_containers()).
+        self._container_ready = False
+
+    def prepare_containers(self, env):
+        """Extract the image ONCE per node into a persistent pyxis named container.
+
+        Pyxis re-extracts the (24GB) squashfs on EVERY `--container-image` srun.
+        Instead we do a single `--container-image=<sqsh> --container-name=NAME`
+        srun per node up front (extracts + names the rootfs), then every later
+        task srun's with ONLY `--container-name=NAME` (no --container-image), so
+        pyxis attaches to the already-extracted rootfs instead of re-extracting.
+        Cuts per-cell wall-clock from ~6min toward ~1-2min.
+        """
+        img = env.get("DYN_BENCH_IMAGE")
+        if not img or not CONTAINER_NAME:
+            return  # bare-metal slurm (no pyxis) or persistence disabled
+        for node in self.nodes:
+            srun = ["srun", "--nodes=1", "--ntasks=1", "--overlap",
+                    f"--nodelist={node}",
+                    f"--container-image={img}",
+                    f"--container-name={CONTAINER_NAME}"]
+            mounts = env.get("DYN_BENCH_MOUNTS")
+            if mounts:
+                srun.append(f"--container-mounts={mounts}")
+            # `true` just forces the create+extract; the named container's rootfs
+            # persists on the node for subsequent --container-name attaches.
+            srun += ["--", "true"]
+            print(f"[slurm] extracting image into container '{CONTAINER_NAME}' "
+                  f"on {node} ...", flush=True)
+            t0 = time.time()
+            rc = subprocess.call(srun, env=env)
+            print(f"[slurm]   {node}: extract rc={rc} in {time.time()-t0:.0f}s",
+                  flush=True)
+        self._container_ready = True
 
     def popen(self, argv, env, logpath, node_idx=0):
         node = self.nodes[node_idx % len(self.nodes)]
         srun = ["srun", "--nodes=1", "--ntasks=1", "--overlap", f"--nodelist={node}"]
         img = env.get("DYN_BENCH_IMAGE")
         if img:  # pyxis container mode (argv uses in-container paths: DYN_BENCH_PY / SUB_BIN)
-            srun.append(f"--container-image={img}")
+            if self._container_ready and CONTAINER_NAME:
+                # Reuse the already-extracted rootfs (NO --container-image -> no
+                # re-extract). Pyxis attaches to the persistent named container.
+                srun.append(f"--container-name={CONTAINER_NAME}")
+            else:
+                srun.append(f"--container-image={img}")
             mounts = env.get("DYN_BENCH_MOUNTS")
             if mounts:
                 srun.append(f"--container-mounts={mounts}")
@@ -169,7 +222,7 @@ def teardown(procs):
 # One (transport, p, s, trial) cell
 # --------------------------------------------------------------------------- #
 def run_cell(lr, transport, p, s, topics, gpus_per_node, duration, warmup,
-             conc, outdir, idx, trial, infra_addr, speedup_ratio):
+             conc, lg_procs, outdir, idx, trial, infra_addr, speedup_ratio):
     ns = f"dis2172_{idx}"
     fe_addr = lr.addr(0)
     env = dict(os.environ)
@@ -210,7 +263,7 @@ def run_cell(lr, transport, p, s, topics, gpus_per_node, duration, warmup,
              "--event-plane", bench_transport, "--speedup-ratio", speedup_ratio],
             env, log(f"mk_n{node_idx}"), node_idx))
 
-    model = wait_model(fe_addr, HTTP_PORT, 120)
+    model = wait_model(fe_addr, HTTP_PORT, MODEL_WAIT)
     if not model:
         teardown(procs)
         return [{"error": "model_not_registered", "mode": transport, "n_workers": p,
@@ -233,19 +286,43 @@ def run_cell(lr, transport, p, s, topics, gpus_per_node, duration, warmup,
                          outp, topic, si))
 
     time.sleep(2)
-    lg = lr.popen([PY, f"{HERE}/loadgen.py", "--port", str(HTTP_PORT), "--model", model,
-                   "--concurrency", str(conc), "--duration", str(duration + warmup + 4)],
-                  {**env, "LOADGEN_HOST": fe_addr}, log("load"), 0)
+    # A single asyncio loadgen process is CPU-bound and caps at ~100 req/s
+    # (-> ~100 events/s) regardless of --concurrency, which is NOT the transport
+    # limit. Fan out into `lg_procs` processes (each carrying conc/lg_procs
+    # in-flight requests) spread across the allocation, so aggregate request
+    # rate -- and thus the event-plane publish rate -- scales toward saturation
+    # (DIS-2172 change B). The loadgen httpx pool is also sized to its
+    # concurrency so >100 in-flight requests don't block on the default pool.
+    per_proc = max(1, conc // lg_procs)
+    lgs = []
+    for li in range(lg_procs):
+        lgs.append(lr.popen(
+            [PY, f"{HERE}/loadgen.py", "--port", str(HTTP_PORT), "--model", model,
+             "--concurrency", str(per_proc),
+             "--duration", str(duration + warmup + 4 + EXTRACT_PAD)],
+            {**env, "LOADGEN_HOST": fe_addr}, log(f"load{li}"), li))
 
     for (pp, _o, _t, _s) in subs:
         try:
-            pp.wait(timeout=duration + warmup + 60)
+            pp.wait(timeout=duration + warmup + 60 + EXTRACT_PAD)
         except subprocess.TimeoutExpired:
             pp.kill()
-    try:
-        lg.wait(timeout=15)
-    except subprocess.TimeoutExpired:
-        lg.kill()
+    # Subscribers have finished measuring; the loadgens are just the load source
+    # (their --duration is padded by EXTRACT_PAD and they are almost always still
+    # running here). Tear them all down at once -- do NOT wait 15s on each, which
+    # would serialize to lg_procs*15s of dead time per cell.
+    for lg in lgs:
+        try:
+            lg.terminate()
+        except Exception:
+            pass
+    time.sleep(1)
+    for lg in lgs:
+        try:
+            if lg.poll() is None:
+                lg.kill()
+        except Exception:
+            pass
 
     rows = []
     for (pp, outp, topic, si) in subs:
@@ -273,7 +350,15 @@ def main():
                     help="multi-node: mocker workers per node (e.g. 18 for NVL72 tray)")
     ap.add_argument("--duration", type=int, default=15)
     ap.add_argument("--warmup", type=int, default=3)
-    ap.add_argument("--concurrency", type=int, default=32)
+    ap.add_argument("--concurrency", type=int, default=256,
+                    help="loadgen in-flight requests; HIGH (256) drives the "
+                         "transport toward saturation (loadgen rate was the "
+                         "bottleneck at low concurrency, masking ZMQ vs NATS)")
+    ap.add_argument("--loadgen-procs", type=int, default=4,
+                    help="parallel loadgen processes per cell, spread across "
+                         "nodes. A single asyncio loadgen caps ~100 req/s "
+                         "(CPU-bound), so fan out to scale event rate >>100/s; "
+                         "concurrency is split across them (DIS-2172 change B)")
     ap.add_argument("--speedup-ratio", default="10",
                     help="mocker exec speedup; 0 = unthrottled (saturation test, no-PTP throughput mode)")
     ap.add_argument("--trials", type=int, default=1)
@@ -283,6 +368,10 @@ def main():
     a = ap.parse_args()
 
     lr = make_launcher(a.launcher)
+    # Extract the image once per node into a persistent named container BEFORE
+    # the sweep, so individual task srun's reuse it instead of re-extracting.
+    if hasattr(lr, "prepare_containers"):
+        lr.prepare_containers(dict(os.environ))
     infra_addr = a.infra_addr or lr.addr(0)
     Path(a.out).mkdir(parents=True, exist_ok=True)
     transports = a.transports.split(",")
@@ -292,7 +381,8 @@ def main():
 
     meta = dict(launcher=lr.name, nodes=lr.nodes, clock=lr.clock, infra_addr=infra_addr,
                 transports=transports, workers=workers, subs=subs, topics=topics,
-                gpus_per_node=a.gpus_per_node, duration=a.duration, trials=a.trials)
+                gpus_per_node=a.gpus_per_node, duration=a.duration, trials=a.trials,
+                concurrency=a.concurrency, loadgen_procs=a.loadgen_procs)
     with open(f"{a.out}/meta.json", "w") as f:
         json.dump(meta, f, indent=2)
     print(f"[bench] launcher={lr.name} nodes={lr.nnodes} clock={lr.clock} "
@@ -307,8 +397,8 @@ def main():
                     print(f"[bench] trial={trial} {t} p={p} s={s} topics={topics}",
                           flush=True)
                     rows = run_cell(lr, t, p, s, topics, a.gpus_per_node, a.duration,
-                                    a.warmup, a.concurrency, a.out, idx, trial, infra_addr,
-                                    a.speedup_ratio)
+                                    a.warmup, a.concurrency, a.loadgen_procs, a.out, idx,
+                                    trial, infra_addr, a.speedup_ratio)
                     for r in rows:
                         lat = r.get("latency_ns", {})
                         print(f"    {r.get('topic'):>22} p50={lat.get('p50')}ns "

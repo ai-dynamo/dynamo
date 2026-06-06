@@ -37,7 +37,13 @@ async def main() -> None:
     errs = 0
     deadline = time.time() + a.duration
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    # httpx defaults to max_connections=100, so >100 concurrency workers block on
+    # the pool and throughput plateaus at ~100/s no matter how high --concurrency
+    # is. Size the pool to the requested concurrency so the knob actually drives
+    # the transport toward saturation (DIS-2172 change B).
+    limits = httpx.Limits(max_connections=a.concurrency,
+                          max_keepalive_connections=a.concurrency)
+    async with httpx.AsyncClient(timeout=30, limits=limits) as client:
         async def worker() -> None:
             nonlocal sent, errs
             while time.time() < deadline:

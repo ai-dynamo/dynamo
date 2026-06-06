@@ -40,6 +40,15 @@ export DYN_BENCH_MODEL="${DYN_BENCH_MODEL:-Qwen/Qwen2.5-0.5B}"
 # zmq_broker.py / results paths resolve identically inside and out.
 export DYN_BENCH_MOUNTS="${DYN_BENCH_MOUNTS:-$BENCH_DIR:$BENCH_DIR}"
 
+# Persistent pyxis container: the image is extracted ONCE per node into this
+# named container up front, then every task srun reuses it (no per-task
+# re-extract of the 24GB squashfs). DYN_BENCH_MODEL_WAIT / DYN_BENCH_EXTRACT_PAD
+# give the first (extracting) srun enough slack to register the model and to
+# keep the sub/loadgen alive while the container is still extracting.
+export DYN_BENCH_CONTAINER_NAME="${DYN_BENCH_CONTAINER_NAME:-dis2172bench}"
+export DYN_BENCH_MODEL_WAIT="${DYN_BENCH_MODEL_WAIT:-300}"
+export DYN_BENCH_EXTRACT_PAD="${DYN_BENCH_EXTRACT_PAD:-220}"
+
 # Pick the host python that runs the orchestrator (stdlib only; NOT the container).
 HOST_PY="${HOST_PY:-python3}"
 
@@ -81,6 +90,10 @@ OUT="${OUT:-$BENCH_DIR/results/nvl72_${SLURM_JOB_ID}}"
   --transports    "${TRANSPORTS:-nats,zmq,zmq-broker}" \
   --topics        "${TOPICS:-kv-events,forward-pass-metrics,kv_metrics}" \
   --trials        "${TRIALS:-3}" \
+  --duration      "${DURATION:-15}" \
+  --warmup        "${WARMUP:-3}" \
+  --concurrency   "${CONCURRENCY:-256}" \
+  --loadgen-procs "${LOADGEN_PROCS:-4}" \
   --speedup-ratio "${SPEEDUP_RATIO:-0}" \
   --infra-addr    "$NODE0" \
   --out           "$OUT"
