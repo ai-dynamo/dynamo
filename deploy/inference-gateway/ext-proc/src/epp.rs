@@ -22,9 +22,10 @@ use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, hash_pod_name};
 use dynamo_runtime::pipeline::RouterMode;
-use dynamo_runtime::{DistributedRuntime, Runtime};
+use dynamo_runtime::{CancellationToken, DistributedRuntime, Runtime};
 
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
+use crate::replica_sync::ReplicaPublisher;
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -64,6 +65,10 @@ pub struct Router {
     tokenize_url: Option<String>,
     pod_store: kube::runtime::reflector::Store<k8s_openapi::api::core::v1::Pod>,
     pod_store_ready: Arc<AtomicBool>,
+    /// Publisher for cross-replica load sync; `None` when `DYN_EPP_REPLICA_SYNC`
+    /// is disabled. Active-sequence events for booked/freed requests are
+    /// mirrored to peer EPP replicas via this handle.
+    replica_publisher: Option<Arc<ReplicaPublisher>>,
 }
 
 impl Router {
@@ -224,6 +229,22 @@ impl Router {
             spawn_kv_event_reconciler(decode_router.clone(), pod_store.clone(), kv_port, kv_topic);
         }
 
+        // Optional runtime-free cross-replica load sync (EndpointSlice + ZMQ).
+        // Spawned background tasks clone what they need, so this survives `drt`
+        // being dropped at the end of this scope (same pattern as the
+        // reflectors above).
+        let replica_publisher = if parse_replica_sync_enabled() {
+            match spawn_replica_sync(&drt, &decode_router).await {
+                Ok(publisher) => Some(publisher),
+                Err(e) => {
+                    tracing::error!(error = %e, "cross-replica load sync disabled (setup failed)");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // `model_manager` and `drt` are intentionally not stored on the
         // Router. The KV chooser, prefill router, prefill discovery watcher,
         // and pod reflector all clone whatever they need from these
@@ -260,6 +281,7 @@ impl Router {
             tokenize_url,
             pod_store,
             pod_store_ready,
+            replica_publisher,
         })
     }
 
@@ -497,6 +519,7 @@ impl Router {
         dp_rank: u32,
     ) -> Result<()> {
         let decode_router = self.decode_router.clone();
+        let publisher = self.replica_publisher.clone();
         let request_id = request_id.to_owned();
         let tokens = tokens.to_vec();
         // Predict-on-route (approximate) crediting of the chosen worker. Can be
@@ -539,7 +562,7 @@ impl Router {
 
             decode_router
                 .add_request(
-                    request_id,
+                    request_id.clone(),
                     &tokens,
                     None,
                     cached_tokens,
@@ -550,6 +573,10 @@ impl Router {
                 )
                 .await;
 
+            if let Some(publisher) = &publisher {
+                publisher.on_add(&request_id, worker).await;
+            }
+
             Ok(())
         })
         .await
@@ -559,13 +586,18 @@ impl Router {
     /// Mark prefill as completed for a request.
     pub async fn mark_prefill_complete(&self, request_id: &str) -> Result<()> {
         let decode_router = self.decode_router.clone();
+        let publisher = self.replica_publisher.clone();
         let request_id = request_id.to_owned();
 
         tokio::time::timeout(BOOKKEEPING_TIMEOUT, async {
             decode_router
                 .mark_prefill_completed(&request_id)
                 .await
-                .map_err(|e| anyhow::anyhow!("mark_prefill_completed failed: {e}"))
+                .map_err(|e| anyhow::anyhow!("mark_prefill_completed failed: {e}"))?;
+            if let Some(publisher) = &publisher {
+                publisher.on_mark_prefill(&request_id).await;
+            }
+            Ok(())
         })
         .await
         .map_err(|_| anyhow::anyhow!("mark_prefill_complete timed out"))?
@@ -574,13 +606,18 @@ impl Router {
     /// Free a request from the router's bookkeeping.
     pub async fn free_request(&self, request_id: &str) -> Result<()> {
         let decode_router = self.decode_router.clone();
+        let publisher = self.replica_publisher.clone();
         let request_id = request_id.to_owned();
 
         tokio::time::timeout(BOOKKEEPING_TIMEOUT, async {
             decode_router
                 .free(&request_id)
                 .await
-                .map_err(|e| anyhow::anyhow!("free failed: {e}"))
+                .map_err(|e| anyhow::anyhow!("free failed: {e}"))?;
+            if let Some(publisher) = &publisher {
+                publisher.on_free(&request_id).await;
+            }
+            Ok(())
         })
         .await
         .map_err(|_| anyhow::anyhow!("free_request timed out"))?
@@ -601,6 +638,60 @@ impl Router {
     pub fn pod_store_ready(&self) -> Arc<AtomicBool> {
         self.pod_store_ready.clone()
     }
+}
+
+/// Whether `DYN_EPP_REPLICA_SYNC` enables runtime-free cross-replica load sync.
+fn parse_replica_sync_enabled() -> bool {
+    std::env::var("DYN_EPP_REPLICA_SYNC")
+        .ok()
+        .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+/// Set up EPP-managed (NATS-free, CRD-free) cross-replica load sync: bind the
+/// ZMQ PUB, start EndpointSlice peer discovery plus the SUB pump, and feed peer
+/// events into the decode router. Returns the publisher used to mirror this
+/// replica's own bookings. See ai-dynamo/dynamo#10384.
+async fn spawn_replica_sync(
+    drt: &DistributedRuntime,
+    decode_router: &Arc<KvRouter>,
+) -> Result<Arc<ReplicaPublisher>> {
+    let port: u16 = std::env::var("DYN_EPP_REPLICA_SYNC_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(9100);
+    let service = std::env::var("DYN_EPP_REPLICA_SYNC_SERVICE").map_err(|_| {
+        anyhow::anyhow!(
+            "DYN_EPP_REPLICA_SYNC_SERVICE not set: cross-replica sync needs the EPP \
+             Service name whose EndpointSlices enumerate peer replicas"
+        )
+    })?;
+    let namespace = std::env::var("POD_NAMESPACE")
+        .map_err(|_| anyhow::anyhow!("POD_NAMESPACE not set (downward API)"))?;
+    let self_pod_ip = std::env::var("POD_IP")
+        .map_err(|_| anyhow::anyhow!("POD_IP not set (downward API)"))?;
+
+    // Must match the decode router's own id so peers apply these events and
+    // this replica never re-applies its own.
+    let router_id = drt.discovery().instance_id();
+
+    // Process-scoped lifetime, matching the reflectors; intentionally not tied
+    // to `drt`, which is dropped at the end of `from_discovery`.
+    let cancel = CancellationToken::new();
+
+    let publisher = Arc::new(ReplicaPublisher::bind(port, router_id).await?);
+    let subscriber = crate::replica_sync::spawn_peer_sync(
+        service,
+        namespace,
+        self_pod_ip,
+        port,
+        cancel.clone(),
+    )
+    .await?;
+    decode_router.start_replica_sync(subscriber, cancel);
+
+    tracing::info!(port, router_id, "EPP cross-replica load sync enabled");
+    Ok(publisher)
 }
 
 /// Extract the router queue `priority_jump` from a chat completion request's

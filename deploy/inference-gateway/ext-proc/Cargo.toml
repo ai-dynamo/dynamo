@@ -35,6 +35,8 @@ rustls-pemfile = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# ZMQ PUB/SUB transport for runtime-free cross-replica load sync (no NATS).
+tmq = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 # `net` for TcpListenerStream (serve_with_incoming), `sync` for ReceiverStream.

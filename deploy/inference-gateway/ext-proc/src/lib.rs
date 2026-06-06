@@ -16,6 +16,7 @@ pub mod envoy_helpers;
 pub mod epp;
 pub mod picker;
 pub mod proto;
+pub mod replica_sync;
 pub mod server;
 
 pub use epp::Router;
