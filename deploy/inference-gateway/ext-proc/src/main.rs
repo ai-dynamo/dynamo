@@ -17,10 +17,14 @@ use dynamo_ext_proc::{ExtProcServer, Router};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
+mod metrics_server;
 mod tokenizer_server;
 
 const GRPC_PORT: u16 = 9002;
 const HEALTH_PORT: u16 = 9003;
+/// Default Prometheus `/metrics` port. Override with `DYN_EPP_METRICS_PORT`;
+/// set it to 0 to disable the metrics server.
+const METRICS_PORT: u16 = 9090;
 const HEALTH_SERVICE_NAME: &str = "inference-extension";
 /// Cap concurrent in-flight TLS handshakes + active gRPC streams. Prevents a
 /// connection flood from exhausting fds / memory. Tuned for an inference EPP
@@ -156,6 +160,17 @@ async fn main() -> Result<()> {
             .add_service(health_service)
             .serve(health_addr),
     );
+
+    // Optional Prometheus /metrics endpoint exposing the KV-router's per-worker
+    // load + scheduler-queue gauges — the same library gauges the standalone
+    // frontend serves. Lets an EPP replica's load view (incl. peer-synced load)
+    // be scraped like the standalone router.
+    let metrics_port = parse_env("DYN_EPP_METRICS_PORT", METRICS_PORT);
+    if metrics_port != 0 {
+        if let Err(e) = metrics_server::spawn_metrics_server(metrics_port).await {
+            tracing::warn!(error = %e, "failed to start EPP metrics server");
+        }
+    }
 
     tracing::info!("Initializing KV-aware router from discovery...");
     let router =
