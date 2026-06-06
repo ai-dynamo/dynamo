@@ -517,7 +517,7 @@ where
         };
         tracing::trace!("round robin router selected {instance_id}");
 
-        self.generate_with_fault_detection(instance_id, request)
+        self.generate_with_fault_detection(instance_id, request, None)
             .await
     }
 
@@ -534,7 +534,7 @@ where
         };
         tracing::trace!("random router selected {instance_id}");
 
-        self.generate_with_fault_detection(instance_id, request)
+        self.generate_with_fault_detection(instance_id, request, None)
             .await
     }
 
@@ -553,7 +553,7 @@ where
         let permit = OccupancyPermit::new(state, instance_id);
 
         match self
-            .generate_with_fault_detection(instance_id, request)
+            .generate_with_fault_detection(instance_id, request, None)
             .await
         {
             Ok(stream) => Ok(permit.into_tracked_stream(stream)),
@@ -566,6 +566,19 @@ where
         &self,
         request: SingleIn<T>,
         instance_id: u64,
+    ) -> anyhow::Result<ManyOut<U>> {
+        self.direct_within(request, instance_id, None).await
+    }
+
+    /// Like [`direct`], but if the selected instance disappears between selection and dispatch,
+    /// the internal reselection is constrained to `allowed_fallback` (when `Some`). Callers that
+    /// pre-narrowed the candidate set (e.g. LoRA replica-set filtering) pass that set so the
+    /// vanished-instance fallback cannot escape it and route to an arbitrary worker.
+    pub async fn direct_within(
+        &self,
+        request: SingleIn<T>,
+        instance_id: u64,
+        allowed_fallback: Option<&std::collections::HashSet<u64>>,
     ) -> anyhow::Result<ManyOut<U>> {
         // When fault detection is disabled, check the raw discovery list
         // (not filtered by report_instance_down) so transient failures
@@ -586,7 +599,7 @@ where
             ));
         }
 
-        self.generate_with_fault_detection(instance_id, request)
+        self.generate_with_fault_detection(instance_id, request, allowed_fallback)
             .await
     }
 
@@ -648,7 +661,7 @@ where
         );
 
         match self
-            .generate_with_fault_detection(instance_id, request)
+            .generate_with_fault_detection(instance_id, request, None)
             .await
         {
             Ok(stream) => Ok(permit.into_tracked_stream(stream)),
@@ -672,7 +685,7 @@ where
         );
 
         match self
-            .generate_with_fault_detection(instance_id, request)
+            .generate_with_fault_detection(instance_id, request, None)
             .await
         {
             Ok(stream) => Ok(permit.into_tracked_stream(stream)),
@@ -770,6 +783,7 @@ where
         &self,
         instance_id: u64,
         request: SingleIn<T>,
+        allowed_fallback: Option<&std::collections::HashSet<u64>>,
     ) -> anyhow::Result<ManyOut<U>> {
         let route_start = Instant::now();
         let request_id = request.id().to_string();
@@ -787,7 +801,7 @@ where
         self.check_workers_available(instance_id, &request_id)?;
 
         let (instance_id, address, transport_kind, instance) =
-            self.resolve_transport(instance_id)?;
+            self.resolve_transport(instance_id, allowed_fallback)?;
 
         let request = request.map(|req| AddressedRequest::with_instance(req, address, instance));
 
@@ -855,6 +869,7 @@ where
     fn resolve_transport(
         &self,
         instance_id: u64,
+        allowed_fallback: Option<&std::collections::HashSet<u64>>,
     ) -> anyhow::Result<(u64, String, &'static str, Instance)> {
         use crate::component::TransportType;
 
@@ -879,11 +894,12 @@ where
         }
 
         let routing_instances = self.client.routing_instances();
-        let fallback_id = routing_instances
-            .free_ids()
-            .iter()
-            .copied()
-            .find(|&id| id != instance_id);
+        // When the caller pre-narrowed the candidate set (e.g. LoRA replica-set
+        // filtering), the vanished-instance fallback must stay within it so we never
+        // route off the allowed set to an arbitrary worker.
+        let fallback_id = routing_instances.free_ids().iter().copied().find(|&id| {
+            id != instance_id && allowed_fallback.is_none_or(|allowed| allowed.contains(&id))
+        });
         match fallback_id {
             Some(id) => {
                 tracing::warn!(
@@ -1033,7 +1049,7 @@ where
 
         self.check_workers_available(instance_id, &request_id)?;
         let (instance_id, address, transport_kind, instance) =
-            self.resolve_transport(instance_id)?;
+            self.resolve_transport(instance_id, None)?;
 
         STAGE_DURATION_SECONDS
             .with_label_values(&[STAGE_ROUTE])
