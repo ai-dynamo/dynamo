@@ -303,9 +303,13 @@ class VllmLLMEngine(LLMEngine):
             sampling_params.min_tokens = 1
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
             prefill_result = require_prefill_result(request, self.disaggregation_mode)
-            kv_params = prefill_result.get("disaggregated_params", {}).get(
-                "kv_transfer_params"
-            )
+            # `disaggregated_params` may be present-but-None (prefill error path
+            # / _build_disaggregated_params returning None), so use `or {}` — a
+            # .get default only applies when the key is absent. A None value then
+            # falls through to the kv_params ValueError below instead of raising
+            # AttributeError on None.get(...).
+            disaggregated_params = prefill_result.get("disaggregated_params") or {}
+            kv_params = disaggregated_params.get("kv_transfer_params")
             if kv_params is None:
                 raise ValueError(
                     "decode worker received prefill_result without "
