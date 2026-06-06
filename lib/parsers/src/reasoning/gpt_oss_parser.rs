@@ -301,8 +301,8 @@ fn reconstruct_directed_envelope(
     let channel_token_id = enc
         .tokenizer()
         .encode_with_special_tokens("<|channel|>")
-        .last()
-        .copied()?;
+        .into_iter()
+        .next()?;
     let last_channel_idx = tokens.iter().rposition(|t| *t == channel_token_id)?;
     let decoded = enc
         .tokenizer()
