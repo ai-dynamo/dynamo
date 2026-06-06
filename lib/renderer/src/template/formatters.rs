@@ -107,10 +107,9 @@ fn detect_passthrough_template(env: &Environment) -> bool {
     if out_string.trim() != PROBE {
         return false;
     }
-    // (2) A mixed text+image array must not be rendered natively. A pure
-    // pass-through stringifies the array, so the output keeps the serialized
-    // list/dict structure (`[` ... `"type"` ...); a native iterator emits the
-    // text value and an image marker, with no such structure.
+    // (2) A mixed text+image array must not be rendered natively: a pure
+    // pass-through stringifies it (output keeps the `[ ... "type" ...` structure),
+    // whereas a native array branch emits the text value + its own image marker.
     let out_mixed = render_default_probe(
         env,
         json!([{"role": "user", "content": [{"type": "text", "text": PROBE}, {"type": "image"}]}]),
@@ -435,6 +434,14 @@ impl HfTokenizerConfigJsonFormatter {
 mod tests {
     use super::*;
 
+    /// Builds the same `default`-template env the production renderer uses
+    /// (`JinjaEnvironment::default()`), with `src` registered as `default`.
+    fn env_with_default(src: &str) -> Environment<'static> {
+        let mut env = JinjaEnvironment::default().env();
+        env.add_template_owned("default", src.to_string()).unwrap();
+        env
+    }
+
     #[test]
     fn test_remove_known_non_jinja2_tags() {
         let template =
@@ -465,14 +472,8 @@ mod tests {
     /// JSON-serialized into the prompt.
     #[test]
     fn test_detect_nemotron_parse_passthrough_template() {
-        let mut env = Environment::new();
-        env.set_lstrip_blocks(true);
-        env.set_trim_blocks(true);
-        env.add_template_owned(
-            "default",
-            "{% for message in messages %}{{ message['content'] }}{% endfor %}".to_string(),
-        )
-        .unwrap();
+        let env =
+            env_with_default("{% for message in messages %}{{ message['content'] }}{% endfor %}");
 
         assert!(
             detect_passthrough_template(&env),
@@ -493,14 +494,9 @@ mod tests {
     /// content) is NOT a pass-through and must not get the empty placeholder.
     #[test]
     fn test_decorated_template_is_not_passthrough() {
-        let mut env = Environment::new();
-        env.set_lstrip_blocks(true);
-        env.set_trim_blocks(true);
-        env.add_template_owned(
-            "default",
-            "{% for message in messages %}<|{{ message['role'] }}|>{{ message['content'] }}<|end|>{% endfor %}{% if add_generation_prompt %}<|assistant|>{% endif %}".to_string(),
-        )
-        .unwrap();
+        let env = env_with_default(
+            "{% for message in messages %}<|{{ message['role'] }}|>{{ message['content'] }}<|end|>{% endfor %}{% if add_generation_prompt %}<|assistant|>{% endif %}",
+        );
 
         assert!(
             !detect_passthrough_template(&env),
@@ -515,14 +511,9 @@ mod tests {
     /// mixed-array probe distinguishes it from a pure pass-through.
     #[test]
     fn test_string_passthrough_with_native_array_branch_is_not_passthrough() {
-        let mut env = Environment::new();
-        env.set_lstrip_blocks(true);
-        env.set_trim_blocks(true);
-        env.add_template_owned(
-            "default",
-            "{% for message in messages %}{% if message['content'] is string %}{{ message['content'] }}{% else %}{% for part in message['content'] %}{% if part['type'] == 'image' %}<image>{% else %}{{ part['text'] }}{% endif %}{% endfor %}{% endif %}{% endfor %}".to_string(),
-        )
-        .unwrap();
+        let env = env_with_default(
+            "{% for message in messages %}{% if message['content'] is string %}{{ message['content'] }}{% else %}{% for part in message['content'] %}{% if part['type'] == 'image' %}<image>{% else %}{{ part['text'] }}{% endif %}{% endfor %}{% endif %}{% endfor %}",
+        );
 
         assert!(
             !detect_passthrough_template(&env),
