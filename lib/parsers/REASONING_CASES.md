@@ -288,6 +288,10 @@ the right boundary and preserve the downstream parser's input.
 - Applies only to reasoning parser families with an explicit downstream
   boundary. For other families, this bucket is an N/A stub until the
   production path wires such a boundary.
+- **`REASONING.stream.4.a`** Harmony start marker split across chunks — partial `<|channel|>` at a chunk boundary must buffer rather than flush, completing the match when the next chunk arrives.
+- **`REASONING.stream.4.b`** Directed Harmony commentary tool recipient split across chunks — the `to=functions.NAME` header can straddle a chunk boundary; the complete envelope must still reach `normal_text` intact for the downstream jail.
+- **`REASONING.stream.4.c`** Partial Harmony channel marker prefix that resolves to non-channel text — `<|chan` that becomes `chance` must not hold back the preceding visible text indefinitely.
+- **`REASONING.stream.4.d`** Directed Harmony analysis-channel tool call split across chunks — a `to=functions.*` recipient on the `analysis` channel is a tool call; the complete envelope (header + body + `<|call|>`) must reach `normal_text` intact even when `<|call|>` arrives in a later chunk than the header. The parser persists the channel/recipient across the chunk boundary and reconstructs the clean envelope from the cumulative token buffer on the `<|call|>` chunk.
 
 ---
 

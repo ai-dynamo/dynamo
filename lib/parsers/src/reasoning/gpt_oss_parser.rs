@@ -946,10 +946,38 @@ mod tests {
                 reasoning_text_incr,
                 "User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function."
             );
-            assert_eq!(
-                normal_text_incr,
-                "<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>"
-            );
+            // Same truncated-call contract as the token-by-token case above:
+            // no <|call|> terminator → no complete envelope → no normal_text.
+            assert_eq!(normal_text_incr, "");
         }
+    }
+
+    #[test] // REASONING.stream.4.d
+    fn test_gpt_oss_reasoning_parser_streaming_split_directed_analysis() {
+        // Header arrives in chunk 1; body + <|call|> arrive in chunk 2.
+        // This is the exact case last_directed_channel / reconstruct_directed_envelope
+        // is designed for: the parser state resets on <|call|>, so the channel
+        // and recipient must be persisted from the earlier chunk.
+        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+        let chunks = vec![
+            "<|channel|>analysis to=functions.grep code<|message|>",
+            r#"{"pattern":"foo"}<|call|>"#,
+        ];
+        let mut reasoning_text_incr = String::new();
+        let mut normal_text_incr = String::new();
+        for chunk in chunks {
+            let result = parser.parse_reasoning_streaming_incremental(chunk, &[]);
+            normal_text_incr.push_str(&result.normal_text);
+            reasoning_text_incr.push_str(&result.reasoning_text);
+        }
+        assert_eq!(reasoning_text_incr, "");
+        assert!(
+            normal_text_incr.contains("analysis to=functions.grep"),
+            "channel header must survive into normal_text: {normal_text_incr:?}"
+        );
+        assert!(
+            normal_text_incr.ends_with("<|call|>"),
+            "terminator must be present: {normal_text_incr:?}"
+        );
     }
 }
