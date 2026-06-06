@@ -158,6 +158,40 @@ def _dump_disagg_config_section(disagg_config: dict[str, Any]) -> str:
     return temp_path
 
 
+def _configure_gms_shadow_mode(
+    server_args: ServerArgs, dynamo_config: DynamoConfig
+) -> None:
+    if not dynamo_config.gms_shadow_mode:
+        return
+
+    if server_args.load_format != "gms":
+        raise ValueError("--gms-shadow-mode requires --load-format gms for SGLang")
+
+    os.environ["DYN_GMS_SCRATCH_KV_ENABLED"] = "1"
+
+    extra_config = server_args.model_loader_extra_config
+    if isinstance(extra_config, str):
+        extra_config = json.loads(extra_config) if extra_config else {}
+    else:
+        extra_config = dict(extra_config or {})
+
+    engine_id = os.environ.get("ENGINE_ID", "0")
+    user_read_only = extra_config.get("gms_read_only")
+    if engine_id == "0":
+        if user_read_only:
+            raise ValueError(
+                "GMS primary engine cannot set gms_read_only=True in shadow mode"
+            )
+    else:
+        if user_read_only is not None and not user_read_only:
+            raise ValueError(
+                "GMS shadow engine must use gms_read_only=True in shadow mode"
+            )
+        extra_config["gms_read_only"] = True
+
+    server_args.model_loader_extra_config = extra_config
+
+
 async def parse_args(args: list[str]) -> Config:
     """Parse CLI arguments and return combined configuration.
     Download the model if necessary.
@@ -371,6 +405,8 @@ async def parse_args(args: list[str]) -> Config:
         )
     else:
         server_args = ServerArgs.from_cli_args(parsed_args)
+
+    _configure_gms_shadow_mode(server_args, dynamo_config)
 
     if getattr(server_args, "schedule_low_priority_values_first", False):
         raise ValueError(

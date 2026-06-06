@@ -143,8 +143,8 @@ func gmsWeightServerPodSpec(basePodSpec *corev1.PodSpec, rank int32, gpuCount in
 
 // gmsEngineEnvVars returns the backend-agnostic environment variables injected
 // into engine pods when GMS failover is enabled. Backend-specific switches
-// (e.g. the vLLM DYN_VLLM_GMS_SHADOW_MODE flag) are injected by the backend's
-// UpdateContainer path so non-vLLM backends do not inherit stray env vars.
+// (e.g. vLLM/SGLang shadow-mode flags) are injected by the backend's
+// UpdateContainer path so other backends do not inherit stray env vars.
 func gmsEngineEnvVars() []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{
@@ -181,7 +181,8 @@ func gmsEngineEnvVars() []corev1.EnvVar {
 //     forced to Never. Engine pods in a failover cohort hold distributed
 //     state that cannot survive an in-place container restart — active NCCL
 //     collectives, torch.distributed TCPStore membership, and primary/shadow
-//     coordination via the failover lock file and DYN_VLLM_GMS_SHADOW_MODE.
+//     coordination via the failover lock file and backend-specific GMS
+//     shadow-mode env vars.
 //     An in-place restart leaves the cohort in a half-torn-down state and
 //     blocks recovery. The correct recovery path is for the pod to exit,
 //     FailoverCascadeReconciler (see failover_cascade_controller.go) to

@@ -37,6 +37,13 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 			"next-steps", "upstream SGLang changes needed")
 	}
 
+	if component.IsInterPodGMSEnabled() {
+		if !containerHasArg(container, "--load-format", "gms") {
+			injectFlagsIntoContainerCommand(container, "--load-format gms", false, "sglang")
+		}
+		container.Env = append(container.Env, corev1.EnvVar{Name: "DYN_SGLANG_GMS_SHADOW_MODE", Value: "true"})
+	}
+
 	// For single node, nothing to do
 	if numberOfNodes <= 1 {
 		return

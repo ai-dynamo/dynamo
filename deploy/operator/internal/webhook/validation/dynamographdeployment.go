@@ -42,10 +42,10 @@ const (
 	// maxCombinedResourceNameLength is kept as a local alias for readability.
 	maxCombinedResourceNameLength = consts.MaxCombinedGroveResourceNameLength
 
-	// backendFrameworkVLLM is the spec.backendFramework value that identifies
-	// a vLLM deployment. Duplicated here (instead of importing from
-	// internal/dynamo) to avoid a webhook -> dynamo import cycle.
-	backendFrameworkVLLM = "vllm"
+	// Duplicated here (instead of importing from internal/dynamo) to avoid a
+	// webhook -> dynamo import cycle.
+	backendFrameworkVLLM   = "vllm"
+	backendFrameworkSGLang = "sglang"
 )
 
 // DynamoGraphDeploymentValidator validates DynamoGraphDeployment resources.
@@ -343,23 +343,21 @@ func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, se
 			serviceName, nvidiacomv1alpha1.GMSModeInterPod))
 	}
 
-	// The inter-pod GMS layout is currently implemented only for vLLM (the
-	// engine relies on vLLM-specific runtime hooks like --load-format gms and
-	// DYN_VLLM_GMS_SHADOW_MODE that activate the GMS client path). Fail fast
-	// at admission rather than producing a broken deployment when another or
-	// no backend is configured — an empty BackendFramework means the operator
-	// cannot confirm the engine speaks vLLM, which is a hard prerequisite for
-	// inter-pod GMS (both standalone and with failover).
+	// Inter-pod GMS requires a backend with explicit runtime hooks that
+	// activate the GMS client path. Fail fast when the operator cannot confirm
+	// the engine supports those hooks.
 	if service.IsInterPodGMSEnabled() &&
-		v.deployment.Spec.BackendFramework != backendFrameworkVLLM {
+		v.deployment.Spec.BackendFramework != backendFrameworkVLLM &&
+		v.deployment.Spec.BackendFramework != backendFrameworkSGLang {
 		detected := v.deployment.Spec.BackendFramework
 		if detected == "" {
 			detected = "<unset>"
 		}
 		return nil, fmt.Errorf(
-			"spec.services[%s]: the inter-pod GMS layout (gpuMemoryService.mode=%q) is currently supported only for vLLM (detected: %s); "+
-				"set spec.backendFramework=%q",
-			serviceName, nvidiacomv1alpha1.GMSModeInterPod, detected, backendFrameworkVLLM)
+			"spec.services[%s]: the inter-pod GMS layout (gpuMemoryService.mode=%q) is currently supported only for vLLM or SGLang (detected: %s); "+
+				"set spec.backendFramework to %q or %q",
+			serviceName, nvidiacomv1alpha1.GMSModeInterPod, detected,
+			backendFrameworkVLLM, backendFrameworkSGLang)
 	}
 
 	// Validate service name length constraints for Grove PodCliqueSet naming

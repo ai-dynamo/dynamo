@@ -956,7 +956,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			errMsg:      "Grove is disabled in the operator configuration",
 		},
 		{
-			name:         "inter-pod GMS rejected on non-vLLM backend",
+			name:         "inter-pod GMS accepted on SGLang backend",
 			groveEnabled: true,
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
@@ -984,9 +984,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 			},
-			wantErr:     true,
-			errContains: true,
-			errMsg:      "currently supported only for vLLM",
+			wantErr: false,
 		},
 		{
 			name:         "inter-pod GMS rejected when backendFramework is unset",
@@ -1021,7 +1019,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 			wantErr:     true,
 			errContains: true,
-			errMsg:      "currently supported only for vLLM",
+			errMsg:      "currently supported only for vLLM or SGLang",
 		},
 		{
 			name: "GMS failover disabled is valid without GPU",

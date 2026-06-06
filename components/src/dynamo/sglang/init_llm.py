@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import fcntl
 import logging
 import os
 import time
@@ -20,6 +21,7 @@ from dynamo.sglang.health_check import (
     SglangHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
+from dynamo.sglang.pause import SGLangEnginePauseController
 from dynamo.sglang.publisher import (
     handle_non_leader_node,
     set_forward_pass_metrics_worker_id,
@@ -27,6 +29,37 @@ from dynamo.sglang.publisher import (
 )
 from dynamo.sglang.register import register_model_with_readiness_gate
 from dynamo.sglang.request_handlers import DecodeWorkerHandler, PrefillWorkerHandler
+
+_GMS_FAILOVER_TAGS = ["weights", "kv_cache"]
+_GMS_FAILOVER_LOCK_FD: int | None = None
+
+
+async def _claim_initial_failover_lock(config: Config) -> None:
+    if (
+        not config.dynamo_args.gms_shadow_mode
+        or config.server_args.node_rank >= 1
+        or os.environ.get("ENGINE_ID", "0") != "0"
+    ):
+        return
+
+    global _GMS_FAILOVER_LOCK_FD
+    lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        logging.info("[Shadow] Initial engine found failover lock already held")
+        return
+    except Exception:
+        os.close(fd)
+        raise
+
+    _GMS_FAILOVER_LOCK_FD = fd
+    os.ftruncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.write(fd, b"engine-0")
+    logging.info("[Shadow] Initial engine acquired failover lock")
 
 
 async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
@@ -41,6 +74,37 @@ async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
     await warmup_prefill_engine(engine, server_args.disaggregation_bootstrap_port)
 
 
+async def _maybe_wait_for_failover_lock(
+    engine: sgl.Engine,
+    runtime: DistributedRuntime,
+    config: Config,
+) -> None:
+    if not config.dynamo_args.gms_shadow_mode:
+        return
+
+    pause_controller = SGLangEnginePauseController(engine)
+    if await pause_controller.pause(_GMS_FAILOVER_TAGS):
+        runtime.set_health_status(True)
+        logging.info(
+            "[Shadow] Engine sleeping, startup probe now passing, waiting for lock"
+        )
+
+        from gpu_memory_service.failover_lock.flock import FlockFailoverLock
+
+        lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
+        engine_id = os.environ.get("ENGINE_ID", "0")
+        if engine_id == "0" and _GMS_FAILOVER_LOCK_FD is not None:
+            logging.info("[Shadow] Initial engine already owns failover lock")
+        else:
+            lock = FlockFailoverLock(lock_path)
+            await lock.acquire(engine_id=f"engine-{engine_id}")
+            logging.info("[Shadow] Lock acquired, waking engine")
+
+        await pause_controller.resume(_GMS_FAILOVER_TAGS)
+        pause_controller.mark_resumed()
+        logging.info("[Shadow] Engine awake, registering service")
+
+
 async def init_decode(
     runtime: DistributedRuntime,
     config: Config,
@@ -53,6 +117,8 @@ async def init_decode(
 
     if server_args.node_rank >= 1:
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
+
+    await _claim_initial_failover_lock(config)
 
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
@@ -103,6 +169,8 @@ async def init_decode(
     if server_args.node_rank >= 1:
         await handle_non_leader_node(engine, publisher, metrics_task)
         return
+
+    await _maybe_wait_for_failover_lock(engine, runtime, config)
 
     ready_event = asyncio.Event()
 
@@ -212,6 +280,8 @@ async def init_prefill(
     if server_args.node_rank >= 1:
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
+    await _claim_initial_failover_lock(config)
+
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
@@ -260,6 +330,8 @@ async def init_prefill(
     if server_args.node_rank >= 1:
         await handle_non_leader_node(engine, publisher, metrics_task)
         return
+
+    await _maybe_wait_for_failover_lock(engine, runtime, config)
 
     try:
         await _warmup_prefill_engine(engine, server_args)

@@ -241,6 +241,56 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 	}
 }
 
+func TestSGLangBackend_UpdateContainer_InterPodGMS(t *testing.T) {
+	backend := &SGLangBackend{}
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+			Enabled: true,
+			Mode:    v1alpha1.GMSModeInterPod,
+		},
+	})
+	container := &corev1.Container{
+		Command: []string{"python3"},
+		Args:    []string{"-m", "dynamo.sglang"},
+	}
+
+	backend.UpdateContainer(container, 1, RoleMain, component, "svc", &GroveMultinodeDeployer{})
+
+	if !containerHasArg(container, "--load-format", "gms") {
+		t.Errorf("expected --load-format gms to be injected; got args=%v", container.Args)
+	}
+
+	count := 0
+	for _, e := range container.Env {
+		if e.Name != "DYN_SGLANG_GMS_SHADOW_MODE" {
+			continue
+		}
+		count++
+		if e.Value != "true" {
+			t.Errorf("DYN_SGLANG_GMS_SHADOW_MODE value = %q, want %q", e.Value, "true")
+		}
+	}
+	if count != 1 {
+		t.Errorf("DYN_SGLANG_GMS_SHADOW_MODE env var count = %d, want 1", count)
+	}
+}
+
+func TestSGLangBackend_UpdateContainer_NoInterPodGMS(t *testing.T) {
+	backend := &SGLangBackend{}
+	container := &corev1.Container{
+		Command: []string{"python3"},
+		Args:    []string{"-m", "dynamo.sglang"},
+	}
+
+	backend.UpdateContainer(container, 1, RoleMain, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "svc", &GroveMultinodeDeployer{})
+
+	for _, e := range container.Env {
+		if e.Name == "DYN_SGLANG_GMS_SHADOW_MODE" {
+			t.Errorf("DYN_SGLANG_GMS_SHADOW_MODE must not be injected when inter-pod GMS is disabled")
+		}
+	}
+}
+
 func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 	backend := &SGLangBackend{}
 

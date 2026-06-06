@@ -145,9 +145,8 @@ func TestAugmentEngineForGMS(t *testing.T) {
 	assert.True(t, hasEnvVar(c, "ENGINE_ID", ""), "ENGINE_ID should be set (via Downward API)")
 	assert.True(t, hasEnvVar(c, gms.EnvSocketDir, gmsSharedMountPath))
 	assert.True(t, hasEnvVar(c, "FAILOVER_LOCK_PATH", gmsSharedMountPath+"/"+gmsFailoverLockFile))
-	// DYN_VLLM_GMS_SHADOW_MODE is backend-specific and is injected by
-	// VLLMBackend.UpdateContainer, not by augmentEngineForGMS. See
-	// TestVLLMBackend_UpdateContainer_InterPodGMS in backend_vllm_test.go.
+	// GMS shadow-mode switches are backend-specific and injected by each
+	// backend's UpdateContainer path, not by augmentEngineForGMS.
 	assert.False(t, hasEnvVar(c, "DYN_VLLM_GMS_SHADOW_MODE", "true"),
 		"vLLM-specific env var must not leak into backend-agnostic GMS helpers")
 	assert.True(t, hasEnvVar(c, "DYN_SYSTEM_STARTING_HEALTH_STATUS", "notready"))
@@ -320,9 +319,8 @@ func TestGmsEngineEnvVars(t *testing.T) {
 	assert.True(t, names[gms.EnvSocketDir])
 	assert.True(t, names["FAILOVER_LOCK_PATH"])
 	assert.True(t, names["DYN_SYSTEM_STARTING_HEALTH_STATUS"])
-	// DYN_VLLM_GMS_SHADOW_MODE is backend-specific and is injected by
-	// VLLMBackend.UpdateContainer, not by gmsEngineEnvVars. See
-	// TestVLLMBackend_UpdateContainer_InterPodGMS in backend_vllm_test.go.
+	// GMS shadow-mode switches are backend-specific and injected by each
+	// backend's UpdateContainer path, not by gmsEngineEnvVars.
 	assert.False(t, names["DYN_VLLM_GMS_SHADOW_MODE"],
 		"vLLM-specific env var must not leak into backend-agnostic GMS helpers")
 

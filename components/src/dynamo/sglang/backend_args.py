@@ -111,6 +111,17 @@ class DynamoSGLangArgGroup(ArgGroup):
             default=False,
             help="Enable RL training support. Registers the call_tokenizer_manager engine route for generic tokenizer_manager passthrough.",
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--gms-shadow-mode",
+            env_var="DYN_SGLANG_GMS_SHADOW_MODE",
+            default=False,
+            help=(
+                "Enable GMS shadow-engine startup: initialize with GMS, "
+                "sleep with memory released, then wait for the failover lock "
+                "before serving."
+            ),
+        )
 
         # Topology constraint: rejecting --frontend-decoding combined with the
         # EPD multimodal flags happens in DynamoSGLangConfig.validate() below.
@@ -143,6 +154,7 @@ class DynamoSGLangConfig(ConfigBase):
 
     video_generation_worker: bool
     enable_rl: bool
+    gms_shadow_mode: bool = False
     frontend_decoding: bool = False
     sglang_trace_level: int
 

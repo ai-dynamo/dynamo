@@ -24,10 +24,12 @@ from typing import Optional
 import torch
 from gpu_memory_service.client.torch.allocator import (
     get_or_create_gms_client_memory_manager,
+    get_or_create_scratch_manager,
     gms_use_mem_pool,
+    is_scratch,
 )
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
-from gpu_memory_service.common.utils import get_socket_path
+from gpu_memory_service.common.utils import get_socket_path, is_scratch_kv_enabled
 from gpu_memory_service.integrations.common.utils import GMS_TAGS, finalize_gms_write
 
 logger = logging.getLogger(__name__)
@@ -74,16 +76,28 @@ class GMSMemorySaverImpl:
         self.preloaded_weights_bytes = 0
         self.ro_connect_timeout_ms = ro_connect_timeout_ms
         requested_mode = mode or RequestedLockType.RW_OR_RO
+        kv_socket_path = get_socket_path(device_index, "kv_cache")
         self.allocators = {
-            tag: get_or_create_gms_client_memory_manager(
-                get_socket_path(device_index, tag),
+            "weights": get_or_create_gms_client_memory_manager(
+                get_socket_path(device_index, "weights"),
                 device_index,
-                # weights follow the configured publish/import mode; kv_cache is
-                # always mutable and therefore always needs an RW session.
-                mode=requested_mode if tag == "weights" else RequestedLockType.RW,
-                tag=tag,
-            )
-            for tag in GMS_TAGS
+                mode=requested_mode,
+                tag="weights",
+            ),
+            "kv_cache": (
+                get_or_create_scratch_manager(
+                    kv_socket_path,
+                    device_index,
+                    tag="kv_cache",
+                )
+                if is_scratch_kv_enabled()
+                else get_or_create_gms_client_memory_manager(
+                    kv_socket_path,
+                    device_index,
+                    mode=RequestedLockType.RW,
+                    tag="kv_cache",
+                )
+            ),
         }
 
         logger.info(
@@ -91,6 +105,14 @@ class GMSMemorySaverImpl:
             requested_mode.name,
             self.allocators["weights"].granted_lock_type.name,
             device_index,
+        )
+        kv_mode = (
+            "scratch"
+            if is_scratch(self.allocators["kv_cache"])
+            else self.allocators["kv_cache"].granted_lock_type.name
+        )
+        logger.info(
+            "[GMS] Initialized kv_cache: mode=%s (device=%d)", kv_mode, device_index
         )
 
     @contextmanager
@@ -121,6 +143,11 @@ class GMSMemorySaverImpl:
             return
 
         allocator = self.allocators[tag]
+        if tag == "kv_cache" and is_scratch(allocator):
+            with gms_use_mem_pool(tag, self._device):
+                yield
+            return
+
         if allocator.granted_lock_type != GrantedLockType.RW:
             mode = (
                 allocator.granted_lock_type.name
@@ -174,9 +201,14 @@ class GMSMemorySaverImpl:
 
             logger.info("[GMS] Remapping %s", target_tag)
             timeout_ms = self.ro_connect_timeout_ms if target_tag == "weights" else None
+            was_scratch = target_tag == "kv_cache" and is_scratch(
+                self.allocators[target_tag]
+            )
             self.allocators[target_tag].connect(
                 _TAG_LOCK_TYPES[target_tag], timeout_ms=timeout_ms
             )
+            if was_scratch:
+                self.allocators[target_tag].prepare_scratch_for_reallocation()
             if target_tag == "kv_cache":
                 # KV cache resumes into a new RW layout epoch, so the handles
                 # must be re-created before the VA range is mapped again.
