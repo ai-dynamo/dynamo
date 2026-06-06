@@ -364,9 +364,7 @@ impl Router {
             const AVG_CHARS_PER_TOKEN: usize = 4;
             // No tokenizer, but still honor nvext.agent_hints.priority so a
             // vanilla-vLLM request keeps its scheduler priority.
-            let priority_jump = serde_json::from_str::<serde_json::Value>(request_json)
-                .map(|v| extract_priority_jump_from_json(&v))
-                .unwrap_or(0.0);
+            let (priority_jump, _osl) = extract_hints(request_json);
             return Ok((
                 vec![0u32; (request_json.len() / AVG_CHARS_PER_TOKEN).max(1)],
                 priority_jump,
@@ -581,6 +579,7 @@ impl Router {
         tokens: &[u32],
         is_disaggregated: bool,
         priority_jump: f64,
+        expected_output_tokens: Option<u32>,
         allowed_worker_ids: Option<HashSet<u64>>,
     ) -> Result<(WorkerWithDpRank, u32)> {
         if let Some(ref ids) = allowed_worker_ids {
@@ -607,7 +606,7 @@ impl Router {
                 false,
                 None,
                 priority_jump,
-                None,
+                expected_output_tokens,
                 allowed_worker_ids,
                 RoutingConstraints::default(),
             )
@@ -622,6 +621,7 @@ impl Router {
         tokens: &[u32],
         worker_id: u64,
         dp_rank: u32,
+        expected_output_tokens: Option<u32>,
     ) -> Result<()> {
         let decode_router = self.decode_router.clone();
         let publisher = self.replica_publisher.clone();
@@ -671,7 +671,7 @@ impl Router {
                     &tokens,
                     None,
                     cached_tokens,
-                    None,
+                    expected_output_tokens,
                     worker,
                     None,
                     Some(&router_config_override),
@@ -899,19 +899,28 @@ async fn spawn_replica_sync(
 /// in `lib/llm/src/preprocessor.rs`). Falls back to the deprecated
 /// `latency_sensitivity` alias for callers still on the old field name.
 /// Returns `0.0` when `nvext` is absent.
-/// Extract `priority_jump` directly from a raw request body `Value`, for the
-/// external (no-`OpenAIPreprocessor`) paths that never deserialize into
-/// `NvCreateChatCompletionRequest`. Mirrors [`extract_priority_jump`].
-fn extract_priority_jump_from_json(body: &serde_json::Value) -> f64 {
-    body.get("nvext")
-        .and_then(|n| n.get("agent_hints"))
+/// Parse routing hints — `priority_jump` and expected output length (`osl`) —
+/// from `nvext.agent_hints`, directly from the raw request body so they survive
+/// both tokenization modes (the sidecar tokenizer returns tokens only) and both
+/// request shapes (chat + completion). Returns `(0.0, None)` on parse failure.
+fn extract_hints(body_str: &str) -> (f64, Option<u32>) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body_str) else {
+        return (0.0, None);
+    };
+    let hints = v.get("nvext").and_then(|n| n.get("agent_hints"));
+    let priority_jump = hints
         .and_then(|h| {
             h.get("priority")
                 .and_then(|p| p.as_i64())
                 .map(|p| p.max(0) as f64)
                 .or_else(|| h.get("latency_sensitivity").and_then(|l| l.as_f64()))
         })
-        .unwrap_or(0.0)
+        .unwrap_or(0.0);
+    let osl = hints
+        .and_then(|h| h.get("osl"))
+        .and_then(|o| o.as_u64())
+        .map(|o| o as u32);
+    (priority_jump, osl)
 }
 
 fn extract_priority_jump(
@@ -1642,19 +1651,20 @@ impl EndpointPicker for Router {
         // Precise external mode: tokenize via the sidecar (one local hop, not a
         // second round-trip to a worker). Otherwise tokenize locally (the
         // dynamo-worker preprocessor) or use the load-aware placeholder.
-        let (tokens, priority_jump) = if let Some(url) = self.tokenize_url.as_deref() {
-            let toks = remote_tokenize(&self.http_client, url, body_str)
+        // Routing hints (priority, expected output length / OSL) from
+        // nvext.agent_hints, parsed independently of the tokenization mode
+        // (sidecar tokenization returns tokens only and would otherwise drop
+        // them). OSL feeds the decode-load projection in the scheduler so a
+        // worker holding many long-output requests is scored as more loaded.
+        let (priority_jump, osl) = extract_hints(body_str);
+        let tokens = if let Some(url) = self.tokenize_url.as_deref() {
+            remote_tokenize(&self.http_client, url, body_str)
                 .await
-                .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
-            // The sidecar returns only tokens; recover the priority hint here so
-            // precise-mode requests keep their scheduler priority.
-            let priority_jump = serde_json::from_str::<serde_json::Value>(body_str)
-                .map(|v| extract_priority_jump_from_json(&v))
-                .unwrap_or(0.0);
-            (toks, priority_jump)
+                .map_err(|e| PickError::TokenizationFailed(e.to_string()))?
         } else {
             self.tokenize(body_str)
                 .map_err(|e| PickError::TokenizationFailed(e.to_string()))?
+                .0
         };
 
         // Try prefill routing first (disaggregated mode).
@@ -1710,7 +1720,7 @@ impl EndpointPicker for Router {
         };
 
         let (decode_worker, _overlap) = self
-            .route_decode(&tokens, is_disaggregated, priority_jump, Some(decode_ids))
+            .route_decode(&tokens, is_disaggregated, priority_jump, osl, Some(decode_ids))
             .await
             .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
 
@@ -1746,6 +1756,7 @@ impl EndpointPicker for Router {
                     &tokens,
                     decode_worker.worker_id,
                     decode_worker.dp_rank,
+                    osl,
                 )
                 .await
         {
