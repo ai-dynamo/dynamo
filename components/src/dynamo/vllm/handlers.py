@@ -374,6 +374,12 @@ def _serialize_prompt_logprobs(
         else:
             converted: Dict[str, Dict[str, Any]] = {}
             for token_id, logprob_obj in entry.items():
+                try:
+                    key = str(int(token_id))
+                except (TypeError, ValueError):
+                    # vLLM only emits int token-id keys; skip a non-int key
+                    # rather than aborting the whole prompt_logprobs payload.
+                    continue
                 lp_dict: Dict[str, Any] = {
                     "logprob": _finite_logprob(logprob_obj.logprob),
                 }
@@ -383,7 +389,7 @@ def _serialize_prompt_logprobs(
                 decoded = getattr(logprob_obj, "decoded_token", None)
                 if decoded is not None:
                     lp_dict["decoded_token"] = decoded
-                converted[str(int(token_id))] = lp_dict
+                converted[key] = lp_dict
             result.append(converted)
     return result
 
@@ -509,7 +515,13 @@ def _accumulate_engine_data(
 
     new_token_ids = tok.get("token_ids")
     if isinstance(new_token_ids, list):
-        token_accumulator.extend(int(t) for t in new_token_ids)
+        for t in new_token_ids:
+            try:
+                token_accumulator.append(int(t))
+            except (TypeError, ValueError):
+                # Defensive: a malformed token id should degrade (drop the
+                # token) rather than abort the whole generation stream.
+                continue
 
     flat_lp = _flatten_logprobs(tok.get("log_probs"))
     if flat_lp:
