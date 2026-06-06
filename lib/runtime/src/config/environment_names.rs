@@ -480,6 +480,18 @@ pub mod event_plane {
 
     /// Event plane codec selection: "json" or "msgpack".
     pub const DYN_EVENT_PLANE_CODEC: &str = "DYN_EVENT_PLANE_CODEC";
+
+    /// Bounded capacity of the direct ZMQ event-subscriber's merged event channel.
+    ///
+    /// Many peer publishers (e.g. every other frontend under replica-sync) feed
+    /// this single-consumer channel; an unbounded channel grows RSS without limit
+    /// when the consumer can't keep up. When the channel is full, new events are
+    /// dropped — the event plane is already best-effort/lossy (ZMQ RCVHWM), so a
+    /// dropped event costs routing-estimate freshness, not correctness.
+    /// Default: 100_000 (matches ZMQ_RCVHWM). Applies only to the direct ZMQ
+    /// subscriber path.
+    pub const DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY: &str =
+        "DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY";
 }
 
 /// ZMQ Broker environment variables
@@ -670,6 +682,7 @@ mod tests {
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
             event_plane::DYN_EVENT_PLANE_CODEC,
+            event_plane::DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY,
             // ZMQ Broker
             zmq_broker::DYN_ZMQ_BROKER_URL,
             zmq_broker::DYN_ZMQ_BROKER_ENABLED,
