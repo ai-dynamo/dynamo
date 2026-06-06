@@ -15,7 +15,8 @@ use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
 
 use super::metrics::ROUTER_QUEUE_METRICS;
 use super::sequence::{
-    RuntimeSequencePublisher, SequenceError, SequenceRequest, create_multi_worker_sequences,
+    RuntimeSequencePublisher, SequenceError, SequenceRequest, SequenceSubscriber,
+    create_multi_worker_sequences,
 };
 use crate::discovery::RuntimeConfigWatch;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
@@ -245,6 +246,18 @@ where
 
     pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
         self.inner.register_workers(worker_ids);
+    }
+
+    /// Drive cross-replica sequence sync from an externally-supplied subscriber
+    /// (see [`crate::kv_router::scheduling::LocalScheduler::start_replica_sync`]).
+    pub fn start_replica_sync<Sub>(
+        &self,
+        subscriber: Sub,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) where
+        Sub: SequenceSubscriber + 'static,
+    {
+        self.inner.start_replica_sync(subscriber, cancel_token);
     }
 
     pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {

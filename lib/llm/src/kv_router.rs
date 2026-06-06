@@ -602,6 +602,22 @@ where
         self.scheduler.register_workers(worker_ids);
     }
 
+    /// Drive cross-replica sequence sync from an externally-supplied subscriber.
+    ///
+    /// Lets callers that manage their own peer discovery and transport (e.g. an
+    /// EPP using EndpointSlice + ZMQ instead of the NATS event plane) feed peer
+    /// `ActiveSequenceEvent`s into the active-sequence tracker so projected load
+    /// reflects requests booked on other router replicas.
+    pub fn start_replica_sync<Sub>(
+        &self,
+        subscriber: Sub,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) where
+        Sub: crate::kv_router::sequence::SequenceSubscriber + 'static,
+    {
+        self.scheduler.start_replica_sync(subscriber, cancel_token);
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn add_request(
         &self,

@@ -24,7 +24,7 @@ use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpR
 use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{
     ActiveSequencesMultiWorker, PrefillTokenDeltas, SequenceError, SequencePublisher,
-    SequenceRequest,
+    SequenceRequest, SequenceSubscriber,
 };
 use dynamo_tokens::SequenceHash;
 
@@ -288,6 +288,21 @@ where
 
     pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
         self.queue.register_workers(worker_ids);
+    }
+
+    /// Drive cross-replica sequence sync from an externally-supplied subscriber.
+    ///
+    /// This lets an out-of-tree transport (e.g. the EPP's EndpointSlice + ZMQ
+    /// peer sync) feed peer `ActiveSequenceEvent`s into this scheduler's
+    /// active-sequence tracker without going through the NATS event-plane
+    /// subscriber created by `create_multi_worker_sequences`. Event application
+    /// is independent of the `replica_sync` publish flag, so callers can mirror
+    /// peer load even with the built-in publisher disabled.
+    pub fn start_replica_sync<Sub>(&self, subscriber: Sub, cancel_token: CancellationToken)
+    where
+        Sub: SequenceSubscriber + 'static,
+    {
+        self.slots.start_replica_sync(subscriber, cancel_token);
     }
 
     pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
