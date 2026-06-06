@@ -24,10 +24,13 @@ jobs:
         include:
           - name: consolidator
             pytest_args: tests/kvbm_integration/test_consolidator_router_e2e.py
-          - name: determinism-cache-reset
-            pytest_args: tests/kvbm_integration/test_determinism_agg.py -m kvbm
-          - name: determinism-concurrency
-            pytest_args: tests/kvbm_integration/test_determinism_agg.py -m kvbm_concurrency
+          # Determinism jobs temporarily disabled while we root-cause the
+          # consolidator worker-registration failure (fast ~8min iterations).
+          # Restore before the final run:
+          # - name: determinism-cache-reset
+          #   pytest_args: tests/kvbm_integration/test_determinism_agg.py -m kvbm
+          # - name: determinism-concurrency
+          #   pytest_args: tests/kvbm_integration/test_determinism_agg.py -m kvbm_concurrency
     name: kvbm-tests (${{ matrix.name }})
     runs-on: aws-dev-02-tester-amd-gpu-v2
     container:
@@ -64,11 +67,19 @@ jobs:
         # success too (cheap) so passing runs show what a healthy startup looks like.
         if: always()
         run: |
+          # Only the vllm/trtllm WORKER logs, and only the error-relevant lines +
+          # tail, so a registration failure is a tiny readable block instead of a
+          # wall of every process's full output.
           root="${DYN_TEST_OUTPUT_PATH:-/tmp/dynamo_tests}"
-          echo "Scanning $root for *.log.txt"
-          find "$root" -type f \( -name '*.log.txt' -o -name '*.log' \) 2>/dev/null \
+          echo "===== worker error scan under $root ====="
+          find "$root" -type f -name 'python.log.txt' \
+            \( -path '*/vllm/*' -o -path '*/trtllm/*' \) 2>/dev/null \
             | while read -r f; do
                 echo ""
-                echo "========================= $f ========================="
-                cat "$f"
+                echo "######################## $f ########################"
+                echo "----- error / traceback lines -----"
+                grep -nE 'Error|Traceback|Exception|raise |CUDA|out of memory|max_model_len|KV cache|num_gpu_blocks|num_blocks|ValueError|RuntimeError|assert|panic|Caused by' "$f" \
+                  || echo "(no error-pattern lines matched)"
+                echo "----- last 80 lines -----"
+                tail -n 80 "$f"
               done || true
