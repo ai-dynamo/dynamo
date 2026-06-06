@@ -2874,7 +2874,7 @@ impl
         )?;
 
         tracing::trace!(request = ?common_request, prompt_injected_reasoning, "Pre-processed request");
-        let trace_state = crate::agents::trace::build_agent_trace_request_end_state(
+        let trace_state = crate::request_trace::build_request_end_trace_state(
             &common_request,
             &tracker,
             &context,
@@ -2882,7 +2882,7 @@ impl
         );
         let trace_tokens_enabled = trace_state.is_some();
         let trace_finish_reason_metadata =
-            crate::agents::trace::finish_reason_metadata_handle(&trace_state);
+            crate::request_trace::finish_reason_metadata_handle(&trace_state);
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
@@ -2959,7 +2959,7 @@ impl
             &self.tokenizer,
         );
 
-        let final_stream = crate::agents::trace::wrap_agent_trace_chat_request_end_stream(
+        let final_stream = crate::request_trace::wrap_chat_request_end_stream(
             final_stream,
             trace_state,
             request_id,
@@ -3036,7 +3036,7 @@ impl
 
         let mut common_request = builder.build()?;
 
-        let trace_state = crate::agents::trace::build_agent_trace_request_end_state(
+        let trace_state = crate::request_trace::build_request_end_trace_state(
             &common_request,
             &tracker,
             &context,
@@ -3044,7 +3044,7 @@ impl
         );
         let trace_tokens_enabled = trace_state.is_some();
         let trace_finish_reason_metadata =
-            crate::agents::trace::finish_reason_metadata_handle(&trace_state);
+            crate::request_trace::finish_reason_metadata_handle(&trace_state);
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
@@ -3083,7 +3083,7 @@ impl
             trace_finish_reason_metadata,
         );
 
-        let stream = crate::agents::trace::wrap_agent_trace_completion_request_end_stream(
+        let stream = crate::request_trace::wrap_completion_request_end_stream(
             Box::pin(stream),
             trace_state,
             request_id,
