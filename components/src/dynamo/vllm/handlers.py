@@ -5,6 +5,7 @@ import asyncio
 import base64
 import inspect
 import logging
+import math
 import os
 
 # MM kwargs NIXL transfer (frontend → backend pre-rendered path)
@@ -329,6 +330,21 @@ def _compute_mm_uuids(
 # Helpers for nvext response fields requested through `nvext.extra_fields`.
 
 
+# Logprobs can be -inf (log of probability 0) for masked/disallowed tokens (e.g.
+# via bad_words_token_ids / allowed_token_ids) or full-vocab prompt logprobs.
+# JSON has no inf/nan, so pythonize -> serde_json rewrites them to `null`, which
+# then fails typed deserialization on the Rust side and SILENTLY DROPS the whole
+# logprobs payload. Clamp non-finite logprobs to a large finite-negative
+# sentinel so the value survives transport while still meaning "effectively
+# impossible".
+_MIN_FINITE_LOGPROB = -1e30
+
+
+def _finite_logprob(value: Any) -> float:
+    lp = float(value)
+    return lp if math.isfinite(lp) else _MIN_FINITE_LOGPROB
+
+
 def _serialize_prompt_logprobs(
     raw_prompt_logprobs: list,
 ) -> list:
@@ -359,7 +375,7 @@ def _serialize_prompt_logprobs(
             converted: Dict[str, Dict[str, Any]] = {}
             for token_id, logprob_obj in entry.items():
                 lp_dict: Dict[str, Any] = {
-                    "logprob": float(logprob_obj.logprob),
+                    "logprob": _finite_logprob(logprob_obj.logprob),
                 }
                 rank = getattr(logprob_obj, "rank", None)
                 if rank is not None:
@@ -459,13 +475,16 @@ def _flatten_logprobs(
     pending: deque = deque(log_probs)
     while pending:
         item = pending.popleft()
+        if isinstance(item, bool):
+            # bool is an int subclass; a True/False here is not a real logprob.
+            continue
         if isinstance(item, (int, float)):
-            out.append(float(item))
+            out.append(_finite_logprob(item))
         elif isinstance(item, list):
             pending.extendleft(reversed(item))
         elif isinstance(item, dict) and "logprob" in item:
             try:
-                out.append(float(item["logprob"]))
+                out.append(_finite_logprob(item["logprob"]))
             except (TypeError, ValueError):
                 continue
     return out or None
