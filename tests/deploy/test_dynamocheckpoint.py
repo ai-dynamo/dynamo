@@ -145,9 +145,7 @@ async def _wait_for(
                 return last_value
         except TRANSIENT_K8S_EXCEPTIONS as exc:
             last_error = exc
-            logger.warning(
-                "Transient error while waiting for %s: %s", description, exc
-            )
+            logger.warning("Transient error while waiting for %s: %s", description, exc)
         await asyncio.sleep(interval_s)
     message = f"timed out waiting for {description}; last={last_value!r}"
     if last_error is not None:
