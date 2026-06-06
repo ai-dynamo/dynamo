@@ -560,7 +560,7 @@ impl Router {
 
             let cached_tokens = overlap_blocks as usize * decode_router.block_size() as usize;
 
-            decode_router
+            let booked = decode_router
                 .add_request(
                     request_id.clone(),
                     &tokens,
@@ -573,8 +573,10 @@ impl Router {
                 )
                 .await;
 
-            if let Some(publisher) = &publisher {
-                publisher.on_add(&request_id, worker).await;
+            if let Some(publisher) = &publisher
+                && let Some(req) = &booked
+            {
+                publisher.on_add(req).await;
             }
 
             Ok(())

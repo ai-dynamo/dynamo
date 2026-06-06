@@ -629,7 +629,7 @@ where
         worker: WorkerWithDpRank,
         lora_name: Option<String>,
         router_config_override: Option<&RouterConfigOverride>,
-    ) {
+    ) -> Option<SequenceRequest> {
         let isl_tokens = tokens.len();
         let hash_options = BlockHashOptions {
             block_mm_infos,
@@ -650,21 +650,25 @@ where
         let prefill_load_hint =
             self.prefill_load_hint_for(isl_tokens, cached_tokens, track_prefill_tokens);
 
-        if let Err(e) = self
-            .scheduler
-            .add_request(SequenceRequest {
-                request_id: request_id.clone(),
-                token_sequence: maybe_seq_hashes,
-                track_prefill_tokens,
-                expected_output_tokens,
-                prefill_load_hint,
-                worker,
-                lora_name,
-            })
-            .await
-        {
+        let request = SequenceRequest {
+            request_id: request_id.clone(),
+            token_sequence: maybe_seq_hashes,
+            track_prefill_tokens,
+            expected_output_tokens,
+            prefill_load_hint,
+            worker,
+            lora_name,
+        };
+        // Mirror copy so a caller managing its own cross-replica transport (the
+        // EPP) can publish the exact active-sequence event the router books — at
+        // full fidelity (token hashes + prefill-load hint), matching what the
+        // standalone router's own replica-sync publisher would emit.
+        let booked = request.clone();
+        if let Err(e) = self.scheduler.add_request(request).await {
             tracing::warn!("Failed to add request {request_id}: {e}");
+            return None;
         }
+        Some(booked)
     }
 
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {

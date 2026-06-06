@@ -35,8 +35,8 @@
 use std::collections::HashSet;
 
 use anyhow::Result;
-use dynamo_kv_router::SequenceSubscriber;
 use dynamo_kv_router::protocols::{ActiveSequenceEvent, ActiveSequenceEventData, WorkerWithDpRank};
+use dynamo_kv_router::{SequenceRequest, SequenceSubscriber};
 use dynamo_runtime::CancellationToken;
 use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
@@ -88,23 +88,29 @@ impl ReplicaPublisher {
         }
     }
 
-    /// Mirror a freshly-booked request to peers.
-    pub async fn on_add(&self, request_id: &str, worker: WorkerWithDpRank) {
+    /// Mirror a freshly-booked request to peers, at full fidelity.
+    ///
+    /// Takes the exact [`SequenceRequest`] the router booked (returned by
+    /// `KvRouter::add_request`) so the published event carries the real token
+    /// hashes, prefill-token tracking flag, expected output tokens and
+    /// prefill-load hint — matching what the standalone router's own
+    /// replica-sync publisher would emit.
+    pub async fn on_add(&self, req: &SequenceRequest) {
         self.req_workers
             .lock()
             .await
-            .insert(request_id.to_string(), worker);
+            .insert(req.request_id.clone(), req.worker);
         let event = ActiveSequenceEvent {
-            request_id: request_id.to_string(),
-            worker,
+            request_id: req.request_id.clone(),
+            worker: req.worker,
             data: ActiveSequenceEventData::AddRequest {
-                token_sequence: None,
-                track_prefill_tokens: false,
-                expected_output_tokens: None,
-                prefill_load_hint: None,
+                token_sequence: req.token_sequence.clone(),
+                track_prefill_tokens: req.track_prefill_tokens,
+                expected_output_tokens: req.expected_output_tokens,
+                prefill_load_hint: req.prefill_load_hint,
             },
             router_id: self.router_id,
-            lora_name: None,
+            lora_name: req.lora_name.clone(),
         };
         self.send(&event).await;
     }

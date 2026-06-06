@@ -125,6 +125,7 @@ pub enum SequenceError {
 }
 
 /// Bundled parameters for adding a request to the sequence tracker.
+#[derive(Clone)]
 pub struct SequenceRequest {
     pub request_id: RequestId,
     pub token_sequence: Option<Vec<SequenceHash>>,
