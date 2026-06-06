@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::transport::{EventTransportRx, WireStream};
 use super::zmq_transport::ZmqSubTransport;
+use crate::config::environment_names::event_plane::DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY;
 use crate::discovery::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
     EventTransport,
@@ -47,9 +48,9 @@ impl DynamicSubscriber {
         // up (observed ~80 GiB/frontend at 168 frontends). Cap it and drop on
         // overflow — the event plane is already best-effort/lossy (ZMQ RCVHWM),
         // so a dropped event costs routing-estimate freshness, not correctness.
-        // Configurable via DYN_EVENT_SUBSCRIBER_CHANNEL_CAP (default 100_000,
-        // matching ZMQ_RCVHWM).
-        let channel_cap = std::env::var("DYN_EVENT_SUBSCRIBER_CHANNEL_CAP")
+        // Configurable via DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY (default
+        // 100_000, matching ZMQ_RCVHWM).
+        let channel_cap = std::env::var(DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY)
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|&n| n > 0)
