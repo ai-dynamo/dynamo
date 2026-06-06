@@ -337,7 +337,10 @@ class TestReasoningParserForwarding:
         assert "disaggregated_params" not in chunks[0]
         routed = chunks[1]["disaggregated_params"]["routed_experts"]
         assert routed["shape"] == [2, 1, 1]
-        decoded = np.frombuffer(base64.b85decode(routed["data"]), dtype=np.int32)
+        assert routed["dtype"] == "int32"
+        decoded = np.frombuffer(
+            base64.b85decode(routed["data"]), dtype=np.dtype(routed["dtype"])
+        )
         np.testing.assert_array_equal(decoded, routed_experts.reshape(-1))
 
 

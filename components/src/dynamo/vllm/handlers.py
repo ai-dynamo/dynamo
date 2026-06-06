@@ -570,6 +570,9 @@ def _serialize_routed_experts(routed_experts: Any) -> Optional[Dict[str, Any]]:
     return {
         "data": base64.b85encode(tobytes()).decode("ascii"),
         "shape": [int(dim) for dim in shape],
+        # Encode dtype so the consumer decodes the raw bytes with the right
+        # element type instead of assuming int32.
+        "dtype": str(getattr(routed_experts, "dtype", "")),
     }
 
 
