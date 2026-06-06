@@ -202,6 +202,57 @@ class TestFlattenLogprobs:
         ) == pytest.approx([-0.1, -0.2, -0.3])
 
 
+class TestNonFiniteLogprobs:
+    """Regression: -inf/nan logprobs (from bad_words/allowed_token_ids masking
+    or full-vocab prompt_logprobs) must be clamped to a finite sentinel. JSON
+    has no inf/nan, so pythonize -> serde_json would rewrite them to null and
+    the Rust typed deserialization would then silently drop the whole logprobs
+    payload."""
+
+    def test_finite_logprob_clamps_non_finite(self):
+        import math
+
+        from dynamo.vllm.handlers import _MIN_FINITE_LOGPROB, _finite_logprob
+
+        assert _finite_logprob(-0.5) == pytest.approx(-0.5)
+        assert _finite_logprob(0.0) == 0.0  # legitimate finite value preserved
+        assert _finite_logprob(float("-inf")) == _MIN_FINITE_LOGPROB
+        assert _finite_logprob(float("inf")) == _MIN_FINITE_LOGPROB
+        assert _finite_logprob(float("nan")) == _MIN_FINITE_LOGPROB
+        assert math.isfinite(_finite_logprob(float("-inf")))
+
+    def test_flatten_logprobs_clamps_inf_and_drops_bool(self):
+        from dynamo.vllm.handlers import _MIN_FINITE_LOGPROB, _flatten_logprobs
+
+        assert _flatten_logprobs([float("-inf"), -0.5, [{"logprob": float("nan")}]]) == [
+            _MIN_FINITE_LOGPROB,
+            pytest.approx(-0.5),
+            _MIN_FINITE_LOGPROB,
+        ]
+        # bool is an int subclass; drop it rather than coerce to 1.0/0.0.
+        assert _flatten_logprobs([True, -0.5, False]) == [pytest.approx(-0.5)]
+
+    def test_serialize_prompt_logprobs_clamps_inf(self):
+        from types import SimpleNamespace
+
+        from dynamo.vllm.handlers import _MIN_FINITE_LOGPROB, _serialize_prompt_logprobs
+
+        out = _serialize_prompt_logprobs([{7: SimpleNamespace(logprob=float("-inf"))}])
+        assert out[0]["7"]["logprob"] == _MIN_FINITE_LOGPROB
+
+    def test_sentinel_is_json_safe(self):
+        import json
+        import math
+
+        from dynamo.vllm.handlers import _MIN_FINITE_LOGPROB
+
+        assert math.isfinite(_MIN_FINITE_LOGPROB)
+        # Must serialize without becoming null (the whole point of the clamp).
+        assert json.loads(json.dumps({"logprob": _MIN_FINITE_LOGPROB})) == {
+            "logprob": _MIN_FINITE_LOGPROB
+        }
+
+
 class TestEngineDataAccumulation:
     def test_prompt_token_ids_come_from_built_prompt_when_available(self):
         from dynamo.vllm.handlers import _prompt_token_ids_for_engine_data
