@@ -2420,7 +2420,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             )
 
             total_output_tokens_by_index: dict[int, int] = {}
-            routed_experts_by_output: dict[int, Dict[str, Any]] = {}
+            raw_routed_experts_by_output: dict[int, Any] = {}
             # vLLM surfaces prompt_logprobs once (at end-of-prefill) and clears
             # them on subsequent chunks, so the generation-finish chunk often
             # carries None. Capture the first non-None payload and attach it to
@@ -2477,11 +2477,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         "index": output_idx,
                         "token_ids": token_ids,
                     }
-                    routed_experts = _serialize_routed_experts(
-                        getattr(output, "routed_experts", None)
-                    )
-                    if routed_experts is not None:
-                        routed_experts_by_output[output_idx] = routed_experts
+                    # Capture the raw routed_experts cheaply here; serialize it
+                    # only once on the final chunk (base85-encoding a tensor on
+                    # every streamed chunk would be wasted work, since only the
+                    # final value is emitted).
+                    raw_routed_experts = getattr(output, "routed_experts", None)
+                    if raw_routed_experts is not None:
+                        raw_routed_experts_by_output[output_idx] = raw_routed_experts
 
                     # vLLM DELTA outputs already align token_ids/logprobs to this chunk.
                     tokenizer = getattr(self.engine_client, "tokenizer", None)
@@ -2506,7 +2508,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             _attach_prompt_logprobs_engine_data(
                                 out, prompt_logprobs_payload
                             )
-                        routed_experts = routed_experts_by_output.get(output_idx)
+                        routed_experts = _serialize_routed_experts(
+                            raw_routed_experts_by_output.get(output_idx)
+                        )
                         if routed_experts is not None:
                             disaggregated_params = dict(
                                 out.get("disaggregated_params") or {}
