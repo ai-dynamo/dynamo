@@ -417,14 +417,13 @@ pub async fn parse_tool_calls_harmony_complete(
                     arguments: args_json,
                 },
             });
-        } else if channel == Some("commentary")
-            && recipient.is_empty()
-            && !(has_recipientless_commentary_call
-                && (message.content_type.as_deref() == Some("<|constrain|>json")
-                    || content_looks_like_json(&message.content)))
+        } else if channel == Some("final")
+            || (channel == Some("commentary")
+                && recipient.is_empty()
+                && !(has_recipientless_commentary_call
+                    && (message.content_type.as_deref() == Some("<|constrain|>json")
+                        || content_looks_like_json(&message.content))))
         {
-            push_harmony_text(&mut normal_text, &message.content);
-        } else if channel == Some("final") {
             push_harmony_text(&mut normal_text, &message.content);
         }
     }
