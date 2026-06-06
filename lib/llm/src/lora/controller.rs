@@ -780,8 +780,19 @@ impl LoraController {
                 tracing::error!(
                     tick = self.tick,
                     error = %e,
-                    "MCF solver failed, keeping previous allocations"
+                    "MCF solver failed; keeping current routes but resetting delta baseline so the next tick re-solves from scratch"
                 );
+                // F6: the solve failed, so prev_* still describes the LAST SUCCESSFUL assignment —
+                // one this tick did NOT apply. Keeping it would make the next tick's delta solve
+                // diff against a stale baseline and could freeze placements indefinitely (new
+                // in-budget LoRAs never reconsidered; removed workers stay frozen-in). Drop the
+                // delta state so the next tick runs a full (non-delta) solve from current cluster
+                // state. Existing routing-table entries are left intact for continuity; the
+                // post-branch cleanup in recompute_allocations still prunes stale/dropped entries.
+                self.prev_assignment.clear();
+                self.prev_workers.clear();
+                self.prev_worker_capacities.clear();
+                self.prev_replica_counts.clear();
             }
         }
     }
