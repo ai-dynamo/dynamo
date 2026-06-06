@@ -7,9 +7,8 @@ use crate::ParserResult;
 use crate::ReasoningParser;
 
 use openai_harmony::StreamableParser;
-use openai_harmony::chat::{Content, Message, TextContent};
+use openai_harmony::chat::TextContent;
 use openai_harmony::{HarmonyEncoding, HarmonyEncodingName, chat::Role, load_harmony_encoding};
-use regex::Regex;
 
 ///// Static initialization of harmony encoder to not affect performance every time a parser is created
 /// This is because load_harmony_encoding downloads some tiktoken files into a directory and we don't want to do this every time we create a parser.
@@ -17,18 +16,6 @@ use std::sync::OnceLock;
 
 static GLOBAL_HARMONY_GPTOSS_ENCODING: OnceLock<Result<HarmonyEncoding, anyhow::Error>> =
     OnceLock::new();
-static HARMONY_CALL_TOKEN_IDS: OnceLock<Vec<u32>> = OnceLock::new();
-static HARMONY_ANALYSIS_BLOCK_REGEX: OnceLock<Regex> = OnceLock::new();
-const HARMONY_CALL_MARKER: &str = "<|call|>";
-const HARMONY_SPECIAL_TOKENS: &[&str] = &[
-    "<|start|>",
-    "<|end|>",
-    "<|return|>",
-    "<|channel|>",
-    "<|constrain|>",
-    "<|message|>",
-    "<|call|>",
-];
 
 fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::Error> {
     GLOBAL_HARMONY_GPTOSS_ENCODING.get_or_init(|| {
@@ -47,19 +34,6 @@ fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::Error> {
 
 pub struct GptOssReasoningParser {
     parser: StreamableParser,
-    pending_text: String,
-    pending_tool_call_text: String,
-    emitted_reasoning_text: bool,
-    insert_reasoning_separator: bool,
-    emitted_normal_text: bool,
-    insert_normal_separator: bool,
-    /// Channel/recipient of the directed tool call currently being streamed.
-    /// Persisted across chunks because the `<|call|>` terminator can arrive in a
-    /// later chunk than the one that resolved the recipient (and `<|call|>` resets
-    /// the live parser state), so the `<|call|>`-chunk envelope reconstruction
-    /// would otherwise lose the channel/recipient. Cleared once the call is emitted.
-    last_directed_channel: Option<String>,
-    last_directed_recipient: Option<String>,
 }
 
 /// Implement Debug for GptOssReasoningParser separately because StreamableParser does not implement Debug
@@ -88,44 +62,7 @@ impl GptOssReasoningParser {
                 return Err(anyhow::anyhow!("Failed to load Harmony encoding: {e}"));
             }
         };
-        Ok(Self {
-            parser,
-            pending_text: String::new(),
-            pending_tool_call_text: String::new(),
-            emitted_reasoning_text: false,
-            insert_reasoning_separator: false,
-            emitted_normal_text: false,
-            insert_normal_separator: false,
-            last_directed_channel: None,
-            last_directed_recipient: None,
-        })
-    }
-
-    // Inherent method (the f1999 `ReasoningParser` trait does not declare
-    // `finish_reasoning_stream`). The serving pipeline never calls it; it exists
-    // for the streaming unit tests to flush any held-back trailing content, so
-    // it reads as dead code on a non-test build.
-    #[allow(dead_code)]
-    fn finish_reasoning_stream(&mut self) -> ParserResult {
-        self.pending_tool_call_text.clear();
-        self.last_directed_channel = None;
-        self.last_directed_recipient = None;
-        let pending = std::mem::take(&mut self.pending_text);
-        if pending.is_empty() {
-            return ParserResult::default();
-        }
-
-        match self.parser.current_channel().as_deref() {
-            Some("analysis") => ParserResult {
-                normal_text: String::new(),
-                reasoning_text: pending,
-            },
-            Some("final") | Some("commentary") => ParserResult {
-                normal_text: pending,
-                reasoning_text: String::new(),
-            },
-            _ => ParserResult::default(),
-        }
+        Ok(Self { parser })
     }
 }
 
@@ -136,231 +73,18 @@ fn encode_text_to_tokens(text: &str) -> anyhow::Result<Vec<u32>> {
     Ok(enc.tokenizer().encode_with_special_tokens(text))
 }
 
-fn harmony_call_token_ids() -> Option<&'static [u32]> {
-    let ids = HARMONY_CALL_TOKEN_IDS.get_or_init(|| {
-        get_harmony_encoding()
-            .as_ref()
-            .map(|enc| {
-                enc.tokenizer()
-                    .encode_with_special_tokens(HARMONY_CALL_MARKER)
-            })
-            .unwrap_or_default()
-    });
-    if ids.is_empty() {
-        None
-    } else {
-        Some(ids.as_slice())
-    }
-}
-
-/// Token id(s) for the harmony `<|call|>` terminator.
-///
-/// `<|call|>` is simultaneously the harmony tool-call terminator the parser
-/// requires AND a gpt-oss EOS token. Pipelines that hide EOS tokens from the
-/// decoded output (e.g. the preprocessor's stop-condition handling) must keep
-/// these ids visible when the harmony tool-call parser is active — otherwise the
-/// terminator is stripped before the parser sees it and tool calls are silently
-/// dropped. Empty if the harmony encoding is unavailable.
-///
-/// Unused on this base: its caller is the preprocessor stop-token integration,
-/// which is part of the separate stop-token work not included in this
-/// parser-only patch.
-#[allow(dead_code)]
-pub fn harmony_terminator_token_ids() -> Vec<u32> {
-    harmony_call_token_ids()
-        .map(|ids| ids.to_vec())
-        .unwrap_or_default()
-}
-
-fn token_ids_contain_sequence(token_ids: &[u32], marker_ids: &[u32]) -> bool {
-    !marker_ids.is_empty()
-        && marker_ids.len() <= token_ids.len()
-        && token_ids
-            .windows(marker_ids.len())
-            .any(|window| window == marker_ids)
-}
-
-fn harmony_analysis_block_regex() -> &'static Regex {
-    HARMONY_ANALYSIS_BLOCK_REGEX.get_or_init(|| {
-        // Match ONLY recipientless analysis reasoning blocks (the CoT channel).
-        // Requiring `<|message|>` to immediately follow `analysis` (no `.*?`
-        // gap) ensures that `analysis to=functions.X code<|message|>…` tool-call
-        // envelopes are NOT stripped — they must survive into normal_text so
-        // the downstream harmony tool-call jail can recover them.
-        Regex::new(
-            r"(?s)(?:<\|start\|>assistant)?<\|channel\|>analysis<\|message\|>.*?(?:<\|call\|>|<\|end\|>|\z)",
-        )
-            .expect("harmony analysis block regex")
-    })
-}
-
-fn input_contains_call_marker(
-    text: &str,
-    token_ids: &[u32],
-    caller_supplied_token_ids: bool,
-) -> bool {
-    if !token_ids.is_empty()
-        && let Some(call_ids) = harmony_call_token_ids()
-    {
-        return token_ids_contain_sequence(token_ids, call_ids);
-    }
-
-    !caller_supplied_token_ids && text.contains(HARMONY_CALL_MARKER)
-}
-
-fn raw_input_text_for_tool_parser(
-    text: &str,
-    token_ids: &[u32],
-    caller_supplied_token_ids: bool,
-) -> String {
-    if caller_supplied_token_ids && let Ok(enc) = get_harmony_encoding() {
-        return enc.tokenizer().decode_utf8(token_ids).unwrap_or_default();
-    }
-
-    text.to_string()
-}
-
-fn split_incomplete_harmony_suffix(text: &str) -> (&str, &str) {
-    let hold_len = HARMONY_SPECIAL_TOKENS
-        .iter()
-        .flat_map(|token| (1..token.len()).map(|idx| &token[..idx]))
-        .filter(|prefix| text.ends_with(*prefix))
-        .map(str::len)
-        .max()
-        .unwrap_or(0);
-
-    text.split_at(text.len() - hold_len)
-}
-
-fn contains_directed_harmony_function_call(text: &str) -> bool {
-    (text.contains("<|channel|>commentary to=functions.")
-        || text.contains("<|channel|>analysis to=functions."))
-        && text.contains(HARMONY_CALL_MARKER)
-}
-
-fn strip_analysis_blocks_for_tool_handoff(text: &str) -> String {
-    harmony_analysis_block_regex()
-        .replace_all(text, "")
-        .into_owned()
-}
-
-fn append_separated(target: &mut String, text: &str) {
-    if text.is_empty() {
-        return;
-    }
-    if !target.is_empty() {
-        target.push('\n');
-    }
-    target.push_str(text);
-}
-
-fn append_text_content(target: &mut String, content: &[Content]) {
-    for item in content {
-        if let Content::Text(TextContent { text }) = item {
-            append_separated(target, text);
-        }
-    }
-}
-
-fn append_message_by_channel(reasoning_text: &mut String, normal_text: &mut String, msg: &Message) {
-    match msg.channel.as_deref() {
-        // Analysis WITHOUT a recipient is chain-of-thought reasoning.
-        // Analysis WITH a functions recipient is a (malformed) tool call whose
-        // payload is handed off via strip_analysis_blocks_for_tool_handoff —
-        // do not also surface it as reasoning_content.
-        Some("analysis") if msg.recipient.is_none() => {
-            append_text_content(reasoning_text, &msg.content)
-        }
-        Some("final") => append_text_content(normal_text, &msg.content),
-        Some("commentary") if msg.recipient.is_none() => {
-            append_text_content(normal_text, &msg.content)
-        }
-        _ => {}
-    }
-}
-
-fn append_current_by_channel(
-    reasoning_text: &mut String,
-    normal_text: &mut String,
-    channel: Option<String>,
-    current: String,
-) {
-    match channel.as_deref() {
-        Some("analysis") => append_separated(reasoning_text, &current),
-        Some("final") => append_separated(normal_text, &current),
-        Some("commentary") => append_separated(normal_text, &current),
-        _ => {}
-    }
-}
-
-fn is_visible_normal_channel(channel: Option<&str>, recipient: Option<&str>) -> bool {
-    matches!(channel, Some("final"))
-        || (matches!(channel, Some("commentary")) && recipient.is_none())
-}
-
-fn starts_directed_harmony_tool_call(text: &str) -> bool {
-    text.contains("<|channel|>commentary to=functions.")
-        || text.contains("<|channel|>analysis to=functions.")
-}
-
-/// Reconstruct the complete harmony envelope for the directed tool call that
-/// just terminated, by decoding the cumulative parser token buffer from its
-/// last `<|channel|>` token to the end.
-///
-/// This is the canonical handoff to the downstream tool-call jail: it always
-/// starts exactly at the tool call's `<|channel|>` token, so it (a) survives a
-/// channel header that was split across streaming chunks, and (b) excludes any
-/// leading `<|end|>` / text from a preceding reasoning message that raw
-/// per-chunk accumulation would otherwise prepend (and leak).
-///
-/// Returns `None` when the captured channel is not a directed tool call, when
-/// the harmony encoding is unavailable, or when no `<|channel|>` token is found.
-fn reconstruct_directed_envelope(
-    parser: &StreamableParser,
-    channel: Option<&str>,
-    recipient: Option<&str>,
-) -> Option<String> {
-    let ch = channel?;
-    let is_tool_ch = ch == "commentary"
-        || (ch == "analysis" && recipient.is_some_and(|r| r.starts_with("functions.")));
-    if !is_tool_ch {
-        return None;
-    }
-    let Ok(enc) = get_harmony_encoding() else {
-        return None;
-    };
-    let tokens = parser.tokens();
-    let channel_token_id = enc
-        .tokenizer()
-        .encode_with_special_tokens("<|channel|>")
-        .last()
-        .copied()?;
-    let last_channel_idx = tokens.iter().rposition(|t| *t == channel_token_id)?;
-    let decoded = enc
-        .tokenizer()
-        .decode_utf8(&tokens[last_channel_idx..])
-        .unwrap_or_default();
-    if decoded.is_empty() {
-        None
-    } else {
-        Some(decoded)
-    }
-}
-
 impl ReasoningParser for GptOssReasoningParser {
     fn detect_and_parse_reasoning(&mut self, text: &str, token_ids: &[u32]) -> ParserResult {
-        let caller_supplied_token_ids = !token_ids.is_empty();
-        let encoded_tokens;
         let token_ids = if token_ids.is_empty() {
             // WAR: Since we are moving to just text based reasoning parsing, converting to token_ids now using harmony encoding
-            encoded_tokens = match encode_text_to_tokens(text) {
+            let encoded_tokens = match encode_text_to_tokens(text) {
                 Ok(tokens) => tokens,
                 Err(err) => {
                     tracing::warn!("Failed to encode Harmony tokens: {err}");
                     return ParserResult::default();
                 }
             };
-            encoded_tokens.as_slice()
+            &encoded_tokens.to_vec()
         } else {
             token_ids
         };
@@ -383,42 +107,70 @@ impl ReasoningParser for GptOssReasoningParser {
         let output_msgs = parser.messages();
         tracing::debug!("Parser has {} output messages", output_msgs.len());
 
-        let mut reasoning_text = String::new();
-        let mut normal_text = String::new();
-        for msg in output_msgs {
-            append_message_by_channel(&mut reasoning_text, &mut normal_text, msg);
-        }
+        match output_msgs.len() {
+            0 => {
+                tracing::debug!("No output messages, using current content");
+                let current = parser.current_content().unwrap_or_default();
+                tracing::debug!("Current content length: {}", current.len());
+                ParserResult {
+                    normal_text: String::new(),
+                    reasoning_text: current,
+                }
+            }
+            1 => {
+                tracing::debug!("Single output message detected");
+                let mut reasoning_text = String::new();
+                if let Some(openai_harmony::chat::Content::Text(TextContent { text })) =
+                    output_msgs[0].content.first()
+                {
+                    reasoning_text.push_str(text);
+                    tracing::debug!("Extracted reasoning text length: {}", reasoning_text.len());
+                }
+                let current = parser.current_content().unwrap_or_default();
+                tracing::debug!("Current content length: {}", current.len());
+                ParserResult {
+                    normal_text: current,
+                    reasoning_text,
+                }
+            }
+            _ => {
+                tracing::debug!("Multiple output messages detected: {}", output_msgs.len());
+                let mut reasoning_text = String::new();
+                let mut normal_text = String::new();
 
-        let current = parser.current_content().unwrap_or_default();
-        let current_channel = parser.current_channel();
-        if current_channel.as_deref() != Some("commentary") || parser.current_recipient().is_none()
-        {
-            append_current_by_channel(
-                &mut reasoning_text,
-                &mut normal_text,
-                current_channel,
-                current,
-            );
-        }
+                // Loop until second last message
+                for (i, parse_msg) in output_msgs.iter().take(output_msgs.len() - 1).enumerate() {
+                    tracing::debug!("Processing reasoning message {}", i + 1);
+                    if let Some(openai_harmony::chat::Content::Text(TextContent { text })) =
+                        parse_msg.content.first()
+                    {
+                        reasoning_text.push_str(text);
+                        tracing::debug!("Added {} chars to reasoning text", text.len());
+                    }
+                }
 
-        let raw_input_text =
-            raw_input_text_for_tool_parser(text, token_ids, caller_supplied_token_ids);
-        if contains_directed_harmony_function_call(&raw_input_text) {
-            // The serving pipeline feeds reasoning normal_text into the Harmony
-            // tool parser. Keep directed commentary envelopes intact so tool
-            // calls are not silently dropped.
-            normal_text = strip_analysis_blocks_for_tool_handoff(&raw_input_text);
-        }
+                let last_msg = &output_msgs[output_msgs.len() - 1];
+                tracing::debug!("Processing final message");
 
-        tracing::debug!(
-            "Final result - normal_text: {} chars, reasoning_text: {} chars",
-            normal_text.len(),
-            reasoning_text.len()
-        );
+                // Handle the last message
+                if let Some(openai_harmony::chat::Content::Text(TextContent { text })) =
+                    last_msg.content.first()
+                {
+                    normal_text.push_str(text);
+                    tracing::debug!("Added {} chars to normal text", text.len());
+                }
 
-        ParserResult {
-            normal_text,
-            reasoning_text,
+                tracing::debug!(
+                    "Final result - normal_text: {} chars, reasoning_text: {} chars",
+                    normal_text.len(),
+                    reasoning_text.len()
+                );
+
+                ParserResult {
+                    normal_text,
+                    reasoning_text,
+                }
+            }
         }
     }
 
@@ -427,34 +179,16 @@ impl ReasoningParser for GptOssReasoningParser {
         text: &str,
         token_ids: &[u32],
     ) -> ParserResult {
-        let caller_supplied_token_ids = !token_ids.is_empty();
-        let text_to_process;
-        let text = if caller_supplied_token_ids {
-            text
-        } else {
-            self.pending_text.push_str(text);
-            let combined = std::mem::take(&mut self.pending_text);
-            let (ready, pending) = split_incomplete_harmony_suffix(&combined);
-            self.pending_text.push_str(pending);
-            text_to_process = ready.to_string();
-            text_to_process.as_str()
-        };
-
-        if text.is_empty() && token_ids.is_empty() {
-            return ParserResult::default();
-        }
-
-        let encoded_tokens;
         let token_ids = if token_ids.is_empty() {
             // WAR: Since we are moving to just text based reasoning parsing, converting to token_ids now using harmony encoding
-            encoded_tokens = match encode_text_to_tokens(text) {
+            let encoded_tokens = match encode_text_to_tokens(text) {
                 Ok(tokens) => tokens,
                 Err(err) => {
                     tracing::warn!("Failed to encode Harmony tokens: {err}");
                     return ParserResult::default();
                 }
             };
-            encoded_tokens.as_slice()
+            &encoded_tokens.to_vec()
         } else {
             token_ids
         };
@@ -470,150 +204,31 @@ impl ReasoningParser for GptOssReasoningParser {
                 token_ids.len(),
                 token_id
             );
-            let previous_channel = parser.current_channel();
-            let previous_recipient = parser.current_recipient();
             if let Err(e) = parser.process(*token_id) {
                 tracing::warn!("Harmony parse error for token_id {token_id}: {e}");
                 return ParserResult::default();
             }
-            let current_channel = parser.current_channel();
-            let current_recipient = parser.current_recipient();
-
-            // Persist directed tool-call context before `<|call|>` can reset it.
-            // This is stored on `self` (not a local) because the `<|call|>`
-            // terminator can arrive in a later chunk than the one that resolved
-            // the recipient — e.g. for short responses split into tiny chunks the
-            // `<|call|>` token can be the first token of its own chunk, by which
-            // point the live parser recipient is already gone.
-            if let (Some(ch), Some(rec)) = (&current_channel, &current_recipient)
-                && (ch.as_str() == "commentary" || ch.as_str() == "analysis")
-                && rec.starts_with("functions.")
-            {
-                self.last_directed_channel = current_channel.clone();
-                self.last_directed_recipient = current_recipient.clone();
-            }
-
-            if previous_channel.as_deref() != Some("analysis")
-                && current_channel.as_deref() == Some("analysis")
-                && self.emitted_reasoning_text
-            {
-                self.insert_reasoning_separator = true;
-            }
-
-            if is_visible_normal_channel(current_channel.as_deref(), current_recipient.as_deref())
-                && !is_visible_normal_channel(
-                    previous_channel.as_deref(),
-                    previous_recipient.as_deref(),
-                )
-                && self.emitted_normal_text
-            {
-                self.insert_normal_separator = true;
-            }
 
             if let (Some(delta), Some(channel)) = (
                 parser.last_content_delta().unwrap_or_default(),
-                current_channel,
+                parser.current_channel(),
             ) {
-                // `last_content_delta` only exposes the newest token slice, so directed
-                // commentary still falls through to the raw handoff path for tool parsing.
+                // `last_content_delta` only exposes the newest token slice, so we forward
+                // `final`/`analysis` chunks immediately; commentary is reconstructed in the
+                // fallback path below because it needs the stripped metadata.
+                let current_recipient = parser.current_recipient();
                 match channel.as_str() {
-                    "final" => {
-                        if self.insert_normal_separator {
-                            normal_delta.push('\n');
-                            self.insert_normal_separator = false;
-                        }
-                        normal_delta.push_str(&delta);
-                        self.emitted_normal_text = true;
-                    }
-                    "analysis" => {
-                        // Analysis WITHOUT a recipient is reasoning content.
-                        // Analysis WITH a functions recipient is a (malformed)
-                        // tool call — its payload is handed off via normal_delta
-                        // below; do not also surface it as reasoning_content.
-                        if current_recipient.is_none() {
-                            if self.insert_reasoning_separator {
-                                reasoning_delta.push('\n');
-                                self.insert_reasoning_separator = false;
-                            }
-                            reasoning_delta.push_str(&delta);
-                            self.emitted_reasoning_text = true;
-                        }
-                    }
-                    "commentary" => {
-                        if current_recipient.is_none() {
-                            if self.insert_normal_separator {
-                                normal_delta.push('\n');
-                                self.insert_normal_separator = false;
-                            }
-                            normal_delta.push_str(&delta);
-                            self.emitted_normal_text = true;
-                        }
-                    }
+                    "final" => normal_delta.push_str(&delta),
+                    // Recipientless analysis is reasoning. Analysis WITH a
+                    // functions recipient is a (malformed) tool call — defer it
+                    // to the reconstruction path below (like commentary) so its
+                    // payload reaches the tool parser instead of polluting
+                    // reasoning_content.
+                    "analysis" if current_recipient.is_none() => reasoning_delta.push_str(&delta),
+                    "analysis" => {}
+                    "commentary" => {}
                     _ => {}
                 }
-            }
-        }
-
-        let has_call_marker =
-            input_contains_call_marker(text, token_ids, caller_supplied_token_ids);
-        let raw_input_text = if has_call_marker
-            || !self.pending_tool_call_text.is_empty()
-            || starts_directed_harmony_tool_call(text)
-        {
-            Some(raw_input_text_for_tool_parser(
-                text,
-                token_ids,
-                caller_supplied_token_ids,
-            ))
-        } else {
-            None
-        };
-
-        if let Some(raw_input_text) = raw_input_text {
-            // Streaming feeds the downstream Harmony tool parser through
-            // `normal_text`. This is an internal handoff, not visible-content
-            // semantics: directed commentary/analysis tool payloads must become
-            // tool calls, not assistant `content`.
-            if has_call_marker {
-                // The tool call terminated in this chunk. Reconstruct the complete,
-                // clean envelope from the cumulative parser token buffer (it starts
-                // exactly at the tool call's `<|channel|>` token). This both handles
-                // a channel header that was split across chunks AND supersedes any
-                // raw text accumulated in `pending_tool_call_text` — which can carry
-                // a leading `<|end|>` (and other markup) from a preceding reasoning
-                // message that would otherwise leak into `response_text`.
-                //
-                // `parser.current_channel()` is None here because `<|call|>` resets
-                // the parser state, so we use the channel/recipient persisted on
-                // `self` during the per-token loop (possibly from a prior chunk).
-                let reconstructed = reconstruct_directed_envelope(
-                    parser,
-                    self.last_directed_channel.as_deref(),
-                    self.last_directed_recipient.as_deref(),
-                );
-                match reconstructed {
-                    Some(env) => {
-                        self.pending_tool_call_text.clear();
-                        normal_delta.push_str(&env);
-                    }
-                    None if !self.pending_tool_call_text.is_empty() => {
-                        // Fallback: no clean reconstruction available; flush the
-                        // accumulated raw text plus this chunk.
-                        self.pending_tool_call_text.push_str(&raw_input_text);
-                        normal_delta.push_str(&std::mem::take(&mut self.pending_tool_call_text));
-                    }
-                    None => normal_delta.push_str(&raw_input_text),
-                }
-                // The directed tool call terminated; clear the persisted context so
-                // the next call (or trailing reasoning) starts fresh.
-                self.last_directed_channel = None;
-                self.last_directed_recipient = None;
-            } else if !self.pending_tool_call_text.is_empty()
-                || starts_directed_harmony_tool_call(&raw_input_text)
-            {
-                // Mid tool call, terminator not yet seen: keep accumulating as a
-                // fallback (e.g. truncated streams that never emit `<|call|>`).
-                self.pending_tool_call_text.push_str(&raw_input_text);
             }
         }
 
@@ -630,35 +245,72 @@ impl ReasoningParser for GptOssReasoningParser {
         }
 
         if let Some(channel) = parser.current_channel() {
+            // A directed tool call (functions recipient) on EITHER the canonical
+            // commentary channel or the malformed analysis channel is recovered
+            // the same way: reconstruct the envelope from the token buffer so the
+            // downstream tool parser receives the channel/recipient/constraint
+            // metadata together with the payload.
             let is_directed_tool_call = channel == "commentary"
                 || (channel == "analysis"
                     && parser
                         .current_recipient()
                         .as_deref()
                         .is_some_and(|r| r.starts_with("functions.")));
-
             if is_directed_tool_call {
-                // We are mid directed-tool-call (channel + functions recipient) but
-                // produced no delta this chunk. Emit NOTHING here:
-                //
-                //  * A complete tool call is reconstructed in full — header, message
-                //    and `<|call|>` together — from the cumulative token buffer on
-                //    the `<|call|>` chunk (the `has_call_marker` branch above). Any
-                //    emission here would be a redundant partial: a bare header (when
-                //    a chunk boundary lands at `<|message|>`) or a header-less body
-                //    fragment, neither of which the downstream jail can assemble into
-                //    a tool call — they only leak raw harmony markup into
-                //    `response_text`.
-                //  * A truncated tool call that never emits `<|call|>` has no complete
-                //    envelope to recover, so emitting its partial header would leak
-                //    too. Suppressing loses nothing recoverable.
-                tracing::debug!(
-                    "In directed tool-call channel ({channel}); suppressing partial mid-stream \
-                     content (complete envelope is recovered on the <|call|> chunk)"
-                );
-            } else if channel != "analysis" {
-                // Pure analysis reasoning (no recipient) is expected to be silent here —
-                // it was already emitted to reasoning_delta in the per-token loop.
+                tracing::debug!("In directed tool-call channel, recovering full content");
+                // If we're in the commentary channel, we should return raw token content and recover content that has been consumed by the parser
+                // so that the tool parser can process it properly
+                if let Ok(enc) = get_harmony_encoding() {
+                    let current_content = parser.current_content().unwrap_or_default();
+                    let mut final_text = text.to_string();
+
+                    // Restore commentary metadata consumed by the parser so the tool-call parser can
+                    // process it correctly.
+                    //
+                    // Example:
+                    //   Before parsing:
+                    //   "<|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{\"format\":\"celsius\",\"location\":\"San Francisco\"}<|call|>"
+                    //   After parsing, the header is stripped, so we must reconstruct it:
+                    //   "<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>"
+                    //
+                    // This ensures downstream tool-call parsing receives the channel, target, and
+                    // constraint metadata together with the message payload.
+
+                    // Recovery should only happen once, and only when `current_content` is empty.
+                    if current_content.is_empty() {
+                        let tokens = parser.tokens();
+
+                        // Get the token id for " <|channel|>"
+                        let channel_token_id = enc
+                            .tokenizer()
+                            .encode_with_special_tokens("<|channel|>")
+                            .last()
+                            .copied();
+
+                        // Find the last occurrence of the <|channel|> token (id 20005) in the tokens vector
+                        let last_channel_token_idx = channel_token_id
+                            .and_then(|token_id| {
+                                tokens.iter().rposition(|token| *token == token_id)
+                            })
+                            .unwrap_or(0);
+
+                        // Then get the generated text from the last <|channel|> to the end of parser.tokens()
+                        let end_token_idx = parser.tokens().len();
+                        // Use Harmony's decode_utf8 to decode tokens into text
+                        let generated_text = enc
+                            .tokenizer()
+                            .decode_utf8(&parser.tokens()[last_channel_token_idx..end_token_idx])
+                            .unwrap_or_default();
+
+                        final_text = generated_text;
+                    }
+
+                    return ParserResult {
+                        normal_text: final_text,
+                        reasoning_text: String::new(),
+                    };
+                }
+            } else {
                 tracing::warn!("Shouldn't be delta content after in channel: {}", channel);
             }
         }
@@ -671,7 +323,7 @@ impl ReasoningParser for GptOssReasoningParser {
 mod tests {
     use super::*;
 
-    #[test] // REASONING.batch.2.c, TOOLCALLING.harmony.1
+    #[test] // REASONING.batch.1, PARSER.harmony.1
     fn test_gpt_oss_reasoning_parser() {
         let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
         let text = "<|channel|>analysis<|message|>The user asks a simple factual question: capital of Brazil. The answer is Brasília. No additional explanation needed.<|end|><|start|>assistant<|channel|>final<|message|>The capital of Brazil is Brasília.";
@@ -683,64 +335,7 @@ mod tests {
         );
     }
 
-    #[test] // REASONING.batch.4
-    fn test_gpt_oss_final_channel_without_analysis_is_normal_text() {
-        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
-        let result = parser.detect_and_parse_reasoning("<|channel|>final<|message|>answer", &[]);
-        assert_eq!(result.reasoning_text, "");
-        assert_eq!(result.normal_text, "answer");
-    }
-
-    #[test] // REASONING.batch.6.a
-    fn test_gpt_oss_multiple_analysis_spans_join_before_final() {
-        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
-        let text = "<|channel|>analysis<|message|>first<|end|><|start|>assistant<|channel|>analysis<|message|>second<|end|><|start|>assistant<|channel|>final<|message|>done";
-        let result = parser.detect_and_parse_reasoning(text, &[]);
-        assert_eq!(result.reasoning_text, "first\nsecond");
-        assert_eq!(result.normal_text, "done");
-    }
-
-    #[test]
-    fn test_gpt_oss_directed_commentary_is_tool_parser_handoff() {
-        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
-        let text = "<|channel|>analysis<|message|>think<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"city\":\"SF\"}<|call|><|start|>assistant<|channel|>final<|message|>It is sunny.";
-        let result = parser.detect_and_parse_reasoning(text, &[]);
-        assert_eq!(result.reasoning_text, "think");
-        assert_eq!(
-            result.normal_text,
-            "<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"city\":\"SF\"}<|call|><|start|>assistant<|channel|>final<|message|>It is sunny."
-        );
-    }
-
-    #[test]
-    fn test_gpt_oss_analysis_call_does_not_swallow_commentary_handoff() {
-        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
-        let text = "<|channel|>analysis to=functions.search <|constrain|>json<|message|>{\"q\":\"x\"}<|call|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"city\":\"SF\"}<|call|><|start|>assistant<|channel|>final<|message|>It is sunny.";
-        let result = parser.detect_and_parse_reasoning(text, &[]);
-        // An analysis-channel message WITH a `to=functions.` recipient is a
-        // (malformed) directed tool call, not chain-of-thought: its args are NOT
-        // leaked to reasoning_text.
-        assert_eq!(result.reasoning_text, "");
-        // Both directed tool-call envelopes (the analysis `search` call and the
-        // commentary `get_weather` call) plus the final message are handed off
-        // intact to the downstream tool-call jail — the analysis call no longer
-        // swallows or strips the commentary handoff.
-        assert_eq!(
-            result.normal_text,
-            "<|channel|>analysis to=functions.search <|constrain|>json<|message|>{\"q\":\"x\"}<|call|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"city\":\"SF\"}<|call|><|start|>assistant<|channel|>final<|message|>It is sunny."
-        );
-    }
-
-    #[test]
-    fn test_gpt_oss_recipientless_commentary_is_normal_text() {
-        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
-        let text = "<|channel|>commentary<|message|>I will check that.<|end|><|start|>assistant<|channel|>final<|message|>Done.";
-        let result = parser.detect_and_parse_reasoning(text, &[]);
-        assert_eq!(result.reasoning_text, "");
-        assert_eq!(result.normal_text, "I will check that.\nDone.");
-    }
-
-    #[test] // REASONING.stream.2.a, REASONING.batch.2.c, TOOLCALLING.harmony.1
+    #[test] // REASONING.stream.3, REASONING.batch.1, PARSER.harmony.1
     fn test_gpt_oss_reasoning_parser_streaming() {
         let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
         let chunks = vec![
@@ -764,107 +359,7 @@ mod tests {
         );
     }
 
-    #[test] // REASONING.stream.3.b
-    fn test_gpt_oss_reasoning_parser_streaming_split_end_marker() {
-        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
-        let chunks = vec![
-            "<|channel|>analysis<|message|>thinking<|e",
-            "nd|><|start|>assistant<|channel|>final<|message|>answer",
-        ];
-        let mut reasoning_text_incr = String::new();
-        let mut normal_text_incr = String::new();
-        for chunk in chunks {
-            let result = parser.parse_reasoning_streaming_incremental(chunk, &[]);
-            normal_text_incr.push_str(&result.normal_text);
-            reasoning_text_incr.push_str(&result.reasoning_text);
-        }
-        assert_eq!(reasoning_text_incr, "thinking");
-        assert_eq!(normal_text_incr, "answer");
-    }
-
-    #[test]
-    fn test_gpt_oss_reasoning_parser_streaming_flushes_pending_suffix_on_finish() {
-        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
-        let result = parser.parse_reasoning_streaming_incremental(
-            "<|channel|>analysis<|message|>thinking<|e",
-            &[],
-        );
-        let finish = parser.finish_reasoning_stream();
-        assert_eq!(result.reasoning_text, "thinking");
-        assert_eq!(finish.reasoning_text, "<|e");
-        assert_eq!(finish.normal_text, "");
-        let finish = parser.finish_reasoning_stream();
-        assert_eq!(finish.reasoning_text, "");
-        assert_eq!(finish.normal_text, "");
-
-        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
-        let result = parser
-            .parse_reasoning_streaming_incremental("<|channel|>final<|message|>answer<|e", &[]);
-        let finish = parser.finish_reasoning_stream();
-        assert_eq!(result.normal_text, "answer");
-        assert_eq!(finish.normal_text, "<|e");
-        assert_eq!(finish.reasoning_text, "");
-    }
-
-    #[test] // REASONING.stream.2.b
-    fn test_gpt_oss_reasoning_parser_streaming_multiple_analysis_spans() {
-        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
-        let chunks = vec![
-            "<|channel|>analysis<|message|>first<|end|><|start|>assistant",
-            "<|channel|>analysis<|message|>second<|end|><|start|>assistant",
-            "<|channel|>final<|message|>done",
-        ];
-        let mut reasoning_text_incr = String::new();
-        let mut normal_text_incr = String::new();
-        for chunk in chunks {
-            let result = parser.parse_reasoning_streaming_incremental(chunk, &[]);
-            normal_text_incr.push_str(&result.normal_text);
-            reasoning_text_incr.push_str(&result.reasoning_text);
-        }
-        assert_eq!(reasoning_text_incr, "first\nsecond");
-        assert_eq!(normal_text_incr, "done");
-    }
-
-    #[test]
-    fn test_gpt_oss_reasoning_parser_streaming_recipientless_commentary() {
-        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
-        let chunks = vec![
-            "<|channel|>commentary<|message|>I will check that.<|end|><|start|>assistant",
-            "<|channel|>final<|message|>Done.",
-        ];
-        let mut reasoning_text_incr = String::new();
-        let mut normal_text_incr = String::new();
-        for chunk in chunks {
-            let result = parser.parse_reasoning_streaming_incremental(chunk, &[]);
-            normal_text_incr.push_str(&result.normal_text);
-            reasoning_text_incr.push_str(&result.reasoning_text);
-        }
-        assert_eq!(reasoning_text_incr, "");
-        assert_eq!(normal_text_incr, "I will check that.\nDone.");
-    }
-
-    #[test]
-    fn test_gpt_oss_reasoning_parser_streaming_split_directed_commentary() {
-        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
-        let chunks = vec![
-            "<|channel|>commentary to=functions.get_",
-            "weather <|constrain|>json<|message|>{\"city\":\"SF\"}<|call|>",
-        ];
-        let mut reasoning_text_incr = String::new();
-        let mut normal_text_incr = String::new();
-        for chunk in chunks {
-            let result = parser.parse_reasoning_streaming_incremental(chunk, &[]);
-            normal_text_incr.push_str(&result.normal_text);
-            reasoning_text_incr.push_str(&result.reasoning_text);
-        }
-        assert_eq!(reasoning_text_incr, "");
-        assert_eq!(
-            normal_text_incr,
-            "<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"city\":\"SF\"}<|call|>"
-        );
-    }
-
-    #[test] // REASONING.stream.2.a, REASONING.batch.2.c, TOOLCALLING.harmony.1
+    #[test] // REASONING.stream.3, REASONING.batch.1, PARSER.harmony.1
     fn test_gpt_oss_reasoning_parser_streaming_chunked() {
         let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
         let enc = get_harmony_encoding()
@@ -893,7 +388,7 @@ mod tests {
         );
     }
 
-    #[test] // REASONING.batch.3.a, TOOLCALLING.harmony.1
+    #[test] // REASONING.stream.3, REASONING.batch.1, PARSER.harmony.1
     fn test_gpt_oss_reasoning_parser_streaming_variable_length_chunks() {
         let text = "<|channel|>analysis<|message|>User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function.<|end|><|start|>assistant<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>{}";
         let enc = get_harmony_encoding()
@@ -915,13 +410,11 @@ mod tests {
                 reasoning_text_incr,
                 "User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function."
             );
-            // This input is a TRUNCATED tool call: it ends at `<|message|>{}` with
-            // no `<|call|>` terminator. A complete directed tool call is handed off
-            // to the jail in one piece (header + body + `<|call|>`) on the `<|call|>`
-            // chunk; without a terminator there is no complete envelope to recover,
-            // so the streaming parser emits no normal_text rather than leaking a
-            // partial `<|channel|>…<|message|>` header.
-            assert_eq!(normal_text_incr, "");
+            // [gluo TODO] missing "<|start|>assistant" and "{}" from original message
+            assert_eq!(
+                normal_text_incr,
+                "<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>"
+            );
         }
 
         // Send token in chunks (chunking obtained from actual model output)
@@ -955,32 +448,10 @@ mod tests {
                 reasoning_text_incr,
                 "User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function."
             );
-            // Truncated tool call (no `<|call|>`): no complete envelope to recover,
-            // so no normal_text is emitted (see the token-by-token block above).
-            assert_eq!(normal_text_incr, "");
+            assert_eq!(
+                normal_text_incr,
+                "<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>"
+            );
         }
-    }
-
-    // NOTE: the corpus-characterization tests that ran captured dynamo.trtllm
-    // output through this parser (`reasoning_characterize_corpus_markup_leak`,
-    // `reasoning_parser_leaks_harmony_markup`) are intentionally omitted here —
-    // they `include_str!` private capture data that cannot be shared. The
-    // malformed analysis-channel frame they exercised is covered synthetically
-    // by `test_gpt_oss_analysis_call_does_not_swallow_commentary_handoff` and
-    // the control test below.
-
-    /// Control: a well-formed analysis+final stream splits cleanly with no
-    /// markup in either field (harness/encoding sanity).
-    #[test]
-    fn reasoning_control_wellformed_no_markup() {
-        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
-        let text = "<|channel|>analysis<|message|>Think about it.<|end|><|start|>assistant<|channel|>final<|message|>Answer.";
-        let r = parser.detect_and_parse_reasoning(text, &[]);
-        assert_eq!(r.reasoning_text, "Think about it.");
-        assert_eq!(r.normal_text, "Answer.");
-        assert!(
-            !r.reasoning_text.contains("<|") && !r.normal_text.contains("<|"),
-            "well-formed stream must not retain markup"
-        );
     }
 }

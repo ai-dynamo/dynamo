@@ -1904,17 +1904,11 @@ mod tests {
         let jail = JailedStream::builder().tool_call_parser("harmony").build();
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        // Should have at least one output containing the parsed tool call.
+        // Should have at least one output containing both analysis text and parsed tool call
         assert!(!results.is_empty());
 
-        // Recipientless analysis is pure reasoning, not visible content. The
-        // harmony tool parser no longer surfaces it as `content` (in the full
-        // pipeline the reasoning parser routes it to `reasoning_content`); here
-        // the jail runs standalone, so the analysis prose is simply dropped from
-        // content. Verify it does NOT leak into content — this is the contract
-        // change that stops Harmony analysis reasoning from polluting response
-        // text. (Was previously asserted to appear in content.)
-        let leaks_analysis_text = results.iter().any(|r| {
+        // Verify the analysis text appears as content in one of the outputs
+        let has_analysis_text = results.iter().any(|r| {
             r.data
                 .as_ref()
                 .and_then(|d| d.inner.choices.first())
@@ -1925,10 +1919,7 @@ mod tests {
                 })
                 .unwrap_or(false)
         });
-        assert!(
-            !leaks_analysis_text,
-            "recipientless analysis reasoning must not leak into content"
-        );
+        assert!(has_analysis_text, "Should contain extracted analysis text");
 
         // Verify a tool call was parsed with expected name and args
         let tool_call_idx = results
