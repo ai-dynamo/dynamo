@@ -49,6 +49,13 @@ jobs:
       - name: KVBM integration test (${{ matrix.name }})
         env:
           HF_HOME: /scratch/hf
+          # The DeepSeek-V2-Lite determinism config defaults its MLA attention
+          # backend to TRITON_MLA, which test_determinism_agg.py flags as the
+          # portable fallback; on H100 the deterministic backend is
+          # FLASH_ATTN_MLA. These are H100 nodes, so select it explicitly --
+          # otherwise the cross-cache-reset determinism check is non-deterministic
+          # (~55%) on the wrong-for-this-GPU backend.
+          KVBM_MLA_BACKEND: FLASH_ATTN_MLA
         run: |
           # Run from the checkout (on the writable ci-local-nvme work PVC), NOT
           # /workspace: the determinism tests write t8.shakespeare.txt to the CWD
