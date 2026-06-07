@@ -46,7 +46,7 @@ export DYN_BENCH_MOUNTS="${DYN_BENCH_MOUNTS:-$BENCH_DIR:$BENCH_DIR}"
 # give the first (extracting) srun enough slack to register the model and to
 # keep the sub/loadgen alive while the container is still extracting.
 export DYN_BENCH_CONTAINER_NAME="${DYN_BENCH_CONTAINER_NAME:-dis2172bench}"
-export DYN_BENCH_MODEL_WAIT="${DYN_BENCH_MODEL_WAIT:-300}"
+export DYN_BENCH_MODEL_WAIT="${DYN_BENCH_MODEL_WAIT:-600}"
 export DYN_BENCH_EXTRACT_PAD="${DYN_BENCH_EXTRACT_PAD:-220}"
 
 # Pick the host python that runs the orchestrator (stdlib only; NOT the container).

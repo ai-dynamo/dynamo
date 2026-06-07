@@ -45,8 +45,11 @@ NS_SCOPED_TOPICS = {"kv_metrics", "prefill_events"}  # namespace-scoped subjects
 
 # How long to wait for the frontend to register the model. The first srun into a
 # pyxis container may have to extract the 24GB .sqsh rootfs, which can exceed the
-# old hardcoded ~120s; default 300s, override with DYN_BENCH_MODEL_WAIT.
-MODEL_WAIT = int(os.environ.get("DYN_BENCH_MODEL_WAIT", "300"))
+# old hardcoded ~120s. At high mocker density (e.g. p=72 over few nodes -> 18
+# mockers/node) the frontend also takes longer to see all workers register, so
+# 300s was too tight and p=72-zmq timed out (DIS-2172). Default bumped to 600s;
+# override with DYN_BENCH_MODEL_WAIT.
+MODEL_WAIT = int(os.environ.get("DYN_BENCH_MODEL_WAIT", "600"))
 # Extra slack (seconds) folded into the subscriber-wait timeout AND the loadgen
 # --duration/wait, so a still-extracting container doesn't get its sub/loadgen
 # killed before it has even started. Override with DYN_BENCH_EXTRACT_PAD.
@@ -55,6 +58,18 @@ EXTRACT_PAD = int(os.environ.get("DYN_BENCH_EXTRACT_PAD", "220"))
 # named container, then reuse it for every subsequent srun (avoids re-extracting
 # the 24GB squashfs per task). Override / disable via DYN_BENCH_CONTAINER_NAME.
 CONTAINER_NAME = os.environ.get("DYN_BENCH_CONTAINER_NAME", "dis2172bench")
+
+# Per-task stdout/stderr logs (frontend/mocker/loadgen/subscriber). These are
+# debug-only chatter (~1320 files for a full sweep) and MUST NOT land in the OUT
+# dir, which lives on the (5G-quota) NFS home -- a full sweep overflows it and
+# OSError(28) kills the summary.json write (DIS-2172 cell-83 crash). Write them
+# to a NODE-LOCAL dir instead (the orchestrator opens them on node0's local fs);
+# only summary.json + meta.json + the per-cell *_sub*.json DATA stay in OUT.
+# Default /tmp/dis2172-logs-$SLURM_JOB_ID/, override with DYN_BENCH_LOGDIR.
+LOGDIR = os.environ.get(
+    "DYN_BENCH_LOGDIR",
+    f"/tmp/dis2172-logs-{os.environ.get('SLURM_JOB_ID', os.getpid())}",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -242,7 +257,8 @@ def run_cell(lr, transport, p, s, topics, gpus_per_node, duration, warmup,
         env["NATS_SERVER"] = f"nats://{infra_addr}:4222"
 
     def log(name):
-        return f"{outdir}/{name}_{idx}.log"
+        # Per-task stdout -> node-local LOGDIR (NOT the NFS OUT dir; see LOGDIR).
+        return f"{LOGDIR}/{name}_{idx}.log"
 
     procs = []
     if transport == "zmq-broker":
@@ -282,7 +298,7 @@ def run_cell(lr, transport, p, s, topics, gpus_per_node, duration, warmup,
                 DYN_BENCH_CLOCK=lr.clock,          # subscriber clock (match publisher)
                 DYN_BENCH_DURATION=str(duration), DYN_BENCH_WARMUP=str(warmup),
                 DYN_BENCH_OUT=outp)
-            subs.append((lr.popen([SUB_BIN], senv, f"{outdir}/sub_{idx}_{topic}_{si}.log", 0),
+            subs.append((lr.popen([SUB_BIN], senv, f"{LOGDIR}/sub_{idx}_{topic}_{si}.log", 0),
                          outp, topic, si))
 
     time.sleep(2)
@@ -374,6 +390,10 @@ def main():
         lr.prepare_containers(dict(os.environ))
     infra_addr = a.infra_addr or lr.addr(0)
     Path(a.out).mkdir(parents=True, exist_ok=True)
+    # Per-task stdout/stderr go here (node-local), NOT into the NFS-home OUT dir.
+    Path(LOGDIR).mkdir(parents=True, exist_ok=True)
+    print(f"[bench] per-task logs -> {LOGDIR} (node-local); data + summary -> {a.out}",
+          flush=True)
     transports = a.transports.split(",")
     workers = [int(x) for x in a.workers.split(",")]
     subs = [int(x) for x in a.subs.split(",")]
