@@ -352,6 +352,10 @@ class WorkerFactory:
             return
 
         await handler._pause_controller.pause(1)
+        startup_release = getattr(handler, "_gms_shadow_startup_release", None)
+        if startup_release is not None:
+            startup_release(None, None, None)
+            delattr(handler, "_gms_shadow_startup_release")
 
         runtime.set_health_status(True)
         logger.info(

@@ -34,9 +34,15 @@ if not HAS_CUDA:
 
 import torch
 from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
+from gpu_memory_service.client.torch.allocator import (
+    evict_gms_client_memory_manager,
+    get_or_create_gms_client_memory_manager,
+    gms_use_mem_pool,
+)
 from gpu_memory_service.client.torch.module import (
     materialize_module_from_gms,
     register_module_tensors,
+    snapshot_auxiliary_tensors,
 )
 from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
 from gpu_memory_service.common.locks import RequestedLockType
@@ -69,6 +75,64 @@ class _TinyModule(torch.nn.Module):
         y = y + self.scale
         y = y * self.extra
         return torch.relu(y)
+
+
+class _TinyModuleWithEmptyTensors(torch.nn.Module):
+    def __init__(self, device: str = "cuda") -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(
+            torch.empty(4, 4, device=device, dtype=torch.float32)
+        )
+        self.empty_param = torch.nn.Parameter(
+            torch.empty(2, 0, device=device, dtype=torch.int32),
+            requires_grad=False,
+        )
+        self.register_buffer(
+            "empty_buffer", torch.empty(0, device=device, dtype=torch.float16)
+        )
+        self.empty_attr = torch.empty(3, 0, device=device, dtype=torch.float32)
+
+
+class _TinyWorkspaceModule(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(
+            torch.zeros(4, 4, device="cuda", dtype=torch.float32)
+        )
+        self.register_buffer(
+            "registered_buffer", torch.ones(2, device="cuda", dtype=torch.float32)
+        )
+        self.workspace = torch.zeros(8, device="cuda", dtype=torch.int32)
+        self.cache = type("_Cache", (), {})()
+        self.cache.workspace = self.workspace
+        self.helper = type("_Helper", (), {})()
+        self.helper.runtime_workspace = torch.arange(
+            4, device="cuda", dtype=torch.int32
+        )
+        self.indexer = torch.nn.Module()
+        self.indexer.indexer_op = torch.nn.Module()
+        self.indexer.indexer_op.topk_indices_buffer = torch.empty(
+            16, 4, device="cuda", dtype=torch.int32
+        )
+
+
+class _TinyRuntimeCacheModule(torch.nn.Module):
+    def __init__(self, device: str = "cuda") -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(
+            torch.empty(4, 4, device=device, dtype=torch.float32),
+            requires_grad=False,
+        )
+        self.register_buffer(
+            "cos_sin_cache",
+            torch.empty(3, 2, device=device, dtype=torch.float32),
+            persistent=False,
+        )
+        if device != "meta":
+            self.cos_sin_cache.copy_(self._compute_cos_sin_cache().to(device=device))
+
+    def _compute_cos_sin_cache(self) -> torch.Tensor:
+        return torch.arange(6, dtype=torch.float32).reshape(3, 2)
 
 
 @pytest.fixture
@@ -158,6 +222,17 @@ def _make_gms_tensor(
     return allocation_id, gms_tensor
 
 
+def _find_gms_mapping_for_test(
+    manager: GMSClientMemoryManager,
+    tensor: torch.Tensor,
+):
+    ptr = int(tensor.data_ptr())
+    for va, mapping in manager.mappings.items():
+        if va <= ptr < va + mapping.aligned_size:
+            return mapping
+    return None
+
+
 def _assert_exact_tensor_equal(expected: torch.Tensor, actual: torch.Tensor) -> None:
     torch.testing.assert_close(expected, actual, rtol=0, atol=0)
 
@@ -197,6 +272,145 @@ def test_gms_tensor_matches_plain_torch_ops(running_gms):
     _assert_exact_tensor_equal(
         (baseline * 2.0 - 5.0).square(), (gms_tensor * 2.0 - 5.0).square()
     )
+
+    reader.close()
+    evict_gms_client_memory_manager(writer)
+
+
+def test_auxiliary_tensors_are_snapshotted_and_moved_out_of_gms(running_gms):
+    socket_path = running_gms
+    writer = get_or_create_gms_client_memory_manager(
+        socket_path,
+        0,
+        RequestedLockType.RW,
+        tag="weights",
+    )
+
+    with gms_use_mem_pool("weights", torch.device("cuda", 0)):
+        model = _TinyWorkspaceModule()
+        expected_weight = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+        model.weight.data.copy_(expected_weight)
+        model.workspace.copy_(
+            torch.arange(8, device="cuda", dtype=torch.int32),
+        )
+
+    snapshotted = snapshot_auxiliary_tensors(writer, model, device_index=0)
+
+    assert snapshotted == [
+        "registered_buffer",
+        "workspace",
+        "cache.workspace",
+        "helper.runtime_workspace",
+        "indexer.indexer_op.topk_indices_buffer",
+    ]
+    assert model.cache.workspace is model.workspace
+    workspace_metadata = writer.metadata_get("workspace")
+    registered_buffer_metadata = writer.metadata_get("registered_buffer")
+    assert workspace_metadata is not None
+    assert registered_buffer_metadata is not None
+    assert cast(torch.Tensor, model.registered_buffer).is_cuda
+
+    register_module_tensors(writer, model)
+    weight_metadata = writer.metadata_get("weight")
+    assert weight_metadata is not None
+    assert workspace_metadata[2] != weight_metadata[2]
+    assert registered_buffer_metadata[2] != weight_metadata[2]
+    assert writer.commit()
+    del model
+    writer.close()
+
+    reader = GMSClientMemoryManager(socket_path, device=0)
+    reader.connect(RequestedLockType.RO)
+    materialized = _TinyWorkspaceModule()
+    materialize_module_from_gms(reader, materialized, device_index=0)
+
+    _assert_exact_tensor_equal(
+        expected_weight, cast(torch.Tensor, materialized.weight).cpu()
+    )
+    _assert_exact_tensor_equal(
+        torch.arange(8, device="cuda", dtype=torch.int32),
+        cast(torch.Tensor, materialized.workspace),
+    )
+    assert materialized.cache.workspace is materialized.workspace
+    assert _find_gms_mapping_for_test(reader, materialized.workspace) is None
+    assert _find_gms_mapping_for_test(reader, materialized.registered_buffer) is None
+    reader.close()
+    evict_gms_client_memory_manager(writer)
+
+
+def test_recomputable_non_persistent_buffers_stay_out_of_gms(running_gms):
+    socket_path = running_gms
+    writer = get_or_create_gms_client_memory_manager(
+        socket_path,
+        0,
+        RequestedLockType.RW,
+        tag="weights",
+    )
+
+    with gms_use_mem_pool("weights", torch.device("cuda", 0)):
+        model = _TinyRuntimeCacheModule()
+        expected_weight = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+        model.weight.data.copy_(expected_weight.to(device="cuda"))
+
+    snapshot_auxiliary_tensors(writer, model, device_index=0)
+    register_module_tensors(writer, model)
+    assert writer.metadata_get("cos_sin_cache") is not None
+    assert writer.commit()
+    del model
+    writer.close()
+
+    reader = GMSClientMemoryManager(socket_path, device=0)
+    try:
+        reader.connect(RequestedLockType.RO)
+        materialized = _TinyRuntimeCacheModule(device="meta")
+        materialize_module_from_gms(reader, materialized, device_index=0)
+
+        _assert_exact_tensor_equal(
+            expected_weight, cast(torch.Tensor, materialized.weight).cpu()
+        )
+        _assert_exact_tensor_equal(
+            torch.arange(6, device="cuda", dtype=torch.float32).reshape(3, 2),
+            cast(torch.Tensor, materialized.cos_sin_cache),
+        )
+    finally:
+        reader.close(best_effort=True)
+        evict_gms_client_memory_manager(writer)
+
+
+def test_zero_size_tensors_are_skipped_then_materialized(running_gms):
+    socket_path = running_gms
+    baseline = torch.arange(16, device="cuda", dtype=torch.float32).reshape(4, 4)
+    gms_model = _TinyModuleWithEmptyTensors()
+
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    writer.connect(RequestedLockType.RW)
+
+    _, gms_weight = _make_gms_tensor(writer, baseline, tag="weights")
+    gms_model.weight = torch.nn.Parameter(gms_weight, requires_grad=False)
+
+    # The empty CUDA tensors are regular registered/attr tensors, but carry no
+    # payload and therefore have no GMS allocation to record.
+    register_module_tensors(writer, gms_model)
+    assert writer.commit()
+    del gms_weight
+    del gms_model
+    writer.close()
+
+    reader = GMSClientMemoryManager(socket_path, device=0)
+    reader.connect(RequestedLockType.RO)
+    materialized = _TinyModuleWithEmptyTensors(device="meta")
+    materialize_module_from_gms(reader, materialized, device_index=0)
+
+    _assert_exact_tensor_equal(baseline, cast(torch.Tensor, materialized.weight))
+    assert materialized.empty_param.is_cuda
+    assert materialized.empty_buffer.is_cuda
+    assert materialized.empty_attr.is_cuda
+    assert tuple(materialized.empty_param.shape) == (2, 0)
+    assert tuple(materialized.empty_buffer.shape) == (0,)
+    assert tuple(materialized.empty_attr.shape) == (3, 0)
+    assert materialized.empty_param.dtype is torch.int32
+    assert materialized.empty_buffer.dtype is torch.float16
+    assert materialized.empty_attr.dtype is torch.float32
 
     reader.close()
 
@@ -318,6 +532,7 @@ def test_materialized_module_from_gms_matches_plain_module_forward(running_gms):
     _, gms_extra = _make_gms_tensor(writer, baseline_extra, tag="weights")
     gms_model.extra = gms_extra
 
+    snapshot_auxiliary_tensors(writer, gms_model, device_index=0)
     register_module_tensors(writer, gms_model)
     _assert_exact_tensor_equal(expected, gms_model(inputs))
     assert writer.commit()

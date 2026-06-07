@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""vLLM monkey-patches applied at GMSWorker import.
+"""GMS-specific vLLM monkey-patches applied at GMSWorker import.
 
 Patches:
   - MemorySnapshot.measure: adds GMS-committed bytes to free_memory in RO mode.
@@ -15,6 +15,8 @@ The torch.cuda.empty_cache patch lives in integrations/common/patches.py.
 from __future__ import annotations
 
 import logging
+import threading
+from contextlib import contextmanager
 
 from gpu_memory_service.client.torch.allocator import get_gms_client_memory_manager
 from gpu_memory_service.common.locks import GrantedLockType
@@ -25,6 +27,8 @@ logger = logging.getLogger(__name__)
 _memory_snapshot_patched = False
 _request_memory_patched = False
 _register_kv_caches_patched = False
+_kv_cache_alloc_patched = False
+_kv_cache_alloc_lock = threading.Lock()
 
 
 # =============================================================================
@@ -172,6 +176,108 @@ def patch_register_kv_caches() -> None:
     logger.info("[GMS Patch] Patched NixlConnector.register_kv_caches")
 
 
+def patch_kv_cache_allocation_for_scratch() -> None:
+    """Route only raw KV tensors through scratch and avoid full-KV writes.
+
+    GMS scratch-KV reserves the final virtual address range but only backs a
+    small prefix until wake-up. vLLM's raw KV allocation uses ``torch.zeros``,
+    which touches the full future range. Reuse the upstream allocation logic,
+    but make those raw scratch allocations ``torch.empty`` and keep transient
+    metadata/cudagraph buffers on PyTorch's normal allocator.
+    """
+    global _kv_cache_alloc_patched
+
+    if _kv_cache_alloc_patched:
+        return
+
+    try:
+        import torch
+        from vllm.v1.worker import gpu_model_runner, kv_connector_model_runner_mixin
+    except ImportError:
+        logger.debug("[GMS Patch] vLLM KV allocation helpers not available")
+        return
+
+    original_allocate = gpu_model_runner.GPUModelRunner._allocate_kv_cache_tensors
+    mixin_cls = kv_connector_model_runner_mixin.KVConnectorModelRunnerMixin
+    original_uniform_allocate = mixin_cls.allocate_uniform_kv_caches
+
+    def allocate_kv_tensor(torch_mod, original_zeros, args, kwargs):
+        from gpu_memory_service.client.torch.allocator import (
+            get_gms_client_memory_manager,
+            gms_use_mem_pool,
+            is_scratch,
+        )
+
+        kv_mgr = get_gms_client_memory_manager("kv_cache")
+        if kv_mgr is None:
+            return original_zeros(*args, **kwargs)
+
+        device = kwargs.get("device")
+        if device is None or "out" in kwargs:
+            return original_zeros(*args, **kwargs)
+
+        # Validate the registered tag before routing through the shared
+        # pluggable allocator. If lookup fails, fail closed instead of silently
+        # allocating KV tensors outside GMS.
+        use_empty = is_scratch(kv_mgr)
+        mempool_device = (
+            torch_mod.device("cuda", device)
+            if isinstance(device, int)
+            else torch_mod.device(device)
+        )
+        with gms_use_mem_pool("kv_cache", device=mempool_device):
+            if use_empty:
+                return torch_mod.empty(*args, **kwargs)
+            return original_zeros(*args, **kwargs)
+
+    @contextmanager
+    def scratch_aware_zeros(func):
+        func_globals = func.__globals__
+        original_torch = func_globals.get("torch", torch)
+
+        class TorchProxy:
+            def __getattr__(self, name):
+                return getattr(original_torch, name)
+
+            def zeros(self, *args, **kwargs):
+                return allocate_kv_tensor(
+                    original_torch,
+                    original_torch.zeros,
+                    args,
+                    kwargs,
+                )
+
+        with _kv_cache_alloc_lock:
+            previous_torch = func_globals.get("torch")
+            func_globals["torch"] = TorchProxy()
+            try:
+                yield
+            finally:
+                if previous_torch is None:
+                    func_globals.pop("torch", None)
+                else:
+                    func_globals["torch"] = previous_torch
+
+    def patched_allocate_kv_cache_tensors(self, kv_cache_config):
+        with scratch_aware_zeros(original_allocate):
+            return original_allocate(self, kv_cache_config)
+
+    def patched_allocate_uniform_kv_caches(*args, **kwargs):
+        with scratch_aware_zeros(original_uniform_allocate):
+            return original_uniform_allocate(*args, **kwargs)
+
+    gpu_model_runner.GPUModelRunner._allocate_kv_cache_tensors = (
+        patched_allocate_kv_cache_tensors
+    )
+    mixin_cls.allocate_uniform_kv_caches = staticmethod(
+        patched_allocate_uniform_kv_caches,
+    )
+    _kv_cache_alloc_patched = True
+    logger.info(
+        "[GMS Patch] Patched vLLM KV cache allocation to avoid full scratch zero-fill"
+    )
+
+
 # =============================================================================
 # Patch application helper
 # =============================================================================
@@ -184,4 +290,5 @@ def apply_scratch_kv_patches() -> None:
 
     patch_request_memory()
     patch_register_kv_caches()
+    patch_kv_cache_allocation_for_scratch()
     logger.info("[GMS Patch] applied")
