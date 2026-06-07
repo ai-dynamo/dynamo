@@ -65,6 +65,8 @@ pub use remote_search::RemoteSearch;
 pub use tokio::TokioConfig;
 pub use v1_compat::V1EnvCompat;
 
+use dynamo_device::DeviceBackend;
+
 use figment::{
     Figment, Metadata, Profile, Provider,
     providers::{Env, Format, Json, Serialized, Toml},
@@ -142,6 +144,13 @@ pub struct KvbmConfig {
     #[validate(nested)]
     #[serde(default)]
     pub debug: DebugConfig,
+
+    /// Device backend to use (CUDA or SYCL/XPU).
+    ///
+    /// Specifies which device backend the workers should use.
+    /// Defaults to CUDA. Set to SYCL for Intel XPU devices.
+    #[serde(default)]
+    pub backend: DeviceBackend,
 
     /// Connector→hub configuration. The sole way the connector reaches a
     /// `kvbm-hub`. `None` = no hub features (normal hub-less connector work);

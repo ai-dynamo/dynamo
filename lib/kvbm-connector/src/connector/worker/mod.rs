@@ -44,6 +44,7 @@ use state::{WorkerDetails, WorkerState};
 use anyhow::{Result, bail};
 use derive_getters::Dissolve;
 use dynamo_memory::TensorDescriptor;
+use kvbm_physical::device::DeviceBackend;
 use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -182,6 +183,8 @@ struct IntraPassOffloadState {
 /// - Leader calls `configure_layouts` RPC to complete initialization
 pub struct ConnectorWorker {
     runtime: Arc<KvbmRuntime>,
+    /// Device backend type (CUDA or SYCL/XPU).
+    backend: DeviceBackend,
     state: Arc<WorkerState>,
     metadata: Mutex<Option<KvConnectorMetadata>>,
     /// Flag indicating whether intra-pass onboarding is active for this iteration.
@@ -211,8 +214,12 @@ impl ConnectorWorker {
         // Register handlers
         velo::service::init(&messenger, Arc::clone(&state));
 
+        // Get backend from runtime config
+        let backend = runtime.config().backend;
+
         Self {
             runtime,
+            backend,
             state,
             metadata: Mutex::new(None),
             intra_pass_onboard_active: Arc::new(AtomicBool::new(false)),
@@ -424,6 +431,7 @@ impl ConnectorWorkerInterface for ConnectorWorker {
         // Create pending state (validates tensors internally)
         let pending = PendingWorkerState::builder()
             .tensors(tensors)
+            .backend(self.backend)
             .num_device_blocks(num_device_blocks)
             .dtype_width_bytes(dtype_width_bytes)
             .layout_config(layout_config)
@@ -436,7 +444,7 @@ impl ConnectorWorkerInterface for ConnectorWorker {
         let details = WorkerDetails { num_layers };
 
         tracing::info!(
-            cuda_device = pending.cuda_device_id,
+            device_id = pending.device_id,
             num_tensors = pending.tensors.len(),
             num_device_blocks,
             dtype_width_bytes,
@@ -504,6 +512,7 @@ impl ConnectorWorkerInterface for ConnectorWorker {
 
         let pending = PendingWorkerState::builder()
             .tensors(vec![tensor])
+            .backend(self.backend)
             .num_device_blocks(num_device_blocks)
             .dtype_width_bytes(dtype_width_bytes)
             .layout_config(layout_config)
@@ -513,7 +522,7 @@ impl ConnectorWorkerInterface for ConnectorWorker {
         let details = WorkerDetails { num_layers };
 
         tracing::info!(
-            cuda_device = pending.cuda_device_id,
+            device_id = pending.device_id,
             "Cross-layer KV cache registered (deferred mode - waiting for leader RPC)"
         );
 

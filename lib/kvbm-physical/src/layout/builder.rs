@@ -380,9 +380,9 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
         let mut entries = Vec::with_capacity(tensors.len());
 
         for (index, tensor) in tensors.into_iter().enumerate() {
-            // Verify the tensor is on a CUDA device
-            if tensor.cuda_device_id().is_none() {
-                bail!("tensor at index {} is not on a CUDA device", index);
+            // Verify the tensor is on a device
+            if tensor.device_id().is_none() {
+                bail!("tensor at index {} is not on a device", index);
             }
 
             // Register tensor with NIXL for RDMA

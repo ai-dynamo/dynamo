@@ -52,9 +52,10 @@ pub use traits::{
 /// add a `rocm` Cargo feature, gate a `rocm` submodule with the FFI
 /// impl, and extend the inherent methods below. No other crate changes
 /// are required for the backend tag itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum DeviceBackend {
     /// NVIDIA CUDA backend.
+    #[default]
     Cuda,
     /// SYCL backend (Intel XPU via SYCL).
     Sycl,

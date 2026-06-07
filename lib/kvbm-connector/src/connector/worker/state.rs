@@ -211,7 +211,7 @@ impl WorkerState {
             })?;
 
         tracing::info!(
-            cuda_device = pending.cuda_device_id,
+            device_id = pending.device_id,
             host_block_count = config.host_block_count,
             disk_block_count = ?config.disk_block_count,
             "Completing deferred NIXL initialization"

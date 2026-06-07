@@ -153,6 +153,17 @@ impl StorageKind {
         }
     }
 
+    /// Returns the device ID if this is device memory.
+    ///
+    /// This is the backend-agnostic equivalent of `cuda_device_index()`.
+    /// Works for CUDA, SYCL, and any future device backend.
+    pub fn device_id(&self) -> Option<u32> {
+        match self {
+            StorageKind::Device(idx) => Some(*idx),
+            _ => None,
+        }
+    }
+
     /// Returns true if this is CUDA device memory.
     pub fn is_cuda(&self) -> bool {
         matches!(self, StorageKind::Device(_))

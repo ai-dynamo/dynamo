@@ -282,26 +282,33 @@ impl Resources {
 
         let all_gpus = numa::enumerate_all_gpus();
 
+        // Device ordinals by PCI address. Always initialize as empty,
+        // then populate based on available backends.
+        let mut device_ordinals_by_pci: HashMap<String, u32> = HashMap::new();
+
         // Best-effort CUDA init so a fresh process (e.g. the inspection
         // binary) can still see ordinals. Wrapped in catch_unwind because
         // cudarc panics (rather than returning Err) when libcuda.so is
         // absent. A CUDA-less host still produces a useful sysfs snapshot.
-        #[allow(unused_mut)]
-        let mut device_ordinals_by_pci: HashMap<String, u32> = std::panic::catch_unwind(|| {
-            let _ = cudarc::driver::result::init();
-            let mut map = HashMap::new();
-            if let Ok(count) = cudarc::driver::result::device::get_count() {
-                for i in 0..count as u32 {
-                    if let Some(pci) = get_pci_bus_address_from_cuda(i) {
-                        map.insert(pci, i);
+        #[cfg(feature = "cuda")]
+        {
+            #[allow(unused_mut)]
+            let mut device_ordinals_by_pci: HashMap<String, u32> = std::panic::catch_unwind(|| {
+                let _ = cudarc::driver::result::init();
+                let mut map = HashMap::new();
+                if let Ok(count) = cudarc::driver::result::device::get_count() {
+                    for i in 0..count as u32 {
+                        if let Some(pci) = get_pci_bus_address_from_cuda(i) {
+                            map.insert(pci, i);
+                        }
                     }
                 }
-            }
-            map
-        })
-        .unwrap_or_default();
+                map
+            })
+            .unwrap_or_default();
+        }
 
-        // If no CUDA devices were found, try SYCL enumeration.
+        // Try SYCL device enumeration.
         // This populates device_ordinal for Intel GPUs on CUDA-less hosts.
         #[cfg(feature = "xpu-sycl")]
         if device_ordinals_by_pci.is_empty() {

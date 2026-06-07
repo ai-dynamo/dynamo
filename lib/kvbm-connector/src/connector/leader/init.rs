@@ -367,6 +367,7 @@ impl ConnectorLeader {
                     disk_block_count,
                     object: object_config.clone(),
                     parallelism: self.runtime.config().cache.parallelism,
+                    backend: self.runtime.config().backend,
                 };
                 futures.push(worker.initialize(leader_config.clone())?);
             }
