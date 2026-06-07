@@ -108,18 +108,6 @@ def _new_vllm_checkpoint_spec(
     decode.setdefault("experimental", {})["checkpoint"] = {
         "mode": "Auto",
         "targetContainerName": TARGET_CONTAINER,
-        "identity": {
-            "model": VLLM_MODEL,
-            "backendFramework": "vllm",
-            "tensorParallelSize": 1,
-            "pipelineParallelSize": 1,
-            "extraParameters": {
-                "ciTest": name,
-                "enforceEager": "true",
-                "gpuMemoryUtilization": VLLM_GPU_MEMORY_UTILIZATION,
-                "maxModelLen": VLLM_MAX_MODEL_LEN,
-            },
-        },
     }
     return deployment_spec
 
