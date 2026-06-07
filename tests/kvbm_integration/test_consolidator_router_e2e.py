@@ -767,9 +767,19 @@ class TestConsolidatorRouterE2E:
             model_id = os.environ.get("CONSOLIDATOR_MODEL_ID", "Qwen/Qwen3-0.6B")
 
             # Fixed cache tier sizes
+            block_size = 16  # Standard vLLM block size in tokens
             g1_gpu_blocks = 10  # Very small GPU cache to force evictions
             g2_cpu_blocks = 5  # Smaller than GPU but large enough to retain blocks
             g3_disk_blocks = 5  # Smaller than GPU but large enough to retain blocks
+
+            # Since vLLM 0.20.1, an explicit --num-gpu-blocks-override is validated
+            # against the model's max sequence length at engine init: the GPU KV
+            # cache must hold at least one full max_model_len request. With only
+            # g1_gpu_blocks of cache, the default max_model_len (40960) needs far
+            # more KV memory than exists, so EngineCore raises ValueError and the
+            # worker never registers. Cap the sequence limit to the GPU cache
+            # budget (same approach as tests/kvbm_integration/common.py).
+            max_model_len = g1_gpu_blocks * block_size
 
             # Compute optimal test parameters for this configuration
             test_params = compute_deduplication_test_params(
@@ -794,6 +804,10 @@ class TestConsolidatorRouterE2E:
                     "--enable-prefix-caching",
                     "--num-gpu-blocks-override",
                     str(g1_gpu_blocks),
+                    "--block-size",
+                    str(block_size),
+                    "--max-model-len",
+                    str(max_model_len),
                 ]
             else:  # trtllm
                 # Create TensorRT-LLM config file with KVBM connector

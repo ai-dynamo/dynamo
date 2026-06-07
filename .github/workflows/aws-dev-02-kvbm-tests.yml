@@ -24,13 +24,10 @@ jobs:
         include:
           - name: consolidator
             pytest_args: tests/kvbm_integration/test_consolidator_router_e2e.py
-          # Determinism jobs temporarily disabled while we root-cause the
-          # consolidator worker-registration failure (fast ~8min iterations).
-          # Restore before the final run:
-          # - name: determinism-cache-reset
-          #   pytest_args: tests/kvbm_integration/test_determinism_agg.py -m kvbm
-          # - name: determinism-concurrency
-          #   pytest_args: tests/kvbm_integration/test_determinism_agg.py -m kvbm_concurrency
+          - name: determinism-cache-reset
+            pytest_args: tests/kvbm_integration/test_determinism_agg.py -m kvbm
+          - name: determinism-concurrency
+            pytest_args: tests/kvbm_integration/test_determinism_agg.py -m kvbm_concurrency
     name: kvbm-tests (${{ matrix.name }})
     runs-on: aws-dev-02-tester-amd-gpu-v2
     container:
