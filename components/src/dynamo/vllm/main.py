@@ -44,7 +44,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
-from .args import Config, _uses_dynamo_connector, parse_args
+from .args import Config, _uses_dynamo_connector, configure_rl_logprobs_mode, parse_args
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
@@ -115,6 +115,8 @@ async def worker() -> None:
     # or the HF name (e.g. "Qwen/Qwen3-0.6B"), depending on cmd line params.
     if not config.served_model_name:
         config.served_model_name = config.engine_args.served_model_name = config.model
+
+    configure_rl_logprobs_mode(config)
 
     # Download the model if necessary using modelexpress.
     # We want it on disk before we start vllm to avoid downloading from HuggingFace.
