@@ -50,12 +50,19 @@ adjusted_prefill_blocks = max(
     - shared_cache_multiplier * shared_beyond_blocks,
     0,
 )
-cost = prefill_load_scale * adjusted_prefill_blocks + decode_blocks
+active_prefill_contribution = min(active_prefill_blocks, adjusted_prefill_blocks)
+request_prefill_contribution = adjusted_prefill_blocks - active_prefill_contribution
+cost = prefill_load_scale * (
+    request_prefill_contribution
+    + router_load_weight * active_prefill_contribution
+) + router_load_weight * decode_blocks
 ```
 
 Lower costs indicate better routing choices.
 `overlap_score_credit` is the device-local prefix-overlap credit multiplier, from 0.0 to 1.0.
 Higher values favor cache reuse (improving TTFT), while lower values prioritize even load distribution (improving ITL). `prefill_load_scale` controls the weight of the adjusted prompt-side load relative to decode blocks.
+`router_load_weight` controls active prefill and decode load. At `0`, eligible
+workers are ranked only by weighted KV overlap.
 
 ### Active Load Modeling
 

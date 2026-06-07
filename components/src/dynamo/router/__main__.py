@@ -195,6 +195,7 @@ async def worker(runtime: DistributedRuntime):
         f"overlap_score_credit={config.overlap_score_credit}, "
         f"prefill_load_scale={config.prefill_load_scale}, "
         f"router_temperature={config.router_temperature}, "
+        f"router_load_weight={config.router_load_weight}, "
         f"use_kv_events={config.use_kv_events}, "
         f"durable_kv_events={config.durable_kv_events}, "
         f"router_replica_sync={config.router_replica_sync}, "

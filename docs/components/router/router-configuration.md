@@ -11,6 +11,7 @@ This page collects the main router flags for frontend-embedded and standalone de
 
 - `--router-kv-overlap-score-credit`: Device-local prefix-overlap credit multiplier in the prefill cost calculation, from 0.0 to 1.0. Higher values improve Time To First Token (TTFT) at the cost of Inter-Token Latency (ITL). When set to 0, the router ignores prefix caches and skips creating a local indexer. Defaults to 1.
 - `--router-prefill-load-scale`: Scale applied to adjusted prompt-side prefill load after device, lower-tier, and shared-cache credits are subtracted. Defaults to 1.
+- `--router-load-weight`: Scale applied to active prefill and decode load during worker scoring. Set to `0` to rank eligible workers only by weighted KV overlap. Defaults to 1.
 - `--router-host-cache-hit-weight`: Credit multiplier for host-pinned (CPU offload) prefix overlap, from 0.0 to 1.0. Symmetric to `--router-kv-overlap-score-credit` but applied to the host-pinned tier when a backend exposes CPU offload via a KV connector. Defaults to 0.75.
 - `--router-disk-cache-hit-weight`: Credit multiplier for disk/lower-tier (e.g. NVMe-backed) prefix overlap, from 0.0 to 1.0. Defaults to 0.25.
 - `--load-aware`: Preset for load-aware KV routing without cache-reuse signals. On the frontend, it implies `--router-mode kv`. It sets `overlap_score_credit=0`, disables KV events, durable KV events, and KV reuse assumptions, enables active-block and prefill-token load tracking, disables remote/shared cache indexers, and preserves `--router-prefill-load-scale`, `--router-host-cache-hit-weight`, and `--router-disk-cache-hit-weight`.
@@ -123,6 +124,20 @@ Deprecated: `--router-kv-overlap-score-weight`, `--kv-overlap-score-weight`, `DY
 If an older config used overlap score weight above 1.0 to make the router care more about TTFT, keep the overlap credit at or below 1.0 and move that larger value to `--router-prefill-load-scale` instead. `prefill_load_scale` multiplies the overlap-adjusted prompt-side load, so it still implicitly accounts for device, host, disk, and shared-cache credits.
 
 Use `--router-prefill-load-scale` when prompt-side load should count more or less than decode-side block load after cache-hit credits are applied. The final score is `prefill_load_scale * adjusted_prefill_blocks + decode_blocks`.
+
+Use `--router-load-weight 0` when worker selection should ignore active load and
+rank eligible workers only by weighted KV overlap. With
+`--router-temperature 0`, equal-overlap workers use a round-robin tie-break. In
+approximate mode (`--no-router-kv-events`), the selected worker is recorded in
+the approximate index, so later requests with the same cached prefix naturally
+prefer that worker until the prediction expires or another worker has better
+overlap.
+
+This flag changes scoring only. To prevent load from filtering or delaying
+requests outside the score calculation, also use `--admission-control none`
+and `--router-queue-threshold None` on the frontend. Explicit worker pins,
+required routing constraints, and preferred-taint score multipliers remain in
+effect.
 
 Use `--router-host-cache-hit-weight` and `--router-disk-cache-hit-weight` when the backend exposes lower-tier prefix cache via a KV connector (for example, vLLM's `OffloadingConnector` for CPU offload, or a disk-backed tier). These multipliers control how much each lower-tier hit credits against the prefill load, mirroring the role of `--router-kv-overlap-score-credit` for the device tier. A worker holding a full prefix in CPU offload gets `host_cache_hit_weight * matched_blocks` credit against its prefill cost; raising the weight makes the router more willing to route prefix-matched requests to that worker even if a different worker has a partial device-local match.
 

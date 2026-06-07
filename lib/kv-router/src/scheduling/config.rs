@@ -47,6 +47,10 @@ const fn default_prefill_load_scale() -> f64 {
     1.0
 }
 
+const fn default_router_load_weight() -> f64 {
+    1.0
+}
+
 pub const OVERLAP_SCORE_CREDIT_RANGE_ERROR: &str =
     "overlap_score_credit must be between 0.0 and 1.0";
 pub const OVERLAP_SCORE_CREDIT_MIGRATION_ERROR: &str = concat!(
@@ -420,6 +424,7 @@ struct KvRouterConfigSerde {
     host_cache_hit_weight: f64,
     disk_cache_hit_weight: f64,
     router_temperature: f64,
+    router_load_weight: f64,
     use_kv_events: bool,
     durable_kv_events: bool,
     router_replica_sync: bool,
@@ -454,6 +459,7 @@ impl Default for KvRouterConfigSerde {
             host_cache_hit_weight: config.host_cache_hit_weight,
             disk_cache_hit_weight: config.disk_cache_hit_weight,
             router_temperature: config.router_temperature,
+            router_load_weight: config.router_load_weight,
             use_kv_events: config.use_kv_events,
             durable_kv_events: config.durable_kv_events,
             router_replica_sync: config.router_replica_sync,
@@ -504,6 +510,12 @@ pub struct KvRouterConfig {
 
     #[validate(range(min = 0.0))]
     pub router_temperature: f64,
+
+    /// Scale applied to active prefill and decode load during worker scoring.
+    /// Set to 0.0 to rank workers only by KV overlap.
+    #[serde(default = "default_router_load_weight")]
+    #[validate(range(min = 0.0))]
+    pub router_load_weight: f64,
 
     pub use_kv_events: bool,
 
@@ -633,6 +645,7 @@ impl Default for KvRouterConfig {
             host_cache_hit_weight: default_host_cache_hit_weight(),
             disk_cache_hit_weight: default_disk_cache_hit_weight(),
             router_temperature: 0.0,
+            router_load_weight: default_router_load_weight(),
             use_kv_events: true,
             durable_kv_events: false, // default to NATS Core (local indexer mode)
             router_replica_sync: false,
@@ -679,6 +692,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             host_cache_hit_weight: compat.host_cache_hit_weight,
             disk_cache_hit_weight: compat.disk_cache_hit_weight,
             router_temperature: compat.router_temperature,
+            router_load_weight: compat.router_load_weight,
             use_kv_events: compat.use_kv_events,
             durable_kv_events: compat.durable_kv_events,
             router_replica_sync: compat.router_replica_sync,
@@ -908,6 +922,16 @@ mod tests {
     }
 
     #[test]
+    fn test_kv_router_config_rejects_negative_router_load_weight() {
+        let config = KvRouterConfig {
+            router_load_weight: -0.1,
+            ..Default::default()
+        };
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
     fn test_kv_router_config_rejects_local_approx_with_predicted_ttl() {
         let config = KvRouterConfig {
             use_kv_events: false,
@@ -1050,9 +1074,14 @@ mod tests {
         let scale_error = serde_json::from_str::<KvRouterConfig>(r#"{"prefill_load_scale":-0.1}"#)
             .unwrap_err()
             .to_string();
+        let load_weight_error =
+            serde_json::from_str::<KvRouterConfig>(r#"{"router_load_weight":-0.1}"#)
+                .unwrap_err()
+                .to_string();
 
         assert!(credit_error.contains("prefill_load_scale"));
         assert!(scale_error.contains("prefill_load_scale"));
+        assert!(load_weight_error.contains("router_load_weight"));
     }
 
     #[test]

@@ -31,6 +31,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "host_cache_hit_weight",
     "disk_cache_hit_weight",
     "router_temperature",
+    "router_load_weight",
     "use_kv_events",
     "durable_kv_events",
     "router_replica_sync",
@@ -113,6 +114,7 @@ class KvRouterConfigBase(ConfigBase):
     host_cache_hit_weight: float
     disk_cache_hit_weight: float
     router_temperature: float
+    router_load_weight: float
     use_kv_events: bool
     durable_kv_events: bool
     router_replica_sync: bool
@@ -237,6 +239,17 @@ class KvRouterArgGroup(ArgGroup):
             help=(
                 "KV Router: Temperature for normalized worker sampling via softmax. "
                 "Higher values promote more randomness, and 0 falls back to deterministic."
+            ),
+            arg_type=float,
+        )
+        add_argument(
+            g,
+            flag_name="--router-load-weight",
+            env_var="DYN_ROUTER_LOAD_WEIGHT",
+            default=1.0,
+            help=(
+                "KV Router: Scale applied to active prefill and decode load during "
+                "worker scoring. Set to 0 to route only by weighted KV overlap."
             ),
             arg_type=float,
         )
