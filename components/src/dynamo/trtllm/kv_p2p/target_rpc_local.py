@@ -63,6 +63,98 @@ def _ipc_socket_path() -> str:
     return f"/tmp/dynamo_remote_g2_target_{os.getpid()}.sock"
 
 
+_DIRECT_ZMQ_PORT = 18888  # Must match source_rpc_server.py
+_source_ip_cache: dict[int, str] = {}
+
+
+def _discover_source_ip(source_worker_id: int) -> Optional[str]:
+    """Discover the source worker's pod IP via k8s DNS + ZMQ identify.
+
+    All workers bind port 18888, so we can't just take the first
+    reachable IP. Instead, send an ``identify`` request to each
+    candidate and match the returned ``worker_id`` against the
+    desired ``source_worker_id``.
+    """
+    if source_worker_id in _source_ip_cache:
+        return _source_ip_cache[source_worker_id]
+
+    import pickle
+    import socket
+    try:
+        import zmq
+    except ImportError:
+        return None
+
+    try:
+        infos = socket.getaddrinfo(
+            "kv-p2p-test-trtllmworker", None,
+            socket.AF_INET, socket.SOCK_STREAM,
+        )
+    except Exception:
+        return None
+
+    seen_ips: set[str] = set()
+    for info in infos:
+        ip = info[4][0]
+        if ip in seen_ips:
+            continue
+        seen_ips.add(ip)
+        addr = f"tcp://{ip}:{_DIRECT_ZMQ_PORT}"
+        ctx = zmq.Context.instance()
+        req = ctx.socket(zmq.REQ)
+        req.RCVTIMEO = 2000
+        req.SNDTIMEO = 2000
+        try:
+            req.connect(addr)
+            req.send(pickle.dumps({"method": "identify"}))
+            raw = req.recv()
+            resp = pickle.loads(raw)
+            remote_wid = resp.get("worker_id", "")
+            if str(remote_wid) == str(source_worker_id):
+                _source_ip_cache[source_worker_id] = ip
+                return ip
+        except Exception:
+            logging.debug(
+                "remote_g2: identify probe to %s failed", addr,
+            )
+        finally:
+            req.close()
+
+    logging.warning(
+        "remote_g2: _discover_source_ip found no match for "
+        "worker_id=%s among %s",
+        source_worker_id, seen_ips,
+    )
+    return None
+
+
+def _zmq_direct_resolve(source_ip: str, payload: dict) -> Optional[dict]:
+    """Direct ZMQ REQ/REP to the source worker's direct TCP port.
+    Bypasses dynamo's client.direct() response stream entirely.
+    """
+    import pickle
+    import zmq
+
+    addr = f"tcp://{source_ip}:{_DIRECT_ZMQ_PORT}"
+    ctx = zmq.Context.instance()
+    req = ctx.socket(zmq.REQ)
+    req.RCVTIMEO = 10000
+    req.SNDTIMEO = 10000
+    try:
+        req.connect(addr)
+        req.send(pickle.dumps({
+            "method": "resolve_and_lease",
+            "payload": payload,
+        }))
+        raw = req.recv()
+        return pickle.loads(raw)
+    except Exception:
+        logging.exception("remote_g2: direct ZMQ resolve to %s failed", addr)
+        return None
+    finally:
+        req.close()
+
+
 def _dispatch_resolve(
     client: _TargetRpcClient,
     payload: dict,
@@ -70,7 +162,7 @@ def _dispatch_resolve(
     lease_map: _LeaseSourceMap,
     timeout_s: float,
 ) -> dict:
-    """Run the async resolve coroutine on the parent's loop and wait.
+    """Resolve via direct ZMQ TCP, falling back to dynamo client.direct().
 
     Returns the standard ``{"ok": ..., "result": ..., "error": ...}`` shape.
     """
@@ -84,6 +176,24 @@ def _dispatch_resolve(
     except (TypeError, ValueError):
         return {"ok": False, "error": f"invalid source_worker_id: {source_worker_id!r}"}
 
+    # Try direct ZMQ TCP first (bypasses dynamo response stream).
+    source_ip = _discover_source_ip(source_worker_id)
+    if source_ip:
+        response = _zmq_direct_resolve(source_ip, {"plan": plan})
+        if response is not None:
+            # Success — process lease mapping and return.
+            if isinstance(response, dict) and response.get("ok"):
+                inner = response.get("result")
+                if isinstance(inner, dict):
+                    lease_id = inner.get("lease_id")
+                    if lease_id:
+                        lease_map.put(str(lease_id), source_worker_id)
+            return response
+        logging.warning(
+            "remote_g2: direct ZMQ resolve failed, falling back to client.direct()"
+        )
+
+    # Fallback: dynamo client.direct() (works with TP=1).
     coro = client.resolve_and_lease(plan, source_worker_id)
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     try:
@@ -104,23 +214,6 @@ def _dispatch_resolve(
     lease_id = inner.get("lease_id")
     if lease_id:
         lease_map.put(str(lease_id), source_worker_id)
-    # PROBE: dump the resolved descriptors so we can verify the source-side
-    # registry actually returned matching blocks. Trim each descriptor for log readability.
-    descs = inner.get("descriptors") or []
-    pbs = inner.get("per_block_status") or []
-    logging.warning(
-        "PROBE rpc_chain resolve_response lease_id=%s num_tokens=%s reason=%s source_generation=%s "
-        "descriptors_count=%d per_block_status_count=%d  descriptors_head=%s",
-        lease_id,
-        inner.get("num_tokens"),
-        inner.get("reason"),
-        inner.get("source_generation"),
-        len(descs),
-        len(pbs),
-        [{k: d.get(k) for k in ("block_hash", "descriptor_generation",
-                                "pool_id", "byte_offset", "byte_length")}
-         for d in descs[:3]],
-    )
     return response
 
 
@@ -199,23 +292,13 @@ def _dispatch_release(
     return {"ok": True, "result": completed}
 
 
-def setup_target_rpc_local(
-    runtime: Any,
-    namespace: str,
-    component: str,
-    *,
-    timeout_s: float = 30.0,
-) -> Optional[dict]:
-    """Bind the parent's ZMQ REP socket and start the dispatch loop.
-
-    Returns a handle dict (kept alive by the caller) on success, or
-    ``None`` on bind failure. The dispatch loop runs in a daemon thread;
-    it uses ``asyncio.run_coroutine_threadsafe`` to dispatch into the
-    parent's running event loop, where the dynamo client lives.
+def bind_target_rpc_socket() -> Optional[Any]:
+    """Phase 1: Bind the ZMQ REP socket early so the engine subprocess
+    can find it during register_kv_caches. Returns the socket on success,
+    None on failure. Call start_target_rpc_dispatch() later to start the
+    dispatch loop.
     """
     import zmq
-
-    from .target_rpc_client import build_target_rpc_client
 
     socket_path = _ipc_socket_path()
     try:
@@ -232,6 +315,26 @@ def setup_target_rpc_local(
             "remote_g2: target REP bind failed at %s", socket_path
         )
         return None
+
+    logging.warning(
+        "remote_g2: target REP bound at %s (phase 1 — dispatch loop pending)",
+        socket_path,
+    )
+    return rep
+
+
+def start_target_rpc_dispatch(
+    rep: Any,
+    runtime: Any,
+    namespace: str,
+    component: str,
+    *,
+    timeout_s: float = 30.0,
+) -> dict:
+    """Phase 2: Start the dispatch loop. Call AFTER the engine is fully
+    initialized so the event loop and runtime are stable for client.direct().
+    """
+    from .target_rpc_client import build_target_rpc_client
 
     client = build_target_rpc_client(runtime, namespace, component)
     lease_map = _LeaseSourceMap()
@@ -252,13 +355,6 @@ def setup_target_rpc_local(
                 req = pickle.loads(raw)
                 method = req.get("method") if isinstance(req, dict) else None
                 payload = (req.get("payload") or {}) if isinstance(req, dict) else {}
-                logging.warning(
-                    "PROBE rpc_chain target_rep_recv pid=%d method=%s "
-                    "payload_keys=%s",
-                    os.getpid(),
-                    method,
-                    list(payload.keys()) if isinstance(payload, dict) else None,
-                )
                 if method == "resolve":
                     response = _dispatch_resolve(
                         client, payload, loop, lease_map, timeout_s
@@ -309,16 +405,36 @@ def setup_target_rpc_local(
     thread.start()
 
     logging.warning(
-        "remote_g2: target REP bound at %s (namespace=%s component=%s)",
-        socket_path,
+        "remote_g2: target dispatch started (namespace=%s component=%s)",
         namespace,
         component,
     )
 
     return {
-        "socket_path": socket_path,
+        "socket_path": _ipc_socket_path(),
         "client": client,
         "lease_map": lease_map,
         "thread": thread,
         "rep": rep,
     }
+
+
+def setup_target_rpc_local(
+    runtime: Any,
+    namespace: str,
+    component: str,
+    *,
+    timeout_s: float = 30.0,
+) -> Optional[dict]:
+    """Bind the parent's ZMQ REP socket and start the dispatch loop.
+
+    Backward-compatible wrapper that calls both phases. For TP>1,
+    prefer calling bind_target_rpc_socket() early and
+    start_target_rpc_dispatch() after the engine is up.
+    """
+    rep = bind_target_rpc_socket()
+    if rep is None:
+        return None
+    return start_target_rpc_dispatch(
+        rep, runtime, namespace, component, timeout_s=timeout_s
+    )

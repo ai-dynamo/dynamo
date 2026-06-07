@@ -145,47 +145,41 @@ class _TargetRpcClient:
             return None
         return None
 
+    _DIRECT_ZMQ_PORT = 18888  # Must match source_rpc_server.py
+
     async def resolve_and_lease(
         self, plan: dict, source_worker_id: int
     ) -> Optional[dict]:
-        """Call the source worker's resolve endpoint. Returns the response
-        dict (whose ``ok`` field indicates success). Returns ``None`` on
-        transport-level failure (caller should treat as plan rejected and
-        fall back to local recompute).
+        """Call the source worker's resolve endpoint.
+
+        Uses direct ZMQ TCP (port 18888) to bypass dynamo's client.direct()
+        response stream which fails with TP>1. Discovers the source pod IP
+        from dynamo's k8s endpoint discovery. Falls back to client.direct()
+        if direct ZMQ fails.
         """
+        payload = {"plan": plan}
+
+        # Try direct ZMQ TCP first.
+        source_ip = await self._discover_source_ip(source_worker_id)
+        if source_ip:
+            direct_addr = f"{source_ip}:{self._DIRECT_ZMQ_PORT}"
+            try:
+                response = self._zmq_direct_call(
+                    direct_addr, "resolve_and_lease", payload,
+                )
+                return response
+            except Exception:
+                logging.exception(
+                    "remote_g2: direct ZMQ resolve to %s failed, "
+                    "falling back to client.direct()",
+                    direct_addr,
+                )
+
+        # Fallback: dynamo client.direct() (works with TP=1).
         try:
             client = await self._resolve_endpoint_client()
-        except Exception:
-            logging.exception(
-                "remote_g2: failed to obtain resolve endpoint client"
-            )
-            return None
-
-        payload = {"plan": plan}
-        try:
-            # PROBE: enumerate which instance_ids dynamo discovery sees
-            # for this endpoint so we can compare against the plan's
-            # source_worker_id.
-            try:
-                ids = list(client.instance_ids())
-            except Exception:
-                ids = ["<query_failed>"]
-            logging.warning(
-                "PROBE rpc_chain target_client_direct instance_id=%s endpoint=remote-g2-resolve known_ids=%s",
-                source_worker_id,
-                ids,
-            )
-            # client.direct(...) returns a Future that resolves to the
-            # response stream — await it to get the async iterator.
             stream = await client.direct(payload, instance_id=source_worker_id)
             async for response in stream:
-                # Unary RPC — the source endpoint yields exactly once.
-                # Dynamo wraps yielded values in an `Annotated` object
-                # (Rust-side container, not picklable). Unwrap to the
-                # plain dict the source endpoint actually yielded.
-                # Unwrap dynamo's Annotated wrapper. `.data` is a method
-                # on the Rust-side object, not an attribute — call it to
-                # get the plain Python dict the source endpoint yielded.
                 if hasattr(response, "data") and callable(response.data):
                     response = response.data()
                 return response
@@ -195,6 +189,87 @@ class _TargetRpcClient:
                 source_worker_id,
             )
             return None
+
+    async def _discover_source_ip(self, source_worker_id: int) -> Optional[str]:
+        """Discover the source worker's pod IP via ZMQ identify.
+
+        All workers bind port 18888, so probe each candidate IP with
+        an ``identify`` call and match the returned ``worker_id``.
+        """
+        # Try dynamo discovery first (endpoint_addresses).
+        try:
+            client = await self._resolve_endpoint_client()
+            try:
+                endpoints = client.endpoint_addresses()
+                if isinstance(endpoints, dict):
+                    addr = endpoints.get(source_worker_id)
+                    if addr and ":" in str(addr):
+                        return str(addr).split(":")[0]
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # Fallback: DNS + ZMQ identify probe.
+        import pickle
+        import socket
+        try:
+            import zmq
+        except ImportError:
+            return None
+
+        try:
+            infos = socket.getaddrinfo(
+                "kv-p2p-test-trtllmworker", None,
+                socket.AF_INET, socket.SOCK_STREAM,
+            )
+        except Exception:
+            return None
+
+        seen_ips: set[str] = set()
+        for info in infos:
+            ip = info[4][0]
+            if ip in seen_ips:
+                continue
+            seen_ips.add(ip)
+            zmq_addr = f"tcp://{ip}:{self._DIRECT_ZMQ_PORT}"
+            ctx = zmq.Context.instance()
+            req = ctx.socket(zmq.REQ)
+            req.RCVTIMEO = 2000
+            req.SNDTIMEO = 2000
+            try:
+                req.connect(zmq_addr)
+                req.send(pickle.dumps({"method": "identify"}))
+                raw = req.recv()
+                resp = pickle.loads(raw)
+                remote_wid = resp.get("worker_id", "")
+                if str(remote_wid) == str(source_worker_id):
+                    return ip
+            except Exception:
+                pass
+            finally:
+                req.close()
+        return None
+
+    @staticmethod
+    def _zmq_direct_call(
+        addr: str, method: str, payload: dict, timeout_ms: int = 10000,
+    ) -> dict:
+        """Blocking ZMQ REQ/REP call to a source worker's direct TCP port."""
+        import pickle
+        import zmq
+
+        ctx = zmq.Context.instance()
+        req = ctx.socket(zmq.REQ)
+        req.RCVTIMEO = timeout_ms
+        req.SNDTIMEO = timeout_ms
+        try:
+            req.connect(f"tcp://{addr}")
+            req.send(pickle.dumps({"method": method, "payload": payload}))
+            raw = req.recv()
+            return pickle.loads(raw)
+        finally:
+            req.close()
         # Empty stream — endpoint closed without yielding anything.
         return None
 

@@ -1054,11 +1054,6 @@ class Publisher:
         """
         if not block_hashes:
             return
-        import logging as _lg
-        _lg.getLogger(__name__).warning(
-            'PROBE dispatch_stored: tier=%s parent=%s hashes=%s ntok=%s',
-            storage_tier, parent_hash, block_hashes, num_block_tokens,
-        )
         if self.zmq_kv_event_publisher:
             if storage_tier != "device":
                 logging.warning(
@@ -1102,11 +1097,6 @@ class Publisher:
     ) -> None:
         if not block_hashes:
             return
-        import logging as _lg
-        _lg.getLogger(__name__).warning(
-            'PROBE dispatch_removed: tier=%s hashes=%s',
-            storage_tier, block_hashes,
-        )
         if self.zmq_kv_event_publisher:
             if storage_tier != "device":
                 logging.warning(

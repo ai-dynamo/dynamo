@@ -77,11 +77,13 @@ def _make_resolve_handler(req_wrapper: _ZmqReqWrapper):
         if plan is None:
             yield {"ok": False, "error": "missing 'plan' in request"}
             return
-        loop = asyncio.get_running_loop()
+
+        # Call the engine's ZMQ REP directly (blocking, ~5-10ms).
+        # run_in_executor breaks the dynamo response stream with TP>1
+        # because the await suspends the generator and the push_handler
+        # invalidates the stream before the executor returns.
         try:
-            response = await loop.run_in_executor(
-                None, req_wrapper.request, "resolve_and_lease", {"plan": plan}
-            )
+            response = req_wrapper.request("resolve_and_lease", {"plan": plan})
         except Exception as exc:
             logging.exception("remote_g2: resolve_and_lease RPC raised")
             yield {"ok": False, "error": repr(exc)}
@@ -158,8 +160,16 @@ def _make_metadata_handler(req_wrapper: _ZmqReqWrapper):
 def _ipc_socket_path() -> str:
     """The Unix-domain-socket path the engine subprocess's REP service
     binds to. Keyed by the dynamo parent's PID so multiple workers on
-    one host don't collide."""
-    return f"/tmp/dynamo_remote_g2_ipc_{os.getpid()}.sock"
+    one host don't collide.
+
+    With TP>1, rank 0's socket is at _tp0.sock. Try that first, fall
+    back to the TP=1 path for backward compatibility.
+    """
+    pid = os.getpid()
+    tp0_path = f"/tmp/dynamo_remote_g2_ipc_{pid}_tp0.sock"
+    if os.path.exists(tp0_path):
+        return tp0_path
+    return f"/tmp/dynamo_remote_g2_ipc_{pid}.sock"
 
 
 def _wait_for_socket(path: str, timeout_s: float = 30.0) -> bool:
@@ -213,6 +223,68 @@ async def setup_source_rpc_endpoints(
     )
     _metadata_task = asyncio.ensure_future(
         metadata_ep.serve_endpoint(_make_metadata_handler(req_wrapper))
+    )
+
+    # Direct ZMQ TCP REP for resolve — bypasses dynamo's client.direct()
+    # response stream which fails with TP>1. The target connects directly
+    # to this port via ZMQ REQ/REP (reliable, no response stream issues).
+    # Wire format: same as the IPC socket (pickle request/response).
+    import zmq as _zmq
+    _direct_ctx = _zmq.Context.instance()
+    _direct_rep = _direct_ctx.socket(_zmq.REP)
+    _DIRECT_ZMQ_PORT = 18888
+    _direct_rep.bind(f"tcp://0.0.0.0:{_DIRECT_ZMQ_PORT}")
+    _direct_port = _DIRECT_ZMQ_PORT
+
+    # Read our own worker_id so the "identify" method can report it.
+    _my_worker_id = os.environ.get("DYNAMO_REMOTE_G2_WORKER_ID", "")
+
+    def _direct_loop():
+        while True:
+            try:
+                raw = _direct_rep.recv()
+            except Exception:
+                logging.exception("remote_g2: direct TCP REP recv failed")
+                return
+            try:
+                req = pickle.loads(raw)
+                method = req.get("method") if isinstance(req, dict) else None
+                payload = (req.get("payload") or {}) if isinstance(req, dict) else {}
+                if method == "identify":
+                    # Lightweight probe: return our worker_id so the target
+                    # can match IPs to worker identities.
+                    response = {"ok": True, "worker_id": _my_worker_id}
+                elif method == "resolve_and_lease":
+                    response = req_wrapper.request("resolve_and_lease", payload)
+                elif method == "release_lease":
+                    response = req_wrapper.request("release_lease", payload)
+                elif method == "get_metadata":
+                    response = req_wrapper.request("get_metadata", payload)
+                else:
+                    response = {"ok": False, "error": f"unknown method: {method!r}"}
+            except Exception as exc:
+                logging.exception("remote_g2: direct TCP REP handler raised")
+                response = {"ok": False, "error": repr(exc)}
+            try:
+                _direct_rep.send(pickle.dumps(response))
+            except Exception:
+                logging.exception("remote_g2: direct TCP REP send failed")
+
+    _direct_thread = threading.Thread(
+        target=_direct_loop, name="remote_g2_direct_tcp", daemon=True
+    )
+    _direct_thread.start()
+
+    # Write the direct TCP address + worker_id to a well-known file.
+    import socket as _socket
+    _my_ip = _socket.gethostbyname(_socket.gethostname())
+    _direct_addr = f"{_my_ip}:{_direct_port}"
+    _direct_addr_file = f"/tmp/dynamo_remote_g2_direct_{os.getpid()}.addr"
+    with open(_direct_addr_file, "w") as f:
+        f.write(_direct_addr)
+    logging.warning(
+        "remote_g2: direct TCP REP bound at %s worker_id=%s (file=%s)",
+        _direct_addr, _my_worker_id, _direct_addr_file,
     )
 
     logging.warning(

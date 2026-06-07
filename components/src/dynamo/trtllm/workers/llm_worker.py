@@ -496,13 +496,6 @@ async def init_llm_worker(
                 f.write(worker_id)
         except Exception:
             logging.exception("remote_g2: failed to write worker_id sidecar file")
-        logging.warning(
-            "PROBE remote_g2 dynamo-side env vars set: "
-            "DYNAMO_REMOTE_G2_WORKER_ID=%s DYNAMO_REMOTE_G2_DP_RANK=0 "
-            "sidecar=%s",
-            worker_id,
-            worker_id_path,
-        )
 
     # Bind the target-side REP socket BEFORE engine subprocess startup.
     # The engine subprocess calls maybe_start_remote_g2_target_client
@@ -510,15 +503,19 @@ async def init_llm_worker(
     # later (e.g. inside get_publisher) the engine times out before the
     # socket appears. The bind itself is synchronous and only needs the
     # dynamo runtime, so it's safe here.
+    # Phase 1: Bind the ZMQ REP socket early so the engine subprocess
+    # can find it during register_kv_caches. The dispatch loop (which
+    # uses client.direct() for cross-worker RPCs) starts later in phase 2
+    # after the engine is fully initialized — this fixes TP>1 where
+    # client.direct() response streams fail if started too early.
+    _remote_g2_target_rep = None
     _remote_g2_target_handle = None
     if config.has_connector("remote_g2"):
         from dynamo.trtllm.kv_p2p.target_rpc_local import (
-            setup_target_rpc_local,
+            bind_target_rpc_socket,
         )
 
-        _remote_g2_target_handle = setup_target_rpc_local(
-            runtime, config.namespace, config.component
-        )
+        _remote_g2_target_rep = bind_target_rpc_socket()
 
     async with get_llm_engine(
         engine_args,
@@ -765,13 +762,25 @@ async def init_llm_worker(
                     )
 
                     # Source REP socket is bound by the engine subprocess;
-                    # the parent's REQ side waits for it to appear. The
-                    # target REP bind was already done before get_llm_engine
-                    # (see _remote_g2_target_handle above) — we keep that
-                    # reference alive but don't re-bind here.
+                    # the parent's REQ side waits for it to appear.
                     _remote_g2_rpc_handle = await setup_source_rpc_endpoints(
                         runtime, config.namespace, config.component
                     )
+
+                    # Phase 2: Start the target dispatch loop now that the
+                    # engine is up and the event loop is stable. The ZMQ REP
+                    # socket was bound in phase 1 (before get_llm_engine).
+                    if _remote_g2_target_rep is not None:
+                        from dynamo.trtllm.kv_p2p.target_rpc_local import (
+                            start_target_rpc_dispatch,
+                        )
+
+                        _remote_g2_target_handle = start_target_rpc_dispatch(
+                            _remote_g2_target_rep,
+                            runtime,
+                            config.namespace,
+                            config.component,
+                        )
 
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
                 if config.load_format == "gms":
