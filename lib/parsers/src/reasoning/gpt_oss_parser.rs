@@ -1029,7 +1029,10 @@ mod tests {
         );
         let call_pos = normal_text.find("<|call|>").unwrap();
         let done_pos = normal_text.find("done").unwrap();
-        assert!(call_pos < done_pos, "tool call must precede final text in output");
+        assert!(
+            call_pos < done_pos,
+            "tool call must precede final text in output"
+        );
     }
 
     /// Two directed tool calls arriving in a single chunk.  The original code had
