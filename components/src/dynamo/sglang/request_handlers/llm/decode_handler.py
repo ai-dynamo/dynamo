@@ -35,6 +35,7 @@ _TOP_LOGPROBS_UNSUPPORTED_MSG = (
 )
 
 _REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY = "remote_kv_reuse_plan"
+_REMOTE_KV_REUSE_SOURCE_ROUTE_EXTRA_ARGS_KEY = "remote_kv_reuse_source_route"
 _REMOTE_KV_REUSE_NO_PLAN_REASON_EXTRA_ARGS_KEY = "remote_kv_reuse_no_plan_reason"
 _SHARED_HICACHE_TP_SIZE_ENV = "DYN_SHARED_HICACHE_TP_SIZE"
 _SHARED_HICACHE_SOURCE_MEDIUM = "CPU_PINNED"
@@ -98,12 +99,7 @@ def _user_stop_token_ids(request: Dict[str, Any]) -> set[int]:
     }
 
 
-def _extract_remote_kv_reuse_plan(
-    request: Dict[str, Any], extra_args: Any
-) -> Optional[Dict[str, Any]]:
-    plan = request.get(_REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY)
-    if isinstance(plan, dict):
-        return _to_shared_hicache_plan(plan)
+def _extract_remote_kv_reuse_plan(extra_args: Any) -> Optional[Dict[str, Any]]:
     if isinstance(extra_args, dict):
         plan = extra_args.get(_REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY)
         if isinstance(plan, dict):
@@ -115,6 +111,8 @@ def _to_shared_hicache_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     shared_plan = dict(plan)
     shared_plan["source_medium"] = _SHARED_HICACHE_SOURCE_MEDIUM
     shared_plan.pop("source_tier", None)
+    shared_plan.pop("source_host", None)
+    shared_plan.pop("source_bootstrap_port", None)
     shared_plan["target_worker_id"] = str(shared_plan["target_worker_id"])
     shared_plan["source_worker_id"] = str(shared_plan["source_worker_id"])
     tp_size = int(os.environ.get(_SHARED_HICACHE_TP_SIZE_ENV, "1"))
@@ -122,6 +120,31 @@ def _to_shared_hicache_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     shared_plan.setdefault("target_tp_size", tp_size)
 
     return shared_plan
+
+
+def _extract_remote_kv_reuse_source_route(extra_args: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(extra_args, dict):
+        route = extra_args.get(_REMOTE_KV_REUSE_SOURCE_ROUTE_EXTRA_ARGS_KEY)
+        if isinstance(route, dict):
+            return route
+    return None
+
+
+def _to_shared_hicache_source_routes(
+    source_route: Dict[str, Any], plan: Dict[str, Any]
+) -> list[Dict[str, Any]]:
+    worker_id = str(source_route.get("source_worker_id", plan["source_worker_id"]))
+    host = str(source_route["source_host"]).strip()
+    base_port = int(source_route["source_bootstrap_port"])
+    source_tp_size = int(plan.get("source_tp_size", 1))
+    return [
+        {
+            "source_worker_id": worker_id,
+            "source_tp_rank": tp_rank,
+            "endpoint": f"tcp://{host}:{base_port + tp_rank}",
+        }
+        for tp_rank in range(source_tp_size)
+    ]
 
 
 def _openai_stop_sampling_params(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -454,20 +477,34 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         priority = (request.get("routing") or {}).get("priority")
         logprob_kwargs = self._build_logprob_kwargs(request)
         extra_args = request.get("extra_args")
-        remote_kv_reuse_plan = _extract_remote_kv_reuse_plan(request, extra_args)
+        remote_kv_reuse_plan = _extract_remote_kv_reuse_plan(extra_args)
+        remote_kv_reuse_source_route = _extract_remote_kv_reuse_source_route(
+            extra_args
+        )
+        shared_hicache_source_routes = (
+            _to_shared_hicache_source_routes(
+                remote_kv_reuse_source_route, remote_kv_reuse_plan
+            )
+            if remote_kv_reuse_plan is not None
+            and remote_kv_reuse_source_route is not None
+            else None
+        )
         cache_hints = (
             {"shared_hicache": remote_kv_reuse_plan}
-            if remote_kv_reuse_plan is not None
+            if shared_hicache_source_routes is not None
             else None
+        )
+        shared_hicache_route_kwargs = filter_supported_async_generate_kwargs(
+            self.engine,
+            {"shared_hicache_source_routes": shared_hicache_source_routes},
         )
         if remote_kv_reuse_plan is not None:
             logging.debug(
                 "Forwarding router remote_kv_reuse_plan as SGLang cache_hints.shared_hicache: "
-                "plan_id=%s source_worker_id=%s source_host=%s source_bootstrap_port=%s extra_arg_keys=%s",
+                "plan_id=%s source_worker_id=%s source_route_present=%s extra_arg_keys=%s",
                 remote_kv_reuse_plan.get("plan_id"),
                 remote_kv_reuse_plan.get("source_worker_id"),
-                remote_kv_reuse_plan.get("source_host"),
-                remote_kv_reuse_plan.get("source_bootstrap_port"),
+                remote_kv_reuse_source_route is not None,
                 sorted(extra_args.keys()) if isinstance(extra_args, dict) else None,
             )
         elif isinstance(extra_args, dict) and (
@@ -523,6 +560,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
                 cache_hints=cache_hints,
+                **shared_hicache_route_kwargs,
                 **self._session_kwargs(request),
                 lora_path=lora_path,
                 **logprob_kwargs,
@@ -569,6 +607,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
                 cache_hints=cache_hints,
+                **shared_hicache_route_kwargs,
                 **self._session_kwargs(request),
                 lora_path=lora_path,
                 **logprob_kwargs,

@@ -662,7 +662,7 @@ impl RouterRequestMetrics {
 
     pub fn observe_remote_g2_decision(&self, decision: &RemoteKvReuseDecision, block_size: u32) {
         match decision {
-            RemoteKvReuseDecision::Plan { plan, stats } => {
+            RemoteKvReuseDecision::Plan { plan, stats, .. } => {
                 self.remote_g2_plans_total.inc();
                 let block_size_tokens = if plan.block_size_tokens == 0 {
                     block_size

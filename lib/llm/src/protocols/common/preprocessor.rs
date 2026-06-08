@@ -10,7 +10,8 @@ use dynamo_kv_router::{
     protocols::{BlockExtraInfo, WorkerId},
     remote_g2_plan::{
         REMOTE_KV_REUSE_NO_PLAN_REASON_EXTRA_ARGS_KEY, REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY,
-        RemoteKvReuseNoPlanReason, RemoteKvReusePlan,
+        REMOTE_KV_REUSE_SOURCE_ROUTE_EXTRA_ARGS_KEY, RemoteKvReuseNoPlanReason, RemoteKvReusePlan,
+        RemoteKvReuseSourceRoute,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -263,11 +264,20 @@ impl PreprocessedRequest {
     pub fn attach_remote_kv_reuse_plan(
         &mut self,
         plan: &RemoteKvReusePlan,
+        source_route: Option<&RemoteKvReuseSourceRoute>,
     ) -> serde_json::Result<()> {
         let plan_value = serde_json::to_value(plan)?;
         let mut map = extra_args_object(self.extra_args.take());
         map.remove(REMOTE_KV_REUSE_NO_PLAN_REASON_EXTRA_ARGS_KEY);
         map.insert(REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY.to_string(), plan_value);
+        if let Some(source_route) = source_route {
+            map.insert(
+                REMOTE_KV_REUSE_SOURCE_ROUTE_EXTRA_ARGS_KEY.to_string(),
+                serde_json::to_value(source_route)?,
+            );
+        } else {
+            map.remove(REMOTE_KV_REUSE_SOURCE_ROUTE_EXTRA_ARGS_KEY);
+        }
         self.extra_args = Some(serde_json::Value::Object(map));
         Ok(())
     }
@@ -279,6 +289,7 @@ impl PreprocessedRequest {
         let reason_value = serde_json::to_value(reason)?;
         let mut map = extra_args_object(self.extra_args.take());
         map.remove(REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY);
+        map.remove(REMOTE_KV_REUSE_SOURCE_ROUTE_EXTRA_ARGS_KEY);
         map.insert(
             REMOTE_KV_REUSE_NO_PLAN_REASON_EXTRA_ARGS_KEY.to_string(),
             reason_value,
@@ -340,7 +351,8 @@ mod tests {
         protocols::{LocalBlockHash, StorageTier},
         remote_g2_plan::{
             REMOTE_KV_REUSE_NO_PLAN_REASON_EXTRA_ARGS_KEY, REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY,
-            REMOTE_KV_REUSE_PLAN_VERSION, RemoteKvReuseNoPlanReason, RemoteKvReusePlan,
+            REMOTE_KV_REUSE_PLAN_VERSION, REMOTE_KV_REUSE_SOURCE_ROUTE_EXTRA_ARGS_KEY,
+            RemoteKvReuseNoPlanReason, RemoteKvReusePlan, RemoteKvReuseSourceRoute,
         },
     };
     use serde_json::json;
@@ -367,8 +379,6 @@ mod tests {
             target_dp_rank: 2,
             source_worker_id: 7,
             source_dp_rank: 0,
-            source_host: "10.0.0.7".to_string(),
-            source_bootstrap_port: 41000,
             source_tier: StorageTier::HostPinned,
             router_block_hashes: vec![LocalBlockHash(11), LocalBlockHash(22)],
             start_block_index: 0,
@@ -381,10 +391,20 @@ mod tests {
         }
     }
 
+    fn test_source_route() -> RemoteKvReuseSourceRoute {
+        RemoteKvReuseSourceRoute {
+            source_worker_id: 7,
+            source_host: "10.0.0.7".to_string(),
+            source_bootstrap_port: 41000,
+        }
+    }
+
     #[test]
     fn extra_args_preserves_existing_keys_when_attaching_remote_plan() {
         let mut request = test_request();
-        request.attach_remote_kv_reuse_plan(&test_plan()).unwrap();
+        request
+            .attach_remote_kv_reuse_plan(&test_plan(), Some(&test_source_route()))
+            .unwrap();
 
         let extra_args = request.extra_args.unwrap();
         assert_eq!(extra_args["existing_key"], "existing_value");
@@ -393,12 +413,17 @@ mod tests {
             "host_pinned"
         );
         assert_eq!(
-            extra_args[REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY]["source_host"],
+            extra_args[REMOTE_KV_REUSE_SOURCE_ROUTE_EXTRA_ARGS_KEY]["source_host"],
             "10.0.0.7"
         );
         assert_eq!(
-            extra_args[REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY]["source_bootstrap_port"],
+            extra_args[REMOTE_KV_REUSE_SOURCE_ROUTE_EXTRA_ARGS_KEY]["source_bootstrap_port"],
             41000
+        );
+        assert!(
+            extra_args[REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY]
+                .get("source_host")
+                .is_none()
         );
     }
 

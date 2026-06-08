@@ -21,7 +21,7 @@ use dynamo_kv_router::{
     },
     remote_g2_plan::{
         RemoteKvReuseDecision, RemoteKvReuseNoPlanReason, RemoteKvReuseSelectionInput,
-        RemoteKvReuseSelectionStats, select_remote_g2_reuse_plan,
+        RemoteKvReuseSelectionStats, RemoteKvReuseSourceRoute, select_remote_g2_reuse_plan,
     },
     scheduling::TierOverlapBlocks,
 };
@@ -183,8 +183,18 @@ pub(crate) fn attach_remote_kv_reuse_decision(
     decision: &RemoteKvReuseDecision,
 ) -> serde_json::Result<()> {
     match decision {
-        RemoteKvReuseDecision::Plan { plan, .. } => {
-            if request.attach_remote_kv_reuse_plan(plan).is_ok() {
+        RemoteKvReuseDecision::Plan {
+            plan, source_route, ..
+        } => {
+            if source_route.is_none() {
+                return request.attach_remote_kv_reuse_no_plan_reason(
+                    RemoteKvReuseNoPlanReason::NoSourceBootstrapEndpoint,
+                );
+            }
+            if request
+                .attach_remote_kv_reuse_plan(plan, source_route.as_ref())
+                .is_ok()
+            {
                 return Ok(());
             }
             request.attach_remote_kv_reuse_no_plan_reason(
@@ -695,6 +705,7 @@ where
         // or demote to NoPlan if the chain is empty entirely.
         if let RemoteKvReuseDecision::Plan {
             plan,
+            source_route,
             stats: plan_stats,
         } = &mut remote_kv_reuse
         {
@@ -703,8 +714,11 @@ where
                 plan.source_dp_rank,
             );
             if let Some(route) = self.shared_hicache_source_route(plan.source_worker_id) {
-                plan.source_host = route.source_host;
-                plan.source_bootstrap_port = route.source_bootstrap_port;
+                *source_route = Some(RemoteKvReuseSourceRoute {
+                    source_worker_id: plan.source_worker_id,
+                    source_host: route.source_host,
+                    source_bootstrap_port: route.source_bootstrap_port,
+                });
 
                 let start = plan.start_block_index as usize;
                 let end = start + plan.planned_prefix_blocks as usize;
@@ -1153,8 +1167,9 @@ mod tests {
         protocols::{LocalBlockHash, OverlapScores, StorageTier},
         remote_g2_plan::{
             REMOTE_KV_REUSE_NO_PLAN_REASON_EXTRA_ARGS_KEY, REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY,
-            REMOTE_KV_REUSE_PLAN_VERSION, RemoteKvReuseNoPlanReason, RemoteKvReusePlan,
-            RemoteKvReuseSelectionStats,
+            REMOTE_KV_REUSE_PLAN_VERSION, REMOTE_KV_REUSE_SOURCE_ROUTE_EXTRA_ARGS_KEY,
+            RemoteKvReuseNoPlanReason, RemoteKvReusePlan, RemoteKvReuseSelectionStats,
+            RemoteKvReuseSourceRoute,
         },
     };
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
@@ -1413,8 +1428,6 @@ mod tests {
             target_dp_rank: 2,
             source_worker_id: 7,
             source_dp_rank: 0,
-            source_host: "10.0.0.7".to_string(),
-            source_bootstrap_port: 41000,
             source_tier: StorageTier::HostPinned,
             router_block_hashes: vec![LocalBlockHash(11), LocalBlockHash(22)],
             start_block_index: 0,
@@ -1427,11 +1440,20 @@ mod tests {
         }
     }
 
+    fn remote_g2_test_source_route() -> RemoteKvReuseSourceRoute {
+        RemoteKvReuseSourceRoute {
+            source_worker_id: 7,
+            source_host: "10.0.0.7".to_string(),
+            source_bootstrap_port: 41000,
+        }
+    }
+
     #[test]
     fn router_attaches_remote_g2_plan_after_target_selection() {
         let mut request = remote_g2_test_request();
         let decision = RemoteKvReuseDecision::Plan {
             plan: remote_g2_test_plan(),
+            source_route: Some(remote_g2_test_source_route()),
             stats: RemoteKvReuseSelectionStats {
                 rejected_g1_candidates: 1,
             },
@@ -1445,9 +1467,12 @@ mod tests {
         assert_eq!(plan["target_dp_rank"], 2);
         assert_eq!(plan["source_worker_id"], 7);
         assert_eq!(plan["source_dp_rank"], 0);
-        assert_eq!(plan["source_host"], "10.0.0.7");
-        assert_eq!(plan["source_bootstrap_port"], 41000);
         assert_eq!(plan["source_tier"], "host_pinned");
+        assert!(plan.get("source_host").is_none());
+        let source_route = &extra_args[REMOTE_KV_REUSE_SOURCE_ROUTE_EXTRA_ARGS_KEY];
+        assert_eq!(source_route["source_worker_id"], 7);
+        assert_eq!(source_route["source_host"], "10.0.0.7");
+        assert_eq!(source_route["source_bootstrap_port"], 41000);
     }
 
     #[test]

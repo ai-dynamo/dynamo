@@ -7,6 +7,7 @@ use crate::indexer::TieredMatchDetails;
 use crate::protocols::{DpRank, LocalBlockHash, StorageTier, WorkerId, WorkerWithDpRank};
 
 pub const REMOTE_KV_REUSE_PLAN_EXTRA_ARGS_KEY: &str = "remote_kv_reuse_plan";
+pub const REMOTE_KV_REUSE_SOURCE_ROUTE_EXTRA_ARGS_KEY: &str = "remote_kv_reuse_source_route";
 pub const REMOTE_KV_REUSE_NO_PLAN_REASON_EXTRA_ARGS_KEY: &str = "remote_kv_reuse_no_plan_reason";
 pub const REMOTE_KV_REUSE_PLAN_VERSION: u32 = 1;
 
@@ -18,8 +19,6 @@ pub struct RemoteKvReusePlan {
     pub target_dp_rank: DpRank,
     pub source_worker_id: WorkerId,
     pub source_dp_rank: DpRank,
-    pub source_host: String,
-    pub source_bootstrap_port: u16,
     pub source_tier: StorageTier,
     pub router_block_hashes: Vec<LocalBlockHash>,
     /// Position in the request's prefix where `router_block_hashes[0]` lives.
@@ -39,6 +38,13 @@ pub struct RemoteKvReusePlan {
 }
 
 // Compatibility identity is intentionally deferred in v1; source resolve remains authoritative.
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteKvReuseSourceRoute {
+    pub source_worker_id: WorkerId,
+    pub source_host: String,
+    pub source_bootstrap_port: u16,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -87,6 +93,7 @@ pub struct RemoteKvReuseSelectionStats {
 pub enum RemoteKvReuseDecision {
     Plan {
         plan: RemoteKvReusePlan,
+        source_route: Option<RemoteKvReuseSourceRoute>,
         stats: RemoteKvReuseSelectionStats,
     },
     NoPlan {
@@ -219,8 +226,6 @@ pub fn select_remote_g2_reuse_plan(
             target_dp_rank: input.target.dp_rank,
             source_worker_id: source.worker_id,
             source_dp_rank: source.dp_rank,
-            source_host: String::new(),
-            source_bootstrap_port: 0,
             source_tier: StorageTier::HostPinned,
             router_block_hashes: input.block_hashes[start..end].to_vec(),
             start_block_index: start as u32,
@@ -234,6 +239,7 @@ pub fn select_remote_g2_reuse_plan(
             // function of `tiered_matches` and does not depend on the indexer.
             engine_block_hashes: Vec::new(),
         },
+        source_route: None,
         stats,
     }
 }
@@ -260,8 +266,6 @@ mod tests {
             target_dp_rank: 0,
             source_worker_id: 7,
             source_dp_rank: 1,
-            source_host: "10.0.0.7".to_string(),
-            source_bootstrap_port: 41000,
             source_tier: StorageTier::HostPinned,
             router_block_hashes: vec![LocalBlockHash(11), LocalBlockHash(22)],
             start_block_index: 0,
@@ -565,7 +569,7 @@ mod tests {
         let decision = select_remote_g2_reuse_plan(selection_input(target, &hashes, &matches));
 
         match decision {
-            RemoteKvReuseDecision::Plan { plan, stats } => {
+            RemoteKvReuseDecision::Plan { plan, stats, .. } => {
                 assert_eq!(plan.source_worker_id, 7);
                 assert_eq!(plan.start_block_index, 0);
                 assert_eq!(plan.planned_prefix_blocks, 3);
@@ -666,7 +670,7 @@ mod tests {
         let decision = select_remote_g2_reuse_plan(selection_input(target, &hashes, &matches));
 
         match decision {
-            RemoteKvReuseDecision::Plan { plan, stats } => {
+            RemoteKvReuseDecision::Plan { plan, stats, .. } => {
                 assert_eq!(plan.source_worker_id, 7);
                 assert_eq!(plan.start_block_index, 0);
                 assert_eq!(plan.planned_prefix_blocks, hashes.len() as u32);

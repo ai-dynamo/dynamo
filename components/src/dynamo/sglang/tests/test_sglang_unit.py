@@ -25,6 +25,7 @@ from dynamo.sglang.health_check import (
 )
 from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
+    _to_shared_hicache_source_routes,
     _to_shared_hicache_plan,
 )
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
@@ -113,10 +114,39 @@ def test_shared_hicache_plan_adapter_uses_string_worker_ids():
 
     assert plan["target_worker_id"] == "42"
     assert plan["source_worker_id"] == "7"
-    assert plan["source_host"] == "10.0.0.7"
-    assert plan["source_bootstrap_port"] == 41000
+    assert "source_host" not in plan
+    assert "source_bootstrap_port" not in plan
     assert plan["source_medium"] == "CPU_PINNED"
     assert "source_endpoint" not in plan
+
+
+def test_shared_hicache_source_route_adapter_uses_runtime_endpoint_fields():
+    routes = _to_shared_hicache_source_routes(
+        {
+            "source_worker_id": 7,
+            "source_host": "10.0.0.7",
+            "source_bootstrap_port": 41000,
+        },
+        _to_shared_hicache_plan(
+            {
+                "plan_id": "plan-1",
+                "request_id": "request-1",
+                "target_worker_id": 42,
+                "source_worker_id": 7,
+                "source_host": "10.0.0.7",
+                "source_bootstrap_port": 41000,
+                "source_tier": "host_pinned",
+                "source_tp_size": 4,
+            }
+        ),
+    )
+
+    assert routes == [
+        {"source_worker_id": "7", "source_tp_rank": 0, "endpoint": "tcp://10.0.0.7:41000"},
+        {"source_worker_id": "7", "source_tp_rank": 1, "endpoint": "tcp://10.0.0.7:41001"},
+        {"source_worker_id": "7", "source_tp_rank": 2, "endpoint": "tcp://10.0.0.7:41002"},
+        {"source_worker_id": "7", "source_tp_rank": 3, "endpoint": "tcp://10.0.0.7:41003"},
+    ]
 
 
 def test_shared_hicache_auto_bootstrap_offsets_dynamo_system_port(monkeypatch):
