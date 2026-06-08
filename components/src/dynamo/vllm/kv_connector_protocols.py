@@ -109,6 +109,7 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
 KV_CONNECTOR_PROTOCOLS: Dict[str, Type[KvConnectorProtocol]] = {
     "NixlConnector": NixlConnectorProtocol,
     "MooncakeConnector": MooncakeConnectorProtocol,
+    "MultiConnector": NixlConnectorProtocol,
 }
 
 
