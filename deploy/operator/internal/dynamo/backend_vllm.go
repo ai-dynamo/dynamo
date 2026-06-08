@@ -37,14 +37,13 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 		if !containerHasArg(container, "--load-format", "gms") {
 			injectFlagsIntoContainerCommand(container, "--load-format gms", false, "vllm")
 		}
-	}
-
-	if component.IsInterPodGMSEnabled() && component.IsInterPodFailoverEnabled() {
-		// DYN_VLLM_GMS_SHADOW_MODE activates vLLM's standby/failover behavior
-		// on top of --load-format gms. Standalone inter-pod GMS should not set
-		// it: those engines are active clients of the dedicated GMS weight
-		// server, not shadow engines waiting for failover activation.
-		container.Env = append(container.Env, corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"})
+		if component.IsInterPodFailoverEnabled() {
+			// DYN_VLLM_GMS_SHADOW_MODE activates vLLM's standby/failover behavior
+			// on top of --load-format gms. Standalone inter-pod GMS should not set
+			// it: those engines are active clients of the dedicated GMS weight
+			// server, not shadow engines waiting for failover activation.
+			container.Env = append(container.Env, corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"})
+		}
 	}
 
 	isMultinode := numberOfNodes > 1
