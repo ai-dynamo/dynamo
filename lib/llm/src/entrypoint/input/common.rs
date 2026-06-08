@@ -19,6 +19,7 @@ use crate::{
     preprocessor::{OpenAIPreprocessor, prompt::PromptFormatter},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
+    kv_router::indexer::EmbeddingCacheIndexer,
     types::{
         Annotated,
         openai::chat_completions::{
@@ -149,11 +150,33 @@ pub async fn build_preprocessed_routing(
 
     wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
 
+    let embedding_cache_indexer = match EmbeddingCacheIndexer::for_component(
+        router_client.endpoint.component(),
+    )
+    .await
+    {
+        Ok(indexer) => Some(
+            Arc::new(indexer) as Arc<dyn dynamo_runtime::pipeline::MultimodalCacheIndex>
+        ),
+        Err(error) => {
+            tracing::warn!(
+                "Embedding cache indexer subscriber not available ({}), skipping cache-state sync.",
+                error
+            );
+            None
+        }
+    };
+
     let monitor_arc =
         worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
 
-    let router =
-        LlmPushRouter::from_client_with_monitor(router_client, router_mode, monitor_arc).await?;
+    let router = LlmPushRouter::from_client_with_state(
+        router_client,
+        router_mode,
+        monitor_arc,
+        embedding_cache_indexer,
+    )
+    .await?;
 
     // Eagerly register router request metrics so they appear as zeros even in
     // non-KV modes (Direct, Random, RoundRobin) where KvPushRouter is never created.

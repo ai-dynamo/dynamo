@@ -86,6 +86,21 @@ async def test_encode_with_cache_partial_hit_and_reuse(
     assert torch.equal(full_embeddings2, full_embeddings)
 
 
+def test_publish_cache_delta_delegates_to_publisher(
+    cache_handler: MultimodalEncodeWorkerHandler,
+) -> None:
+    publisher = SimpleNamespace(publish_delta=AsyncMock())
+    # publish_delta is sync in production bindings; AsyncMock still tracks calls.
+    publisher.publish_delta = lambda added, removed: setattr(
+        publisher, "last_call", (added, removed)
+    )
+    cache_handler._cache_publisher = publisher
+
+    cache_handler._publish_cache_delta(["a"], ["b"])
+
+    assert publisher.last_call == (["a"], ["b"])
+
+
 @pytest.mark.asyncio
 async def test_encode_with_cache_all_hit_no_remote_call(
     cache_handler: MultimodalEncodeWorkerHandler,

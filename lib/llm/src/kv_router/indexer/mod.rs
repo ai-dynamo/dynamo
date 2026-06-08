@@ -29,9 +29,11 @@ use tokio::sync::oneshot;
 
 mod jetstream;
 pub mod remote;
+mod embedding_cache;
 mod subscriber;
 mod worker_query;
 
+pub use self::embedding_cache::EmbeddingCacheIndexer;
 use self::remote::RemoteIndexer;
 pub use self::remote::{ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub(crate) use subscriber::start_subscriber;

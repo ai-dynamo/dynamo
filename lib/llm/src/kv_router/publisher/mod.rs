@@ -44,6 +44,7 @@ use event_processor::run_event_processor_loop;
 use event_processor::{start_event_processor, start_event_processor_jetstream};
 pub use multimodal_embedding_cache::{
     MultimodalEmbeddingCacheEvent, MultimodalEmbeddingCachePublisher,
+    MultimodalEmbeddingCacheUpdate,
 };
 use sinks::EventPlanePublisher;
 pub use worker_metrics::WorkerMetricsPublisher;

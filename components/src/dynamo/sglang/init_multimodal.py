@@ -53,7 +53,7 @@ async def init_multimodal_encode_worker(
     ):
         cache_publisher = MultimodalEmbeddingCachePublisher()
         await cache_publisher.create_endpoint(generate_endpoint)
-        cache_publisher.publish([])
+        cache_publisher.publish_snapshot([])
 
     handler = MultimodalEncodeWorkerHandler(
         config,

@@ -111,14 +111,11 @@ pub trait WorkerLoadMonitor: Send + Sync {
     /// Start background monitoring of worker load.
     /// This should spawn background tasks that update the client's busy instances.
     async fn start_monitoring(&self) -> anyhow::Result<()>;
+}
 
-    /// Return worker IDs that contain all provided multimodal cache keys.
-    ///
-    /// The default implementation returns no candidates when a monitor does not
-    /// support multimodal cache indexing.
-    fn workers_with_cached_multimodal_keys(&self, _cache_keys: &[String]) -> Vec<u64> {
-        Vec::new()
-    }
+/// Query interface for routing against multimodal embedding cache state.
+pub trait MultimodalCacheIndex: Send + Sync {
+    fn workers_with_all_cache_keys(&self, cache_keys: &[String]) -> Vec<u64>;
 }
 
 #[derive(Clone)]
@@ -159,8 +156,11 @@ where
     /// Shared request occupancy state for tracked routing modes.
     occupancy_state: Option<Arc<RoutingOccupancyState>>,
 
-    /// Optional worker monitor for load and cache-aware routing hints.
+    /// Optional worker monitor for load/busy-state tracking.
     worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
+
+    /// Optional cache index for direct multimodal embedding cache lookups.
+    multimodal_cache_indexer: Option<Arc<dyn MultimodalCacheIndex>>,
 
     /// An internal Rust type. This says that PushRouter is generic over the T and U types,
     /// which are the input and output types of it's `generate` function. It allows the
@@ -482,6 +482,7 @@ where
             response_timeout: response_inactivity_timeout(),
             occupancy_state,
             worker_monitor: None,
+            multimodal_cache_indexer: None,
             _phantom: PhantomData,
         })
     }
@@ -496,6 +497,16 @@ where
         client: Client,
         router_mode: RouterMode,
         worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
+    ) -> anyhow::Result<Self> {
+        Self::from_client_with_state(client, router_mode, worker_monitor, None).await
+    }
+
+    /// Create a new PushRouter with optional load monitoring and multimodal cache indexing.
+    pub async fn from_client_with_state(
+        client: Client,
+        router_mode: RouterMode,
+        worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
+        multimodal_cache_indexer: Option<Arc<dyn MultimodalCacheIndex>>,
     ) -> anyhow::Result<Self> {
         let addressed = addressed_router(&client.endpoint).await?;
 
@@ -531,6 +542,7 @@ where
             response_timeout: response_inactivity_timeout(),
             occupancy_state,
             worker_monitor,
+            multimodal_cache_indexer,
             _phantom: PhantomData,
         };
 
@@ -678,11 +690,11 @@ where
 
         let request_cache_keys = extract_multimodal_cache_keys_from_request(&request);
         let cache_matched_candidates = self
-            .worker_monitor
+            .multimodal_cache_indexer
             .as_ref()
             .filter(|_| !request_cache_keys.is_empty())
-            .map(|m| {
-                let mut matched = m.workers_with_cached_multimodal_keys(&request_cache_keys);
+            .map(|indexer| {
+                let mut matched = indexer.workers_with_all_cache_keys(&request_cache_keys);
                 matched.retain(|id| instance_ids.contains(id));
                 matched
             })

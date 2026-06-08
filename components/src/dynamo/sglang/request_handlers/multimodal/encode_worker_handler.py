@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from contextlib import suppress
 from typing import Any, AsyncIterator, Dict, Optional
 
 import torch
@@ -132,13 +133,44 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             self._embedding_cache = MultimodalEmbeddingCacheManager(capacity_bytes)
             logger.info("Multimodal embedding cache enabled: %.2f GB", capacity_gb)
 
+        self._cache_snapshot_interval_secs = 30.0
+        self._cache_snapshot_task: asyncio.Task | None = None
+        if self._embedding_cache is not None and self._cache_publisher is not None:
+            self._cache_snapshot_task = asyncio.create_task(
+                self._run_cache_snapshot_publisher()
+            )
+
     def _publish_cache_snapshot(self) -> None:
         if self._embedding_cache is None or self._cache_publisher is None:
             return
-        self._cache_publisher.publish(self._embedding_cache.keys())
+        self._cache_publisher.publish_snapshot(self._embedding_cache.keys())
+
+    def _publish_cache_delta(
+        self, added_keys: list[str], removed_keys: list[str]
+    ) -> None:
+        if self._cache_publisher is None or (
+            not added_keys and not removed_keys
+        ):
+            return
+        self._cache_publisher.publish_delta(added_keys, removed_keys)
+
+    async def _run_cache_snapshot_publisher(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(self._cache_snapshot_interval_secs)
+                self._publish_cache_snapshot()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Failed to publish embedding cache snapshot")
 
     def cleanup(self) -> None:
-        pass
+        if self._cache_snapshot_task is not None:
+            self._cache_snapshot_task.cancel()
+            self._cache_snapshot_task = None
+        if self._cache_publisher is not None:
+            with suppress(Exception):
+                self._cache_publisher.publish_snapshot([])
 
     @staticmethod
     def _url_hash(url: str) -> str:
@@ -274,9 +306,9 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                     tensor=tensor.contiguous(),
                     image_grid_thw=grid_thw,
                 )
-                self._embedding_cache.set(self._url_hash(url), entry)
+                mutation = self._embedding_cache.set_with_delta(self._url_hash(url), entry)
+                self._publish_cache_delta(mutation.added_keys, mutation.removed_keys)
                 new_entries[orig_idx] = entry
-            self._publish_cache_snapshot()
 
         # Reassemble results in original URL order
         all_grid_thw: list = []

@@ -237,8 +237,15 @@ impl MultimodalEmbeddingCachePublisher {
     }
 
     #[pyo3(signature = (cache_keys))]
-    fn publish(&self, cache_keys: Vec<String>) -> PyResult<()> {
-        self.inner.publish(cache_keys).map_err(to_pyerr)
+    fn publish_snapshot(&self, cache_keys: Vec<String>) -> PyResult<()> {
+        self.inner.publish_snapshot(cache_keys).map_err(to_pyerr)
+    }
+
+    #[pyo3(signature = (added_keys, removed_keys))]
+    fn publish_delta(&self, added_keys: Vec<String>, removed_keys: Vec<String>) -> PyResult<()> {
+        self.inner
+            .publish_delta(added_keys, removed_keys)
+            .map_err(to_pyerr)
     }
 }
 

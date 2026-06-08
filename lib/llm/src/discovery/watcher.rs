@@ -31,7 +31,7 @@ use crate::{
     discovery::{KvWorkerMonitor, WORKER_TYPE_DECODE, WorkerSet},
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::PrefillRouter,
+    kv_router::{PrefillRouter, indexer::EmbeddingCacheIndexer},
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
     preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::PromptFormatter},
@@ -957,13 +957,33 @@ impl ModelWatcher {
                 || card.model_type.supports_audios()
                 || card.model_type.supports_videos())
         {
+            let multimodal_cache_indexer = match EmbeddingCacheIndexer::for_component(
+                client.endpoint.component(),
+            )
+            .await
+            {
+                Ok(indexer) => Some(
+                    Arc::new(indexer) as Arc<dyn dynamo_runtime::pipeline::MultimodalCacheIndex>
+                ),
+                Err(error) => {
+                    tracing::warn!(
+                        "Embedding cache indexer subscriber not available ({}), skipping cache-state sync.",
+                        error
+                    );
+                    None
+                }
+            };
+
             // Image/Audio/Video models can also support chat completions (vLLM omni way)
             if card.model_type.supports_chat() {
                 let chat_router = PushRouter::<
                     NvCreateChatCompletionRequest,
                     Annotated<NvCreateChatCompletionStreamResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_state(
+                    client.clone(),
+                    router_config.router_mode,
+                    None,
+                    multimodal_cache_indexer.clone(),
                 )
                 .await?;
                 worker_set.chat_engine = Some(Arc::new(chat_router));
@@ -973,8 +993,11 @@ impl ModelWatcher {
                 let images_router = PushRouter::<
                     NvCreateImageRequest,
                     Annotated<NvImagesResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_state(
+                    client.clone(),
+                    router_config.router_mode,
+                    None,
+                    multimodal_cache_indexer.clone(),
                 )
                 .await?;
                 worker_set.images_engine = Some(Arc::new(images_router));
@@ -984,8 +1007,11 @@ impl ModelWatcher {
                 let videos_router = PushRouter::<
                     NvCreateVideoRequest,
                     Annotated<NvVideosResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_state(
+                    client.clone(),
+                    router_config.router_mode,
+                    None,
+                    multimodal_cache_indexer.clone(),
                 )
                 .await?;
                 worker_set.videos_engine = Some(Arc::new(videos_router));
@@ -995,8 +1021,11 @@ impl ModelWatcher {
                 let audios_router = PushRouter::<
                     NvCreateAudioSpeechRequest,
                     Annotated<NvAudioSpeechResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_state(
+                    client.clone(),
+                    router_config.router_mode,
+                    None,
+                    multimodal_cache_indexer.clone(),
                 )
                 .await?;
                 worker_set.audios_engine = Some(Arc::new(audios_router));
