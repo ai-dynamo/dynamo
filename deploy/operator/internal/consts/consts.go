@@ -116,16 +116,17 @@ const (
 	EnvTopologyEnabled   = "DYN_TOPOLOGY_ENABLED"
 	EnvTopologyMountPath = "DYN_TOPOLOGY_MOUNT_PATH"
 
-	// KubeAnnotationTopologyLabelKey is set on worker pods when
-	// spec.experimental.kvTransferPolicy.labelKey is configured. The topology
-	// label controller watches for pods with this annotation and copies the
-	// corresponding node label onto the pod after scheduling.
+	// Topology source annotations are set on worker pods when
+	// spec.experimental.kvTransferPolicy is configured. The topology label
+	// controller consumes them after scheduling and copies node topology labels
+	// onto pod labels projected through the Downward API.
+	//
+	// KubeAnnotationTopologyLabelKey selects a single node label key to copy
+	// onto the pod under the same label key.
 	KubeAnnotationTopologyLabelKey = "nvidia.com/topology-label-key"
 
-	// KubeAnnotationTopologyClusterTopologyName is set on worker pods when
-	// spec.experimental.kvTransferPolicy.clusterTopologyName is configured. The
-	// topology label controller reads the referenced Grove ClusterTopology and
-	// copies its node-label levels onto Dynamo-owned pod labels after scheduling.
+	// KubeAnnotationTopologyClusterTopologyName selects a Grove ClusterTopology;
+	// each level key is copied onto a Dynamo-owned topology label.
 	KubeAnnotationTopologyClusterTopologyName = "nvidia.com/topology-cluster-topology-name"
 
 	// KubeLabelDynamoTopologyPrefix prefixes Dynamo-owned pod labels that mirror
@@ -288,6 +289,15 @@ const (
 // a ClusterTopology domain through the Downward API.
 func DynamoTopologyLabelKey(domain string) string {
 	return KubeLabelDynamoTopologyPrefix + domain
+}
+
+// KubeTopologySourceAnnotationKeys returns pod annotations consumed by the
+// topology label controller.
+func KubeTopologySourceAnnotationKeys() []string {
+	return []string{
+		KubeAnnotationTopologyLabelKey,
+		KubeAnnotationTopologyClusterTopologyName,
+	}
 }
 
 // GroupVersionResources for external APIs

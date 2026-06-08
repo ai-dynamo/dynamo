@@ -143,21 +143,14 @@ func topologyLabelCopyBecameNeeded(oldObj, newObj client.Object) bool {
 		return false
 	}
 
-	oldLabelKey := oldPod.GetAnnotations()[consts.KubeAnnotationTopologyLabelKey]
-	newLabelKey := newPod.GetAnnotations()[consts.KubeAnnotationTopologyLabelKey]
-	oldClusterTopologyName := oldPod.GetAnnotations()[consts.KubeAnnotationTopologyClusterTopologyName]
-	newClusterTopologyName := newPod.GetAnnotations()[consts.KubeAnnotationTopologyClusterTopologyName]
-
 	if oldPod.Spec.NodeName == "" && newPod.Spec.NodeName != "" {
 		return true
 	}
-	if oldLabelKey != newLabelKey {
-		return true
-	}
-	if oldClusterTopologyName != newClusterTopologyName {
+	if topologySourceAnnotationChanged(oldPod, newPod) {
 		return true
 	}
 
+	oldLabelKey := oldPod.GetAnnotations()[consts.KubeAnnotationTopologyLabelKey]
 	if oldLabelKey != "" {
 		_, oldHadLabel := oldPod.GetLabels()[oldLabelKey]
 		_, newHasLabel := newPod.GetLabels()[oldLabelKey]
@@ -166,9 +159,18 @@ func topologyLabelCopyBecameNeeded(oldObj, newObj client.Object) bool {
 		}
 	}
 
-	return oldClusterTopologyName != "" &&
+	return oldPod.GetAnnotations()[consts.KubeAnnotationTopologyClusterTopologyName] != "" &&
 		!clusterTopologyLabelCopyNeeded(oldPod) &&
 		clusterTopologyLabelCopyNeeded(newPod)
+}
+
+func topologySourceAnnotationChanged(oldPod, newPod *corev1.Pod) bool {
+	for _, annotationKey := range consts.KubeTopologySourceAnnotationKeys() {
+		if oldPod.GetAnnotations()[annotationKey] != newPod.GetAnnotations()[annotationKey] {
+			return true
+		}
+	}
+	return false
 }
 
 func needsTopologyLabelCopy(obj client.Object) bool {

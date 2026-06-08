@@ -376,8 +376,9 @@ func generateSingleDCD(
 	if err := applyDGDComponentAlphaCompatibilityToDCD(parentDGD, componentName, deployment); err != nil {
 		return nil, err
 	}
-	delete(deployment.Annotations, commonconsts.KubeAnnotationTopologyLabelKey)
-	delete(deployment.Annotations, commonconsts.KubeAnnotationTopologyClusterTopologyName)
+	for _, annotationKey := range commonconsts.KubeTopologySourceAnnotationKeys() {
+		delete(deployment.Annotations, annotationKey)
+	}
 
 	labels := make(map[string]string)
 	maps.Copy(labels, GetPodTemplateLabels(component))
@@ -1896,8 +1897,9 @@ func applyKvTransferPolicyTopologyAnnotations(annotations map[string]string, kvt
 	if annotations == nil {
 		return
 	}
-	delete(annotations, commonconsts.KubeAnnotationTopologyLabelKey)
-	delete(annotations, commonconsts.KubeAnnotationTopologyClusterTopologyName)
+	for _, annotationKey := range commonconsts.KubeTopologySourceAnnotationKeys() {
+		delete(annotations, annotationKey)
+	}
 	if kvt == nil {
 		return
 	}
@@ -2148,8 +2150,9 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate annotations: %w", err)
 	}
-	delete(annotations, commonconsts.KubeAnnotationTopologyLabelKey)
-	delete(annotations, commonconsts.KubeAnnotationTopologyClusterTopologyName)
+	for _, annotationKey := range commonconsts.KubeTopologySourceAnnotationKeys() {
+		delete(annotations, annotationKey)
+	}
 	if p.r.Role != RoleGMS && shouldApplyKvTransferPolicyToWorkerComponent(p.component, p.dynamoDeployment) {
 		applyKvTransferPolicyTopologyAnnotations(annotations, p.dynamoDeployment.Spec.Experimental.KvTransferPolicy)
 	}
