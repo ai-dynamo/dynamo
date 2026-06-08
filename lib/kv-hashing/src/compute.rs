@@ -38,8 +38,12 @@ impl Request {
     fn into_blocks_consuming(self, block_size: u32) -> Result<Vec<UniversalBlock>, KvHashingError> {
         let salt_hash = compute_salt_hash(self.salt(), self.lora_name())?;
         let token_mm = self.mm_info.into_iter().map(Into::into).collect::<Vec<_>>();
-        let seq =
-            TokenBlockSequence::new_with_mm(Tokens::from(self.tokens), &token_mm, block_size, Some(salt_hash))?;
+        let seq = TokenBlockSequence::new_with_mm(
+            Tokens::from(self.tokens),
+            &token_mm,
+            block_size,
+            Some(salt_hash),
+        )?;
         Ok(seq.blocks().iter().map(UniversalBlock::from).collect())
     }
 
