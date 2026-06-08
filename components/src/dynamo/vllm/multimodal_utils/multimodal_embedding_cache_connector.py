@@ -72,7 +72,7 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
                 _vllm_version,
             )
         super().__init__(vllm_config=vllm_config, role=role)
-        self._vllm_config = vllm_config
+        self._device = _get_device(vllm_config)
 
         transfer_config = vllm_config.ec_transfer_config
         if transfer_config is None:
@@ -221,7 +221,7 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
                 continue
             if mm_hash in self._cpu_store:
                 encoder_cache[mm_hash] = self._cpu_store[mm_hash].to(
-                    _get_device(self._vllm_config), non_blocking=True
+                    self._device, non_blocking=True
                 )
             else:
                 logger.warning(
