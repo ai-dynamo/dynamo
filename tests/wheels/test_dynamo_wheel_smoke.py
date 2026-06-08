@@ -23,9 +23,7 @@ import sys
 from pathlib import Path
 
 import pytest
-
 import smoke_install
-
 
 pytestmark = [
     pytest.mark.gpu_0,

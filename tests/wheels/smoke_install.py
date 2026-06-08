@@ -16,7 +16,6 @@ from email.parser import Parser
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-
 GLIBC_FLOOR = (2, 28)
 MANYLINUX_POLICY = "manylinux_2_28"
 # First-party optional wheel that must ship with the core wheels.
@@ -52,7 +51,9 @@ def all_wheels(wheelhouse: Path) -> list[Path]:
 
 def find_wheels(wheelhouse: Path, dist_name: str) -> list[Path]:
     wanted = canonical_name(dist_name)
-    return [wheel for wheel in all_wheels(wheelhouse) if wheel_dist_name(wheel) == wanted]
+    return [
+        wheel for wheel in all_wheels(wheelhouse) if wheel_dist_name(wheel) == wanted
+    ]
 
 
 def require_one_wheel(wheelhouse: Path, dist_name: str) -> Path:
@@ -68,7 +69,9 @@ def require_one_wheel(wheelhouse: Path, dist_name: str) -> Path:
 def wheel_tags(wheel: Path) -> tuple[str, str, str]:
     parts = wheel.name.removesuffix(".whl").split("-")
     if len(parts) < 5:
-        raise AssertionError(f"wheel filename does not include PEP 427 tags: {wheel.name}")
+        raise AssertionError(
+            f"wheel filename does not include PEP 427 tags: {wheel.name}"
+        )
     return parts[-3], parts[-2], parts[-1]
 
 
@@ -128,7 +131,9 @@ def assert_core_wheel_metadata(wheelhouse: Path, target_arch: str | None) -> Non
             f"{runtime.name} should target manylinux_2_28, got {runtime_platform_tag}"
         )
     if runtime_py_tag not in {"cp310", "cp311", "cp312"}:
-        raise AssertionError(f"{runtime.name} has unexpected Python tag {runtime_py_tag}")
+        raise AssertionError(
+            f"{runtime.name} has unexpected Python tag {runtime_py_tag}"
+        )
 
     ai_meta = wheel_metadata(ai_dynamo)
     runtime_meta = wheel_metadata(runtime)
@@ -221,11 +226,15 @@ def assert_glibc_floor(wheelhouse: Path) -> None:
             wheel_tmp = tmp_path / wheel.name.removesuffix(".whl")
             shared_libraries = extracted_shared_libraries(wheel, wheel_tmp)
             if not shared_libraries:
-                raise AssertionError(f"{wheel.name} is tagged binary but has no .so files")
+                raise AssertionError(
+                    f"{wheel.name} is tagged binary but has no .so files"
+                )
 
             for shared_library in shared_libraries:
                 versions = glibc_version_needs(shared_library)
-                too_new = sorted(version for version in versions if version > GLIBC_FLOOR)
+                too_new = sorted(
+                    version for version in versions if version > GLIBC_FLOOR
+                )
                 if too_new:
                     offenders.append(
                         f"{wheel.name}:{shared_library.relative_to(wheel_tmp)} "
@@ -294,7 +303,9 @@ def assert_local_direct_url(
 
     parsed = urlparse(url)
     if parsed.scheme != "file":
-        raise AssertionError(f"{dist_name} was not installed from a local file URL: {url}")
+        raise AssertionError(
+            f"{dist_name} was not installed from a local file URL: {url}"
+        )
 
     installed_path = Path(unquote(parsed.path)).resolve()
     expected_path = expected_wheel.resolve()
@@ -343,13 +354,19 @@ assert not bundled_libs, bundled_libs
 OPTIONAL_IMPORT_NAMES = {"kvbm": "kvbm"}
 
 
-def install_core(wheelhouse: Path, python_spec: str, also: tuple[str, ...] = ()) -> Path:
+def install_core(
+    wheelhouse: Path, python_spec: str, also: tuple[str, ...] = ()
+) -> Path:
     ai_dynamo = require_one_wheel(wheelhouse, "ai-dynamo")
     runtime = require_one_wheel(wheelhouse, "ai-dynamo-runtime")
     also_wheels = {dist: require_one_wheel(wheelhouse, dist) for dist in also}
 
     venv_python = create_venv(python_spec)
-    requirements = [str(runtime), str(ai_dynamo), *(str(w) for w in also_wheels.values())]
+    requirements = [
+        str(runtime),
+        str(ai_dynamo),
+        *(str(w) for w in also_wheels.values()),
+    ]
     pip_install(venv_python, wheelhouse, requirements)
     pip_check(venv_python)
     assert_dynamo_local_install(venv_python, wheelhouse, ai_dynamo, runtime)
