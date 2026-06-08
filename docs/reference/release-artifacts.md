@@ -778,7 +778,7 @@ Not shipped for pre-release versions.
 
 | Image:Tag | Backend | CUDA | Arch |
 |-----------|---------|------|------|
-| `sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1` | SGLang (DSv4 Blackwell preview) | `v12.9` | AMD64/ARM64 |
+| `sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1` | SGLang (DSv4 Blackwell preview) | `v12.9` | AMD64 |
 
 #### Python Wheels
 
