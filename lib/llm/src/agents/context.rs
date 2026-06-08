@@ -39,8 +39,8 @@ pub struct AgentContext {
     pub parent_trajectory_id: Option<String>,
 
     /// Optional terminal marker: when true, this request signals that the
-    /// trajectory is complete. Program-aware schedulers (thunderagent_router)
-    /// use it to release/delete the program's bookkeeping. Other backends ignore it.
+    /// trajectory is complete. Lifecycle-aware backends use it to release any
+    /// per-trajectory state they hold right away; other backends ignore it.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trajectory_final: Option<bool>,

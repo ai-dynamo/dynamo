@@ -412,7 +412,7 @@ class ThunderAgentScheduler:
         return True
 
     async def end_program(self, program_id: str) -> bool:
-        """Release a finished program (the A1 close signal).
+        """Release a finished program.
 
         Deletes it from the program table + paused set and wakes any waiter,
         so its tokens stop counting against worker utilization. Mirrors
@@ -508,8 +508,6 @@ class ThunderAgentScheduler:
                 else:
                     backend_caps.pop(0)
 
-            # INFO summary symmetric to the pause-side scheduler.tick log, so
-            # resume is observable at INFO (per-program detail stays at debug).
             if resumed_this_tick:
                 logger.info(
                     "scheduler.tick resumed=%d still_paused=%d",
