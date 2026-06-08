@@ -393,8 +393,8 @@ pub async fn parse_tool_calls_harmony_complete(
 
             let Some(fname) = message
                 .recipient
-                .as_ref()
-                .and_then(|r| r.split('.').nth(1))
+                .as_deref()
+                .and_then(|r| r.strip_prefix("functions."))
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string())
             else {
