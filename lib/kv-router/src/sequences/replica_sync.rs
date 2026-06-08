@@ -9,7 +9,9 @@ use rustc_hash::FxHashMap;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-use super::multi_worker::{ActiveSequencesMultiWorker, SequencePublisher, SequenceSubscriber};
+use super::multi_worker::{
+    ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequencePublisher, SequenceSubscriber,
+};
 use super::prompt_registry::WorkerLoadSnapshot;
 use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData, WorkerWithDpRank};
 
@@ -167,12 +169,14 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 expected_output_tokens,
                 prefill_load_hint,
             } => {
-                self.ensure_worker_registered(event_worker);
+                if self.replica_worker_policy == ReplicaWorkerPolicy::LazyRegister {
+                    self.ensure_worker_registered(event_worker);
+                }
                 let table = self.workers.read();
                 let Some(&idx) = table.index.get(&event_worker) else {
-                    tracing::warn!(
-                        "Worker {:?} not found, cannot process AddRequest",
-                        event_worker
+                    tracing::debug!(
+                        worker = ?event_worker,
+                        "Dropping replica AddRequest for unregistered worker"
                     );
                     return;
                 };

@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::future::{self, Future};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -10,16 +9,20 @@ use dynamo_tokens::SequenceHash;
 use parking_lot::Mutex;
 use rustc_hash::FxHashSet;
 use serde::Serialize;
+use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::protocols::{
-    ActiveLoad, ActiveSequenceEvent, PrefillLoadHint, WorkerId, WorkerWithDpRank,
-};
+use crate::protocols::{PrefillLoadHint, WorkerId, WorkerWithDpRank};
 use crate::scheduling::PotentialLoad;
 use crate::sequences::{
-    ActiveSequencesMultiWorker, PrefillTokenDeltas, SequenceError, SequencePublisher,
+    ActiveSequencesMultiWorker, PrefillTokenDeltas, ReplicaWorkerPolicy, SequenceError,
     SequenceRequest,
+};
+
+use super::replica_sync::{
+    ChannelSequenceSubscriber, REPLICA_EVENT_CHANNEL_CAPACITY, ReplicaEventSender,
+    ScopedSequencePublisher, SlotReplicaEvent,
 };
 
 fn default_tenant() -> String {
@@ -103,51 +106,67 @@ pub enum RegistryError {
     },
 }
 
-pub struct StandaloneSequencePublisher;
-
-impl SequencePublisher for StandaloneSequencePublisher {
-    fn publish_event(
-        &self,
-        _event: &ActiveSequenceEvent,
-    ) -> impl Future<Output = anyhow::Result<()>> + Send {
-        future::ready(Ok(()))
-    }
-
-    fn publish_load(&self, _load: ActiveLoad) {}
-
-    fn observe_load(
-        &self,
-        _worker: &WorkerWithDpRank,
-        _worker_type: &str,
-        _blocks: usize,
-        _tokens: usize,
-    ) {
-    }
+#[derive(Clone)]
+struct RegistryReplicaConfig {
+    process_id: u64,
+    outbound_tx: ReplicaEventSender,
 }
 
-pub struct TrackerEntry {
-    pub tracker: Arc<ActiveSequencesMultiWorker<StandaloneSequencePublisher>>,
+struct TrackerEntry {
+    tracker: Arc<ActiveSequencesMultiWorker<ScopedSequencePublisher>>,
     pub block_size: u32,
     worker_ranges: Mutex<HashMap<WorkerId, (u32, u32)>>,
+    replica_tx: Option<mpsc::Sender<crate::protocols::ActiveSequenceEvent>>,
     cancel_token: CancellationToken,
 }
 
 impl TrackerEntry {
-    fn new(block_size: u32, root_cancel_token: &CancellationToken) -> Arc<Self> {
+    fn new(
+        key: &TrackerKey,
+        block_size: u32,
+        root_cancel_token: &CancellationToken,
+        replica_config: Option<&RegistryReplicaConfig>,
+    ) -> Arc<Self> {
         let cancel_token = root_cancel_token.child_token();
-        let tracker = Arc::new(ActiveSequencesMultiWorker::new(
-            StandaloneSequencePublisher,
+        let (publisher, replica_sync, router_id, replica_channel) =
+            if let Some(replica_config) = replica_config {
+                let (replica_tx, replica_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
+                (
+                    ScopedSequencePublisher::enabled(
+                        Arc::from(key.model_name.as_str()),
+                        Arc::from(key.tenant_id.as_str()),
+                        block_size,
+                        replica_config.outbound_tx.clone(),
+                    ),
+                    true,
+                    replica_config.process_id,
+                    Some((replica_tx, replica_rx)),
+                )
+            } else {
+                (ScopedSequencePublisher::disabled(), false, 0, None)
+            };
+        let tracker = Arc::new(ActiveSequencesMultiWorker::new_with_replica_worker_policy(
+            publisher,
             block_size as usize,
             HashMap::new(),
-            false,
-            0,
+            replica_sync,
+            router_id,
             "standalone",
+            ReplicaWorkerPolicy::RequireRegistered,
         ));
+        let replica_tx = replica_channel.map(|(replica_tx, replica_rx)| {
+            tracker.start_replica_sync(
+                ChannelSequenceSubscriber::new(replica_rx),
+                cancel_token.clone(),
+            );
+            replica_tx
+        });
         tracker.start_periodic_force_expiry_across_all_workers(cancel_token.clone());
         Arc::new(Self {
             tracker,
             block_size,
             worker_ranges: Mutex::new(HashMap::new()),
+            replica_tx,
             cancel_token,
         })
     }
@@ -156,6 +175,7 @@ impl TrackerEntry {
 pub struct SlotTrackerRegistry {
     trackers: DashMap<TrackerKey, Arc<TrackerEntry>>,
     root_cancel_token: CancellationToken,
+    replica_config: Option<RegistryReplicaConfig>,
 }
 
 impl SlotTrackerRegistry {
@@ -163,6 +183,22 @@ impl SlotTrackerRegistry {
         Self {
             trackers: DashMap::new(),
             root_cancel_token,
+            replica_config: None,
+        }
+    }
+
+    pub(crate) fn new_with_replica_sync(
+        root_cancel_token: CancellationToken,
+        process_id: u64,
+        outbound_tx: ReplicaEventSender,
+    ) -> Self {
+        Self {
+            trackers: DashMap::new(),
+            root_cancel_token,
+            replica_config: Some(RegistryReplicaConfig {
+                process_id,
+                outbound_tx,
+            }),
         }
     }
 
@@ -180,7 +216,14 @@ impl SlotTrackerRegistry {
             let entry = self
                 .trackers
                 .entry(key.clone())
-                .or_insert_with(|| TrackerEntry::new(block_size, &self.root_cancel_token))
+                .or_insert_with(|| {
+                    TrackerEntry::new(
+                        &key,
+                        block_size,
+                        &self.root_cancel_token,
+                        self.replica_config.as_ref(),
+                    )
+                })
                 .clone();
 
             if entry.block_size != block_size {
@@ -392,6 +435,61 @@ impl SlotTrackerRegistry {
             .collect())
     }
 
+    pub(crate) fn dispatch_replica_event(&self, envelope: SlotReplicaEvent) {
+        if self
+            .replica_config
+            .as_ref()
+            .is_some_and(|config| envelope.event.router_id == config.process_id)
+        {
+            return;
+        }
+
+        let key = TrackerKey::new(envelope.model_name, Some(envelope.tenant_id));
+        let Some(entry) = self
+            .trackers
+            .get(&key)
+            .map(|entry| Arc::clone(entry.value()))
+        else {
+            tracing::trace!(
+                model_name = %key.model_name,
+                tenant_id = %key.tenant_id,
+                "Dropping replica event for unknown slot tracker"
+            );
+            return;
+        };
+        if entry.block_size != envelope.block_size {
+            tracing::debug!(
+                model_name = %key.model_name,
+                tenant_id = %key.tenant_id,
+                expected_block_size = entry.block_size,
+                received_block_size = envelope.block_size,
+                "Dropping replica event with mismatched block size"
+            );
+            return;
+        }
+        let Some(replica_tx) = &entry.replica_tx else {
+            return;
+        };
+        match replica_tx.try_send(envelope.event) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(event)) => {
+                tracing::trace!(
+                    model_name = %key.model_name,
+                    tenant_id = %key.tenant_id,
+                    request_id = %event.request_id,
+                    "Replica subscriber channel full; dropping event"
+                );
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                tracing::debug!(
+                    model_name = %key.model_name,
+                    tenant_id = %key.tenant_id,
+                    "Replica subscriber channel closed; dropping event"
+                );
+            }
+        }
+    }
+
     fn entry(&self, key: &TrackerKey) -> Result<Arc<TrackerEntry>, RegistryError> {
         self.trackers
             .get(key)
@@ -443,6 +541,7 @@ fn matches_filters(key: &TrackerKey, model_name: Option<&str>, tenant_id: Option
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
 
     fn registry() -> SlotTrackerRegistry {
         SlotTrackerRegistry::new(CancellationToken::new())
@@ -450,6 +549,31 @@ mod tests {
 
     fn key(tenant_id: &str) -> TrackerKey {
         TrackerKey::new("model".to_string(), Some(tenant_id.to_string()))
+    }
+
+    fn replica_event(
+        tenant_id: &str,
+        block_size: u32,
+        worker: WorkerWithDpRank,
+        router_id: u64,
+    ) -> SlotReplicaEvent {
+        SlotReplicaEvent {
+            model_name: "model".to_string(),
+            tenant_id: tenant_id.to_string(),
+            block_size,
+            event: ActiveSequenceEvent {
+                request_id: "replica-request".to_string(),
+                worker,
+                data: ActiveSequenceEventData::AddRequest {
+                    token_sequence: Some(vec![1, 2, 3]),
+                    track_prefill_tokens: false,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                },
+                router_id,
+                lora_name: None,
+            },
+        }
     }
 
     #[tokio::test]
@@ -572,6 +696,76 @@ mod tests {
             assert_eq!(workers[0].worker_id, 2);
             registry.unregister(&key, 2).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn replica_dispatch_requires_registered_worker_and_matching_configuration() {
+        let (outbound_tx, _outbound_rx) = mpsc::channel(1);
+        let registry =
+            SlotTrackerRegistry::new_with_replica_sync(CancellationToken::new(), 7, outbound_tx);
+        let key = key("default");
+        registry.register(key.clone(), 1, 16, 0, 1).unwrap();
+
+        registry.dispatch_replica_event(replica_event(
+            "default",
+            16,
+            WorkerWithDpRank::new(1, 1),
+            8,
+        ));
+        registry.dispatch_replica_event(replica_event(
+            "default",
+            32,
+            WorkerWithDpRank::new(1, 0),
+            8,
+        ));
+        registry.dispatch_replica_event(replica_event(
+            "default",
+            16,
+            WorkerWithDpRank::new(1, 0),
+            7,
+        ));
+        tokio::task::yield_now().await;
+        assert_eq!(registry.list_loads(None, None)[0].active_decode_blocks, 0);
+
+        registry.dispatch_replica_event(replica_event(
+            "default",
+            16,
+            WorkerWithDpRank::new(1, 0),
+            8,
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if registry.list_loads(None, None)[0].active_decode_blocks == 3 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn recreated_tracker_uses_a_fresh_replica_channel() {
+        let (outbound_tx, _outbound_rx) = mpsc::channel(1);
+        let registry =
+            SlotTrackerRegistry::new_with_replica_sync(CancellationToken::new(), 7, outbound_tx);
+        let key = key("default");
+        registry.register(key.clone(), 1, 16, 0, 1).unwrap();
+        let first = registry.entry(&key).unwrap();
+
+        registry.unregister(&key, 1).unwrap();
+        registry.register(key.clone(), 1, 16, 0, 1).unwrap();
+        let second = registry.entry(&key).unwrap();
+
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert!(
+            !first
+                .replica_tx
+                .as_ref()
+                .unwrap()
+                .same_channel(second.replica_tx.as_ref().unwrap())
+        );
     }
 
     #[tokio::test]

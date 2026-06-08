@@ -95,6 +95,15 @@ pub trait SequenceSubscriber: Send {
 // Types
 // ---------------------------------------------------------------------------
 
+/// Controls how replica-sync events handle workers missing from local topology.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplicaWorkerPolicy {
+    /// Preserve the legacy router behavior by creating the exact missing worker rank.
+    LazyRegister,
+    /// Drop replica events until the worker rank has been registered locally.
+    RequireRegistered,
+}
+
 /// Errors that can occur during sequence management operations.
 #[derive(Debug, thiserror::Error)]
 pub enum SequenceError {
@@ -145,6 +154,7 @@ pub struct ActiveSequencesMultiWorker<P: SequencePublisher> {
     #[cfg(test)]
     remote_state_update_count: AtomicUsize,
     replica_sync: bool,
+    pub(super) replica_worker_policy: ReplicaWorkerPolicy,
     worker_type: &'static str,
 }
 
@@ -159,6 +169,27 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         replica_sync: bool,
         router_id: u64,
         worker_type: &'static str,
+    ) -> Self {
+        Self::new_with_replica_worker_policy(
+            publisher,
+            block_size,
+            dp_range,
+            replica_sync,
+            router_id,
+            worker_type,
+            ReplicaWorkerPolicy::LazyRegister,
+        )
+    }
+
+    /// Create a tracker with an explicit worker-admission policy for replica events.
+    pub fn new_with_replica_worker_policy(
+        publisher: P,
+        block_size: usize,
+        dp_range: HashMap<u64, (u32, u32)>,
+        replica_sync: bool,
+        router_id: u64,
+        worker_type: &'static str,
+        replica_worker_policy: ReplicaWorkerPolicy,
     ) -> Self {
         assert!(block_size > 0, "block_size must be greater than 0");
         let (remote_state_updates, _) = watch::channel(());
@@ -176,6 +207,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             #[cfg(test)]
             remote_state_update_count: AtomicUsize::new(0),
             replica_sync,
+            replica_worker_policy,
             worker_type,
         }
     }
@@ -2128,6 +2160,68 @@ mod tests {
         );
         assert!(!sequences.prompt_registry.is_block_index_empty());
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(3));
+    }
+
+    #[tokio::test]
+    async fn replica_sync_require_registered_drops_missing_worker() {
+        let sequences = ActiveSequencesMultiWorker::new_with_replica_worker_policy(
+            NoopSequencePublisher,
+            4,
+            HashMap::new(),
+            true,
+            0,
+            "test",
+            ReplicaWorkerPolicy::RequireRegistered,
+        );
+        let worker = WorkerWithDpRank::new(1, 0);
+
+        sequences
+            .run_replica_sync(
+                VecSubscriber {
+                    events: VecDeque::from(vec![Ok(replica_add("req-1", worker, vec![1, 2, 3]))]),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(sequences.num_workers(), 0);
+        assert_eq!(
+            sequences.request_index.worker_for(&"req-1".to_string()),
+            None
+        );
+        assert!(sequences.prompt_registry.is_block_index_empty());
+    }
+
+    #[tokio::test]
+    async fn replica_sync_require_registered_drops_event_after_worker_removal() {
+        let sequences = ActiveSequencesMultiWorker::new_with_replica_worker_policy(
+            NoopSequencePublisher,
+            4,
+            HashMap::from([(1_u64, (0_u32, 1_u32))]),
+            true,
+            0,
+            "test",
+            ReplicaWorkerPolicy::RequireRegistered,
+        );
+        let worker = WorkerWithDpRank::new(1, 0);
+        sequences.update_workers(&HashMap::new());
+
+        sequences
+            .run_replica_sync(
+                VecSubscriber {
+                    events: VecDeque::from(vec![Ok(replica_add("req-1", worker, vec![1, 2, 3]))]),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(sequences.num_workers(), 0);
+        assert_eq!(
+            sequences.request_index.worker_for(&"req-1".to_string()),
+            None
+        );
     }
 
     #[test]

@@ -3,6 +3,9 @@
 
 //! Standalone services built from brokerless transport primitives.
 
+#[cfg(any(feature = "standalone-indexer", feature = "standalone-slot-tracker"))]
+pub(crate) mod zmq;
+
 #[cfg(feature = "standalone-indexer")]
 pub mod indexer;
 

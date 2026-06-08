@@ -16,8 +16,9 @@ The service accepts ordered final chained sequence hashes, one hash per prompt b
 Hashes are serialized as signed 64-bit JSON integers and reinterpreted bit-for-bit as internal
 unsigned hashes. Send hashes rather than prompt tokens.
 
-This first version intentionally excludes metrics, discovery-based registration, output
-block updates, replica synchronization, persistence, and peer recovery.
+The service optionally replicates lifecycle events directly between slot-tracker processes
+over ZMQ. It still excludes metrics, discovery-based worker registration, output block
+updates, persistence, and peer recovery.
 
 ## Build And Launch
 
@@ -34,6 +35,16 @@ Launch the service:
 .venv/bin/python -m dynamo.slot_tracker --port 8091
 ```
 
+Enable replica synchronization:
+
+```bash
+.venv/bin/python -m dynamo.slot_tracker \
+  --port 8091 \
+  --replica-sync-bind 'tcp://*:8092' \
+  --replica-sync-advertise 'tcp://slot-tracker-a:8092' \
+  --replica-sync-peers 'tcp://slot-tracker-b:8092'
+```
+
 The default port is `8091`. `GET /health` returns `200 OK` with an empty body as soon as
 the HTTP listener is ready. This endpoint is liveness-only. After a restart the registry
 is empty; consumers must re-register workers and replay active requests if they need
@@ -41,6 +52,40 @@ restored accounting.
 
 The service binds to `0.0.0.0` and does not provide authentication. Run it on a trusted
 internal network or place it behind an appropriate network policy.
+
+## Replica Synchronization
+
+`--replica-sync-bind` enables a ZMQ PUB endpoint and replica-event consumption. The
+service generates an ephemeral process identity internally; it is not a configuration
+parameter. `--replica-sync-advertise` is the externally reachable form of the local
+endpoint and prevents exact self-registration. `--replica-sync-peers` accepts a
+comma-separated list of peer PUB endpoints.
+
+Peer connections are directional. For bidirectional synchronization, configure each
+replica with the other replica's advertised endpoint. All replicas must independently
+receive the same worker registrations before lifecycle traffic begins. A replica event
+for an unknown `(model_name, tenant_id)`, block size, worker ID, or DP rank is dropped.
+Replica traffic never creates workers.
+
+The transport is bounded and best-effort. A full queue drops new events rather than
+blocking HTTP operations, and ZMQ subscription setup may lose events sent immediately
+after peer registration. There is no acknowledgement, replay, snapshot, or gap recovery.
+`/add`, `/prefill_complete`, and `/free` should normally remain sticky to the replica
+that accepted `/add`; replica synchronization provides advisory peer state rather than
+cross-replica lifecycle ownership.
+
+Peers may also be managed dynamically:
+
+```http
+POST /register_peer
+Content-Type: application/json
+
+{"url":"tcp://slot-tracker-b:8092"}
+```
+
+The same body is accepted by `POST /deregister_peer`. `GET /peers` returns the sorted
+configured endpoints. Registration confirms that the endpoint was accepted by the local
+SUB socket, not that the asynchronous ZMQ subscription handshake has completed.
 
 ## Common Responses
 
