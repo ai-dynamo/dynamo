@@ -37,6 +37,12 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 			"next-steps", "upstream SGLang changes needed")
 	}
 
+	if component.IsInterPodGMSEnabled() {
+		if !containerHasGMSLoadFormat(container) {
+			injectFlagsIntoContainerCommand(container, "--load-format gms", false, "sglang")
+		}
+	}
+
 	// For single node, nothing to do
 	if numberOfNodes <= 1 {
 		return

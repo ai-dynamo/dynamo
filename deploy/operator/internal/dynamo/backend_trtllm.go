@@ -30,6 +30,12 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 			"next-steps", "upstream TensorRT-LLM changes needed")
 	}
 
+	if component.IsInterPodGMSEnabled() {
+		if !containerHasGMSLoadFormat(container) {
+			injectFlagsIntoContainerCommand(container, "--load-format gms", false, "trtllm")
+		}
+	}
+
 	// For single node, nothing to do
 	if numberOfNodes <= 1 {
 		return
@@ -141,7 +147,7 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 		"cp /ssh-pk/private.key.pub $HOME/.ssh/authorized_keys",
 		"chmod 600 $HOME/.ssh/id_rsa $HOME/.ssh/authorized_keys",
 		"chmod 644 $HOME/.ssh/id_rsa.pub",
-		fmt.Sprintf("printf 'Host *\\nIdentityFile '$HOME'/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort %d\\n' > $HOME/.ssh/config", commonconsts.MpiRunSshPort),
+		fmt.Sprintf("printf 'Host *\\nIdentityFile '$HOME'/.ssh/id_rsa\\nStrictHostKeyChecking no\\nUserKnownHostsFile /dev/null\\nGlobalKnownHostsFile /dev/null\\nPort %d\\n' > $HOME/.ssh/config", commonconsts.MpiRunSshPort),
 	}
 
 	// Calculate total number of GPUs across all nodes. In the normal pod

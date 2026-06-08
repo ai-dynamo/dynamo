@@ -103,12 +103,13 @@ const (
 	// corresponding node label onto the pod after scheduling.
 	KubeAnnotationTopologyLabelKey = "nvidia.com/topology-label-key"
 
-	DynamoDeploymentConfigEnvVar      = "DYN_DEPLOYMENT_CONFIG"
-	DynamoNamespaceEnvVar             = "DYN_NAMESPACE"
-	DynamoNamespacePrefixEnvVar       = "DYN_NAMESPACE_PREFIX"
-	DynamoNamespaceWorkerSuffixEnvVar = "DYN_NAMESPACE_WORKER_SUFFIX"
-	DynamoComponentEnvVar             = "DYN_COMPONENT"
-	DynamoDiscoveryBackendEnvVar      = "DYN_DISCOVERY_BACKEND"
+	DynamoDeploymentConfigEnvVar            = "DYN_DEPLOYMENT_CONFIG"
+	DynamoNamespaceEnvVar                   = "DYN_NAMESPACE"
+	DynamoNamespacePrefixEnvVar             = "DYN_NAMESPACE_PREFIX"
+	DynamoNamespaceWorkerSuffixEnvVar       = "DYN_NAMESPACE_WORKER_SUFFIX"
+	DynamoComponentEnvVar                   = "DYN_COMPONENT"
+	DynamoDiscoveryBackendEnvVar            = "DYN_DISCOVERY_BACKEND"
+	DynamoDiscoveryLogicalInstanceKeyEnvVar = "DYN_DISCOVERY_LOGICAL_INSTANCE_KEY"
 
 	// DynamoOperatorAllowGMSSnapshotEnvVar enables the temporary internal
 	// GMS + Snapshot admission gate when set to "1".

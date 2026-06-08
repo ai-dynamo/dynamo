@@ -13,8 +13,10 @@ import (
 )
 
 const (
-	vllmMasterPortFlag   = "--master-port"
-	vllmMasterPortStride = 100
+	vllmMasterPortFlag             = "--master-port"
+	vllmMasterPortStride           = 100
+	vllmGlooSocketIfNameEnvVar     = "GLOO_SOCKET_IFNAME"
+	vllmDefaultGlooSocketInterface = "eth0"
 )
 
 // applyVLLMOverrides injects vLLM-specific env vars into all engine containers.
@@ -31,7 +33,7 @@ func applyVLLMOverrides(podSpec *corev1.PodSpec, numberOfNodes int32) {
 		engineID, _ := strconv.Atoi(strings.TrimPrefix(c.Name, "engine-"))
 
 		c.Env = append(c.Env,
-			corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"},
+			corev1.EnvVar{Name: vllmGMSShadowModeEnvVar, Value: "true"},
 			corev1.EnvVar{Name: "VLLM_NIXL_SIDE_CHANNEL_PORT", Value: strconv.Itoa(5600 + engineID)},
 			corev1.EnvVar{Name: "DYN_VLLM_KV_EVENT_PORT", Value: strconv.Itoa(20080 + engineID)},
 		)
@@ -51,6 +53,9 @@ func applyVLLMOverrides(podSpec *corev1.PodSpec, numberOfNodes int32) {
 			c.Env = append(c.Env,
 				corev1.EnvVar{Name: "NNODES", Value: strconv.Itoa(int(numberOfNodes))},
 			)
+			if !hasVLLMGlooSocketIfNameEnv(c.Env) {
+				c.Env = append(c.Env, corev1.EnvVar{Name: vllmGlooSocketIfNameEnvVar, Value: vllmDefaultGlooSocketInterface})
+			}
 		}
 	}
 }
@@ -129,4 +134,13 @@ func staggerFlagValue(container *corev1.Container, flag string, offset int) {
 			}
 		}
 	}
+}
+
+func hasVLLMGlooSocketIfNameEnv(envs []corev1.EnvVar) bool {
+	for _, env := range envs {
+		if env.Name == vllmGlooSocketIfNameEnvVar {
+			return true
+		}
+	}
+	return false
 }

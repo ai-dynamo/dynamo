@@ -23,6 +23,7 @@ const (
 	dataParallelSizeLocalFlag = "--data-parallel-size-local"
 	distributedExecutorFlag   = "--distributed-executor-backend"
 	enableElasticEPFlag       = "--enable-elastic-ep"
+	vllmGMSShadowModeEnvVar   = "DYN_VLLM_GMS_SHADOW_MODE"
 )
 
 type VLLMBackend struct {
@@ -38,7 +39,7 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 	// naming convention, not a statement about whether shadow pods are
 	// present.
 	if component.IsInterPodGMSEnabled() {
-		if !containerHasArg(container, "--load-format", "gms") {
+		if !containerHasGMSLoadFormat(container) {
 			injectFlagsIntoContainerCommand(container, "--load-format gms", false, "vllm")
 		}
 		// DYN_VLLM_GMS_SHADOW_MODE is a vLLM-engine-specific switch (activates
@@ -46,7 +47,7 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 		// injected here — in the vLLM backend — rather than in the backend-
 		// agnostic GMS helpers so non-vLLM backends do not inherit a stray,
 		// meaningless env var if/when inter-pod GMS is extended to them.
-		container.Env = append(container.Env, corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"})
+		container.Env = append(container.Env, corev1.EnvVar{Name: vllmGMSShadowModeEnvVar, Value: "true"})
 	}
 
 	isMultinode := numberOfNodes > 1
@@ -465,16 +466,6 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 		)}
 	}
 	container.Command = []string{"/bin/sh", "-c"}
-}
-
-// hasFlag returns true if flag exists in expandedArgs.
-func hasFlag(expandedArgs []string, flag string) bool {
-	for _, arg := range expandedArgs {
-		if arg == flag {
-			return true
-		}
-	}
-	return false
 }
 
 func injectDataParallelLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *corev1.ResourceRequirements, numberOfNodes int32) {

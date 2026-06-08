@@ -54,15 +54,14 @@ func shellQuoteForBashC(s string) string {
 	return s
 }
 
-// containerHasArg reports whether the container already carries the given
-// flag/value pair in its Args (either as adjacent tokens "flag", "value" or
-// as a single token "flag=value" or "flag value" embedded inside a shell
-// string). It is used to make flag injection idempotent.
-func containerHasArg(container *corev1.Container, flag, value string) bool {
+// containerHasGMSLoadFormat reports whether the container already carries
+// --load-format gms in Args. It is used to make GMS load-format injection
+// idempotent.
+func containerHasGMSLoadFormat(container *corev1.Container) bool {
 	if container == nil {
 		return false
 	}
-	return hasArg(container.Args, flag, value)
+	return hasArg(container.Args, "--load-format", "gms")
 }
 
 func containerCommandLineHasArg(container *corev1.Container, flag, value string) bool {
@@ -83,6 +82,24 @@ func containerCommandLineHasArg(container *corev1.Container, flag, value string)
 	return hasArg(expandedCommandLine, flag, value)
 }
 
+func containerCommandLineHasFlag(container *corev1.Container, flag string) bool {
+	if container == nil {
+		return false
+	}
+	commandLine := make([]string, 0, len(container.Command)+len(container.Args))
+	commandLine = append(commandLine, container.Command...)
+	commandLine = append(commandLine, container.Args...)
+	if hasFlag(commandLine, flag) {
+		return true
+	}
+
+	expandedCommandLine := []string{}
+	for _, arg := range commandLine {
+		expandedCommandLine = append(expandedCommandLine, strings.Fields(arg)...)
+	}
+	return hasFlag(expandedCommandLine, flag)
+}
+
 func hasArg(args []string, flag, value string) bool {
 	joined := flag + " " + value
 	equals := flag + "=" + value
@@ -91,6 +108,16 @@ func hasArg(args []string, flag, value string) bool {
 			return true
 		}
 		if arg == flag && i+1 < len(args) && args[i+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
+// hasFlag returns true if flag exists in args.
+func hasFlag(args []string, flag string) bool {
+	for _, arg := range args {
+		if arg == flag {
 			return true
 		}
 	}
