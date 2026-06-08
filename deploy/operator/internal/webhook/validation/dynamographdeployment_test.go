@@ -1774,7 +1774,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				},
 			},
 			wantErr: true,
-			errMsg:  "spec.experimental.kvTransferPolicy.clusterTopologyName requires the Grove pathway, but Grove is disabled at the operator level (global.grove.enabled=false)",
+			errMsg:  "spec.experimental.kvTransferPolicy.clusterTopologyName requires the Grove pathway, but Grove is disabled in the operator configuration",
 		},
 		{
 			name: "experimental kvTransferPolicy clusterTopologyName rejects Grove opt-out annotation",
