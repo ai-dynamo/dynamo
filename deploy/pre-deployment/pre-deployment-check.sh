@@ -22,7 +22,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Global state flags
-MANAGED_GPU_DETECTED=false
+ALLOCATABLE_GPU_DETECTED=false
 
 # Function to print colored output
 print_status() {
@@ -149,10 +149,10 @@ check_cluster_resources() {
     allocatable_count=$(echo "$allocatable_gpu_nodes" | awk '$2 != "" && $2 != "0"' | wc -l | tr -d ' ')
 
     if [[ $allocatable_count -gt 0 ]]; then
-        MANAGED_GPU_DETECTED=true
+        ALLOCATABLE_GPU_DETECTED=true
 
         print_status $GREEN "✅ Found ${allocatable_count} GPU node(s) via allocatable GPU resources"
-        print_status $BLUE "Managed GPU environment detected (GPU Operator labels not present)"
+        print_status $BLUE "Allocatable NVIDIA GPU resources detected (GPU Operator labels not present)"
 
         echo "$allocatable_gpu_nodes" | awk '$2 != "" && $2 != "0"' | while read -r node gpu_count; do
             print_status $GREEN "  - ${node}: ${gpu_count} GPU(s)"
@@ -174,13 +174,6 @@ check_cluster_resources() {
 check_gpu_operator() {
     print_section "Checking GPU operator"
 
-    # Managed GPU environments may not use GPU Operator
-    if [[ "$MANAGED_GPU_DETECTED" == "true" ]]; then
-        print_status $YELLOW "⚠️  GPU Operator not required in managed GPU environments"
-        print_status $GREEN "✅ Managed GPU support detected via allocatable GPU resources"
-        return 0
-    fi
-
     # Check for GPU operator pods
     local gpu_operator_pods
     gpu_operator_pods=$(kubectl get pods -A \
@@ -194,15 +187,24 @@ check_gpu_operator() {
             --no-headers 2>/dev/null || true)
     fi
 
+    # If GPU operator is NOT found
     if [[ -z "$gpu_operator_pods" ]]; then
+
+        if [[ "$ALLOCATABLE_GPU_DETECTED" == "true" ]]; then
+            print_status $YELLOW "⚠️ GPU Operator not found (non-blocking as allocatable NVIDIA GPU resources are available)"
+            print_status $YELLOW "ℹ️ Assuming GPU functionality is provided via external device plugin / cloud image"
+            return 0
+        fi
+
         print_status $RED "❌ GPU operator not found in the cluster"
         print_status $YELLOW "Dynamo requires either:"
         print_status $YELLOW "  - NVIDIA GPU Operator"
-        print_status $YELLOW "  - Managed GPU support with allocatable GPUs"
+        print_status $YELLOW "  - Allocatable NVIDIA GPU resources"
 
         return 1
     fi
 
+    # Count running pods
     local running_pods
     running_pods=$(echo "$gpu_operator_pods" | awk '$4 == "Running"' | wc -l | tr -d ' ')
 
@@ -215,7 +217,7 @@ check_gpu_operator() {
         return 1
 
     elif [[ $running_pods -lt $total_pods ]]; then
-        print_status $YELLOW "⚠️  GPU operator partially running: $running_pods/$total_pods pods running"
+        print_status $YELLOW "⚠️ GPU operator partially running: $running_pods/$total_pods pods running"
         echo "$gpu_operator_pods"
         print_status $GREEN "✅ GPU operator is available (with warnings)"
         return 0
