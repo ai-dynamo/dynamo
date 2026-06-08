@@ -6,7 +6,8 @@
 Registers a ``ModelType.Realtime`` + ``ModelInput.Text`` model and serves a
 Python ``async def generate(request_stream, context)`` bidirectional engine
 via ``serve_bidirectional_endpoint``. A launched ``dynamo.frontend`` discovers
-this worker over etcd and installs a typed realtime PushRouter to it.
+this worker via the configured discovery backend (the e2e uses the file
+backend, ``DYN_FILE_KV``) and installs a typed realtime PushRouter to it.
 """
 
 from __future__ import annotations
