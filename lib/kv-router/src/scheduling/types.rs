@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::config::RouterConfigOverride;
 use crate::protocols::{DpRank, SharedCacheHits, WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use crate::remote_g2_plan::RemoteG2CandidateScore;
 use crate::sequences::PrefillTokenDeltas;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -67,6 +68,7 @@ pub struct SchedulingRequest {
     pub effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
     pub effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
     pub shared_cache_hits: Option<SharedCacheHits>,
+    pub remote_g2_candidates: HashMap<WorkerWithDpRank, RemoteG2CandidateScore>,
 
     // Load state computed during admission.
     pub decode_blocks: FxHashMap<WorkerWithDpRank, usize>,

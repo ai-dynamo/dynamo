@@ -14,6 +14,7 @@ use validator::{Validate, ValidationError};
 use crate::protocols::{
     BlockHashOptions, LocalBlockHash, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
+use crate::remote_g2_plan::RemoteG2CostModel;
 
 const fn default_track_prefill_tokens() -> bool {
     true
@@ -260,17 +261,24 @@ pub struct KvRouterConfig {
     #[serde(default)]
     pub serve_indexer: bool,
 
-    /// Multiplier for shared cache hits when scoring workers (0.0 to 1.0).
-    /// Blocks available in the shared cache are less valuable than device-local blocks
-    /// because they need to be fetched. A value of 0.5 means each shared cache hit
-    /// counts as half a device-local hit. Default: 0.0 (shared cache scoring disabled);
-    /// the CLI sets this to 0.5 when shared cache is enabled.
+    /// Multiplier for non-local KV hits when scoring workers (0.0 to 1.0).
+    /// Blocks available through shared cache or Direct G2 are less valuable than
+    /// device-local blocks because they need to be fetched. A value of 0.5 means
+    /// each non-local hit counts as half a device-local hit. Default: 0.0
+    /// (non-local scoring disabled); the CLI defaults this to 0.5.
     #[validate(range(min = 0.0, max = 1.0))]
     pub shared_cache_multiplier: f64,
 
     /// Type of external shared KV cache to query during routing.
     /// "none" (default): disabled. "hicache": query sglang workers for L3 cache state.
     pub shared_cache_type: SharedCacheType,
+
+    /// Whether to plan live source-worker HostPinned KV transfer for scored remote G2 candidates.
+    pub remote_g2_reuse_enabled: bool,
+
+    /// Direct G2 transfer tax in block-equivalent units.
+    #[validate(range(min = 0.0))]
+    pub remote_g2_cost_blocks: f64,
 }
 
 impl Default for KvRouterConfig {
@@ -299,6 +307,8 @@ impl Default for KvRouterConfig {
             serve_indexer: false,
             shared_cache_multiplier: 0.0,
             shared_cache_type: SharedCacheType::default(),
+            remote_g2_reuse_enabled: false,
+            remote_g2_cost_blocks: 0.0,
         }
     }
 }
@@ -367,6 +377,18 @@ impl KvRouterConfig {
         config_override
             .and_then(|cfg| cfg.track_prefill_tokens)
             .unwrap_or(self.router_track_prefill_tokens)
+    }
+
+    pub fn remote_g2_cost_model(
+        &self,
+        config_override: Option<&RouterConfigOverride>,
+    ) -> RemoteG2CostModel {
+        RemoteG2CostModel {
+            score_weight: config_override
+                .and_then(|cfg| cfg.shared_cache_multiplier)
+                .unwrap_or(self.shared_cache_multiplier),
+            cost_blocks: self.remote_g2_cost_blocks,
+        }
     }
 
     /// Compute sequence hashes for active block tracking based on configuration.
@@ -511,6 +533,16 @@ mod tests {
 
         assert!(too_small.validate().is_err());
         assert!(too_large.validate().is_err());
+    }
+
+    #[test]
+    fn test_kv_router_config_rejects_out_of_range_remote_g2_cost_policy() {
+        let negative_cost = KvRouterConfig {
+            remote_g2_cost_blocks: -1.0,
+            ..Default::default()
+        };
+
+        assert!(negative_cost.validate().is_err());
     }
 
     #[test]

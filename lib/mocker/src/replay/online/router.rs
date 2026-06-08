@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -253,6 +254,7 @@ impl KvReplayRouter {
                 None,
                 None,
                 None,
+                HashMap::new(),
             )
             .await?;
         usize::try_from(response.best_worker.worker_id)

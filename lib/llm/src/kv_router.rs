@@ -16,12 +16,13 @@ use dynamo_kv_router::{
     protocols::KV_EVENT_SUBJECT,
     protocols::{
         BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint, RouterEvent,
-        RouterRequest, RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank,
-        compute_block_hash_for_seq,
+        RouterRequest, RouterResponse, TokensWithHashes, WorkerConfigLike, WorkerId,
+        WorkerWithDpRank, compute_block_hash_for_seq,
     },
     remote_g2_plan::{
-        RemoteKvReuseDecision, RemoteKvReuseNoPlanReason, RemoteKvReuseSelectionInput,
-        RemoteKvReuseSelectionStats, RemoteKvReuseSourceRoute, select_remote_g2_reuse_plan,
+        RemoteG2CandidateDecision, RemoteG2CandidateScore, RemoteKvReuseDecision,
+        RemoteKvReuseNoPlanReason, RemoteKvReuseSelectionInput, RemoteKvReuseSelectionStats,
+        RemoteKvReuseSourceRoute, materialize_remote_g2_reuse_plan, select_remote_g2_candidate,
     },
     scheduling::TierOverlapBlocks,
 };
@@ -113,7 +114,6 @@ struct CacheHitEstimates {
 }
 
 const REMOTE_KV_REUSE_PLAN_TTL_MS: u64 = 30_000;
-const REMOTE_G2_REUSE_ENABLED_ENV: &str = "DYN_REMOTE_G2_REUSE_ENABLED";
 const REMOTE_G2_TRACE_ENV: &str = "DYN_REMOTE_G2_TRACE";
 const SGLANG_SHARED_HICACHE_RUNTIME_KEY: &str = "sglang_shared_hicache";
 
@@ -158,15 +158,6 @@ fn unix_epoch_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
         .unwrap_or_default()
-}
-
-fn remote_g2_reuse_enabled() -> bool {
-    env::var(REMOTE_G2_REUSE_ENABLED_ENV)
-        .map(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            !matches!(normalized.as_str(), "0" | "false" | "no" | "off")
-        })
-        .unwrap_or(true)
 }
 
 fn remote_g2_trace_enabled() -> bool {
@@ -227,6 +218,74 @@ fn cached_tokens_from_effective_overlap(block_size: u32, effective_overlap_block
     (effective_overlap_blocks * block_size as f64)
         .round()
         .max(0.0) as usize
+}
+
+fn remote_g2_target_local_prefix_blocks(
+    target: WorkerWithDpRank,
+    tier_overlap_blocks: &TierOverlapBlocks,
+    cache_hit_estimates: &CacheHitEstimates,
+) -> u32 {
+    let effective_blocks = cache_hit_estimates
+        .effective_overlap_blocks
+        .get(&target)
+        .copied()
+        .unwrap_or(0.0)
+        .round()
+        .max(0.0) as u32;
+    let host_pinned_blocks = tier_overlap_blocks
+        .host_pinned
+        .get(&target)
+        .copied()
+        .unwrap_or(0) as u32;
+    effective_blocks.max(host_pinned_blocks)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn remote_g2_candidates_from_tiered_matches(
+    kv_router_config: &KvRouterConfig,
+    router_config_override: Option<&RouterConfigOverride>,
+    workers: &HashMap<WorkerId, ModelRuntimeConfig>,
+    block_hashes: &[LocalBlockHash],
+    block_size: u32,
+    tiered_matches: &indexer::TieredMatchDetails,
+    tier_overlap_blocks: &TierOverlapBlocks,
+    cache_hit_estimates: &CacheHitEstimates,
+    request_id: &str,
+    created_at_ms: u64,
+    expires_at_ms: u64,
+) -> HashMap<WorkerWithDpRank, RemoteG2CandidateScore> {
+    if !kv_router_config.remote_g2_reuse_enabled {
+        return HashMap::new();
+    }
+    let cost_model = kv_router_config.remote_g2_cost_model(router_config_override);
+    let mut candidates = HashMap::new();
+    for (worker_id, config) in workers {
+        let data_parallel_size = config.data_parallel_size();
+        let data_parallel_start_rank = config.data_parallel_start_rank();
+        for dp_rank in data_parallel_start_rank..(data_parallel_start_rank + data_parallel_size) {
+            let target = WorkerWithDpRank::new(*worker_id, dp_rank);
+            let target_local_prefix_blocks = remote_g2_target_local_prefix_blocks(
+                target,
+                tier_overlap_blocks,
+                cache_hit_estimates,
+            );
+            let decision = select_remote_g2_candidate(RemoteKvReuseSelectionInput {
+                request_id,
+                target,
+                target_local_prefix_blocks,
+                block_hashes,
+                block_size_tokens: block_size,
+                tiered_matches,
+                created_at_ms,
+                expires_at_ms,
+                cost_model: Some(cost_model),
+            });
+            if let RemoteG2CandidateDecision::Candidate { candidate, .. } = decision {
+                candidates.insert(target, candidate);
+            }
+        }
+    }
+    candidates
 }
 
 fn cache_hit_estimates_from_tiered_matches(
@@ -653,6 +712,24 @@ where
         let tier_overlap_blocks = tier_overlap_blocks_from_tiered_matches(&tiered_matches);
         let cache_hit_estimates = self.cache_hit_estimates_from_tiered_matches(&tiered_matches);
         let find_matches_elapsed = start.elapsed();
+        let created_at_ms = unix_epoch_ms();
+        let expires_at_ms = created_at_ms.saturating_add(REMOTE_KV_REUSE_PLAN_TTL_MS);
+        let remote_g2_candidates = {
+            let workers = self.workers_with_configs.borrow();
+            remote_g2_candidates_from_tiered_matches(
+                &self.kv_router_config,
+                router_config_override,
+                &workers,
+                &block_hashes,
+                self.block_size,
+                &tiered_matches,
+                &tier_overlap_blocks,
+                &cache_hit_estimates,
+                context_id.unwrap_or_default(),
+                created_at_ms,
+                expires_at_ms,
+            )
+        };
 
         // Capture shared cache info for metrics before moving into schedule().
         // Clone the hits so we can compute `hits_beyond(overlap_blocks)` after
@@ -666,9 +743,9 @@ where
                 context_id.map(|s| s.to_string()),
                 isl_tokens,
                 maybe_seq_hashes,
-                tier_overlap_blocks,
-                cache_hit_estimates.effective_overlap_blocks,
-                cache_hit_estimates.cached_tokens,
+                tier_overlap_blocks.clone(),
+                cache_hit_estimates.effective_overlap_blocks.clone(),
+                cache_hit_estimates.cached_tokens.clone(),
                 router_config_override,
                 update_states,
                 lora_name,
@@ -677,20 +754,38 @@ where
                 pinned_worker,
                 allowed_worker_ids,
                 shared_cache_hits,
+                remote_g2_candidates.clone(),
             )
             .instrument(tracing::info_span!("kv_router.schedule"))
             .await?;
-        let created_at_ms = unix_epoch_ms();
-        let mut remote_kv_reuse = if remote_g2_reuse_enabled() {
-            select_remote_g2_reuse_plan(RemoteKvReuseSelectionInput {
-                request_id: context_id.unwrap_or_default(),
-                target: response.best_worker,
-                block_hashes: &block_hashes,
-                block_size_tokens: self.block_size,
-                tiered_matches: &tiered_matches,
-                created_at_ms,
-                expires_at_ms: created_at_ms.saturating_add(REMOTE_KV_REUSE_PLAN_TTL_MS),
-            })
+        let selected_target_local_prefix_blocks = remote_g2_target_local_prefix_blocks(
+            response.best_worker,
+            &tier_overlap_blocks,
+            &cache_hit_estimates,
+        );
+        let selected_remote_g2_input = RemoteKvReuseSelectionInput {
+            request_id: context_id.unwrap_or_default(),
+            target: response.best_worker,
+            target_local_prefix_blocks: selected_target_local_prefix_blocks,
+            block_hashes: &block_hashes,
+            block_size_tokens: self.block_size,
+            tiered_matches: &tiered_matches,
+            created_at_ms,
+            expires_at_ms,
+            cost_model: Some(
+                self.kv_router_config
+                    .remote_g2_cost_model(router_config_override),
+            ),
+        };
+        let mut remote_kv_reuse = if self.kv_router_config.remote_g2_reuse_enabled {
+            match select_remote_g2_candidate(selected_remote_g2_input) {
+                RemoteG2CandidateDecision::Candidate { candidate, .. } => {
+                    materialize_remote_g2_reuse_plan(selected_remote_g2_input, candidate)
+                }
+                RemoteG2CandidateDecision::NoCandidate { reason, stats } => {
+                    RemoteKvReuseDecision::NoPlan { reason, stats }
+                }
+            }
         } else {
             RemoteKvReuseDecision::NoPlan {
                 reason: RemoteKvReuseNoPlanReason::Disabled,
@@ -793,6 +888,7 @@ where
                 cached_tokens = response.cached_tokens,
                 ?device_hits,
                 ?host_pinned_hits,
+                ?remote_g2_candidates,
                 decision = ?remote_kv_reuse,
                 "REMOTE_G2_TRACE planner decision"
             );

@@ -186,6 +186,10 @@ where
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         shared_cache_hits: Option<crate::SharedCacheHits>,
+        remote_g2_candidates: HashMap<
+            WorkerWithDpRank,
+            crate::remote_g2_plan::RemoteG2CandidateScore,
+        >,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let track_prefill_tokens = router_config_override
@@ -209,6 +213,7 @@ where
             pinned_worker,
             allowed_worker_ids,
             shared_cache_hits,
+            remote_g2_candidates,
             resp_tx: Some(resp_tx),
         };
 
@@ -458,6 +463,7 @@ mod tests {
                 None,
                 None,
                 None,
+                HashMap::new(),
             )
             .await
             .unwrap();
@@ -502,6 +508,7 @@ mod tests {
                 None,
                 None,
                 None,
+                HashMap::new(),
             )
             .await
             .unwrap();
@@ -546,6 +553,7 @@ mod tests {
                 None,
                 None,
                 None,
+                HashMap::new(),
             )
             .await
             .unwrap();
@@ -591,6 +599,7 @@ mod tests {
                 None,
                 None,
                 None,
+                HashMap::new(),
             )
             .await
             .unwrap();
@@ -614,6 +623,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        HashMap::new(),
                     )
                     .await
             })
@@ -658,6 +668,7 @@ mod tests {
                 None,
                 None,
                 None,
+                HashMap::new(),
             )
             .await
             .unwrap();
@@ -681,6 +692,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        HashMap::new(),
                     )
                     .await
             })
@@ -739,6 +751,7 @@ mod tests {
                 None,
                 None,
                 None,
+                HashMap::new(),
             )
             .await
             .unwrap();
@@ -762,6 +775,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        HashMap::new(),
                     )
                     .await
             })
@@ -819,6 +833,7 @@ mod tests {
                 None,
                 None,
                 None,
+                HashMap::new(),
             )
             .await
             .unwrap();
@@ -842,6 +857,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        HashMap::new(),
                     )
                     .await
             })
@@ -897,6 +913,7 @@ mod tests {
                 None,
                 None,
                 None,
+                HashMap::new(),
             )
             .await
             .unwrap();
@@ -997,6 +1014,7 @@ mod tests {
                 None,
                 None,
                 None,
+                HashMap::new(),
             )
             .await
             .unwrap();
@@ -1095,6 +1113,7 @@ mod tests {
                 None,
                 None,
                 None,
+                HashMap::new(),
             )
             .await
             .unwrap();

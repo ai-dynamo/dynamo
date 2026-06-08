@@ -38,6 +38,8 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "serve_indexer",
     "shared_cache_multiplier",
     "shared_cache_type",
+    "remote_g2_reuse_enabled",
+    "remote_g2_cost_blocks",
 )
 
 
@@ -64,6 +66,8 @@ class KvRouterConfigBase(ConfigBase):
     serve_indexer: bool = False
     shared_cache_multiplier: float = 0.0
     shared_cache_type: str = "none"
+    remote_g2_reuse_enabled: bool = False
+    remote_g2_cost_blocks: float = 0.0
 
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
@@ -288,9 +292,9 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_SHARED_CACHE_MULTIPLIER",
             default=0.5,
             help=(
-                "[EXPERIMENTAL] KV Router: Multiplier for shared cache hits (0.0-1.0). "
-                "Blocks in the shared cache are less valuable than device-local blocks. "
-                "E.g. 0.5 means each shared hit counts as half a device-local hit. "
+                "[EXPERIMENTAL] KV Router: Multiplier for non-local KV hits (0.0-1.0). "
+                "Blocks in shared cache or Direct G2 are less valuable than device-local blocks. "
+                "E.g. 0.5 means each non-local hit counts as half a device-local hit. "
                 "Default 0.5."
             ),
             arg_type=float,
@@ -308,4 +312,27 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=str,
             choices=["none", "hicache"],
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--remote-g2-reuse",
+            env_var="DYN_REMOTE_G2_REUSE_ENABLED",
+            default=False,
+            help=(
+                "[EXPERIMENTAL] KV Router: Enable live source-worker HostPinned KV transfer "
+                "planning for cost-positive remote G2 candidates."
+            ),
+            dest="remote_g2_reuse_enabled",
+        )
+        add_argument(
+            g,
+            flag_name="--remote-g2-cost-blocks",
+            env_var="DYN_REMOTE_G2_COST_BLOCKS",
+            default=0.0,
+            help=(
+                "[EXPERIMENTAL] KV Router: Direct G2 transfer tax in block-equivalent units. "
+                "The router scores Direct G2 as shared_cache_multiplier * incremental_blocks "
+                "minus this cost."
+            ),
+            arg_type=float,
         )

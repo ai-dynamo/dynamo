@@ -52,6 +52,7 @@ pub enum RemoteKvReuseNoPlanReason {
     Disabled,
     NoRemoteG2Candidate,
     NoContiguousPrefix,
+    BelowRemoteG2Cost,
     SourceIsTarget,
     IncompatibleBlockSize,
     PlanExpired,
@@ -65,6 +66,7 @@ impl RemoteKvReuseNoPlanReason {
             Self::Disabled => "disabled",
             Self::NoRemoteG2Candidate => "no_remote_g2_candidate",
             Self::NoContiguousPrefix => "no_contiguous_prefix",
+            Self::BelowRemoteG2Cost => "below_remote_g2_cost",
             Self::SourceIsTarget => "source_is_target",
             Self::IncompatibleBlockSize => "incompatible_block_size",
             Self::PlanExpired => "plan_expired",
@@ -74,19 +76,61 @@ impl RemoteKvReuseNoPlanReason {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct RemoteKvReuseSelectionInput<'a> {
     pub request_id: &'a str,
     pub target: WorkerWithDpRank,
+    pub target_local_prefix_blocks: u32,
     pub block_hashes: &'a [LocalBlockHash],
     pub block_size_tokens: u32,
     pub tiered_matches: &'a TieredMatchDetails,
     pub created_at_ms: u64,
     pub expires_at_ms: u64,
+    pub cost_model: Option<RemoteG2CostModel>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RemoteKvReuseSelectionStats {
     pub rejected_g1_candidates: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct RemoteG2CostModel {
+    pub score_weight: f64,
+    pub cost_blocks: f64,
+}
+
+impl RemoteG2CostModel {
+    pub fn estimated_cost_blocks(&self) -> f64 {
+        self.cost_blocks
+    }
+
+    pub fn score_blocks(&self, incremental_blocks: u32) -> f64 {
+        self.score_weight * incremental_blocks as f64 - self.cost_blocks
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct RemoteG2CandidateScore {
+    pub target: WorkerWithDpRank,
+    pub source: WorkerWithDpRank,
+    pub start_block_index: u32,
+    pub planned_blocks: u32,
+    pub incremental_blocks: u32,
+    pub cost_blocks: f64,
+    pub score_blocks: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RemoteG2CandidateDecision {
+    Candidate {
+        candidate: RemoteG2CandidateScore,
+        stats: RemoteKvReuseSelectionStats,
+    },
+    NoCandidate {
+        reason: RemoteKvReuseNoPlanReason,
+        stats: RemoteKvReuseSelectionStats,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,43 +146,88 @@ pub enum RemoteKvReuseDecision {
     },
 }
 
-fn choose_better_candidate(
-    best: &mut Option<(WorkerWithDpRank, usize, usize)>,
+fn choose_better_candidate_score(
+    best: &mut Option<RemoteG2CandidateScore>,
     worker: WorkerWithDpRank,
     start: usize,
     hits: usize,
+    input: RemoteKvReuseSelectionInput<'_>,
 ) {
+    let start_block_index = start as u32;
+    let planned_blocks = hits as u32;
+    let incremental_blocks = remote_g2_incremental_blocks(
+        start_block_index,
+        planned_blocks,
+        input.target_local_prefix_blocks,
+    );
+    let (cost_blocks, score_blocks) =
+        remote_g2_score_for_candidate(input.cost_model, incremental_blocks);
+    let candidate = RemoteG2CandidateScore {
+        target: input.target,
+        source: worker,
+        start_block_index,
+        planned_blocks,
+        incremental_blocks,
+        cost_blocks,
+        score_blocks,
+    };
+
     match best {
-        None => *best = Some((worker, start, hits)),
-        Some((best_worker, _, best_hits))
-            if hits > *best_hits || (hits == *best_hits && worker < *best_worker) =>
+        None => *best = Some(candidate),
+        Some(best_candidate)
+            if candidate.score_blocks > best_candidate.score_blocks
+                || (candidate.score_blocks == best_candidate.score_blocks
+                    && (candidate.planned_blocks > best_candidate.planned_blocks
+                        || (candidate.planned_blocks == best_candidate.planned_blocks
+                            && candidate.source < best_candidate.source))) =>
         {
-            *best = Some((worker, start, hits));
+            *best = Some(candidate);
         }
         Some(_) => {}
     }
 }
 
-pub fn select_remote_g2_reuse_plan(
-    input: RemoteKvReuseSelectionInput<'_>,
-) -> RemoteKvReuseDecision {
-    let stats = RemoteKvReuseSelectionStats {
-        rejected_g1_candidates: input
-            .tiered_matches
+fn remote_g2_selection_stats(tiered_matches: &TieredMatchDetails) -> RemoteKvReuseSelectionStats {
+    RemoteKvReuseSelectionStats {
+        rejected_g1_candidates: tiered_matches
             .device
             .overlap_scores
             .scores
             .values()
             .filter(|&&overlap| overlap > 0)
             .count() as u32,
-    };
+    }
+}
+
+fn remote_g2_incremental_blocks(start: u32, planned_blocks: u32, target_local_blocks: u32) -> u32 {
+    let end = start.saturating_add(planned_blocks);
+    end.saturating_sub(target_local_blocks.max(start))
+}
+
+fn remote_g2_score_for_candidate(
+    cost_model: Option<RemoteG2CostModel>,
+    incremental_blocks: u32,
+) -> (f64, f64) {
+    match cost_model {
+        Some(model) => (
+            model.estimated_cost_blocks(),
+            model.score_blocks(incremental_blocks),
+        ),
+        None => (0.0, incremental_blocks as f64),
+    }
+}
+
+pub fn select_remote_g2_candidate(
+    input: RemoteKvReuseSelectionInput<'_>,
+) -> RemoteG2CandidateDecision {
+    let stats = remote_g2_selection_stats(input.tiered_matches);
 
     let Some(host_pinned_matches) = input
         .tiered_matches
         .lower_tier
         .get(&StorageTier::HostPinned)
     else {
-        return RemoteKvReuseDecision::NoPlan {
+        return RemoteG2CandidateDecision::NoCandidate {
             reason: RemoteKvReuseNoPlanReason::NoRemoteG2Candidate,
             stats,
         };
@@ -146,8 +235,8 @@ pub fn select_remote_g2_reuse_plan(
 
     let request_blocks = input.block_hashes.len();
     let mut saw_remote_candidate = false;
-    let mut best_continuation: Option<(WorkerWithDpRank, usize, usize)> = None;
-    let mut best_root_fallback: Option<(WorkerWithDpRank, usize, usize)> = None;
+    let mut best_continuation: Option<RemoteG2CandidateScore> = None;
+    let mut best_root_fallback: Option<RemoteG2CandidateScore> = None;
     for (&worker, &host_continuation_hits) in &host_pinned_matches.hits {
         if worker == input.target {
             continue;
@@ -185,15 +274,15 @@ pub fn select_remote_g2_reuse_plan(
         }
 
         if host_continuation_hits > 0 {
-            choose_better_candidate(&mut best_continuation, worker, start, hits);
+            choose_better_candidate_score(&mut best_continuation, worker, start, hits, input);
         } else {
-            choose_better_candidate(&mut best_root_fallback, worker, start, hits);
+            choose_better_candidate_score(&mut best_root_fallback, worker, start, hits, input);
         }
     }
 
     let best = best_continuation.or(best_root_fallback);
-    let Some((source, start, hits)) = best else {
-        return RemoteKvReuseDecision::NoPlan {
+    let Some(candidate) = best else {
+        return RemoteG2CandidateDecision::NoCandidate {
             reason: if saw_remote_candidate {
                 RemoteKvReuseNoPlanReason::NoContiguousPrefix
             } else {
@@ -203,32 +292,66 @@ pub fn select_remote_g2_reuse_plan(
         };
     };
 
-    // Continuation candidates start where the source worker's Device chain ended.
-    // Write-through candidates start at root because their HostPinned copy mirrors
-    // blocks that are also still present in the source worker's Device tier.
-    let planned_prefix_blocks = hits as u32;
-    if planned_prefix_blocks == 0 {
-        return RemoteKvReuseDecision::NoPlan {
+    if candidate.planned_blocks == 0 {
+        return RemoteG2CandidateDecision::NoCandidate {
             reason: RemoteKvReuseNoPlanReason::NoContiguousPrefix,
             stats,
         };
     }
+    if candidate.score_blocks <= 0.0 {
+        return RemoteG2CandidateDecision::NoCandidate {
+            reason: RemoteKvReuseNoPlanReason::BelowRemoteG2Cost,
+            stats,
+        };
+    }
+
+    RemoteG2CandidateDecision::Candidate { candidate, stats }
+}
+
+pub fn materialize_remote_g2_reuse_plan(
+    input: RemoteKvReuseSelectionInput<'_>,
+    candidate: RemoteG2CandidateScore,
+) -> RemoteKvReuseDecision {
+    let stats = remote_g2_selection_stats(input.tiered_matches);
+    if candidate.target != input.target {
+        return RemoteKvReuseDecision::NoPlan {
+            reason: RemoteKvReuseNoPlanReason::NoRemoteG2Candidate,
+            stats,
+        };
+    }
+    if candidate.source == input.target {
+        return RemoteKvReuseDecision::NoPlan {
+            reason: RemoteKvReuseNoPlanReason::SourceIsTarget,
+            stats,
+        };
+    }
+    if candidate.score_blocks <= 0.0 {
+        return RemoteKvReuseDecision::NoPlan {
+            reason: RemoteKvReuseNoPlanReason::BelowRemoteG2Cost,
+            stats,
+        };
+    }
+    let start = candidate.start_block_index as usize;
+    let planned_prefix_blocks = candidate.planned_blocks;
     let end = start + planned_prefix_blocks as usize;
 
     RemoteKvReuseDecision::Plan {
         plan: RemoteKvReusePlan {
             plan_id: format!(
                 "remote-g2:{}:{}:{}:{}",
-                input.request_id, source.worker_id, source.dp_rank, input.created_at_ms
+                input.request_id,
+                candidate.source.worker_id,
+                candidate.source.dp_rank,
+                input.created_at_ms
             ),
             request_id: input.request_id.to_string(),
             target_worker_id: input.target.worker_id,
             target_dp_rank: input.target.dp_rank,
-            source_worker_id: source.worker_id,
-            source_dp_rank: source.dp_rank,
+            source_worker_id: candidate.source.worker_id,
+            source_dp_rank: candidate.source.dp_rank,
             source_tier: StorageTier::HostPinned,
             router_block_hashes: input.block_hashes[start..end].to_vec(),
-            start_block_index: start as u32,
+            start_block_index: candidate.start_block_index,
             planned_prefix_blocks,
             block_size_tokens: input.block_size_tokens,
             created_at_ms: input.created_at_ms,
@@ -244,6 +367,19 @@ pub fn select_remote_g2_reuse_plan(
     }
 }
 
+pub fn select_remote_g2_reuse_plan(
+    input: RemoteKvReuseSelectionInput<'_>,
+) -> RemoteKvReuseDecision {
+    match select_remote_g2_candidate(input) {
+        RemoteG2CandidateDecision::Candidate { candidate, .. } => {
+            materialize_remote_g2_reuse_plan(input, candidate)
+        }
+        RemoteG2CandidateDecision::NoCandidate { reason, stats } => {
+            RemoteKvReuseDecision::NoPlan { reason, stats }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Test naming convention:
@@ -254,8 +390,9 @@ mod tests {
     use crate::indexer::{LowerTierMatchDetails, MatchDetails, TieredMatchDetails};
     use crate::protocols::{LocalBlockHash, OverlapScores, StorageTier, WorkerWithDpRank};
     use crate::remote_g2_plan::{
-        REMOTE_KV_REUSE_PLAN_VERSION, RemoteKvReuseDecision, RemoteKvReuseNoPlanReason,
-        RemoteKvReusePlan, RemoteKvReuseSelectionInput, select_remote_g2_reuse_plan,
+        REMOTE_KV_REUSE_PLAN_VERSION, RemoteG2CandidateDecision, RemoteG2CostModel,
+        RemoteKvReuseDecision, RemoteKvReuseNoPlanReason, RemoteKvReusePlan,
+        RemoteKvReuseSelectionInput, select_remote_g2_candidate, select_remote_g2_reuse_plan,
     };
 
     fn test_plan() -> RemoteKvReusePlan {
@@ -311,11 +448,13 @@ mod tests {
         RemoteKvReuseSelectionInput {
             request_id: "request-1",
             target,
+            target_local_prefix_blocks: 0,
             block_hashes,
             block_size_tokens: 16,
             tiered_matches,
             created_at_ms: 1000,
             expires_at_ms: 2000,
+            cost_model: None,
         }
     }
 
@@ -501,11 +640,13 @@ mod tests {
         let input = RemoteKvReuseSelectionInput {
             request_id: "req-meta",
             target,
+            target_local_prefix_blocks: 0,
             block_hashes: &hashes,
             block_size_tokens: 32,
             tiered_matches: &matches,
             created_at_ms: 1234,
             expires_at_ms: 5678,
+            cost_model: None,
         };
 
         let decision = select_remote_g2_reuse_plan(input);
@@ -678,6 +819,58 @@ mod tests {
                 assert_eq!(stats.rejected_g1_candidates, 0);
             }
             other => panic!("expected plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_candidate_scores_only_incremental_blocks_beyond_target_local_prefix() {
+        let hashes = block_hashes(8);
+        let target = WorkerWithDpRank::new(9, 0);
+        let source = WorkerWithDpRank::new(7, 0);
+        let matches = tiered_matches(&[], &[(source, 8)]);
+        let input = RemoteKvReuseSelectionInput {
+            target_local_prefix_blocks: 3,
+            cost_model: Some(RemoteG2CostModel {
+                score_weight: 0.5,
+                cost_blocks: 1.0,
+            }),
+            ..selection_input(target, &hashes, &matches)
+        };
+
+        let decision = select_remote_g2_candidate(input);
+
+        match decision {
+            RemoteG2CandidateDecision::Candidate { candidate, .. } => {
+                assert_eq!(candidate.planned_blocks, 8);
+                assert_eq!(candidate.incremental_blocks, 5);
+                assert_eq!(candidate.cost_blocks, 1.0);
+                assert_eq!(candidate.score_blocks, 1.5);
+            }
+            other => panic!("expected candidate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_candidate_rejects_cost_negative_direct_g2() {
+        let hashes = block_hashes(8);
+        let target = WorkerWithDpRank::new(9, 0);
+        let source = WorkerWithDpRank::new(7, 0);
+        let matches = tiered_matches(&[], &[(source, 8)]);
+        let input = RemoteKvReuseSelectionInput {
+            cost_model: Some(RemoteG2CostModel {
+                score_weight: 0.5,
+                cost_blocks: 16.0,
+            }),
+            ..selection_input(target, &hashes, &matches)
+        };
+
+        let decision = select_remote_g2_candidate(input);
+
+        match decision {
+            RemoteG2CandidateDecision::NoCandidate { reason, .. } => {
+                assert_eq!(reason, RemoteKvReuseNoPlanReason::BelowRemoteG2Cost);
+            }
+            other => panic!("expected no candidate, got {other:?}"),
         }
     }
 

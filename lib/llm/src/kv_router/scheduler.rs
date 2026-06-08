@@ -21,6 +21,7 @@ use dynamo_kv_router::{
     PrefillLoadEstimator,
     config::{KvRouterConfig, RouterConfigOverride},
     protocols::{WorkerId, WorkerWithDpRank},
+    remote_g2_plan::RemoteG2CandidateScore,
 };
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
@@ -142,6 +143,7 @@ where
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         shared_cache_hits: Option<SharedCacheHits>,
+        remote_g2_candidates: HashMap<WorkerWithDpRank, RemoteG2CandidateScore>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         let response = self
             .inner
@@ -160,6 +162,7 @@ where
                 pinned_worker,
                 allowed_worker_ids,
                 shared_cache_hits,
+                remote_g2_candidates,
             )
             .await;
         ROUTER_QUEUE_METRICS.set_pending(self.worker_type(), self.pending_count());

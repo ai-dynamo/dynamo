@@ -174,6 +174,7 @@ impl PendingRequest {
             pinned_worker: None,
             allowed_worker_ids: None,
             shared_cache_hits: None,
+            remote_g2_candidates: HashMap::new(),
             resp_tx: None,
         }
     }

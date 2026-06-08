@@ -111,6 +111,8 @@ impl SchedulingPolicy for RouterSchedulingPolicy {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use rustc_hash::FxHashMap;
 
     use super::*;
@@ -149,6 +151,7 @@ mod tests {
             pinned_worker: None,
             allowed_worker_ids: None,
             shared_cache_hits: None,
+            remote_g2_candidates: HashMap::new(),
             resp_tx: None,
         }
     }
