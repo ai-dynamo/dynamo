@@ -15,10 +15,15 @@ from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
     AllocateRequest,
     AllocateResponse,
+    ClaimPersistentAllocationRequest,
+    ClaimPersistentAllocationResponse,
     CommitRequest,
     CommitResponse,
+    ErrorResponse,
     ExportAllocationRequest,
     ExportAllocationResponse,
+    ExportPersistentAllocationRequest,
+    ExportPersistentAllocationResponse,
     FreeAllocationRequest,
     FreeAllocationResponse,
     GetAllocationRequest,
@@ -34,6 +39,8 @@ from gpu_memory_service.common.protocol.messages import (
     GMSRuntimeEvent,
     ListAllocationsRequest,
     ListAllocationsResponse,
+    ListPersistentAllocationsRequest,
+    ListPersistentAllocationsResponse,
     MetadataDeleteRequest,
     MetadataDeleteResponse,
     MetadataGetRequest,
@@ -42,10 +49,18 @@ from gpu_memory_service.common.protocol.messages import (
     MetadataListResponse,
     MetadataPutRequest,
     MetadataPutResponse,
+    PersistentAllocationInfo,
+    ReleasePersistentAllocationRequest,
+    ReleasePersistentAllocationResponse,
 )
 
 from .allocations import AllocationInfo, GMSAllocationManager
 from .fsm import Connection, ServerState, StateEvent
+from .persistent_allocations import (
+    PersistentAllocationManager,
+    PersistentClaimConflictError,
+    PersistentNotFoundError,
+)
 from .session import GMSSessionManager
 
 logger = logging.getLogger(__name__)
@@ -75,11 +90,22 @@ class GMS:
             allocation_retry_interval=allocation_retry_interval,
             allocation_retry_timeout=allocation_retry_timeout,
         )
+        self._persistent = PersistentAllocationManager(device)
+        # Per-session set of (engine_id, tag) keys claimed via the
+        # persistent namespace, so we know what to unclaim on disconnect.
+        # The unclaim releases the CLAIM (lets another client attach
+        # next), not the underlying allocation — that requires explicit
+        # release_persistent.
+        self._persistent_claims_by_session: dict[str, set[tuple[str, str]]] = {}
         self._sessions = GMSSessionManager()
         self._events: deque[GMSRuntimeEvent] = deque(maxlen=self._MAX_EVENTS)
         self._metadata: dict[str, MetadataEntry] = {}
         self._memory_layout_hash = ""
         logger.info("GMS initialized: device=%d", device)
+
+    @property
+    def persistent(self) -> PersistentAllocationManager:
+        return self._persistent
 
     @property
     def state(self) -> ServerState:
@@ -114,6 +140,15 @@ class GMS:
 
     def next_session_id(self) -> str:
         return self._sessions.next_session_id()
+
+    def _has_persistent_claim(
+        self,
+        conn: Connection,
+        engine_id: str,
+        tag: str,
+    ) -> bool:
+        claims = self._persistent_claims_by_session.get(conn.session_id, set())
+        return (engine_id, tag) in claims
 
     async def acquire_lock(
         self,
@@ -221,6 +256,22 @@ class GMS:
                     allocation_count=cleared,
                 )
             )
+        # Release any persistent claims held by this session. The
+        # allocations themselves persist; this only releases the
+        # exclusive claim so a new client can attach.
+        if conn is not None:
+            claims = self._persistent_claims_by_session.pop(
+                conn.session_id,
+                None,
+            )
+            if claims:
+                for engine_id, tag in claims:
+                    self._persistent.unclaim(engine_id, tag)
+                logger.info(
+                    "Released %d persistent claims on session=%s disconnect",
+                    len(claims),
+                    conn.session_id,
+                )
         await self._sessions.finish_cleanup(conn)
 
     async def handle_request(
@@ -405,5 +456,114 @@ class GMS:
                     key for key in self._metadata if key.startswith(msg.prefix)
                 )
             return MetadataListResponse(keys=keys), -1, False
+
+        # ----------------------------------------------------------------
+        # Persistent allocations (KV-pool namespace; lock-state-independent)
+        # ----------------------------------------------------------------
+
+        if msg_type is ClaimPersistentAllocationRequest:
+            try:
+                alloc, reattached = self._persistent.claim(
+                    engine_id=msg.engine_id,
+                    tag=msg.tag,
+                    size=msg.size,
+                    shared=getattr(msg, "shared", False),
+                )
+            except PersistentClaimConflictError as exc:
+                return ErrorResponse(error=str(exc), code=1), -1, False
+            except (ValueError, MemoryError) as exc:
+                return ErrorResponse(error=str(exc), code=2), -1, False
+            # Track for cleanup-on-disconnect: when this session goes
+            # away, we'll unclaim every key it owns.
+            self._persistent_claims_by_session.setdefault(
+                conn.session_id,
+                set(),
+            ).add((msg.engine_id, msg.tag))
+            return (
+                ClaimPersistentAllocationResponse(
+                    allocation_id=alloc.allocation_id,
+                    size=alloc.size,
+                    aligned_size=alloc.aligned_size,
+                    reattached=reattached,
+                ),
+                -1,
+                False,
+            )
+
+        if msg_type is ReleasePersistentAllocationRequest:
+            if not self._has_persistent_claim(conn, msg.engine_id, msg.tag):
+                return (
+                    ErrorResponse(
+                        error="persistent allocation not claimed by session",
+                        code=4,
+                    ),
+                    -1,
+                    False,
+                )
+            released = self._persistent.release(
+                engine_id=msg.engine_id,
+                tag=msg.tag,
+            )
+            # Drop the claim record too.
+            claims = self._persistent_claims_by_session.get(conn.session_id)
+            if claims is not None:
+                claims.discard((msg.engine_id, msg.tag))
+                if not claims:
+                    self._persistent_claims_by_session.pop(conn.session_id, None)
+            return ReleasePersistentAllocationResponse(released=released), -1, False
+
+        if msg_type is ExportPersistentAllocationRequest:
+            if not self._has_persistent_claim(conn, msg.engine_id, msg.tag):
+                return (
+                    ErrorResponse(
+                        error="persistent allocation not claimed by session",
+                        code=4,
+                    ),
+                    -1,
+                    False,
+                )
+            try:
+                alloc, fd = self._persistent.export(
+                    engine_id=msg.engine_id,
+                    tag=msg.tag,
+                )
+            except PersistentNotFoundError as exc:
+                return ErrorResponse(error=str(exc), code=3), -1, False
+            return (
+                ExportPersistentAllocationResponse(
+                    allocation_id=alloc.allocation_id,
+                    size=alloc.size,
+                    aligned_size=alloc.aligned_size,
+                ),
+                fd,
+                False,
+            )
+
+        if msg_type is ListPersistentAllocationsRequest:
+            session_claims = self._persistent_claims_by_session.get(
+                conn.session_id, set()
+            )
+            allocations = [
+                a
+                for a in self._persistent.list(engine_id=msg.engine_id)
+                if (a.engine_id, a.tag) in session_claims
+            ]
+            return (
+                ListPersistentAllocationsResponse(
+                    allocations=[
+                        PersistentAllocationInfo(
+                            allocation_id=a.allocation_id,
+                            engine_id=a.engine_id,
+                            tag=a.tag,
+                            size=a.size,
+                            aligned_size=a.aligned_size,
+                            claimed=True,
+                        )
+                        for a in allocations
+                    ]
+                ),
+                -1,
+                False,
+            )
 
         raise ValueError(f"Unknown request: {msg_type.__name__}")

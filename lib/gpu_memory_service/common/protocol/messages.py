@@ -101,6 +101,226 @@ class FreeAllocationResponse(msgspec.Struct, tag="free_allocation_response"):
     success: bool
 
 
+# ----------------------------------------------------------------------
+# Persistent allocations (separate namespace from the RW/RO/COMMITTED
+# layout machinery). Keyed by (engine_id, tag). Survive client
+# disconnect; can be re-attached. Used for VMM-IPC KV pools.
+# ----------------------------------------------------------------------
+
+
+class ClaimPersistentAllocationRequest(
+    msgspec.Struct,
+    tag="claim_persistent_allocation_request",
+):
+    engine_id: str
+    tag: str
+    size: int
+    # Shared claims allow multiple cooperating engine processes to map the
+    # same persistent KV pool. Writers must then coordinate through KV leases.
+    shared: bool = False
+
+
+class ClaimPersistentAllocationResponse(
+    msgspec.Struct,
+    tag="claim_persistent_allocation_response",
+):
+    allocation_id: str
+    size: int
+    aligned_size: int
+    # True if this claim returned an already-existing allocation
+    # (re-attach). False if a fresh allocation was created.
+    reattached: bool
+
+
+class ReleasePersistentAllocationRequest(
+    msgspec.Struct,
+    tag="release_persistent_allocation_request",
+):
+    engine_id: str
+    tag: str
+
+
+class ReleasePersistentAllocationResponse(
+    msgspec.Struct,
+    tag="release_persistent_allocation_response",
+):
+    released: bool
+
+
+class ExportPersistentAllocationRequest(
+    msgspec.Struct,
+    tag="export_persistent_allocation_request",
+):
+    engine_id: str
+    tag: str
+
+
+class ExportPersistentAllocationResponse(
+    msgspec.Struct,
+    tag="export_persistent_allocation_response",
+):
+    allocation_id: str
+    size: int
+    aligned_size: int
+
+
+class ListPersistentAllocationsRequest(
+    msgspec.Struct,
+    tag="list_persistent_allocations_request",
+):
+    engine_id: Optional[str] = None
+
+
+class PersistentAllocationInfo(
+    msgspec.Struct,
+    tag="persistent_allocation_info",
+):
+    allocation_id: str
+    engine_id: str
+    tag: str
+    size: int
+    aligned_size: int
+    claimed: bool
+
+
+class ListPersistentAllocationsResponse(
+    msgspec.Struct,
+    tag="list_persistent_allocations_response",
+):
+    allocations: List[PersistentAllocationInfo] = []
+
+
+# ----------------------------------------------------------------------
+# KV block leases for shared persistent KV pools.
+# ----------------------------------------------------------------------
+
+
+class KVLeaseBlockInfo(msgspec.Struct, tag="kv_lease_block_info"):
+    block_id: int
+    generation: int
+    lease_epoch: int
+    owner_id: str
+    state: str
+    read_pins: int = 0
+
+
+class InitKVLeaseNamespaceRequest(
+    msgspec.Struct,
+    tag="init_kv_lease_namespace_request",
+):
+    namespace: str
+    total_blocks: int
+    reserved_blocks: List[int] = []
+
+
+class InitKVLeaseNamespaceResponse(
+    msgspec.Struct,
+    tag="init_kv_lease_namespace_response",
+):
+    total_blocks: int
+
+
+class AcquireKVBlockLeasesRequest(
+    msgspec.Struct,
+    tag="acquire_kv_block_leases_request",
+):
+    namespace: str
+    owner_id: str
+    count: int
+    preferred_blocks: List[int] = []
+    allow_partial: bool = False
+    strict_preferred: bool = False
+
+
+class AcquireKVBlockLeasesResponse(
+    msgspec.Struct,
+    tag="acquire_kv_block_leases_response",
+):
+    blocks: List[KVLeaseBlockInfo] = []
+
+
+class SealKVBlockLeasesRequest(
+    msgspec.Struct,
+    tag="seal_kv_block_leases_request",
+):
+    namespace: str
+    owner_id: str
+    block_ids: List[int]
+    generations: List[int] = []
+
+
+class SealKVBlockLeasesResponse(
+    msgspec.Struct,
+    tag="seal_kv_block_leases_response",
+):
+    blocks: List[KVLeaseBlockInfo] = []
+
+
+class ReleaseKVBlockLeasesRequest(
+    msgspec.Struct,
+    tag="release_kv_block_leases_request",
+):
+    namespace: str
+    owner_id: str
+    block_ids: List[int]
+    generations: List[int] = []
+
+
+class ReleaseKVBlockLeasesResponse(
+    msgspec.Struct,
+    tag="release_kv_block_leases_response",
+):
+    blocks: List[KVLeaseBlockInfo] = []
+
+
+class PinKVBlockLeasesRequest(
+    msgspec.Struct,
+    tag="pin_kv_block_leases_request",
+):
+    namespace: str
+    reader_id: str
+    block_ids: List[int]
+    generations: List[int] = []
+
+
+class PinKVBlockLeasesResponse(
+    msgspec.Struct,
+    tag="pin_kv_block_leases_response",
+):
+    blocks: List[KVLeaseBlockInfo] = []
+
+
+class UnpinKVBlockLeasesRequest(
+    msgspec.Struct,
+    tag="unpin_kv_block_leases_request",
+):
+    namespace: str
+    reader_id: str
+    block_ids: List[int]
+    generations: List[int] = []
+
+
+class UnpinKVBlockLeasesResponse(
+    msgspec.Struct,
+    tag="unpin_kv_block_leases_response",
+):
+    blocks: List[KVLeaseBlockInfo] = []
+
+
+class ListKVBlockLeasesRequest(
+    msgspec.Struct,
+    tag="list_kv_block_leases_request",
+):
+    namespace: str
+
+
+class ListKVBlockLeasesResponse(
+    msgspec.Struct,
+    tag="list_kv_block_leases_response",
+):
+    blocks: List[KVLeaseBlockInfo] = []
+
+
 class ErrorResponse(msgspec.Struct, tag="error_response"):
     error: str
     code: int = 0
@@ -214,6 +434,31 @@ Message = Union[
     GetRuntimeStateResponse,
     GetEventHistoryRequest,
     GetEventHistoryResponse,
+    # Persistent allocations (KV-pool namespace)
+    ClaimPersistentAllocationRequest,
+    ClaimPersistentAllocationResponse,
+    ReleasePersistentAllocationRequest,
+    ReleasePersistentAllocationResponse,
+    ExportPersistentAllocationRequest,
+    ExportPersistentAllocationResponse,
+    ListPersistentAllocationsRequest,
+    ListPersistentAllocationsResponse,
+    PersistentAllocationInfo,
+    KVLeaseBlockInfo,
+    InitKVLeaseNamespaceRequest,
+    InitKVLeaseNamespaceResponse,
+    AcquireKVBlockLeasesRequest,
+    AcquireKVBlockLeasesResponse,
+    SealKVBlockLeasesRequest,
+    SealKVBlockLeasesResponse,
+    ReleaseKVBlockLeasesRequest,
+    ReleaseKVBlockLeasesResponse,
+    PinKVBlockLeasesRequest,
+    PinKVBlockLeasesResponse,
+    UnpinKVBlockLeasesRequest,
+    UnpinKVBlockLeasesResponse,
+    ListKVBlockLeasesRequest,
+    ListKVBlockLeasesResponse,
 ]
 
 _encoder = msgspec.msgpack.Encoder()

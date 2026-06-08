@@ -12,6 +12,7 @@ or until a child exits.
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import subprocess
 import sys
@@ -25,14 +26,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-_TAGS = ("weights", "kv_cache")
+_DEFAULT_TAGS = ("weights", "kv_cache")
+
+
+def _tags_from_env() -> tuple[str, ...]:
+    raw = os.environ.get("GMS_SERVER_TAGS")
+    if not raw:
+        return _DEFAULT_TAGS
+    tags = tuple(tag.strip() for tag in raw.split(",") if tag.strip())
+    if not tags:
+        raise RuntimeError("GMS_SERVER_TAGS must contain at least one tag")
+    return tags
 
 
 def main() -> None:
     devices = list_devices()
     processes = []
     for device in devices:
-        for tag in _TAGS:
+        for tag in _tags_from_env():
             proc = subprocess.Popen(
                 [
                     sys.executable,

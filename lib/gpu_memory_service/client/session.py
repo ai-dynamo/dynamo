@@ -11,12 +11,18 @@ from typing import List, Optional, Tuple
 from gpu_memory_service.client.rpc import _GMSRPCTransport
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
+    AcquireKVBlockLeasesRequest,
+    AcquireKVBlockLeasesResponse,
     AllocateRequest,
     AllocateResponse,
+    ClaimPersistentAllocationRequest,
+    ClaimPersistentAllocationResponse,
     CommitRequest,
     CommitResponse,
     ExportAllocationRequest,
     ExportAllocationResponse,
+    ExportPersistentAllocationRequest,
+    ExportPersistentAllocationResponse,
     FreeAllocationRequest,
     FreeAllocationResponse,
     GetAllocationRequest,
@@ -28,8 +34,15 @@ from gpu_memory_service.common.protocol.messages import (
     GetStateHashRequest,
     GetStateHashResponse,
     HandshakeResponse,
+    InitKVLeaseNamespaceRequest,
+    InitKVLeaseNamespaceResponse,
+    KVLeaseBlockInfo,
     ListAllocationsRequest,
     ListAllocationsResponse,
+    ListKVBlockLeasesRequest,
+    ListKVBlockLeasesResponse,
+    ListPersistentAllocationsRequest,
+    ListPersistentAllocationsResponse,
     MetadataDeleteRequest,
     MetadataDeleteResponse,
     MetadataGetRequest,
@@ -38,6 +51,17 @@ from gpu_memory_service.common.protocol.messages import (
     MetadataListResponse,
     MetadataPutRequest,
     MetadataPutResponse,
+    PersistentAllocationInfo,
+    PinKVBlockLeasesRequest,
+    PinKVBlockLeasesResponse,
+    ReleaseKVBlockLeasesRequest,
+    ReleaseKVBlockLeasesResponse,
+    ReleasePersistentAllocationRequest,
+    ReleasePersistentAllocationResponse,
+    SealKVBlockLeasesRequest,
+    SealKVBlockLeasesResponse,
+    UnpinKVBlockLeasesRequest,
+    UnpinKVBlockLeasesResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -174,6 +198,186 @@ class _GMSClientSession:
             FreeAllocationRequest(allocation_id=allocation_id),
             FreeAllocationResponse,
         ).success
+
+    # ------------------------------------------------------------------
+    # Persistent allocations (KV-pool namespace; lock-independent)
+    # ------------------------------------------------------------------
+
+    def claim_persistent(
+        self,
+        engine_id: str,
+        tag: str,
+        size: int,
+        *,
+        shared: bool = False,
+    ) -> ClaimPersistentAllocationResponse:
+        """Claim a persistent allocation by (engine_id, tag). If one
+        already exists for that key, returns it (reattached=True);
+        otherwise allocates fresh."""
+        return self._transport.request(
+            ClaimPersistentAllocationRequest(
+                engine_id=engine_id,
+                tag=tag,
+                size=size,
+                shared=shared,
+            ),
+            ClaimPersistentAllocationResponse,
+        )
+
+    def release_persistent(self, engine_id: str, tag: str) -> bool:
+        """Explicitly destroy a persistent allocation. Returns True iff
+        an allocation existed and was freed."""
+        return self._transport.request(
+            ReleasePersistentAllocationRequest(
+                engine_id=engine_id,
+                tag=tag,
+            ),
+            ReleasePersistentAllocationResponse,
+        ).released
+
+    def export_persistent(
+        self,
+        engine_id: str,
+        tag: str,
+    ) -> Tuple[ExportPersistentAllocationResponse, int]:
+        """Export the persistent allocation's FD for cuMemImport. The
+        caller owns the returned FD and must close it after mapping."""
+        response, fd = self._transport.request_with_fd(
+            ExportPersistentAllocationRequest(
+                engine_id=engine_id,
+                tag=tag,
+            ),
+            ExportPersistentAllocationResponse,
+        )
+        if fd < 0:
+            raise RuntimeError(
+                f"GMS export_persistent returned no FD for ({engine_id!r}, {tag!r})"
+            )
+        return response, fd
+
+    def list_persistent(
+        self,
+        engine_id: Optional[str] = None,
+    ) -> List[PersistentAllocationInfo]:
+        return self._transport.request(
+            ListPersistentAllocationsRequest(engine_id=engine_id),
+            ListPersistentAllocationsResponse,
+        ).allocations
+
+    # ------------------------------------------------------------------
+    # KV block leases (shared persistent KV pools)
+    # ------------------------------------------------------------------
+
+    def init_kv_lease_namespace(
+        self,
+        namespace: str,
+        total_blocks: int,
+        reserved_blocks: list[int] | None = None,
+    ) -> int:
+        return self._transport.request(
+            InitKVLeaseNamespaceRequest(
+                namespace=namespace,
+                total_blocks=total_blocks,
+                reserved_blocks=list(reserved_blocks or []),
+            ),
+            InitKVLeaseNamespaceResponse,
+        ).total_blocks
+
+    def acquire_kv_block_leases(
+        self,
+        namespace: str,
+        owner_id: str,
+        count: int,
+        *,
+        preferred_blocks: list[int] | None = None,
+        allow_partial: bool = False,
+        strict_preferred: bool = False,
+    ) -> list[KVLeaseBlockInfo]:
+        return self._transport.request(
+            AcquireKVBlockLeasesRequest(
+                namespace=namespace,
+                owner_id=owner_id,
+                count=count,
+                preferred_blocks=list(preferred_blocks or []),
+                allow_partial=allow_partial,
+                strict_preferred=strict_preferred,
+            ),
+            AcquireKVBlockLeasesResponse,
+        ).blocks
+
+    def seal_kv_block_leases(
+        self,
+        namespace: str,
+        owner_id: str,
+        block_ids: list[int],
+        generations: list[int] | None = None,
+    ) -> list[KVLeaseBlockInfo]:
+        return self._transport.request(
+            SealKVBlockLeasesRequest(
+                namespace=namespace,
+                owner_id=owner_id,
+                block_ids=list(block_ids),
+                generations=list(generations or []),
+            ),
+            SealKVBlockLeasesResponse,
+        ).blocks
+
+    def release_kv_block_leases(
+        self,
+        namespace: str,
+        owner_id: str,
+        block_ids: list[int],
+        generations: list[int] | None = None,
+    ) -> list[KVLeaseBlockInfo]:
+        return self._transport.request(
+            ReleaseKVBlockLeasesRequest(
+                namespace=namespace,
+                owner_id=owner_id,
+                block_ids=list(block_ids),
+                generations=list(generations or []),
+            ),
+            ReleaseKVBlockLeasesResponse,
+        ).blocks
+
+    def pin_kv_block_leases(
+        self,
+        namespace: str,
+        reader_id: str,
+        block_ids: list[int],
+        generations: list[int] | None = None,
+    ) -> list[KVLeaseBlockInfo]:
+        return self._transport.request(
+            PinKVBlockLeasesRequest(
+                namespace=namespace,
+                reader_id=reader_id,
+                block_ids=list(block_ids),
+                generations=list(generations or []),
+            ),
+            PinKVBlockLeasesResponse,
+        ).blocks
+
+    def unpin_kv_block_leases(
+        self,
+        namespace: str,
+        reader_id: str,
+        block_ids: list[int],
+        generations: list[int] | None = None,
+    ) -> list[KVLeaseBlockInfo]:
+        return self._transport.request(
+            UnpinKVBlockLeasesRequest(
+                namespace=namespace,
+                reader_id=reader_id,
+                block_ids=list(block_ids),
+                generations=list(generations or []),
+            ),
+            UnpinKVBlockLeasesResponse,
+        ).blocks
+
+    def list_kv_block_leases(self, namespace: str) -> list[KVLeaseBlockInfo]:
+        return self._transport.request(
+            ListKVBlockLeasesRequest(namespace=namespace),
+            ListKVBlockLeasesResponse,
+        ).blocks
 
     def metadata_put(
         self, key: str, allocation_id: str, offset_bytes: int, value: bytes

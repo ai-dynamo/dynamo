@@ -6,19 +6,80 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-import torch
-from gpu_memory_service.client.torch.allocator import prune_allocations
-from gpu_memory_service.client.torch.module import register_module_tensors
 from gpu_memory_service.common.locks import RequestedLockType
 
 if TYPE_CHECKING:
+    import torch
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 
 logger = logging.getLogger(__name__)
 GMS_TAGS = ("weights", "kv_cache")
+
+_FALSEY_ENV_VALUES = {"", "0", "false", "no", "off"}
+
+
+def env_enabled_by_default(name: str, *, default: bool = True) -> bool:
+    """Return True unless an environment variable explicitly disables a feature."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in _FALSEY_ENV_VALUES
+
+
+def get_gms_persistent_kv_socket(device: int, socket_env: str) -> str:
+    """Resolve the GMS server socket used for persistent KV allocations.
+
+    Persistent KV is a namespace inside the normal per-GPU ``kv_cache`` GMS
+    server, so the default deliberately reuses that socket instead of creating
+    a separate VMM-IPC daemon socket.
+    """
+    explicit = os.environ.get(socket_env) or os.environ.get(
+        "DYN_GMS_PERSISTENT_KV_SOCKET"
+    )
+    if explicit:
+        return explicit
+    from gpu_memory_service.common.utils import get_socket_path
+
+    return get_socket_path(device, "kv_cache")
+
+
+def get_gms_persistent_kv_engine_id(
+    engine: str,
+    device: int,
+    engine_env: str,
+) -> str:
+    """Return a stable engine id for persistent KV attachment.
+
+    Operators should set the engine-specific env var in production. The derived
+    fallback is stable across process restarts on a local Dynamo deployment and
+    includes common Dynamo identity fields when present.
+    """
+    for name in (
+        engine_env,
+        f"GMS_{engine.upper()}_ENGINE_ID",
+        "DYN_GMS_ENGINE_ID",
+        "DYN_ENGINE_ID",
+    ):
+        value = os.environ.get(name)
+        if value:
+            return value
+
+    parts = [engine, f"cuda={device}"]
+    for name in (
+        "DYN_NAMESPACE",
+        "DYN_COMPONENT",
+        "DYN_SYSTEM_NAME",
+        "DYN_WORKER_ID",
+        "CUDA_VISIBLE_DEVICES",
+    ):
+        value = os.environ.get(name)
+        if value:
+            parts.append(f"{name.lower()}={value}")
+    return "|".join(parts)
 
 
 @dataclass(frozen=True)
@@ -77,7 +138,7 @@ def setup_meta_tensor_workaround() -> None:
 
 def finalize_gms_write(
     allocator: "GMSClientMemoryManager",
-    model: torch.nn.Module,
+    model: "torch.nn.Module",
 ) -> GMSCommittedMemoryStats:
     """Finalize GMS write mode: register tensors, commit, reconnect in read mode.
 
@@ -90,6 +151,9 @@ def finalize_gms_write(
     Returns:
         Committed/pruned byte stats.
     """
+    from gpu_memory_service.client.torch.allocator import prune_allocations
+    from gpu_memory_service.client.torch.module import register_module_tensors
+
     referenced_allocation_ids = register_module_tensors(allocator, model)
     before_prune_bytes = allocator.total_bytes
     before_prune_count = len(allocator.mappings)
