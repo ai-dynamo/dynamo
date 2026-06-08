@@ -65,11 +65,10 @@ export DYN_AGENT_TRACE=1
 
 That picks `jsonl_gz` output at `/tmp/dynamo-agent-trace.*.jsonl.gz`. Tool-call
 understanding works immediately from `request_end` finish metadata — no harness
-tooling. (It also binds the optional tool-event ZMQ endpoint at
-`tcp://127.0.0.1:20390` for harnesses that publish their own tool spans; it stays
-idle otherwise.) Any of the per-knob variables below still wins when set
-explicitly, so you only need to reach for them to relocate output, add `stderr`,
-or tune buffers.
+tooling and no sockets (the optional ZMQ tool-event ingress is opt-in; see
+[Tool call observability](#tool-call-observability)). Any of the per-knob variables
+below still wins when set explicitly, so you only need to reach for them to relocate
+output, add `stderr`, or tune buffers.
 
 To relocate captures only:
 
@@ -92,52 +91,13 @@ export DYN_AGENT_TRACE_OUTPUT_PATH=/mnt/captures/run-42
 | `DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES`      |           No            | `268435456`                        | Roll gzip segment by uncompressed bytes.                                             |
 | `DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES`      |           No            | unset                              | Optional roll by line count.                                                         |
 | `DYN_AGENT_TRACE_REPLAY_HASHES`            |           No            | on                                 | Falsey (`0`, `no`, …) disables `replay` hashes on requests.                          |
-| `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` |           No            | `tcp://127.0.0.1:20390`            | PULL bind address for tool records.                                                  |
+| `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` |           No            | unset (opt-in)                     | Set a PULL bind address (e.g. `tcp://127.0.0.1:20390`) to enable tool-event ingress. |
 | `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC`    |           No            | unset                              | If set, first ZMQ frame must match.                                                  |
 
 Without `DYN_AGENT_TRACE=1`, tracing is off; the other variables only
 take effect once the master switch is on.
 
 </details>
-
-## Tool events (ZMQ) — optional
-
-Dynamo already captures tool-call **names** and finish reasons per request via
-`finish_reason_metadata` (see [the `request_end` record](#dynamo-request_end-record)) with
-zero harness work. Publish explicit tool events **only** when you need what autodetection
-cannot give: tool **timing** (`started_at_unix_ms` / `ended_at_unix_ms` / `duration_ms`),
-`status`, and output sizes — e.g. to attribute tool-wait time between dependent LLM calls in
-agentic replay.
-
-Wire format: `[topic, seq_be_u64, msgpack(AgentTraceRecord)]`. To publish to Dynamo, use a background publisher, bounded queue, monotonic sequence, and PUSH with HWM. **Terminal** `tool_end` / `tool_error` rows should carry timing (`started_at_unix_ms`, `ended_at_unix_ms`, `duration_ms`) even if `tool_start` was dropped.
-
-Same `agent_context` as the surrounding LLM calls; `tool_call_id` unique per trajectory. Join offline on `session_id`, `trajectory_id`, `tool_call_id`.
-
-Example `tool_end`:
-
-```json
-{
-  "schema": "dynamo.agent.trace.v1",
-  "event_type": "tool_end",
-  "event_time_unix_ms": 1777312801500,
-  "event_source": "harness",
-  "agent_context": {
-    "session_type_id": "deep_research",
-    "session_id": "research-run-42",
-    "trajectory_id": "research-run-42:researcher"
-  },
-  "tool": {
-    "tool_call_id": "call-abc",
-    "tool_class": "web_search",
-    "status": "succeeded",
-    "started_at_unix_ms": 1777312801080,
-    "ended_at_unix_ms": 1777312801500,
-    "duration_ms": 420.5
-  }
-}
-```
-
-Optional `tool` keys: `output_tokens`, `output_bytes`, `tool_name_hash`, `error_type` (useful on `tool_error`). Status values: `running`, `succeeded`, `error`, `cancelled`; synonyms `ok`/`success`, `failed`, `timeout`/`canceled` also deserialize.
 
 ## Dynamo `request_end` record
 
@@ -203,6 +163,66 @@ single-choice case; `choices` keeps per-choice finish fields when `n > 1`. For c
 streams, finish metadata is recorded after parser/jail rewrites; completion streams
 record the final OpenAI-compatible completion finish reason. See `AgentTraceRecord` /
 `AgentRequestMetrics` in `lib/llm/src/agents/trace/types.rs` for the full Rust schema.
+
+</details>
+
+## Tool call observability
+
+**Default — autodetected, no harness work.** Dynamo parses each response stream and records the
+tool calls the model made into [`request_end.finish_reason_metadata`](#dynamo-request_end-record):
+the per-turn `finish_reason` and each call's `name` and `id` (arguments are never stored). Active
+whenever `DYN_AGENT_TRACE=1` and the worker runs a tool-call parser (`--dyn-tool-call-parser …`).
+This tells you *what* the agent called and *when each turn ended*.
+
+You can also recover **tool-wait time offline, without any tool events**. Within a trajectory the
+agent is sequential, so the gap between one turn finishing and the next arriving is the tool +
+agent-overhead time:
+
+```
+tool_wait(turn N) ~= next.request_received_ms - this.event_time_unix_ms
+```
+
+`request_received_ms` is stamped at the frontend **before** the request enters the router
+queue/pause, so server wait time lands in each request's own duration, not in the inter-turn gap —
+the estimate holds under load. For agentic replay that gap *is* the inter-request delay you would
+inject, so autodetect alone reproduces realistic arrival timing. It cannot *split* tool execution
+from agent overhead (you get the sum, as the wall-clock union of any parallel calls).
+
+<details>
+<summary>Optional — explicit tool events (ZMQ)</summary>
+
+Opt-in: set `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` to bind the ingress, and have the harness
+publish. Use it **only** when you need what autodetection and the timing gap can't give: the
+*attribution* of tool time, per-tool `duration_ms`, `status` (succeeded/error/cancelled), and output
+sizes. Nothing emits tool events on its own.
+
+Wire format: `[topic, seq_be_u64, msgpack(AgentTraceRecord)]`. Use a background publisher, bounded queue, monotonic sequence, and PUSH with HWM. **Terminal** `tool_end` / `tool_error` rows should carry timing (`started_at_unix_ms`, `ended_at_unix_ms`, `duration_ms`) even if `tool_start` was dropped. Same `agent_context` as the surrounding LLM calls; `tool_call_id` unique per trajectory. Join offline on `session_id`, `trajectory_id`, `tool_call_id`.
+
+Example `tool_end`:
+
+```json
+{
+  "schema": "dynamo.agent.trace.v1",
+  "event_type": "tool_end",
+  "event_time_unix_ms": 1777312801500,
+  "event_source": "harness",
+  "agent_context": {
+    "session_type_id": "deep_research",
+    "session_id": "research-run-42",
+    "trajectory_id": "research-run-42:researcher"
+  },
+  "tool": {
+    "tool_call_id": "call-abc",
+    "tool_class": "web_search",
+    "status": "succeeded",
+    "started_at_unix_ms": 1777312801080,
+    "ended_at_unix_ms": 1777312801500,
+    "duration_ms": 420.5
+  }
+}
+```
+
+Optional `tool` keys: `output_tokens`, `output_bytes`, `tool_name_hash`, `error_type`. Status values: `running`, `succeeded`, `error`, `cancelled`; synonyms `ok`/`success`, `failed`, `timeout`/`canceled` also deserialize.
 
 </details>
 
