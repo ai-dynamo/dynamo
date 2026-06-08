@@ -148,6 +148,26 @@ def assert_core_wheel_metadata(wheelhouse: Path, target_arch: str | None) -> Non
         assert_arch_tag(wheel, target_arch)
 
 
+def assert_no_bundled_libraries(wheelhouse: Path) -> None:
+    """The runtime wheel must not vendor shared libraries.
+
+    All .so dependencies should come from the runtime image / pip packages, not be
+    bundled inside the wheel by auditwheel. If this fails, add --exclude flags to the
+    auditwheel repair command in container/templates/wheel_builder.Dockerfile.
+    """
+    runtime = require_one_wheel(wheelhouse, "ai-dynamo-runtime")
+    with zipfile.ZipFile(runtime) as archive:
+        bundled = [
+            name for name in archive.namelist() if ".libs/" in name and ".so" in name
+        ]
+    if bundled:
+        details = "\n".join(f"  {name}" for name in bundled)
+        raise AssertionError(
+            f"{runtime.name} bundles shared libraries (add --exclude to the auditwheel "
+            f"repair in wheel_builder.Dockerfile):\n{details}"
+        )
+
+
 def check_optional_wheels(wheelhouse: Path, target_arch: str | None) -> None:
     kvbm = require_one_wheel(wheelhouse, REQUIRED_OPTIONAL_DIST)
     metadata = wheel_metadata(kvbm)
@@ -340,13 +360,6 @@ from dynamo._core import __version__
 assert runtime
 assert __version__[0].isdigit()
 assert metadata.version("ai-dynamo") == metadata.version("ai-dynamo-runtime")
-
-runtime_files = metadata.files("ai-dynamo-runtime")
-assert runtime_files is not None
-bundled_libs = [
-    str(path) for path in runtime_files if ".libs/" in str(path) and ".so" in str(path)
-]
-assert not bundled_libs, bundled_libs
 """
     run([str(venv_python), "-c", code])
 
