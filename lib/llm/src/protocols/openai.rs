@@ -190,6 +190,7 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
             max_tokens,
             min_tokens,
             stop,
+            stop_token_ids_visible: None,
             stop_token_ids_hidden: None,
             ignore_eos,
             max_thinking_tokens,

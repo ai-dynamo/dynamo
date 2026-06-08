@@ -1074,18 +1074,35 @@ class HandlerBase(BaseGenerativeHandler):
                 dynamic_default = max(1, self.max_seq_len - input_length)
                 sampling_params.max_tokens = dynamic_default
 
-        ignore_eos = request["stop_conditions"].get("ignore_eos")
-        if ignore_eos:
-            sampling_params.ignore_eos = ignore_eos
+        stop_conditions = request["stop_conditions"]
+        ignore_eos = stop_conditions.get("ignore_eos")
+        visible_stop_token_ids = set(
+            stop_conditions.get("stop_token_ids_visible") or []
+        )
+        # TRT-LLM PyTorch backend has no per-token "visible stop" hook, so
+        # visible stop tokens (e.g. Harmony's `<|call|>` for gpt-oss) are
+        # stripped before Dynamo sees them. Force `ignore_eos=True` to disable
+        # engine-side stopping and let backend.rs (`VisibleStopTokenDetected` /
+        # `HiddenStopTokenDetected`) own all stopping.
+        #
+        # TODO: revisit once TRT-LLM exposes a per-token visible-stop hook.
+        if ignore_eos or visible_stop_token_ids:
+            sampling_params.ignore_eos = True
 
-        min_tokens = request["stop_conditions"].get("min_tokens")
+        min_tokens = stop_conditions.get("min_tokens")
         if min_tokens:
             sampling_params.min_tokens = min_tokens
 
-        stop_token_ids = request["stop_conditions"].get("stop_token_ids_hidden")
+        stop_token_ids = stop_conditions.get("stop_token_ids_hidden")
         if stop_token_ids:
             existing = sampling_params.stop_token_ids or []
-            sampling_params.stop_token_ids = list(set(existing).union(stop_token_ids))
+            engine_stop_token_ids = set(existing).union(stop_token_ids)
+            engine_stop_token_ids.difference_update(visible_stop_token_ids)
+            sampling_params.stop_token_ids = list(engine_stop_token_ids)
+        elif visible_stop_token_ids and sampling_params.stop_token_ids:
+            sampling_params.stop_token_ids = list(
+                set(sampling_params.stop_token_ids) - visible_stop_token_ids
+            )
 
         # TODO: Instead of True, we should use streaming from the request.
         # However, currently dynamo run does not send streaming in the request.
