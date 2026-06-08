@@ -4,8 +4,6 @@
 title: Deploying Your First Model
 ---
 
-# Deploying Your First Model
-
 End-to-end tutorial for deploying `Qwen/Qwen3-0.6B` on Kubernetes using Dynamo's recommended
 `DynamoGraphDeploymentRequest` (DGDR) workflow — from zero to your first inference response.
 

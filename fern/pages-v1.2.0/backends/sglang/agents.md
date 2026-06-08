@@ -5,8 +5,6 @@ title: SGLang for Agentic Workloads
 subtitle: Priority scheduling and session control for multi-turn agentic serving
 ---
 
-# SGLang for Agentic Workloads
-
 This guide covers SGLang-specific configuration for agentic serving with Dynamo. It explains which SGLang engine flags to enable, how Dynamo's [agent hints](../../components/frontend/nvext.md#agent-hints) map to SGLang behavior, and how to use session control to manage KV cache for multi-turn agent conversations.
 
 ## Overview

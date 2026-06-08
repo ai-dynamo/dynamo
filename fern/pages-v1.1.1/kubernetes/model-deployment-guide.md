@@ -4,8 +4,6 @@
 title: Model Deployment Guide
 ---
 
-# Model Deployment Guide
-
 This guide explains how to deploy your model on Dynamo using a
 `DynamoGraphDeploymentRequest` (DGDR). If you've completed the
 [Quickstart](README.md) and want to understand how DGDR works end-to-end, how

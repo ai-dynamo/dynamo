@@ -6,8 +6,6 @@ title: Inference Gateway (GAIE)
 
 ## Inference Gateway Setup with Dynamo
 
-# Inference Gateway (GAIE)
-
 Integrate Dynamo with the Gateway API Inference Extension for intelligent KV-aware request routing at the gateway layer.
 
 ## Features

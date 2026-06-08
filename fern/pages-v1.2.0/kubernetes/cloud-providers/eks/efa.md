@@ -4,8 +4,6 @@
 title: EFA (RDMA over AWS Fabric) on EKS
 ---
 
-# EFA (RDMA over AWS Fabric) on EKS
-
 This guide covers setting up RDMA over AWS Elastic Fabric Adapter (EFA) on EKS for high-performance disaggregated inference with Dynamo. EFA is the only RDMA fabric available on AWS — InfiniBand and RoCE are not offered. With EFA, Dynamo's prefill and decode workers transfer KV cache directly between GPUs across nodes via GPU-Direct RDMA, bypassing CPU and TCP/IP stacks.
 
 Without RDMA, disaggregated inference falls back to TCP with severe performance degradation (~98s TTFT vs ~1s with EFA on Llama-3.1-8B at ISL 8000). See the [Disaggregated Communication Guide](../../disagg-communication-guide.md) for the transport-layer fundamentals.

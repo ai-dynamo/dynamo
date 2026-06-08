@@ -6,8 +6,6 @@ title: Inference Gateway (GAIE)
 
 ## Inference Gateway Setup with Dynamo
 
-# Inference Gateway (GAIE)
-
 Integrate Dynamo with the Gateway API Inference Extension for intelligent KV-aware request routing at the gateway layer.
 
 EPP's default kv-routing approach is not token-aware because the prompt is not tokenized. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model's tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](https://github.com/ai-dynamo/dynamo/blob/v1.0.0/deploy/inference-gateway/standalone/helm/dynamo-gaie/epp-config-dynamo.yaml) per EPP [convention](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/).
