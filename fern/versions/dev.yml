@@ -32,6 +32,8 @@ navigation:
         path: ../pages-dev/getting-started/kubernetes-deployment.md
       - page: Contribution Guide
         path: ../pages-dev/contribution-guide.md
+      - page: Documentation Style Guide
+        path: ../pages-dev/documentation-style-guide.md
   # ==================== Resources ====================
   - section: Resources
     contents:

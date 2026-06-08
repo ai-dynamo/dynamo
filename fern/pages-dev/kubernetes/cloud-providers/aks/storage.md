@@ -4,6 +4,8 @@
 title: Storage for Model Caching on AKS
 ---
 
+# Storage for Model Caching on AKS
+
 For implementing tiered storage on AKS, you can take advantage of the different storage options available in Azure. This guide covers choosing the right storage for each Dynamo cache type and configuring PVCs.
 
 ## Available Storage Options

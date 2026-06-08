@@ -4,6 +4,8 @@
 title: Azure Kubernetes Service (AKS)
 ---
 
+# Dynamo on AKS
+
 This guide covers setting up an AKS cluster with GPU nodes and deploying Dynamo.
 
 ## Prerequisites
