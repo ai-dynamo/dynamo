@@ -356,6 +356,173 @@ func topologyPredicateNonDynamoPod(labels map[string]string) *corev1.Pod {
 	}
 }
 
+func topologyPredicateLabelFieldPath(labelKey string) string {
+	return "metadata.labels['" + labelKey + "']"
+}
+
+func TestExpectedDynamoTopologyLabelKeys(t *testing.T) {
+	tests := []struct {
+		name string
+		pod  *corev1.Pod
+		want []string
+	}{
+		{
+			name: "extracts Dynamo topology labels from Downward API field refs",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Volumes: []corev1.Volume{
+						{
+							Name: "config",
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{},
+							},
+						},
+						{
+							Name: "topology-labels",
+							VolumeSource: corev1.VolumeSource{
+								DownwardAPI: &corev1.DownwardAPIVolumeSource{
+									Items: []corev1.DownwardAPIVolumeFile{
+										{Path: "nil-field-ref"},
+										{
+											Path: "metadata-name",
+											FieldRef: &corev1.ObjectFieldSelector{
+												FieldPath: "metadata.name",
+											},
+										},
+										{
+											Path: "app-label",
+											FieldRef: &corev1.ObjectFieldSelector{
+												FieldPath: topologyPredicateLabelFieldPath("app.kubernetes.io/name"),
+											},
+										},
+										{
+											Path: "zone",
+											FieldRef: &corev1.ObjectFieldSelector{
+												FieldPath: topologyPredicateLabelFieldPath(consts.DynamoTopologyLabelKey("zone")),
+											},
+										},
+										{
+											Path: "double-quotes",
+											FieldRef: &corev1.ObjectFieldSelector{
+												FieldPath: "metadata.labels[\"" + consts.DynamoTopologyLabelKey("node") + "\"]",
+											},
+										},
+										{
+											Path: "rack",
+											FieldRef: &corev1.ObjectFieldSelector{
+												FieldPath: topologyPredicateLabelFieldPath(consts.DynamoTopologyLabelKey("rack")),
+											},
+										},
+										{
+											Path: "malformed",
+											FieldRef: &corev1.ObjectFieldSelector{
+												FieldPath: "metadata.labels['" + consts.DynamoTopologyLabelKey("host"),
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: []string{
+				consts.DynamoTopologyLabelKey("zone"),
+				consts.DynamoTopologyLabelKey("rack"),
+			},
+		},
+		{
+			name: "returns no keys without matching Downward API label refs",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Volumes: []corev1.Volume{
+						{
+							Name: "topology-labels",
+							VolumeSource: corev1.VolumeSource{
+								DownwardAPI: &corev1.DownwardAPIVolumeSource{
+									Items: []corev1.DownwardAPIVolumeFile{
+										{
+											Path: "metadata-name",
+											FieldRef: &corev1.ObjectFieldSelector{
+												FieldPath: "metadata.name",
+											},
+										},
+										{
+											Path: "app-label",
+											FieldRef: &corev1.ObjectFieldSelector{
+												FieldPath: topologyPredicateLabelFieldPath("app.kubernetes.io/name"),
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: nil,
+		},
+		{
+			name: "nil pod",
+			pod:  nil,
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, expectedDynamoTopologyLabelKeys(tt.pod))
+		})
+	}
+}
+
+func TestMissingDynamoTopologyLabel(t *testing.T) {
+	tests := []struct {
+		name string
+		pod  *corev1.Pod
+		want bool
+	}{
+		{
+			name: "expected labels all present",
+			pod: topologyPredicateClusterPod("node-1", map[string]string{
+				consts.DynamoTopologyLabelKey("zone"): "",
+				consts.DynamoTopologyLabelKey("rack"): "rack-22",
+			}),
+			want: false,
+		},
+		{
+			name: "expected label partially missing",
+			pod: topologyPredicateClusterPod("node-1", map[string]string{
+				consts.DynamoTopologyLabelKey("zone"): "us-east-1a",
+			}),
+			want: true,
+		},
+		{
+			name: "no expected labels and no Dynamo topology labels",
+			pod:  topologyPredicatePod("node-1", nil, nil),
+			want: true,
+		},
+		{
+			name: "no expected labels falls back to any Dynamo topology label",
+			pod: topologyPredicatePod("node-1", nil, map[string]string{
+				consts.DynamoTopologyLabelKey("zone"): "us-east-1a",
+			}),
+			want: false,
+		},
+		{
+			name: "nil pod",
+			pod:  nil,
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, missingDynamoTopologyLabel(tt.pod))
+		})
+	}
+}
+
 func TestTopologyLabelPredicateCreate(t *testing.T) {
 	predicate := topologyLabelPredicate()
 
