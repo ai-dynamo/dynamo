@@ -174,6 +174,9 @@ class VllmLLMEngine(LLMEngine):
         # publish this (not engine_args.block_size) so LoRA block hashes match
         # vLLM's emitted KV events for routing.
         self._kv_event_block_size: int | None = None
+        # Per-rank KV block count, computed in start() and published on both the
+        # base-model and LoRA MDCs so the router sees the worker's real capacity.
+        self._total_kv_blocks: int | None = None
         # Constructed in start() before AsyncLLM init so vLLM's stat-logger
         # factory call sees a valid object. `num_gpu_blocks` is patched
         # after KV profiling finishes.
@@ -274,6 +277,7 @@ class VllmLLMEngine(LLMEngine):
         if per_rank_num_gpu_blocks is None:
             raise RuntimeError("per-rank KV block count is not set")
         self._stat_logger_factory.num_gpu_blocks = per_rank_num_gpu_blocks
+        self._total_kv_blocks = per_rank_num_gpu_blocks
         self._model_max_len = getattr(
             getattr(vllm_config, "model_config", None), "max_model_len", None
         )
@@ -647,6 +651,22 @@ class VllmLLMEngine(LLMEngine):
         if model_type != ModelType.Prefill:
             runtime_config.tool_call_parser = self._dyn_tool_call_parser
             runtime_config.reasoning_parser = self._dyn_reasoning_parser
+
+        # Carry the worker's DP-rank range and capacity metadata (the same
+        # effective vLLM values the base-model MDC publishes via EngineConfig in
+        # start()), so multi-DP LoRA requests are routed/attributed per rank
+        # instead of as if every worker only served rank 0. start() always runs
+        # before a load; guard in case a load somehow races ahead of it.
+        if self._vllm_config is not None and self._dp_range is not None:
+            scheduler_config = self._vllm_config.scheduler_config
+            if self._total_kv_blocks is not None:
+                runtime_config.total_kv_blocks = self._total_kv_blocks
+            runtime_config.max_num_seqs = scheduler_config.max_num_seqs
+            runtime_config.max_num_batched_tokens = (
+                scheduler_config.max_num_batched_tokens
+            )
+            runtime_config.data_parallel_start_rank = self._dp_range[0]
+            runtime_config.data_parallel_size = self._dp_range[1]
 
         # Publish the effective KV-event block size (computed in start() and
         # used by the base-model MDC) so LoRA block hashes match vLLM's emitted

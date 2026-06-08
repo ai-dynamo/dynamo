@@ -314,6 +314,36 @@ async def test_load_lora_publishes_disagg_topology(
 
 
 @pytest.mark.asyncio
+async def test_load_lora_publishes_dp_and_capacity_metadata(monkeypatch):
+    # The LoRA MDC must carry the worker's real DP-rank range and capacity (the
+    # same effective vLLM metadata the base-model card publishes), so multi-DP
+    # LoRA requests are routed/attributed per rank instead of as if every worker
+    # only served rank 0.
+    engine = _make_lora_engine(endpoint=object())
+    engine._vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=256,
+            max_num_batched_tokens=8192,
+        )
+    )
+    engine._dp_range = (2, 4)
+    engine._total_kv_blocks = 1024
+    register, _ = _patch_discovery(monkeypatch)
+
+    result = await engine.load_lora(
+        {"lora_name": "adapterA", "source": {"uri": "file:///x"}}
+    )
+
+    assert result["status"] == "success"
+    runtime_config = register.await_args.kwargs["runtime_config"]
+    assert runtime_config.total_kv_blocks == 1024
+    assert runtime_config.max_num_seqs == 256
+    assert runtime_config.max_num_batched_tokens == 8192
+    assert runtime_config.data_parallel_start_rank == 2
+    assert runtime_config.data_parallel_size == 4
+
+
+@pytest.mark.asyncio
 async def test_load_lora_idempotent_reload(monkeypatch):
     engine = _make_lora_engine(endpoint=object())
     manager = SimpleNamespace(download_lora=AsyncMock())
