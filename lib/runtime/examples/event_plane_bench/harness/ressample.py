@@ -48,6 +48,15 @@ CLASSES = {
     "loadgen": ["loadgen.py"],
 }
 
+# Launcher/wrapper cmdlines that CONTAIN a class needle but are NOT the target
+# process (the srun client + slurmstepd carry the full `-- nats-server ...`
+# command in their argv; a `bash -c` orchestrator may quote a needle; the
+# sampler must never count itself). Skip any process whose cmdline matches one
+# of these so e.g. the `nats` class counts ONLY the real nats-server, not the
+# 2 srun clients that launched it (DIS-2172 nproc-inflation fix).
+LAUNCHER_MARKERS = ("srun ", "slurmstepd", "ressample.py", "/bin/sh -c ",
+                    "bash -c ", "bash -lc ", " -- ")
+
 CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
 
 
@@ -94,15 +103,28 @@ def _proc_stat(pid):
         stime = int(after[12])
     except Exception:
         return None
+    # RSS: for enroot/pyxis processes viewed from the host, /proc/<pid>/status
+    # VmRSS (and statm resident) read back 0 -- only /proc/<pid>/smaps_rollup
+    # `Rss:` reports the true resident set (DIS-2172: host-view of in-container
+    # nats/sub/mocker). Prefer smaps_rollup; fall back to VmRSS for host procs.
     rss_kb = 0
     try:
-        with open(f"/proc/{pid}/status") as f:
+        with open(f"/proc/{pid}/smaps_rollup") as f:
             for ln in f:
-                if ln.startswith("VmRSS:"):
+                if ln.startswith("Rss:"):
                     rss_kb = int(ln.split()[1])
                     break
     except Exception:
         pass
+    if rss_kb == 0:
+        try:
+            with open(f"/proc/{pid}/status") as f:
+                for ln in f:
+                    if ln.startswith("VmRSS:"):
+                        rss_kb = int(ln.split()[1])
+                        break
+        except Exception:
+            pass
     return (utime + stime, rss_kb)
 
 
@@ -114,6 +136,11 @@ def _proc_fds(pid):
 
 
 def _classify(cmd):
+    # Skip srun/slurmstepd/bash launcher wrappers that merely carry a class
+    # needle in their argv (e.g. the srun client that launched nats-server),
+    # so we count only the actual target process, not its launchers.
+    if any(m in cmd for m in LAUNCHER_MARKERS):
+        return None
     for cls, needles in CLASSES.items():
         if any(n in cmd for n in needles):
             return cls
@@ -178,10 +205,20 @@ def main():
     snap = sample(a.cpu_interval)
     snap.update(node=a.node or "?", transport=a.transport, cell=a.cell,
                 snap=a.snap, ts=time.time())
-    with open(a.out, "w") as f:
-        json.dump(snap, f)
-    # Also echo to stdout so the orchestrator's log captures it for debugging.
-    print(json.dumps(snap))
+    # Echo to stdout FIRST: the orchestrator reads snapshots from the srun-
+    # streamed stdout log, so this must happen even if the --out file write
+    # below fails (worker nodes may not have the node0-created LOGDIR; the
+    # --out path lives on the remote node's local fs). The file write is a
+    # best-effort node-local copy.
+    print(json.dumps(snap), flush=True)
+    try:
+        d = os.path.dirname(a.out)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(a.out, "w") as f:
+            json.dump(snap, f)
+    except Exception as e:
+        print(f"# ressample: --out write skipped: {e}")
 
 
 if __name__ == "__main__":
