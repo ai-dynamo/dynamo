@@ -231,10 +231,10 @@ from dynamo.llm.exceptions import (
 The unified path supports the canonical PD-disagg roles via a single
 `--disaggregation-mode` flag. The mode flows from CLI → `WorkerConfig` →
 the Rust `Worker`, which uses it to decide model registration
-(`ModelType::Prefill` for prefill workers, the parsed `endpoint_types`
-for everyone else) and to disable the local KV indexer on decode
-workers. Engines read the same field on their runtime config to switch
-per-mode behavior in `generate()`.
+(`ModelType::empty()` + `WorkerType::Prefill` for prefill workers, the
+parsed `endpoint_types` for everyone else) and to disable the local KV
+indexer on decode workers. Engines read the same field on their runtime
+config to switch per-mode behavior in `generate()`.
 
 ```text
 +-----------+   --disaggregation-mode prefill    +------------------+
@@ -242,7 +242,7 @@ per-mode behavior in `generate()`.
 +-----------+                                    +------------------+
                                                           |
                                                           v
-                                          ModelType::Prefill registration
+                                          WorkerType::Prefill registration
                                           (Rust Worker)
 
                                                           |

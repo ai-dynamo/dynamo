@@ -44,7 +44,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
-from .args import Config, _uses_dynamo_connector, parse_args
+from .args import Config, _uses_dynamo_connector, configure_rl_logprobs_mode, parse_args
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
@@ -115,6 +115,8 @@ async def worker() -> None:
     # or the HF name (e.g. "Qwen/Qwen3-0.6B"), depending on cmd line params.
     if not config.served_model_name:
         config.served_model_name = config.engine_args.served_model_name = config.model
+
+    configure_rl_logprobs_mode(config)
 
     # Download the model if necessary using modelexpress.
     # We want it on disk before we start vllm to avoid downloading from HuggingFace.
@@ -648,7 +650,7 @@ async def register_vllm_model(
     config: Config,
     engine_client: AsyncLLM,
     vllm_config: VllmConfig,
-    worker_type: WorkerType | None = None,
+    worker_type: WorkerType,
     needs: list[list[WorkerType]] | None = None,
 ) -> None:
     """
@@ -656,14 +658,18 @@ async def register_vllm_model(
 
     Args:
         model_input: Input type for the model (e.g., ModelInput.Tokens)
-        model_type: Type of model (e.g., ModelType.Chat, ModelType.Prefill)
+        model_type: OpenAI surface this card exposes (e.g., ModelType.Chat).
+            Prefill workers have no OpenAI surface — their role is carried by
+            `worker_type=WorkerType.Prefill` — but pass the legacy
+            `ModelType.Prefill` marker bit (not a surface) so an old frontend
+            still detects them during the cross-version rollout.
         generate_endpoint: Endpoint to register
         config: Configuration object
         engine_client: vLLM engine client
         vllm_config: vLLM configuration
         worker_type: The disaggregation role this worker plays
-            (Prefill / Decode / Encode / Aggregated). Required for the
-            frontend's topology readiness check once strict mode lands.
+            (Prefill / Decode / Encode / Aggregated). Required by the
+            frontend's model-serving-readiness check.
         needs: Peer worker types required to serve traffic, in DNF form
             (list of alternative AND-sets).
     """
@@ -698,8 +704,10 @@ async def register_vllm_model(
         and config.disaggregation_mode != DisaggregationMode.DECODE
     )
 
-    # Add tool/reasoning parsers for decode models
-    if model_type != ModelType.Prefill:
+    # Add tool/reasoning parsers for decode/aggregated workers. Prefill
+    # workers have no OpenAI surface and don't run a parser — key off
+    # `worker_type` to skip them.
+    if worker_type != WorkerType.Prefill:
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
     runtime_config.exclude_tools_when_tool_choice_none = (

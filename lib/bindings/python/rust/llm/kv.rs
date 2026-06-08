@@ -18,9 +18,9 @@ use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
 #[cfg(feature = "kv-indexer")]
-use dynamo_kv_router::standalone_indexer::{self, IndexerConfig};
+use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "slot-tracker")]
-use dynamo_kv_router::standalone_slot_tracker::{self, SlotTrackerConfig};
+use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
@@ -89,7 +89,7 @@ where
         init_standalone_logging();
 
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(standalone_indexer::run_server(IndexerConfig {
+        rt.block_on(indexer::run_server(IndexerConfig {
             block_size: cli.block_size,
             port: cli.port,
             threads: cli.threads,
@@ -119,6 +119,18 @@ struct SlotTrackerCli {
     /// HTTP server port
     #[arg(long, default_value_t = 8091)]
     port: u16,
+
+    /// ZMQ PUB endpoint for replica-sync events
+    #[arg(long)]
+    replica_sync_bind: Option<String>,
+
+    /// Externally reachable local replica-sync endpoint
+    #[arg(long)]
+    replica_sync_advertise: Option<String>,
+
+    /// Comma-separated ZMQ PUB endpoints for peer slot trackers
+    #[arg(long, value_delimiter = ',')]
+    replica_sync_peers: Vec<String>,
 }
 
 pub fn run_slot_tracker_cli<I, T>(args: I) -> anyhow::Result<()>
@@ -136,8 +148,11 @@ where
         init_standalone_logging();
 
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(standalone_slot_tracker::run_server(SlotTrackerConfig {
+        rt.block_on(slot_tracker::run_server(SlotTrackerConfig {
             port: cli.port,
+            replica_sync_bind: cli.replica_sync_bind,
+            replica_sync_advertise: cli.replica_sync_advertise,
+            replica_sync_peers: cli.replica_sync_peers,
         }))
     }
 

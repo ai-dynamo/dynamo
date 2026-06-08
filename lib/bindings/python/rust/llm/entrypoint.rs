@@ -452,6 +452,7 @@ pub(crate) struct EntrypointArgs {
     namespace: Option<String>,
     namespace_prefix: Option<String>,
     is_prefill: bool,
+    is_decode: bool,
     migration_limit: u32,
     migration_max_seq_len: Option<u32>,
     chat_engine_factory: Option<PyEngineFactory>,
@@ -462,7 +463,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -484,6 +485,7 @@ impl EntrypointArgs {
         namespace: Option<String>,
         namespace_prefix: Option<String>,
         is_prefill: bool,
+        is_decode: bool,
         migration_limit: u32,
         migration_max_seq_len: Option<u32>,
         chat_engine_factory: Option<PyObject>,
@@ -537,6 +539,7 @@ impl EntrypointArgs {
             namespace,
             namespace_prefix,
             is_prefill,
+            is_decode,
             migration_limit,
             migration_max_seq_len,
             chat_engine_factory,
@@ -791,6 +794,7 @@ async fn select_engine(
                 engine,
                 model: Box::new(local_model),
                 is_prefill: args.is_prefill,
+                is_decode: args.is_decode,
             }
         }
     };
