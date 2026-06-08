@@ -107,6 +107,8 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 			$(YQ) eval '.metadata.annotations."helm.sh/resource-policy" = "keep"' -i "$$file"; \
 		fi; \
 	done
+	echo "Add conversion webhook"
+	yq -i '. *= load("config/crd/convert-patch.yaml")' config/crd/bases/nvidia.com_dynamographdeployments.yaml
 	echo "Copying CRD files to operator Helm chart crds/ directory"
 	mkdir -p ../helm/charts/platform/components/operator/crds/
 	cp config/crd/bases/*.yaml ../helm/charts/platform/components/operator/crds/

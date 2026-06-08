@@ -79,6 +79,8 @@ spec:
       - args:
         - --config=/etc/dynamo-operator/config.yaml
         - --operator-version={{ .Chart.AppVersion }}
+        - --webhook-service="{{ include "dynamo-operator.fullname" . }}-webhook-service"
+        - --namespace={{ .Release.Namespace }}
         command:
         - /manager
         env:

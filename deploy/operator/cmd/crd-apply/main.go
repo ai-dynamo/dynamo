@@ -26,11 +26,14 @@ import (
 const (
 	fieldManager      = "dynamo-crd-apply"
 	versionAnnotation = "dynamo.nvidia.com/operator-version"
+	addConvAnnotation = "dynamo.nvidia.com/add-conversion"
 )
 
 func main() {
 	crdsDir := flag.String("crds-dir", "/opt/dynamo-operator/crds/", "Directory containing CRD YAML files")
 	version := flag.String("version", "", "Operator version to stamp on CRDs")
+	webhookService := flag.String("webhook-service", "", "Operator webhook service name")
+	namespace := flag.String("namespace", "", "Operator webhook namespace")
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
@@ -80,6 +83,11 @@ func main() {
 				crd.Annotations = make(map[string]string)
 			}
 			crd.Annotations[versionAnnotation] = *version
+		}
+
+		if val, ok := crd.Annotations[addConvAnnotation]; ok && val == "true" {
+			crd.Spec.Conversion.Webhook.ClientConfig.Service.Name = *webhookService
+			crd.Spec.Conversion.Webhook.ClientConfig.Service.Namespace = *namespace
 		}
 
 		patchData, err := yaml.Marshal(crd)

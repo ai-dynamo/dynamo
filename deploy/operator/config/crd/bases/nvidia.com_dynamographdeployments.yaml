@@ -8,6 +8,7 @@ metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.4
     helm.sh/resource-policy: keep
+    dynamo.nvidia.com/add-conversion: "true"
   name: dynamographdeployments.nvidia.com
 spec:
   group: nvidia.com
@@ -21200,3 +21201,13 @@ spec:
       storage: false
       subresources:
         status: {}
+  conversion:
+    strategy: Webhook
+    webhook:
+      clientConfig:
+        service:
+          name: dynamo-operator-webhook-service
+          namespace: dynamo-operator
+          path: /convert
+      conversionReviewVersions:
+        - v1
