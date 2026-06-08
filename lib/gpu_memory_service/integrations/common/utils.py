@@ -6,10 +6,11 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import torch
+from gpu_memory_service.client.torch.allocator import prune_allocations
 from gpu_memory_service.client.torch.module import register_module_tensors
 from gpu_memory_service.common.locks import RequestedLockType
 
@@ -18,6 +19,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 GMS_TAGS = ("weights", "kv_cache")
+
+
+@dataclass(frozen=True)
+class GMSCommittedMemoryStats:
+    committed_bytes: int
+    pruned_bytes: int
 
 
 def get_gms_lock_mode(extra_config: dict):
@@ -29,6 +36,19 @@ def get_gms_lock_mode(extra_config: dict):
         logger.info("[GMS] gms_read_only=True, forcing RO mode")
         return RequestedLockType.RO
     return RequestedLockType.RW_OR_RO
+
+
+def get_gms_ro_connect_timeout_ms(extra_config: dict) -> int | None:
+    """Weight RO reconnect timeout in ms. None waits indefinitely."""
+    raw = extra_config.get("gms_ro_connect_timeout_ms")
+    if raw is None:
+        return None
+    timeout_ms = int(raw)
+    if timeout_ms < 0:
+        raise ValueError(
+            f"gms_ro_connect_timeout_ms must be non-negative, got {timeout_ms}"
+        )
+    return timeout_ms
 
 
 def strip_gms_model_loader_config(load_config, load_format: str):
@@ -56,8 +76,9 @@ def setup_meta_tensor_workaround() -> None:
 
 
 def finalize_gms_write(
-    allocator: "GMSClientMemoryManager", model: torch.nn.Module
-) -> int:
+    allocator: "GMSClientMemoryManager",
+    model: torch.nn.Module,
+) -> GMSCommittedMemoryStats:
     """Finalize GMS write mode: register tensors, commit, reconnect in read mode.
 
     Flow: register tensors -> sync -> unmap + commit -> connect(RO) -> remap
@@ -67,13 +88,22 @@ def finalize_gms_write(
         model: The loaded model with weights to register.
 
     Returns:
-        Total bytes committed.
+        Committed/pruned byte stats.
     """
-    register_module_tensors(allocator, model)
-    total_bytes = allocator.total_bytes
+    referenced_allocation_ids = register_module_tensors(allocator, model)
+    before_prune_bytes = allocator.total_bytes
+    before_prune_count = len(allocator.mappings)
 
-    # Synchronize before commit — caller's writes must be visible
-    torch.cuda.synchronize()
+    # prune_allocations synchronizes allocator.device before destroying
+    # unreferenced mappings. allocator.commit() performs the publish-barrier
+    # sync before committing the remaining registered weights.
+    prune_allocations(
+        allocator,
+        referenced_allocation_ids=referenced_allocation_ids,
+    )
+    total_bytes = allocator.total_bytes
+    pruned_bytes = before_prune_bytes - total_bytes
+    pruned_count = before_prune_count - len(allocator.mappings)
 
     allocator.commit()
 
@@ -81,9 +111,15 @@ def finalize_gms_write(
     allocator.remap_all_vas()
 
     logger.info(
-        "[GMS] Committed %.2f GiB, switched to read mode with %d mappings",
+        "[GMS] Committed %.2f GiB, switched to read mode with %d mappings "
+        "(pruned %d allocations / %.2f GiB before commit)",
         total_bytes / (1 << 30),
-        len(allocator._mappings),
+        len(allocator.mappings),
+        pruned_count,
+        pruned_bytes / (1 << 30),
     )
 
-    return int(total_bytes)
+    return GMSCommittedMemoryStats(
+        committed_bytes=int(total_bytes),
+        pruned_bytes=int(pruned_bytes),
+    )

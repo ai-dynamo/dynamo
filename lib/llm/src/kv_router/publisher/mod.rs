@@ -67,7 +67,14 @@ fn create_kv_stream_name(component: &Component, subject: &str) -> String {
 /// Configure the source of KV events.
 /// Currently, only ZMQ is supported.
 pub enum KvEventSourceConfig {
-    Zmq { endpoint: String, topic: String },
+    Zmq {
+        endpoint: String,
+        topic: String,
+        /// Model image-placeholder token id, used by the normalizer to rewrite
+        /// vLLM BlockStored events to the canonical pad_value scheme. `None`
+        /// for text-only / non-MM deployments (normalization is a no-op).
+        image_token_id: Option<u32>,
+    },
 }
 
 enum KvEventSource {
@@ -87,7 +94,11 @@ impl KvEventSource {
         next_event_id: Arc<AtomicU64>,
     ) -> Result<Self> {
         match source_config {
-            KvEventSourceConfig::Zmq { endpoint, topic } => {
+            KvEventSourceConfig::Zmq {
+                endpoint,
+                topic,
+                image_token_id,
+            } => {
                 let zmq_handle = component
                     .drt()
                     .runtime()
@@ -100,6 +111,7 @@ impl KvEventSource {
                         cancellation_token.clone(),
                         kv_block_size,
                         next_event_id,
+                        image_token_id,
                     ));
 
                 Ok(KvEventSource::Zmq { zmq_handle })
@@ -157,6 +169,26 @@ impl KvEventPublisher {
         dp_rank: DpRank,
         batching_timeout_ms: Option<u64>,
     ) -> Result<Self> {
+        Self::new_with_local_indexer_and_worker_id(
+            component,
+            None,
+            kv_block_size,
+            source_config,
+            enable_local_indexer,
+            dp_rank,
+            batching_timeout_ms,
+        )
+    }
+
+    pub fn new_with_local_indexer_and_worker_id(
+        component: Component,
+        worker_id: Option<WorkerId>,
+        kv_block_size: u32,
+        source_config: Option<KvEventSourceConfig>,
+        enable_local_indexer: bool,
+        dp_rank: DpRank,
+        batching_timeout_ms: Option<u64>,
+    ) -> Result<Self> {
         let cancellation_token = CancellationToken::new();
         let batching_timeout_ms = batching_timeout_ms
             .filter(|&ms| {
@@ -172,7 +204,7 @@ impl KvEventPublisher {
             .map(|ms| ms.min(MAX_BATCHING_TIMEOUT_MS));
 
         let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
-        let worker_id = component.drt().connection_id();
+        let worker_id = worker_id.unwrap_or_else(|| component.drt().connection_id());
 
         let _ = KvPublisherMetrics::from_component(&component);
 

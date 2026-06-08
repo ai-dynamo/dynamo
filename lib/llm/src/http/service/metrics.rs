@@ -252,7 +252,7 @@ struct MetricsHandlerState {
 pub struct Metrics {
     request_started_counter: IntCounterVec,
     request_counter: IntCounterVec,
-    /// Deprecated: use `active_requests_gauge`. Kept for backwards compatibility until Phase 3.
+    /// Deprecated: use `active_requests_gauge`. Kept for backwards compatibility.
     inflight_gauge: IntGaugeVec,
     active_requests_gauge: IntGaugeVec,
     client_disconnect_gauge: prometheus::IntGauge,
@@ -265,6 +265,11 @@ pub struct Metrics {
     output_tokens_counter: IntCounterVec,
     time_to_first_token: HistogramVec,
     inter_token_latency: HistogramVec,
+    /// End-to-end latency of an OpenAI `/v1/embeddings` request. Distinct from
+    /// `request_duration` so the buckets can be sized for sub-second pooling
+    /// inference rather than the 1-512s LLM-generation range. Labeled by
+    /// `model`.
+    embedding_latency: HistogramVec,
 
     // Runtime configuration metrics. Note: Some of these metrics represent counter-like values from
     // source systems, but are implemented as gauges because they are copied/synchronized from upstream
@@ -389,6 +394,16 @@ pub enum ErrorType {
 pub struct ResponseMetricCollector {
     metrics: Arc<Metrics>,
     model: String,
+    // Per-model metric handles resolved once at construction. The collector lives for a
+    // single request and `model` is fixed, so caching these avoids re-hashing the `model`
+    // label via `with_label_values` on every chunk (and, for ITL, on every output token —
+    // it was previously resolved inside a `for _ in 0..num_tokens` loop). Each handle
+    // shares the underlying metric with its vec, so observations are equivalent.
+    output_tokens_counter: prometheus::IntCounter,
+    time_to_first_token: prometheus::Histogram,
+    inter_token_latency: prometheus::Histogram,
+    input_sequence_length: prometheus::Histogram,
+    cached_tokens: prometheus::Histogram,
     start_time: Instant,
     // we use is_first_token to distinguish TTFT from ITL. It is true by default and
     // flipped to false when the first token is returned and TTFT is published.
@@ -418,6 +433,11 @@ pub struct ResponseMetricCollector {
     decode_dp_rank: Option<u32>,
     // Decode worker type for Prometheus labeling - stored at routing time to avoid MDC lookup
     decode_worker_type: Option<String>,
+    // Cached per-worker ITL gauge handle. The decode-worker labels are latched once at
+    // routing time (`set_worker_info` only sets when unset), so this GaugeVec handle is
+    // resolved a single time and reused — the per-token observe path then does no label
+    // formatting (`worker_id.to_string()`) or label hashing, only `set`.
+    decode_itl_gauge: Option<prometheus::Gauge>,
 }
 
 impl Default for Metrics {
@@ -452,6 +472,7 @@ impl Metrics {
     /// - `DYN_METRICS_OUTPUT_SEQUENCE_{MIN,MAX,COUNT}` - Output sequence length histogram (defaults: 50.0, 32000.0, 10)
     /// - `DYN_METRICS_TTFT_{MIN,MAX,COUNT}` - Time to first token histogram (defaults: 0.001, 480.0, 18)
     /// - `DYN_METRICS_ITL_{MIN,MAX,COUNT}` - Inter-token latency histogram (defaults: 0.001, 2.0, 13)
+    /// - `DYN_METRICS_EMBEDDING_LATENCY_{MIN,MAX,COUNT}` - End-to-end `/v1/embeddings` latency histogram (defaults: 0.001, 10.0, 14)
     ///
     /// ## Model Configuration Metrics
     ///
@@ -624,6 +645,26 @@ impl Metrics {
         )
         .unwrap();
 
+        // Embedding latency buckets: pooling-model inference is typically
+        // sub-second (60-200 token inputs on L4-class GPUs land in the 5-50ms
+        // range), so 1ms..10s on a log scale gives p50/p99 resolution that
+        // the 1..512s `request_duration` buckets cannot.
+        let (emb_min, emb_max, emb_count) =
+            parse_bucket_config("DYN_METRICS_EMBEDDING_LATENCY", 0.001, 10.0, 14);
+        let embedding_latency_buckets = generate_log_buckets(emb_min, emb_max, emb_count);
+
+        let embedding_latency = HistogramVec::new(
+            HistogramOpts::new(
+                frontend_metric_name(frontend_service::EMBEDDING_LATENCY_SECONDS),
+                "End-to-end latency of /v1/embeddings requests, in seconds. \
+                 Distinct from request_duration_seconds so the bucket range can \
+                 cover sub-second pooling-model inference.",
+            )
+            .buckets(embedding_latency_buckets),
+            &["model"],
+        )
+        .unwrap();
+
         let cached_tokens = HistogramVec::new(
             HistogramOpts::new(
                 frontend_metric_name(frontend_service::CACHED_TOKENS),
@@ -755,6 +796,7 @@ impl Metrics {
             output_tokens_counter,
             time_to_first_token,
             inter_token_latency,
+            embedding_latency,
             model_total_kv_blocks,
             model_max_num_seqs,
             model_max_num_batched_tokens,
@@ -833,6 +875,38 @@ impl Metrics {
         self.inflight_gauge.with_label_values(&[model]).get()
     }
 
+    /// Record one observation of the end-to-end latency of an
+    /// `/v1/embeddings` request, in seconds. Labeled by model.
+    ///
+    /// Negative values are dropped (they can only happen from a clock skew or
+    /// programming bug; recording them would corrupt percentile estimates).
+    pub fn observe_embedding_latency(&self, model: &str, seconds: f64) {
+        if !seconds.is_finite() || seconds < 0.0 {
+            return;
+        }
+        self.embedding_latency
+            .with_label_values(&[model])
+            .observe(seconds);
+    }
+
+    /// Get the cumulative count of embedding latency observations for the given
+    /// model. Test helper.
+    #[cfg(test)]
+    pub fn embedding_latency_count(&self, model: &str) -> u64 {
+        self.embedding_latency
+            .with_label_values(&[model])
+            .get_sample_count()
+    }
+
+    /// Get the cumulative sum (seconds) of embedding latency observations for
+    /// the given model. Test helper.
+    #[cfg(test)]
+    pub fn embedding_latency_sum(&self, model: &str) -> f64 {
+        self.embedding_latency
+            .with_label_values(&[model])
+            .get_sample_sum()
+    }
+
     fn inc_inflight_gauge(&self, model: &str) {
         self.inflight_gauge.with_label_values(&[model]).inc();
         self.active_requests_gauge.with_label_values(&[model]).inc();
@@ -876,6 +950,7 @@ impl Metrics {
         registry.register(Box::new(self.output_tokens_counter.clone()))?;
         registry.register(Box::new(self.time_to_first_token.clone()))?;
         registry.register(Box::new(self.inter_token_latency.clone()))?;
+        registry.register(Box::new(self.embedding_latency.clone()))?;
 
         // Register runtime configuration metrics
         registry.register(Box::new(self.model_total_kv_blocks.clone()))?;
@@ -1042,7 +1117,7 @@ impl Metrics {
 
         InflightGuard::new(
             self.clone(),
-            model.to_string().to_lowercase(),
+            model.to_string(),
             endpoint,
             request_type,
             request_id.to_string(),
@@ -1051,7 +1126,7 @@ impl Metrics {
 
     /// Create a new [`ResponseMetricCollector`] for collecting per-response metrics (i.e., TTFT, ITL)
     pub fn create_response_collector(self: Arc<Self>, model: &str) -> ResponseMetricCollector {
-        ResponseMetricCollector::new(self, model.to_string().to_lowercase())
+        ResponseMetricCollector::new(self, model.to_string())
     }
 
     /// Create a new [`HttpQueueGuard`] for tracking HTTP processing queue
@@ -1059,7 +1134,7 @@ impl Metrics {
     /// This guard tracks requests from HTTP handler start until first token generation,
     /// providing visibility into HTTP processing queue time before actual LLM processing begins.
     pub fn create_http_queue_guard(self: Arc<Self>, model: &str) -> HttpQueueGuard {
-        HttpQueueGuard::new(self, model.to_string().to_lowercase())
+        HttpQueueGuard::new(self, model.to_string())
     }
 }
 
@@ -1281,9 +1356,21 @@ impl std::fmt::Display for ErrorType {
 
 impl ResponseMetricCollector {
     fn new(metrics: Arc<Metrics>, model: String) -> Self {
+        // Resolve the per-model handles once (cheap clones of the vec entries) so the
+        // per-chunk / per-token hot path in `observe_response` does no label hashing.
+        let output_tokens_counter = metrics.output_tokens_counter.with_label_values(&[&model]);
+        let time_to_first_token = metrics.time_to_first_token.with_label_values(&[&model]);
+        let inter_token_latency = metrics.inter_token_latency.with_label_values(&[&model]);
+        let input_sequence_length = metrics.input_sequence_length.with_label_values(&[&model]);
+        let cached_tokens = metrics.cached_tokens.with_label_values(&[&model]);
         ResponseMetricCollector {
             metrics,
             model,
+            output_tokens_counter,
+            time_to_first_token,
+            inter_token_latency,
+            input_sequence_length,
+            cached_tokens,
             is_first_token: true,
             last_response_time: None,
             start_time: Instant::now(),
@@ -1302,6 +1389,7 @@ impl ResponseMetricCollector {
             decode_worker_id: None,
             decode_dp_rank: None,
             decode_worker_type: None,
+            decode_itl_gauge: None,
         }
     }
 
@@ -1353,10 +1441,7 @@ impl ResponseMetricCollector {
             && !self.cached_tokens_observed
         {
             self.cached_tokens_observed = true;
-            self.metrics
-                .cached_tokens
-                .with_label_values(&[&self.model])
-                .observe(tokens as f64);
+            self.cached_tokens.observe(tokens as f64);
         }
     }
 
@@ -1396,10 +1481,7 @@ impl ResponseMetricCollector {
         self.isl = isl;
 
         // Increment the real-time output tokens counter
-        self.metrics
-            .output_tokens_counter
-            .with_label_values(&[&self.model])
-            .inc_by(num_tokens as u64);
+        self.output_tokens_counter.inc_by(num_tokens as u64);
 
         if self.is_first_token {
             // NOTE: when there are multiple tokens in the first response,
@@ -1409,10 +1491,7 @@ impl ResponseMetricCollector {
             // Publish TTFT and store for span recording
             let ttft = self.start_time.elapsed().as_secs_f64();
             self.ttft_ms = Some(ttft * 1000.0);
-            self.metrics
-                .time_to_first_token
-                .with_label_values(&[&self.model])
-                .observe(ttft);
+            self.time_to_first_token.observe(ttft);
 
             // Update per-worker TTFT and input sequence tokens gauges - attributed to prefill worker.
             // Both gauges are updated atomically from the same request to correlate latency with input size.
@@ -1438,10 +1517,7 @@ impl ResponseMetricCollector {
 
             // Publish ISL
             // TODO: publish ISL as soon as the tokenization process completes
-            self.metrics
-                .input_sequence_length
-                .with_label_values(&[&self.model])
-                .observe(isl as f64);
+            self.input_sequence_length.observe(isl as f64);
         }
 
         let current_duration = self.start_time.elapsed();
@@ -1451,17 +1527,23 @@ impl ResponseMetricCollector {
             let itl = response_duration.as_secs_f64() / num_tokens as f64;
             self.itl_sum_secs += itl * num_tokens as f64;
             self.itl_count += num_tokens as u64;
+            // Handle resolved once at construction — the observe loop no longer re-hashes
+            // the `model` label on every output token.
             for _ in 0..num_tokens {
-                self.metrics
-                    .inter_token_latency
-                    .with_label_values(&[&self.model])
-                    .observe(itl);
+                self.inter_token_latency.observe(itl);
             }
 
             // Update per-worker ITL gauge - attributed to decode worker.
             // Use stored worker_type (from routing time) to avoid MDC lookup.
             // Falls back to WORKER_TYPE_DECODE if not available.
-            if let Some(worker_id) = self.decode_worker_id {
+            //
+            // The worker labels are fixed for the request's lifetime (latched in
+            // `set_worker_info`), so resolve the GaugeVec handle once and cache it.
+            // This keeps the per-token path free of `to_string()` allocations and
+            // label hashing; subsequent tokens only call `set`.
+            if self.decode_itl_gauge.is_none()
+                && let Some(worker_id) = self.decode_worker_id
+            {
                 let worker_id_str = worker_id.to_string();
                 let dp_rank_str = self
                     .decode_dp_rank
@@ -1470,9 +1552,15 @@ impl ResponseMetricCollector {
                     .decode_worker_type
                     .as_deref()
                     .unwrap_or(WORKER_TYPE_DECODE);
-                WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
-                    .with_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type])
-                    .set(itl);
+                self.decode_itl_gauge =
+                    Some(WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.with_label_values(&[
+                        worker_id_str.as_str(),
+                        dp_rank_str.as_str(),
+                        worker_type,
+                    ]));
+            }
+            if let Some(gauge) = &self.decode_itl_gauge {
+                gauge.set(itl);
             }
         }
 
@@ -1945,6 +2033,87 @@ mod tests {
             .with_label_values(&[model])
             .get();
         assert_eq!(counter_value, 22);
+    }
+
+    #[test]
+    fn test_cached_handles_record_through_vec() {
+        // The collector resolves per-model handles once at construction; observing
+        // through them must update the same metric the vec exposes. Regression guard
+        // for the handle cache (incl. the per-token ITL loop using the cached handle).
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let model = "cached-handle-model";
+
+        let mut collector = metrics.clone().create_response_collector(model);
+        // First chunk (3 tokens): TTFT + ISL observed once; no ITL yet.
+        collector.observe_response(42, 3);
+        // Second chunk (4 tokens): ITL observed once per token via the cached handle.
+        collector.observe_response(42, 4);
+
+        let ttft = metrics.time_to_first_token.with_label_values(&[model]);
+        assert_eq!(ttft.get_sample_count(), 1, "TTFT observed once");
+
+        let isl = metrics.input_sequence_length.with_label_values(&[model]);
+        assert_eq!(isl.get_sample_count(), 1, "ISL observed once");
+        assert_eq!(isl.get_sample_sum(), 42.0);
+
+        let itl = metrics.inter_token_latency.with_label_values(&[model]);
+        assert_eq!(
+            itl.get_sample_count(),
+            4,
+            "ITL observed once per token of 2nd chunk"
+        );
+
+        let out = metrics
+            .output_tokens_counter
+            .with_label_values(&[model])
+            .get();
+        assert_eq!(out, 7, "output tokens = 3 + 4 via cached counter handle");
+    }
+
+    #[test]
+    fn test_cached_decode_itl_gauge_records_for_worker() {
+        // The per-worker ITL gauge handle is resolved once (worker labels are latched
+        // at routing time via `set_worker_info`) and reused on every output token.
+        // Verify observations through the cached handle land on the same GaugeVec
+        // series the labels address. Regression guard for the per-token handle cache.
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).ok();
+        let model = "itl-gauge-model";
+
+        // Distinctive worker id so this never collides with other tests on the
+        // process-global WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.
+        let worker_id: u64 = 9_876_543_210;
+        let mut collector = metrics.clone().create_response_collector(model);
+        collector.set_worker_info(
+            None,
+            None,
+            None,
+            Some(worker_id),
+            Some(0),
+            Some("decode".to_string()),
+        );
+
+        // First chunk: TTFT only, no ITL yet (no prior response time) -> gauge unset.
+        collector.observe_response(10, 1);
+        // Elapse measurable time so ITL > 0, then a second chunk drives the cached
+        // per-worker ITL gauge.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        collector.observe_response(10, 1);
+
+        let worker_id_str = worker_id.to_string();
+        let gauge = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.with_label_values(&[
+            worker_id_str.as_str(),
+            "0",
+            "decode",
+        ]);
+        assert!(
+            gauge.get() > 0.0,
+            "cached per-worker ITL gauge must record a positive ITL through the vec, got {}",
+            gauge.get()
+        );
     }
 
     #[test]
@@ -2491,6 +2660,53 @@ mod tests {
     }
 
     #[test]
+    fn test_lifecycle_constructors_preserve_model_label_casing() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "Llama-3.1-8B-Instruct";
+
+        let _inflight = metrics.clone().create_inflight_guard(
+            model,
+            Endpoint::ChatCompletions,
+            true,
+            "req-case",
+        );
+        let mut collector = metrics.clone().create_response_collector(model);
+        collector.observe_response(100, 1);
+        let _queue = metrics.clone().create_http_queue_guard(model);
+
+        // Drop the lifecycle guards so their Drop impls record
+        // completion-time metrics (request_counter, request_duration,
+        // detokenize observations) before we gather. Without this the
+        // regression only covers constructor-time labels.
+        drop(_inflight);
+        drop(collector);
+        drop(_queue);
+
+        let metric_families = registry.gather();
+        let observed: Vec<String> = metric_families
+            .iter()
+            .flat_map(|mf| mf.get_metric())
+            .flat_map(|m| m.get_label())
+            .filter(|l| l.name() == "model")
+            .map(|l| l.value().to_string())
+            .collect();
+
+        assert!(
+            !observed.is_empty(),
+            "expected at least one metric to carry a model label"
+        );
+        for value in &observed {
+            assert_eq!(
+                value, model,
+                "model label was modified; expected original casing to be preserved"
+            );
+        }
+    }
+
+    #[test]
     fn test_all_error_types_recorded_correctly() {
         let metrics = Arc::new(Metrics::new());
         let registry = prometheus::Registry::new();
@@ -2684,5 +2900,81 @@ mod tests {
             error: None,
         };
         assert!(run_event_converter(annotated).is_ok());
+    }
+
+    #[test]
+    fn test_observe_embedding_latency_records_observation() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "embed-test";
+        assert_eq!(metrics.embedding_latency_count(model), 0);
+        assert_eq!(metrics.embedding_latency_sum(model), 0.0);
+
+        metrics.observe_embedding_latency(model, 0.005);
+        metrics.observe_embedding_latency(model, 0.020);
+
+        assert_eq!(metrics.embedding_latency_count(model), 2);
+        assert!((metrics.embedding_latency_sum(model) - 0.025).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_observe_embedding_latency_drops_invalid_values() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "embed-test";
+
+        metrics.observe_embedding_latency(model, -0.5);
+        metrics.observe_embedding_latency(model, f64::NAN);
+        metrics.observe_embedding_latency(model, f64::INFINITY);
+        metrics.observe_embedding_latency(model, f64::NEG_INFINITY);
+
+        assert_eq!(metrics.embedding_latency_count(model), 0);
+        assert_eq!(metrics.embedding_latency_sum(model), 0.0);
+
+        // Zero is allowed (boundary case for finite, non-negative).
+        metrics.observe_embedding_latency(model, 0.0);
+        assert_eq!(metrics.embedding_latency_count(model), 1);
+    }
+
+    #[test]
+    fn test_observe_embedding_latency_partitions_by_model() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let m1 = "embed-a";
+        let m2 = "embed-b";
+
+        metrics.observe_embedding_latency(m1, 0.010);
+        metrics.observe_embedding_latency(m1, 0.030);
+        metrics.observe_embedding_latency(m2, 0.005);
+
+        assert_eq!(metrics.embedding_latency_count(m1), 2);
+        assert_eq!(metrics.embedding_latency_count(m2), 1);
+        assert!((metrics.embedding_latency_sum(m1) - 0.040).abs() < 1e-9);
+        assert!((metrics.embedding_latency_sum(m2) - 0.005).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_embedding_latency_registered_in_registry() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        metrics.observe_embedding_latency("embed-test", 0.012);
+
+        let metric_families = registry.gather();
+        let found = metric_families.iter().any(|mf| {
+            mf.name()
+                .ends_with(frontend_service::EMBEDDING_LATENCY_SECONDS)
+        });
+        assert!(
+            found,
+            "embedding_latency_seconds histogram must be registered with the registry"
+        );
     }
 }

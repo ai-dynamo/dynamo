@@ -14,7 +14,7 @@ use std::{
 };
 
 mod common;
-pub use common::{build_routed_pipeline, build_routed_pipeline_with_preprocessor};
+pub use common::{PreprocessedRouting, build_preprocessed_routing};
 pub mod endpoint;
 pub mod grpc;
 pub mod http;
@@ -98,6 +98,9 @@ pub async fn run_input(
     in_opt: Input,
     engine_config: super::EngineConfig,
 ) -> anyhow::Result<()> {
+    if let Err(e) = crate::request_trace::init_from_env_with_shutdown(drt.child_token()).await {
+        tracing::warn!(error = %e, "Request trace initialization failed; continuing without trace sink");
+    }
     if let Err(e) = crate::agents::trace::init_from_env_with_shutdown(drt.child_token()).await {
         tracing::warn!(error = %e, "Agent trace initialization failed; continuing without trace sink");
     }

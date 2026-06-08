@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import os
 import sys
 from contextlib import nullcontext
 from typing import List, Optional
@@ -21,7 +22,6 @@ from typing import List, Optional
 import torch
 from gpu_memory_service.client.memory_manager import StaleMemoryLayoutError
 from gpu_memory_service.client.torch.allocator import (
-    ensure_scratch_disabled,
     get_gms_client_memory_manager,
     get_or_create_gms_client_memory_manager,
     get_or_create_scratch_manager,
@@ -31,8 +31,15 @@ from gpu_memory_service.client.torch.allocator import (
 from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path, is_scratch_kv_enabled
 from gpu_memory_service.integrations.common import patch_empty_cache
-from gpu_memory_service.integrations.common.utils import GMS_TAGS, get_gms_lock_mode
-from gpu_memory_service.integrations.vllm.model_loader import register_gms_loader
+from gpu_memory_service.integrations.common.utils import (
+    GMS_TAGS,
+    get_gms_lock_mode,
+    get_gms_ro_connect_timeout_ms,
+)
+from gpu_memory_service.integrations.vllm.model_loader import (
+    get_mx_load_context,
+    register_gms_loader,
+)
 from gpu_memory_service.integrations.vllm.patches import (
     apply_scratch_kv_patches,
     patch_memory_snapshot,
@@ -52,8 +59,63 @@ apply_scratch_kv_patches()
 
 logger.info("[GMS] Worker module loaded - model loader registered, all patches applied")
 
+# MX imports — only when MX_ENABLED=1 (modelexpress is an optional dependency).
+# Pause/resume serving lifecycle is implemented in modelexpress.lifecycle, which
+# composes publish/unpublish_metadata + register_tensors + MxClient/NIXL
+# teardown into a single pause/resume pair.
+if os.environ.get("MX_ENABLED", "0") == "1":
+    try:
+        from modelexpress import configure_vllm_logging
+        from modelexpress.lifecycle import pause_serving, resume_serving
+
+        configure_vllm_logging()
+    except ImportError as e:
+        raise ImportError(
+            "MX_ENABLED=1 but modelexpress is not installed. "
+            "Install with: pip install modelexpress"
+        ) from e
+
+
 # Import Worker after patches are applied
 from vllm.v1.worker.gpu_worker import Worker  # noqa: E402
+
+
+def _get_dp_adjusted_local_rank(local_rank: int, parallel_config) -> int:
+    """Return the CUDA device index vLLM will use for this worker.
+
+    vLLM adjusts ``self.local_rank`` inside ``Worker.init_device()`` for
+    intra-node data parallelism so that every local DP engine lands on a
+    different GPU:
+
+        DP_LOCAL_RANK * TP_PP_WORLD_SIZE + TP_LOCAL_RANK
+
+    GMS intentionally connects before ``super().init_device()`` because the
+    initial vLLM ``MemorySnapshot`` needs GMS-aware committed-byte accounting.
+    That means GMS cannot observe vLLM's in-place local-rank adjustment yet, so
+    duplicate the upstream calculation here and use it only for the early GMS
+    socket/device selection.
+
+    TODO: add an upstream vLLM hook/API that exposes the resolved CUDA device
+    before the initial MemorySnapshot, then replace this duplicated vLLM logic.
+    """
+    adjusted_local_rank = local_rank
+    if (
+        parallel_config.distributed_executor_backend not in ("ray", "external_launcher")
+        and parallel_config.data_parallel_backend != "ray"
+        and parallel_config.nnodes_within_dp == 1
+    ):
+        # Use local DP rank if available, otherwise use global DP rank.
+        dp_local_rank = parallel_config.data_parallel_rank_local
+        if dp_local_rank is None:
+            dp_local_rank = parallel_config.data_parallel_index
+
+        tp_pp_world_size = (
+            parallel_config.pipeline_parallel_size
+            * parallel_config.tensor_parallel_size
+        )
+        adjusted_local_rank += dp_local_rank * tp_pp_world_size
+
+    return adjusted_local_rank
 
 
 class GMSWorker(Worker):
@@ -67,8 +129,9 @@ class GMSWorker(Worker):
         """
         from vllm.platforms import current_platform
 
-        # Set CUDA device first (vLLM provides self.local_rank)
-        device = self.local_rank
+        # Set CUDA device first. Do not mutate self.local_rank here; the parent
+        # Worker will apply the same DP adjustment during super().init_device().
+        device = _get_dp_adjusted_local_rank(self.local_rank, self.parallel_config)
         current_platform.set_device(torch.device(f"cuda:{device}"))
 
         # Establish weights GMS connection (so MemorySnapshot can query committed bytes).
@@ -78,6 +141,7 @@ class GMSWorker(Worker):
             getattr(self.vllm_config.load_config, "model_loader_extra_config", {}) or {}
         )
         mode = get_gms_lock_mode(extra)
+        self.gms_ro_connect_timeout_ms = get_gms_ro_connect_timeout_ms(extra)
         get_or_create_gms_client_memory_manager(
             get_socket_path(device, "weights"),
             device,
@@ -97,10 +161,27 @@ class GMSWorker(Worker):
         if not is_scratch_kv_enabled():
             return super().determine_available_memory()
 
+        import vllm.envs as envs
+        from vllm.config import CUDAGraphMode
+        from vllm.platforms import current_platform
+
         torch.cuda.reset_peak_memory_stats()
         self.model_runner.profile_run()
         torch.cuda.synchronize()
         torch_peak = torch.cuda.max_memory_allocated()
+
+        cudagraph_memory_estimate = 0
+        if (
+            current_platform.is_cuda()
+            and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
+        cudagraph_memory_estimate_applied = (
+            cudagraph_memory_estimate
+            if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
+            else 0
+        )
+        self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
         # GMS weights mapped via cuMemMap are invisible to PyTorch's memory
         # stats on RO engines. Add them explicitly. On RW engines, torch_peak
@@ -111,18 +192,26 @@ class GMSWorker(Worker):
         else:
             non_kv_cache_memory = torch_peak
 
-        projected_available = self.requested_memory - non_kv_cache_memory
+        projected_available = (
+            self.requested_memory
+            - non_kv_cache_memory
+            - cudagraph_memory_estimate_applied
+        )
+        self.available_kv_cache_memory_bytes = int(projected_available)
 
         msg = (
             "[GMS] projected available memory "
             "%.2f GiB (requested=%.2f GiB, non_kv=%.2f GiB, "
-            "torch_peak=%.2f GiB, weights=%.2f GiB)"
+            "torch_peak=%.2f GiB, weights=%.2f GiB, "
+            "cudagraph_estimate=%.2f GiB, cudagraph_applied=%.2f GiB)"
             % (
                 projected_available / (1 << 30),
                 self.requested_memory / (1 << 30),
                 non_kv_cache_memory / (1 << 30),
                 torch_peak / (1 << 30),
                 weights_memory / (1 << 30),
+                cudagraph_memory_estimate / (1 << 30),
+                cudagraph_memory_estimate_applied / (1 << 30),
             )
         )
         logger.info(msg)
@@ -134,9 +223,10 @@ class GMSWorker(Worker):
         """Allocate KV cache backing.
 
         In scratch-KV mode the tensors are allocated over scratch-aliased
-        backing client-side; wake_up promotes to real per-tensor backing via
-        the standard reallocate+remap path. With enable_sleep_mode the manager
-        connects RW at init and allocates real backing immediately.
+        backing client-side; wake_up drops scratch backing and installs fresh
+        server backing via the standard reallocate+remap path. With
+        enable_sleep_mode the manager connects RW at init and allocates real
+        backing immediately.
         """
         from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 
@@ -146,7 +236,7 @@ class GMSWorker(Worker):
         socket = get_socket_path(device, "kv_cache")
         if is_scratch_kv_enabled():
             # Client-local scratch only — no GMS server session at init.
-            # wake_up will connect RW and migrate to real backing.
+            # wake_up will connect RW and allocate fresh server backing.
             get_or_create_scratch_manager(socket, device, tag="kv_cache")
             with gms_use_mem_pool("kv_cache", torch.device(f"cuda:{device}")):
                 self.model_runner.initialize_kv_cache(kv_cache_config)
@@ -175,20 +265,30 @@ class GMSWorker(Worker):
         try:
             from gpu_memory_service.integrations.vllm.model_loader import (
                 get_imported_weights_bytes,
+                get_model_memory_usage_offset_bytes,
             )
 
-            imported_bytes = int(get_imported_weights_bytes())
-            if (
-                imported_bytes > 0
-                and hasattr(self, "model_runner")
-                and self.model_runner is not None
-            ):
+            imported_weights_bytes = get_imported_weights_bytes()
+            memory_usage_offset_bytes = get_model_memory_usage_offset_bytes()
+            # The offset is not committed/restored GMS weight state. It is the
+            # load-time allocation footprint pruned before commit. vLLM uses
+            # model_memory_usage for KV-cache sizing, not only as a literal
+            # live-weight counter; reporting committed GMS bytes only can
+            # overestimate safe KV capacity and allocate an oversized cache.
+            model_memory_usage_bytes = int(
+                imported_weights_bytes + memory_usage_offset_bytes
+            )
+            if model_memory_usage_bytes > 0 and self.model_runner is not None:
                 old_usage = getattr(self.model_runner, "model_memory_usage", 0)
-                self.model_runner.model_memory_usage = imported_bytes
+                self.model_runner.model_memory_usage = model_memory_usage_bytes
                 logger.info(
-                    "[GMS] Corrected model_memory_usage: %.2f GiB -> %.2f GiB",
+                    "[GMS] Corrected vLLM model_memory_usage for KV sizing: "
+                    "%.2f GiB -> %.2f GiB "
+                    "(weights %.2f GiB + offset %.2f GiB)",
                     old_usage / (1 << 30),
-                    imported_bytes / (1 << 30),
+                    model_memory_usage_bytes / (1 << 30),
+                    imported_weights_bytes / (1 << 30),
+                    memory_usage_offset_bytes / (1 << 30),
                 )
         except Exception as e:
             logger.debug("[GMS] Could not correct memory accounting: %s", e)
@@ -204,6 +304,11 @@ class GMSWorker(Worker):
         prepare_scratch_for_reallocation → reallocate → remap pipeline.
         """
         free_bytes_before = torch.cuda.mem_get_info()[0]
+
+        # Pause MX serving before GMS unmap
+        mx_ctx = get_mx_load_context()
+        if mx_ctx is not None:
+            pause_serving(mx_ctx)
 
         for tag in ("weights", "kv_cache"):
             manager = get_gms_client_memory_manager(tag)
@@ -238,7 +343,10 @@ class GMSWorker(Worker):
             # the worker cannot serve requests without weights. sys.exit(1)
             # ensures clean termination so the orchestrator (K8s) can restart.
             try:
-                weights_manager.connect(RequestedLockType.RO, timeout_ms=30_000)
+                weights_manager.connect(
+                    RequestedLockType.RO,
+                    timeout_ms=getattr(self, "gms_ro_connect_timeout_ms", None),
+                )
                 weights_manager.remap_all_vas()
             except TimeoutError:
                 logger.error(
@@ -255,33 +363,32 @@ class GMSWorker(Worker):
                 logger.error("Fatal: cannot connect to GMS during remap: %s", e)
                 sys.exit(1)
 
+            # Resume MX serving after GMS remap
+            mx_ctx = get_mx_load_context()
+            if mx_ctx is not None:
+                resume_serving(mx_ctx, self.model_runner.model)
+
         if "kv_cache" in tags:
             kv_cache_manager = get_gms_client_memory_manager("kv_cache")
             assert (
                 kv_cache_manager is not None
             ), "GMS kv_cache client is not initialized"
             # Capture scratch state BEFORE the flip so we know whether to
-            # migrate and whether to replay the deferred NIXL registration.
+            # move bookkeeping and whether to replay the deferred NIXL
+            # registration.
             was_scratch = is_scratch(kv_cache_manager)
             assert kv_cache_manager.is_unmapped, "GMS kv_cache is not unmapped"
             kv_cache_manager.connect(RequestedLockType.RW)
             if was_scratch:
-                # Move scratch entries from _scratch_mappings into _mappings
-                # as preserved-VA records, then flip routing to server-backed
-                # so subsequent torch allocations on this mempool go through
-                # create_mapping. Order matters: migrate first, flip second.
+                # Move scratch bookkeeping from _scratch_mappings into _mappings
+                # as preserved-VA records and flip subsequent allocations on
+                # this mempool to server-backed create_mapping.
                 kv_cache_manager.prepare_scratch_for_reallocation()
-                ensure_scratch_disabled(kv_cache_manager)
             kv_cache_manager.reallocate_all_handles(tag="kv_cache")
             kv_cache_manager.remap_all_vas()
+            self.model_runner.post_kv_cache_wake_up()
             if was_scratch:
                 self._register_kv_caches_with_nixl()
-
-            # Reinitialize FP8 KV scales if needed
-            if self.cache_config.cache_dtype.startswith("fp8") and hasattr(
-                self.model_runner, "init_fp8_kv_scales"
-            ):
-                self.model_runner.init_fp8_kv_scales()
 
     def _register_kv_caches_with_nixl(self) -> None:
         """Fire the NixlConnector KV-cache registration after deferred KV swap.

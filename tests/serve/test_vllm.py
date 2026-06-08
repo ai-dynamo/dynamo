@@ -4,6 +4,7 @@
 import dataclasses
 import logging
 import os
+import platform
 import random
 from dataclasses import dataclass, field
 from typing import Optional
@@ -25,23 +26,49 @@ from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
 from tests.utils.multimodal import make_multimodal_configs
 from tests.utils.payload_builder import (
-    cached_tokens_chat_payload,
     chat_payload,
     chat_payload_default,
     chat_payload_with_logprobs,
     completion_payload_default,
     completion_payload_with_logprobs,
+    embedding_payload,
+    embedding_payload_default,
+    kv_events_metrics_payload,
     metric_payload_default,
+    router_cached_tokens_chat_payload,
+    router_selection_chat_payload_default,
 )
-from tests.utils.payloads import LoraTestChatPayload, ToolCallingChatPayload
+from tests.utils.payloads import (
+    EmbeddingMultiWorkerDispatchPayload,
+    EmbeddingPayload,
+    LoraTestChatPayload,
+    ToolCallingChatPayload,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def _is_cuda13() -> bool:
+def _is_cuda12() -> bool:
     v = os.environ.get("CUDA_VERSION", "")
-    # handles "13", "13.0", "13.0.1", etc.
-    return v.startswith("13")
+    # handles "12", "12.9", "12.9.1", etc.
+    return v.startswith("12")
+
+
+def _is_aarch64() -> bool:
+    arch = os.environ.get("TARGETARCH") or os.environ.get("ARCH") or platform.machine()
+    return arch in ("aarch64", "arm64")
+
+
+def _xfail_lmcache_upstream_container():
+    return pytest.mark.xfail(
+        _is_cuda12() or _is_aarch64(),
+        reason=(
+            "LMCache is provided by the upstream vLLM image. The CUDA 12 image "
+            "ships LMCache c_ops linked against libcudart.so.13, and LMCache "
+            "does not publish aarch64 wheels yet."
+        ),
+        strict=False,
+    )
 
 
 @dataclass
@@ -74,15 +101,18 @@ vllm_configs = {
         name="aggregated",
         directory=vllm_dir,
         script_name="agg.sh",
+        # Forwarded through agg.sh -> dynamo.vllm. Required for the
+        # max_thinking_tokens payload below: vLLM only enables the thinking-
+        # budget logits processor when reasoning_config is populated.
+        script_args=["--reasoning-parser", "qwen3"],
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(
-                480
-            ),  # vLLM 0.20.x startup can exceed 360s on contended CI runners
+            pytest.mark.timeout(610),  # 3x ~203s under new scheduler (3d1554f)
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -108,6 +138,17 @@ vllm_configs = {
                     "include_stop_str_in_output": True,
                 },
             ),
+            # Smoke: nvext.max_thinking_tokens reaches vLLM's
+            # SamplingParams.thinking_token_budget without erroring. Requires
+            # the worker to be started with `--reasoning-parser qwen3`
+            # (see script_args above).
+            chat_payload(
+                "Solve: 1+1.",
+                repeat_count=1,
+                expected_response=[],
+                max_tokens=64,
+                extra_body={"nvext": {"max_thinking_tokens": 16}},
+            ),
             metric_payload_default(min_num_requests=6, backend="vllm"),
         ],
     ),
@@ -117,10 +158,11 @@ vllm_configs = {
         script_name="agg.sh",
         script_args=["--unified"],
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),
             pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000),
-            pytest.mark.timeout(480),
+            pytest.mark.timeout(610),  # 3x ~203s unified, new scheduler (3d1554f)
             pytest.mark.pre_merge,
             pytest.mark.unified,
         ],
@@ -135,6 +177,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -166,13 +209,15 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_lmcache.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.lmcache,
+            _xfail_lmcache_upstream_container(),
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(360),  # ~7x observed 49.0s; old value before profiling
+            pytest.mark.timeout(600),  # 3x ~200s under new scheduler (3d1554f)
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -188,13 +233,15 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_lmcache_multiproc.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.lmcache,
+            _xfail_lmcache_upstream_container(),
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(360),  # ~7x observed 49.3s; old value before profiling
+            pytest.mark.timeout(600),  # 3x ~199s multiproc, new scheduler (3d1554f)
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -208,45 +255,45 @@ vllm_configs = {
             metric_payload_default(min_num_requests=6, backend="lmcache"),
         ],
     ),
+    "aggregated_lmcache_mp": VLLMConfig(
+        name="aggregated_lmcache_mp",
+        directory=vllm_dir,
+        script_name="agg_lmcache_mp.sh",
+        marks=[
+            pytest.mark.core,
+            pytest.mark.lmcache,
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(3.8),
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_119_388_000
+            ),  # KV cache cap (2x safety over min=559_693_824)
+            pytest.mark.timeout(640),  # 3x ~213s under new scheduler (3d1554f)
+            pytest.mark.pre_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        env={"LMCACHE_L1_SIZE_GB": "8"},
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            metric_payload_default(min_num_requests=6, backend="vllm"),
+        ],
+    ),
     "agg-request-plane-tcp": VLLMConfig(
         name="agg-request-plane-tcp",
         directory=vllm_dir,
         script_name="agg_request_planes.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(
-                360
-            ),  # ~8x observed 43.0s; bumped for GPU-parallel headroom
+            pytest.mark.timeout(600),  # 3x ~199s under new scheduler (3d1554f)
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
         script_args=["--tcp"],
-        request_payloads=[
-            chat_payload_default(),
-            completion_payload_default(),
-        ],
-    ),
-    "agg-request-plane-http": VLLMConfig(
-        name="agg-request-plane-http",
-        directory=vllm_dir,
-        script_name="agg_request_planes.sh",
-        marks=[
-            pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
-            pytest.mark.requested_vllm_kv_cache_bytes(
-                1_119_388_000
-            ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(
-                360
-            ),  # ~8.5x observed 42.3s; bumped for GPU-parallel headroom
-            pytest.mark.pre_merge,
-        ],
-        model="Qwen/Qwen3-0.6B",
-        script_args=["--http"],
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
@@ -258,22 +305,16 @@ vllm_configs = {
         script_name="agg_router.sh",
         marks=[
             pytest.mark.gpu_2,
+            pytest.mark.router,
             pytest.mark.pre_merge,
             pytest.mark.skip(reason="DYN-2263"),
         ],  # TODO: profile to get max_vram and timeout
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
-            chat_payload_default(
-                expected_log=[
-                    r"ZMQ listener .* received batch with \d+ events \(seq=\d+(?:, [^)]*)?\)",
-                    r"Event processor for worker_id \d+ processing event: Stored\(",
-                    r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
-                ]
-            )
+            router_selection_chat_payload_default(),
+            kv_events_metrics_payload(system_ports=[DefaultPort.SYSTEM2.value]),
         ],
-        env={
-            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",
-        },
+        env={},
     ),
     "agg-router-approx": VLLMConfig(
         name="agg-router-approx",
@@ -281,40 +322,26 @@ vllm_configs = {
         script_name="agg_router_approx.sh",
         marks=[
             pytest.mark.gpu_2,
+            pytest.mark.router,
             pytest.mark.pre_merge,
             pytest.mark.skip(reason="DYN-2264"),
         ],  # TODO: profile to get max_vram and timeout
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             # Test approximate KV routing (--no-kv-events mode)
-            # Repeated requests should show cache-aware routing in logs
-            chat_payload_default(
-                repeat_count=3,
-                expected_log=[
-                    # Verify scheduler is selecting workers with cache awareness
-                    r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
-                    # After first request, should see cached blocks being tracked
-                    r"with \d+ cached blocks",
-                ],
-            ),
+            # Repeated requests should show cache-aware routing in nvext.
+            router_selection_chat_payload_default(repeat_count=3),
             # Also test with cached tokens payload to verify usage field
-            cached_tokens_chat_payload(
-                repeat_count=3,
-                expected_log=[
-                    # Verify routing decision shows cache hits
-                    r"with \d+ cached blocks",
-                ],
-            ),
+            router_cached_tokens_chat_payload(repeat_count=3),
         ],
-        env={
-            "DYN_LOG": "dynamo_kv_router::scheduling::selector=info",
-        },
+        env={},
     ),
     "disaggregated": VLLMConfig(
         name="disaggregated",
         directory=vllm_dir,
         script_name="disagg.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_2,
             pytest.mark.pre_merge,
         ],  # TODO: profile to get max_vram and timeout
@@ -329,6 +356,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="disagg_same_gpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(7.3),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -347,11 +375,57 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
+    "disaggregated_same_gpu_chat_processor": VLLMConfig(
+        name="disaggregated_same_gpu_chat_processor",
+        directory=vllm_dir,
+        script_name="disagg_same_gpu.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(7.3),
+            pytest.mark.requested_vllm_kv_cache_bytes(1_023_525_000),
+            pytest.mark.timeout(300),
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        delayed_start=10,
+        health_check_workers=True,
+        env={"DYN_CHAT_PROCESSOR": "vllm"},
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
+    ),
+    "disaggregated_same_gpu_chat_processor_kv_router": VLLMConfig(
+        name="disaggregated_same_gpu_chat_processor_kv_router",
+        directory=vllm_dir,
+        script_name="disagg_same_gpu.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(7.3),
+            pytest.mark.requested_vllm_kv_cache_bytes(1_023_525_000),
+            pytest.mark.timeout(300),
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        delayed_start=10,
+        health_check_workers=True,
+        env={
+            "DYN_CHAT_PROCESSOR": "vllm",
+            "DYN_ROUTER_MODE": "kv",
+            # Deterministic hash for KV event IDs, matches disagg_router.sh.
+            "PYTHONHASHSEED": "0",
+        },
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
+    ),
     "deepep": VLLMConfig(
         name="deepep",
         directory=vllm_dir,
         script_name="dsr1_dep.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_2,
             pytest.mark.vllm,
             pytest.mark.h100,
@@ -465,6 +539,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(18.3),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -491,6 +566,7 @@ vllm_configs = {
         directory=os.path.join(WORKSPACE_DIR, "tests/serve"),
         script_name="multi_node_tp_headless.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_2,
             pytest.mark.pre_merge,
             # TODO: profile to get max_vram
@@ -507,12 +583,13 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(180),  # vLLM 0.20.x needs more CI headroom
+            pytest.mark.timeout(220),  # 3x ~72s under new scheduler (3d1554f)
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -552,6 +629,76 @@ vllm_configs = {
             ),
         ],
     ),
+    "embedding_agg": VLLMConfig(
+        name="embedding_agg",
+        directory=vllm_dir,
+        script_name="agg_embed.sh",
+        marks=[
+            pytest.mark.core,
+            pytest.mark.gpu_1,
+            # Qwen3-Embedding-0.6B at float32 = ~2.4 GiB params + vLLM overhead.
+            # Refine after first CI run reports the actual profiled peak.
+            pytest.mark.profiled_vram_gib(5.0),
+            # Pooling models do not use a KV cache, but the test harness still
+            # needs a non-zero allocation budget. Use the minimum vLLM accepts.
+            pytest.mark.requested_vllm_kv_cache_bytes(559_693_824),
+            # Cold model load + vLLM startup + warmup for embedding pooling.
+            # Mirrors SGLang's 300s embedding-test timeout; refine after profiling.
+            # 360 already >= 3x observed 92s (job-log 2026-05-29); left as headroom.
+            pytest.mark.timeout(360),
+            pytest.mark.pre_merge,
+        ],
+        model="Qwen/Qwen3-Embedding-0.6B",
+        request_payloads=[
+            # Default helper sends two pre-defined inputs.
+            embedding_payload_default(
+                repeat_count=2,
+                expected_response=["Generated 2 embeddings with dimension"],
+            ),
+            # Single string input — exercises the str path in
+            # EmbeddingWorkerHandler.generate.
+            embedding_payload(
+                input_text="Hello, world!",
+                repeat_count=1,
+                expected_response=["Generated 1 embeddings with dimension"],
+            ),
+            # Batched list input — exercises the per-input loop and index
+            # preservation in EmbeddingWorkerHandler._transform_response.
+            embedding_payload(
+                input_text=[
+                    "The quick brown fox jumps over the lazy dog.",
+                    "Machine learning is transforming technology.",
+                    "Natural language processing enables computers to understand text.",
+                ],
+                repeat_count=1,
+                expected_response=["Generated 3 embeddings with dimension"],
+            ),
+            # `dimensions` truncation (Matryoshka). Qwen3-Embedding-0.6B has a
+            # hidden dim of 1024, so the truncated vector should be exactly 128.
+            # Built inline because the `embedding_payload()` helper doesn't
+            # expose an `extra_body` kwarg yet.
+            EmbeddingPayload(
+                body={"input": ["Hello, world!"], "dimensions": 128},
+                repeat_count=1,
+                expected_log=[],
+                expected_response=["Generated 1 embeddings with dimension 128"],
+            ),
+            # encoding_format=base64. The Python handler base64-encodes the
+            # vector and the Rust frontend deserializes it as a string.
+            # The validator decodes back to floats so the dimension
+            # assertion stays uniform across both shapes.
+            EmbeddingPayload(
+                body={
+                    "input": ["Hello, world!"],
+                    "dimensions": 128,
+                    "encoding_format": "base64",
+                },
+                repeat_count=1,
+                expected_log=[],
+                expected_response=["Generated 1 embeddings with dimension 128"],
+            ),
+        ],
+    ),
 }
 
 
@@ -563,17 +710,22 @@ def vllm_config_test(request):
 
 @pytest.mark.vllm
 @pytest.mark.e2e
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 def test_serve_deployment(
     vllm_config_test,
     request,
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
+    num_system_ports,
     predownload_models,
     image_server,
 ):
     """
     Test dynamo serve deployments with different graph configurations.
     """
+    assert (
+        num_system_ports >= 2
+    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
     config = dataclasses.replace(
         vllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
@@ -619,6 +771,7 @@ def lora_chat_payload(
 
 
 @pytest.mark.vllm
+@pytest.mark.core
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.model("Qwen/Qwen3-0.6B")
@@ -679,6 +832,7 @@ def test_lora_aggregated(
 
 
 @pytest.mark.vllm
+@pytest.mark.router
 @pytest.mark.e2e
 @pytest.mark.gpu_2
 @pytest.mark.model("Qwen/Qwen3-0.6B")
@@ -760,3 +914,213 @@ def test_lora_aggregated_router(
     run_serve_deployment(
         config, request, ports=dynamo_dynamic_ports, extra_env=env_vars
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-worker embedding tests
+#
+# Verify that Dynamo's routing layer correctly:
+#   1. Load-balances across N workers serving the SAME embedding model.
+#   2. Dispatches by request `model` field across workers serving
+#      DIFFERENT embedding models.
+#
+# The routing code (`get_embeddings_engine` + `select_worker_set_with`) is
+# already exercised by chat-completions through identical machinery, so the
+# code is verified by construction; what these tests add is **explicit
+# exercise of the embedding code path**.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _embedding_warmup_payload(model: str) -> EmbeddingPayload:
+    """One quick embedding request used as a smoke check before the burst."""
+    return EmbeddingPayload(
+        body={"model": model, "input": "warmup"},
+        expected_response=["Generated 1 embeddings with dimension"],
+        expected_log=[],
+        repeat_count=1,
+    )
+
+
+def _embedding_dispatch_burst(
+    *,
+    model: str,
+    repeat_count: int,
+    expected_worker_indices_with_delta: set[int],
+    min_total_delta: int,
+) -> EmbeddingMultiWorkerDispatchPayload:
+    """One burst payload that drives the dispatch assertion.
+
+    ``system_ports`` is fixed at ``[SYSTEM_PORT1, SYSTEM_PORT2]`` — the
+    harness remaps those placeholders to the per-test dynamic ports.
+    Dispatch expectations are expressed as INDICES into that list (index 0
+    = first worker = GPU 0, index 1 = second worker = GPU 1).
+    """
+    return EmbeddingMultiWorkerDispatchPayload(
+        body={"model": model, "input": "Hello, world!"},
+        expected_response=["Generated 1 embeddings with dimension"],
+        expected_log=[],
+        repeat_count=repeat_count,
+        system_ports=[DefaultPort.SYSTEM1.value, DefaultPort.SYSTEM2.value],
+        expected_worker_indices_with_delta=expected_worker_indices_with_delta,
+        min_total_delta=min_total_delta,
+    )
+
+
+# Same model on both GPUs — verifies weighted-random selection in
+# `select_worker_set_with` fans out across both registered workers.
+_EMBED_SAME_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+
+# Multi-model setup: each model is served by exactly one worker, so a
+# request whose `model` field names model A must never reach model B's
+# worker. BGE-small-en is intentionally small (33M params, fits alongside
+# Qwen3-Embedding-0.6B on stock CI nodes).
+_EMBED_MODEL_A = "Qwen/Qwen3-Embedding-0.6B"
+_EMBED_MODEL_B = "BAAI/bge-small-en-v1.5"
+
+
+@pytest.mark.vllm
+@pytest.mark.core
+@pytest.mark.e2e
+@pytest.mark.gpu_2
+@pytest.mark.model(_EMBED_SAME_MODEL)
+@pytest.mark.profiled_vram_gib(5.0)  # per GPU; mirrors single-worker embedding_agg
+@pytest.mark.requested_vllm_kv_cache_bytes(559_693_824)
+@pytest.mark.timeout(
+    420
+)  # 2x cold-load vs single-worker embedding_agg (2 GPUs in parallel)
+@pytest.mark.pre_merge
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+def test_embedding_multi_worker_same_model_load_balance(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    num_system_ports,
+    predownload_models,
+):
+    """Two workers serving the same model: a burst of requests should be
+    weighted-randomly distributed so both workers' /metrics counters > 0.
+
+    Burst size is deliberately small (20) so pure chance of all-to-one-
+    worker is negligible (≈ 1 in 2^19) while keeping test runtime tight
+    on 2-GPU CI nodes.
+    """
+    assert num_system_ports >= 2, "Requires SYSTEM_PORT1 + SYSTEM_PORT2"
+
+    # 20 repeats inside the burst; the payload uses repeat 1 as its
+    # baseline snapshot and asserts the delta across repeats 2..20.
+    burst = _embedding_dispatch_burst(
+        model=_EMBED_SAME_MODEL,
+        repeat_count=20,
+        # Both workers (indices 0 and 1) should see delta > 0.
+        expected_worker_indices_with_delta={0, 1},
+        # 19 post-baseline requests; loose lower bound absorbs any frontend
+        # health probes that the worker happens to count.
+        min_total_delta=15,
+    )
+
+    config = VLLMConfig(
+        name="embedding_multi_worker_same_model",
+        directory=vllm_dir,
+        script_name="agg_embed_multiworker.sh",
+        script_args=[_EMBED_SAME_MODEL, _EMBED_SAME_MODEL],
+        marks=[],  # markers at function level
+        model=_EMBED_SAME_MODEL,
+        timeout=420,
+        # ``DYN_HEALTH_CHECK_ENABLED=true`` flips the runtime's canary
+        # on. Without it ``/health`` returns 200 the moment the endpoint
+        # is registered (before the engine has produced anything), so
+        # ``health_check_workers=True`` would gate on a constant-true
+        # signal and we'd race startup just like the old ``delayed_start``
+        # path. Setting the flag plus the embedding-shaped probe payload
+        # in ``_create_embedding_worker`` is what actually makes
+        # readiness mean "engine produced an embedding".
+        health_check_workers=True,
+        env={"DYN_HEALTH_CHECK_ENABLED": "true"},
+        request_payloads=[
+            _embedding_warmup_payload(_EMBED_SAME_MODEL),
+            burst,
+        ],
+    )
+
+    config = dataclasses.replace(
+        config, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
+@pytest.mark.vllm
+@pytest.mark.core
+@pytest.mark.e2e
+@pytest.mark.gpu_2
+@pytest.mark.model(_EMBED_MODEL_A)
+@pytest.mark.model(_EMBED_MODEL_B)
+@pytest.mark.profiled_vram_gib(5.0)  # Qwen3-Embed (0.6B) is the larger of the two
+@pytest.mark.requested_vllm_kv_cache_bytes(559_693_824)
+@pytest.mark.timeout(420)
+@pytest.mark.pre_merge
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+def test_embedding_multi_worker_multi_model_dispatch(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    num_system_ports,
+    predownload_models,
+):
+    """Two workers, two different models: requests for model A must reach
+    only worker A; symmetric for model B. Verifies name-keyed dispatch in
+    ``get_embeddings_engine`` for embedding traffic.
+    """
+    assert num_system_ports >= 2, "Requires SYSTEM_PORT1 + SYSTEM_PORT2"
+
+    # Worker A → SYSTEM_PORT1 (GPU 0, model A, payload index 0)
+    # Worker B → SYSTEM_PORT2 (GPU 1, model B, payload index 1)
+    #
+    # Each burst takes its own baseline snapshot and checks the DELTA
+    # over its repeats — so burst_b's check is independent of burst_a's
+    # absolute count, and "wrong-model traffic stays out" can actually
+    # be expressed (no delta on the wrong worker during this burst).
+    burst_a = _embedding_dispatch_burst(
+        model=_EMBED_MODEL_A,
+        repeat_count=10,
+        expected_worker_indices_with_delta={0},  # only worker A
+        min_total_delta=5,
+    )
+    burst_b = _embedding_dispatch_burst(
+        model=_EMBED_MODEL_B,
+        repeat_count=10,
+        expected_worker_indices_with_delta={1},  # only worker B
+        min_total_delta=5,
+    )
+
+    config = VLLMConfig(
+        name="embedding_multi_worker_multi_model",
+        directory=vllm_dir,
+        script_name="agg_embed_multiworker.sh",
+        script_args=[_EMBED_MODEL_A, _EMBED_MODEL_B],
+        marks=[],  # markers at function level
+        # ``model`` here is just metadata for the test runner; the real
+        # per-request model is set in each payload's body.
+        model=_EMBED_MODEL_A,
+        # BGE-small-en-v1.5's architecture caps at ``max_position_embeddings=512``
+        # — applying the script's default ``MAX_MODEL_LEN=2048`` to it crashes
+        # the second worker at engine init. Drop the cap to BGE's native max;
+        # Qwen3-Embedding-0.6B happily accepts the lower cap.
+        # ``DYN_HEALTH_CHECK_ENABLED=true`` is required for
+        # ``health_check_workers=True`` below to gate on the canary
+        # rather than on endpoint registration (see same-model test for
+        # the full rationale).
+        env={"MAX_MODEL_LEN": "512", "DYN_HEALTH_CHECK_ENABLED": "true"},
+        timeout=420,
+        health_check_workers=True,
+        request_payloads=[
+            _embedding_warmup_payload(_EMBED_MODEL_A),
+            _embedding_warmup_payload(_EMBED_MODEL_B),
+            burst_a,
+            burst_b,
+        ],
+    )
+
+    config = dataclasses.replace(
+        config, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)

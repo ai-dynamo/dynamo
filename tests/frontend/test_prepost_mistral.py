@@ -12,7 +12,7 @@ import pytest
 
 from .common import check_module_available
 
-HAS_VLLM = check_module_available("vllm")
+HAS_VLLM = check_module_available("vllm.entrypoints.openai.chat_completion.protocol")
 if HAS_VLLM:
     from mistral_common.tokens.tokenizers.base import SpecialTokens
     from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -39,6 +39,7 @@ else:
 
 pytestmark = [
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,  # "Hardware"
     pytest.mark.pre_merge,  # "Lifecyle"
     pytest.mark.unit,  # "Test Type"

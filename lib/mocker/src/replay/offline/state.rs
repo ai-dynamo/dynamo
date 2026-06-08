@@ -7,6 +7,8 @@ use crate::common::protocols::DirectRequest;
 use crate::common::protocols::MockEngineArgs;
 use crate::replay::TraceCollector;
 use crate::scheduler::{EngineCore, EnginePassResult};
+#[cfg(feature = "kvbm-offload")]
+use dynamo_kv_router::protocols::RouterEvent;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,7 +162,8 @@ pub(crate) struct OfflineWorkerSnapshot {
 impl OfflineWorkerState {
     pub(crate) fn new(worker_idx: usize, args: MockEngineArgs, capture_kv_events: bool) -> Self {
         let core = match args.engine_type {
-            crate::common::protocols::EngineType::Vllm => {
+            crate::common::protocols::EngineType::Vllm
+            | crate::common::protocols::EngineType::Trtllm => {
                 #[cfg_attr(not(feature = "kvbm-offload"), allow(unused_mut))]
                 let mut core = if capture_kv_events {
                     crate::scheduler::VllmCore::new_with_kv_capture(args, worker_idx as u64)
@@ -234,6 +237,16 @@ impl OfflineWorkerState {
 
     pub(crate) fn execute_hidden_pass(&mut self, now_ms: f64) -> EnginePassResult {
         self.core.execute_hidden_pass(now_ms)
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    pub(crate) fn tick_offload_only(&mut self, now_ms: f64) -> Vec<RouterEvent> {
+        self.core.tick_offload_only(now_ms)
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    pub(crate) fn earliest_offload_deadline(&self) -> Option<f64> {
+        self.core.earliest_offload_deadline()
     }
 
     #[cfg(test)]

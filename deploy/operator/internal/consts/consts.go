@@ -42,6 +42,12 @@ const (
 
 	KubeAnnotationEnableGrove = "nvidia.com/enable-grove"
 
+	// KubeAnnotationIstioSidecarInject is the standard Istio annotation that
+	// controls whether the mutating webhook injects an istio-proxy sidecar into
+	// a pod. Setting it to "false" opts the pod out of sidecar injection even
+	// when the namespace carries istio-injection=enabled.
+	KubeAnnotationIstioSidecarInject = "sidecar.istio.io/inject"
+
 	KubeAnnotationDisableImagePullSecretDiscovery = "nvidia.com/disable-image-pull-secret-discovery"
 	KubeAnnotationDynamoDiscoveryBackend          = "nvidia.com/dynamo-discovery-backend"
 	KubeAnnotationDynamoKubeDiscoveryMode         = "nvidia.com/dynamo-kube-discovery-mode"
@@ -71,12 +77,50 @@ const (
 	// so v1-compatible releases continue to generate new DCDs with the v1 value.
 	KubeLabelDynamoWorkerHash = "nvidia.com/dynamo-worker-hash"
 
+	// CheckpointAutoAnnotation marks operator-created checkpoints whose
+	// lifecycle is tied to an owning DGD generation.
+	CheckpointAutoAnnotation = "nvidia.com/dynamo-auto-checkpoint"
+	// CheckpointDeletionPolicyAnnotation stores whether a DGD-managed
+	// automatic checkpoint should be deleted or retained when the owning DGD is
+	// deleted.
+	CheckpointDeletionPolicyAnnotation = "nvidia.com/dynamo-checkpoint-deletion-policy"
+	// CheckpointRestoreCandidateAnnotation marks owner pod templates whose Pods
+	// should be restore-shaped by the operator's pod-create mutating webhook
+	// once the referenced checkpoint is Ready. This intentionally does not use
+	// the snapshot CheckpointIDLabel because the snapshot-agent watches that
+	// label to start a restore.
+	CheckpointRestoreCandidateAnnotation = "nvidia.com/dynamo-checkpoint-restore-candidate"
+	// CheckpointNameAnnotation stores the candidate DynamoCheckpoint CR name.
+	CheckpointNameAnnotation = "nvidia.com/dynamo-checkpoint-name"
+	// CheckpointStartupPolicyAnnotation stores the DGD checkpoint startup policy
+	// on generated pod templates for debugging and admission.
+	CheckpointStartupPolicyAnnotation = "nvidia.com/dynamo-checkpoint-startup-policy"
+
 	KubeLabelValueFalse = "false"
 	KubeLabelValueTrue  = "true"
 
 	KubeLabelDynamoComponentPod = "nvidia.com/dynamo-component-pod"
 
 	KubeResourceGPUNvidia = "nvidia.com/gpu"
+
+	// KV transfer policy env vars (worker) — injected when
+	// spec.experimental.kvTransferPolicy is configured. Workers publish these
+	// in their MDC so the router reads policy per-worker rather than from its
+	// own env.
+	EnvKvTransferDomain          = "DYN_KV_TRANSFER_DOMAIN"
+	EnvKvTransferEnforcement     = "DYN_KV_TRANSFER_ENFORCEMENT"
+	EnvKvTransferPreferredWeight = "DYN_KV_TRANSFER_PREFERRED_WEIGHT"
+
+	// Topology env vars (worker) injected when
+	// spec.experimental.kvTransferPolicy is configured.
+	EnvTopologyEnabled   = "DYN_TOPOLOGY_ENABLED"
+	EnvTopologyMountPath = "DYN_TOPOLOGY_MOUNT_PATH"
+
+	// KubeAnnotationTopologyLabelKey is set on worker pods when
+	// spec.experimental.kvTransferPolicy.labelKey is configured. The topology
+	// label controller watches for pods with this annotation and copies the
+	// corresponding node label onto the pod after scheduling.
+	KubeAnnotationTopologyLabelKey = "nvidia.com/topology-label-key"
 
 	DynamoDeploymentConfigEnvVar      = "DYN_DEPLOYMENT_CONFIG"
 	DynamoNamespaceEnvVar             = "DYN_NAMESPACE"

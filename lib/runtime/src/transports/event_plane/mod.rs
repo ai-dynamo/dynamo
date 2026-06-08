@@ -41,7 +41,7 @@ use crate::discovery::{
     Discovery, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, EventChannelQuery, EventTransport,
 };
 use crate::traits::DistributedRuntimeProvider;
-use crate::utils::ip_resolver::get_local_ip_for_advertise;
+use crate::utils::local_ip_for_advertise;
 
 /// Scope of the event plane - determines the subject prefix for pub/sub.
 #[derive(Debug, Clone)]
@@ -409,7 +409,7 @@ impl EventPublisher {
                         .next()
                         .and_then(|s| s.parse().ok())
                         .expect("Failed to parse port from bind endpoint");
-                    let local_ip = get_local_ip_for_advertise();
+                    let local_ip = local_ip_for_advertise();
                     let public_endpoint = format!("tcp://{}:{}", local_ip, actual_port);
 
                     let codec = Arc::new(Codec::Msgpack(MsgpackCodec));
@@ -770,13 +770,21 @@ pub struct TypedEventSubscriber<T> {
 impl<T: DeserializeOwned + Send + 'static> TypedEventSubscriber<T> {
     /// Get the next typed event with its envelope.
     pub async fn next(&mut self) -> Option<Result<(EventEnvelope, T)>> {
-        let envelope = self.stream.next().await?;
-        match envelope {
-            Ok(env) => match self.codec.decode_payload(&env.payload) {
-                Ok(typed) => Some(Ok((env, typed))),
-                Err(e) => Some(Err(e)),
-            },
-            Err(e) => Some(Err(e)),
+        std::future::poll_fn(|cx| self.poll_next(cx)).await
+    }
+
+    /// Poll for the next typed event.
+    pub fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<(EventEnvelope, T)>>> {
+        match self.stream.as_mut().poll_next(cx) {
+            Poll::Ready(Some(envelope)) => Poll::Ready(Some(match envelope {
+                Ok(env) => match self.codec.decode_payload(&env.payload) {
+                    Ok(typed) => Ok((env, typed)),
+                    Err(e) => Err(e),
+                },
+                Err(e) => Err(e),
+            })),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
     }
 }

@@ -17,7 +17,6 @@ use crate::scheduler::{
 };
 
 use super::core::SglangCore;
-use super::request::{SglangRequest, direct_to_sglang};
 
 #[derive(Clone)]
 pub struct SglangScheduler {
@@ -100,14 +99,9 @@ impl SglangScheduler {
             let mut core = SglangCore::new_with_sink(args, dp_rank, buffering_publishers);
 
             loop {
-                if receive_requests(
-                    &mut core.waiting,
-                    &mut request_rx,
-                    &cancel_token_clone,
-                    &core.running,
-                )
-                .await
-                .is_none()
+                if receive_requests(&mut core, &mut request_rx, &cancel_token_clone)
+                    .await
+                    .is_none()
                 {
                     break;
                 }
@@ -134,15 +128,11 @@ impl SglangScheduler {
                     publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
                     publish_deferred_fpm(&fpm_publisher, deferred_fpm.drain());
                 }
-                let active_decode_blocks = pass.active_decode_blocks;
+                let metrics = pass.mocker_metrics.clone();
                 flush_output_signals(&output_tx, pass.output_signals);
                 publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
                 publish_deferred_fpm(&fpm_publisher, deferred_fpm.drain());
-                let _ = metrics_tx.send(MockerMetrics::new(
-                    dp_rank,
-                    active_decode_blocks,
-                    total_blocks,
-                ));
+                let _ = metrics_tx.send(metrics);
             }
         });
 
@@ -169,28 +159,27 @@ impl SchedulerHandle for SglangScheduler {
 }
 
 async fn receive_requests(
-    waiting: &mut std::collections::VecDeque<SglangRequest>,
+    core: &mut SglangCore,
     request_rx: &mut mpsc::UnboundedReceiver<DirectRequest>,
     cancel_token: &CancellationToken,
-    running: &[SglangRequest],
 ) -> Option<()> {
     if cancel_token.is_cancelled() {
         return None;
     }
 
-    if waiting.is_empty() && running.is_empty() {
+    if core.is_empty() {
         tokio::select! {
             biased;
             _ = cancel_token.cancelled() => return None,
             result = request_rx.recv() => {
                 let request = result?;
-                waiting.push_back(direct_to_sglang(request));
+                core.receive(request);
             }
         }
     }
 
     while let Ok(request) = request_rx.try_recv() {
-        waiting.push_back(direct_to_sglang(request));
+        core.receive(request);
     }
 
     Some(())

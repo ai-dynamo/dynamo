@@ -9,15 +9,18 @@ use std::sync::atomic::AtomicU32;
 use std::sync::mpsc;
 use tokio_stream::StreamExt;
 
+use super::local_model::RoutingConstraints;
 use super::*;
 use crate::Endpoint;
-#[cfg(feature = "kv-indexer")]
+#[cfg(any(feature = "kv-indexer", feature = "slot-tracker"))]
 use clap::Parser;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
 #[cfg(feature = "kv-indexer")]
-use dynamo_kv_router::standalone_indexer::{self, IndexerConfig};
+use dynamo_kv_router::services::indexer::{self, IndexerConfig};
+#[cfg(feature = "slot-tracker")]
+use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
@@ -86,7 +89,7 @@ where
         init_standalone_logging();
 
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(standalone_indexer::run_server(IndexerConfig {
+        rt.block_on(indexer::run_server(IndexerConfig {
             block_size: cli.block_size,
             port: cli.port,
             threads: cli.threads,
@@ -106,7 +109,63 @@ where
     }
 }
 
-#[cfg(feature = "kv-indexer")]
+#[cfg(feature = "slot-tracker")]
+#[derive(Parser)]
+#[command(
+    name = "python -m dynamo.slot_tracker",
+    about = "Standalone KV router slot tracker"
+)]
+struct SlotTrackerCli {
+    /// HTTP server port
+    #[arg(long, default_value_t = 8091)]
+    port: u16,
+
+    /// ZMQ PUB endpoint for replica-sync events
+    #[arg(long)]
+    replica_sync_bind: Option<String>,
+
+    /// Externally reachable local replica-sync endpoint
+    #[arg(long)]
+    replica_sync_advertise: Option<String>,
+
+    /// Comma-separated ZMQ PUB endpoints for peer slot trackers
+    #[arg(long, value_delimiter = ',')]
+    replica_sync_peers: Vec<String>,
+}
+
+pub fn run_slot_tracker_cli<I, T>(args: I) -> anyhow::Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    #[cfg(feature = "slot-tracker")]
+    {
+        let cli = SlotTrackerCli::try_parse_from(
+            std::iter::once(OsString::from("python -m dynamo.slot_tracker"))
+                .chain(args.into_iter().map(Into::into)),
+        )?;
+
+        init_standalone_logging();
+
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(slot_tracker::run_server(SlotTrackerConfig {
+            port: cli.port,
+            replica_sync_bind: cli.replica_sync_bind,
+            replica_sync_advertise: cli.replica_sync_advertise,
+            replica_sync_peers: cli.replica_sync_peers,
+        }))
+    }
+
+    #[cfg(not(feature = "slot-tracker"))]
+    {
+        let _ = args;
+        anyhow::bail!(
+            "dynamo.slot_tracker is not available in this build; reinstall with --features slot-tracker"
+        )
+    }
+}
+
+#[cfg(any(feature = "kv-indexer", feature = "slot-tracker"))]
 fn init_standalone_logging() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -210,6 +269,27 @@ pub(crate) struct KvEventPublisher {
     warning_count: Arc<AtomicU32>,
 }
 
+impl KvEventPublisher {
+    /// Wrap an already-constructed Rust publisher as the Python pyclass.
+    ///
+    /// Used by the unified-backend bridge (`crate::backend`) so the Worker
+    /// can hand a publisher built from a [`PushSource`] back to the Python
+    /// engine without going through the Python-side `__init__` (which
+    /// requires an `Endpoint` and rebuilds the publisher from scratch).
+    pub(crate) fn from_arc(
+        inner: Arc<llm_rs::kv_router::publisher::KvEventPublisher>,
+        dp_rank: DpRank,
+    ) -> Self {
+        let kv_block_size = inner.kv_block_size() as usize;
+        Self {
+            inner,
+            kv_block_size,
+            dp_rank,
+            warning_count: Arc::new(AtomicU32::new(0)),
+        }
+    }
+}
+
 #[pymethods]
 impl KvEventPublisher {
     /// Create a KV event publisher that batches raw engine events before forwarding
@@ -217,7 +297,8 @@ impl KvEventPublisher {
     ///
     /// Args:
     ///     endpoint: The Dynamo component endpoint for this worker.
-    ///     worker_id: Identifier of this worker (default 0).
+    ///     worker_id: Optional worker identity override. When None, the publisher
+    ///         uses the endpoint's local connection id.
     ///     kv_block_size: KV cache block size in tokens; must be > 0.
     ///     dp_rank: Data-parallel rank of this worker (default 0).
     ///     enable_local_indexer: When True, a local KV indexer is kept in-process
@@ -231,23 +312,23 @@ impl KvEventPublisher {
     ///         ``0`` is treated as ``None`` (also disables batching).
     ///         Maximum allowed is 15_000 (15 seconds); larger values are capped.
     #[new]
-    #[pyo3(signature = (endpoint, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS))]
+    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
-        worker_id: WorkerId,
+        worker_id: Option<WorkerId>,
         kv_block_size: usize,
         dp_rank: DpRank,
         enable_local_indexer: bool,
         zmq_endpoint: Option<String>,
         zmq_topic: Option<String>,
         batching_timeout_ms: Option<u64>,
+        image_token_id: Option<u32>,
     ) -> PyResult<Self> {
-        let _ = worker_id;
-
         let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
             endpoint: ep,
             topic: zmq_topic.unwrap_or_default(),
+            image_token_id,
         });
 
         if kv_block_size == 0 {
@@ -257,15 +338,17 @@ impl KvEventPublisher {
         // Extract component from endpoint
         let component = endpoint.inner.component().clone();
 
-        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer(
-            component,
-            kv_block_size as u32,
-            source_config,
-            enable_local_indexer,
-            dp_rank,
-            batching_timeout_ms,
-        )
-        .map_err(to_pyerr)?;
+        let inner =
+            llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer_and_worker_id(
+                component,
+                worker_id,
+                kv_block_size as u32,
+                source_config,
+                enable_local_indexer,
+                dp_rank,
+                batching_timeout_ms,
+            )
+            .map_err(to_pyerr)?;
 
         Ok(Self {
             inner: inner.into(),
@@ -316,6 +399,7 @@ impl KvEventPublisher {
                         &warning_count,
                         mm_infos.as_deref(),
                         is_eagle,
+                        None, // image_token_id: publish path keeps caller-supplied mm_infos
                     ),
                 }),
                 dp_rank,
@@ -796,6 +880,17 @@ fn inject_worker_id_from_tracker(
     }
 }
 
+/// Attach the request's timing to `routing_data` so it survives the
+/// Rust->Python->Rust router path to the frontend (data survives, annotations don't).
+fn inject_timing_from_tracker(
+    data: &mut llm_rs::protocols::common::llm_backend::LLMEngineOutput,
+    tracker: &RequestTracker,
+) {
+    data.routing_data
+        .get_or_insert_with(Default::default)
+        .timing = Some(tracker.get_timing_info());
+}
+
 // TODO: can this reuse the stream conversion method in Client bindings?
 impl KvRouter {
     /// Helper method to process a request and create a Python async generator
@@ -835,6 +930,14 @@ impl KvRouter {
                             }
                             first_token_gauges_observed = true;
                         }
+                    }
+
+                    // On the terminal chunk, finalize timing and attach it for the frontend.
+                    if let (Some(tracker), Some(data)) = (&tracker, &mut response.data)
+                        && data.finish_reason.is_some()
+                    {
+                        tracker.record_finish();
+                        inject_timing_from_tracker(data, tracker);
                     }
 
                     let py_response = Python::with_gil(|py| {
@@ -895,6 +998,11 @@ impl KvRouter {
                         config.model_path(),
                         config.tp_size(),
                         config.backend_version(),
+                        config.moe_tp_size(),
+                        config.moe_ep_size(),
+                        config.attention_dp_size(),
+                        config.nextn(),
+                        config.nextn_accept_rates(),
                     )
                 })
             })
@@ -936,7 +1044,7 @@ impl KvRouter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None, worker_id=None, dp_rank=None, extra_args=None, block_mm_infos=None, multi_modal_data=None, mm_routing_info=None))]
+    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None, worker_id=None, dp_rank=None, extra_args=None, block_mm_infos=None, multi_modal_data=None, mm_routing_info=None, routing_constraints=None))]
     fn generate<'p>(
         &self,
         py: Python<'p>,
@@ -952,6 +1060,7 @@ impl KvRouter {
         block_mm_infos: Option<PyObject>,
         multi_modal_data: Option<PyObject>,
         mm_routing_info: Option<PyObject>,
+        routing_constraints: Option<RoutingConstraints>,
     ) -> PyResult<Bound<'p, PyAny>> {
         // Depythonize the options with defaults
         let stop_conditions: StopConditions = if let Some(obj) = stop_conditions {
@@ -1027,10 +1136,11 @@ impl KvRouter {
             .tracker(Some(tracker.clone()));
 
         // Set routing hints if worker_id or dp_rank is provided
-        if worker_id.is_some() || dp_rank.is_some() {
+        if worker_id.is_some() || dp_rank.is_some() || routing_constraints.is_some() {
             let routing = llm_rs::protocols::common::preprocessor::RoutingHints {
                 backend_instance_id: worker_id,
                 dp_rank,
+                routing_constraints: routing_constraints.map(Into::into),
                 ..Default::default()
             };
             request_builder.routing(Some(routing));
@@ -1066,7 +1176,7 @@ impl KvRouter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, update_indexer=false, block_mm_infos=None, lora_name=None))]
+    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, update_indexer=false, block_mm_infos=None, lora_name=None, routing_constraints=None))]
     fn best_worker<'p>(
         &self,
         py: Python<'p>,
@@ -1076,6 +1186,7 @@ impl KvRouter {
         update_indexer: bool,
         block_mm_infos: Option<PyObject>,
         lora_name: Option<String>,
+        routing_constraints: Option<RoutingConstraints>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let router_config_override = if let Some(obj) = router_config_override {
             let override_config: RouterConfigOverride =
@@ -1093,20 +1204,55 @@ impl KvRouter {
         let update_states = request_id.is_some();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let (best_worker, overlap_blocks) = chooser
-                .find_best_match(
+            let outcome = chooser
+                .find_best_match_details(
                     request_id.as_deref(),
                     &token_ids,
                     block_mm_infos.as_deref(),
                     router_config_override.as_ref(),
                     update_states,
+                    false,
                     lora_name.clone(),
                     0.0,
                     None,
+                    None,
                     None, // allowed_worker_ids: pass via RoutingHints in PreprocessedRequest path
+                    routing_constraints.map(Into::into).unwrap_or_default(),
                 )
                 .await
                 .map_err(to_pyerr)?;
+            let (best_worker, overlap_blocks) = match outcome {
+                llm_rs::kv_router::FindBestMatchOutcome::Routed {
+                    worker,
+                    overlap_blocks,
+                    ..
+                } => (worker, overlap_blocks),
+                llm_rs::kv_router::FindBestMatchOutcome::Backpressure {
+                    reason,
+                    queued_isl_tokens,
+                    max_queued_isl_tokens,
+                } => {
+                    // Note: Backpressure is currently treated as Unavailable and falls through
+                    // to the error path. Distinguishing backpressure from regular errors in Python
+                    // would require returning a structured result type instead of raising an exception,
+                    // which is a breaking API change. For now, callers should treat any error from
+                    // best_worker as potentially transient and implement retry logic accordingly.
+                    // The backpressure info (reason, queued_isl_tokens, max_queued_isl_tokens) is logged but
+                    // not exposed to Python callers.
+                    tracing::warn!(
+                        reason = ?reason,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens = ?max_queued_isl_tokens,
+                        "Router backpressure - treating as unavailable"
+                    );
+                    return Err(to_pyerr(anyhow::anyhow!(
+                        "router backpressure: {:?} (queued_isl_tokens={}, max_queued_isl_tokens={:?})",
+                        reason,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens
+                    )));
+                }
+            };
 
             if update_indexer {
                 let cfg = chooser.kv_router_config();
