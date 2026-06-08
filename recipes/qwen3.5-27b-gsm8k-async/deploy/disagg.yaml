@@ -1,0 +1,174 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Qwen/Qwen3.5-27B — prefill/decode (1P1D) DISAGGREGATION. This is the
+# vLLM issue #42182 repro topology: a GDN-hybrid whose decode worker must
+# receive the GDN conv/recurrent state over the NIXL connector. With
+# --async-scheduling ON (ASYNC_FLAG=--async-scheduling) the conv-state /
+# KV blocks misalign and GSM8K accuracy COLLAPSES; with
+# --no-async-scheduling it is healthy (the control).
+#
+# Per-worker flags mirror the issue: TP=1, bf16 KV, prefix caching OFF,
+# generation-config vllm, NixlConnector kv_both + kv_load_failure_policy:fail,
+# VLLM_SSM_CONV_STATE_LAYOUT=DS (3-read GDN conv transfer; workers crash-loop
+# without it). 27B bf16 (~54 GB) fits TP=1 on one H100; prefill + decode are
+# 1 GPU each. NIXL falls back to TCP on AWS without EFA — fine for an
+# ACCURACY repro (correctness bug is transport-independent).
+#
+# Templated (envsubst allow-list): $VLLM_IMAGE $HW_NODE_SELECTOR
+#   $HW_TOLERATIONS $DGD_NAME $ASYNC_FLAG   (in-pod ${MODEL_NAME} stays literal)
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: ${DGD_NAME}
+  labels:
+    app.kubernetes.io/name: qwen3.5-27b-gsm8k-async
+    app.kubernetes.io/component: disagg
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  backendFramework: vllm
+  pvcs:
+    - create: false
+      name: shared-model-cache
+  services:
+    Frontend:
+      componentType: frontend
+      envs:
+        - name: HF_HOME
+          value: /home/dynamo/.cache/huggingface
+        - name: DYN_REQUEST_PLANE
+          value: tcp
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /home/dynamo/.cache/huggingface
+      extraPodSpec:
+        nodeSelector: ${HW_NODE_SELECTOR}
+        tolerations: ${HW_TOLERATIONS}
+        mainContainer:
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+      replicas: 1
+      resources:
+        requests:
+          cpu: "4"
+          memory: 16Gi
+        limits:
+          cpu: "8"
+          memory: 32Gi
+      subComponentType: null
+
+    VllmPrefillWorker:
+      componentType: worker
+      subComponentType: prefill
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /home/dynamo/.cache/huggingface
+      sharedMemory:
+        size: 32Gi
+      extraPodSpec:
+        nodeSelector: ${HW_NODE_SELECTOR}
+        tolerations: ${HW_TOLERATIONS}
+        mainContainer:
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              ulimit -l unlimited
+              python3 -m dynamo.vllm \
+                --model "${MODEL_NAME}" \
+                --tensor-parallel-size ${TP} \
+                --data-parallel-size 1 \
+                --disaggregation-mode prefill \
+                --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail"}' \
+                --generation-config vllm \
+                --kv-cache-dtype bfloat16 \
+                --no-enable-prefix-caching \
+                --max-model-len 8192 \
+                --max-num-seqs 256 \
+                ${ASYNC_FLAG} \
+                --no-enable-log-requests
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MODEL_NAME
+              value: "${MODEL}"
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: DYN_REQUEST_PLANE
+              value: tcp
+            - name: VLLM_SSM_CONV_STATE_LAYOUT
+              value: DS
+          workingDir: /workspace
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_RESOURCE
+      replicas: 1
+      resources:
+        requests:
+          gpu: "${GPU_COUNT}"
+        limits:
+          gpu: "${GPU_COUNT}"
+
+    VllmDecodeWorker:
+      componentType: worker
+      subComponentType: decode
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /home/dynamo/.cache/huggingface
+      sharedMemory:
+        size: 32Gi
+      extraPodSpec:
+        nodeSelector: ${HW_NODE_SELECTOR}
+        tolerations: ${HW_TOLERATIONS}
+        mainContainer:
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              ulimit -l unlimited
+              python3 -m dynamo.vllm \
+                --model "${MODEL_NAME}" \
+                --tensor-parallel-size ${TP} \
+                --data-parallel-size 1 \
+                --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail"}' \
+                --generation-config vllm \
+                --kv-cache-dtype bfloat16 \
+                --no-enable-prefix-caching \
+                --max-model-len 8192 \
+                --max-num-seqs 256 \
+                ${ASYNC_FLAG} \
+                --no-enable-log-requests
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MODEL_NAME
+              value: "${MODEL}"
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: DYN_REQUEST_PLANE
+              value: tcp
+            - name: VLLM_SSM_CONV_STATE_LAYOUT
+              value: DS
+          workingDir: /workspace
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_RESOURCE
+      replicas: 1
+      resources:
+        requests:
+          gpu: "${GPU_COUNT}"
+        limits:
+          gpu: "${GPU_COUNT}"

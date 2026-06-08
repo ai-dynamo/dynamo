@@ -1,0 +1,87 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# GSM8K accuracy run for the #42182 repro. Full 1319-question test set @
+# concurrency 64 (the load that triggers the disagg collapse; a small run
+# stays healthy). lm-eval gsm8k pulls openai/gsm8k. NOTE: lm-eval needs the
+# [api] extra (tenacity) for local-chat-completions.
+#
+#   export BENCH_ACC_POD=disagg-async-acc BENCH_FRONTEND=<dgd>-frontend BENCH_RUN_LABEL=disagg-async
+#   envsubst '$HW_NODE_SELECTOR $HW_TOLERATIONS $BENCH_ACC_POD $BENCH_FRONTEND $BENCH_RUN_LABEL' \
+#     < accuracy-job.yaml | kubectl -n qiwa apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${BENCH_ACC_POD}
+  labels:
+    app.kubernetes.io/name: qwen3.5-27b-gsm8k-async
+    app.kubernetes.io/component: accuracy
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  restartPolicy: Never
+  nodeSelector: ${HW_NODE_SELECTOR}
+  tolerations: ${HW_TOLERATIONS}
+  containers:
+    - name: accuracy
+      image: python:3.11
+      command:
+        - /bin/bash
+        - -lc
+        - |
+          set -euo pipefail
+          apt update && apt install -y --no-install-recommends curl jq
+          pip install --no-cache-dir 'lm-eval[api]'
+
+          echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000/v1/models ..."
+          until curl -s "http://${FRONTEND}:8000/v1/models" \
+              | jq -e --arg m "${MODEL_NAME}" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do
+            echo "[$(date '+%H:%M:%S')] not ready, sleeping 10s"
+            sleep 10
+          done
+          echo "Model '${MODEL_NAME}' is ready."
+
+          OUT="/perf-cache/accuracy/${RUN_LABEL}"
+          mkdir -p "${OUT}"
+          echo "GSM8K (limit=${LIMIT}, conc=${ACC_CONCURRENCY}, max_gen_toks=${MAX_GEN_TOKS}) against ${FRONTEND} -> ${OUT}"
+
+          lm_eval \
+            --model local-chat-completions \
+            --model_args "model=${MODEL_NAME},base_url=http://${FRONTEND}:8000/v1/chat/completions,num_concurrent=${ACC_CONCURRENCY},timeout=600,max_retries=3,tokenized_requests=False" \
+            --tasks gsm8k \
+            --limit "${LIMIT}" \
+            --gen_kwargs "max_gen_toks=${MAX_GEN_TOKS}" \
+            --apply_chat_template \
+            --output_path "${OUT}"
+
+          echo "===== GSM8K result (${RUN_LABEL}) ====="
+          find "${OUT}" -name 'results*.json' -exec cat {} \; | jq '.results.gsm8k'
+          echo "Accuracy run complete. Results in ${OUT}"
+          sleep 3600
+      env:
+        - name: MODEL_NAME
+          value: ${MODEL}
+        - name: FRONTEND
+          value: ${BENCH_FRONTEND}
+        - name: RUN_LABEL
+          value: ${BENCH_RUN_LABEL}
+        - name: LIMIT
+          value: "1319"
+        - name: ACC_CONCURRENCY
+          value: "64"
+        - name: MAX_GEN_TOKS
+          value: "2048"
+      resources:
+        requests:
+          cpu: "4"
+          memory: 8Gi
+        limits:
+          cpu: "8"
+          memory: 16Gi
+      volumeMounts:
+        - name: shared-model-cache
+          mountPath: /perf-cache
+          subPath: qwen35-27b-gsm8k/perf-cache
+  volumes:
+    - name: shared-model-cache
+      persistentVolumeClaim:
+        claimName: shared-model-cache
