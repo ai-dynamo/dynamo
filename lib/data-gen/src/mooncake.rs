@@ -16,11 +16,11 @@
 //! deserialization. Dynamo-produced traces always emit the canonical names.
 
 use anyhow::{Context, Result, bail};
-use dynamo_kv_hashing::Request;
-use rustc_hash::{FxHashMap, FxHasher};
+use dynamo_kv_hashing::{Request, compute_hash_v2};
+use dynamo_tokens::compute_next_sequence_hash;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::hash::{Hash, Hasher};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
@@ -178,8 +178,8 @@ impl RollingHashIdMapper {
 /// Token-block hashing helper for the Mooncake replay schema.
 ///
 /// Splits `tokens` into chunks of `mapper.block_size()`, derives sequence-aware
-/// hashes for complete blocks through `dynamo-kv-hashing`, appends a stable
-/// synthetic key for a trailing partial block when present, and returns the
+/// hashes for complete blocks through `dynamo-kv-hashing`, appends a sequence
+/// hash for a trailing partial block when present, and returns the
 /// compact ids assigned by `mapper`. Mirrors
 /// [`RollingHashIdMapper::hash_token_blocks`] as a free function so callers
 /// that already hold a mutable mapper reference can invoke it without
@@ -192,40 +192,41 @@ pub fn hash_token_blocks(mapper: &mut RollingHashIdMapper, tokens: &[u32]) -> Ve
 /// invalid block-size or request-shape errors.
 pub fn try_hash_token_blocks(mapper: &mut RollingHashIdMapper, tokens: &[u32]) -> Result<Vec<u64>> {
     require_positive("block size", mapper.block_size)?;
-    let mut sequence_hashes = Request::builder()
-        .tokens(tokens.to_vec())
-        .build()?
-        .sequence_hashes(
-            mapper
-                .block_size
-                .try_into()
-                .context("block_size does not fit u32")?,
-        )?;
-    if let Some(partial_hash) = trailing_partial_sequence_hash(mapper, tokens, &sequence_hashes) {
+    let block_size: u32 = mapper
+        .block_size
+        .try_into()
+        .context("block_size does not fit u32")?;
+    let request = Request::builder().tokens(tokens.to_vec()).build()?;
+    let mut sequence_hashes = request.sequence_hashes(block_size)?;
+    if let Some(partial_hash) =
+        trailing_partial_sequence_hash(&request, mapper.block_size, tokens, &sequence_hashes)?
+    {
         sequence_hashes.push(partial_hash);
     }
     Ok(ids_for_sequence_hashes(mapper, &sequence_hashes))
 }
 
 fn trailing_partial_sequence_hash(
-    mapper: &RollingHashIdMapper,
+    request: &Request,
+    block_size: usize,
     tokens: &[u32],
     complete_sequence_hashes: &[u64],
-) -> Option<u64> {
-    let tail_len = tokens.len() % mapper.block_size;
+) -> Result<Option<u64>> {
+    let tail_len = tokens.len() % block_size;
     if tail_len == 0 {
-        return None;
+        return Ok(None);
     }
 
     let tail = &tokens[tokens.len() - tail_len..];
-    let parent = complete_sequence_hashes.last().copied();
-    let mut hasher = FxHasher::default();
-    "mooncake-partial-v1".hash(&mut hasher);
-    mapper.block_size.hash(&mut hasher);
-    complete_sequence_hashes.len().hash(&mut hasher);
-    parent.hash(&mut hasher);
-    tail.hash(&mut hasher);
-    Some(hasher.finish())
+    let mut tail_bytes = Vec::with_capacity(std::mem::size_of_val(tail));
+    for token in tail {
+        tail_bytes.extend_from_slice(&token.to_ne_bytes());
+    }
+    let tail_block_hash = compute_hash_v2(&tail_bytes, request.salt_hash()?);
+    Ok(Some(match complete_sequence_hashes.last().copied() {
+        Some(parent) => compute_next_sequence_hash(parent, tail_block_hash),
+        None => tail_block_hash,
+    }))
 }
 
 /// Map stable sequence hashes to compact Mooncake IDs with a shared mapper.
@@ -448,6 +449,29 @@ mod tests {
 
         assert_eq!(mapper.hash_token_blocks(&[1, 2, 3]), vec![0]);
         assert_eq!(mapper.hash_token_blocks(&[1, 2, 3, 4, 5, 6]), vec![1, 2]);
+    }
+
+    #[test]
+    fn trailing_partial_block_uses_shared_chain_contract() {
+        let tokens = vec![1u32, 2, 3, 4, 5, 6];
+        let request = Request::builder().tokens(tokens.clone()).build().unwrap();
+        let complete_sequence_hashes = request.sequence_hashes(4).unwrap();
+        let mut tail_bytes = Vec::new();
+        for token in &tokens[4..] {
+            tail_bytes.extend_from_slice(&token.to_ne_bytes());
+        }
+        let tail_block_hash = compute_hash_v2(&tail_bytes, request.salt_hash().unwrap());
+        let expected_tail_hash =
+            compute_next_sequence_hash(complete_sequence_hashes[0], tail_block_hash);
+
+        let mut token_mapper = RollingHashIdMapper::new(4);
+        let mut sequence_mapper = RollingHashIdMapper::new(4);
+        let token_ids = token_mapper.hash_token_blocks(&tokens);
+        let mut expected_hashes = complete_sequence_hashes;
+        expected_hashes.push(expected_tail_hash);
+        let sequence_ids = sequence_mapper.ids_for_sequence_hashes(&expected_hashes);
+
+        assert_eq!(token_ids, sequence_ids);
     }
 
     #[test]
