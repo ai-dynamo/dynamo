@@ -12,13 +12,15 @@ use tokio_stream::StreamExt;
 use super::local_model::RoutingConstraints;
 use super::*;
 use crate::Endpoint;
-#[cfg(feature = "kv-indexer")]
+#[cfg(any(feature = "kv-indexer", feature = "slot-tracker"))]
 use clap::Parser;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
 #[cfg(feature = "kv-indexer")]
-use dynamo_kv_router::standalone_indexer::{self, IndexerConfig};
+use dynamo_kv_router::services::indexer::{self, IndexerConfig};
+#[cfg(feature = "slot-tracker")]
+use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
@@ -87,7 +89,7 @@ where
         init_standalone_logging();
 
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(standalone_indexer::run_server(IndexerConfig {
+        rt.block_on(indexer::run_server(IndexerConfig {
             block_size: cli.block_size,
             port: cli.port,
             threads: cli.threads,
@@ -107,7 +109,48 @@ where
     }
 }
 
-#[cfg(feature = "kv-indexer")]
+#[cfg(feature = "slot-tracker")]
+#[derive(Parser)]
+#[command(
+    name = "python -m dynamo.slot_tracker",
+    about = "Standalone KV router slot tracker"
+)]
+struct SlotTrackerCli {
+    /// HTTP server port
+    #[arg(long, default_value_t = 8091)]
+    port: u16,
+}
+
+pub fn run_slot_tracker_cli<I, T>(args: I) -> anyhow::Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    #[cfg(feature = "slot-tracker")]
+    {
+        let cli = SlotTrackerCli::try_parse_from(
+            std::iter::once(OsString::from("python -m dynamo.slot_tracker"))
+                .chain(args.into_iter().map(Into::into)),
+        )?;
+
+        init_standalone_logging();
+
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(slot_tracker::run_server(SlotTrackerConfig {
+            port: cli.port,
+        }))
+    }
+
+    #[cfg(not(feature = "slot-tracker"))]
+    {
+        let _ = args;
+        anyhow::bail!(
+            "dynamo.slot_tracker is not available in this build; reinstall with --features slot-tracker"
+        )
+    }
+}
+
+#[cfg(any(feature = "kv-indexer", feature = "slot-tracker"))]
 fn init_standalone_logging() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -254,7 +297,7 @@ impl KvEventPublisher {
     ///         ``0`` is treated as ``None`` (also disables batching).
     ///         Maximum allowed is 15_000 (15 seconds); larger values are capped.
     #[new]
-    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS))]
+    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
@@ -265,10 +308,12 @@ impl KvEventPublisher {
         zmq_endpoint: Option<String>,
         zmq_topic: Option<String>,
         batching_timeout_ms: Option<u64>,
+        image_token_id: Option<u32>,
     ) -> PyResult<Self> {
         let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
             endpoint: ep,
             topic: zmq_topic.unwrap_or_default(),
+            image_token_id,
         });
 
         if kv_block_size == 0 {
@@ -339,6 +384,7 @@ impl KvEventPublisher {
                         &warning_count,
                         mm_infos.as_deref(),
                         is_eagle,
+                        None, // image_token_id: publish path keeps caller-supplied mm_infos
                     ),
                 }),
                 dp_rank,
@@ -819,6 +865,17 @@ fn inject_worker_id_from_tracker(
     }
 }
 
+/// Attach the request's timing to `routing_data` so it survives the
+/// Rust->Python->Rust router path to the frontend (data survives, annotations don't).
+fn inject_timing_from_tracker(
+    data: &mut llm_rs::protocols::common::llm_backend::LLMEngineOutput,
+    tracker: &RequestTracker,
+) {
+    data.routing_data
+        .get_or_insert_with(Default::default)
+        .timing = Some(tracker.get_timing_info());
+}
+
 // TODO: can this reuse the stream conversion method in Client bindings?
 impl KvRouter {
     /// Helper method to process a request and create a Python async generator
@@ -858,6 +915,14 @@ impl KvRouter {
                             }
                             first_token_gauges_observed = true;
                         }
+                    }
+
+                    // On the terminal chunk, finalize timing and attach it for the frontend.
+                    if let (Some(tracker), Some(data)) = (&tracker, &mut response.data)
+                        && data.finish_reason.is_some()
+                    {
+                        tracker.record_finish();
+                        inject_timing_from_tracker(data, tracker);
                     }
 
                     let py_response = Python::with_gil(|py| {
@@ -921,6 +986,8 @@ impl KvRouter {
                         config.moe_tp_size(),
                         config.moe_ep_size(),
                         config.attention_dp_size(),
+                        config.nextn(),
+                        config.nextn_accept_rates(),
                     )
                 })
             })

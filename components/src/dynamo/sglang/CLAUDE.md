@@ -141,6 +141,23 @@ BaseGenerativeHandler (handler_base.py)
 3. **Video generation** (`register_video_generation_model`): Same fast path with
    `ModelType.Videos`.
 
+### Multinode DP Rank Visibility
+
+SGLang multinode LLM workers have two different DP-rank views:
+
+- **Model registration / router scheduling** is global. In the legacy
+  `python -m dynamo.sglang` path, only the leader process (`node_rank == 0`)
+  serves the Dynamo endpoint and registers the model card. That single routable
+  worker must advertise `[0, dp_size)` via `ModelRuntimeConfig`; otherwise the
+  router cannot schedule remote DP ranks.
+- **KV events, FPM, and component metrics** are local. Each node subscribes only
+  to its own rank slice from `local_dp_rank_bounds(server_args)`, and non-leader
+  nodes publish those events using the leader worker id so the router-visible KV
+  trees remain keyed as `(leader_worker_id, dp_rank)`.
+
+Do not reuse the local per-node rank slice for model registration. Keep
+registration on the global range and local publishers on the local range.
+
 ## Init Flow (typical LLM decode)
 
 ```

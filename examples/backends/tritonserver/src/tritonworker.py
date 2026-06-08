@@ -12,7 +12,13 @@ import uvloop
 from google.protobuf import text_format
 from tritonclient.utils import triton_to_np_dtype
 
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
+from dynamo.llm import (
+    ModelInput,
+    ModelRuntimeConfig,
+    ModelType,
+    WorkerType,
+    register_model,
+)
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -151,6 +157,7 @@ async def triton_worker(runtime: DistributedRuntime, args: argparse.Namespace):
         endpoint,
         model_name,  # model_path (used as display name for tensor-based models)
         runtime_config=runtime_config,
+        worker_type=WorkerType.Aggregated,
     )
     logger.info(
         f"✓ Successfully registered model '{model_name}' with endpoint triton/tritonserver/generate"

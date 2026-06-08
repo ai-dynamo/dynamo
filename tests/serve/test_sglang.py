@@ -16,9 +16,13 @@ from tests.serve.common import (
     run_serve_deployment,
 )
 from tests.serve.lora_utils import DEFAULT_LORA_REPO, MinioLoraConfig
+from tests.serve.multimodal_profiles.sglang import (
+    SGLANG_MULTIMODAL_PROFILES,
+    SGLANG_TOPOLOGY_SCRIPTS,
+)
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
-from tests.utils.multimodal import make_image_payload_b64
+from tests.utils.multimodal import make_image_payload_b64, make_multimodal_configs
 from tests.utils.payload_builder import (
     anthropic_messages_payload_default,
     anthropic_messages_stream_payload_default,
@@ -62,6 +66,17 @@ REMOTE_VIDEO_TEST_URI = (
     "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4"
 )
 
+# Generated multimodal configs from profile definitions (mirrors test_vllm.py).
+# Each profile expands into one config per MmCase per topology with the
+# appropriate marks (gpu_*, timeout, pre/post_merge, requested_sglang_kv_tokens).
+_mm_configs: dict[str, SGLangConfig] = {}
+for _profile in SGLANG_MULTIMODAL_PROFILES:
+    _mm_configs.update(
+        make_multimodal_configs(
+            _profile, SGLangConfig, sglang_dir, SGLANG_TOPOLOGY_SCRIPTS
+        )
+    )
+
 # SGLang test configurations
 # NOTE: pytest.mark.gpu_1 tests take ~167s (2m 47s) total to run sequentially (with models pre-cached)
 # TODO: Now that these tests use dynamic ports and each config has a profiled_vram_gib marker,
@@ -69,6 +84,7 @@ REMOTE_VIDEO_TEST_URI = (
 # A future collector/launcher can sum profiled_vram_gib values to decide how many tests fit
 # concurrently without exceeding available VRAM.
 sglang_configs = {
+    **_mm_configs,
     "aggregated": SGLangConfig(
         # Uses backend agg.sh (with metrics enabled) for testing standard
         # aggregated deployment with metrics collection
@@ -785,6 +801,7 @@ def test_sglang_deployment(
     dynamo_dynamic_ports,
     num_system_ports,
     predownload_models,
+    image_server,
 ):
     """Test SGLang deployment scenarios using common helpers"""
     assert (

@@ -18,6 +18,12 @@ from tests.hf_cache import (
     _enable_offline_with_mistral_patch,
     _restore_models_dir_env,
 )
+from tests.utils.collection_env_guard import (
+    collection_env_guard_disabled,
+    diff_collection_env,
+    format_collection_env_changes,
+    snapshot_collection_env,
+)
 from tests.utils.constants import TEST_MODELS, DefaultPort
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import (
@@ -36,8 +42,73 @@ _logger = logging.getLogger(__name__)
 _gpu_parallel_gpus_key: pytest.StashKey[list[dict]] = pytest.StashKey()
 _gpu_indices_key: pytest.StashKey[list[int] | None] = pytest.StashKey()
 _gpu_slots_key: pytest.StashKey[int | None] = pytest.StashKey()
+_collection_env_snapshot_key: pytest.StashKey[dict[str, str]] = pytest.StashKey()
+# Controller-side accumulator for collection-env changes reported by xdist workers.
+_collection_env_changes_key: pytest.StashKey[dict] = pytest.StashKey()
 
 _GPU_PARALLEL_DOWNLOADS_READY_ENV = "DYNAMO_GPU_PARALLEL_DOWNLOADS_READY"
+
+
+def _is_xdist_worker(config: pytest.Config) -> bool:
+    return hasattr(config, "workerinput")
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_sessionstart(session: pytest.Session) -> None:
+    if not collection_env_guard_disabled():
+        session.config.stash[_collection_env_snapshot_key] = snapshot_collection_env()
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_finish(session: pytest.Session) -> None:
+    # Gate solely on snapshot presence (taken at session start). Re-reading the
+    # disable flag here would let an import-time mutation switch the guard off
+    # mid-run and mask other mutations.
+    before = session.config.stash.get(_collection_env_snapshot_key, None)
+    if before is None:
+        return
+    changes = diff_collection_env(before)
+    if not changes:
+        return
+    # Under xdist the import (and therefore the mutation) happens on the worker,
+    # not the controller. Raising here crashes the worker after collection, which
+    # xdist surfaces as an opaque INTERNALERROR ("assert not crashitem") instead
+    # of our message. Report changes back to the controller via workeroutput and
+    # let it fail the session cleanly in pytest_sessionfinish.
+    if _is_xdist_worker(session.config):
+        session.config.workeroutput["collection_env_changes"] = changes
+    else:
+        raise pytest.UsageError(format_collection_env_changes(changes))
+
+
+# optionalhook: pytest_testnodedown is an xdist-provided hookspec. Mark it
+# optional so collection does not raise PluginValidationError in environments
+# without pytest-xdist installed (e.g. the pre-commit marker-report hook).
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node, error) -> None:
+    # Controller side: gather each xdist worker's reported collection-env changes
+    # as it shuts down (node.workeroutput is the worker's workeroutput dict).
+    changes = (getattr(node, "workeroutput", {}) or {}).get("collection_env_changes")
+    if changes:
+        node.config.stash.setdefault(_collection_env_changes_key, {}).update(changes)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    # Controller side: if any worker reported a collection-time env mutation,
+    # surface it with the readable message and fail the session.
+    if _is_xdist_worker(session.config):
+        return
+    reported = session.config.stash.get(_collection_env_changes_key, None)
+    if not reported:
+        return
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        reporter.write_line("")
+        reporter.write_line(format_collection_env_changes(reported), red=True)
+    # Don't mask a more severe outcome (e.g. real test failures = exit 1).
+    if session.exitstatus == pytest.ExitCode.OK:
+        session.exitstatus = pytest.ExitCode.USAGE_ERROR
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -542,11 +613,38 @@ def _item_has_marker(item, marker_name):
     return False
 
 
+def _check_sglang_mm_hashes_present(items) -> None:
+    """Log whether the installed sglang has the mm_hashes interop hook
+    (sgl-project/sglang#25300). The dynamo sglang image bakes this patch
+    in at build time (`container/deps/sglang/patches/<ver>/`); this check
+    is just for diagnostic clarity when the strong-gate MM-routing
+    assertion later trips on an unpatched image."""
+    if not any("test_sglang" in i.nodeid and "mm_" in i.nodeid for i in items):
+        return
+    try:
+        import sglang
+
+        io_struct = Path(sglang.__file__).parent / "srt/managers/io_struct.py"
+        present = "mm_hashes:" in io_struct.read_text()
+    except Exception as exc:
+        _logger.warning("sglang mm_hashes interop probe failed: %s", exc)
+        return
+    _logger.info(
+        "sglang mm_hashes interop: %s",
+        "present"
+        if present
+        else "MISSING — image was built without the "
+        "vendored sgl-project/sglang#25300 patch; MM-aware routing tests "
+        "will degrade to text-prefix fallback.",
+    )
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config, items):
     """
     This function is called to modify the list of tests to run.
     """
+    _check_sglang_mm_hashes_present(items)
     # Auto-skip tests marked with a framework marker when the framework is not installed
     framework_markers = {
         "trtllm": "tensorrt_llm",
