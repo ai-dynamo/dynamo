@@ -222,7 +222,9 @@ trtllm_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
-            pytest.mark.nightly,
+            # TEMP: pre_merge so this PR's CI validates the test; revert to
+            # pytest.mark.nightly before merge.
+            pytest.mark.pre_merge,
             pytest.mark.profiled_vram_gib(3.6),  # actual nvidia-smi peak
             pytest.mark.requested_trtllm_kv_tokens(
                 2592
