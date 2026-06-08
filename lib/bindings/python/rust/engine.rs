@@ -395,6 +395,9 @@ where
             };
 
             if tx.send(response).await.is_err() {
+                // Consumer dropped the response stream — tell the generator to
+                // stop rather than relying solely on upstream push_handler.
+                ctx.stop_generating();
                 tracing::trace!(
                     request_id,
                     "error forwarding annotated response to channel; channel is closed"
