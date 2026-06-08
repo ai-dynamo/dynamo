@@ -15,6 +15,7 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::scheduling::SchedulingContext;
+use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
     ActiveSequencesMultiWorker, DefaultWorkerSelector, PrefillTokenDeltas, RadixTree,
     RouterSchedulingPolicy, SchedulingPolicy, SchedulingRequest, SequenceRequest, WorkerSelector,
@@ -357,8 +358,10 @@ impl OfflineReplayRouter {
         {
             return Err(anyhow!("router worker {worker_id} already exists"));
         }
-        let dp_range = HashMap::from([(wid, (0u32, 1u32))]);
-        self.slots.register_external_workers(&dp_range);
+        if let Err(error) = self.slots.upsert_worker(WorkerDpRange::new(wid, 0, 1)) {
+            self.workers_with_configs.remove(&wid);
+            return Err(error.into());
+        }
 
         Ok(())
     }
@@ -922,6 +925,24 @@ mod tests {
         assert_eq!(
             router.debug_snapshot(0.0).active_tokens_by_worker,
             vec![(0, 64), (1, 64), (2, 0)]
+        );
+    }
+
+    #[test]
+    fn test_readding_removed_worker_reuses_slot_state() {
+        let mut router =
+            OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 1)
+                .unwrap();
+
+        router
+            .on_request_arrival(&request(1, 7), None, 0.0)
+            .unwrap();
+        router.remove_worker(0).unwrap();
+        router.add_worker(0).unwrap();
+
+        assert_eq!(
+            router.debug_snapshot(0.0).active_tokens_by_worker,
+            vec![(0, 64)]
         );
     }
 

@@ -29,9 +29,10 @@ use super::prompt_membership_trie::lookup_live_hashes;
 use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
 use super::request_maps::RequestIndex;
 use super::single::{ActiveSequences, PromptMembershipDelta, RequestId};
-use super::topology::WorkerTable;
+use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTopologyError};
 use crate::protocols::{
-    ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerWithDpRank,
+    ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerId,
+    WorkerWithDpRank,
 };
 
 // How often we force expire stale requests across all workers. See the comment
@@ -329,45 +330,92 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.remote_state_update_count.load(Ordering::Relaxed)
     }
 
-    /// Register externally-provided workers (e.g. from EPP) in the slot tracker,
-    /// adding any that are missing.
-    ///
-    /// Unlike [`update_workers`], this does not remove workers absent from the
-    /// input — it only adds new ones.  This is intentional: the EPP may send
-    /// different subsets of workers on different requests, and one routing call
-    /// must not evict workers registered by another.
-    ///
-    /// Worker removal in External mode will be handled separately via GAIE
-    /// lifecycle events (not yet implemented). TODO (atchernych) once we upgrade to GAIE latest.
-    pub fn register_external_workers(&self, dp_range: &HashMap<u64, (u32, u32)>) {
+    /// Register one worker and reject duplicate worker IDs.
+    pub fn register_worker(&self, range: WorkerDpRange) -> Result<(), WorkerTopologyError> {
         let change = {
             let mut table = self.workers.write();
-            table.register_external(self.block_size, dp_range)
+            table.register_worker(self.block_size, range)?
         };
 
         for worker in &change.added {
-            tracing::debug!("Lazily registering external worker {:?}", worker);
+            tracing::debug!("Registering worker {:?}", worker);
         }
-        self.prompt_registry.apply_topology_change(change);
+        self.apply_worker_topology_change(change);
+        Ok(())
     }
 
-    /// Update the set of workers, adding and removing as needed.
+    /// Add or update one worker without changing unrelated workers.
     ///
-    /// `new_dp_range` maps worker IDs to their data-parallel range (start, size).
-    pub fn update_workers(&self, new_dp_range: &HashMap<u64, (u32, u32)>) {
+    /// This supports external routing calls that provide different worker
+    /// subsets over time. Updating a worker replaces only that worker's DP
+    /// ranks and preserves unrelated lazily-created slots.
+    pub fn upsert_worker(&self, range: WorkerDpRange) -> Result<(), WorkerTopologyError> {
         let change = {
             let mut table = self.workers.write();
-            table.reconcile(self.block_size, new_dp_range)
+            table.upsert_worker(self.block_size, range)?
+        };
+
+        for removed in &change.removed {
+            tracing::debug!("Removing external worker rank {:?}", removed.worker);
+        }
+        for worker in &change.added {
+            tracing::debug!("Registering external worker rank {:?}", worker);
+        }
+        self.apply_worker_topology_change(change);
+        Ok(())
+    }
+
+    /// Unregister one worker and all of its DP ranks.
+    pub fn unregister_worker(&self, worker_id: WorkerId) -> Result<(), WorkerTopologyError> {
+        let change = {
+            let mut table = self.workers.write();
+            table.unregister_worker(self.block_size, worker_id)?
         };
 
         for removed in &change.removed {
             tracing::warn!("Removing worker {:?}", removed.worker);
-            self.request_index.remove_worker_requests(removed.worker);
+        }
+        self.apply_worker_topology_change(change);
+        Ok(())
+    }
+
+    /// Replace the complete authoritative worker topology.
+    ///
+    /// Workers absent from `ranges`, including lazily-created slots, are removed.
+    pub fn reconcile_workers(
+        &self,
+        ranges: impl IntoIterator<Item = WorkerDpRange>,
+    ) -> Result<(), WorkerTopologyError> {
+        let change = {
+            let mut table = self.workers.write();
+            table.reconcile(self.block_size, ranges.into_iter().collect())?
+        };
+
+        for removed in &change.removed {
+            tracing::warn!("Removing worker {:?}", removed.worker);
         }
         for worker in &change.added {
             tracing::warn!("Adding worker {:?}", worker);
         }
 
+        self.apply_worker_topology_change(change);
+        Ok(())
+    }
+
+    /// Return the authoritative worker ranges, sorted by worker ID.
+    pub fn worker_ranges(&self) -> Vec<WorkerDpRange> {
+        self.workers.read().worker_ranges()
+    }
+
+    /// Return whether the authoritative topology contains any workers.
+    pub fn has_registered_workers(&self) -> bool {
+        self.workers.read().has_registered_workers()
+    }
+
+    fn apply_worker_topology_change(&self, change: WorkerTopologyChange) {
+        for removed in &change.removed {
+            self.request_index.remove_worker_requests(removed.worker);
+        }
         self.prompt_registry.apply_topology_change(change);
     }
 
@@ -690,7 +738,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         let change = table.ensure_worker(self.block_size, worker);
         drop(table);
 
-        self.prompt_registry.apply_topology_change(change);
+        self.apply_worker_topology_change(change);
     }
 
     fn add_request_local(
@@ -2205,7 +2253,7 @@ mod tests {
             ReplicaWorkerPolicy::RequireRegistered,
         );
         let worker = WorkerWithDpRank::new(1, 0);
-        sequences.update_workers(&HashMap::new());
+        sequences.reconcile_workers([]).unwrap();
 
         sequences
             .run_replica_sync(
@@ -2245,12 +2293,14 @@ mod tests {
             )
             .unwrap();
 
-        sequences.update_workers(&HashMap::new());
+        sequences.reconcile_workers([]).unwrap();
         assert!(sequences.prompt_registry.is_block_index_empty());
         assert!(sequences.active_blocks().is_empty());
         assert!(sequences.request_index.is_empty());
 
-        sequences.update_workers(&HashMap::from([(1_u64, (0_u32, 1_u32))]));
+        sequences
+            .reconcile_workers([WorkerDpRange::new(1, 0, 1)])
+            .unwrap();
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
         assert!(sequences.prompt_registry.is_block_index_empty());
     }
@@ -2283,7 +2333,7 @@ mod tests {
         });
 
         ready.wait();
-        sequences.update_workers(&HashMap::new());
+        sequences.reconcile_workers([]).unwrap();
         proceed.wait();
         let result = add.join().unwrap();
 

@@ -359,7 +359,7 @@ fn service_error(error: ServiceError) -> Response {
 }
 
 fn peer_error(error: PeerError) -> Response {
-    let status = match error {
+    let status = match &error {
         PeerError::InvalidEndpoint(_) | PeerError::SelfEndpoint => StatusCode::BAD_REQUEST,
         PeerError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
     };

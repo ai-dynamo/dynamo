@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -15,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::protocols::{PrefillLoadHint, WorkerId, WorkerWithDpRank};
 use crate::scheduling::PotentialLoad;
+use crate::sequences::topology::{WorkerDpRange, WorkerTopologyError};
 use crate::sequences::{
     ActiveSequencesMultiWorker, PrefillTokenDeltas, ReplicaWorkerPolicy, SequenceError,
     SequenceRequest,
@@ -115,7 +115,7 @@ struct RegistryReplicaConfig {
 struct TrackerEntry {
     tracker: Arc<ActiveSequencesMultiWorker<ScopedSequencePublisher>>,
     pub block_size: u32,
-    worker_ranges: Mutex<HashMap<WorkerId, (u32, u32)>>,
+    lifecycle_lock: Mutex<()>,
     replica_tx: Option<mpsc::Sender<crate::protocols::ActiveSequenceEvent>>,
     cancel_token: CancellationToken,
 }
@@ -148,7 +148,7 @@ impl TrackerEntry {
         let tracker = Arc::new(ActiveSequencesMultiWorker::new_with_replica_worker_policy(
             publisher,
             block_size as usize,
-            HashMap::new(),
+            Default::default(),
             replica_sync,
             router_id,
             "standalone",
@@ -165,7 +165,7 @@ impl TrackerEntry {
         Arc::new(Self {
             tracker,
             block_size,
-            worker_ranges: Mutex::new(HashMap::new()),
+            lifecycle_lock: Mutex::new(()),
             replica_tx,
             cancel_token,
         })
@@ -210,7 +210,10 @@ impl SlotTrackerRegistry {
         dp_start: u32,
         dp_size: u32,
     ) -> Result<(), RegistryError> {
-        validate_registration(block_size, dp_start, dp_size)?;
+        validate_block_size(block_size)?;
+        let range = WorkerDpRange::new(worker_id, dp_start, dp_size)
+            .validate()
+            .map_err(|error| topology_error(&key, error))?;
 
         loop {
             let entry = self
@@ -226,6 +229,10 @@ impl SlotTrackerRegistry {
                 })
                 .clone();
 
+            let _lifecycle = entry.lifecycle_lock.lock();
+            if !self.is_attached(&key, &entry) {
+                continue;
+            }
             if entry.block_size != block_size {
                 return Err(RegistryError::BlockSizeMismatch {
                     model_name: key.model_name,
@@ -235,20 +242,10 @@ impl SlotTrackerRegistry {
                 });
             }
 
-            let mut worker_ranges = entry.worker_ranges.lock();
-            if !self.is_attached(&key, &entry) {
-                continue;
-            }
-            if worker_ranges.contains_key(&worker_id) {
-                return Err(RegistryError::DuplicateWorker {
-                    worker_id,
-                    model_name: key.model_name,
-                    tenant_id: key.tenant_id,
-                });
-            }
-
-            worker_ranges.insert(worker_id, (dp_start, dp_size));
-            entry.tracker.update_workers(&worker_ranges);
+            entry
+                .tracker
+                .register_worker(range)
+                .map_err(|error| topology_error(&key, error))?;
             return Ok(());
         }
     }
@@ -267,20 +264,16 @@ impl SlotTrackerRegistry {
                 });
             };
 
-            let mut worker_ranges = entry.worker_ranges.lock();
+            let _lifecycle = entry.lifecycle_lock.lock();
             if !self.is_attached(key, &entry) {
                 continue;
             }
-            if worker_ranges.remove(&worker_id).is_none() {
-                return Err(RegistryError::WorkerNotFound {
-                    worker_id,
-                    model_name: key.model_name.clone(),
-                    tenant_id: key.tenant_id.clone(),
-                });
-            }
 
-            entry.tracker.update_workers(&worker_ranges);
-            if worker_ranges.is_empty()
+            entry
+                .tracker
+                .unregister_worker(worker_id)
+                .map_err(|error| topology_error(key, error))?;
+            if !entry.tracker.has_registered_workers()
                 && self
                     .trackers
                     .remove_if(key, |_, current| Arc::ptr_eq(current, &entry))
@@ -303,14 +296,14 @@ impl SlotTrackerRegistry {
             if !matches_filters(key, model_name, tenant_id) {
                 continue;
             }
-            for (&worker_id, &(dp_start, dp_size)) in entry.value().worker_ranges.lock().iter() {
+            for range in entry.value().tracker.worker_ranges() {
                 workers.push(WorkerInfo {
-                    worker_id,
+                    worker_id: range.worker_id,
                     model_name: key.model_name.clone(),
                     tenant_id: key.tenant_id.clone(),
                     block_size: entry.value().block_size,
-                    dp_start,
-                    dp_size,
+                    dp_start: range.dp_start,
+                    dp_size: range.dp_size,
                 });
             }
         }
@@ -516,21 +509,30 @@ pub enum ServiceError {
     Sequence(#[from] SequenceError),
 }
 
-fn validate_registration(
-    block_size: u32,
-    dp_start: u32,
-    dp_size: u32,
-) -> Result<(), RegistryError> {
+fn validate_block_size(block_size: u32) -> Result<(), RegistryError> {
     if block_size == 0 {
         return Err(RegistryError::InvalidBlockSize);
     }
-    if dp_size == 0 {
-        return Err(RegistryError::InvalidDpSize);
-    }
-    if dp_start.checked_add(dp_size).is_none() {
-        return Err(RegistryError::InvalidDpRange { dp_start, dp_size });
-    }
     Ok(())
+}
+
+fn topology_error(key: &TrackerKey, error: WorkerTopologyError) -> RegistryError {
+    match error {
+        WorkerTopologyError::InvalidDpSize { .. } => RegistryError::InvalidDpSize,
+        WorkerTopologyError::InvalidDpRange {
+            dp_start, dp_size, ..
+        } => RegistryError::InvalidDpRange { dp_start, dp_size },
+        WorkerTopologyError::DuplicateWorker { worker_id } => RegistryError::DuplicateWorker {
+            worker_id,
+            model_name: key.model_name.clone(),
+            tenant_id: key.tenant_id.clone(),
+        },
+        WorkerTopologyError::WorkerNotFound { worker_id } => RegistryError::WorkerNotFound {
+            worker_id,
+            model_name: key.model_name.clone(),
+            tenant_id: key.tenant_id.clone(),
+        },
+    }
 }
 
 fn matches_filters(key: &TrackerKey, model_name: Option<&str>, tenant_id: Option<&str>) -> bool {
