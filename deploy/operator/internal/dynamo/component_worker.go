@@ -134,18 +134,18 @@ const (
 // TopologyLabelVolume returns a Downward API volume that projects topology pod
 // labels into files. The volume updates dynamically when labels are added or
 // changed, so the runtime can poll until the files have content.
-func TopologyLabelVolume(policy *v1beta1.KvTransferPolicy, topologyDomains []v1beta1.TopologyDomain) corev1.Volume {
+func TopologyLabelVolume(policy *v1beta1.KvTransferPolicy, groveClusterTopologyDomains []v1beta1.TopologyDomain) corev1.Volume {
 	return corev1.Volume{
 		Name: topologyVolumeName,
 		VolumeSource: corev1.VolumeSource{
 			DownwardAPI: &corev1.DownwardAPIVolumeSource{
-				Items: topologyLabelVolumeItems(policy, topologyDomains),
+				Items: topologyLabelVolumeItems(policy, groveClusterTopologyDomains),
 			},
 		},
 	}
 }
 
-func topologyLabelVolumeItems(policy *v1beta1.KvTransferPolicy, topologyDomains []v1beta1.TopologyDomain) []corev1.DownwardAPIVolumeFile {
+func topologyLabelVolumeItems(policy *v1beta1.KvTransferPolicy, groveClusterTopologyDomains []v1beta1.TopologyDomain) []corev1.DownwardAPIVolumeFile {
 	if policy == nil {
 		return nil
 	}
@@ -160,9 +160,8 @@ func topologyLabelVolumeItems(policy *v1beta1.KvTransferPolicy, topologyDomains 
 		}
 	}
 
-	domains := topologyProjectionDomains(policy, topologyDomains)
-	items := make([]corev1.DownwardAPIVolumeFile, 0, len(domains))
-	for _, domain := range domains {
+	items := make([]corev1.DownwardAPIVolumeFile, 0, len(groveClusterTopologyDomains))
+	for _, domain := range groveClusterTopologyDomains {
 		items = append(items, corev1.DownwardAPIVolumeFile{
 			Path: string(domain),
 			FieldRef: &corev1.ObjectFieldSelector{
@@ -171,31 +170,6 @@ func topologyLabelVolumeItems(policy *v1beta1.KvTransferPolicy, topologyDomains 
 		})
 	}
 	return items
-}
-
-func topologyProjectionDomains(policy *v1beta1.KvTransferPolicy, topologyDomains []v1beta1.TopologyDomain) []v1beta1.TopologyDomain {
-	if policy == nil {
-		return nil
-	}
-
-	seen := map[string]struct{}{}
-	domains := make([]v1beta1.TopologyDomain, 0, len(topologyDomains)+1)
-	addDomain := func(domain v1beta1.TopologyDomain) {
-		if domain == "" {
-			return
-		}
-		if _, ok := seen[string(domain)]; ok {
-			return
-		}
-		seen[string(domain)] = struct{}{}
-		domains = append(domains, domain)
-	}
-
-	for _, domain := range topologyDomains {
-		addDomain(domain)
-	}
-	addDomain(policy.Domain)
-	return domains
 }
 
 // TopologyLabelVolumeMount returns the volume mount for the topology label volume.
