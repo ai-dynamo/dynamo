@@ -36,6 +36,11 @@ from transformers import AutoConfig
 import dynamo.nixl_connect as nixl_connect
 from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
+from dynamo.common.gms_failover import (
+    acquire_gms_failover_lock_before_init,
+    prepare_gms_failover,
+    run_gms_failover_promotion_warmup,
+)
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
@@ -61,10 +66,12 @@ from dynamo.trtllm.engine import Backend, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import DYNAMO_COMPONENT_REGISTRY, get_publisher
+from dynamo.trtllm.request_handlers.handler_base import TRTLLMEngineQuiesceController
 from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
 )
+from dynamo.trtllm.startup import configure_gms_openmpi_defaults
 from dynamo.trtllm.utils.trtllm_utils import deep_update
 
 # Default buffer size for kv cache events.
@@ -132,6 +139,62 @@ def _sync_config_from_engine_args(config: Config, engine_args: dict) -> None:
             setattr(config, field_name, engine_args[field_name])
 
 
+def _kv_cache_config_as_dict(kv_cache_config: object) -> dict[str, object]:
+    if isinstance(kv_cache_config, KvCacheConfig):
+        return kv_cache_config.model_dump(exclude_none=True)
+    if isinstance(kv_cache_config, dict):
+        return dict(kv_cache_config)
+    raise TypeError(
+        "kv_cache_config must be a TensorRT-LLM KvCacheConfig or dict, "
+        f"got {type(kv_cache_config).__name__}"
+    )
+
+
+def _configure_gms_v2_kv_cache(arg_map: dict[str, object]) -> None:
+    """Force the supported TRT-LLM GMS path onto KVCacheManagerV2.
+
+    TRT-LLM V2 is the only GMS KV path we support here. The older connector
+    manager and event-buffer paths force TRT-LLM back to the V1 manager, so keep
+    them disabled instead of silently losing V2 lease semantics.
+    """
+
+    if arg_map.get("kv_connector_config") is not None:
+        raise ValueError(
+            "--load-format gms requires TRT-LLM KVCacheManagerV2, but "
+            "KVCacheManagerV2 does not support kv_connector_config. "
+            "Disable --connector or use a non-GMS TRT-LLM path."
+        )
+
+    cache_transceiver_config = arg_map.get("cache_transceiver_config")
+    if cache_transceiver_config not in (None, {}):
+        raise ValueError(
+            "--load-format gms requires TRT-LLM KVCacheManagerV2, but "
+            "KVCacheManagerV2 does not support cache_transceiver_config. "
+            "GMS TRT-LLM is currently aggregated-mode only."
+        )
+
+    max_beam_width = int(arg_map.get("max_beam_width") or 1)
+    if max_beam_width != 1:
+        raise ValueError(
+            "--load-format gms requires TRT-LLM KVCacheManagerV2, which "
+            f"supports only max_beam_width=1; got {max_beam_width}."
+        )
+
+    kv_cache_config = _kv_cache_config_as_dict(arg_map["kv_cache_config"])
+    kv_cache_config["use_kv_cache_manager_v2"] = True
+    # TRT-LLM falls back to KVCacheManager V1 when event_buffer_max_size > 0.
+    # Dynamo can still publish worker metrics; KV-event support for GMS/TRT V2
+    # needs a dedicated V2 event path.
+    if kv_cache_config.get("event_buffer_max_size"):
+        logging.warning(
+            "Ignoring kv_cache_config.event_buffer_max_size=%s for TRT-LLM "
+            "GMS because KVCacheManagerV2 would otherwise fall back to V1.",
+            kv_cache_config["event_buffer_max_size"],
+        )
+    kv_cache_config["event_buffer_max_size"] = 0
+    arg_map["kv_cache_config"] = kv_cache_config
+
+
 def _register_memory_routes(runtime, handler) -> None:
     runtime.register_engine_route(
         "release_memory_occupation",
@@ -153,6 +216,7 @@ async def init_llm_worker(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: Optional[list] = None,
     engine_holder: Optional[list] = None,
+    publisher_holder: Optional[list] = None,
 ) -> None:
     """Initialize and run the LLM worker.
 
@@ -165,6 +229,8 @@ async def init_llm_worker(
         shutdown_endpoints: Optional list to populate with endpoints for graceful shutdown.
         engine_holder: Optional mutable list; when provided, the TensorRTLLMEngine
             is appended so that the drain callback can reference it at shutdown time.
+        publisher_holder: Optional mutable list; when provided, the Publisher is
+            appended so signal cleanup can stop polling threads before engine teardown.
     """
 
     encode_client = None
@@ -216,6 +282,11 @@ async def init_llm_worker(
         sys.exit(1)
 
     if config.load_format == "gms":
+        if kv_connector_config is not None:
+            raise ValueError(
+                "--load-format gms targets TRT-LLM KVCacheManagerV2 and cannot "
+                "be combined with --connector. Use --connector none."
+            )
         try:
             from gpu_memory_service.integrations.trtllm import setup_gms
         except ImportError as exc:
@@ -223,9 +294,11 @@ async def init_llm_worker(
                 "gpu-memory-service is required for --load-format gms. "
                 "Install or update the package."
             ) from exc
+        configure_gms_openmpi_defaults()
         setup_gms(model_loader_extra_config)
         logging.info(
-            "TRT-LLM GMS integration enabled (extra=%s)", model_loader_extra_config
+            "TRT-LLM GMS integration enabled in KVCacheManagerV2 mode (extra=%s)",
+            model_loader_extra_config,
         )
 
     # Resolve load_format for engine args. GMS patches are active regardless;
@@ -249,6 +322,7 @@ async def init_llm_worker(
         "moe_expert_parallel_size": config.expert_parallel_size,
         "enable_attention_dp": config.enable_attention_dp,
         "backend": Backend.PYTORCH,
+        "dtype": config.torch_dtype,
         "kv_cache_config": kv_cache_config,
         "gpus_per_node": gpus_per_node,
         "max_num_tokens": config.max_num_tokens,
@@ -262,6 +336,14 @@ async def init_llm_worker(
         "enable_iter_perf_stats": config.publish_events_and_metrics,
         "kv_connector_config": kv_connector_config,
     }
+
+    attn_backend_explicit = os.environ.get(
+        "DYN_TRTLLM_ATTN_BACKEND"
+    ) is not None or any(
+        arg == "--attn-backend" or arg.startswith("--attn-backend=") for arg in sys.argv
+    )
+    if attn_backend_explicit:
+        arg_map["attn_backend"] = config.attn_backend
 
     arg_map["load_format"] = engine_load_format
 
@@ -297,6 +379,9 @@ async def init_llm_worker(
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
 
+    if config.load_format == "gms":
+        _configure_gms_v2_kv_cache(arg_map)
+
     _sync_config_from_engine_args(config, arg_map)
 
     if config.publish_events_and_metrics:
@@ -310,17 +395,27 @@ async def init_llm_worker(
             arg_map["kv_cache_config"] = current_kv_config
 
         if isinstance(current_kv_config, dict):
-            # Preserve a user-specified event_buffer_max_size from YAML/overrides;
-            # only apply the default when it is unset or zero (TRTLLM's disabled value).
-            existing = current_kv_config.get("event_buffer_max_size")
-            if existing:
-                logging.info(
-                    f"Using existing event_buffer_max_size={existing} from kv_cache_config"
-                )
+            if config.load_format == "gms":
+                if current_kv_config.get("event_buffer_max_size"):
+                    logging.warning(
+                        "Ignoring kv_cache_config.event_buffer_max_size=%s for "
+                        "TRT-LLM GMS because KVCacheManagerV2 would otherwise "
+                        "fall back to V1.",
+                        current_kv_config["event_buffer_max_size"],
+                    )
+                current_kv_config["event_buffer_max_size"] = 0
             else:
-                current_kv_config[
-                    "event_buffer_max_size"
-                ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+                # Preserve a user-specified event_buffer_max_size from YAML/overrides;
+                # only apply the default when it is unset or zero (TRTLLM's disabled value).
+                existing = current_kv_config.get("event_buffer_max_size")
+                if existing:
+                    logging.info(
+                        f"Using existing event_buffer_max_size={existing} from kv_cache_config"
+                    )
+                else:
+                    current_kv_config[
+                        "event_buffer_max_size"
+                    ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
 
         # Only pytorch backend is supported for now to publish events and metrics.
         if "backend" not in arg_map:
@@ -478,6 +573,13 @@ async def init_llm_worker(
         model_name=model_name_for_metrics,
         component_name=config.component,
     )
+
+    early_failover_activation = None
+    lock_before_init = os.environ.get("DYN_TRTLLM_GMS_LOCK_BEFORE_INIT", "1").lower()
+    if lock_before_init not in {"0", "false", "no", "off"}:
+        early_failover_activation = await acquire_gms_failover_lock_before_init(
+            backend_name="trtllm"
+        )
 
     async with get_llm_engine(
         engine_args,
@@ -648,6 +750,20 @@ async def init_llm_worker(
             media_fetcher.allow_direct_ip(allow_internal)
             media_fetcher.allow_direct_port(allow_internal)
 
+        health_check_payload = TrtllmHealthCheckPayload(
+            tokenizer=tokenizer,
+            disaggregation_mode=config.disaggregation_mode,
+        ).to_dict()
+
+        if early_failover_activation is not None and early_failover_activation.enabled:
+            failover_activation = early_failover_activation
+        else:
+            failover_activation = await prepare_gms_failover(
+                TRTLLMEngineQuiesceController(engine),
+                runtime,
+                backend_name="trtllm",
+            )
+
         # Register the model with runtime config
         # Encode workers do NOT register - they're internal workers only.
         # Prefill and decode workers register
@@ -679,11 +795,6 @@ async def init_llm_worker(
                 worker_type=worker_type,
                 needs=needs,
             )
-
-        health_check_payload = TrtllmHealthCheckPayload(
-            tokenizer=tokenizer,
-            disaggregation_mode=config.disaggregation_mode,
-        ).to_dict()
 
         if config.publish_events_and_metrics:
             # Initialize and pass in the publisher to the request handler to
@@ -729,32 +840,52 @@ async def init_llm_worker(
                 enable_local_indexer=config.enable_local_indexer,
                 metrics_collector=metrics_collector,
             ) as publisher:
-                handler_config.publisher = publisher
-                handler = RequestHandlerFactory().get_request_handler(handler_config)
-                if config.load_format == "gms":
-                    _register_memory_routes(runtime, handler)
-
-                encoder_cache = getattr(handler, "_encoder_cache", None)
-                if encoder_cache is not None:
-                    register_embedding_cache_metrics(
-                        endpoint=endpoint,
-                        cache=encoder_cache,
-                        model_name=model_name_for_metrics,
-                        component_name=config.component,
+                if publisher_holder is not None:
+                    publisher_holder.append(publisher)
+                try:
+                    handler_config.publisher = publisher
+                    handler = RequestHandlerFactory().get_request_handler(
+                        handler_config
                     )
-                await endpoint.serve_endpoint(
-                    handler.generate,
-                    metrics_labels=metrics_labels,
-                    health_check_payload=health_check_payload,
-                )
+                    failover_activation.attach_to(handler)
+                    if config.load_format == "gms":
+                        _register_memory_routes(runtime, handler)
+                    if failover_activation.enabled:
+                        await run_gms_failover_promotion_warmup(
+                            handler.generate,
+                            health_check_payload,
+                            backend_name="trtllm",
+                        )
+
+                    encoder_cache = getattr(handler, "_encoder_cache", None)
+                    if encoder_cache is not None:
+                        register_embedding_cache_metrics(
+                            endpoint=endpoint,
+                            cache=encoder_cache,
+                            model_name=model_name_for_metrics,
+                            component_name=config.component,
+                        )
+                    await endpoint.serve_endpoint(
+                        handler.generate,
+                        metrics_labels=metrics_labels,
+                        health_check_payload=health_check_payload,
+                    )
+                finally:
+                    if publisher_holder is not None and publisher in publisher_holder:
+                        publisher_holder.remove(publisher)
 
             # Shutdown consolidator publisher if it was created
             if consolidator_publisher:
                 consolidator_publisher.shutdown()
         else:
             handler = RequestHandlerFactory().get_request_handler(handler_config)
+            failover_activation.attach_to(handler)
             if config.load_format == "gms":
                 _register_memory_routes(runtime, handler)
+            if failover_activation.enabled:
+                await run_gms_failover_promotion_warmup(
+                    handler.generate, health_check_payload, backend_name="trtllm"
+                )
             await endpoint.serve_endpoint(
                 handler.generate, health_check_payload=health_check_payload
             )

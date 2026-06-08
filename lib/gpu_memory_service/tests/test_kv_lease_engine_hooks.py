@@ -777,6 +777,109 @@ def test_trtllm_v2_slot_allocator_uses_global_gms_leases(monkeypatch):
     assert int(second.allocate().slot_id) == 0
 
 
+class _CapturingLeaseClient:
+    namespace = "trtllm-test"
+    owner_id = "owner-test"
+
+    def __init__(self, block_id: int | None = None) -> None:
+        self.block_id = block_id
+        self.preferred_requests: list[list[int]] = []
+        self.released: list[int] = []
+
+    def acquire(
+        self,
+        count: int,
+        *,
+        preferred_blocks: list[int] | None = None,
+        allow_partial: bool = False,
+        strict_preferred: bool = False,
+    ) -> list[KVLease]:
+        del allow_partial, strict_preferred
+        self.preferred_requests.append(list(preferred_blocks or []))
+        if count != 1:
+            raise AssertionError("test client only supports single-slot acquire")
+        block_id = self.block_id
+        if block_id is None:
+            if not preferred_blocks:
+                raise AssertionError("expected ready preferred block")
+            block_id = int(preferred_blocks[0])
+        return [KVLease(int(block_id), 0, 0)]
+
+    def release(self, leases: list[KVLease]) -> None:
+        self.released.extend(int(lease.block_id) for lease in leases)
+
+    def seal(self, leases: list[KVLease]) -> None:
+        del leases
+
+    def free_count(self) -> int:
+        return 1
+
+
+def test_trtllm_v2_slot_allocator_only_advertises_ready_recycled_slots(monkeypatch):
+    core = _install_fake_trtllm(monkeypatch)
+    from gpu_memory_service.integrations.trtllm import install_kv_leases_v2
+
+    install_kv_leases_v2._patched = False
+    install_kv_leases_v2._factory = None
+    install_kv_leases_v2._ALLOC_STATE.clear()
+    clients: list[_CapturingLeaseClient] = []
+
+    def factory(_group, _total_slots: int, _suffix: str):
+        client = _CapturingLeaseClient()
+        clients.append(client)
+        return client
+
+    assert install_kv_leases_v2.install(factory=factory) is True
+    allocator = core.GpuPoolGroup(4, [128], None)._slot_allocator
+    allocator._num_active_slots = 4
+    allocator._recycled_slots = [
+        core.Slot(core.SlotId(1), core.CachedCudaEvent.NULL),
+        core.Slot(core.SlotId(2), core.CachedCudaEvent.NULL),
+    ]
+    allocator._num_ready_recycled_slots = 1
+    allocator._scrub_events = lambda: None
+
+    slot = allocator.allocate()
+
+    assert int(slot.slot_id) == 1
+    assert clients[0].preferred_requests == [[1]]
+    assert [int(slot.slot_id) for slot in allocator._recycled_slots] == [2]
+    assert allocator._num_ready_recycled_slots == 0
+
+
+def test_trtllm_v2_slot_allocator_does_not_take_pending_recycled_slot(monkeypatch):
+    core = _install_fake_trtllm(monkeypatch)
+    from gpu_memory_service.integrations.trtllm import install_kv_leases_v2
+
+    install_kv_leases_v2._patched = False
+    install_kv_leases_v2._factory = None
+    install_kv_leases_v2._ALLOC_STATE.clear()
+    clients: list[_CapturingLeaseClient] = []
+
+    def factory(_group, _total_slots: int, _suffix: str):
+        client = _CapturingLeaseClient(block_id=2)
+        clients.append(client)
+        return client
+
+    assert install_kv_leases_v2.install(factory=factory) is True
+    allocator = core.GpuPoolGroup(4, [128], None)._slot_allocator
+    allocator._num_active_slots = 4
+    allocator._recycled_slots = [
+        core.Slot(core.SlotId(1), core.CachedCudaEvent.NULL),
+        core.Slot(core.SlotId(2), core.CachedCudaEvent.NULL),
+    ]
+    allocator._num_ready_recycled_slots = 1
+    allocator._scrub_events = lambda: None
+
+    with pytest.raises(core.OutOfPagesError):
+        allocator.allocate()
+
+    assert clients[0].preferred_requests == [[1]]
+    assert clients[0].released == [2]
+    assert [int(slot.slot_id) for slot in allocator._recycled_slots] == [1, 2]
+    assert allocator._num_ready_recycled_slots == 1
+
+
 def test_trtllm_gms_remote_code_cache_is_local(monkeypatch, tmp_path):
     model_config = types.ModuleType("tensorrt_llm._torch.model_config")
     model_config.HF_MODULES_CACHE = "/shared/hf/modules"

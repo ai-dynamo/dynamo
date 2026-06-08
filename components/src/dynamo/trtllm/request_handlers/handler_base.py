@@ -34,6 +34,7 @@ from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Client, Context
+from dynamo.common.gms_failover import release_attached_gms_failover_lock
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.llm.exceptions import EngineShutdown
@@ -321,16 +322,45 @@ class HandlerBase(BaseGenerativeHandler):
                 return {"status": "ok", "message": "Memory already released"}
 
             try:
-                await self._set_reject_new_requests(True)
+                timeout_s = float(body.get("timeout_s", 30.0))
 
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.unregister_endpoint_instance()
 
-                timeout_s = float(body.get("timeout_s", 30.0))
+                if body.get("handoff"):
+                    settle_ms = float(
+                        body.get(
+                            "handoff_settle_ms",
+                            os.environ.get("DYN_TRTLLM_HANDOFF_ROUTE_SETTLE_MS", "250"),
+                        )
+                    )
+                    if settle_ms > 0:
+                        await asyncio.sleep(settle_ms / 1000.0)
+                    await self._set_reject_new_requests(True)
+                    lock_released = await release_attached_gms_failover_lock(
+                        self, backend_name="trtllm"
+                    )
+                    return {
+                        "status": "ok",
+                        "message": "Failover handoff released",
+                        "failover_lock_released": lock_released,
+                    }
+
+                await self._set_reject_new_requests(True)
                 await self._wait_for_inflight_requests(timeout_s)
                 await self._quiesce_controller.quiesce(tags)
 
-                return {"status": "ok", "message": "Memory released"}
+                lock_released = False
+                if body.get("release_failover_lock"):
+                    lock_released = await release_attached_gms_failover_lock(
+                        self, backend_name="trtllm"
+                    )
+
+                return {
+                    "status": "ok",
+                    "message": "Memory released",
+                    "failover_lock_released": lock_released,
+                }
             except Exception as exc:
                 logger.error("release_memory_occupation failed: %s", exc)
                 # Rollback: TRT-LLM has no pause_generation(), so we

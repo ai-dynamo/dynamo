@@ -102,9 +102,22 @@ async def worker():
     # The drain callback waits for in-flight requests to finish so that GPU
     # memory is not freed while transfers are active (issue #7319).
     engine_holder: list = []
+    publisher_holder: list = []
     drain_callback = None
     if config.disaggregation_mode == DisaggregationMode.PREFILL:
         drain_callback = _make_drain_callback(engine_holder)
+
+    async def cleanup_engine() -> None:
+        if publisher_holder:
+            await publisher_holder[0].cleanup()
+            logging.info("TRT-LLM publisher cleanup complete")
+
+        if not engine_holder:
+            logging.info("TRT-LLM engine not initialized; skipping cleanup")
+            return
+
+        await engine_holder[0].cleanup()
+        logging.info("TRT-LLM engine cleanup complete")
 
     install_signal_handlers(
         loop,
@@ -112,6 +125,7 @@ async def worker():
         shutdown_endpoints,
         shutdown_event,
         drain_callback=drain_callback,
+        cleanup_callback=cleanup_engine,
     )
 
     logging.info(f"Initializing the worker with config: {config}")
@@ -121,6 +135,7 @@ async def worker():
         shutdown_event,
         shutdown_endpoints,
         engine_holder=engine_holder,
+        publisher_holder=publisher_holder,
     )
 
 
