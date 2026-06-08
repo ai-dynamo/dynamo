@@ -101,6 +101,17 @@ logger = logging.getLogger(__name__)
 _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 
+# Conditional-prefill bypass marker. Kept in sync with
+# `BYPASS_REMOTE_PREFILL_ANNOTATION` in
+# `lib/llm/src/kv_router/prefill_router/mod.rs`. When the Rust router decides
+# a request is cheap enough to run locally on a decode worker (small net-new
+# prefill, mostly cached), it pushes this string into `req.annotations` and
+# routes the request straight to the chosen decode worker, skipping the
+# remote prefill stage. The decode handler treats a request carrying this
+# annotation as if disaggregation_mode were AGGREGATED — full prefill+decode
+# on this worker, no `kv_transfer_params`.
+BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
+
 
 class _DeferredAbort:
     """Defers engine_client.abort(request_id) until the first engine output.
@@ -2313,6 +2324,22 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             embedding_params = None
 
         is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
+        if is_decode_only and BYPASS_REMOTE_PREFILL_ANNOTATION in (
+            request.get("annotations") or []
+        ):
+            # Conditional-prefill bypass: the Rust router skipped the remote
+            # prefill stage for this request. Run it like an AGG request
+            # (full prefill+decode locally) instead of taking the decode-only
+            # paths that expect KV-transfer metadata from an upstream prefill
+            # worker. `kv_params` / `embedding_params` are already `None`
+            # above (no `prefill_result` is sent on the bypass path), so the
+            # downstream code will naturally skip the `kv_transfer_params`
+            # wiring and let vLLM run a full forward pass.
+            logger.debug(
+                "DECODE: conditional-prefill bypass annotation present; "
+                "running request as AGG (prefill+decode on this worker)."
+            )
+            is_decode_only = False
         has_mm_data = (
             "multi_modal_data" in request and request["multi_modal_data"] is not None
         )

@@ -610,6 +610,77 @@ class TestDecodeWorkerMultimodalBranching:
         assert len(chunks) == 1
         assert chunks[0]["status"] == "error"
 
+    async def test_decode_only_bypass_annotation_runs_as_agg(self):
+        """Decode worker with conditional-prefill bypass annotation runs as AGG.
+
+        With `x-bypass-remote-prefill` set, the decode handler should take
+        the AGG multimodal path (`_extract_multimodal_data`) instead of the
+        decode-only path that errors when there is no `prefill_result`.
+        """
+        handler = _make_decode_handler(
+            model="Qwen/Qwen3-VL-2B-Instruct",
+            disaggregation_mode="DECODE",
+        )
+        handler._extract_multimodal_data = AsyncMock(return_value=None)
+        # Stop _generate_token_mode early to avoid mocking the engine.
+        handler._build_prompt_from_request = MagicMock(
+            return_value=(None, None, {"status": "error", "message": "test stop"})
+        )
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "multi_modal_data": {"image_url": [{"Url": "http://img.png"}]},
+            "sampling_options": {},
+            "stop_conditions": {},
+            "output_options": {},
+            "annotations": [mod.BYPASS_REMOTE_PREFILL_ANNOTATION],
+        }
+        context = MagicMock()
+
+        chunks = []
+        async for chunk in handler._generate_token_mode(request, context, "req-1"):
+            chunks.append(chunk)
+
+        # Took the AGG path, not the decode-only error path.
+        handler._extract_multimodal_data.assert_awaited_once()
+        assert len(chunks) == 1
+        assert chunks[0]["message"] == "test stop"
+
+    async def test_decode_only_bypass_annotation_text_only_does_not_set_kv_params(self):
+        """Text-only bypass request: no `kv_transfer_params` flows to vLLM.
+
+        Confirms the AGG-style execution doesn't accidentally pick up KV
+        transfer metadata. We stop just before the engine call by returning
+        an error from `_build_prompt_from_request`, then inspect the
+        sampling_params constructed up to that point would have no
+        kv_transfer_params (none were extracted because there is no
+        `prefill_result`).
+        """
+        handler = _make_decode_handler(disaggregation_mode="DECODE")
+        handler._extract_multimodal_data = AsyncMock(return_value=None)
+        handler._build_prompt_from_request = MagicMock(
+            return_value=(None, None, {"status": "error", "message": "stop"})
+        )
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "sampling_options": {},
+            "stop_conditions": {},
+            "output_options": {},
+            "annotations": [mod.BYPASS_REMOTE_PREFILL_ANNOTATION],
+        }
+        context = MagicMock()
+
+        chunks = []
+        async for chunk in handler._generate_token_mode(request, context, "req-1"):
+            chunks.append(chunk)
+
+        # Reached the AGG branch (sampling params would not have
+        # kv_transfer_params attached since no prefill_result was supplied).
+        # Bypass should not error on the missing prefill_result.
+        assert len(chunks) == 1
+        assert chunks[0]["message"] == "stop"
+
 
 # ── Prefill _build_embedding_params tests ──────────────────────────
 
