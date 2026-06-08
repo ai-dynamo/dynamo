@@ -240,6 +240,11 @@ pub fn select_remote_g2_reuse_plan(
 
 #[cfg(test)]
 mod tests {
+    // Test naming convention:
+    // - `serde_*` covers the wire-format contract.
+    // - `select_*` covers the selection algorithm.
+    // - `scenario_*` covers full plan-shape behavior for concrete inputs.
+
     use crate::indexer::{LowerTierMatchDetails, MatchDetails, TieredMatchDetails};
     use crate::protocols::{LocalBlockHash, OverlapScores, StorageTier, WorkerWithDpRank};
     use crate::remote_g2_plan::{
@@ -311,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_kv_reuse_plan_round_trips_json() {
+    fn serde_plan_round_trips_basic() {
         let plan = test_plan();
         let json = serde_json::to_string(&plan).unwrap();
         let decoded: RemoteKvReusePlan = serde_json::from_str(&json).unwrap();
@@ -319,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_kv_reuse_plan_round_trips_engine_block_hashes() {
+    fn serde_plan_round_trips_engine_block_hashes() {
         // Populated engine_block_hashes must appear in the JSON and survive
         // a serialize → deserialize round trip with the exact same values.
         let mut plan = test_plan();
@@ -340,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_kv_reuse_plan_serialization_has_no_forbidden_router_truth() {
+    fn serde_plan_has_no_router_truth_fields() {
         let json = serde_json::to_string(&test_plan()).unwrap();
         for forbidden in [
             "virtual_address",
@@ -360,13 +365,13 @@ mod tests {
     }
 
     #[test]
-    fn no_plan_reason_is_low_cardinality_snake_case() {
+    fn serde_no_plan_reason_uses_snake_case() {
         let json = serde_json::to_string(&RemoteKvReuseNoPlanReason::NoRemoteG2Candidate).unwrap();
         assert_eq!(json, "\"no_remote_g2_candidate\"");
     }
 
     #[test]
-    fn selects_longest_remote_g2_prefix() {
+    fn select_longest_remote_g2_prefix() {
         let hashes = block_hashes(5);
         let target = WorkerWithDpRank::new(9, 0);
         let matches = tiered_matches(
@@ -391,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_g2_tie_break_is_stable_by_worker_then_rank() {
+    fn select_tie_break_by_worker_then_rank() {
         let hashes = block_hashes(4);
         let target = WorkerWithDpRank::new(9, 0);
         let matches = tiered_matches(
@@ -416,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_g1_device_hits_are_rejected_not_selected() {
+    fn select_rejects_g1_only_device_hits() {
         let hashes = block_hashes(2);
         let target = WorkerWithDpRank::new(9, 0);
         let matches = TieredMatchDetails {
@@ -446,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn source_selection_does_not_change_target() {
+    fn select_preserves_target_identity() {
         let hashes = block_hashes(3);
         let target = WorkerWithDpRank::new(42, 2);
         let matches = tiered_matches(&[], &[(WorkerWithDpRank::new(7, 0), 3)]);
@@ -465,7 +470,59 @@ mod tests {
     }
 
     #[test]
-    fn zero_host_pinned_hits_return_no_contiguous_prefix() {
+    fn select_distinguishes_target_by_dp_rank() {
+        let hashes = block_hashes(3);
+        let target = WorkerWithDpRank::new(9, 0);
+        let source = WorkerWithDpRank::new(9, 1);
+        let matches = tiered_matches(&[], &[(source, 3)]);
+
+        let decision = select_remote_g2_reuse_plan(selection_input(target, &hashes, &matches));
+
+        match decision {
+            RemoteKvReuseDecision::Plan { plan, .. } => {
+                assert_eq!(plan.source_worker_id, 9);
+                assert_eq!(plan.source_dp_rank, 1);
+                assert_eq!(plan.planned_prefix_blocks, 3);
+            }
+            other => panic!("expected plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_plan_metadata_propagates_from_input() {
+        let hashes = block_hashes(3);
+        let target = WorkerWithDpRank::new(42, 2);
+        let source = WorkerWithDpRank::new(7, 1);
+        let matches = tiered_matches(&[], &[(source, 3)]);
+        let input = RemoteKvReuseSelectionInput {
+            request_id: "req-meta",
+            target,
+            block_hashes: &hashes,
+            block_size_tokens: 32,
+            tiered_matches: &matches,
+            created_at_ms: 1234,
+            expires_at_ms: 5678,
+        };
+
+        let decision = select_remote_g2_reuse_plan(input);
+
+        match decision {
+            RemoteKvReuseDecision::Plan { plan, .. } => {
+                assert_eq!(plan.request_id, "req-meta");
+                assert_eq!(plan.block_size_tokens, 32);
+                assert_eq!(plan.created_at_ms, 1234);
+                assert_eq!(plan.expires_at_ms, 5678);
+                assert_eq!(plan.plan_version, REMOTE_KV_REUSE_PLAN_VERSION);
+                assert_eq!(plan.source_tier, StorageTier::HostPinned);
+                assert!(plan.engine_block_hashes.is_empty());
+                assert_eq!(plan.plan_id, "remote-g2:req-meta:7:1:1234");
+            }
+            other => panic!("expected plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scenario_zero_host_pinned_hits_no_contiguous_prefix() {
         let hashes = block_hashes(2);
         let target = WorkerWithDpRank::new(9, 0);
         let matches = tiered_matches(&[], &[(WorkerWithDpRank::new(7, 0), 0)]);
@@ -481,7 +538,23 @@ mod tests {
     }
 
     #[test]
-    fn plan_start_block_index_is_zero_when_source_has_no_device_match() {
+    fn scenario_empty_request_no_contiguous_prefix() {
+        let hashes: Vec<LocalBlockHash> = Vec::new();
+        let target = WorkerWithDpRank::new(9, 0);
+        let matches = tiered_matches(&[], &[(WorkerWithDpRank::new(7, 0), 3)]);
+
+        let decision = select_remote_g2_reuse_plan(selection_input(target, &hashes, &matches));
+
+        match decision {
+            RemoteKvReuseDecision::NoPlan { reason, .. } => {
+                assert_eq!(reason, RemoteKvReuseNoPlanReason::NoContiguousPrefix);
+            }
+            other => panic!("expected no plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scenario_partial_g2_no_g1_matched_prefix_only() {
         // Source A has 0 device-tier matches and 3 HostPinned hits → plan
         // covers request positions [0, 3) and start_block_index == 0.
         let hashes = block_hashes(5);
@@ -492,17 +565,20 @@ mod tests {
         let decision = select_remote_g2_reuse_plan(selection_input(target, &hashes, &matches));
 
         match decision {
-            RemoteKvReuseDecision::Plan { plan, .. } => {
+            RemoteKvReuseDecision::Plan { plan, stats } => {
+                assert_eq!(plan.source_worker_id, 7);
                 assert_eq!(plan.start_block_index, 0);
                 assert_eq!(plan.planned_prefix_blocks, 3);
                 assert_eq!(plan.router_block_hashes, hashes[..3].to_vec());
+                assert!(plan.planned_prefix_blocks < hashes.len() as u32);
+                assert_eq!(stats.rejected_g1_candidates, 0);
             }
             other => panic!("expected plan, got {other:?}"),
         }
     }
 
     #[test]
-    fn plan_start_block_index_equals_source_device_match() {
+    fn scenario_g1_partial_g2_tail_start_at_device_match() {
         // Source A has 2 device-tier matches and 2 HostPinned hits chained
         // past them → plan covers request positions [2, 4) and
         // start_block_index == 2 (skip past A's device chain).
@@ -520,6 +596,102 @@ mod tests {
                 assert_eq!(plan.router_block_hashes, hashes[2..4].to_vec());
             }
             other => panic!("expected plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scenario_zero_overlap_no_remote_g2_candidate() {
+        let hashes = block_hashes(4);
+        let target = WorkerWithDpRank::new(9, 0);
+        let matches = tiered_matches(&[], &[]);
+
+        let decision = select_remote_g2_reuse_plan(selection_input(target, &hashes, &matches));
+
+        match decision {
+            RemoteKvReuseDecision::NoPlan { reason, stats } => {
+                assert_eq!(reason, RemoteKvReuseNoPlanReason::NoRemoteG2Candidate);
+                assert_eq!(stats.rejected_g1_candidates, 0);
+            }
+            other => panic!("expected no plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scenario_target_only_host_pinned_no_remote_g2_candidate() {
+        let hashes = block_hashes(3);
+        let target = WorkerWithDpRank::new(9, 0);
+        let matches = tiered_matches(&[], &[(target, 3)]);
+
+        let decision = select_remote_g2_reuse_plan(selection_input(target, &hashes, &matches));
+
+        match decision {
+            RemoteKvReuseDecision::NoPlan { reason, stats } => {
+                assert_eq!(reason, RemoteKvReuseNoPlanReason::NoRemoteG2Candidate);
+                assert_eq!(stats.rejected_g1_candidates, 0);
+            }
+            other => panic!("expected no plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scenario_no_host_pinned_tier_no_remote_g2_candidate() {
+        let hashes = block_hashes(3);
+        let target = WorkerWithDpRank::new(9, 0);
+        let matches = TieredMatchDetails {
+            device: MatchDetails {
+                overlap_scores: OverlapScores::new(),
+                ..Default::default()
+            },
+            lower_tier: Default::default(),
+        };
+
+        let decision = select_remote_g2_reuse_plan(selection_input(target, &hashes, &matches));
+
+        match decision {
+            RemoteKvReuseDecision::NoPlan { reason, stats } => {
+                assert_eq!(reason, RemoteKvReuseNoPlanReason::NoRemoteG2Candidate);
+                assert_eq!(stats.rejected_g1_candidates, 0);
+            }
+            other => panic!("expected no plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scenario_full_g2_no_g1_full_coverage_plan() {
+        let hashes = block_hashes(3);
+        let target = WorkerWithDpRank::new(9, 0);
+        let source = WorkerWithDpRank::new(7, 0);
+        let matches = tiered_matches(&[], &[(source, 3)]);
+
+        let decision = select_remote_g2_reuse_plan(selection_input(target, &hashes, &matches));
+
+        match decision {
+            RemoteKvReuseDecision::Plan { plan, stats } => {
+                assert_eq!(plan.source_worker_id, 7);
+                assert_eq!(plan.start_block_index, 0);
+                assert_eq!(plan.planned_prefix_blocks, hashes.len() as u32);
+                assert_eq!(plan.router_block_hashes, hashes);
+                assert_eq!(stats.rejected_g1_candidates, 0);
+            }
+            other => panic!("expected plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scenario_full_g1_extra_g2_no_contiguous_prefix() {
+        let hashes = block_hashes(4);
+        let target = WorkerWithDpRank::new(9, 0);
+        let source = WorkerWithDpRank::new(7, 0);
+        let matches = tiered_matches(&[(source, 4)], &[(source, 2)]);
+
+        let decision = select_remote_g2_reuse_plan(selection_input(target, &hashes, &matches));
+
+        match decision {
+            RemoteKvReuseDecision::NoPlan { reason, stats } => {
+                assert_eq!(reason, RemoteKvReuseNoPlanReason::NoContiguousPrefix);
+                assert!(stats.rejected_g1_candidates > 0);
+            }
+            other => panic!("expected no plan, got {other:?}"),
         }
     }
 }
