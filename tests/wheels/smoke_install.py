@@ -19,10 +19,12 @@ from urllib.parse import unquote, urlparse
 
 GLIBC_FLOOR = (2, 28)
 MANYLINUX_POLICY = "manylinux_2_28"
-# First-party optional wheels expected on a CUDA build.
-ASSERTED_OPTIONAL_DISTS = ("kvbm", "gpu-memory-service")
-# Third-party wheels we ship but do not own — reported, never asserted.
-REPORTED_OPTIONAL_DISTS = ("nixl",)
+# First-party optional wheel that must ship with the core wheels.
+REQUIRED_OPTIONAL_DIST = "kvbm"
+# Wheels we ship but do not own / do not validate as manylinux: nixl lives under the
+# nixl/ subdir (excluded by considering only top-level wheels); gpu-memory-service is
+# not a shipped artifact and is a non-manylinux wheel.
+IGNORED_BINARY_DISTS = ("gpu-memory-service",)
 EXTRA_EXPECTED_DISTS = {
     "mocker": ("aiconfigurator",),
     "vllm": ("vllm", "nixl"),
@@ -141,37 +143,25 @@ def assert_core_wheel_metadata(wheelhouse: Path, target_arch: str | None) -> Non
         assert_arch_tag(wheel, target_arch)
 
 
-def check_optional_wheels(
-    wheelhouse: Path, target_arch: str | None, expect_optional: bool
-) -> None:
-    for dist_name in ASSERTED_OPTIONAL_DISTS:
-        matches = find_wheels(wheelhouse, dist_name)
-        if not matches:
-            if expect_optional:
-                raise AssertionError(
-                    f"expected first-party {dist_name!r} wheel on this build, "
-                    f"none found in {wheelhouse}"
-                )
-            print(f"optional wheel absent: {dist_name}")
-            continue
-        for wheel in matches:
-            metadata = wheel_metadata(wheel)
-            print(
-                f"optional wheel present: {wheel.name} "
-                f"({metadata.get('Name')} {metadata.get('Version')})"
-            )
-            assert_arch_tag(wheel, target_arch)
+def check_optional_wheels(wheelhouse: Path, target_arch: str | None) -> None:
+    kvbm = require_one_wheel(wheelhouse, REQUIRED_OPTIONAL_DIST)
+    metadata = wheel_metadata(kvbm)
+    print(
+        f"required wheel present: {kvbm.name} "
+        f"({metadata.get('Name')} {metadata.get('Version')})"
+    )
+    assert_arch_tag(kvbm, target_arch)
 
-    for dist_name in REPORTED_OPTIONAL_DISTS:
-        for wheel in find_wheels(wheelhouse, dist_name):
-            print(f"third-party wheel present (not asserted): {wheel.name}")
+    for wheel in find_wheels(wheelhouse, "nixl"):
+        print(f"third-party wheel present (not asserted): {wheel.name}")
 
 
 def binary_wheels(wheelhouse: Path) -> list[Path]:
-    third_party = {canonical_name(dist) for dist in REPORTED_OPTIONAL_DISTS}
+    # Top-level wheels only: the nixl/ subdir is third-party and excluded here.
+    ignored = {canonical_name(dist) for dist in IGNORED_BINARY_DISTS}
     result = []
-    for wheel in all_wheels(wheelhouse):
-        if wheel_dist_name(wheel) in third_party:
+    for wheel in sorted(wheelhouse.glob("*.whl")):
+        if wheel_dist_name(wheel) in ignored:
             continue
         _, _, platform_tag = wheel_tags(wheel)
         if platform_tag != "any":
@@ -250,9 +240,11 @@ def assert_glibc_floor(wheelhouse: Path) -> None:
             )
 
 
-def create_venv(base_python: str) -> Path:
+def create_venv(python_spec: str) -> Path:
+    # python_spec is a version ("3.10") or an interpreter path; uv fetches the
+    # interpreter if needed and --seed installs pip into the fresh venv.
     venv_dir = Path(tempfile.mkdtemp(prefix="dynamo-wheel-venv-"))
-    run([base_python, "-m", "venv", str(venv_dir)])
+    run(["uv", "venv", "--seed", "--python", python_spec, str(venv_dir)])
     return venv_dir / "bin" / "python"
 
 
@@ -348,14 +340,25 @@ assert not bundled_libs, bundled_libs
     run([str(venv_python), "-c", code])
 
 
-def install_core(wheelhouse: Path, base_python: str) -> Path:
+OPTIONAL_IMPORT_NAMES = {"kvbm": "kvbm"}
+
+
+def install_core(wheelhouse: Path, python_spec: str, also: tuple[str, ...] = ()) -> Path:
     ai_dynamo = require_one_wheel(wheelhouse, "ai-dynamo")
     runtime = require_one_wheel(wheelhouse, "ai-dynamo-runtime")
-    venv_python = create_venv(base_python)
-    pip_install(venv_python, wheelhouse, [str(runtime), str(ai_dynamo)])
+    also_wheels = {dist: require_one_wheel(wheelhouse, dist) for dist in also}
+
+    venv_python = create_venv(python_spec)
+    requirements = [str(runtime), str(ai_dynamo), *(str(w) for w in also_wheels.values())]
+    pip_install(venv_python, wheelhouse, requirements)
     pip_check(venv_python)
     assert_dynamo_local_install(venv_python, wheelhouse, ai_dynamo, runtime)
     run_core_import_smoke(venv_python)
+
+    for dist, wheel in also_wheels.items():
+        assert_local_direct_url(venv_python, dist, wheel, wheelhouse)
+        import_name = OPTIONAL_IMPORT_NAMES.get(dist, dist)
+        run([str(venv_python), "-c", f"import {import_name}; assert {import_name}"])
     return venv_python
 
 
@@ -403,7 +406,6 @@ def main() -> None:
     parser.add_argument("--target-arch", default="")
     parser.add_argument("--extra", default="")
     parser.add_argument("--python", default=sys.executable)
-    parser.add_argument("--expect-optional", action="store_true")
     args = parser.parse_args()
 
     wheelhouse = args.wheelhouse.resolve()
@@ -417,7 +419,7 @@ def main() -> None:
 
     if args.scenario == "metadata":
         assert_core_wheel_metadata(wheelhouse, args.target_arch)
-        check_optional_wheels(wheelhouse, args.target_arch, args.expect_optional)
+        check_optional_wheels(wheelhouse, args.target_arch)
         assert_auditwheel_show(wheelhouse)
         assert_glibc_floor(wheelhouse)
     elif args.scenario == "core":
