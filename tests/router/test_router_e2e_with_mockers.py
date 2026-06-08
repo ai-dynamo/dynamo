@@ -42,6 +42,7 @@ from tests.router.common import (
 from tests.router.helper import (
     generate_random_suffix,
     get_kv_indexer_command,
+    get_kv_indexer_test_env,
     get_runtime,
     poll_for_worker_instances,
     topology_env,
@@ -418,6 +419,7 @@ class MockerProcess:
                 log_dir=self._request.node.name,
                 terminate_all_matching_process_names=False,
                 display_name="dynamo-kv-indexer",
+                env=get_kv_indexer_test_env(),
             )
             logger.info(
                 f"Starting standalone indexer on port {self._standalone_indexer_port}"
@@ -587,6 +589,7 @@ class MockerProcess:
             log_dir=self._request.node.name,
             terminate_all_matching_process_names=False,
             display_name="dynamo-kv-indexer-b",
+            env=get_kv_indexer_test_env(),
         )
         logger.info(
             f"Starting standalone indexer B on port {self._standalone_indexer_b_port} "

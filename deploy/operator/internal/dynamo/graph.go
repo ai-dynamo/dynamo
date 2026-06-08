@@ -262,18 +262,24 @@ func ParseDynDeploymentConfig(jsonContent []byte) (DynDeploymentConfig, error) {
 }
 
 func (r RollingUpdateContext) InProgress() bool {
-	return len(r.OldWorkerReplicas) > 0
+	return len(r.OldWorkerReplicaTargetsByComponent) > 0
 }
 
 // RollingUpdateContext provides information about an in-progress rolling update.
 type RollingUpdateContext struct {
 	// NewWorkerHash is the short hash (8 chars) for the new worker spec, used for DCD naming
 	NewWorkerHash string
-	// OldWorkerReplicas maps service name to the desired replica count for old workers.
-	// Used by the controller to patch old worker DCDs directly.
-	OldWorkerReplicas map[string]int32
-	// NewWorkerReplicas maps service name to the desired replica count for new workers.
-	NewWorkerReplicas map[string]int32
+
+	// Aggregate desired replica targets for old worker generations, keyed by logical component name.
+	// Example: worker -> 3 means all old DCDs for component "worker" should sum to 3 replicas.
+	OldWorkerReplicaTargetsByComponent map[string]int32
+
+	// Concrete desired replica targets for each old worker DCD, keyed by DCD object name.
+	// Example: dgd-worker-a -> 3, dgd-worker-b -> 0.
+	OldWorkerReplicaTargetsByDCD map[string]int32
+
+	// Desired replica targets for the new worker generation, keyed by logical component name.
+	NewWorkerReplicaTargetsByComponent map[string]int32
 }
 
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig.
@@ -331,6 +337,16 @@ func backendFrameworkForGeneratedDCDs(parentDGD *v1beta1.DynamoGraphDeployment) 
 	}
 
 	return string(detected), nil
+}
+
+// BackendFrameworkForComponent returns the framework used to render a specific
+// DGD component. It is exported for controllers that need to build resources
+// from a component without going through DCD generation.
+func BackendFrameworkForComponent(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	dynamoDeployment *v1beta1.DynamoGraphDeployment,
+) (BackendFramework, error) {
+	return getBackendFrameworkFromComponent(component, dynamoDeployment)
 }
 
 func GetDynamoNamespace(object metav1.Object, service *v1beta1.DynamoComponentDeploymentSharedSpec) string {
@@ -427,7 +443,7 @@ func generateSingleDCD(
 	}
 
 	// during a rolling update, the replica count is determined by the rollingUpdateCtx instead of the component spec
-	if newReplicas, ok := rollingUpdateCtx.NewWorkerReplicas[componentName]; rollingUpdateCtx.InProgress() && IsWorkerComponent(string(component.ComponentType)) && ok {
+	if newReplicas, ok := rollingUpdateCtx.NewWorkerReplicaTargetsByComponent[componentName]; rollingUpdateCtx.InProgress() && IsWorkerComponent(string(component.ComponentType)) && ok {
 		deployment.Spec.Replicas = ptr.To(newReplicas)
 	} else if component.Replicas != nil {
 		deployment.Spec.Replicas = component.Replicas
@@ -1987,7 +2003,12 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	}
 
 	// GMS weight servers load weights fresh from disk and are not CRIU targets.
-	if p.operatorConfig.Checkpoint.Enabled && p.r.Role != RoleGMS {
+	shouldUseAdmissionRestore := p.operatorConfig.Checkpoint.Enabled &&
+		p.r.Role != RoleGMS &&
+		p.checkpointInfo != nil &&
+		(p.checkpointInfo.StartupPolicy == "" ||
+			p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyImmediate)
+	if p.operatorConfig.Checkpoint.Enabled && p.r.Role != RoleGMS && !shouldUseAdmissionRestore {
 		if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
 			p.ctx, p.kubeClient, p.dynamoDeployment.Namespace, podSpec, p.checkpointInfo,
 			p.operatorConfig.Checkpoint.Storage,
@@ -2029,12 +2050,21 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	if p.isMultinode && !p.isInterPodFailover {
 		minAvailable = p.r.Replicas
 	}
+	replicas := p.r.Replicas
+	if p.r.Role != RoleGMS &&
+		p.checkpointInfo != nil &&
+		p.checkpointInfo.Enabled &&
+		p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
+		!p.checkpointInfo.Ready {
+		replicas = 0
+		minAvailable = 0
+	}
 
 	clique := &grovev1alpha1.PodCliqueTemplateSpec{
 		Name: strings.ToLower(p.r.Name),
 		Spec: grovev1alpha1.PodCliqueSpec{
 			RoleName:     strings.ToLower(p.r.Name),
-			Replicas:     p.r.Replicas,
+			Replicas:     replicas,
 			MinAvailable: ptr.To(minAvailable),
 			PodSpec:      *podSpec,
 		},
@@ -2073,8 +2103,14 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		annotations[commonconsts.KubeAnnotationTopologyLabelKey] = p.dynamoDeployment.Spec.Experimental.KvTransferPolicy.LabelKey
 	}
 	if p.r.Role != RoleGMS {
-		if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(labels, annotations, p.checkpointInfo, p.operatorConfig.Checkpoint.Storage); err != nil {
-			return nil, fmt.Errorf("failed to apply checkpoint metadata for role %s: %w", p.r.Name, err)
+		if shouldUseAdmissionRestore {
+			if err := checkpoint.ApplyRestoreCandidateMetadata(labels, annotations, p.checkpointInfo); err != nil {
+				return nil, fmt.Errorf("failed to apply checkpoint candidate metadata for role %s: %w", p.r.Name, err)
+			}
+		} else {
+			if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(labels, annotations, p.checkpointInfo, p.operatorConfig.Checkpoint.Storage); err != nil {
+				return nil, fmt.Errorf("failed to apply checkpoint metadata for role %s: %w", p.r.Name, err)
+			}
 		}
 	}
 	annotations = applyRestartAnnotation(annotations, p.componentName, p.restartState, p.existingRestartAnnotations)
@@ -2128,6 +2164,7 @@ func GenerateGrovePodCliqueSet(
 		PublishNotReadyAddresses: true,
 	}
 	gangSet.Spec.Template.StartupType = ptr.To(grovev1alpha1.CliqueStartupTypeAnyOrder)
+	gangSet.Spec.Template.PriorityClassName = dynamoDeployment.Spec.PriorityClassName
 	if operatorConfig.Orchestrators.Grove.TerminationDelay.Duration > 0 {
 		gangSet.Spec.Template.TerminationDelay = &operatorConfig.Orchestrators.Grove.TerminationDelay
 	}
@@ -2226,11 +2263,20 @@ func GenerateGrovePodCliqueSet(
 		}
 
 		if usesPCSG {
+			replicas := component.Replicas
+			minAvailable := ptr.To(int32(1))
+			if checkpointInfo != nil &&
+				checkpointInfo.Enabled &&
+				checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
+				!checkpointInfo.Ready {
+				replicas = ptr.To(int32(0))
+				minAvailable = ptr.To(int32(0))
+			}
 			pcsg := grovev1alpha1.PodCliqueScalingGroupConfig{
 				Name:               strings.ToLower(componentName),
 				CliqueNames:        cliqueNames,
-				Replicas:           component.Replicas,
-				MinAvailable:       ptr.To(int32(1)),
+				Replicas:           replicas,
+				MinAvailable:       minAvailable,
 				TopologyConstraint: toGroveTopologyConstraint(component.TopologyConstraint),
 			}
 			if isInterPodGMS {

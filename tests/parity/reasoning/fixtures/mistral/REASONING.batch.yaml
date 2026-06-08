@@ -139,3 +139,19 @@ cases:
       sglang:
         reasoning_text: first
         normal_text: ' middle [THINK]second[/THINK] done'
+  REASONING.batch.6.b:
+    description: Stray end marker after a complete reasoning span(unbalanced-tag)
+    ref: dynamo
+    spec_ref: tests/parity/README.md
+    model_text: '[THINK]preamble[/THINK]body[/THINK]answer'
+    expected:
+      dynamo:
+        reasoning_text: preamble
+        normal_text: 'bodyanswer'
+        reason: 'Lossless split: when a stray close marker appears outside any reasoning block, it is stripped (parser-owned syntax must not appear in normal_text). Reasoning is captured from the first <open>...<close> pair only; subsequent stray closes are discarded.'
+      vllm:
+        reasoning_text: 'preamble'
+        normal_text: 'body[/THINK]answer'
+      sglang:
+        reasoning_text: 'preamble'
+        normal_text: 'body[/THINK]answer'

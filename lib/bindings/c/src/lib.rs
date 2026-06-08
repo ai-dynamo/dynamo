@@ -1533,10 +1533,10 @@ fn spawn_prefill_discovery_watcher(
                             Err(_) => continue,
                         };
 
-                        if !card.model_type.supports_prefill()
-                            || card.model_type.supports_chat()
-                            || card.model_type.supports_completions()
-                        {
+                        // Prefill workers are identified by `worker_type`.
+                        // Skip any card that is not a Prefill worker.
+                        use dynamo_llm::worker_type::WorkerType;
+                        if card.worker_type != Some(WorkerType::Prefill) {
                             continue;
                         }
 
@@ -1568,7 +1568,7 @@ fn spawn_prefill_discovery_watcher(
 ///
 /// This function:
 /// 1. Lists all models via discovery
-/// 2. Finds the first model in the target namespace (decode workers only)
+/// 2. Finds the first model in the target namespace (Decode or Aggregated only)
 /// 3. Downloads the model config (tokenizer files) if needed
 /// 4. Creates an OpenAIPreprocessor from the model card
 /// 5. Returns the preprocessor, the model card, and the resolved worker namespace
@@ -1583,7 +1583,10 @@ async fn fetch_preprocessor_from_discovery(
     // List all models
     let instances = discovery.list(DiscoveryQuery::AllModels).await?;
 
-    // Find first model card in the target namespace (decode workers only).
+    // Find first model card in the target namespace. We want a worker that
+    // owns the OpenAI surface (tokenizer + chat/completions), which is
+    // Decode or Aggregated — Prefill and Encode workers register cards with
+    // no engine and an empty OpenAI surface and must be skipped.
     // Use prefix matching because workers may append a rolling-update hash
     // suffix to the base namespace (e.g. "ns-dgd-58908edc" vs "ns-dgd").
     let mut model_card: Option<(ModelDeploymentCard, String)> = None;
@@ -1597,11 +1600,11 @@ async fn fetch_preprocessor_from_discovery(
             let actual_namespace = namespace.clone();
             match instance.deserialize_model::<ModelDeploymentCard>() {
                 Ok(card) => {
-                    // Skip prefill-only workers, we want decode workers for routing
-                    if card.model_type.supports_prefill()
-                        && !card.model_type.supports_chat()
-                        && !card.model_type.supports_completions()
-                    {
+                    use dynamo_llm::worker_type::WorkerType;
+                    if matches!(
+                        card.worker_type,
+                        Some(WorkerType::Prefill) | Some(WorkerType::Encode)
+                    ) {
                         continue;
                     }
                     model_card = Some((card, actual_namespace));

@@ -1,66 +1,169 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Tool Calling
-subtitle: Parse tool calls from model output and surface them as OpenAI-compatible tool_calls
+title: Tool Call Parsing (Dynamo)
+subtitle: Connect Dynamo to external tools and services using Dynamo's built-in tool call parsers
 ---
 
 <p align="left">
   <a href="./README.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
 </p>
 
-Dynamo can connect models to external tools and services by parsing tool-call
-syntax out of raw model output and surfacing it as OpenAI-compatible
-`tool_calls` on the response. Tool calling is controlled by the `tool_choice`
-and `tools` request parameters on the chat completions API.
+You can connect Dynamo to external tools and services using tool calling. By
+providing a list of available functions, Dynamo can choose to output function
+arguments for the relevant function(s) which you can execute to augment the
+prompt with relevant external information.
 
-There are two ways to parse tool calls in Dynamo, depending on whether the
-parser lives in Dynamo's own registry or in an upstream engine frontend
-(`vllm serve`, `sglang serve`, or `trtllm-serve`).
+Tool calling is controlled using the `tool_choice` and `tools` request
+parameters.
 
-## Choose a parsing path
+This page covers parser names for the default Dynamo-native path. If Dynamo
+does not list a parser for your model, see
+[Parser Engine Fallback](engine-fallback.md). For how
+`--dyn-tool-call-parser` combines with `--dyn-chat-processor` and
+`--dyn-reasoning-parser` (and which combinations are invalid), see
+[Parser Configuration](parser-configuration.md).
 
-| Path | When to use | Page |
-|------|-------------|------|
-| **Dynamo** | Dynamo ships a framework-agnostic Rust parser for the model's tool-call format. Default path. | [Tool Call Parsing (Dynamo)](dynamo.md) |
-| **Engine Fallback** | Use the framework's parser implementation (vLLM or SGLang today; TRTLLM in progress) for pre/post processing, including tool call and reasoning parsing - ensure consistency with framework behavior. | [Tool Call Parsing (Engine Fallback)](engine-fallback.md) |
+## Prerequisites
 
-Start with the Dynamo path. Fall back to the engine path only when Dynamo's
-registry does not list a parser for your model.
+To enable this feature, you should set the following flag while launching the backend worker
 
-## Why Dynamo implements tool-call and reasoning parsers
+- `--dyn-tool-call-parser`: select the tool call parser from the supported list below
 
-In `vllm serve`, `sglang serve`, and `trtllm-serve`, tool-call parsing and
-reasoning parsing happens in the engine's frontend server, with subtle
-behavioral differences across each. For performance purposes, Dynamo orchestrates
-routing and tokenization, passing tokens directly to each LLM engine and circumventing
-each engine's frontend OpenAI API server to avoid duplicate work per request.
+```bash
+# <backend> can be sglang, trtllm, vllm, etc. based on your installation
+python -m dynamo.<backend> --help
+```
 
-Dynamo therefore implements tool-call parsing and reasoning parsing in its
-frontend as a framework-agnostic Rust layer. This gives Dynamo one tested
-OpenAI-compatible contract across vLLM, SGLang, TRTLLM, and other workers,
-while keeping the serving hot path highly concurrent and scalable, avoiding
-Python GIL bottlenecks.
+> [!TIP]
+> If your model's default chat template doesn't support tool calling, but the model itself does, you can specify a custom chat template per worker
+> with `python -m dynamo.<backend> --custom-jinja-template </path/to/template.jinja>`.
 
-## Troubleshooting
+> [!TIP]
+> If your model also emits reasoning content that should be separated from normal output, see [Reasoning Parsing (Dynamo)](../reasoning/README.md) for the supported `--dyn-reasoning-parser` values.
 
-If a tool call comes back wrong, add `logprobs: true` to a single repro
-request and share the response. See
-[Troubleshooting Tool Calls](troubleshooting.md) for what to capture and
-include when reporting an issue.
+## Supported Tool Call Parsers
+
+The table below lists the currently supported tool call parsers in Dynamo's registry. The
+**Upstream name** column shows where the vLLM or SGLang parser name differs
+from Dynamo's -- relevant when using `--dyn-chat-processor vllm` or `sglang`
+(see [Parser Engine Fallback](engine-fallback.md)). A blank upstream
+column means the same name works everywhere. `Dynamo-only` means no upstream
+parser exists for this format.
+
+| Parser Name | Models | Upstream name | Notes |
+|---|---|---|---|
+| `kimi_k2` | Kimi K2 Instruct/Thinking, Kimi K2.5 | | Pair with `--dyn-reasoning-parser kimi` or `kimi_k25` |
+| `minimax_m2` | MiniMax M2 / M2.1 | vLLM: `minimax` | XML `<minimax:tool_call>` |
+| `deepseek_v4` | DeepSeek V4 Pro / Flash | vLLM: `deepseek_v4`; SGLang: `deepseekv4` | DSML tags (`<｜DSML｜tool_calls>...`). Aliases: `deepseek-v4`, `deepseekv4` |
+| `deepseek_v3` | DeepSeek V3, DeepSeek R1-0528+ | SGLang: `deepseekv3` | Special Unicode markers |
+| `deepseek_v3_1` | DeepSeek V3.1 | Dynamo-only | JSON separators |
+| `deepseek_v3_2` | DeepSeek V3.2+ | Dynamo-only | DSML tags (`<｜DSML｜function_calls>...`) |
+| `qwen3_coder` | Qwen3.5, Qwen3-Coder | | XML `<tool_call><function=...>` |
+| `glm47` | GLM-4.5, GLM-4.7 | Dynamo-only | XML `<arg_key>/<arg_value>` |
+| `nemotron_deci` | Nemotron-Super / -Ultra / -Deci, Llama-Nemotron-Ultra / -Super | Dynamo-only | `<TOOLCALL>` JSON |
+| `nemotron_nano` | Nemotron-Nano | Dynamo-only | Alias for `qwen3_coder` |
+| `gemma4` | Google Gemma 4 (thinking models) | vLLM: `gemma4` | Custom non-JSON grammar with `<\|"\|>` string delimiters and `<\|tool_call>...<tool_call\|>` markers. Aliases: `gemma-4`. Pair with `--dyn-reasoning-parser gemma4` and `--custom-jinja-template examples/chat_templates/gemma4_tool.jinja` |
+| `harmony` | gpt-oss-20b / -120b | Dynamo-only | Harmony channel format |
+| `hermes` | Qwen2.5-\*, QwQ-32B, Qwen3-Instruct, Qwen3-Think, NousHermes-2/3 | vLLM: `qwen2_5`; SGLang: `qwen25` (for Qwen models) | `<tool_call>` JSON |
+| `phi4` | Phi-4, Phi-4-mini, Phi-4-mini-reasoning | vLLM: `phi4_mini_json` | `functools[...]` JSON |
+| `pythonic` | Llama 4 (Scout / Maverick) | | Python-list tool syntax |
+| `llama3_json` | Llama 3 / 3.1 / 3.2 / 3.3 Instruct | | `<\|python_tag\|>` tool syntax |
+| `mistral` | Mistral / Mixtral / Mistral-Nemo, Magistral | | `[TOOL_CALLS]...[/TOOL_CALLS]` |
+| `jamba` | Jamba 1.5 / 1.6 / 1.7 | Dynamo-only | `<tool_calls>` JSON |
+| `default` | *(fallback)* | Dynamo-only | Empty JSON config (no start/end tokens). Prefer a model-specific parser for production use. |
+
+> [!TIP]
+> For Kimi K2.5 thinking models, pair `--dyn-tool-call-parser kimi_k2` with
+> `--dyn-reasoning-parser kimi_k25` from [Reasoning Parsing (Dynamo)](../reasoning/README.md) so that both `<think>` blocks and tool calls
+> are parsed correctly from the same response.
+
+## Examples
+
+### Launch Dynamo Frontend and Backend
+
+```bash
+# launch backend worker (or dynamo.vllm)
+python -m dynamo.sglang --model Qwen/Qwen3.5-4B --dyn-tool-call-parser qwen3_coder --dyn-reasoning-parser qwen3
+
+# launch frontend worker
+python -m dynamo.frontend
+```
+
+### Tool Calling Request Example
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen3.5-4B",
+    "messages": [
+      {"role": "user", "content": "What is the weather in San Francisco and New York?"}
+    ],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a location.",
+        "parameters": {
+          "type": "object",
+          "properties": {"location": {"type": "string"}},
+          "required": ["location"]
+        }
+      }
+    }],
+    "tool_choice": "auto"
+  }'
+```
+
+Dynamo parses the tool calls out of the model output and surfaces them as
+OpenAI-compatible `tool_calls` entries on the response:
+
+```json
+{
+  "id": "chatcmpl-b415caad-9be0-4d9e-ac6d-9d23bfe57703",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "reasoning_content": "The user is asking about the weather in two cities: San Francisco and New York. I need to call the get_weather function for each city. I'll make two separate function calls to get the weather information for both locations.\n",
+        "tool_calls": [
+          {
+            "id": "call-56223a95-3d14-4433-a94e-011f106c0e40",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"location\":\"San Francisco\"}"
+            }
+          },
+          {
+            "id": "call-d5b5772b-6b0c-4120-ad01-623278a937fe",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"location\":\"New York\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls",
+      "logprobs": null
+    }
+  ],
+  "created": 1778653281,
+  "model": "Qwen/Qwen3.5-4B",
+  ...
+}
+```
+
+> [!TIP]
+> If a tool call comes back wrong, add `"logprobs": true` to a single repro
+> request and share the response. See
+> [Troubleshooting Tool Calls](troubleshooting.md) for what to capture and
+> include when reporting an issue.
 
 ## Optional: structural tags
 
 You can optionally turn on **xgrammar structural tags** so guided decoding matches the parser's tool-call format at token granularity. See [Structural tag (guided decoding for tool calls)](structural-tag.md).
-
-## See Also
-
-- [Troubleshooting Tool Calls](troubleshooting.md) -- capture raw model
-  output with `logprobs` so tool-call issues can be localized.
-- [Reasoning](../reasoning/README.md) -- separate `reasoning_content` from
-  assistant content for chain-of-thought models. Several models need both a
-  tool-call parser and a reasoning parser configured together.
-- [Frontend Configuration Reference](../components/frontend/configuration.md) --
-  full CLI flag reference.
-- [Structural tag (guided decoding)](structural-tag.md) — optional xgrammar
-  constraints aligned with Dynamo tool-call parsers.

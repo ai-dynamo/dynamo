@@ -9,6 +9,7 @@ and feature gap details.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import tempfile
@@ -24,6 +25,7 @@ from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 from dynamo._core import Context
+from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend import telemetry
 from dynamo.common.backend.disagg import require_prefill_result
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
@@ -45,14 +47,18 @@ from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, Zm
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import ModelInput
-from dynamo.vllm.args import parse_args
+from dynamo.vllm.args import configure_rl_logprobs_mode, parse_args
 from dynamo.vllm.cache_info import (
     configure_kv_event_block_size,
     get_configured_kv_event_block_size,
 )
 from dynamo.vllm.capacity import per_rank_kv_blocks
 
-from .handlers import build_sampling_params, get_dp_range_for_worker
+from .handlers import (
+    VllmEnginePauseController,
+    build_sampling_params,
+    get_dp_range_for_worker,
+)
 
 if TYPE_CHECKING:
     from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
@@ -135,11 +141,13 @@ class VllmLLMEngine(LLMEngine):
         disaggregation_mode: DisaggregationMode,
         served_model_name: str,
         component: str,
+        enable_rl: bool = False,
     ):
         self.engine_args = engine_args
         self.disaggregation_mode = disaggregation_mode
         self._served_model_name = served_model_name
         self._component = component
+        self.enable_rl = enable_rl
         self.engine_client: AsyncLLM | None = None
         self._vllm_config: Any = None
         self._default_sampling_params: Any = None
@@ -150,6 +158,10 @@ class VllmLLMEngine(LLMEngine):
         # factory call sees a valid object. `num_gpu_blocks` is patched
         # after KV profiling finishes.
         self._stat_logger_factory: Optional[_UnifiedStatLoggerFactory] = None
+        self._pause_controller: VllmEnginePauseController | None = None
+        self._pause_lock = asyncio.Lock()
+        self._scale_ep_lock = asyncio.Lock()
+        self._scale_ep_in_progress = False
 
     @classmethod
     async def from_args(
@@ -168,6 +180,8 @@ class VllmLLMEngine(LLMEngine):
                 config.engine_args.served_model_name
             ) = config.model
 
+        configure_rl_logprobs_mode(config)
+
         # _resolve_disaggregation_mode() in DynamoVllmConfig has already
         # promoted the field to a DisaggregationMode enum; the field type
         # is still the input union, so narrow it here for mypy (cast
@@ -178,6 +192,7 @@ class VllmLLMEngine(LLMEngine):
             mode,
             served_model_name=config.served_model_name or config.model,
             component=config.component,
+            enable_rl=config.enable_rl,
         )
         worker_config = WorkerConfig.from_runtime_config(
             config,
@@ -211,6 +226,7 @@ class VllmLLMEngine(LLMEngine):
             usage_context=UsageContext.OPENAI_API_SERVER,
             stat_loggers=[self._stat_logger_factory],
         )
+        self._pause_controller = VllmEnginePauseController(self.engine_client)
         num_gpu_blocks = self.engine_client.vllm_config.cache_config.num_gpu_blocks or 0
         per_rank_num_gpu_blocks = per_rank_kv_blocks(num_gpu_blocks, self._dp_range[1])
         if per_rank_num_gpu_blocks is None:
@@ -256,7 +272,10 @@ class VllmLLMEngine(LLMEngine):
 
         # TODO: remove dict() once build_sampling_params accepts GenerateRequest
         sampling_params = build_sampling_params(
-            dict(request), self._default_sampling_params, self._model_max_len
+            dict(request),
+            self._default_sampling_params,
+            self._model_max_len,
+            enable_rl=self.enable_rl,
         )
 
         # vLLM's KV transfer is internal to NixlConnector
@@ -284,9 +303,13 @@ class VllmLLMEngine(LLMEngine):
             sampling_params.min_tokens = 1
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
             prefill_result = require_prefill_result(request, self.disaggregation_mode)
-            kv_params = prefill_result.get("disaggregated_params", {}).get(
-                "kv_transfer_params"
-            )
+            # `disaggregated_params` may be present-but-None (prefill error path
+            # / _build_disaggregated_params returning None), so use `or {}` — a
+            # .get default only applies when the key is absent. A None value then
+            # falls through to the kv_params ValueError below instead of raising
+            # AttributeError on None.get(...).
+            disaggregated_params = prefill_result.get("disaggregated_params") or {}
+            kv_params = disaggregated_params.get("kv_transfer_params")
             if kv_params is None:
                 raise ValueError(
                     "decode worker received prefill_result without "
@@ -317,6 +340,15 @@ class VllmLLMEngine(LLMEngine):
         )
 
         is_prefill = self.disaggregation_mode == DisaggregationMode.PREFILL
+        tokenizer = getattr(self.engine_client, "tokenizer", None)
+        # vLLM emits a selected-token logprob dict even at `logprobs=0`,
+        # so the top-k suppression happens below, not at the engine.
+        (
+            requested_logprobs_count,
+            requested_prompt_logprobs_count,
+        ) = _shared_logprobs.parse_logprob_options(
+            request.get("output_options", {}) or {}
+        )
 
         total_output_tokens_by_index: dict[int, int] = {}
         async for res in gen:
@@ -338,16 +370,46 @@ class VllmLLMEngine(LLMEngine):
                 finish_reason = getattr(output, "finish_reason", None)
                 if not token_ids and not finish_reason:
                     continue
-                prepared_outputs.append((output_idx, token_ids, finish_reason))
+                prepared_outputs.append((output, output_idx, token_ids, finish_reason))
 
-            for output_idx, token_ids, finish_reason in prepared_outputs:
+            for output, output_idx, token_ids, finish_reason in prepared_outputs:
                 out: GenerateChunk = {
                     "index": output_idx,
                     "token_ids": token_ids,
                 }
 
+                # `build_sampling_params` forces DELTA output → offset 0.
+                # `fallback_to_first_on_missing=True` matches legacy
+                # vLLM handler: always emit when vLLM returned a dict.
+                (
+                    log_probs,
+                    top_logprobs,
+                ) = _shared_logprobs.extract_from_completion_output(
+                    output,
+                    0,
+                    tokenizer=tokenizer,
+                    fallback_to_first_on_missing=True,
+                    include_bytes=True,
+                )
+                if log_probs is not None:
+                    out["log_probs"] = log_probs
+                if (
+                    top_logprobs is not None
+                    and requested_logprobs_count is not None
+                    and requested_logprobs_count > 0
+                ):
+                    out["top_logprobs"] = top_logprobs
+
                 if finish_reason:
                     out["finish_reason"] = str(finish_reason)
+                    # vLLM hangs prompt_logprobs off `RequestOutput`, not
+                    # `CompletionOutput` — read from `res`.
+                    if requested_prompt_logprobs_count is not None:
+                        prompt_payload = _shared_logprobs.extract_prompt_logprobs_from_completion_output(
+                            res, tokenizer=tokenizer
+                        )
+                        if prompt_payload is not None:
+                            out["engine_data"] = {"prompt_logprobs": prompt_payload}
                     prompt_tokens = (
                         len(res.prompt_token_ids) if res.prompt_token_ids else 0
                     )
@@ -424,6 +486,163 @@ class VllmLLMEngine(LLMEngine):
                 multiproc_only_prefixes=["lmcache:"],
             )
 
+    def supported_controls(self) -> set[str]:
+        controls = {"start_profile", "stop_profile", "sleep", "wake_up"}
+        if self.engine_client is not None and hasattr(
+            self.engine_client, "scale_elastic_ep"
+        ):
+            controls.add("scale_elastic_ep")
+        return controls
+
+    async def engine_control(self, control: str, body: dict) -> dict:
+        handlers = {
+            "start_profile": self.start_profile,
+            "stop_profile": self.stop_profile,
+            "sleep": self.sleep,
+            "wake_up": self.wake_up,
+        }
+        if self.engine_client is not None and hasattr(
+            self.engine_client, "scale_elastic_ep"
+        ):
+            handlers["scale_elastic_ep"] = self.scale_elastic_ep
+
+        handler = handlers.get(control)
+        if handler is None:
+            return {
+                "status": "error",
+                "message": f"unsupported engine control: {control}",
+            }
+        return await handler(body or {})
+
+    async def sleep(self, body: dict) -> dict:
+        body = body or {}
+        level = body.get("level", 1)
+        controller = self._pause_controller
+        if controller is None:
+            return {"status": "error", "message": "engine is not initialized"}
+
+        async with self._pause_lock:
+            if controller.is_paused:
+                return {"status": "ok", "message": "Engine already sleeping"}
+            if controller.needs_resume_recovery:
+                return {
+                    "status": "error",
+                    "message": "wake_up required before retrying sleep",
+                }
+            try:
+                if not await controller.pause(level):
+                    return {"status": "ok", "message": "Engine already sleeping"}
+                return {"status": "ok", "message": f"Engine slept (level={level})"}
+            except Exception as e:
+                logger.error("Failed to sleep engine: %s", e)
+                return {"status": "error", "message": str(e)}
+
+    async def wake_up(self, body: dict) -> dict:
+        body = body or {}
+        tags = body.get("tags")
+        controller = self._pause_controller
+        if controller is None:
+            return {"status": "error", "message": "engine is not initialized"}
+
+        async with self._pause_lock:
+            needs_recovery = controller.needs_resume_recovery
+            if not controller.is_paused and not needs_recovery:
+                return {"status": "ok", "message": "Engine already awake"}
+            try:
+                await controller.resume(tags)
+                controller.mark_resumed()
+                return {"status": "ok", "message": "Engine woke"}
+            except Exception as e:
+                logger.error("Failed to wake up engine: %s", e)
+                return {"status": "error", "message": str(e)}
+
+    async def start_profile(self, body: dict) -> dict:
+        body = body or {}
+        if self.engine_client is None:
+            return {"status": "error", "message": "engine is not initialized"}
+        profile_prefix = body.get("profile_prefix")
+        try:
+            await self.engine_client.start_profile(profile_prefix=profile_prefix)
+            return {"status": "ok", "message": "Profiling started"}
+        except Exception as e:
+            logger.error("Failed to start profiling: %s", e)
+            return {"status": "error", "message": str(e)}
+
+    async def stop_profile(self, body: dict) -> dict:
+        if self.engine_client is None:
+            return {"status": "error", "message": "engine is not initialized"}
+        try:
+            await self.engine_client.stop_profile()
+            return {"status": "ok", "message": "Profiling stopped"}
+        except Exception as e:
+            logger.error("Failed to stop profiling: %s", e)
+            return {"status": "error", "message": str(e)}
+
+    async def scale_elastic_ep(self, body: dict) -> dict:
+        body = body or {}
+        if self.engine_client is None:
+            return {"status": "error", "message": "engine is not initialized"}
+        new_dp_size = body.get("new_data_parallel_size")
+        if new_dp_size is None:
+            return {
+                "status": "error",
+                "message": "Missing required field: new_data_parallel_size",
+            }
+        try:
+            new_dp_size = int(new_dp_size)
+        except (TypeError, ValueError):
+            return {
+                "status": "error",
+                "message": f"new_data_parallel_size must be an integer, got: {new_dp_size!r}",
+            }
+        if new_dp_size < 2:
+            return {
+                "status": "error",
+                "message": "new_data_parallel_size must be >= 2 when elastic EP/ePLB is enabled",
+            }
+
+        async with self._scale_ep_lock:
+            if self._scale_ep_in_progress:
+                msg = (
+                    "A scale_elastic_ep operation is already in progress; "
+                    f"rejecting concurrent request for new_data_parallel_size={new_dp_size}"
+                )
+                logger.warning("[ElasticEP] %s", msg)
+                return {"status": "error", "message": msg}
+            self._scale_ep_in_progress = True
+
+        try:
+            import ray
+            import ray.util.state as _ray_util_state
+
+            class _NodeInfo:
+                __slots__ = ("node_id", "node_ip")
+
+                def __init__(self, d: dict) -> None:
+                    self.node_ip: str = d["NodeManagerAddress"]
+                    self.node_id: str = d["NodeID"]
+
+            original_list_nodes = _ray_util_state.list_nodes
+            try:
+                _ray_util_state.list_nodes = lambda **kw: [
+                    _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
+                ]
+                await self.engine_client.scale_elastic_ep(new_dp_size)
+            finally:
+                _ray_util_state.list_nodes = original_list_nodes
+
+            return {
+                "status": "ok",
+                "message": f"Scaled to data_parallel_size={new_dp_size}",
+                "new_data_parallel_size": new_dp_size,
+            }
+        except Exception as e:
+            logger.error("[ElasticEP] Scaling failed: %s", e)
+            return {"status": "error", "message": str(e)}
+        finally:
+            async with self._scale_ep_lock:
+                self._scale_ep_in_progress = False
+
     async def abort(self, context: Context) -> None:
         request_id = context.id()
         if self.engine_client is not None and request_id is not None:
@@ -447,6 +666,7 @@ class VllmLLMEngine(LLMEngine):
                 self.engine_client.shutdown()
         finally:
             self.engine_client = None
+            self._pause_controller = None
             if self._prometheus_temp_dir is not None:
                 if (
                     os.environ.get("PROMETHEUS_MULTIPROC_DIR")

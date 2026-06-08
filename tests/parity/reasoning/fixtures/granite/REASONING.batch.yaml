@@ -142,3 +142,15 @@ cases:
     description: Open Granite reasoning interrupted by downstream tool-call text is not covered by a paired Dynamo tool call parser
     ref: *upstream_ref
     reason: Granite reasoning parsing has no paired Dynamo tool call parser fixture or open-reasoning tool boundary in this seed fixture set.
+  REASONING.batch.6.b:
+    description: Stray end marker after a complete reasoning span(unbalanced-tag)
+    ref: dynamo
+    spec_ref: tests/parity/README.md
+    model_text: ''
+    expected:
+      dynamo:
+        unavailable: 'Pattern not applicable: granite does not use paired open/close markers, so the 1-open + 2-close unbalanced-tag shape has no direct analog.'
+      vllm:
+        unavailable: 'Pattern not applicable: granite does not use paired open/close markers, so the 1-open + 2-close unbalanced-tag shape has no direct analog.'
+      sglang:
+        unavailable: "UNAVAILABLE: SGLang has no reasoning parser for family='granite'"

@@ -76,5 +76,34 @@ cases:
     description: Large / deep JSON-edge payload test 7.e — not yet authored for this family
     reason: Large/deep JSON-edge payload test 7.e not yet authored for deepseek_v4; existing batch.7 coverage remains in 7.a-d.
   TOOLCALLING.batch.7.f:
-    description: Numeric precision edge test 7.f — not yet authored for this family
-    reason: Numeric precision edge test 7.f not yet authored for deepseek_v4; Qwen3-Coder coverage is provided by qwen3_coder 7.f.
+    description: Numeric precision edge preserves integer-like number literal
+    ref: inferhub live capture on nvidia/deepseek-ai/deepseek-v4-pro; format follows https://huggingface.co/deepseek-ai/DeepSeek-V3.2/blob/main/encoding/encoding_dsv32.py
+    model_text: |-
+      <｜DSML｜tool_calls>
+      <｜DSML｜invoke name="set_limit">
+      <｜DSML｜parameter name="count" string="false">9007199254740993</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜tool_calls>
+    tools:
+    - name: set_limit
+      parameters:
+        type: object
+        properties:
+          count:
+            type: number
+    expected:
+      dynamo: &d_7_f
+        calls:
+        - name: set_limit
+          arguments:
+            count: 9007199254740993
+        normal_text: ''
+      vllm:
+        reason: Dynamo preserves integer-like number literals; vLLM rounds this DSML number parameter through f64 and loses precision above 2^53.
+        calls:
+        - name: set_limit
+          arguments:
+            count: 9007199254740992
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'

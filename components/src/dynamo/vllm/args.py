@@ -120,6 +120,22 @@ def parse_args(argv: list[str] | None = None) -> Config:
     return dynamo_config
 
 
+def configure_rl_logprobs_mode(config: Config) -> None:
+    if not config.enable_rl:
+        return
+
+    if config.engine_args.logprobs_mode == "raw_logprobs":
+        config.engine_args.logprobs_mode = "processed_logprobs"
+        logger.info("Defaulting logprobs_mode=processed_logprobs (--enable-rl active).")
+        return
+
+    if config.engine_args.logprobs_mode != "processed_logprobs":
+        raise ValueError(
+            "--enable-rl requires logprobs_mode=processed_logprobs; "
+            f"got {config.engine_args.logprobs_mode!r}."
+        )
+
+
 def cross_validate_config(
     dynamo_config: Config, engine_config: AsyncEngineArgs
 ) -> None:

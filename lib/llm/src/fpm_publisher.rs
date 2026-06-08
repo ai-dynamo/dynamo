@@ -375,6 +375,7 @@ mod tests {
             sum_queued_decode_kv_tokens: 0,
             var_queued_decode_kv_tokens: 0.0,
             wall_time_secs: 0.025,
+            ..Default::default()
         };
 
         let bytes = serialize_fpm(&snapshot, "worker-abc", 2, 42).unwrap();

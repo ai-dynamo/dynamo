@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Replay-oriented request hash capture for agent traces.
+//! Replay-oriented request hash capture for live traces.
 
 use bytemuck::cast_slice;
 use dynamo_kv_router::protocols::{
@@ -14,18 +14,11 @@ use crate::protocols::TokenIdType;
 
 use super::AgentReplayMetrics;
 
-pub(crate) fn request_replay_metrics(
+pub(crate) fn replay_metrics(
     token_ids: &[TokenIdType],
     trace_block_size: usize,
 ) -> Option<AgentReplayMetrics> {
-    let policy = super::policy();
-    if !policy.enabled || !policy.replay_hashes_enabled {
-        return None;
-    }
     if trace_block_size == 0 {
-        tracing::warn!(
-            "agent trace replay hashes requested but model KV cache block size is unavailable"
-        );
         return None;
     }
 
@@ -45,9 +38,8 @@ pub(crate) fn input_sequence_hashes(
         "agent trace replay block size must be positive"
     );
 
-    // TODO(replay): move this token-id -> sequence-hash helper into a shared
-    // crate with the router/mocker hash path. Agent tracing, Mooncake export,
-    // and replay should not each carry subtly different block hash logic.
+    // Keep this identical to the router/mocker sequence-aware hashing path so
+    // replay preserves shared-prefix identity.
     let block_size = trace_block_size as u32;
     let mut block_hashes =
         compute_block_hash_for_seq(token_ids, block_size, BlockHashOptions::default());
@@ -66,6 +58,8 @@ fn partial_local_block_hash(tokens: &[TokenIdType]) -> LocalBlockHash {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use super::input_sequence_hashes;
 
     #[test]
@@ -92,5 +86,20 @@ mod tests {
     #[test]
     fn empty_input_has_empty_sequence_hashes() {
         assert!(input_sequence_hashes(&[], 64).is_empty());
+    }
+
+    #[test]
+    fn long_input_hashes_cover_every_token() {
+        let tokens = (0..131_072_u32).collect::<Vec<_>>();
+        let started = Instant::now();
+        let hashes = input_sequence_hashes(&tokens, 64);
+        eprintln!(
+            "hashed {} input tokens into {} sequence hashes in {:?}",
+            tokens.len(),
+            hashes.len(),
+            started.elapsed()
+        );
+
+        assert_eq!(hashes.len(), tokens.len() / 64);
     }
 }

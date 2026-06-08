@@ -13,7 +13,7 @@ cases:
       {"location": "NYC"}
       ```
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
@@ -21,11 +21,11 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &d_5_a
+      dynamo: &id001
         calls: []
         normal_text: ''
-      vllm: *d_5_a
-      sglang: *d_5_a
+      vllm: *id001
+      sglang: *id001
   TOOLCALLING.batch.5.b:
     description: Closing tool_calls_end without matching tool_calls_begin
     ref: dynamo
@@ -35,18 +35,23 @@ cases:
       {"location": "NYC"}
       ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &id002
-        reason: "Dynamo's deepseek_v3 parser leaves <｜tool▁call…｜> deepseek_v3 token, <｜tool▁sep｜> in normal_text on missing/orphan end marker (impl-defined recovery)"
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: &id003
+        reason: vLLM/SGLang deepseek_v3 handling leaves the <｜tool▁call…｜> envelope and <｜tool▁sep｜> in normal_text on this orphan end-marker case.
         calls: []
         normal_text: |-
           <｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
           ```json
           {"location": "NYC"}
           ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
-      vllm: *id002
-      sglang: *id002
+      sglang: *id003
   TOOLCALLING.batch.5.c:
     description: Truncation mid-arguments JSON inside fenced block
     ref: dynamo
@@ -55,13 +60,13 @@ cases:
       ```json
       {"loc
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_5_c
+      dynamo: &id004
         calls: []
         normal_text: ''
-      vllm: *d_5_c
-      sglang: *d_5_c
+      vllm: *id004
+      sglang: *id004
   TOOLCALLING.batch.5.d:
     description: Multi-call, last call missing only end marker (body complete)
     ref: dynamo
@@ -75,16 +80,16 @@ cases:
       {"location": "New York"}
       ```
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_5_d
+      dynamo: &id005
         calls:
         - name: get_weather
           arguments:
             location: Boston
         normal_text: |
           I'll start by fetching the weather for both Boston and New York at the same time!
-      vllm: *d_5_d
+      vllm: *id005
       sglang:
         reason: SGLang recovers the completed leading DeepSeek V3 call but trims the trailing newline from prefix normal_text.
         calls:
@@ -104,16 +109,16 @@ cases:
       ```json
       {"location": "New York
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_5_e
+      dynamo: &id006
         calls:
         - name: get_weather
           arguments:
             location: Boston
         normal_text: |
           I'll start by fetching the weather for both Boston and New York at the same time!
-      vllm: *d_5_e
+      vllm: *id006
       sglang:
         reason: SGLang recovers the completed leading DeepSeek V3 call but trims the trailing newline from prefix normal_text.
         calls:

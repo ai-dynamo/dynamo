@@ -41,9 +41,11 @@ The Dynamo platform Helm chart includes a pre-built values file for Spot VM depl
 - MPI SSH key generation job
 - Other core Dynamo platform pods
 
-Install Dynamo with the Spot values file:
+Install Dynamo with the Spot values file (from `examples/deployments/AKS/`):
 
 ```bash
+cd dynamo/examples/deployments/AKS
+
 helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz \
   --namespace dynamo-system \
   --create-namespace \

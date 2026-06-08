@@ -63,6 +63,8 @@ def test_aic_perf_moe_cli_flows_to_binding_kwargs() -> None:
         "aic_moe_tp_size": 2,
         "aic_moe_ep_size": 1,
         "aic_attention_dp_size": 1,
+        "aic_nextn": None,
+        "aic_nextn_accept_rates": None,
     }
 
 
@@ -344,6 +346,28 @@ def test_load_aware_preserves_prefill_load_scale() -> None:
 
     assert kwargs["overlap_score_credit"] == 0.0
     assert kwargs["prefill_load_scale"] == 2.5
+
+
+def test_load_aware_preserves_cache_hit_weights() -> None:
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(
+        [
+            "--load-aware",
+            "--router-host-cache-hit-weight",
+            "0.9",
+            "--router-disk-cache-hit-weight",
+            "0.1",
+        ]
+    )
+
+    config = KvRouterConfigBase.from_cli_args(args)
+    kwargs = config.kv_router_kwargs()
+
+    assert kwargs["overlap_score_credit"] == 0.0
+    assert kwargs["host_cache_hit_weight"] == 0.9
+    assert kwargs["disk_cache_hit_weight"] == 0.1
 
 
 def test_kv_router_kwargs_preserves_explicit_queue_tiers() -> None:

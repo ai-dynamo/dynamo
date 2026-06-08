@@ -40,6 +40,12 @@ issues:
     - linters:
         - staticcheck
       text: "SA1019:.*deprecated.*namespace"
+    # Intentional compatibility usage of deprecated checkpoint identity fields.
+    # Standalone/manual checkpoint flows and conversion code still need to read
+    # and write these fields until the v1alpha1 API can remove them.
+    - linters:
+        - staticcheck
+      text: "SA1019:.*[Ii]dentity is ignored by DGD-managed automatic checkpoints"
 linters:
   disable-all: true
   enable:

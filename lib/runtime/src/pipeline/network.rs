@@ -28,10 +28,12 @@ use super::{AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Respons
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AsyncTransportEngine, Context, Data, Error, ManyOut, PipelineError, PipelineIO, SegmentSource,
-    ServiceBackend, ServiceEngine, SingleIn, Source, context,
+    AsyncTransportEngine, Context, Data, Error, ManyIn, ManyOut, PipelineError, PipelineIO,
+    SegmentSource, ServiceBackend, ServiceEngine, SingleIn, Source, context,
 };
 use crate::metrics::MetricsHierarchy;
+use crate::metrics::prometheus_names::work_handler;
+use crate::protocols::maybe_error::MaybeError;
 use ingress::push_handler::WorkHandlerMetrics;
 use prometheus::{CounterVec, Histogram, IntCounter, IntCounterVec, IntGauge};
 
@@ -60,7 +62,7 @@ pub trait WorkQueueConsumer {
     async fn dequeue(&self) -> Result<Bytes, String>;
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamType {
     Request,
@@ -94,6 +96,11 @@ pub(crate) struct RequestControlMessage {
     /// Reliable for single-machine profiling; treat cross-host values as approximate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) frontend_send_ts_ns: Option<u64>,
+    /// For bidirectional dispatch (`request_type == ManyIn`): connection info the
+    /// worker dials back to in order to receive subsequent request frames. `None`
+    /// for the unary path, which is the wire-compatible default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) request_stream_connection_info: Option<ConnectionInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -362,9 +369,9 @@ pub struct StreamOptions {
     pub context: Arc<dyn AsyncEngineContext>,
 
     /// Register with the server that this connection will have a server-side Sender
-    /// that can be picked up by the Request/Forward pipeline
-    ///
-    /// TODO - note, this option is currently not implemented and will cause a panic
+    /// that can be picked up by the Request/Forward pipeline. The downstream side
+    /// dials in via [`crate::pipeline::network::tcp::client::TcpClient::create_request_stream`]
+    /// to receive the frames the server pushes.
     pub enable_request_stream: bool,
 
     /// Register with the server that this connection will have a server-side Receiver

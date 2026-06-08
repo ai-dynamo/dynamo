@@ -25,35 +25,14 @@ cases:
           location:
             type: string
     expected:
-      dynamo:
-        reason: |-
-          Strict per MiniMax-M2.7's published parser regexes: the outer
-          <minimax:tool_call>...</minimax:tool_call> block must be paired, so
-          a stream that ends before </minimax:tool_call> recovers no call.
-          Dynamo drops the buffered protocol block from normal_text so
-          tool-call markup does not leak to user-facing content.
-        calls: []
-        normal_text: ''
-      sglang:
+      dynamo: &d_4_a
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
-        reason: |-
-          SGLang's streaming parser recovers a MiniMax call from a body that
-          lacks the required closing </minimax:tool_call>; that contradicts
-          the strict MiniMax-M2.7 reference parser.
-      vllm:
-        calls:
-        - name: get_weather
-          arguments:
-            location: NYC
-        normal_text: ''
-        reason: |-
-          vLLM's streaming parser recovers a MiniMax call from a body that
-          lacks the required closing </minimax:tool_call>; that contradicts
-          the strict MiniMax-M2.7 reference parser.
+      sglang: *d_4_a
+      vllm: *d_4_a
   TOOLCALLING.stream.4.b:
     description: Stream terminates mid-call body before the in-flight argument payload is complete
     ref: derived from TOOLCALLING.batch.5.c
@@ -115,7 +94,13 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &id002
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: &id002
         calls: []
         normal_text: |-
           <invoke name="get_weather">
@@ -123,5 +108,7 @@ cases:
           </invoke>
           </invoke>
           </invoke>
-      vllm: *id002
-      sglang: *id002
+        reason: vLLM preserves the bare MiniMax invoke and orphan close-marker spam as content; Dynamo recovers the complete inner <invoke> call and drops the orphan marker tail.
+      sglang:
+        <<: *id002
+        reason: SGLang preserves the bare MiniMax invoke and orphan close-marker spam as content; Dynamo recovers the complete inner <invoke> call and drops the orphan marker tail.

@@ -7,7 +7,8 @@ use dynamo_protocols::types::{
     ChatCompletionStreamResponseDelta, FinishReason, FunctionCallStream, FunctionType, Role,
 };
 
-use dynamo_parsers::tool_calling::config::JsonParserConfig;
+use dynamo_parsers::tool_calling::config::{JsonParserConfig, ParserConfig};
+use dynamo_parsers::tool_calling::gemma4::split_partial_call_prefix_gemma4;
 use dynamo_parsers::tool_calling::json::try_tool_call_parse_basic_json;
 use dynamo_parsers::tool_calling::parsers::get_tool_parser_map;
 use dynamo_parsers::tool_calling::{
@@ -204,6 +205,69 @@ impl ChoiceJailState {
         std::mem::take(&mut self.accumulated_content)
     }
 
+    fn handle_trailing_content(
+        &mut self,
+        content: &str,
+        choice: &ChatChoiceStream,
+        jail_stream: &JailedStream,
+        emissions: &mut Vec<ChoiceEmission>,
+    ) {
+        if content.is_empty() {
+            return;
+        }
+
+        if let MatchResult::Partial {
+            prefix, partial, ..
+        } = jail_stream.marker_matcher.process_chunk(content, "")
+        {
+            if !prefix.is_empty() {
+                #[allow(deprecated)]
+                let trailing_choice = create_choice_stream(
+                    choice.index,
+                    choice.delta.role,
+                    &prefix,
+                    None,
+                    None,
+                    choice.logprobs.clone(),
+                );
+                emissions.push(ChoiceEmission::Trailing(trailing_choice));
+            }
+            self.partial_match_buffer = partial;
+            return;
+        }
+
+        if let Some((prefix, partial)) = jail_stream.split_partial_tool_call_start(content) {
+            if !prefix.is_empty() {
+                #[allow(deprecated)]
+                let trailing_choice = create_choice_stream(
+                    choice.index,
+                    choice.delta.role,
+                    prefix,
+                    None,
+                    None,
+                    choice.logprobs.clone(),
+                );
+                emissions.push(ChoiceEmission::Trailing(trailing_choice));
+            }
+            self.partial_match_buffer = partial.to_string();
+        } else if jail_stream.should_start_jail(content) {
+            self.is_jailed = true;
+            self.accumulated_content = content.to_string();
+            self.accumulated_logprobs = None;
+        } else {
+            #[allow(deprecated)]
+            let trailing_choice = create_choice_stream(
+                choice.index,
+                choice.delta.role,
+                content,
+                None,
+                choice.finish_reason,
+                choice.logprobs.clone(),
+            );
+            emissions.push(ChoiceEmission::Trailing(trailing_choice));
+        }
+    }
+
     /// Process incoming content and return what should be emitted (if anything)
     async fn process_content(
         &mut self,
@@ -252,6 +316,7 @@ impl ChoiceJailState {
 
                     // Check if this already contains the end marker
                     let (should_end, split_pos) = jail_stream.should_end_jail(&full_content).await;
+                    self.partial_match_buffer.clear();
 
                     if should_end {
                         // Complete tool call found in this chunk
@@ -278,25 +343,12 @@ impl ChoiceJailState {
                         }
 
                         // Handle trailing content if any
-                        if !trailing_part.is_empty() {
-                            if jail_stream.should_start_jail(trailing_part) {
-                                self.is_jailed = true;
-                                self.accumulated_content = trailing_part.to_string();
-                                // No logprobs to seed here — they were already emitted with the tool call
-                                self.accumulated_logprobs = None;
-                            } else {
-                                #[allow(deprecated)]
-                                let trailing_choice = create_choice_stream(
-                                    choice.index,
-                                    choice.delta.role,
-                                    trailing_part,
-                                    None,
-                                    choice.finish_reason,
-                                    choice.logprobs.clone(),
-                                );
-                                emissions.push(ChoiceEmission::Trailing(trailing_choice));
-                            }
-                        }
+                        self.handle_trailing_content(
+                            trailing_part,
+                            choice,
+                            jail_stream,
+                            &mut emissions,
+                        );
                     } else {
                         // Start jailing with the marker and suffix
                         self.is_jailed = true;
@@ -304,8 +356,6 @@ impl ChoiceJailState {
                         // Seed accumulated logprobs with this chunk's logprobs
                         self.accumulated_logprobs = choice.logprobs.clone();
                     }
-
-                    self.partial_match_buffer.clear();
                 }
 
                 MatchResult::Partial {
@@ -349,17 +399,26 @@ impl ChoiceJailState {
                 }
 
                 MatchResult::None { content } => {
-                    // Check if this content (combined with partial buffer) should start jailing
-                    let combined_content = if self.partial_match_buffer.is_empty() {
-                        content.clone()
-                    } else {
-                        format!("{}{}", self.partial_match_buffer, content)
-                    };
-
-                    if jail_stream.should_start_jail(&combined_content) {
+                    if let Some((prefix, partial)) =
+                        jail_stream.split_partial_tool_call_start(&content)
+                    {
+                        if !prefix.is_empty() {
+                            #[allow(deprecated)]
+                            let prefix_choice = create_choice_stream(
+                                choice.index,
+                                choice.delta.role,
+                                prefix,
+                                None,
+                                None,
+                                choice.logprobs.clone(),
+                            );
+                            emissions.push(ChoiceEmission::PassThrough(prefix_choice));
+                        }
+                        self.partial_match_buffer = partial.to_string();
+                    } else if jail_stream.should_start_jail(&content) {
                         // Start jailing with the combined content
                         self.is_jailed = true;
-                        self.accumulated_content = combined_content;
+                        self.accumulated_content = content;
                         // Seed accumulated logprobs with this chunk's logprobs
                         self.accumulated_logprobs = choice.logprobs.clone();
                         self.partial_match_buffer.clear();
@@ -423,23 +482,7 @@ impl ChoiceJailState {
                 self.end_jail();
 
                 // Handle trailing content if any
-                if !trailing_owned.is_empty() {
-                    if jail_stream.should_start_jail(&trailing_owned) {
-                        self.is_jailed = true;
-                        self.accumulated_content = trailing_owned;
-                    } else {
-                        #[allow(deprecated)]
-                        let trailing_choice = create_choice_stream(
-                            choice.index,
-                            choice.delta.role,
-                            &trailing_owned,
-                            None,
-                            choice.finish_reason,
-                            choice.logprobs.clone(),
-                        );
-                        emissions.push(ChoiceEmission::Trailing(trailing_choice));
-                    }
-                }
+                self.handle_trailing_content(&trailing_owned, choice, jail_stream, &mut emissions);
             }
             // If not unjailing, don't emit anything (still accumulating)
         }
@@ -494,6 +537,17 @@ impl ChoiceJailState {
             } else {
                 Some(ChoiceEmission::Content(final_choice))
             }
+        } else if !self.partial_match_buffer.is_empty() {
+            let content = std::mem::take(&mut self.partial_match_buffer);
+            let choice = create_choice_stream(
+                self.index,
+                Some(Role::Assistant),
+                &content,
+                None,
+                self.stream_finish_reason,
+                None,
+            );
+            Some(ChoiceEmission::Content(choice))
         } else {
             None
         }
@@ -685,7 +739,11 @@ impl JailedStream {
                             if choice.finish_reason.is_some() {
                                 choice_state.stream_finish_reason = choice.finish_reason;
                             }
-                            let was_ever_jailed = !choice_state.accumulated_content.is_empty() || choice_state.is_jailed;
+                            let has_pending_buffered_output =
+                                !choice_state.partial_match_buffer.is_empty();
+                            let was_ever_jailed = !choice_state.accumulated_content.is_empty()
+                                || choice_state.is_jailed
+                                || has_pending_buffered_output;
 
                             // Reasoning-only chunks must pass through even when jailed; only
                             // `content` is subject to accumulation.
@@ -849,6 +907,13 @@ impl JailedStream {
     }
 
     /// Check if content matches any jail start patterns
+    fn split_partial_tool_call_start<'a>(&self, content: &'a str) -> Option<(&'a str, &'a str)> {
+        if self.tool_call_parser.as_deref() == Some("gemma4") {
+            return split_partial_call_prefix_gemma4(content);
+        }
+        None
+    }
+
     fn should_start_jail(&self, content: &str) -> bool {
         // Path 1: Check configured start sequences
         let sequence_match = !self.jail_start_sequences.is_empty()
@@ -1551,6 +1616,15 @@ impl JailedStreamBuilder {
             if let Some(config) = parser_map.get(parser_name.as_str()) {
                 // Add start tokens from the parser config
                 all_patterns.extend(config.parser_config.tool_call_start_tokens());
+                if let ParserConfig::Glm47(glm_config) = &config.parser_config
+                    && let Some(tools) = self.tool_definitions.as_ref()
+                {
+                    for tool in tools {
+                        if !tool.name.is_empty() {
+                            all_patterns.push(format!("{}{}", tool.name, glm_config.arg_key_start));
+                        }
+                    }
+                }
             }
         }
 

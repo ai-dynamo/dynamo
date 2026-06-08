@@ -152,6 +152,28 @@ fn find_dynamo_error_in_chain<'a>(
     None
 }
 
+/// Match `InvalidArgument` at top-level OR under `Backend()`.
+/// `py_err_to_dynamo` wraps Python `ValueError`/`TypeError` as
+/// `Backend(InvalidArgument)`; both variants are 400-worthy.
+fn find_invalid_argument_in_chain<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a dynamo_runtime::error::DynamoError> {
+    use dynamo_runtime::error::{BackendError, ErrorType};
+    let mut current = Some(err);
+    while let Some(e) = current {
+        if let Some(dynamo_err) = e.downcast_ref::<dynamo_runtime::error::DynamoError>()
+            && matches!(
+                dynamo_err.error_type(),
+                ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
+            )
+        {
+            return Some(dynamo_err);
+        }
+        current = e.source();
+    }
+    None
+}
+
 impl ErrorMessage {
     /// Not Found Error
     pub fn model_not_found() -> ErrorResponse {
@@ -199,6 +221,22 @@ impl ErrorMessage {
             code,
             Json(ErrorMessage {
                 message: "Service is not ready".to_string(),
+                error_type,
+                code: code.as_u16(),
+            }),
+        )
+    }
+
+    /// Service Unavailable with a structured message body. Used by topology
+    /// readiness to distinguish "model registered but topology incomplete"
+    /// from generic "service not ready".
+    pub fn service_unavailable_with_body(message: String) -> ErrorResponse {
+        let code = StatusCode::SERVICE_UNAVAILABLE;
+        let error_type = map_error_code_to_error_type(code);
+        (
+            code,
+            Json(ErrorMessage {
+                message,
                 error_type,
                 code: code.as_u16(),
             }),
@@ -277,15 +315,8 @@ impl ErrorMessage {
             );
         }
 
-        // Check for DynamoError with InvalidArgument anywhere in the chain → HTTP 400.
-        // This matches *any* nested InvalidArgument DynamoError, not only the NATS
-        // oversized-payload case, so previously-opaque nested InvalidArgument errors
-        // now surface as 400 instead of 500. Intentional: 400 is the correct class
-        // for a malformed/invalid request.
-        if let Some(dynamo_err) = find_dynamo_error_in_chain(
-            err.as_ref(),
-            dynamo_runtime::error::ErrorType::InvalidArgument,
-        ) {
+        // InvalidArgument (top-level OR Backend) → 400.
+        if let Some(dynamo_err) = find_invalid_argument_in_chain(err.as_ref()) {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorMessage {
@@ -483,8 +514,9 @@ async fn handler_completions(
     headers: HeaderMap,
     Json(mut request): Json<NvCreateCompletionRequest>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service is not ready
+    // return a 503 if the service or per-model topology is not ready
     check_ready(&state)?;
+    check_model_serving_ready(&state, &request.inner.model)?;
 
     request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
@@ -910,8 +942,9 @@ async fn embeddings(
     headers: HeaderMap,
     Json(request): Json<NvCreateEmbeddingRequest>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service is not ready
+    // return a 503 if the service or per-model topology is not ready
     check_ready(&state)?;
+    check_model_serving_ready(&state, &request.inner.model)?;
 
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
@@ -1068,8 +1101,15 @@ async fn handler_chat_completions(
     headers: HeaderMap,
     Json(mut request): Json<NvCreateChatCompletionRequest>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service is not ready
+    // return a 503 if the service is not ready (process-level + per-model
+    // serving readiness). An aggregated request to a decode-only namespace
+    // would otherwise hang/crash on the decode worker. Resolve the templated
+    // model first so empty/missing `model` fields don't bypass the gate.
     check_ready(&state)?;
+    let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
+    if !resolved_model.is_empty() {
+        check_model_serving_ready(&state, resolved_model)?;
+    }
 
     request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
@@ -1420,7 +1460,6 @@ async fn chat_completions(
             request.inner.max_completion_tokens = Some(template.max_completion_tokens);
         }
     }
-
     // Capture the resolved model after template application for metrics and engine lookup
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
@@ -1437,6 +1476,11 @@ async fn chat_completions(
         streaming,
         &request_id,
     );
+
+    if let Err(err_response) = normalize_chat_reasoning_template_args(&mut request) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
 
     // Handle unsupported fields - if Some(resp) is returned by
     // validate_chat_completion_unsupported_fields,
@@ -1655,6 +1699,18 @@ pub fn validate_chat_completion_unsupported_fields(
     Ok(())
 }
 
+/// Normalizes OpenAI-style reasoning controls before chat completion validation.
+fn normalize_chat_reasoning_template_args(
+    request: &mut NvCreateChatCompletionRequest,
+) -> Result<(), ErrorResponse> {
+    request.normalize_reasoning_template_args().map_err(|e| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: VALIDATION_PREFIX.to_string() + &e.to_string(),
+        })
+    })
+}
+
 /// Validates that required fields are present and valid in the chat completion request
 pub fn validate_chat_completion_required_fields(
     request: &NvCreateChatCompletionRequest,
@@ -1742,8 +1798,17 @@ async fn handler_responses(
     headers: HeaderMap,
     Json(mut request): Json<NvCreateResponse>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service is not ready
+    // return a 503 if the service or per-model topology is not ready.
+    // Resolve the templated model first so empty/missing `model` fields
+    // don't bypass the gate.
     check_ready(&state)?;
+    let resolved_model = resolve_request_model(
+        request.inner.model.as_deref().unwrap_or(""),
+        template.as_ref(),
+    );
+    if !resolved_model.is_empty() {
+        check_model_serving_ready(&state, resolved_model)?;
+    }
 
     request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
@@ -1885,6 +1950,10 @@ async fn responses(
     // that the stream converter needs for faithful response reconstruction.
     let responses_ctx = unified_request.responses_context().cloned();
     let mut chat_request = unified_request.into_inner();
+    if let Err(err_response) = normalize_chat_reasoning_template_args(&mut chat_request) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
 
     // Always use internal streaming for aggregation.
     // Set stream_options.include_usage so the backend sends token counts in the final chunk.
@@ -2132,6 +2201,37 @@ pub(crate) fn check_ready(_state: &Arc<service_v2::State>) -> Result<(), ErrorRe
     Ok(())
 }
 
+/// Per-model serving readiness gate.
+///
+/// Composes AND-wise with [`check_ready`]: a request is admitted only when
+/// (a) the process is ready (`check_ready`) AND (b) at least one namespace
+/// for this specific model has a complete set of workers — every worker's
+/// `needs` DNF is satisfied by the worker types currently present in that
+/// namespace.
+///
+/// Returns `503 Service Unavailable` with a structured body when the model
+/// isn't ready to serve. Models the frontend has never heard of fall through
+/// here; the per-handler engine lookup later in the request path returns a
+/// 404 instead, which is the right shape for "unknown model".
+pub(crate) fn check_model_serving_ready(
+    state: &Arc<service_v2::State>,
+    model_name: &str,
+) -> Result<(), ErrorResponse> {
+    let Some(model) = state.manager().get_model(model_name) else {
+        // Unknown model — let the per-endpoint engine accessor produce the
+        // canonical 404. The readiness gate has nothing to say.
+        return Ok(());
+    };
+    if model.has_ready_workers() {
+        return Ok(());
+    }
+    Err(ErrorMessage::service_unavailable_with_body(format!(
+        "Model `{model_name}` is registered but no namespace has a complete worker set. \
+         At least one prefill/decode/encode role required by a registered worker is missing. \
+         Check worker startup logs for the affected namespace."
+    )))
+}
+
 /// openai compatible format
 /// Example:
 /// {
@@ -2174,6 +2274,16 @@ async fn list_models_openai(
 
     let models: HashSet<String> = state.manager().model_display_names();
     for model_name in models {
+        // Only list models whose worker set is complete in at least one
+        // namespace. A registered-but-broken deployment (e.g. decode-only
+        // with no prefill peer) is hidden until a peer joins.
+        let serving_ready = state
+            .manager()
+            .get_model(&model_name)
+            .is_some_and(|m| m.has_ready_workers());
+        if !serving_ready {
+            continue;
+        }
         let context_window = cw_override.or_else(|| card_map.get(&model_name).map(|&cl| cl as u64));
         data.push(ModelListing {
             id: model_name.clone(),
@@ -2295,6 +2405,10 @@ async fn get_model_openai(
         return Err(ErrorMessage::model_not_found());
     }
 
+    // GET /v1/models/{model} reports the model only if it is ready to
+    // serve. Mirrors the filter applied in list_models_openai.
+    check_model_serving_ready(&state, model_id)?;
+
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -2347,6 +2461,8 @@ async fn images(
     Json(request): Json<NvCreateImageRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
+    // (per-model topology check is deferred until after we resolve the
+    // ImageModel enum into a string; see below)
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
@@ -2370,6 +2486,10 @@ async fn images(
             dynamo_protocols::types::ImageModel::Other(s) => s.clone(),
         })
         .unwrap_or_else(|| "diffusion".to_string());
+
+    // Per-model serving readiness gate (now that we have a resolved model
+    // name string).
+    check_model_serving_ready(&state, &model)?;
 
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
@@ -2478,8 +2598,9 @@ async fn videos(
     headers: HeaderMap,
     Json(request): Json<NvCreateVideoRequest>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service is not ready
+    // return a 503 if the service or per-model topology is not ready
     check_ready(&state)?;
+    check_model_serving_ready(&state, &request.model)?;
 
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
@@ -2600,6 +2721,7 @@ async fn video_stream(
     Json(request): Json<NvCreateVideoRequest>,
 ) -> Result<Response, ErrorResponse> {
     check_ready(&state)?;
+    check_model_serving_ready(&state, &request.model)?;
 
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
@@ -2763,6 +2885,8 @@ async fn audio_speech(
     Json(request): Json<NvCreateAudioSpeechRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
+    // (per-model topology check is deferred until after we resolve the
+    // Option<String> model field; see below)
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
@@ -2781,6 +2905,10 @@ async fn audio_speech(
             .unwrap_or_default()
     });
     let metric_model = state.manager().metric_model_for(&model).to_string();
+
+    // Per-model serving readiness gate (now that we have a resolved model
+    // name string).
+    check_model_serving_ready(&state, &model)?;
 
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
@@ -3009,6 +3137,26 @@ mod tests {
     }
 
     #[test]
+    fn test_backend_invalid_argument_surfaces_as_400() {
+        // `Backend(InvalidArgument)` is what `py_err_to_dynamo` produces
+        // for Python `ValueError` / `TypeError` raised inside an engine's
+        // `generate()` — must map to 400, not 500.
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+
+        let err: anyhow::Error = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("Dynamo's SGLang backend does not currently support logprobs >= 1")
+            .build()
+            .into();
+
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.code, StatusCode::BAD_REQUEST.as_u16());
+        assert!(response.1.message.contains("does not currently support"));
+    }
+
+    #[test]
     fn test_cancelled_error_response_from_anyhow() {
         use dynamo_runtime::error::{DynamoError, ErrorType};
 
@@ -3144,6 +3292,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -3177,12 +3326,34 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_normalize_chat_reasoning_template_args_error_response() {
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "thinking": {"type": "auto"}
+            }))
+            .unwrap();
+
+        let result = normalize_chat_reasoning_template_args(&mut request);
+        assert!(result.is_err());
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                error_response.1.message,
+                format!("{VALIDATION_PREFIX}`thinking.type` must be `enabled` or `disabled`")
+            );
+        }
     }
 
     #[test]
@@ -3401,6 +3572,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -3432,6 +3604,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -3462,6 +3635,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -3492,6 +3666,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -3524,6 +3699,7 @@ mod tests {
                 .unwrap(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -3554,6 +3730,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),

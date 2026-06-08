@@ -101,6 +101,7 @@ func ConvertFromDynamoGraphDeploymentSpec(src *DynamoGraphDeploymentSpec, dst *v
 	// Convert fields represented by both versions from the live source.
 	dst.Annotations = src.Annotations
 	dst.Labels = src.Labels
+	dst.PriorityClassName = src.PriorityClassName
 	dst.BackendFramework = src.BackendFramework
 
 	if src.Restart != nil {
@@ -407,6 +408,7 @@ func ConvertToDynamoGraphDeploymentSpec(src *v1beta1.DynamoGraphDeploymentSpec, 
 	// Convert fields represented by both versions from the live source.
 	dst.Annotations = src.Annotations
 	dst.Labels = src.Labels
+	dst.PriorityClassName = src.PriorityClassName
 	dst.BackendFramework = src.BackendFramework
 
 	if src.Restart != nil {
@@ -720,6 +722,7 @@ func ConvertToRestartStatus(src *v1beta1.RestartStatus, dst *RestartStatus) {
 func ConvertFromServiceCheckpointStatus(src *ServiceCheckpointStatus, dst *v1beta1.ComponentCheckpointStatus) {
 	*dst = v1beta1.ComponentCheckpointStatus{
 		CheckpointName: src.CheckpointName,
+		CheckpointID:   src.CheckpointID,
 		IdentityHash:   src.IdentityHash,
 		Ready:          src.Ready,
 	}
@@ -730,6 +733,7 @@ func ConvertFromServiceCheckpointStatus(src *ServiceCheckpointStatus, dst *v1bet
 func ConvertToServiceCheckpointStatus(src *v1beta1.ComponentCheckpointStatus, dst *ServiceCheckpointStatus) {
 	*dst = ServiceCheckpointStatus{
 		CheckpointName: src.CheckpointName,
+		CheckpointID:   src.CheckpointID,
 		IdentityHash:   src.IdentityHash,
 		Ready:          src.Ready,
 	}

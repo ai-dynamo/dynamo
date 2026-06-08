@@ -169,11 +169,7 @@ async fn detect_and_parse_tool_call_with_recovery_options(
         }
         ParserConfig::Xml(c) => {
             let mut c = c.clone();
-            // Strict-match families opt out — flipping recovery here would
-            // contradict their per-spec strictness.
-            if !c.strict_match {
-                c.allow_eof_recovery = true;
-            }
+            c.allow_eof_recovery = true;
             ParserConfig::Xml(c)
         }
         ParserConfig::Dsml(c) if recover_dsml_eof => {
@@ -2938,14 +2934,14 @@ mod detect_parser_tests {
     }
 
     // DeepSeek V3
-    #[test]
-    fn test_e2e_detect_incomplete_tool_call_start_deepseek_v3() {
+    #[test] // A bare inner call (no outer wrapper) is jailed so it can be recovered, matching deepseek_v3_2/v4.
+    fn test_e2e_detect_bare_tool_call_start_deepseek_v3() {
         let text = r#"<｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather
 ```json
 {"location": "Tokyo"}
 ```<｜tool▁call▁end｜>"#;
         let result = detect_tool_call_start(text, Some("deepseek_v3")).unwrap();
-        assert!(!result);
+        assert!(result);
     }
 
     #[test]
@@ -2959,11 +2955,11 @@ mod detect_parser_tests {
     }
 
     // DeepSeek V3.1
-    #[test]
-    fn test_e2e_detect_incomplete_tool_call_start_deepseek_v3_1() {
+    #[test] // A bare inner call (no outer wrapper) is jailed so it can be recovered, matching deepseek_v3_2/v4.
+    fn test_e2e_detect_bare_tool_call_start_deepseek_v3_1() {
         let text = r#"<｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Tokyo"}<｜tool▁call▁end｜>"#;
         let result = detect_tool_call_start(text, Some("deepseek_v3_1")).unwrap();
-        assert!(!result);
+        assert!(result);
     }
 
     #[test]

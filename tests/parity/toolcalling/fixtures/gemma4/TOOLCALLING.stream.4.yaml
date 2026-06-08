@@ -20,22 +20,19 @@ cases:
           location:
             type: string
     expected:
-      dynamo:
-        calls: []
-        normal_text: ''
-      sglang:
+      dynamo: &id001
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
-        reason: SGLang recovers a call before the required `<tool_call|>` end marker; Dynamo follows Gemma4 batch.5 and drops incomplete envelopes without leaking markup.
+      sglang: *id001
       vllm:
         calls:
         - name: get_weather
           arguments: '{"location": "NYC'
         normal_text: ''
-        reason: vLLM emits partial arguments before the required `<tool_call|>` end marker; Dynamo follows Gemma4 batch.5 and drops incomplete envelopes without leaking markup.
+        reason: vLLM emits partial arguments before the required `<tool_call|>` end marker; Dynamo and SGLang recover the complete call body.
   TOOLCALLING.stream.4.b:
     description: Stream terminates mid-call body before the in-flight argument payload is complete
     ref: derived from TOOLCALLING.batch.5.c
@@ -83,8 +80,14 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &id001
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: &id002
         calls: []
         normal_text: call:get_weather{location:<|"|>NYC<|"|>}<tool_call|><tool_call|><tool_call|>
-      vllm: *id001
-      sglang: *id001
+        reason: vLLM preserves the raw Gemma call body as content when the opening <|tool_call> marker is missing; Dynamo recovers the complete bare call body and drops close-marker spam.
+      sglang: *id002

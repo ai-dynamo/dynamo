@@ -90,7 +90,7 @@ def detect_force_reasoning_from_template(chat_template: str | None) -> bool:
 # explicitly opts out via chat_template_kwargs. Mirrors sglang's
 # serving_chat._get_reasoning_from_request table.
 _THINKING_BY_DEFAULT = {"qwen3", "glm45", "nemotron_3", "interns1", "kimi_k2"}
-_THINKING_OPT_IN = {"deepseek-v3", "gemma4"}
+_THINKING_OPT_IN = {"deepseek-v3", "deepseek-v4", "gemma4"}
 
 
 def resolve_request_force_reasoning(
@@ -125,7 +125,9 @@ def resolve_request_force_reasoning(
 
     if reasoning_parser_name in _THINKING_OPT_IN:
         flag_key = (
-            "thinking" if reasoning_parser_name == "deepseek-v3" else "enable_thinking"
+            "thinking"
+            if reasoning_parser_name in {"deepseek-v3", "deepseek-v4"}
+            else "enable_thinking"
         )
         return kwargs.get(flag_key) is True
 
@@ -307,10 +309,10 @@ def _should_use_deepseek_v4_encoding(
 def _filter_template_tools(
     request: dict[str, Any],
     *,
+    sglang_tools: list[SglangTool] | None,
     exclude_tools_when_tool_choice_none: bool,
 ) -> list[dict[str, Any]] | None:
-    raw_tools = request.get("tools") or []
-    if not raw_tools:
+    if not sglang_tools:
         return None
 
     tool_choice = request.get("tool_choice", "auto")
@@ -320,12 +322,63 @@ def _filter_template_tools(
     if _is_named_tool_choice(tool_choice):
         chosen_name = tool_choice["function"]["name"]
         return [
-            copy.deepcopy(tool)
-            for tool in raw_tools
-            if tool.get("function", {}).get("name") == chosen_name
+            tool.model_dump()
+            for tool in sglang_tools
+            if tool.function.name == chosen_name
         ]
 
-    return copy.deepcopy(raw_tools)
+    return [tool.model_dump() for tool in sglang_tools]
+
+
+def _flatten_message_content(content: Any) -> Any:
+    """Flatten an OpenAI content-parts array to a plain string for the DSv4 encoder.
+
+    SGLang's DeepSeek-V4 encoder (``encoding_dsv4.encode_messages``) consumes
+    string content; SGLang's own OpenAI server flattens parts-list content before
+    calling it (``serving_chat._process_messages`` runs the ``"string"`` content
+    format over each message). Dynamo invokes ``encode_messages`` directly, so it
+    must do the same flattening or the standard structured form
+    ``[{"type": "text", "text": "..."}]`` crashes the encoder with
+    ``TypeError: sequence item 0: expected str instance, list found``.
+
+    Replicate SGLang's ``"string"``-format behaviour for byte-parity with native
+    SGLang serving: join the text parts with a single space and drop non-text
+    parts (DSv4 is text-only). Non-list content (``str``/``None``) is returned
+    unchanged.
+    """
+    if not isinstance(content, list):
+        return content
+    text_parts = [
+        part["text"]
+        for part in content
+        if isinstance(part, dict)
+        and part.get("type") == "text"
+        and isinstance(part.get("text"), str)
+    ]
+    return " ".join(text_parts)
+
+
+def _normalize_openai_thinking_template_kwargs(
+    request: dict[str, Any],
+) -> dict[str, Any]:
+    request = copy.copy(request)
+    chat_template_kwargs = dict(
+        request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
+    )
+    thinking = request.get("thinking")
+    if "thinking" not in chat_template_kwargs:
+        if isinstance(thinking, bool):
+            chat_template_kwargs["thinking"] = thinking
+        elif isinstance(thinking, dict):
+            thinking_type = thinking.get("type")
+            if thinking_type == "enabled":
+                chat_template_kwargs["thinking"] = True
+            elif thinking_type == "disabled":
+                chat_template_kwargs["thinking"] = False
+
+    if chat_template_kwargs:
+        request["chat_template_kwargs"] = chat_template_kwargs
+    return request
 
 
 def _render_deepseek_v4_prompt_token_ids(
@@ -346,15 +399,18 @@ def _render_deepseek_v4_prompt_token_ids(
 
     encoding_messages = copy.deepcopy(messages)
     for msg in encoding_messages:
-        if msg.get("content") is None:
+        content = msg.get("content")
+        if content is None:
             msg["content"] = ""
+        else:
+            msg["content"] = _flatten_message_content(content)
 
     if template_tools:
         if not encoding_messages or encoding_messages[0].get("role") != "system":
             encoding_messages.insert(0, {"role": "system", "content": ""})
         encoding_messages[0]["tools"] = template_tools
 
-    chat_template_kwargs = (
+    chat_template_kwargs = dict(
         request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
     )
     thinking_mode = "thinking" if chat_template_kwargs.get("thinking") else "chat"
@@ -499,6 +555,7 @@ def preprocess_chat_request(
 
     Synchronous -- suitable for both main-process and worker-process execution.
     """
+    request = _normalize_openai_thinking_template_kwargs(request)
     messages = _materialize_messages(request.get("messages", []))
 
     # Per-request client escape hatch: skip reasoning parsing entirely when
@@ -532,6 +589,7 @@ def preprocess_chat_request(
 
     template_tools = _filter_template_tools(
         request,
+        sglang_tools=sglang_tools,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
     )
 

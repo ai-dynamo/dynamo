@@ -45,6 +45,25 @@ pub struct JsonParserConfig {
     /// isn't silently dropped.
     #[serde(default)]
     pub allow_eof_recovery: bool,
+
+    /// Strict recovery: never leak wrapper markers (e.g. `<TOOLCALL>` /
+    /// `</TOOLCALL>`) into `normal_text`. When the normal parse path produces
+    /// no tool call, strip all configured start/end tokens from the raw text
+    /// and retry a strict parse of the remaining payload. If it yields one or
+    /// more tool calls, surface them (the model just emitted malformed framing,
+    /// e.g. an orphan close tag); otherwise drop the content entirely (empty
+    /// `normal_text`). Either way the wrapper markers never reach the user, and
+    /// a `tracing::warn!` records what was recovered or dropped so the loss is
+    /// debuggable. Default `false` keeps every other JSON family's existing
+    /// impl-defined recovery (which may leave raw text in `normal_text`)
+    /// unchanged. Only `nemotron_deci` opts in today.
+    ///
+    /// Only takes effect when `allow_eof_recovery` is also true (finalize /
+    /// non-streaming aggregate paths). On a mid-stream chunk it would otherwise
+    /// claim a complete call before the end token arrives and strand the
+    /// trailing marker as leaked text on the next chunk.
+    #[serde(default)]
+    pub strip_markup_on_recovery: bool,
 }
 
 impl Default for JsonParserConfig {
@@ -58,6 +77,7 @@ impl Default for JsonParserConfig {
             parser_type: JsonParserType::Basic,
             bare_json_mode: false,
             allow_eof_recovery: false,
+            strip_markup_on_recovery: false,
         }
     }
 }
@@ -84,9 +104,9 @@ pub struct XmlParserConfig {
 
     /// When true, the function- and parameter-regex omit the `|$` end-of-block
     /// fallback (so missing `</function>` / `</parameter>` causes the match to
-    /// fail rather than being silently recovered), AND `detect_and_parse_tool_
-    /// call_with_recovery` does not flip `allow_eof_recovery=true` for this
-    /// config. Used by families whose official reference parser is
+    /// fail rather than being silently recovered). Finalize recovery may still
+    /// accept a missing outer wrapper end marker if the inner blocks are
+    /// complete. Used by families whose official reference parser is
     /// strict-match (e.g. MiniMax-M2 — see
     /// https://huggingface.co/MiniMaxAI/MiniMax-M2/blob/main/docs/tool_calling_guide.md).
     #[serde(default)]
@@ -102,11 +122,10 @@ pub struct XmlParserConfig {
 
     /// When true, if `tool_call_start_token` is absent but `function_start_
     /// token` is present, parse the entire input as a single tool-call block
-    /// (back-off strategy). Matches the `if len(raw_tool_calls) == 0:
-    /// raw_tool_calls = [model_output]` back-off in Qwen3-Coder's reference
-    /// parser. Independent of `passthrough_when_no_function` (different
-    /// trigger: this one fires when function tags exist but the outer wrapper
-    /// does not).
+    /// (back-off strategy). Used by XML families that can recover a complete
+    /// function/invoke body even when the outer wrapper opener is missing.
+    /// Independent of `passthrough_when_no_function` (different trigger: this
+    /// one fires when function tags exist but the outer wrapper does not).
     #[serde(default)]
     pub backoff_when_no_wrapper: bool,
 }
@@ -293,13 +312,30 @@ impl ParserConfig {
         match self {
             ParserConfig::Json(config) => config.tool_call_start_tokens.clone(),
             ParserConfig::Harmony(config) => config.tool_call_start_tokens.clone(),
-            ParserConfig::Xml(config) => vec![config.tool_call_start_token.clone()],
+            ParserConfig::Xml(config) => {
+                let mut tokens = vec![config.tool_call_start_token.clone()];
+                if config.backoff_when_no_wrapper {
+                    tokens.push(config.function_start_token.clone());
+                }
+                tokens
+            }
             ParserConfig::Pythonic => vec![],
             ParserConfig::Typescript => vec![],
-            ParserConfig::Dsml(config) => vec![config.block_start.clone()],
+            ParserConfig::Dsml(config) => {
+                vec![
+                    config.block_start.clone(),
+                    config.invoke_start_prefix.clone(),
+                ]
+            }
             ParserConfig::Glm47(config) => vec![config.tool_call_start.clone()],
-            ParserConfig::KimiK2(config) => config.section_start_variants.clone(),
-            ParserConfig::Gemma4 => vec![crate::tool_calling::gemma4::TOOL_CALL_START.to_string()],
+            ParserConfig::KimiK2(config) => {
+                let mut tokens = config.section_start_variants.clone();
+                tokens.push(config.call_start.clone());
+                tokens
+            }
+            ParserConfig::Gemma4 => {
+                vec![crate::tool_calling::gemma4::TOOL_CALL_START.to_string()]
+            }
         }
     }
 
@@ -376,6 +412,11 @@ impl ToolCallConfig {
             parser_config: ParserConfig::Json(JsonParserConfig {
                 tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
                 tool_call_end_tokens: vec!["</TOOLCALL>".to_string()],
+                // Nemotron Ultra/Deci is an agent target where leaking a bare
+                // <TOOLCALL> envelope into message.content breaks OpenAI-shaped
+                // clients (they read tool_calls, never the content body). Strip
+                // the markers on recovery and either surface the call or drop it.
+                strip_markup_on_recovery: true,
                 ..Default::default()
             }),
             structural_tag_builder: None,
@@ -576,12 +617,9 @@ impl ToolCallConfig {
         // </minimax:tool_call>
         // Reference: https://huggingface.co/MiniMaxAI/MiniMax-M2.1/blob/main/docs/tool_calling_guide.md
         //
-        // MiniMax's official reference parser is strict-match — its three
-        // regexes (outer/invoke/parameter) all require paired fences and
-        // return [] on any mismatch. `strict_match=true` enforces that:
-        // it drops the `|$` end-of-block fallback from the function- and
-        // parameter-regex AND prevents the PyO3 `with_recovery` shim from
-        // flipping `allow_eof_recovery=true`.
+        // MiniMax uses strict inner invoke/parameter fences. Dynamo still
+        // recovers complete inner invokes when only the outer wrapper is
+        // missing or truncated so valid tool calls do not disappear.
         Self {
             parser_config: ParserConfig::Xml(XmlParserConfig {
                 tool_call_start_token: "<minimax:tool_call>".to_string(),
@@ -593,7 +631,7 @@ impl ToolCallConfig {
                 allow_eof_recovery: false,
                 strict_match: true,
                 passthrough_when_no_function: false,
-                backoff_when_no_wrapper: false,
+                backoff_when_no_wrapper: true,
             }),
             structural_tag_builder: None,
         }

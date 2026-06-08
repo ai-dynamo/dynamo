@@ -117,6 +117,20 @@ fn harmony_call_token_ids() -> Option<&'static [u32]> {
     }
 }
 
+/// Token id(s) for the harmony `<|call|>` terminator.
+///
+/// `<|call|>` is simultaneously the harmony tool-call terminator the parser
+/// requires AND a gpt-oss EOS token. Pipelines that hide EOS tokens from the
+/// decoded output (e.g. the preprocessor's stop-condition handling) must keep
+/// these ids visible when the harmony tool-call parser is active — otherwise the
+/// terminator is stripped before the parser sees it and tool calls are silently
+/// dropped. Empty if the harmony encoding is unavailable.
+pub fn harmony_terminator_token_ids() -> Vec<u32> {
+    harmony_call_token_ids()
+        .map(|ids| ids.to_vec())
+        .unwrap_or_default()
+}
+
 fn token_ids_contain_sequence(token_ids: &[u32], marker_ids: &[u32]) -> bool {
     !marker_ids.is_empty()
         && marker_ids.len() <= token_ids.len()

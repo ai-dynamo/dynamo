@@ -174,3 +174,21 @@ cases:
            middle <|channel>thought
           second<channel|> done
         reason: Dynamo extracts every complete reasoning span and concatenates them; SGLang exits reasoning at the first end marker and leaves the later span, with its literal markers, in normal_text.
+  REASONING.batch.6.b:
+    description: Stray end marker after a complete reasoning span(unbalanced-tag)
+    ref: dynamo
+    spec_ref: tests/parity/README.md
+    model_text: |-
+      <|channel>thought
+      preamble<channel|>body<channel|>answer
+    expected:
+      dynamo:
+        reasoning_text: preamble
+        normal_text: 'bodyanswer'
+        reason: 'Lossless split: stray <channel|> close marker after a complete reasoning span is stripped (parser-owned syntax must not appear in normal_text).'
+      vllm:
+        reasoning_text: 'preamble'
+        normal_text: 'body<channel|>answer'
+      sglang:
+        reasoning_text: 'preamble'
+        normal_text: 'body<channel|>answer'

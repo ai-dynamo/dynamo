@@ -77,6 +77,25 @@ const (
 	// so v1-compatible releases continue to generate new DCDs with the v1 value.
 	KubeLabelDynamoWorkerHash = "nvidia.com/dynamo-worker-hash"
 
+	// CheckpointAutoAnnotation marks operator-created checkpoints whose
+	// lifecycle is tied to an owning DGD generation.
+	CheckpointAutoAnnotation = "nvidia.com/dynamo-auto-checkpoint"
+	// CheckpointDeletionPolicyAnnotation stores whether a DGD-managed
+	// automatic checkpoint should be deleted or retained when the owning DGD is
+	// deleted.
+	CheckpointDeletionPolicyAnnotation = "nvidia.com/dynamo-checkpoint-deletion-policy"
+	// CheckpointRestoreCandidateAnnotation marks owner pod templates whose Pods
+	// should be restore-shaped by the operator's pod-create mutating webhook
+	// once the referenced checkpoint is Ready. This intentionally does not use
+	// the snapshot CheckpointIDLabel because the snapshot-agent watches that
+	// label to start a restore.
+	CheckpointRestoreCandidateAnnotation = "nvidia.com/dynamo-checkpoint-restore-candidate"
+	// CheckpointNameAnnotation stores the candidate DynamoCheckpoint CR name.
+	CheckpointNameAnnotation = "nvidia.com/dynamo-checkpoint-name"
+	// CheckpointStartupPolicyAnnotation stores the DGD checkpoint startup policy
+	// on generated pod templates for debugging and admission.
+	CheckpointStartupPolicyAnnotation = "nvidia.com/dynamo-checkpoint-startup-policy"
+
 	KubeLabelValueFalse = "false"
 	KubeLabelValueTrue  = "true"
 

@@ -12,7 +12,7 @@ mod minimax_append_think_parser;
 // Re-export main types and functions for convenience
 pub use base_parser::BasicReasoningParser;
 pub use gemma4_parser::Gemma4ReasoningParser;
-pub use gpt_oss_parser::GptOssReasoningParser;
+pub use gpt_oss_parser::{GptOssReasoningParser, harmony_terminator_token_ids};
 pub use granite_parser::GraniteReasoningParser;
 pub use minimax_append_think_parser::MiniMaxAppendThinkParser;
 

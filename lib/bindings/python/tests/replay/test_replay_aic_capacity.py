@@ -7,7 +7,7 @@ import pytest
 
 import dynamo._internal.aic as aic
 import dynamo.replay.main as replay_main
-from dynamo.llm import MockEngineArgs, PlannerReplayBridge
+from dynamo.mocker import MockEngineArgs, PlannerReplayBridge
 from dynamo.replay import run_synthetic_trace_replay
 
 from .replay_utils import _write_trace_and_args
@@ -56,6 +56,7 @@ def test_load_engine_args_estimates_aic_blocks(monkeypatch):
             "max_num_batched_tokens": 4096,
             "gpu_memory_utilization": 0.8,
             "mem_fraction_static": 0.88,
+            "free_gpu_memory_fraction": None,
             "backend_version": None,
             "moe_tp_size": None,
             "moe_ep_size": None,
@@ -84,6 +85,7 @@ def test_resolve_aic_blocks_preserves_explicit_zero_inputs(monkeypatch):
         "max_num_batched_tokens": 0,
         "gpu_memory_utilization": 0.0,
         "mem_fraction_static": 0.0,
+        "free_gpu_memory_fraction": 0.0,
         "sglang": {"page_size": 0},
     }
 
@@ -95,6 +97,7 @@ def test_resolve_aic_blocks_preserves_explicit_zero_inputs(monkeypatch):
     assert calls[0]["max_num_batched_tokens"] == 0
     assert calls[0]["gpu_memory_utilization"] == 0.0
     assert calls[0]["mem_fraction_static"] == 0.0
+    assert calls[0]["free_gpu_memory_fraction"] == 0.0
 
 
 def test_programmatic_replay_estimates_unset_aic_blocks(monkeypatch):
@@ -107,8 +110,8 @@ def test_programmatic_replay_estimates_unset_aic_blocks(monkeypatch):
         def predict_decode(self, batch_size, isl, osl):
             return float(batch_size + isl + osl)
 
-    def fake_estimate_num_gpu_blocks(*args):
-        calls.append(args)
+    def fake_estimate_num_gpu_blocks(**kwargs):
+        calls.append(kwargs)
         return 100
 
     def fake_create_session(*_args):
@@ -139,20 +142,21 @@ def test_programmatic_replay_estimates_unset_aic_blocks(monkeypatch):
 
     assert report["num_requests"] == 1
     assert calls == [
-        (
-            "vllm",
-            "h200_sxm",
-            "/models/mock",
-            2,
-            2,
-            16,
-            0.9,
-            0.88,
-            None,
-            None,
-            None,
-            None,
-        )
+        {
+            "backend_name": "vllm",
+            "system": "h200_sxm",
+            "model_path": "/models/mock",
+            "tp_size": 2,
+            "block_size": 2,
+            "max_num_batched_tokens": 16,
+            "gpu_memory_utilization": 0.9,
+            "mem_fraction_static": 0.88,
+            "free_gpu_memory_fraction": None,
+            "backend_version": None,
+            "moe_tp_size": None,
+            "moe_ep_size": None,
+            "attention_dp_size": None,
+        }
     ]
 
 
@@ -166,8 +170,8 @@ def test_planner_bridge_materializes_unset_aic_blocks(tmp_path, monkeypatch):
         def predict_decode(self, batch_size, isl, osl):
             return float(batch_size + isl + osl)
 
-    def fake_estimate_num_gpu_blocks(*args):
-        calls.append(args)
+    def fake_estimate_num_gpu_blocks(**kwargs):
+        calls.append(kwargs)
         return 100
 
     def fake_create_session(*_args):
@@ -222,49 +226,27 @@ def test_planner_bridge_materializes_unset_aic_blocks(tmp_path, monkeypatch):
         num_decode_workers=1,
     )
 
+    def expected(model_path):
+        return {
+            "backend_name": "vllm",
+            "system": "h200_sxm",
+            "model_path": model_path,
+            "tp_size": 2,
+            "block_size": 2,
+            "max_num_batched_tokens": 16,
+            "gpu_memory_utilization": 0.9,
+            "mem_fraction_static": 0.88,
+            "free_gpu_memory_fraction": None,
+            "backend_version": None,
+            "moe_tp_size": None,
+            "moe_ep_size": None,
+            "attention_dp_size": None,
+        }
+
     assert calls == [
-        (
-            "vllm",
-            "h200_sxm",
-            "/models/agg",
-            2,
-            2,
-            16,
-            0.9,
-            0.88,
-            None,
-            None,
-            None,
-            None,
-        ),
-        (
-            "vllm",
-            "h200_sxm",
-            "/models/prefill",
-            2,
-            2,
-            16,
-            0.9,
-            0.88,
-            None,
-            None,
-            None,
-            None,
-        ),
-        (
-            "vllm",
-            "h200_sxm",
-            "/models/decode",
-            2,
-            2,
-            16,
-            0.9,
-            0.88,
-            None,
-            None,
-            None,
-            None,
-        ),
+        expected("/models/agg"),
+        expected("/models/prefill"),
+        expected("/models/decode"),
     ]
 
 

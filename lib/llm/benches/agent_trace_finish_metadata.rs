@@ -114,6 +114,7 @@ fn backend_outputs(count: usize) -> Vec<BackendOutput> {
             disaggregated_params: None,
             worker_trace_link: None,
             engine_data: None,
+            routing_data: None,
         })
         .collect()
 }

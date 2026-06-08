@@ -5,7 +5,7 @@
 """Throughput-based scaling logic (Prometheus traffic-driven, predictive).
 
 Mixin consumed by ``PlannerStateMachine``.  All methods access state
-via ``self._config``, ``self._capabilities``, and regression models.
+via ``self._config``, ``self._capabilities``, and perf models.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ import logging
 import math
 from typing import Optional
 
-from dynamo.planner.core.perf_model.base import _clamp_kv_hit_rate
 from dynamo.planner.core.types import ScalingDecision, TrafficObservation
 
 logger = logging.getLogger(__name__)
@@ -151,7 +150,7 @@ class ThroughputScalingMixin:
         num_p = self._compute_prefill_replicas(demand_rps, isl, osl, kv_hit_rate)
         num_d = self._compute_decode_replicas(demand_rps, isl, osl)
         # _compute_* sets _diag_throughput_reason = "model_not_ready" when
-        # the regression isn't fit yet.  If one side is not ready, the other
+        # the perf model cannot estimate yet. If one side is not ready, the other
         # side's computation was still valid but its decision is blocked,
         # so we label it "partner_not_ready" to keep per-component
         # diagnostics consistent with the aggregate reason.
@@ -195,25 +194,25 @@ class ThroughputScalingMixin:
             self._diag_throughput_reason = "model_not_ready"
             return None
 
-        (
-            engine_rps,
-            actual_ttft,
-            actual_itl,
-        ) = self._agg_regression.find_best_engine_agg_rps(
+        capacity = self._agg_regression.find_engine_capacity_rps(
             isl=isl,
             osl=osl,
-            max_num_batched_tokens=max_tokens,
-            ttft_sla=self._config.ttft_ms,
-            itl_sla=self._config.itl_ms,
-            max_kv_tokens=d_caps.max_kv_tokens if d_caps else None,
-            max_num_seqs=d_caps.max_num_seqs if d_caps else None,
+            ttft_sla_ms=self._config.ttft_ms,
+            itl_sla_ms=self._config.itl_ms,
             kv_hit_rate=kv_hit_rate,
         )
+        engine_rps = capacity.rps if capacity is not None else 0.0
         if engine_rps <= 0:
             logger.warning("Agg perf model not ready, skipping throughput scaling")
             self._diag_throughput_reason = "model_not_ready"
             return None
-        if actual_ttft > self._config.ttft_ms or actual_itl > self._config.itl_ms:
+        actual_ttft = capacity.ttft_ms or 0.0
+        actual_itl = capacity.itl_ms or 0.0
+        if (
+            not capacity.eligible
+            or actual_ttft > self._config.ttft_ms
+            or actual_itl > self._config.itl_ms
+        ):
             logger.warning(
                 f"Agg SLA not fully met: TTFT={actual_ttft:.1f}ms, ITL={actual_itl:.1f}ms"
             )
@@ -243,22 +242,20 @@ class ThroughputScalingMixin:
         osl: float,
         kv_hit_rate: Optional[float] = None,
     ) -> Optional[int]:
-        # Prefix cache reuse shrinks the *compute* work of prefill but not
-        # decode KV residency, so we discount only the ISL fed into the
-        # prefill regression.
-        effective_isl = isl * (1.0 - _clamp_kv_hit_rate(kv_hit_rate))
-        p_caps = self._capabilities.prefill
-        engine_rps, ttft_ms = self._prefill_regression.find_best_engine_prefill_rps(
-            ttft_sla=self._config.ttft_ms,
-            isl=effective_isl,
-            max_num_batched_tokens=p_caps.max_num_batched_tokens if p_caps else None,
+        capacity = self._prefill_regression.find_engine_capacity_rps(
+            isl=isl,
+            osl=osl,
+            ttft_sla_ms=self._config.ttft_ms,
+            kv_hit_rate=kv_hit_rate,
         )
+        engine_rps = capacity.rps if capacity is not None else 0.0
         if engine_rps <= 0:
             logger.warning("Prefill perf model not ready, skipping throughput scaling")
             self._diag_throughput_reason = "model_not_ready"
             return None
+        ttft_ms = capacity.ttft_ms or 0.0
         sla_floor = 1
-        if ttft_ms > self._config.ttft_ms:
+        if not capacity.eligible or ttft_ms > self._config.ttft_ms:
             logger.warning(
                 f"Prefill TTFT SLA not met: {ttft_ms:.1f}ms > {self._config.ttft_ms:.1f}ms"
             )
@@ -273,26 +270,25 @@ class ThroughputScalingMixin:
         logger.info(
             f"Prefill: {demand_rps:.2f} rps / {engine_rps:.2f} = {result}, "
             f"est_ttft={ttft_ms:.1f}ms, isl_raw={isl:.1f}, "
-            f"isl_effective={effective_isl:.1f}"
+            f"kv_hit_rate={kv_hit_rate or 0.0:.3f}"
         )
         return result
 
     def _compute_decode_replicas(
         self, demand_rps: float, isl: float, osl: float
     ) -> Optional[int]:
-        d_caps = self._capabilities.decode
-        engine_rps, itl_ms = self._decode_regression.find_best_engine_decode_rps(
-            itl=self._config.itl_ms,
-            context_length=isl + osl / 2,
+        capacity = self._decode_regression.find_engine_capacity_rps(
+            isl=isl,
             osl=osl,
-            max_kv_tokens=d_caps.max_kv_tokens if d_caps else None,
-            max_num_seqs=d_caps.max_num_seqs if d_caps else None,
+            itl_sla_ms=self._config.itl_ms,
         )
+        engine_rps = capacity.rps if capacity is not None else 0.0
         if engine_rps <= 0:
             logger.warning("Decode perf model not ready, skipping throughput scaling")
             self._diag_throughput_reason = "model_not_ready"
             return None
-        if itl_ms > self._config.itl_ms:
+        itl_ms = capacity.itl_ms or 0.0
+        if not capacity.eligible or itl_ms > self._config.itl_ms:
             logger.warning(
                 f"Decode ITL SLA not met: {itl_ms:.1f}ms > {self._config.itl_ms:.1f}ms"
             )

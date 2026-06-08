@@ -186,6 +186,7 @@ pub(super) fn simulate_decode_step(
         output_signals.push(OutputSignal {
             uuid: req.uuid,
             completed: is_complete,
+            rejected: false,
             handoff_delay_ms: compute_prefill_handoff_delay_ms(
                 config.worker_type,
                 is_complete,

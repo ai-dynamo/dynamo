@@ -1,0 +1,187 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# AIPerf trace-replay benchmark for Nemotron-3-Super DGDs.
+#
+# One Job covers every variant (B200/H200 × chat/agent traces) — the
+# benchmark itself is identical regardless of GPU SKU. To target a specific
+# DGD, edit the env values below (and `metadata.name` / `labels.app` if you
+# run multiple jobs in the same namespace).
+#
+# Runs a single concurrency value. To sweep concurrencies, restart the DGD
+# workers between runs so KV cache and prefix-cache state are reset — see
+# README.md "Running a concurrency sweep".
+#
+# Prerequisites:
+# - Target DGD is Ready (see ../README.md)
+# - model-cache PVC mounted in the namespace and contains TRACE_FILE
+# - TARGET_MODEL matches the served-model-name on the DGD (NVFP4 for B200,
+#   FP8 for H200)
+#
+# Results: /model-cache/perf/<epoch>_<job-name>/
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nemotron-3-super-bench
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 7200 # 2h hard cap on the Job
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: nemotron-3-super-bench
+    spec:
+      # Co-locate the bench pod with the DGD frontend to minimise client/server
+      # network overhead.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: nvidia.com/dynamo-component-type
+                operator: In
+                values:
+                - frontend
+              - key: nvidia.com/dynamo-graph-deployment-name
+                operator: In
+                values:
+                - nemotron-3-super-b200-chat
+                - nemotron-3-super-b200-agentic
+                - nemotron-3-super-h200-chat
+                - nemotron-3-super-h200-agentic
+            topologyKey: kubernetes.io/hostname
+      # tolerations: # uncomment to populate any tolerations for the gpu nodes
+      containers:
+      - name: perf
+        image: python:3.12-slim
+        imagePullPolicy: IfNotPresent
+        workingDir: /workspace
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -euo pipefail
+          ulimit -n 600000
+          apt-get update && apt-get install -y curl jq procps git && apt-get clean
+          pip install "aiperf==0.7.0" "protobuf==7.35.0" "transformers==4.57.3" "tiktoken==0.13.0"
+          sysctl -w net.ipv4.ip_local_port_range="1024 65000" 2>/dev/null || true
+          export COLUMNS=200
+          EPOCH=$(date +%s)
+          wait_for_model_ready() {
+            local max_attempts=${WAIT_FOR_MODEL_MAX_ATTEMPTS:-720} # 720 * 5s = 1h default
+            local attempt=0
+            echo "Waiting for model '$TARGET_MODEL' at $ENDPOINT/v1/models (max ${max_attempts} attempts) ..."
+            while ! curl -sf "http://$ENDPOINT/v1/models" | jq -e --arg m "$TARGET_MODEL" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do
+              attempt=$((attempt + 1))
+              if [ "$attempt" -ge "$max_attempts" ]; then
+                echo "ERROR: model '$TARGET_MODEL' did not become ready after ${max_attempts} attempts. Aborting."
+                exit 1
+              fi
+              echo "[$(date '+%H:%M:%S')] not ready (attempt ${attempt}/${max_attempts}), sleeping 5s"
+              sleep 5
+            done
+            curl -s "http://$ENDPOINT/v1/models" | jq .
+          }
+          if [ ! -f "${TRACE_FILE}" ]; then
+            echo "ERROR: trace file not found at ${TRACE_FILE}"
+            echo "Copy it onto the PVC via a helper pod, e.g.:"
+            echo " kubectl cp <local_trace.jsonl> <ns>/<helper-pod>:${TRACE_FILE}"
+            exit 1
+          fi
+          wait_for_model_ready
+          ROOT_DIR="${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}"
+          mkdir -p "$ROOT_DIR"
+          echo "=============================================="
+          echo "Trace Replay Benchmark (aiperf)"
+          echo "=============================================="
+          echo "Endpoint:     http://${ENDPOINT}"
+          echo "Model:        ${TARGET_MODEL}"
+          echo "Trace file:   ${TRACE_FILE}"
+          echo "Concurrency:  ${CONCURRENCY}"
+          echo "Artifact root:${ROOT_DIR}"
+          echo "=============================================="
+          # Warmup
+          WARMUP_DIR="${ROOT_DIR}/warmup"
+          mkdir -p "$WARMUP_DIR"
+          aiperf profile \
+          -m "${TARGET_MODEL}" \
+          --tokenizer "${TARGET_MODEL}" \
+          --tokenizer-trust-remote-code \
+          --url "http://${ENDPOINT}" \
+          --streaming \
+          --ui simple \
+          --isl 8000 \
+          --osl 1000 \
+          --concurrency 1 \
+          --request-count 5 \
+          --artifact-dir "${WARMUP_DIR}"
+          echo "Warmup complete"
+          MODEL_BASE="${TARGET_MODEL##*/}"
+          TS=$(date +'%Y%m%d_%H%M%S')
+          RUN_DIR="${ROOT_DIR}/${MODEL_BASE}_trace_c${CONCURRENCY}_${TS}"
+          mkdir -p "$RUN_DIR"
+          aiperf profile \
+          -m "${TARGET_MODEL}" \
+          --tokenizer "${TARGET_MODEL}" \
+          --tokenizer-trust-remote-code \
+          --input-file "${TRACE_FILE}" \
+          --custom-dataset-type mooncake_trace \
+          --num-requests $(wc -l < "${TRACE_FILE}") \
+          --prompt-input-tokens-block-size 512 \
+          --url "http://${ENDPOINT}" \
+          --streaming \
+          --use-server-token-count \
+          --extra-inputs ignore_eos:true \
+          --concurrency "${CONCURRENCY}" \
+          --random-seed 42 \
+          --ui simple \
+          --artifact-dir "${RUN_DIR}" \
+          --request-timeout-seconds 1200 \
+          --workers-max "${CONCURRENCY}" \
+          --export-http-trace
+          echo "Concurrency ${CONCURRENCY} complete; artifacts in ${RUN_DIR}"
+          ls -la "${RUN_DIR}" || true
+          echo ""
+          echo "Done. Root: ${ROOT_DIR}"
+        env:
+        # --- Edit these to target the DGD + trace you want to benchmark ---
+        - name: ENDPOINT
+          value: nemotron-3-super-b200-chat-frontend:8000
+        - name: TRACE_FILE
+          value: /model-cache/traces/8k_1k_70kv_chat_new_noschedule.jsonl  # use /model-cache/traces/64k_400_90kv_agent_new_noschedule.jsonl for agent
+        - name: CONCURRENCY
+          value: "24"
+        # B200 deploys serve the NVFP4 model id; H200 deploys serve FP8 — swap
+        # TARGET_MODEL to match the DGD's --served-model-name.
+        - name: TARGET_MODEL
+          value: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4  # H200: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8
+        # --- The remainder is shared across all variants ---
+        - name: AIPERF_HTTP_CONNECTION_LIMIT
+          value: "200"
+        - name: AIPERF_HTTP_SO_RCVTIMEO
+          value: "120"
+        - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT
+          value: "3600"
+        - name: AIPERF_DATASET_CONFIGURATION_TIMEOUT
+          value: "3600"
+        - name: JOB_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.labels['job-name']
+        - name: ROOT_ARTIFACT_DIR
+          value: /model-cache/perf
+        - name: HF_HOME
+          value: /model-cache
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        volumeMounts:
+        - name: model-cache
+          mountPath: /model-cache
+      restartPolicy: Never
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache

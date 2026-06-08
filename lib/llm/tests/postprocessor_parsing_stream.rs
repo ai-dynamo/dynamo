@@ -1503,6 +1503,255 @@ async fn tool_choice_matrix_non_force_required_prompt_injected_bare_json_contrac
     );
 }
 
+/// DeepSeek V4 + required + `prompt_injected_reasoning=true` + bare JSON.
+///
+/// This is the production failure shape from DeepSeek V4 Pro: the V4 formatter
+/// seeds `<think>`, but vLLM guided decoding emits the constrained JSON payload
+/// without a closing `</think>`. The postprocessor must let the immediate jail
+/// parse that JSON instead of classifying it as reasoning_content.
+#[tokio::test]
+async fn tool_choice_deepseek_v4_required_prompt_injected_bare_json_recovers() {
+    let bare_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+    let preprocessor = build_preprocessor(Some("deepseek_v4"), Some("deepseek_v4"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(bare_json), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        finish_reasons,
+    } = drain_stream(output_stream).await;
+
+    let case = "DeepSeek V4 required + prompt_injected=true + bare JSON";
+    assert!(
+        reasoning.is_empty(),
+        "{case}: guided JSON must not be classified as reasoning_content, got: {reasoning:?}"
+    );
+    assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+    assert!(
+        finish_reasons.contains(&FinishReason::ToolCalls),
+        "{case}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
+    );
+}
+
+/// DeepSeek V4/GLM + required + `prompt_injected_reasoning=true` +
+/// reasoning-close-marker JSON. This is not bare JSON; the reasoning parser
+/// must strip the pre-`</think>` prefix before the immediate jail sees JSON.
+#[tokio::test]
+async fn tool_choice_prompt_injected_close_marker_json_keeps_reasoning_parser_for_dsv4_glm() {
+    let stream_text = r#"Let me check.</think>[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+
+    for (case, reasoning_parser, tool_call_parser) in [
+        ("DeepSeek V4", "deepseek_v4", "deepseek_v4"),
+        ("GLM45", "glm45", "glm47"),
+    ] {
+        let preprocessor = build_preprocessor(Some(reasoning_parser), Some(tool_call_parser));
+        let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+        let input_stream = stream::iter(
+            vec![mock_content_chunk(stream_text), mock_final_chunk()]
+                .into_iter()
+                .map(Annotated::from_data),
+        );
+        let output_stream = preprocessor
+            .postprocessor_parsing_stream(input_stream, &request, true, false)
+            .expect("postprocessor_parsing_stream should build");
+        let DrainOutput {
+            reasoning,
+            content,
+            tool_calls,
+            finish_reasons,
+        } = drain_stream(output_stream).await;
+
+        assert_eq!(
+            reasoning.trim(),
+            "Let me check.",
+            "{case}: reasoning_content should hold only the pre-</think> text, got: {reasoning:?}"
+        );
+        assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+        assert!(
+            finish_reasons.contains(&FinishReason::ToolCalls),
+            "{case}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
+        );
+    }
+}
+
+/// DeepSeek V4 + named tool_choice + `prompt_injected_reasoning=true` + bare
+/// parameters object. Same bug as the required case, but exercises the named
+/// SingleObject immediate-jail path.
+#[tokio::test]
+async fn tool_choice_deepseek_v4_named_prompt_injected_bare_params_recovers() {
+    let bare_params = r#"{"location":"San Francisco"}"#;
+    let preprocessor = build_preprocessor(Some("deepseek_v4"), Some("deepseek_v4"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Named(
+        "get_weather".to_string().into(),
+    ));
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(bare_params), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        finish_reasons,
+    } = drain_stream(output_stream).await;
+
+    let case = "DeepSeek V4 named + prompt_injected=true + bare params";
+    assert!(
+        reasoning.is_empty(),
+        "{case}: guided JSON must not be classified as reasoning_content, got: {reasoning:?}"
+    );
+    assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+    assert!(
+        finish_reasons.contains(&FinishReason::ToolCalls),
+        "{case}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
+    );
+}
+
+/// GLM + required + `prompt_injected_reasoning=true` + bare JSON.
+///
+/// Mirrors the DeepSeek V4 guided-decoding failure shape for the `glm45`
+/// reasoning parser paired with the `glm47` tool-call parser used by GLM-5.1.
+#[tokio::test]
+async fn tool_choice_glm45_required_prompt_injected_bare_json_recovers() {
+    let bare_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+    let preprocessor = build_preprocessor(Some("glm45"), Some("glm47"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(bare_json), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        finish_reasons,
+    } = drain_stream(output_stream).await;
+
+    let case = "GLM45 required + prompt_injected=true + bare JSON";
+    assert!(
+        reasoning.is_empty(),
+        "{case}: guided JSON must not be classified as reasoning_content, got: {reasoning:?}"
+    );
+    assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+    assert!(
+        finish_reasons.contains(&FinishReason::ToolCalls),
+        "{case}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
+    );
+}
+
+/// GLM + named tool_choice + `prompt_injected_reasoning=true` + bare
+/// parameters object. Exercises the named SingleObject immediate-jail path.
+#[tokio::test]
+async fn tool_choice_glm45_named_prompt_injected_bare_params_recovers() {
+    let bare_params = r#"{"location":"San Francisco"}"#;
+    let preprocessor = build_preprocessor(Some("glm45"), Some("glm47"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Named(
+        "get_weather".to_string().into(),
+    ));
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(bare_params), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        finish_reasons,
+    } = drain_stream(output_stream).await;
+
+    let case = "GLM45 named + prompt_injected=true + bare params";
+    assert!(
+        reasoning.is_empty(),
+        "{case}: guided JSON must not be classified as reasoning_content, got: {reasoning:?}"
+    );
+    assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+    assert!(
+        finish_reasons.contains(&FinishReason::ToolCalls),
+        "{case}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
+    );
+}
+
+/// DeepSeek V4/GLM structural-tag guided decoding may emit reasoning text,
+/// then `</think>`, then the model-native tool-call marker. The prompt-injected
+/// bare-JSON bypass must not skip the reasoning parser on this path, or the
+/// pre-`</think>` reasoning text leaks as assistant content before the tool call.
+#[tokio::test]
+async fn tool_choice_structural_tag_keeps_prompt_injected_reasoning_parser() {
+    for (case, reasoning_parser, tool_call_parser, structural_tool_call) in [
+        (
+            "DeepSeek V4 DSML",
+            "deepseek_v4",
+            "deepseek_v4",
+            "<｜DSML｜tool_calls>\n\
+<｜DSML｜invoke name=\"get_weather\">\n\
+<｜DSML｜parameter name=\"location\" string=\"true\">San Francisco</｜DSML｜parameter>\n\
+</｜DSML｜invoke>\n\
+</｜DSML｜tool_calls>",
+        ),
+        (
+            "GLM XML",
+            "glm45",
+            "glm47",
+            "<tool_call>get_weather\
+<arg_key>location</arg_key><arg_value>San Francisco</arg_value>\
+</tool_call>",
+        ),
+    ] {
+        let preprocessor = build_preprocessor(Some(reasoning_parser), Some(tool_call_parser));
+        let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+        let stream_text = format!("Let me check.</think>{structural_tool_call}");
+        let input_stream = stream::iter(
+            vec![mock_content_chunk(&stream_text), mock_final_chunk()]
+                .into_iter()
+                .map(Annotated::from_data),
+        );
+        let output_stream = preprocessor
+            .postprocessor_parsing_stream(input_stream, &request, true, true)
+            .expect("postprocessor_parsing_stream should build");
+        let DrainOutput {
+            reasoning,
+            content,
+            tool_calls,
+            finish_reasons,
+        } = drain_stream(output_stream).await;
+
+        assert_eq!(
+            reasoning.trim(),
+            "Let me check.",
+            "{case}: reasoning_content should hold only the pre-</think> text, got: {reasoning:?}"
+        );
+        assert!(
+            content.is_empty(),
+            "{case}: reasoning prefix or structural tags leaked into content: {content:?}"
+        );
+        assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+        assert!(
+            finish_reasons.contains(&FinishReason::ToolCalls),
+            "{case}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
+        );
+    }
+}
+
 /// CASE 6 — Immediate jail mode + first chunk has only `reasoning_content`
 /// (no text delta) + JSON arrives in a later chunk. Regression for the
 /// `jail.rs:678` fix: before the fix, the else branch hardcoded

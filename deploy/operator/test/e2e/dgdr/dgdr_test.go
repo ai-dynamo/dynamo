@@ -109,7 +109,8 @@ var _ = Describe("DGDR Lifecycle Scenarios", Label("gpu_0", "nightly", "integrat
 					Features: &v1beta1.FeaturesSpec{
 						Planner: plannerRawExtension(map[string]interface{}{
 							"enabled":                      true,
-							"plannerPreDeploymentSweeping": "rapid",
+							"optimization_target":          "sla",
+							"pre_deployment_sweeping_mode": "rapid",
 						}),
 					},
 					ExpectDGDReady: true,

@@ -119,3 +119,22 @@ cases:
         reasoning_text: plain answer
         normal_text: ''
       sglang: *sg_stream_1_b
+  REASONING.stream.2.c:
+    description: Stray end marker after a complete reasoning span, across chunks(unbalanced-tag)
+    ref: dynamo
+    spec_ref: tests/parity/README.md
+    chunks:
+    - '<think>preamble</think>'
+    - 'body</think>'
+    - 'answer'
+    expected:
+      dynamo:
+        reasoning_text: preamble
+        normal_text: 'bodyanswer'
+        reason: 'Lossless split: when a stray close marker appears outside any reasoning block, it is stripped (parser-owned syntax must not appear in normal_text). Reasoning is captured from the first <open>...<close> pair only; subsequent stray closes are discarded.'
+      vllm:
+        reasoning_text: '<think>preamble'
+        normal_text: 'body</think>answer'
+      sglang:
+        reasoning_text: 'preamble'
+        normal_text: 'body</think>answer'

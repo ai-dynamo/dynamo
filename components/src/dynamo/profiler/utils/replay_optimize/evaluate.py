@@ -16,7 +16,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from dynamo.llm import KvRouterConfig, MockEngineArgs
+from dynamo.llm import KvRouterConfig
+from dynamo.mocker import MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 
 from .engine_args import (

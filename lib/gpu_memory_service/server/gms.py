@@ -174,17 +174,17 @@ class GMS:
 
     def _compute_memory_layout_hash(self, allocations: list[AllocationInfo]) -> str:
         h = hashlib.sha256()
-        allocation_slots_by_id: dict[str, int] = {}
-        for info in sorted(allocations, key=lambda info: info.layout_slot):
-            allocation_slots_by_id[info.allocation_id] = info.layout_slot
-            h.update(
-                f"{info.layout_slot}:{info.size}:{info.aligned_size}:{info.tag}".encode()
-            )
+        allocation_ranks_by_id: dict[str, int] = {}
+        for rank, info in enumerate(
+            sorted(allocations, key=lambda info: info.layout_slot)
+        ):
+            allocation_ranks_by_id[info.allocation_id] = rank
+            h.update(f"{rank}:{info.size}:{info.aligned_size}:{info.tag}".encode())
 
         for key in sorted(self._metadata):
             entry = self._metadata[key]
-            layout_slot = allocation_slots_by_id[entry.allocation_id]
-            h.update(f"{key}:{layout_slot}:{entry.offset_bytes}:".encode())
+            rank = allocation_ranks_by_id[entry.allocation_id]
+            h.update(f"{key}:{rank}:{entry.offset_bytes}:".encode())
             h.update(entry.value)
         return h.hexdigest()
 

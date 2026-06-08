@@ -24,13 +24,13 @@ use dynamo_runtime::engine::AsyncEngine;
 use dynamo_runtime::pipeline::{Context as PipelineContext, Error, ManyOut, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
 
-use crate::preprocessor::prompt::{OAIChatLikeRequest, OAIPromptFormatter};
 use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
 use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
 };
 use crate::tokenizers::traits::Tokenizer;
+use dynamo_renderer::{OAIChatLikeRequest, OAIPromptFormatter};
 
 /// A minimal `OAIChatLikeRequest` for speculative next-turn prefill.
 /// Holds the full conversation (including a new assistant message) and

@@ -86,6 +86,8 @@ pub struct AicPerfConfig {
     aic_moe_tp_size: Option<usize>,
     aic_moe_ep_size: Option<usize>,
     aic_attention_dp_size: Option<usize>,
+    aic_nextn: Option<usize>,
+    aic_nextn_accept_rates: Option<String>,
 }
 
 impl AicPerfConfig {
@@ -120,12 +122,20 @@ impl AicPerfConfig {
     pub(crate) fn attention_dp_size(&self) -> Option<usize> {
         self.aic_attention_dp_size
     }
+
+    pub(crate) fn nextn(&self) -> Option<usize> {
+        self.aic_nextn
+    }
+
+    pub(crate) fn nextn_accept_rates(&self) -> Option<&str> {
+        self.aic_nextn_accept_rates.as_deref()
+    }
 }
 
 #[pymethods]
 impl AicPerfConfig {
     #[new]
-    #[pyo3(signature = (aic_backend, aic_system, aic_model_path, aic_tp_size=1, aic_backend_version=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None))]
+    #[pyo3(signature = (aic_backend, aic_system, aic_model_path, aic_tp_size=1, aic_backend_version=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         aic_backend: String,
@@ -136,6 +146,8 @@ impl AicPerfConfig {
         aic_moe_tp_size: Option<usize>,
         aic_moe_ep_size: Option<usize>,
         aic_attention_dp_size: Option<usize>,
+        aic_nextn: Option<usize>,
+        aic_nextn_accept_rates: Option<String>,
     ) -> PyResult<Self> {
         if aic_backend.is_empty() {
             return Err(PyValueError::new_err("aic_backend must be non-empty"));
@@ -158,6 +170,14 @@ impl AicPerfConfig {
                 return Err(PyValueError::new_err(format!("{name} must be >= 1")));
             }
         }
+        // AIC caps MTP draft tokens at 5; >5 would IndexError in calc_expectation.
+        if let Some(nextn) = aic_nextn
+            && !(1..=5).contains(&nextn)
+        {
+            return Err(PyValueError::new_err(
+                "aic_nextn must be 1..=5 when set (omit to disable spec dec)",
+            ));
+        }
 
         Ok(Self {
             aic_backend,
@@ -168,6 +188,8 @@ impl AicPerfConfig {
             aic_moe_tp_size,
             aic_moe_ep_size,
             aic_attention_dp_size,
+            aic_nextn,
+            aic_nextn_accept_rates,
         })
     }
 }
@@ -430,6 +452,7 @@ pub(crate) struct EntrypointArgs {
     namespace: Option<String>,
     namespace_prefix: Option<String>,
     is_prefill: bool,
+    is_decode: bool,
     migration_limit: u32,
     migration_max_seq_len: Option<u32>,
     chat_engine_factory: Option<PyEngineFactory>,
@@ -440,7 +463,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -462,6 +485,7 @@ impl EntrypointArgs {
         namespace: Option<String>,
         namespace_prefix: Option<String>,
         is_prefill: bool,
+        is_decode: bool,
         migration_limit: u32,
         migration_max_seq_len: Option<u32>,
         chat_engine_factory: Option<PyObject>,
@@ -515,6 +539,7 @@ impl EntrypointArgs {
             namespace,
             namespace_prefix,
             is_prefill,
+            is_decode,
             migration_limit,
             migration_max_seq_len,
             chat_engine_factory,
@@ -681,6 +706,8 @@ async fn select_engine(
                             config.moe_tp_size(),
                             config.moe_ep_size(),
                             config.attention_dp_size(),
+                            config.nextn(),
+                            config.nextn_accept_rates(),
                         )
                     })
                 })
@@ -722,6 +749,8 @@ async fn select_engine(
                 let moe_tp_size = mocker_args.aic_moe_tp_size;
                 let moe_ep_size = mocker_args.aic_moe_ep_size;
                 let attention_dp_size = mocker_args.aic_attention_dp_size;
+                let nextn = mocker_args.aic_nextn;
+                let nextn_accept_rates = mocker_args.aic_nextn_accept_rates.as_deref();
                 match Python::with_gil(|py| {
                     create_aic_callback(
                         py,
@@ -733,6 +762,8 @@ async fn select_engine(
                         moe_tp_size,
                         moe_ep_size,
                         attention_dp_size,
+                        nextn,
+                        nextn_accept_rates,
                     )
                 }) {
                     Ok(callback) => {
@@ -763,6 +794,7 @@ async fn select_engine(
                 engine,
                 model: Box::new(local_model),
                 is_prefill: args.is_prefill,
+                is_decode: args.is_decode,
             }
         }
     };

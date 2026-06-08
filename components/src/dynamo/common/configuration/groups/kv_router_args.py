@@ -28,6 +28,8 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "overlap_score_weight",
     "overlap_score_credit",
     "prefill_load_scale",
+    "host_cache_hit_weight",
+    "disk_cache_hit_weight",
     "router_temperature",
     "use_kv_events",
     "durable_kv_events",
@@ -108,6 +110,8 @@ class KvRouterConfigBase(ConfigBase):
     overlap_score_weight: Optional[float] = None
     overlap_score_credit: float
     prefill_load_scale: float
+    host_cache_hit_weight: float
+    disk_cache_hit_weight: float
     router_temperature: float
     use_kv_events: bool
     durable_kv_events: bool
@@ -197,6 +201,33 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=float,
             dest="prefill_load_scale",
+        )
+        add_argument(
+            g,
+            flag_name="--router-host-cache-hit-weight",
+            env_var="DYN_ROUTER_HOST_CACHE_HIT_WEIGHT",
+            default=0.75,
+            help=(
+                "KV Router: Credit multiplier for host-pinned (CPU offload) prefix overlap. "
+                "Range: 0.0 to 1.0; higher values more strongly prefer workers holding the "
+                "prefix in CPU-tier KV cache. Symmetric to --router-kv-overlap-score-credit "
+                "but applied to host_pinned tier overlap."
+            ),
+            arg_type=float,
+            dest="host_cache_hit_weight",
+        )
+        add_argument(
+            g,
+            flag_name="--router-disk-cache-hit-weight",
+            env_var="DYN_ROUTER_DISK_CACHE_HIT_WEIGHT",
+            default=0.25,
+            help=(
+                "KV Router: Credit multiplier for disk/lower-tier (e.g. NVMe-backed) prefix overlap. "
+                "Range: 0.0 to 1.0. Same semantics as --router-host-cache-hit-weight applied to "
+                "the disk tier."
+            ),
+            arg_type=float,
+            dest="disk_cache_hit_weight",
         )
         add_argument(
             g,

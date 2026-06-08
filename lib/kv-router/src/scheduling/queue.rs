@@ -568,7 +568,7 @@ impl<
     }
 
     /// Run the full scheduling pipeline for a single request:
-    /// compute potential load -> select worker -> respond -> book via add_request.
+    /// compute potential load -> select worker -> book tracked state -> respond.
     fn admit_one(&self, mut request: SchedulingRequest, decay_now: Instant) {
         let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens_at(
             request.token_seq.as_deref(),
@@ -598,18 +598,22 @@ impl<
             }
         };
 
-        request.respond(Ok(SchedulingResponse {
+        let response = SchedulingResponse {
             best_worker: selection.worker,
             effective_overlap_blocks: selection.effective_overlap_blocks,
             cached_tokens: selection.cached_tokens,
-        }));
+        };
 
         if !request.update_states {
+            request.respond(Ok(response));
             return;
         }
 
-        let Some(request_id) = request.maybe_request_id else {
+        let Some(request_id) = request.maybe_request_id.clone() else {
             tracing::error!("No request_id provided to add_request to the slot tracker");
+            request.respond(Err(KvSchedulerError::BookingFailed(
+                "tracked scheduling request did not include a request_id".to_string(),
+            )));
             return;
         };
 
@@ -619,19 +623,46 @@ impl<
             request.track_prefill_tokens,
         );
 
-        if let Err(e) = self.slots.add_request(
-            SequenceRequest {
-                request_id: request_id.clone(),
-                token_sequence: request.token_seq,
-                track_prefill_tokens: request.track_prefill_tokens,
-                expected_output_tokens: request.expected_output_tokens,
-                prefill_load_hint,
-                worker: selection.worker,
-                lora_name: request.lora_name.clone(),
-            },
-            Instant::now(),
-        ) {
-            tracing::warn!("Failed to add request {request_id}: {e}");
+        let sequence_request = SequenceRequest {
+            request_id,
+            token_sequence: request.token_seq.take(),
+            track_prefill_tokens: request.track_prefill_tokens,
+            expected_output_tokens: request.expected_output_tokens,
+            prefill_load_hint,
+            worker: selection.worker,
+            lora_name: request.lora_name.take(),
+        };
+        self.book_and_respond(request, sequence_request, response);
+    }
+
+    fn book_and_respond(
+        &self,
+        mut request: SchedulingRequest,
+        sequence_request: SequenceRequest,
+        response: SchedulingResponse,
+    ) {
+        if request.response_is_closed() {
+            tracing::debug!(
+                request_id = %sequence_request.request_id,
+                "Skipping scheduler booking for cancelled request"
+            );
+            return;
+        }
+
+        let request_id = sequence_request.request_id.clone();
+        if let Err(error) = self.slots.add_request(sequence_request, Instant::now()) {
+            tracing::warn!(%request_id, %error, "Failed to book scheduler state");
+            request.respond(Err(KvSchedulerError::BookingFailed(error.to_string())));
+            return;
+        }
+
+        if request.respond(Ok(response)) {
+            return;
+        }
+
+        tracing::debug!(%request_id, "Rolling back undelivered scheduler booking");
+        if let Err(error) = self.slots.free(&request_id, Instant::now()) {
+            tracing::error!(%request_id, %error, "Failed to roll back scheduler booking");
         }
     }
 
@@ -744,9 +775,12 @@ mod tests {
 
     use super::*;
     use crate::config::RouterQueueDepthByMissingIslTier;
-    use crate::protocols::{RouterBackpressureReason, WorkerSelectionResult, WorkerWithDpRank};
+    use crate::protocols::{
+        ActiveLoad, ActiveSequenceEvent, RouterBackpressureReason, WorkerSelectionResult,
+        WorkerWithDpRank,
+    };
     use crate::scheduling::types::KvSchedulerError;
-    use crate::sequences::ActiveSequencesMultiWorker;
+    use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher};
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
     use crate::{DefaultWorkerSelector, WorkerSelector};
 
@@ -767,6 +801,28 @@ mod tests {
         ) -> anyhow::Result<Duration> {
             Ok(self.duration)
         }
+    }
+
+    type SchedulingResponseReceiver =
+        tokio::sync::oneshot::Receiver<Result<SchedulingResponse, KvSchedulerError>>;
+
+    struct DropResponseOnLoadPublisher {
+        response_rx: Arc<StdMutex<Option<SchedulingResponseReceiver>>>,
+    }
+
+    impl SequencePublisher for DropResponseOnLoadPublisher {
+        fn publish_event(
+            &self,
+            _event: &ActiveSequenceEvent,
+        ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send {
+            std::future::ready(Ok(()))
+        }
+
+        fn publish_load(&self, _load: ActiveLoad) {
+            self.response_rx.lock().unwrap().take();
+        }
+
+        fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
     }
 
     #[derive(Default)]
@@ -1223,6 +1279,71 @@ mod tests {
             resp_tx: Some(tx),
         };
         (req, rx)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_cancelled_pending_request_is_not_booked() {
+        let isl = 512;
+        let (queue, slots) = make_queue(1, 16, isl, Some(0.0));
+
+        let (first, first_rx) = make_request("first", isl);
+        queue.enqueue(first).await;
+        first_rx
+            .await
+            .expect("first response sender dropped")
+            .expect("first request should be scheduled");
+
+        let (cancelled, cancelled_rx) = make_request("cancelled", isl);
+        queue.enqueue(cancelled).await;
+        assert_eq!(queue.pending_count(), 1);
+        drop(cancelled_rx);
+
+        slots.free(&"first".to_string(), decay_now()).unwrap();
+        queue.update().await;
+
+        assert_eq!(queue.pending_count(), 0);
+        slots.assert_completely_drained(decay_now());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_failed_response_delivery_rolls_back_booking() {
+        let isl = 512;
+        let response_rx = Arc::new(StdMutex::new(None));
+        let publisher = DropResponseOnLoadPublisher {
+            response_rx: Arc::clone(&response_rx),
+        };
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            publisher,
+            16,
+            HashMap::from([(0, (0, 1))]),
+            false,
+            0,
+            "test",
+        ));
+        let (_cfg_tx, cfg_rx) = watch::channel(HashMap::from([(
+            0,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(isl as u64),
+                ..Default::default()
+            },
+        )]));
+        let queue = SchedulerQueue::new(
+            Arc::clone(&slots),
+            cfg_rx,
+            None,
+            RouterQueueDepthTiers::unbounded_cap(),
+            16,
+            DefaultWorkerSelector::new(None, "test"),
+            FcfsPolicy,
+            None,
+        );
+
+        let (request, receiver) = make_request("delivery-race", isl);
+        *response_rx.lock().unwrap() = Some(receiver);
+        queue.enqueue(request).await;
+
+        assert!(response_rx.lock().unwrap().is_none());
+        slots.assert_completely_drained(decay_now());
     }
 
     #[tokio::test(flavor = "multi_thread")]

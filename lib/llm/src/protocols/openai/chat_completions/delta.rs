@@ -403,6 +403,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -471,6 +472,7 @@ mod tests {
             })),
             worker_trace_link: None,
             engine_data: None,
+            routing_data: None,
         }
     }
 
@@ -498,6 +500,7 @@ mod tests {
                     .unwrap(),
             ),
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -524,6 +527,7 @@ mod tests {
                 "disaggregated_kv_transfer_time_ms": 8.1,
                 "prefill_compute_time_ms": 45.6
             })),
+            routing_data: None,
         }
     }
 
@@ -729,6 +733,7 @@ mod tests {
             disaggregated_params: None,
             worker_trace_link: None,
             engine_data: None, // engine didn't provide any data
+            routing_data: None,
         };
 
         let response = generator

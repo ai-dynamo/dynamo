@@ -1740,7 +1740,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 	}
 
-	t.Run("ready checkpoint adds explicit restore labels", func(t *testing.T) {
+	t.Run("ready checkpoint in immediate mode adds restore candidate metadata", func(t *testing.T) {
 		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
 		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
 		if err != nil {
@@ -1768,11 +1768,17 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
 		}
 
-		if got := podTemplateSpec.Labels[snapshotprotocol.CheckpointIDLabel]; got != checkpointName {
-			t.Fatalf("expected %s to be checkpoint id, got %q", snapshotprotocol.CheckpointIDLabel, got)
+		if got := podTemplateSpec.Labels[snapshotprotocol.CheckpointIDLabel]; got != "" {
+			t.Fatalf("expected %s to be omitted before pod-create mutation, got %q", snapshotprotocol.CheckpointIDLabel, got)
 		}
 		if _, has := podTemplateSpec.Labels[snapshotprotocol.CheckpointSourceLabel]; has {
 			t.Fatalf("restore pod template must not carry %s label: %#v", snapshotprotocol.CheckpointSourceLabel, podTemplateSpec.Labels)
+		}
+		if got := podTemplateSpec.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation]; got != commonconsts.KubeLabelValueTrue {
+			t.Fatalf("expected restore-candidate annotation, got %q", got)
+		}
+		if got := podTemplateSpec.Annotations[commonconsts.CheckpointNameAnnotation]; got != checkpointName {
+			t.Fatalf("expected checkpoint name annotation %q, got %q", checkpointName, got)
 		}
 		if got := podTemplateSpec.Annotations[snapshotprotocol.TargetContainersAnnotation]; got != commonconsts.MainContainerName {
 			t.Fatalf("expected %s=main annotation, got %q", snapshotprotocol.TargetContainersAnnotation, got)
@@ -1787,6 +1793,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			t.Fatalf("ComputeIdentityHash failed: %v", err)
 		}
 		dcd := makeDCD(checkpointName)
+		dcd.Spec.Experimental.Checkpoint.StartupPolicy = v1beta1.CheckpointStartupPolicyWaitForCheckpoint
 		dcd.Spec.PodTemplate.Spec.Containers = append(dcd.Spec.PodTemplate.Spec.Containers, corev1.Container{
 			Name:    "gms-loader",
 			Image:   "custom-loader:latest",
@@ -1959,6 +1966,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			t.Fatalf("ComputeIdentityHash failed: %v", err)
 		}
 		dcd := makeDCD(checkpointName)
+		dcd.Spec.Experimental.Checkpoint.StartupPolicy = v1beta1.CheckpointStartupPolicyWaitForCheckpoint
 		dcd.Spec.PodTemplate.Spec.Containers = append(dcd.Spec.PodTemplate.Spec.Containers, corev1.Container{
 			Name:    "gms-loader",
 			Image:   "sidecar:latest",
@@ -2068,6 +2076,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			t.Fatalf("ComputeIdentityHash failed: %v", err)
 		}
 		dcd := makeDCD(checkpointName)
+		dcd.Spec.Experimental.Checkpoint.StartupPolicy = v1beta1.CheckpointStartupPolicyWaitForCheckpoint
 		ckpt := &v1alpha1.DynamoCheckpoint{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      checkpointName,

@@ -11,7 +11,7 @@
 //! and lazily allocates each tier on first event arrival.
 //!
 //! Both the request-plane indexer (`dynamo-llm`) and the standalone HTTP
-//! indexer (this crate's `standalone_indexer` module) share this implementation
+//! indexer (this crate's `services::indexer` module) share this implementation
 //! so tier semantics stay aligned across the two surfaces.
 
 use std::collections::HashMap;

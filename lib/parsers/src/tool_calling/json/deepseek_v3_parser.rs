@@ -178,6 +178,47 @@ pub fn parse_tool_calls_deepseek_v3(
     // Batch parsing requires a complete outer wrapper start; the public
     // detector also accepts partial prefixes for streaming chunk detection.
     if wrapper_start_index(trimmed, config).is_none() {
+        if trimmed.contains("<｜tool▁call▁begin｜>") {
+            let normal_text = trimmed
+                .find("<｜tool▁call▁begin｜>")
+                .map(|idx| trimmed[..idx].to_string())
+                .unwrap_or_default();
+            let blocks = extract_tool_call_blocks_v3(
+                trimmed,
+                &tool_call_start_tokens,
+                &tool_call_end_tokens,
+            );
+            let mut tool_calls: Vec<ToolCallResponse> = Vec::new();
+            for block in blocks {
+                if let Some((function_name, arguments)) =
+                    parse_single_tool_call_v3(&block, separator_tokens)
+                {
+                    tool_calls.push(ToolCallResponse {
+                        id: format!("call-{}", Uuid::new_v4()),
+                        tp: ToolCallType::Function,
+                        function: CalledFunction {
+                            name: function_name,
+                            arguments: serde_json::to_string(&arguments)?,
+                        },
+                    });
+                }
+            }
+            if !tool_calls.is_empty() {
+                tracing::warn!(
+                    why = "bare_deepseek_v3_call_without_outer_wrapper",
+                    recovered_calls = tool_calls.len(),
+                    stripped_bytes = trimmed.len(),
+                    "DeepSeek V3 parser recovered bare inner tool-call block and suppressed parser markup from normal_text"
+                );
+                return Ok((tool_calls, Some(normal_text)));
+            }
+            tracing::warn!(
+                why = "bare_deepseek_v3_call_without_outer_wrapper",
+                stripped_bytes = trimmed.len(),
+                "DeepSeek V3 parser suppressed malformed bare inner tool-call block so parser markup does not leak into normal_text"
+            );
+            return Ok((vec![], Some(String::new())));
+        }
         return Ok((vec![], Some(trimmed.to_string())));
     }
 
@@ -240,6 +281,10 @@ pub fn detect_tool_call_start_deepseek_v3(chunk: &str, config: &JsonParserConfig
         .any(|token| !token.is_empty() && trimmed.contains(token));
 
     if has_complete_token {
+        return true;
+    }
+
+    if trimmed.contains("<｜tool▁call▁begin｜>") {
         return true;
     }
 
@@ -384,7 +429,7 @@ mod tests {
             _ => panic!("Expected JSON parser config"),
         };
         let (result, content) = parse_tool_calls_deepseek_v3(text, &config, None).unwrap();
-        assert_eq!(content, Some(text.to_string()));
+        assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 0);
     }
 
@@ -529,6 +574,27 @@ mod tests {
             Some("I'll help you understand this Xiaohongshu codebase. Let me start by exploring the structure\n  and key files to provide you with a comprehensive\n  explanation.".to_string())
         );
     }
+
+    #[test] // TOOLCALLING.stream.4.c
+    fn test_parse_deepseek_v3_bare_inner_call_recovers_without_marker_leak() {
+        let text = r#"Before <｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+```json
+{"location": "NYC"}
+```
+<｜tool▁call▁end｜>
+<｜tool▁call▁end｜>
+<｜tool▁call▁end｜>"#;
+        let config = match ToolCallConfig::deepseek_v3().parser_config {
+            super::super::config::ParserConfig::Json(cfg) => cfg,
+            _ => panic!("Expected JSON parser config"),
+        };
+        let (result, content) = parse_tool_calls_deepseek_v3(text, &config, None).unwrap();
+        assert_eq!(content, Some("Before ".to_string()));
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "NYC");
+    }
 }
 
 #[cfg(test)]
@@ -554,7 +620,7 @@ mod detect_parser_tests {
             _ => panic!("Expected JSON parser config"),
         };
         let result = detect_tool_call_start_deepseek_v3(text, &config);
-        assert!(!result);
+        assert!(result);
     }
 
     #[test] // helper

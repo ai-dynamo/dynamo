@@ -511,11 +511,10 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                         precomputed_embeddings
                     )
                     request.transfer_payload = transfer_request
-                    logger.debug(f"Request: {request.model_dump_json()}")
-
             # Get the response generator from downstream worker
+            payload = request.model_dump_json()
             response_generator = await self.pd_worker_client.round_robin(
-                request.model_dump_json(), context=context
+                payload, context=context
             )
 
             # Parse PD worker responses and yield as LLMEngineOutput-

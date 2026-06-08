@@ -81,13 +81,11 @@ cases:
             type: string
     expected:
       dynamo:
-        calls: []
-        normal_text: |-
-          <｜DSML｜invoke name="get_weather">
-          <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
-          </｜DSML｜invoke>
-          </｜DSML｜invoke>
-          </｜DSML｜invoke>
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
       vllm:
         calls:
         - name: get_weather

@@ -129,7 +129,6 @@ class EncodeWorkerHandler:
     async def generate(
         self, request: vLLMMultimodalRequest, context
     ) -> AsyncIterator[str]:
-        logger.debug(f"Got raw request: {request}")
         if not isinstance(request, vLLMMultimodalRequest):
             if isinstance(request, str):
                 request = vLLMMultimodalRequest.model_validate_json(request)
@@ -327,7 +326,7 @@ class EncodeWorkerHandler:
                         (transfer_request[1], embedding_item.embeddings)
                     )
 
-            logger.debug(f"Request: {request.model_dump_json()}")
+            payload = request.model_dump_json()
 
             time_end = time.perf_counter()
             self._accumulated_time += time_end - time_start
@@ -341,7 +340,7 @@ class EncodeWorkerHandler:
             )
 
             # Yield transformed request back
-            yield request.model_dump_json()
+            yield payload
 
         except Exception as e:
             logger.error(f"Error processing request {request_id}: {e}")

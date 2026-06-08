@@ -8,7 +8,7 @@ title: Planner 指南
   <a href="./planner-guide.md" hreflang="en">English</a> | <strong>简体中文</strong>
 </p>
 
-Dynamo Planner 是一个自动扩缩容控制器，会在运行时调整 prefill 和 decode 引擎的副本数，以满足延迟 SLA。它读取流量信号（Prometheus 指标或负载预测器输出）和引擎性能画像，用于决定何时扩容或缩容。
+Dynamo Planner 是一个自动扩缩容控制器，会在运行时调整 prefill 和 decode 引擎的副本数，以满足延迟 SLA。它读取流量信号（Prometheus 指标或负载预测器输出）和引擎性能模型，用于决定何时扩容或缩容。
 
 如需快速概览，请参阅 [Planner overview](README.md)。如需了解架构内部机制，请参阅 [Planner Design](../../design-docs/planner-design.md)。
 
@@ -19,7 +19,7 @@ planner 支持四个优化目标，这些目标决定扩缩容决策的方式：
 - **`throughput`**（默认）：基于队列深度和 KV cache 利用率使用静态阈值。不需要 SLA 目标或 profiling。开箱即用。
 - **`latency`**：与 `throughput` 采用相同方法，但使用更激进的阈值，即更早扩容并容忍更少排队。适合对延迟敏感的工作负载。
 - **`load`**：使用用户定义的 prefill 队列 token 阈值和 decode KV 利用率阈值，进行反应式的基于负载扩缩容。
-- **`sla`**：使用基于回归的性能模型，并指定 TTFT/ITL 目标。支持基于吞吐量（预测式）和基于负载（反应式）的扩缩容模式。适合需要精确 SLA 控制的高级用户。
+- **`sla`**：使用 Rust 引擎性能模型 shim；原生 AIC 可用时直接使用 AIC 估算，并结合在线 FPM 调优，否则回退到 FPM 回归模型。支持基于吞吐量（预测式）和基于负载（反应式）的扩缩容模式。适合需要精确 SLA 控制的高级用户。
 
 **何时使用哪种模式：**
 
@@ -67,7 +67,7 @@ advisory 模式仅提供建议。Planner 会计算建议副本数、记录日志
 
 | 字段 | 类型 | 默认值 | 说明 |
 |-------|------|---------|-------------|
-| `optimization_target` | string | `throughput` | `throughput`：基于队列/利用率阈值扩缩容。`latency`：激进的低延迟阈值。`load`：用户定义的 prefill 队列和 decode KV 利用率阈值。`sla`：基于回归的扩缩容，并使用 ttft_ms/itl_ms 目标。 |
+| `optimization_target` | string | `throughput` | `throughput`：基于队列/利用率阈值扩缩容。`latency`：激进的低延迟阈值。`load`：用户定义的 prefill 队列和 decode KV 利用率阈值。`sla`：使用 Rust 引擎性能模型，并以 ttft_ms/itl_ms 为目标扩缩容。 |
 
 当 `optimization_target` 为 `throughput`、`latency` 或 `load` 时，会自动启用基于负载的扩缩容，并禁用基于吞吐量的扩缩容。`ttft_ms`/`itl_ms` 字段会被忽略。
 
@@ -75,7 +75,7 @@ advisory 模式仅提供建议。Planner 会计算建议副本数、记录日志
 
 | 字段 | 类型 | 默认值 | 说明 |
 |-------|------|---------|-------------|
-| `enable_throughput_scaling` | bool | `true` | 启用基于吞吐量的扩缩容（需要部署前性能数据）。仅在 `optimization_target: sla` 时使用。 |
+| `enable_throughput_scaling` | bool | `true` | 启用基于吞吐量的扩缩容。仅在 `optimization_target: sla` 时使用。 |
 | `enable_load_scaling` | bool | `false` | 启用基于负载的扩缩容。仅在 `optimization_target: sla` 时使用。 |
 
 使用 `optimization_target: sla` 时，必须至少启用一种扩缩容模式。
@@ -84,9 +84,25 @@ advisory 模式仅提供建议。Planner 会计算建议副本数、记录日志
 
 | 字段 | 类型 | 默认值 | 说明 |
 |-------|------|---------|-------------|
-| `pre_deployment_sweeping_mode` | string | `rapid` | 如何生成引擎性能数据：`rapid`（AIC 仿真，约 30 秒）、`thorough`（真实 GPU，2-4 小时）或 `none`（跳过）。 |
+| `pre_deployment_sweeping_mode` | string | `rapid` | 如何生成可选的性能模型启动数据：`rapid`（AIC 仿真，约 30 秒）、`thorough`（真实 GPU，2-4 小时）或 `none`（跳过）。 |
 
-启用基于吞吐量的扩缩容时，planner 需要引擎性能数据。启动时，它会先尝试从 `get_perf_metrics` Dynamo 端点获取自基准测试结果（参见 PR #7779）。如果不可用，则回退到 `profile_results_dir` 中 profiler 生成的数据（npz 或 JSON）。这两种来源都会转换为 ForwardPassMetrics，并输入到 FPM 回归模型中。
+SLA 模式使用 Rust 引擎性能模型 shim。如果配置了 `aic_perf_model`，planner 会用原生 AIC 模型身份和引擎上限初始化 shim；如果该模型不被原生 AIC 支持，shim 会自动回退到基于观测 FPM 的回归模型。如果没有配置 `aic_perf_model`，shim 会从 FPM 回归模型启动，并在自基准测试或在线 FPM 观测足够后变为可用。
+
+启动时，planner 总会先尝试从 `get_perf_metrics` Dynamo 端点获取自基准测试结果。如果不可用，则在配置存在时回退到 rapid 模式 AIC interpolation 数据或 `profile_results_dir` 中 profiler 生成的数据（npz 或 JSON）。这些数据都会转换为 ForwardPassMetrics，并用于调优或启动性能模型。当 `pre_deployment_sweeping_mode: none` 时，planner 仍然可以启动；吞吐量决策会在原生 AIC 可用或在线 FPM 足够之前报告 `model_not_ready`。
+
+手动配置原生 AIC 性能模型：
+
+```yaml
+features:
+  planner:
+    optimization_target: sla
+    aic_perf_model:
+      hf_id: nvidia/Llama-3.1-8B-Instruct-FP8
+      system: h200_sxm
+      backend: vllm
+      prefill_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
+      decode_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
+```
 
 ### 基于吞吐量的扩缩容设置
 
@@ -103,11 +119,10 @@ advisory 模式仅提供建议。Planner 会计算建议副本数、记录日志
 
 | 字段 | 类型 | 默认值 | 说明 |
 |-------|------|---------|-------------|
-| `load_adjustment_interval_seconds` | int | `5` | FPM 回归更新和基于负载的扩缩容决策之间的秒数。即使只启用了吞吐量扩缩容，实时 FPM 观测也会按此间隔输入到回归中。必须短于 `throughput_adjustment_interval_seconds`。 |
-| `max_num_fpm_samples` | int | `64` | 为回归保留的 FPM 观测最大数量。 |
+| `load_adjustment_interval_seconds` | int | `5` | FPM 调优更新和基于负载的扩缩容决策之间的秒数。即使只启用了吞吐量扩缩容，实时 FPM 观测也会按此间隔输入到性能模型中。必须短于 `throughput_adjustment_interval_seconds`。 |
+| `max_num_fpm_samples` | int | `64` | 为在线调优或回归保留的 FPM 观测最大数量。 |
 | `fpm_sample_bucket_size` | int | `16` | 用于观测淘汰的 bucket 数量（必须是完全平方数）。 |
 | `load_scaling_down_sensitivity` | int | `80` | 缩容敏感度 0-100（0=永不，100=激进）。 |
-| `load_metric_samples` | int | `10` | 每次决策要收集的指标样本数。 |
 | `load_min_observations` | int | `5` | 做出扩缩容决策前所需的最少观测数。 |
 
 ### 通用设置
@@ -155,11 +170,11 @@ Replica Counts 图会将实际 prefill/decode 副本与 Planner 建议的 prefil
 当 profiler 在启用 planner 的情况下运行时，它会：
 
 1. 选择最佳 prefill 和 decode 引擎配置
-2. 生成引擎性能数据（prefill TTFT vs ISL、decode ITL vs KV-cache 利用率）
-3. 将 `PlannerConfig` 和性能数据保存到独立的 Kubernetes ConfigMaps 中
+2. 生成可选的引擎性能启动数据（prefill TTFT vs ISL、decode ITL vs KV-cache 利用率）
+3. 将 `PlannerConfig` 和可选性能数据保存到独立的 Kubernetes ConfigMaps 中
 4. 将 planner 服务添加到生成的 DGD，并配置为从这些 ConfigMaps 读取
 
-planner 通过 `--config /path/to/planner_config.json` 接收其配置，该文件从 `planner-config-XXXX` ConfigMap 挂载。Profiling 数据从 `planner-profile-data-XXXX` ConfigMap 挂载。
+planner 通过 `--config /path/to/planner_config.json` 接收其配置，该文件从 `planner-config-XXXX` ConfigMap 挂载。当生成 thorough 启动数据时，profiling 数据会从 `planner-profile-data-XXXX` ConfigMap 挂载。
 
 请参阅 [Profiler Guide](../profiler/profiler-guide.md)，了解完整 profiling 工作流以及如何配置部署前扫描。
 

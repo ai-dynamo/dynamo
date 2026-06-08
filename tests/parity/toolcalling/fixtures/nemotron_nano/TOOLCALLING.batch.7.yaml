@@ -86,5 +86,31 @@ cases:
     description: Large / deep JSON-edge payload test 7.e — not yet authored for this family
     reason: Large/deep JSON-edge payload test 7.e not yet authored for nemotron_nano; existing batch.7 coverage remains in 7.a-d.
   TOOLCALLING.batch.7.f:
-    description: Numeric precision edge test 7.f — not yet authored for this family
-    reason: Numeric precision edge test 7.f not yet authored for nemotron_nano; Qwen3-Coder coverage is provided by qwen3_coder 7.f.
+    description: Numeric precision edge preserves integer-like number literal
+    ref: inferhub live capture on nvidia/nvidia/Nemotron-3-Nano-30B-A3B; format follows https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct/blob/main/qwen3coder_tool_parser.py
+    model_text: |-
+      <tool_call>
+      <function=set_limit>
+      <parameter=count>
+      9007199254740993
+      </parameter>
+      </function>
+      </tool_call>
+    tools:
+    - name: set_limit
+      parameters:
+        type: object
+        properties:
+          count:
+            type: number
+    expected:
+      dynamo: &d_7_f
+        calls:
+        - name: set_limit
+          arguments:
+            count: 9007199254740993
+        normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_nano'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_nano'

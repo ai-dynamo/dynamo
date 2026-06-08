@@ -4,6 +4,7 @@
 //! Dynamo LLM integration helpers for agent trace records.
 
 use std::collections::HashMap;
+#[cfg(test)]
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,6 +13,7 @@ use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::pipeline::Context;
 use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
+#[cfg(test)]
 use futures::{Stream, StreamExt};
 use parking_lot::Mutex;
 
@@ -238,7 +240,7 @@ pub(crate) struct AgentTraceRequestEndState {
     pub request_model: String,
     pub request_tracker: Option<Arc<RequestTracker>>,
     pub x_request_id: Option<String>,
-    pub replay_metrics: Option<AgentReplayMetrics>,
+    pub replay_metrics: Option<Arc<AgentReplayMetrics>>,
     pub finish_reason_metadata: SharedFinishReasonMetadata,
 }
 
@@ -246,7 +248,7 @@ pub(crate) fn build_agent_trace_request_end_state(
     common_request: &PreprocessedRequest,
     tracker: &Option<Arc<RequestTracker>>,
     context: &Context<()>,
-    trace_block_size: usize,
+    replay_metrics: Option<Arc<AgentReplayMetrics>>,
 ) -> Option<AgentTraceRequestEndState> {
     if !super::is_enabled() {
         return None;
@@ -265,11 +267,12 @@ pub(crate) fn build_agent_trace_request_end_state(
         request_model: common_request.model.clone(),
         request_tracker: tracker.clone(),
         x_request_id,
-        replay_metrics: super::request_replay_metrics(&common_request.token_ids, trace_block_size),
+        replay_metrics,
         finish_reason_metadata: SharedFinishReasonMetadata::default(),
     })
 }
 
+#[cfg(test)]
 pub(crate) fn finish_reason_metadata_handle(
     trace_state: &Option<AgentTraceRequestEndState>,
 ) -> Option<SharedFinishReasonMetadata> {
@@ -298,7 +301,7 @@ pub(crate) fn record_backend_finish_reason_metadata(
     );
 }
 
-fn record_chat_finish_reason_metadata(
+pub(crate) fn record_chat_finish_reason_metadata(
     finish_reason_metadata: &SharedFinishReasonMetadata,
     response: &Annotated<NvCreateChatCompletionStreamResponse>,
 ) {
@@ -343,7 +346,7 @@ fn completion_finish_reason_to_finish_reason(
     }
 }
 
-fn record_completion_finish_reason_metadata(
+pub(crate) fn record_completion_finish_reason_metadata(
     finish_reason_metadata: &SharedFinishReasonMetadata,
     response: &Annotated<NvCreateCompletionResponse>,
 ) {
@@ -368,6 +371,43 @@ fn snapshot_finish_reason_metadata(
     finish_reason_metadata.lock().snapshot()
 }
 
+pub(crate) fn emit_agent_trace_request_end(
+    trace_state: AgentTraceRequestEndState,
+    request_id: String,
+) {
+    let AgentTraceRequestEndState {
+        agent_context,
+        request_model,
+        request_tracker,
+        x_request_id,
+        replay_metrics,
+        finish_reason_metadata,
+    } = trace_state;
+
+    if request_tracker.is_none() {
+        tracing::warn!(
+            request_id,
+            "agent_context present but request tracker is missing; emitting partial trace"
+        );
+    }
+    let mut metrics = super::request_metrics(
+        request_id,
+        x_request_id,
+        request_model,
+        request_tracker.as_deref(),
+    );
+    metrics.replay = replay_metrics.map(into_owned_replay_metrics);
+    metrics.finish_reason_metadata = snapshot_finish_reason_metadata(&finish_reason_metadata);
+    super::emit_request_end(agent_context, metrics);
+}
+
+pub(crate) fn into_owned_replay_metrics(
+    replay_metrics: Arc<AgentReplayMetrics>,
+) -> AgentReplayMetrics {
+    Arc::try_unwrap(replay_metrics).unwrap_or_else(|shared| shared.as_ref().clone())
+}
+
+#[cfg(test)]
 pub(crate) fn wrap_agent_trace_request_end_stream<Resp>(
     stream: Pin<Box<dyn Stream<Item = Annotated<Resp>> + Send>>,
     trace_state: Option<AgentTraceRequestEndState>,
@@ -376,40 +416,19 @@ pub(crate) fn wrap_agent_trace_request_end_stream<Resp>(
 where
     Resp: Send + 'static,
 {
-    let Some(AgentTraceRequestEndState {
-        agent_context,
-        request_model,
-        request_tracker,
-        x_request_id,
-        replay_metrics,
-        finish_reason_metadata,
-    }) = trace_state
-    else {
+    let Some(trace_state) = trace_state else {
         return stream;
     };
 
     let (stream, done_fut) = crate::telemetry::stream::notify_on_completion(stream);
     tokio::spawn(async move {
         done_fut.await;
-        if request_tracker.is_none() {
-            tracing::warn!(
-                request_id,
-                "agent_context present but request tracker is missing; emitting partial trace"
-            );
-        }
-        let mut metrics = super::request_metrics(
-            request_id,
-            x_request_id,
-            request_model,
-            request_tracker.as_deref(),
-        );
-        metrics.replay = replay_metrics;
-        metrics.finish_reason_metadata = snapshot_finish_reason_metadata(&finish_reason_metadata);
-        super::emit_request_end(agent_context, metrics);
+        emit_agent_trace_request_end(trace_state, request_id);
     });
     stream
 }
 
+#[cfg(test)]
 pub(crate) fn wrap_agent_trace_chat_request_end_stream(
     stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
     trace_state: Option<AgentTraceRequestEndState>,
@@ -426,6 +445,7 @@ pub(crate) fn wrap_agent_trace_chat_request_end_stream(
     wrap_agent_trace_request_end_stream(Box::pin(stream), trace_state, request_id)
 }
 
+#[cfg(test)]
 pub(crate) fn wrap_agent_trace_completion_request_end_stream(
     stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateCompletionResponse>> + Send>>,
     trace_state: Option<AgentTraceRequestEndState>,

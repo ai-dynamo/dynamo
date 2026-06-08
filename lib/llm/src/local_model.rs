@@ -483,9 +483,9 @@ impl LocalModel {
     /// For base models, pass `lora_name = None`.
     /// For LoRA adapters, pass `lora_name = Some("adapter-name")`.
     ///
-    /// `worker_type` and `needs` carry the topology readiness fields. Pass
-    /// `None` / empty `Vec` for callers that haven't been updated to declare
-    /// their role yet — readers apply the missing-field shim.
+    /// `worker_type` and `needs` carry the model-serving-readiness fields.
+    /// Cards without a declared `worker_type` are treated as misconfigured
+    /// and do not count toward readiness.
     pub async fn attach(
         &mut self,
         endpoint: &Endpoint,

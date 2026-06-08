@@ -228,7 +228,7 @@ This checks kubectl connectivity, default StorageClass configuration, GPU node a
 
 ## Next Steps
 
-Your cluster is ready. Follow the **[Model Deployment Guide](model-deployment-guide.md)** to deploy a model using DGDR.
+Your cluster is ready. Follow the **[Deployment Overview](model-deployment-guide.md)** to choose between applying a tuned DGD recipe, creating a DGD directly, or using DGDR to generate one.
 
 ## Troubleshooting
 

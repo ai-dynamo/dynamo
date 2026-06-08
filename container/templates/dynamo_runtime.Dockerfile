@@ -79,9 +79,14 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libclang-dev \
         patchelf \
         git \
-        git-lfs && \
+        git-lfs \
+        libjemalloc2 && \
     rm -rf /var/lib/apt/lists/* && \
     ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python3
+
+# libjemalloc2 is installed above so user may opt into jemalloc for memory allocation
+# tuning. We deliberately do NOT set ENV LD_PRELOAD here — that would force jemalloc
+# on every process in the image.
 
 # Switch to dynamo user and create virtual environment
 USER dynamo

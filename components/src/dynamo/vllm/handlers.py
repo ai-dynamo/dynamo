@@ -5,6 +5,7 @@ import asyncio
 import base64
 import inspect
 import logging
+import math
 import os
 
 # MM kwargs NIXL transfer (frontend → backend pre-rendered path)
@@ -14,9 +15,9 @@ import tempfile
 import threading
 import time
 from abc import ABC, abstractmethod
+from collections import deque
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, Final, Generic, Optional, TypeVar
+from typing import Any, AsyncIterator, Dict, Final, Generic, Iterator, Optional, TypeVar
 
 import torch
 from vllm.config import ModelConfig, VllmConfig
@@ -33,6 +34,8 @@ from vllm.sampling_params import (
 from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo._core import Context
+from dynamo.common.backend import logprobs as _shared_logprobs
+from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
@@ -61,6 +64,7 @@ from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
+    WorkerType,
     lora_name_to_id,
     register_model,
     unregister_model,
@@ -228,49 +232,72 @@ async def _deferred_abort_guard(
             await guard.close()
 
 
-class VllmEngineQuiesceController:
+class VllmEnginePauseController:
     def __init__(self, engine_client: Any):
         self._engine_client = engine_client
-        self._is_quiesced = False
+        self._is_paused = False
+        self._generation_paused = False
 
     @property
-    def is_quiesced(self) -> bool:
-        return self._is_quiesced
+    def is_paused(self) -> bool:
+        return self._is_paused
 
-    async def quiesce(self, *args: object) -> bool:
-        if self._is_quiesced:
+    @property
+    def needs_resume_recovery(self) -> bool:
+        return self._generation_paused
+
+    async def pause(self, *args: object) -> bool:
+        if self._is_paused or self._generation_paused:
             return False
 
         level = args[0] if args else None
         await self._engine_client.pause_generation()
-        if level is None:
-            await self._engine_client.sleep()
-        else:
-            await self._engine_client.sleep(level)
-        self._is_quiesced = True
+        self._generation_paused = True
+        try:
+            if level is None:
+                await self._engine_client.sleep()
+            else:
+                await self._engine_client.sleep(level)
+        except Exception:
+            try:
+                await self._engine_client.resume_generation()
+                self._generation_paused = False
+            except Exception:
+                logger.exception(
+                    "Failed to resume generation after native vLLM sleep failure"
+                )
+            raise
+        self._is_paused = True
         return True
 
     async def resume(self, tags: list[str] | None = None) -> bool:
-        if not self._is_quiesced:
+        if not self._is_paused and not self._generation_paused:
             return False
 
-        if tags is None:
-            await self._engine_client.wake_up()
-        else:
-            await self._engine_client.wake_up(tags)
-        await self._engine_client.resume_generation()
+        if self._is_paused:
+            if tags is None:
+                await self._engine_client.wake_up()
+            else:
+                await self._engine_client.wake_up(tags)
+        if self._generation_paused:
+            await self._engine_client.resume_generation()
+            self._generation_paused = False
         return True
 
     def mark_resumed(self) -> None:
-        self._is_quiesced = False
+        self._is_paused = False
+        self._generation_paused = False
 
 
-@dataclass(frozen=True)
-class LoRAInfo:
-    """Metadata for a loaded LoRA adapter."""
-
-    id: int
-    path: str
+def _pad_mm_hashes_to_64(mm_hashes: list[str]) -> list[str]:
+    """Pad the frontend's canonical 16-char hex hashes to vLLM's 64-char
+    BlockStored form. The router's parse_mm_hash_from_extra_key keys on the
+    64-char length to distinguish MM hashes from other extra_keys, so vLLM
+    must publish 64 chars. Already-64-char values pass through unchanged.
+    """
+    return [
+        h.ljust(64, "0") if isinstance(h, str) and len(h) < 64 else h for h in mm_hashes
+    ]
 
 
 def _compute_mm_uuids(
@@ -300,37 +327,272 @@ def _compute_mm_uuids(
     return {"image": uuids}
 
 
-# LoRAManager singleton - initialized lazily when DYN_LORA_ENABLED is set
-# None = not yet initialized, False = disabled/failed, LoRAManager = initialized
-_lora_manager = None
+# Helpers for nvext response fields requested through `nvext.extra_fields`.
 
 
-def get_lora_manager():
-    """Get the LoRAManager singleton, initializing it on first call if enabled."""
-    global _lora_manager
+# Logprobs can be -inf (log of probability 0) for masked/disallowed tokens (e.g.
+# via bad_words_token_ids / allowed_token_ids) or full-vocab prompt logprobs.
+# JSON has no inf/nan, so pythonize -> serde_json rewrites them to `null`, which
+# then fails typed deserialization on the Rust side and SILENTLY DROPS the whole
+# logprobs payload. Clamp non-finite logprobs to a large finite-negative
+# sentinel so the value survives transport while still meaning "effectively
+# impossible".
+_MIN_FINITE_LOGPROB = -1e30
 
-    if _lora_manager is not None:
-        return _lora_manager
 
-    if os.environ.get("DYN_LORA_ENABLED", "").lower() in ("true", "1", "yes"):
-        try:
-            from dynamo.common.lora import LoRAManager
+def _finite_logprob(value: Any) -> float:
+    lp = float(value)
+    return lp if math.isfinite(lp) else _MIN_FINITE_LOGPROB
 
-            _lora_manager = LoRAManager()
-            logger.info("LoRAManager initialized successfully")
-            return _lora_manager
-        except Exception as e:
+
+def _serialize_prompt_logprobs(
+    raw_prompt_logprobs: list,
+) -> list:
+    """Convert vLLM's ``RequestOutput.prompt_logprobs`` into the dict shape
+    expected by Dynamo's Rust ``PromptLogprobEntry`` (serde deserialization).
+
+    vLLM shape: ``list[dict[int, Logprob] | None]`` where ``Logprob`` has
+    ``.logprob``, ``.rank``, ``.decoded_token`` attributes.
+
+    Output shape: ``list[dict[str, {"logprob": float, ...}] | None]``.
+    Workers carry it under ``engine_data.prompt_logprobs`` so the Rust
+    postprocessor can surface it on ``NvExtResponse.prompt_logprobs`` without
+    changing the public ``LLMEngineOutput`` struct shape.
+
+    NOTE: token_id keys are emitted as **strings** (not ints) so that
+    pythonize → serde → JSON survives the worker→frontend transport. JSON
+    object keys are required to be strings; ``HashMap<u32, _>`` on the Rust
+    side deserializes string keys via ``u32::from_str``. Emitting int keys
+    here causes the chunk to be silently dropped on pythonize → JSON, which
+    surfaces as ``"Stream ended before generation completed"`` on the
+    frontend (worker emits cleanly, frontend never sees ``complete_final``).
+    """
+    result: list = []
+    for entry in raw_prompt_logprobs:
+        if entry is None:
+            result.append(None)
+        else:
+            converted: Dict[str, Dict[str, Any]] = {}
+            for token_id, logprob_obj in entry.items():
+                try:
+                    key = str(int(token_id))
+                except (TypeError, ValueError):
+                    # vLLM only emits int token-id keys; skip a non-int key
+                    # rather than aborting the whole prompt_logprobs payload.
+                    continue
+                lp_dict: Dict[str, Any] = {
+                    "logprob": _finite_logprob(logprob_obj.logprob),
+                }
+                rank = getattr(logprob_obj, "rank", None)
+                if rank is not None:
+                    lp_dict["rank"] = int(rank)
+                decoded = getattr(logprob_obj, "decoded_token", None)
+                if decoded is not None:
+                    lp_dict["decoded_token"] = decoded
+                converted[key] = lp_dict
+            result.append(converted)
+    return result
+
+
+def _attach_prompt_logprobs_engine_data(
+    tok: Dict[str, Any], prompt_logprobs: list
+) -> None:
+    engine_data = tok.setdefault("engine_data", {})
+    if isinstance(engine_data, dict):
+        engine_data["prompt_logprobs"] = prompt_logprobs
+
+
+def _iter_nvext_sources(request: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
+    """Yield each nvext dict on the request, in priority order:
+
+      1. ``request["nvext"]``               — raw OpenAI shape (SGLang / tests).
+      2. ``request["extra_args"]["nvext"]`` — what the Rust preprocessor stashes
+         when building PreprocessedRequest from an OpenAI request
+         (PreprocessedRequest itself has no nvext field).
+
+    Centralizing this lookup keeps ``_nvext_extra_field_requested``,
+    ``_is_token_in_request`` and ``_apply_nvext_cache_salt`` consistent so an
+    nvext field is never honored by one helper but silently missed by another.
+    """
+    extra_args = request.get("extra_args")
+    for source in (
+        request.get("nvext"),
+        extra_args.get("nvext") if isinstance(extra_args, dict) else None,
+    ):
+        if isinstance(source, dict):
+            yield source
+
+
+def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
+    """Return True iff the request opted into the given nvext extra field."""
+    return any(
+        isinstance(source.get("extra_fields"), list) and field in source["extra_fields"]
+        for source in _iter_nvext_sources(request)
+    )
+
+
+def _apply_nvext_cache_salt(request: Dict[str, Any], prompt: Any) -> None:
+    if not isinstance(prompt, dict):
+        return
+    for source in _iter_nvext_sources(request):
+        cache_salt = source.get("cache_salt")
+        if cache_salt is not None:
+            prompt["cache_salt"] = cache_salt
+            return
+
+
+def _prompt_token_ids_for_engine_data(
+    request: Dict[str, Any],
+    prompt: Any,
+) -> list[int]:
+    prompt_token_ids = (
+        prompt.get("prompt_token_ids")
+        if isinstance(prompt, dict)
+        else request.get("token_ids")
+    )
+    return list(prompt_token_ids or [])
+
+
+def _flatten_logprobs(
+    log_probs: Any,
+) -> Optional[list[float]]:
+    """Coerce a per-token logprob sequence into a flat list[float].
+
+    The backend's per-chunk `log_probs` field is one float per emitted
+    token (the logprob the engine sampled). Some upstream paths wrap it
+    in dicts or nested lists; this helper accepts:
+      - list[float]               -> returned as-is
+      - list[list[float]]         -> flattened
+      - list[dict{logprob: ...}]  -> .logprob extracted
+      - None                      -> None
+
+    Any element that isn't coercible to float is dropped silently rather
+    than poisoning the entire payload. The trainer treats missing
+    per-token logprobs as off-policy correction = 0 for that token, so a
+    partial list is preferable to a hard failure.
+    """
+    if log_probs is None:
+        return None
+    if not isinstance(log_probs, list):
+        return None
+    out: list[float] = []
+    # deque + popleft/extendleft avoids the O(n^2) of list.pop(0)/front-splice
+    # on long RL/TITO logprob payloads. reversed() keeps original token order.
+    pending: deque = deque(log_probs)
+    while pending:
+        item = pending.popleft()
+        if isinstance(item, bool):
+            # bool is an int subclass; a True/False here is not a real logprob.
+            continue
+        if isinstance(item, (int, float)):
+            out.append(_finite_logprob(item))
+        elif isinstance(item, list):
+            pending.extendleft(reversed(item))
+        elif isinstance(item, dict) and "logprob" in item:
+            try:
+                out.append(_finite_logprob(item["logprob"]))
+            except (TypeError, ValueError):
+                continue
+    return out or None
+
+
+def _is_token_in_request(request: Dict[str, Any]) -> bool:
+    return any(
+        source.get("token_data") or source.get("token_in")
+        for source in _iter_nvext_sources(request)
+    )
+
+
+def _accumulate_engine_data(
+    tok: Dict[str, Any],
+    request_prompt_token_ids: Optional[list[int]],
+    accumulated_token_ids: dict[int, list[int]],
+    accumulated_log_probs: dict[int, list[float]],
+) -> None:
+    output_index = int(tok.get("index") or 0)
+    token_accumulator = accumulated_token_ids.setdefault(output_index, [])
+    logprob_accumulator = accumulated_log_probs.setdefault(output_index, [])
+
+    new_token_ids = tok.get("token_ids")
+    if isinstance(new_token_ids, list):
+        for t in new_token_ids:
+            try:
+                token_accumulator.append(int(t))
+            except (TypeError, ValueError):
+                # Defensive: a malformed token id should degrade (drop the
+                # token) rather than abort the whole generation stream.
+                continue
+
+    flat_lp = _flatten_logprobs(tok.get("log_probs"))
+    if flat_lp:
+        logprob_accumulator.extend(flat_lp)
+
+    finish_reason = tok.get("finish_reason")
+    if finish_reason is None:
+        return
+
+    # An engine error is delivered as a finish_reason like "error: ..."; do not
+    # report it to the RL client as a clean finish (which would look like a
+    # successful empty completion).
+    finished = not (
+        isinstance(finish_reason, str) and finish_reason.startswith("error")
+    )
+
+    engine_data: Dict[str, Any] = dict(tok.get("engine_data") or {})
+    engine_data.update(
+        {
+            "completion_token_ids": list(token_accumulator),
+            "finished": finished,
+        }
+    )
+    if logprob_accumulator:
+        # completion_logprobs must stay positionally aligned 1:1 with
+        # completion_token_ids — the trainer indexes them together. A dropped or
+        # None logprob on any chunk shifts every later logprob onto the wrong
+        # token, so emit them only when the counts match; otherwise omit (a
+        # silently misaligned list corrupts the off-policy correction).
+        if len(logprob_accumulator) == len(token_accumulator):
+            engine_data["completion_logprobs"] = list(logprob_accumulator)
+        else:
             logger.warning(
-                f"Failed to initialize LoRAManager: {e}. URI-based LoRA loading will be disabled."
+                "Dropping completion_logprobs for output index %d: logprob "
+                "count %d != token count %d (misaligned)",
+                output_index,
+                len(logprob_accumulator),
+                len(token_accumulator),
             )
+    if request_prompt_token_ids:
+        engine_data["prompt_token_ids"] = list(request_prompt_token_ids)
+    tok["engine_data"] = engine_data
 
-    return None
+
+def _serialize_routed_experts(routed_experts: Any) -> Optional[Dict[str, Any]]:
+    if routed_experts is None:
+        return None
+
+    shape = getattr(routed_experts, "shape", None)
+    tobytes = getattr(routed_experts, "tobytes", None)
+    if shape is None or not callable(tobytes):
+        logger.warning(
+            "Unable to serialize routed_experts of type %s",
+            type(routed_experts).__name__,
+        )
+        return None
+
+    return {
+        "data": base64.b85encode(tobytes()).decode("ascii"),
+        "shape": [int(dim) for dim in shape],
+        # Encode dtype so the consumer decodes the raw bytes with the right
+        # element type instead of assuming int32.
+        "dtype": str(getattr(routed_experts, "dtype", "")),
+    }
 
 
 def build_sampling_params(
     request: Dict[str, Any],
     default_sampling_params: Dict[str, Any],
     model_max_len: int | None = None,
+    enable_rl: bool = False,
 ) -> SamplingParams:
     """
     Build SamplingParams from a PreprocessedRequest (internal protocol format).
@@ -338,15 +600,32 @@ def build_sampling_params(
     Args:
         request: The PreprocessedRequest dict with 'sampling_options', 'stop_conditions',
                  and 'output_options'
-        default_sampling_params: Default sampling parameters to initialize with
+        default_sampling_params: Default sampling parameters from the model's
+            ``generation_config.json`` (vLLM ``ModelConfig.get_diff_sampling_param``).
+            Used for non-RL/chat clients that want the model's recommended
+            sampling defaults applied transparently.
 
     Returns:
         SamplingParams configured from the request
+
+    RL token-in requests use vLLM's default sampling values instead of model
+    `generation_config.json` sampling overrides. Ordinary token-data requests
+    keep generation_config defaults for Gateway/backward-compatible traffic.
+    Stop-token defaults from the model config are still applied later.
     """
-    sampling_params = SamplingParams(**default_sampling_params)
+    if enable_rl and _is_token_in_request(request):
+        # Use vLLM defaults without model generation_config overlays.
+        sampling_params = SamplingParams()
+    else:
+        sampling_params = SamplingParams(**default_sampling_params)
 
     # Handle guided_decoding - convert to StructuredOutputsParams
-    sampling_options = request.get("sampling_options", {})
+    sampling_options = dict(request.get("sampling_options") or {})
+    extra_args = request.get("extra_args") or {}
+    if isinstance(extra_args, dict):
+        passthrough_sampling_options = extra_args.get("sampling_options")
+        if isinstance(passthrough_sampling_options, dict):
+            sampling_options.update(passthrough_sampling_options)
     guided_decoding = sampling_options.get("guided_decoding")
     if guided_decoding is not None and isinstance(guided_decoding, dict):
         sampling_params.structured_outputs = StructuredOutputsParams(
@@ -364,6 +643,18 @@ def build_sampling_params(
     for key, value in sampling_options.items():
         # Skip guided_decoding - already handled above
         if key == "guided_decoding":
+            continue
+        if key == "bad_words_token_ids" and value is not None:
+            # vLLM has no public setter for token-id bad words; we write the
+            # private field directly. Guard so a vLLM upgrade that renames it
+            # fails loudly here instead of silently dropping the constraint.
+            if not hasattr(sampling_params, "_bad_words_token_ids"):
+                raise AttributeError(
+                    "vLLM SamplingParams._bad_words_token_ids missing; TITO "
+                    "bad_words_token_ids passthrough needs updating for this "
+                    "vLLM version"
+                )
+            sampling_params._bad_words_token_ids = value
             continue
         if value is not None and hasattr(sampling_params, key):
             setattr(sampling_params, key, value)
@@ -393,39 +684,17 @@ def build_sampling_params(
             sampling_params.thinking_token_budget = value
 
     # Apply output_options (logprobs, prompt_logprobs, etc.)
-    output_options = request.get("output_options", {})
-    if output_options:
-        # Handle logprobs - vLLM expects this as an integer or None
-        logprobs_value = output_options.get("logprobs")
-        if logprobs_value is not None and logprobs_value != "":
-            try:
-                parsed_logprobs = int(logprobs_value)
-                if parsed_logprobs < 0:
-                    logger.warning(
-                        f"Invalid logprobs value: {logprobs_value} (must be non-negative), ignoring"
-                    )
-                else:
-                    sampling_params.logprobs = parsed_logprobs
-            except (ValueError, TypeError):
-                logger.warning(
-                    f"Invalid logprobs value: {logprobs_value} (must be integer), ignoring"
-                )
+    output_options = request.get("output_options", {}) or {}
+    logprobs, prompt_logprobs = _shared_logprobs.parse_logprob_options(output_options)
+    if logprobs is not None:
+        sampling_params.logprobs = logprobs
+    if prompt_logprobs is not None:
+        sampling_params.prompt_logprobs = prompt_logprobs
 
-        # Handle prompt_logprobs - vLLM expects this as an integer or None
-        prompt_logprobs_value = output_options.get("prompt_logprobs")
-        if prompt_logprobs_value is not None and prompt_logprobs_value != "":
-            try:
-                parsed_prompt_logprobs = int(prompt_logprobs_value)
-                if parsed_prompt_logprobs < 0:
-                    logger.warning(
-                        f"Invalid prompt_logprobs value: {prompt_logprobs_value} (must be non-negative), ignoring"
-                    )
-                else:
-                    sampling_params.prompt_logprobs = parsed_prompt_logprobs
-            except (ValueError, TypeError):
-                logger.warning(
-                    f"Invalid prompt_logprobs value: {prompt_logprobs_value} (must be integer), ignoring"
-                )
+    # skip_special_tokens is intentionally NOT forwarded to vLLM here: this path
+    # forces detokenize=False (below), so vLLM never detokenizes and ignores it.
+    # Dynamo detokenizes in the Rust backend, which reads skip_special_tokens
+    # directly from the request output_options (lib/llm/src/backend.rs).
 
     # If max_tokens wasn't provided (None or missing), compute a dynamic default
     provided_max_tokens = request.get("stop_conditions", {}).get("max_tokens", None)
@@ -616,6 +885,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     # __new__ still have a sane value; __init__ overrides this from
     # hf_config.use_unified_vision_chunk on real instances.
     _use_unified_vision_chunk: bool = False
+    _scale_ep_in_progress: bool = False
 
     def __init__(
         self,
@@ -665,8 +935,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.use_vllm_tokenizer = use_vllm_tokenizer
 
         self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
-        self._quiesce_controller = VllmEngineQuiesceController(self.engine_client)
-        self._quiesce_lock = asyncio.Lock()
+        self._pause_controller = VllmEnginePauseController(self.engine_client)
+        self._pause_lock = asyncio.Lock()
         self._mm_kwargs_receiver: MmKwargsNixlReceiver | None = None
 
         # Some models (Kimi-K2.5) declare their image modality as
@@ -694,6 +964,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # concurrent HTTP callers share this lock and only one scale operation
         # can mutate _coord_store at a time.
         self._scale_ep_lock = asyncio.Lock()
+        self._scale_ep_in_progress = False
 
         # Initialize InputParamManager for text-in-text-out mode
         tokenizer = None
@@ -764,28 +1035,35 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         Order of operations:
         1. Unregister from discovery - stop accepting new requests
         2. Abort and drain in-flight requests
-        3. Sleep engine - safe now that GPU is quiesced
+        3. Sleep engine - safe once generation has stopped
         """
         body = body or {}
         level = body.get("level", 1)
-        async with self._quiesce_lock:
-            if self._quiesce_controller.is_quiesced:
+        async with self._pause_lock:
+            if self._pause_controller.is_paused:
                 return {
                     "status": "ok",
                     "message": "Engine already sleeping",
                 }
+            if self._pause_controller.needs_resume_recovery:
+                return {
+                    "status": "error",
+                    "message": "wake_up required before retrying sleep",
+                }
 
+            unregistered = False
             try:
                 # Step 1: Unregister endpoint instance before memory transitions.
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.unregister_endpoint_instance()
+                    unregistered = True
                     logger.info(
                         "[Sleep] Unregistered endpoint from discovery - worker removed from routing pool"
                     )
 
-                # Step 2: Abort in-flight requests and wait for them to drain so the
-                # GPU is fully quiesced before unmapping memory.
-                if not await self._quiesce_controller.quiesce(level):
+                # Step 2: Abort in-flight requests and wait for them to drain so
+                # generation is fully paused before unmapping memory.
+                if not await self._pause_controller.pause(level):
                     return {
                         "status": "ok",
                         "message": "Engine already sleeping",
@@ -797,6 +1075,24 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 }
             except Exception as e:
                 logger.error(f"Failed to sleep engine: {e}")
+                # If pause rolled back cleanly the engine is serving-safe again,
+                # but discovery still shows us unregistered and wake_up will
+                # early-return. Re-register so the worker rejoins the routing pool.
+                if (
+                    unregistered
+                    and not self._pause_controller.is_paused
+                    and not self._pause_controller.needs_resume_recovery
+                    and self.generate_endpoint is not None
+                ):
+                    try:
+                        await self.generate_endpoint.register_endpoint_instance()
+                        logger.info(
+                            "[Sleep] Re-registered endpoint after failed sleep rollback"
+                        )
+                    except Exception as reg_err:
+                        logger.error(
+                            f"Failed to re-register endpoint after sleep failure: {reg_err}"
+                        )
                 return {"status": "error", "message": str(e)}
 
     async def scale_elastic_ep(self, body: dict) -> dict:
@@ -840,64 +1136,67 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # queuing behind it: a queued caller would garbage-collect the first
         # caller's TCPStore before its Ray actor connects, causing a 300 s
         # timeout on the worker node.
-        # The locked() check followed immediately by async with is safe:
-        # asyncio.Lock.acquire() only suspends (yields to the event loop) when
-        # the lock is already held. When locked() returns False the lock is
-        # free, so acquire() completes synchronously — no other coroutine can
-        # run between the check and the acquisition.
-        if self._scale_ep_lock.locked():
-            msg = (
-                f"A scale_elastic_ep operation is already in progress; "
-                f"rejecting concurrent request for new_data_parallel_size={new_dp_size}"
-            )
-            logger.warning(f"[ElasticEP] {msg}")
-            return {"status": "error", "message": msg}
-
         async with self._scale_ep_lock:
+            if self._scale_ep_in_progress:
+                msg = (
+                    "A scale_elastic_ep operation is already in progress; "
+                    f"rejecting concurrent request for new_data_parallel_size={new_dp_size}"
+                )
+                logger.warning("[ElasticEP] %s", msg)
+                return {"status": "error", "message": msg}
+            self._scale_ep_in_progress = True
+
+        try:
+            # TODO(upstream-vllm): remove this patch once vLLM fixes
+            # add_dp_placement_groups in vllm/v1/engine/utils.py to use ray.nodes()
+            # instead of ray.util.state.list_nodes().
+            #
+            # Patch ray.util.state.list_nodes to use the GCS API instead of the
+            # dashboard HTTP API (127.0.0.1:8265/api/v0/nodes). The dynamo image
+            # installs ray core only (not ray[default]), so the dashboard HTTP server
+            # starts in --minimal mode with the HTTP server disabled. vLLM's
+            # add_dp_placement_groups calls list_nodes() which requires that HTTP
+            # endpoint, causing scale_elastic_ep to fail with "Failed to connect to
+            # API server".
+            #
+            # ray.nodes() uses the GCS gRPC channel directly (no dashboard process
+            # needed) and returns the same information. Imported lazily so ray is not
+            # required at module load time (absent in non-elastic-EP deployments).
+            #
+            # Format mapping:
+            #   list_nodes() -> objects with .node_ip and .node_id
+            #   ray.nodes()  -> dicts with "NodeManagerAddress" and "NodeID"
+            import ray
+            import ray.util.state as _ray_util_state
+
+            class _NodeInfo:
+                __slots__ = ("node_id", "node_ip")
+
+                def __init__(self, d: dict) -> None:
+                    self.node_ip: str = d["NodeManagerAddress"]
+                    self.node_id: str = d["NodeID"]
+
+            original_list_nodes = _ray_util_state.list_nodes
             try:
-                # TODO(upstream-vllm): remove this patch once vLLM fixes
-                # add_dp_placement_groups in vllm/v1/engine/utils.py to use ray.nodes()
-                # instead of ray.util.state.list_nodes().
-                #
-                # Patch ray.util.state.list_nodes to use the GCS API instead of the
-                # dashboard HTTP API (127.0.0.1:8265/api/v0/nodes). The dynamo image
-                # installs ray core only (not ray[default]), so the dashboard HTTP server
-                # starts in --minimal mode with the HTTP server disabled. vLLM's
-                # add_dp_placement_groups calls list_nodes() which requires that HTTP
-                # endpoint, causing scale_elastic_ep to fail with "Failed to connect to
-                # API server".
-                #
-                # ray.nodes() uses the GCS gRPC channel directly (no dashboard process
-                # needed) and returns the same information. Imported lazily so ray is not
-                # required at module load time (absent in non-elastic-EP deployments).
-                #
-                # Format mapping:
-                #   list_nodes() → objects with .node_ip and .node_id
-                #   ray.nodes()  → dicts with "NodeManagerAddress" and "NodeID"
-                import ray
-                import ray.util.state as _ray_util_state
-
-                class _NodeInfo:
-                    __slots__ = ("node_id", "node_ip")
-
-                    def __init__(self, d: dict) -> None:
-                        self.node_ip: str = d["NodeManagerAddress"]
-                        self.node_id: str = d["NodeID"]
-
                 _ray_util_state.list_nodes = lambda **kw: [
                     _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
                 ]
-
                 await self.engine_client.scale_elastic_ep(new_dp_size)
-                logger.info(f"[ElasticEP] Scaling to dp={new_dp_size} complete")
-                return {
-                    "status": "ok",
-                    "message": f"Scaled to data_parallel_size={new_dp_size}",
-                    "new_data_parallel_size": new_dp_size,
-                }
-            except Exception as e:
-                logger.error(f"[ElasticEP] Scaling failed: {e}")
-                return {"status": "error", "message": str(e)}
+            finally:
+                _ray_util_state.list_nodes = original_list_nodes
+
+            logger.info(f"[ElasticEP] Scaling to dp={new_dp_size} complete")
+            return {
+                "status": "ok",
+                "message": f"Scaled to data_parallel_size={new_dp_size}",
+                "new_data_parallel_size": new_dp_size,
+            }
+        except Exception as e:
+            logger.error(f"[ElasticEP] Scaling failed: {e}")
+            return {"status": "error", "message": str(e)}
+        finally:
+            async with self._scale_ep_lock:
+                self._scale_ep_in_progress = False
 
     async def wake_up(self, body: dict) -> dict:
         """Wake the engine to restore GPU memory and re-register to discovery.
@@ -911,19 +1210,20 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """
         body = body or {}
         tags = body.get("tags")
-        async with self._quiesce_lock:
-            if not self._quiesce_controller.is_quiesced:
+        async with self._pause_lock:
+            needs_recovery = self._pause_controller.needs_resume_recovery
+            if not self._pause_controller.is_paused and not needs_recovery:
                 return {"status": "ok", "message": "Engine already awake"}
 
             try:
                 # Step 1: Wake engine first - must be ready before accepting requests
-                await self._quiesce_controller.resume(tags)
+                await self._pause_controller.resume(tags)
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.register_endpoint_instance()
                     logger.info(
                         "[Wake] Re-registered endpoint to discovery - worker added back to routing pool"
                     )
-                self._quiesce_controller.mark_resumed()
+                self._pause_controller.mark_resumed()
 
                 return {
                     "status": "ok",
@@ -1259,10 +1559,44 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 self.config.dyn_reasoning_parser
                             )
 
+                            # Match the base-model registration topology (see
+                            # worker_factory.py _create_decode_worker /
+                            # _create_prefill_worker) so the router activates for the
+                            # LoRA model name the same way it does for the base model.
+                            # A prefill worker carries its role via worker_type=Prefill;
+                            # we register the legacy ModelType.Prefill marker bit (not a
+                            # surface) so an old frontend still detects it during the
+                            # cross-version rollout. Decode and aggregated workers expose the
+                            # LoRA on the same chat/completions surface.
+                            # --route-to-encoder adds Encode to the AND-set of peers.
+                            if (
+                                self.config.disaggregation_mode
+                                == DisaggregationMode.PREFILL
+                            ):
+                                lora_model_type = ModelType.Prefill
+                                lora_worker_type = WorkerType.Prefill
+                                lora_needs_set: list[WorkerType] = [WorkerType.Decode]
+                            elif (
+                                self.config.disaggregation_mode
+                                == DisaggregationMode.DECODE
+                            ):
+                                lora_model_type = ModelType.Chat | ModelType.Completions
+                                lora_worker_type = WorkerType.Decode
+                                lora_needs_set = [WorkerType.Prefill]
+                            else:  # AGGREGATED
+                                lora_model_type = ModelType.Chat | ModelType.Completions
+                                lora_worker_type = WorkerType.Aggregated
+                                lora_needs_set = []
+                            if self.config.route_to_encoder:
+                                lora_needs_set.append(WorkerType.Encode)
+                            lora_needs: list[list[WorkerType]] = (
+                                [lora_needs_set] if lora_needs_set else []
+                            )
+
                             # Publish with format: v1/mdc/dynamo/backend/generate/{instance_id}/{lora_slug}
                             await register_model(
                                 model_input=ModelInput.Tokens,
-                                model_type=ModelType.Chat | ModelType.Completions,
+                                model_type=lora_model_type,
                                 endpoint=self.generate_endpoint,
                                 model_path=self.config.model,
                                 kv_cache_block_size=self.config.engine_args.block_size,
@@ -1270,6 +1604,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 user_data=user_data,
                                 lora_name=lora_name,
                                 base_model_path=self.config.model,
+                                worker_type=lora_worker_type,
+                                needs=lora_needs,
                             )
                             logger.info(
                                 f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
@@ -1599,6 +1935,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     transport,
                 )
                 return None
+            mm_hashes = _pad_mm_hashes_to_64(mm_hashes)
 
             # Receive pickled kwargs items (NVTX wrap is owned by the receiver).
             results = await receiver.receive(metadata)
@@ -1931,6 +2268,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         forwarded_hashes = extra_args.get("mm_hashes")
         mm_uuids: dict[str, Any] | None = None
         if forwarded_hashes:
+            forwarded_hashes = _pad_mm_hashes_to_64(forwarded_hashes)
             # vLLM binds multi_modal_uuids by modality key string match.
             # For models with use_unified_vision_chunk=True (e.g. Kimi-K2.5)
             # images live under `vision_chunk`, not `image`; hardcoding
@@ -2015,76 +2353,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     def _extract_logprobs(
         output, num_output_tokens_so_far: int, tokenizer=None
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
-        """
-        Extract logprobs from vLLM CompletionOutput for new tokens.
-
-        Args:
-            output: vLLM CompletionOutput object
-            num_output_tokens_so_far: Number of tokens already processed
-            tokenizer: Optional tokenizer for decoding token IDs when
-                       decoded_token is not populated by the engine
-
-        Returns:
-            Tuple of (log_probs, top_logprobs) in Dynamo's expected format:
-            - log_probs: List of log probabilities for each new token
-            - top_logprobs: List of top logprobs dicts for each new token
-        """
-        if output.logprobs is None:
-            return None, None
-
-        token_ids = list(output.token_ids or [])
-        if not token_ids or num_output_tokens_so_far >= len(token_ids):
-            return None, None
-
-        # Get logprobs for new tokens only
-        new_logprobs = output.logprobs[num_output_tokens_so_far:]
-        new_token_ids = token_ids[num_output_tokens_so_far:]
-        new_logprobs = new_logprobs[: len(new_token_ids)]
-        if not new_logprobs:
-            return None, None
-
-        log_probs = []
-        top_logprobs = []
-
-        for token_idx, token_logprobs_dict in enumerate(new_logprobs):
-            if token_logprobs_dict is None:
-                continue
-
-            # Get the actual token_id that was generated at this position
-            actual_token_id = new_token_ids[token_idx]
-
-            # Extract log probability for the selected token
-            # vLLM guarantees the selected token is always in the logprobs dict
-            selected_logprob = token_logprobs_dict.get(actual_token_id)
-            if selected_logprob is None:
-                continue
-            log_probs.append(float(selected_logprob.logprob))
-
-            # Build top_logprobs list for this token position
-            token_top_logprobs = []
-            for tok_id, logprob_info in token_logprobs_dict.items():
-                token_str = getattr(logprob_info, "decoded_token", None)
-                if not token_str and tokenizer:
-                    try:
-                        token_str = tokenizer.decode([tok_id])
-                    except Exception:
-                        token_str = None
-                token_top_logprobs.append(
-                    {
-                        "rank": (
-                            logprob_info.rank if hasattr(logprob_info, "rank") else 0
-                        ),
-                        "token_id": tok_id,
-                        "token": token_str,
-                        "logprob": float(logprob_info.logprob),
-                        "bytes": (
-                            list(token_str.encode("utf-8")) if token_str else None
-                        ),
-                    }
-                )
-            top_logprobs.append(token_top_logprobs)
-
-        return log_probs if log_probs else None, top_logprobs if top_logprobs else None
+        # Legacy vLLM handler always emits when vLLM returned a dict.
+        return _shared_logprobs.extract_from_completion_output(
+            output,
+            num_output_tokens_so_far,
+            tokenizer=tokenizer,
+            fallback_to_first_on_missing=True,
+            include_bytes=True,
+        )
 
     @staticmethod
     def _log_with_lora_context(
@@ -2156,8 +2432,21 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             )
 
             total_output_tokens_by_index: dict[int, int] = {}
+            raw_routed_experts_by_output: dict[int, Any] = {}
+            # vLLM surfaces prompt_logprobs once (at end-of-prefill) and clears
+            # them on subsequent chunks, so the generation-finish chunk often
+            # carries None. Capture the first non-None payload and attach it to
+            # the final chunk instead of reading res.prompt_logprobs there.
+            prompt_logprobs_payload: Optional[list] = None
             async for res in gen:
                 # res is vllm's RequestOutput
+                if (
+                    prompt_logprobs_payload is None
+                    and getattr(res, "prompt_logprobs", None) is not None
+                ):
+                    prompt_logprobs_payload = _serialize_prompt_logprobs(
+                        res.prompt_logprobs
+                    )
 
                 if not res.outputs:
                     self._log_with_lora_context(
@@ -2200,6 +2489,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         "index": output_idx,
                         "token_ids": token_ids,
                     }
+                    # Capture the raw routed_experts cheaply here; serialize it
+                    # only once on the final chunk (base85-encoding a tensor on
+                    # every streamed chunk would be wasted work, since only the
+                    # final value is emitted).
+                    raw_routed_experts = getattr(output, "routed_experts", None)
+                    if raw_routed_experts is not None:
+                        raw_routed_experts_by_output[output_idx] = raw_routed_experts
 
                     # vLLM DELTA outputs already align token_ids/logprobs to this chunk.
                     tokenizer = getattr(self.engine_client, "tokenizer", None)
@@ -2220,6 +2516,20 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             embedding_sequence_length=embedding_sequence_length,
                             completion_token_counts=total_output_tokens_by_index,
                         )
+                        if prompt_logprobs_payload is not None:
+                            _attach_prompt_logprobs_engine_data(
+                                out, prompt_logprobs_payload
+                            )
+                        routed_experts = _serialize_routed_experts(
+                            raw_routed_experts_by_output.get(output_idx)
+                        )
+                        if routed_experts is not None:
+                            existing = out.get("disaggregated_params")
+                            disaggregated_params: Dict[str, Any] = (
+                                dict(existing) if isinstance(existing, dict) else {}
+                            )
+                            disaggregated_params["routed_experts"] = routed_experts
+                            out["disaggregated_params"] = disaggregated_params
                         # Log completion with LoRA info (debug level to avoid log spam)
                         self._log_with_lora_context(
                             "Completed token generation for request {request_id}{lora_info}: "
@@ -2299,12 +2609,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Firstly extract disaggregated params from prefill result if available
         prefill_result = request.get("prefill_result")
         if prefill_result and isinstance(prefill_result, dict):
-            kv_params = prefill_result.get("disaggregated_params", {}).get(
-                "kv_transfer_params"
-            )
-            embedding_params = prefill_result.get("disaggregated_params", {}).get(
-                "embedding_params"
-            )
+            # `disaggregated_params` may be explicitly None (prefill error path,
+            # or _build_disaggregated_params returning None when empty), so use
+            # `or {}` rather than a .get default — the default only applies when
+            # the key is absent, not when it is present-but-None.
+            disaggregated_params = prefill_result.get("disaggregated_params") or {}
+            kv_params = disaggregated_params.get("kv_transfer_params")
+            embedding_params = disaggregated_params.get("embedding_params")
             # Normalize embedding_params to None if it is an empty dict
             if not embedding_params:
                 embedding_params = None
@@ -2417,9 +2728,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             yield error
             return
 
+        _apply_nvext_cache_salt(request, prompt)
+
         # Build sampling params from request
         sampling_params = build_sampling_params(
-            request, self.default_sampling_params, self.model_max_len
+            request,
+            self.default_sampling_params,
+            self.model_max_len,
+            enable_rl=self.config.enable_rl,
         )
 
         if kv_params is not None:
@@ -2463,6 +2779,26 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             async with self._abort_monitor(
                 context, request_id, abort_guard=abort_guard
             ):
+                # nvext.engine_data opt-in: if the client requested
+                # `nvext.extra_fields=["engine_data"]`, we accumulate
+                # per-chunk token_ids and logprobs and attach them to the
+                # FINAL chunk (the one carrying `finish_reason`). The Rust
+                # frontend's response builder (delta.rs) gates emission via
+                # `NvExtResponseFieldSelection.engine_data` so this payload
+                # only reaches clients that asked for it.
+                want_engine_data = _nvext_extra_field_requested(request, "engine_data")
+                # Prompt token IDs the engine actually saw. Either the
+                # pre-tokenized `nvext.token_data` (TITO) or whatever the
+                # preprocessor produced from messages (MITO). We echo them
+                # back in engine_data so the client doesn't have to re-derive
+                # them from a request it might no longer hold.
+                request_prompt_token_ids = (
+                    _prompt_token_ids_for_engine_data(request, prompt)
+                    if want_engine_data
+                    else None
+                )
+                accumulated_token_ids: dict[int, list[int]] = {}
+                accumulated_log_probs: dict[int, list[float]] = {}
                 try:
                     async for tok in self.generate_tokens(
                         prompt,
@@ -2482,6 +2818,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             tok["completion_usage"][
                                 "prompt_tokens_details"
                             ] = prefill_prompt_tokens_details
+
+                        if want_engine_data:
+                            _accumulate_engine_data(
+                                tok,
+                                request_prompt_token_ids,
+                                accumulated_token_ids,
+                                accumulated_log_probs,
+                            )
                         yield tok
                 except EngineDeadError as e:
                     logger.error(f"vLLM EngineDeadError: {e}")
@@ -2667,9 +3011,14 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             yield error
             return
 
+        _apply_nvext_cache_salt(request, prompt)
+
         # Build sampling params from request using shared utility
         sampling_params = build_sampling_params(
-            request, self.default_sampling_params, self.model_max_len
+            request,
+            self.default_sampling_params,
+            self.model_max_len,
+            enable_rl=self.config.enable_rl,
         )
 
         # One protocol instance per request; carries per-request state
@@ -2958,8 +3307,7 @@ class EmbeddingWorkerHandler:
         dimensions = request.get("dimensions")
         if dimensions is not None and not isinstance(dimensions, int):
             raise TypeError(
-                f"Invalid 'dimensions' type {type(dimensions).__name__}; "
-                "expected int"
+                f"Invalid 'dimensions' type {type(dimensions).__name__}; expected int"
             )
         if dimensions is not None and dimensions < 1:
             raise ValueError(f"dimensions must be >= 1, got {dimensions}")

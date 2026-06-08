@@ -79,6 +79,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secrets"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	webhookdefaulting "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/defaulting"
+	webhookmutation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/mutation"
 	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
@@ -826,6 +827,13 @@ func registerWebhooks(
 	dgdrDefaulter := webhookdefaulting.NewDGDRDefaulter(operatorVersion)
 	if err := dgdrDefaulter.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest defaulting webhook: %w", err)
+	}
+
+	setupLog.Info("Registering mutation webhooks")
+
+	podCheckpointRestoreMutator := webhookmutation.NewPodCheckpointRestoreMutator(mgr.GetClient(), operatorCfg)
+	if err := podCheckpointRestoreMutator.RegisterWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to register Pod checkpoint restore mutating webhook: %w", err)
 	}
 
 	setupLog.Info("Webhooks registered successfully")

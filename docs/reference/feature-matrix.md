@@ -6,7 +6,7 @@ title: Feature Matrix
 
 This document provides a comprehensive compatibility matrix for key Dynamo features across the supported backends.
 
-*Updated for Dynamo v1.1.1*
+*Updated for Dynamo v1.2.0*
 
 **Legend:**
 *   ✅ : Supported
@@ -115,7 +115,7 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 
 {/* Design Docs */}
 [disagg]: ../design-docs/disaggregated-serving
-[kv-routing]: ../components/router/router-guide
+[kv-routing]: ../user-guides/kv-cache-aware-routing
 [planner]: ../components/planner
 [kvbm]: ../components/kvbm
 [migration]: ../user-guides/fault-tolerance/request-migration
@@ -129,9 +129,9 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 [mm-kv-routing]: ../features/multimodal/multimodal-kv-routing.md
 
 {/* Feature-specific */}
-[lora]: ../kubernetes-deployment/deployment-guide/managing-models-with-dynamo-model
+[lora]: ../kubernetes-deployment/deploy-models/managing-models-with-dynamo-model
 [vllm-spec]: ../additional-resources/speculative-decoding/speculative-decoding-with-v-llm
 [trtllm-eagle]: ../additional-resources/tensor-rt-llm-details/llama-4-eagle
 
 {/* Dynamo Snapshot */}
-[snapshot]: ../kubernetes-deployment/deployment-guide/snapshot
+[snapshot]: ../kubernetes-deployment/advanced-platform/snapshot

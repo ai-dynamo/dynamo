@@ -35,6 +35,11 @@ type DynamoGraphDeploymentSpec struct {
 	// +optional
 	Labels map[string]string `json:"labels,omitempty"`
 
+	// priorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.
+	// Requires the Grove pathway.
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
+
 	// components are the components deployed as part of this graph. Each entry
 	// carries its own stable logical `name`, and names must be unique within
 	// the list. Component types are generally repeatable, except `type: epp`

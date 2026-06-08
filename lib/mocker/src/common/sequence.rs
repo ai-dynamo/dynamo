@@ -119,6 +119,15 @@ impl ActiveSequence {
         self.tokens.total_tokens() == 0
     }
 
+    /// To-completion footprint in blocks: `ceil((prompt + max_output) / block_size)`.
+    ///
+    /// The full physical residency a request needs to run end to end, with no
+    /// prefix-reuse or already-allocated discount. Callers deciding "can it be
+    /// admitted now?" apply their own discounts on top of this primitive.
+    pub(crate) fn to_completion_blocks(&self) -> usize {
+        (self.num_input_tokens + self.max_output_tokens).div_ceil(self.block_size)
+    }
+
     /// Build a `MoveBlock::Use` signal for blocks up to `cumulative_tokens`
     /// without updating internal state. Returns `None` if no new blocks are needed.
     /// Call `commit_allocation` after the signal is successfully processed.

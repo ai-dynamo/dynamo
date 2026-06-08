@@ -97,9 +97,10 @@ class WorkerConfig:
     enable_kv_routing: bool = True
     metrics_labels: list[tuple[str, str]] = field(default_factory=list)
     # Disaggregation role; default AGGREGATED keeps existing callers unchanged.
-    # The Rust Worker reads this for registration (Prefill→ModelType::Prefill,
-    # Decode→disable local indexer); engines read it from their own runtime
-    # config to switch per-mode protocol behavior in `generate()`.
+    # The Rust Worker reads this for registration (Prefill → ModelType.Prefill
+    # legacy marker bit + WorkerType.Prefill, Decode → disable local indexer);
+    # engines read it from their own runtime config to switch per-mode protocol
+    # behavior in `generate()`.
     disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED
     # Operator override; when set, the Rust Worker uses this instead of
     # `engine.health_check_payload()`. Populated by `from_runtime_config`.

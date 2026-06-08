@@ -15,7 +15,7 @@ use super::config::SglangConfig;
 use super::decode::{cache_materialized_prefix, simulate_decode_step};
 use super::policy::apply_schedule_policy;
 use super::prefill::get_new_batch_prefill;
-use super::request::{SglangRequest, direct_to_sglang};
+use super::request::SglangRequest;
 use crate::scheduler::{
     CapturedRouterEventBuffer, EnginePassResult, MockerMetrics, RouterEventVisibility,
     build_fpm_snapshot, capture_router_event_sink,
@@ -81,7 +81,7 @@ impl SglangCore {
     }
 
     pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
-        let request = direct_to_sglang(request);
+        let request = SglangRequest::from(request);
         request.debug_assert_invariants(self.config.block_size);
         let uuid = request.uuid;
         self.waiting.push_back(request);

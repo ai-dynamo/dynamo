@@ -74,6 +74,24 @@ impl TransferDirection {
     }
 }
 
+impl TryFrom<(LogicalLayoutHandle, LogicalLayoutHandle)> for TransferDirection {
+    type Error = anyhow::Error;
+
+    fn try_from((src, dst): (LogicalLayoutHandle, LogicalLayoutHandle)) -> Result<Self> {
+        match (src, dst) {
+            (LogicalLayoutHandle::G1, LogicalLayoutHandle::G2) => Ok(Self::G1ToG2),
+            (LogicalLayoutHandle::G2, LogicalLayoutHandle::G1) => Ok(Self::G2ToG1),
+            (LogicalLayoutHandle::G2, LogicalLayoutHandle::G3) => Ok(Self::G2ToG3),
+            (LogicalLayoutHandle::G3, LogicalLayoutHandle::G2) => Ok(Self::G3ToG2),
+            (s, d) => bail!(
+                "MockWorker only simulates local G1↔G2 and G2↔G3 transfers; got src={:?} dst={:?}",
+                s,
+                d
+            ),
+        }
+    }
+}
+
 struct PipelineAwaiter {
     event: Event,
     owner_id: u64,
@@ -604,24 +622,6 @@ impl MockWorker {
     }
 }
 
-/// Map `(src, dst)` logical layout handles to a mocker-supported direction.
-fn infer_direction(
-    src: LogicalLayoutHandle,
-    dst: LogicalLayoutHandle,
-) -> Result<TransferDirection> {
-    match (src, dst) {
-        (LogicalLayoutHandle::G1, LogicalLayoutHandle::G2) => Ok(TransferDirection::G1ToG2),
-        (LogicalLayoutHandle::G2, LogicalLayoutHandle::G1) => Ok(TransferDirection::G2ToG1),
-        (LogicalLayoutHandle::G2, LogicalLayoutHandle::G3) => Ok(TransferDirection::G2ToG3),
-        (LogicalLayoutHandle::G3, LogicalLayoutHandle::G2) => Ok(TransferDirection::G3ToG2),
-        (s, d) => bail!(
-            "MockWorker only simulates local G1↔G2 and G2↔G3 transfers; got src={:?} dst={:?}",
-            s,
-            d
-        ),
-    }
-}
-
 impl WorkerTransfers for MockWorker {
     fn execute_local_transfer(
         &self,
@@ -631,7 +631,7 @@ impl WorkerTransfers for MockWorker {
         _dst_block_ids: Arc<[BlockId]>,
         _options: TransferOptions,
     ) -> Result<TransferCompleteNotification> {
-        let direction = infer_direction(src, dst)?;
+        let direction = TransferDirection::try_from((src, dst))?;
         let now_ms = self.now_ms();
         self.reserve_transfer(direction, now_ms, src_block_ids.len())
     }

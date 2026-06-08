@@ -55,7 +55,7 @@ Advanced disaggregated deployment with SLA-based automatic scaling.
 - `prefill`: Specialized prefill-only worker
 
 > [!NOTE]
-> This deployment requires pre-deployment profiling to be completed first. See [Pre-Deployment Profiling](../../../../docs/components/profiler/profiler-guide.md) for detailed instructions.
+> This deployment can use native AIC estimates when available, optional pre-deployment profiling data, or live FPM observations after warmup. See [Pre-Deployment Profiling](../../../../docs/components/profiler/profiler-guide.md) for the optional bootstrap workflow.
 
 ## CRD Structure
 

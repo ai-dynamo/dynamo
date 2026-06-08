@@ -46,15 +46,20 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &d_5_b
-        reason: "Dynamo's DSML parser leaves <｜DSML｜…> envelope in normal_text on missing/orphan end marker (impl-defined recovery)"
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: &d_5_b
+        reason: "vLLM and SGLang preserve orphan DSML markers as content when the opening <｜DSML｜function_calls> wrapper is missing; Dynamo recovers the complete bare <｜DSML｜invoke> call and strips the orphan marker tail."
         calls: []
         normal_text: |-
           <｜DSML｜invoke name="get_weather">
           <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
           </｜DSML｜invoke>
           </｜DSML｜function_calls>
-      vllm: *d_5_b
       sglang: *d_5_b
   TOOLCALLING.batch.5.c:
     description: Truncation mid-parameter value

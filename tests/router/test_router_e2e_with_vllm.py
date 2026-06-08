@@ -25,6 +25,7 @@ from tests.router.e2e_harness import (
 from tests.router.helper import (
     generate_random_suffix,
     get_kv_indexer_command,
+    get_kv_indexer_test_env,
     wait_for_indexer_workers_active,
 )
 from tests.utils.constants import DefaultPort
@@ -340,6 +341,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
             log_dir=self._request.node.name,
             terminate_all_matching_process_names=False,
             display_name="dynamo-kv-indexer",
+            env=get_kv_indexer_test_env(),
         )
         logger.info(
             "Starting standalone indexer on port %s", self._standalone_indexer_port
@@ -472,6 +474,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
             log_dir=self._request.node.name,
             terminate_all_matching_process_names=False,
             display_name="dynamo-kv-indexer-b",
+            env=get_kv_indexer_test_env(),
         )
         logger.info(
             "Starting standalone indexer B on port %s with peer http://localhost:%s",

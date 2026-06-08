@@ -1,26 +1,105 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Model Deployment Guide
+title: Deployment Overview
+subtitle: Understand DynamoGraphDeployments, DynamoComponentDeployments, DGDR, and recipes
 ---
 
-# Model Deployment Guide
+Dynamo's canonical Kubernetes deployment is a
+[`DynamoGraphDeployment`](api-reference.md#dynamographdeployment) (DGD). A DGD
+describes the inference graph you want to run. The Dynamo operator reconciles
+that graph into one or more
+[`DynamoComponentDeployment`](api-reference.md#dynamocomponentdeployment) (DCD)
+resources, which run the frontend, router, prefill workers, decode workers, and
+other graph components.
 
-This guide explains how to deploy your model on Dynamo using a
-`DynamoGraphDeploymentRequest` (DGDR). If you've completed the
-[Quickstart](README.md) and want to understand how DGDR works end-to-end, how
-to choose the right settings for your model, and how to avoid common pitfalls,
-this is the place.
+This is the Kubernetes-native control path for Dynamo: you author or generate
+Dynamo resources, and the operator translates them into Kubernetes workloads,
+services, routing metadata, model-loading resources, and status conditions. For
+local development or incremental adoption, you can still run the same frontend,
+router, and worker components outside Kubernetes.
 
-For the DGDR spec reference, field descriptions, and lifecycle phases, see the
-[DGDR Reference](dgdr.md).
+You can create a DGD directly from a known-good manifest, or you can use a
+[`DynamoGraphDeploymentRequest`](dgdr.md) (DGDR) to profile your model and
+generate a DGD for you.
 
-## What is a DGDR?
+Most users only need three ideas before they deploy:
 
-A DGDR is Dynamo's **deploy-by-intent** Custom Resource. Instead of hand-crafting
-a deployment spec with parallelism settings, replica counts, and resource limits,
-you describe _what_ you want to run (model, backend, SLA targets) and DGDR
-automates the rest:
+- **Recipes are the fastest path** when one matches your model, backend,
+  hardware, and serving pattern. They are already DGD manifests.
+- **DGDR is the guided path** when you want Dynamo to profile and generate a
+  DGD from model/SLA intent.
+- **DGD is the object that serves traffic**. DGDR can create it, but the DGD is
+  what persists after profiling completes.
+
+You do not need to author DCDs directly for normal deployments.
+
+## Start Here: Resource Model
+
+```mermaid
+flowchart LR
+    DGDR["DynamoGraphDeploymentRequest (DGDR)<br/>optional generator and profiler"]
+    Recipes["recipes/model/.../deploy.yaml<br/>pre-tuned DGD manifests"]
+    DGD["DynamoGraphDeployment (DGD)<br/>canonical live deployment"]
+    DCD["DynamoComponentDeployments (DCDs)<br/>per-component deployments"]
+    Pods["Pods and Services<br/>frontend, router, workers"]
+
+    DGDR -->|"profiles + generates"| DGD
+    Recipes -->|"kubectl apply"| DGD
+    DGD -->|"operator reconciles"| DCD
+    DCD --> Pods
+```
+
+| Resource or path | What it is | Use it when | Learn more |
+|---|---|---|---|
+| `DynamoGraphDeployment` (DGD) | The canonical live deployment for a Dynamo inference graph. | You have a known-good configuration or tuned YAML. | [Creating Deployments](deployment/create-deployment.md), [DGD API](api-reference.md#dynamographdeployment) |
+| `DynamoComponentDeployment` (DCD) | The per-component deployment objects created from a DGD. | Usually not authored directly; inspect them to debug frontend/router/worker rollout. | [DCD API](api-reference.md#dynamocomponentdeployment) |
+| `DynamoGraphDeploymentRequest` (DGDR) | A deploy-by-intent request that profiles your model/hardware and generates a DGD. | You want Dynamo to size the deployment, choose parallelism, configure supported generated-deployment features such as Planner, or produce DGD YAML. | [DGDR Reference](dgdr.md) |
+| Recipes | Curated `deploy.yaml` manifests that are already DGD specs. | A recipe matches your model, backend, hardware, and serving mode. | [Dynamo recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes) |
+| `DynamoModel` | Model and adapter lifecycle management layered onto an existing DGD or DCD. | You need declarative model operations such as LoRA adapter loading. | [Managing Models with DynamoModel](deployment/dynamomodel-guide.md) |
+
+## Choose Your Path
+
+Start with the row that matches your situation. The sections later in this page
+are reference material; you can read them as needed instead of going linearly.
+
+| Situation | Do this first | Then read |
+|---|---|---|
+| A recipe matches your model/backend/hardware | Apply the recipe's model cache resources, then apply its `deploy.yaml`. | [Deploy a Tuned DGD from Recipes](#deploy-a-tuned-dgd-from-recipes) |
+| You want Dynamo to generate the deployment | Create a DGDR. Use `autoApply: true` to let the operator create the DGD, or `autoApply: false` to inspect the generated DGD YAML first. | [Use DGDR to Generate a DGD](#use-dgdr-to-generate-a-dgd) |
+| You already know the exact topology | Author or edit a DGD directly, then apply it with `kubectl`. | [Creating Deployments](deployment/create-deployment.md) |
+| You are preparing for production | Add model caching, choose backend/search strategy, and validate networking/planner needs. | [Production Details](#production-details) |
+
+## Deploy a Tuned DGD from Recipes
+
+If a [recipe](https://github.com/ai-dynamo/dynamo/tree/main/recipes) matches
+your target model, backend, GPU type, and serving mode, start there. Recipes are
+curated `DynamoGraphDeployment` manifests with model-cache setup and, for many
+recipes, benchmark jobs.
+
+The common recipe flow is:
+
+```bash
+cd recipes
+
+# Update the recipe storageClassName first, then create model cache resources.
+kubectl apply -f <model>/model-cache/ -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download \
+  -n ${NAMESPACE} --timeout=6000s
+
+# Deploy a tuned DGD.
+kubectl apply -f <model>/<backend>/<mode>/deploy.yaml -n ${NAMESPACE}
+```
+
+Follow the README in the specific recipe directory for model-specific images,
+GPU requirements, cache setup, and request examples.
+
+## Use DGDR to Generate a DGD
+
+A DGDR is Dynamo's deploy-by-intent path. Instead of hand-crafting a deployment
+spec with parallelism settings, replica counts, and resource limits, you
+describe what you want to run (model, backend, workload, SLA targets) and DGDR
+generates a DGD:
 
 1. **Spec** — You submit a DGDR with your model, workload expectations, and
    optional SLA targets.
@@ -34,10 +113,16 @@ automates the rest:
 5. **Review** (when `autoApply: false`) — The generated DGD is stored in
    `.status.profilingResults.selectedConfig` for you to inspect and optionally
    modify before deploying.
-6. **Deploy** — The operator creates the DGD, which provisions the inference
-   pods.
+6. **Deploy** — With `autoApply: true`, the operator creates the DGD. With
+   `autoApply: false`, you apply the generated DGD yourself.
 7. **Planner** (optional) — If enabled, the Planner monitors live traffic and
    adjusts replica counts at runtime to meet your SLA targets.
+
+DGDR currently supports generated-deployment feature configuration for Planner
+(`features.planner`) and mocker mode (`features.mocker`). The DGDR API does not
+currently expose `features.kvRouter`; configure explicit router mode in a DGD,
+a tuned recipe, or a generated DGD override when you need KV-aware routing
+details.
 
 ```text
 ┌──────┐    ┌───────────┐    ┌──────────┐    ┌─────────────┐    ┌────────┐    ┌─────────┐
@@ -49,7 +134,10 @@ automates the rest:
                                              ▼ Review
 ```
 
-## Choosing a Search Strategy
+For the DGDR spec reference, field descriptions, and lifecycle phases, see the
+[DGDR Reference](dgdr.md).
+
+## DGDR Detail: Choose a Search Strategy
 
 The `searchStrategy` field controls how the profiler explores configurations.
 Your choice depends on how much time you can invest and how close to optimal
@@ -99,7 +187,7 @@ benchmarks with AIPerf. Takes 2–4 hours.
 - **Requires GPU resources** — the profiler deploys real inference engines on
   your cluster during profiling.
 
-## AIC Support Matrix
+## DGDR Detail: AIC Support Matrix
 
 The rapid strategy relies on AIC performance models. AIC currently supports:
 
@@ -152,7 +240,19 @@ model architecture:
 | GQA+MoE (Qwen3-MoE) | TP, TEP, DEP | TP, TEP, DEP |
 | Dense models (Llama, Qwen, etc.) | TP | TP |
 
-## Model Caching
+## Production Details
+
+After the basic deployment path is clear, use this checklist to decide which
+production topics apply:
+
+| Concern | Why it matters | Section |
+|---|---|---|
+| Model startup is slow or the model is gated | Avoid repeated downloads and pass `HF_TOKEN` cleanly. | [Model Caching](#production-detail-model-caching) |
+| Traffic changes over time | Planner can scale prefill/decode replicas at runtime. | [Planner](#production-detail-planner) |
+| The model spans nodes or uses disaggregated serving | Grove/LWS and RDMA affect scheduling and KV transfer. | [Multinode and RDMA](#production-detail-multinode-and-rdma) |
+| You need a specific inference engine | Backend choice affects MoE support, thorough profiling, and distributed behavior. | [Backend Selection](#production-detail-backend-selection) |
+
+## Production Detail: Model Caching
 
 **Set up model caching before deploying if any of these apply:**
 
@@ -211,7 +311,7 @@ kubectl create secret generic hf-token-secret \
 
 The profiler and deployed pods will automatically use this token.
 
-## Enabling the Planner
+## Production Detail: Planner
 
 The Planner provides **runtime autoscaling** for disaggregated deployments. It
 adjusts prefill and decode replica counts to meet your SLA targets as traffic
@@ -233,7 +333,7 @@ spec:
 |---|---|---|
 | `throughput` (default) | Static queue-depth and KV-cache thresholds; scales based on saturation | No |
 | `latency` | Same as throughput with more aggressive thresholds | No |
-| `sla` | Regression-based models targeting specific TTFT/ITL values; uses profiling data and live metrics | Yes |
+| `sla` | Rust engine perf shim targeting specific TTFT/ITL values; uses native AIC when available, optional bootstrap data, and live FPM tuning | Yes |
 
 ### Prometheus Requirement
 
@@ -248,7 +348,7 @@ The `throughput` and `latency` modes use internal queue-depth signals and work
 See the [Planner Guide](../components/planner/planner-guide.md) for advanced
 configuration and scaling behavior details.
 
-## Multinode Deployments
+## Production Detail: Multinode and RDMA
 
 Models that require more GPUs than a single node provides (e.g., DeepSeek-R1 on
 8-GPU nodes) need multinode orchestration.
@@ -283,8 +383,9 @@ Understanding the networking stack helps you diagnose performance issues:
 | **GPUDirect RDMA** | Allows data to go directly between a GPU and a network adapter, bypassing CPU memory entirely. |
 | **NCCL** | NVIDIA Collective Communications Library — handles intra-model parallelism (TP/PP) communication _within_ a pod. Separate from NIXL. |
 
-Without RDMA, NIXL falls back to TCP, causing **~40x degradation** in TTFT
-(from ~355ms to 10+ seconds).
+When RDMA is missing or not active, NIXL can fall back to TCP. That makes KV
+cache movement the likely bottleneck and can produce very high TTFT or low
+throughput even when the model workers appear healthy.
 
 **Enable RDMA if:**
 - You are running multinode disaggregated deployments
@@ -302,7 +403,7 @@ max per engine during sweep). If your MoE model requires more than 4 nodes of
 GPUs, the profiler will select the best config within that range and you may
 need to adjust replica counts manually.
 
-## Backend Selection
+## Production Detail: Backend Selection
 
 The `backend` field controls which inference engine is used. The default
 (`auto`) lets the profiler pick the best backend, but you should specify a
@@ -327,7 +428,7 @@ Each backend handles multinode inference differently:
 - **SGLang**: Uses `--dist-init-addr`, `--nnodes`, `--node-rank` flags for distributed setup.
 - **TRT-LLM**: MPI-based. The operator auto-generates SSH keypairs; the leader runs `mpirun`.
 
-## Common Pitfalls
+## Troubleshooting
 
 ### OOM During Profiling or Serving
 
@@ -385,7 +486,7 @@ kubectl delete dgdr my-model -n $NAMESPACE
 kubectl delete dgd my-model-dgd -n $NAMESPACE
 ```
 
-## Putting It Together: Example Workflows
+## Example Workflows
 
 ### Small Dense Model (Quick Start)
 

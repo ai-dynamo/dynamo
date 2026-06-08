@@ -521,6 +521,29 @@ impl DisaggRuntime {
             return Ok(());
         }
 
+        if signal.rejected {
+            // Rejected at the prefill worker: it never prefilled, so it must not
+            // be marked prefill-completed or handed off to decode (that would
+            // reject it again at decode and book phantom traffic). Free its
+            // prefill-router slot and terminally complete it here.
+            if self.prefill_router.is_some() {
+                let admissions = {
+                    let prefill_router =
+                        self.prefill_router.as_mut().expect("router checked above");
+                    prefill_router
+                        .on_request_completed(signal.uuid, self.now_ms)?
+                        .admissions
+                };
+                self.record_router_pending();
+                self.dispatch_prefill_admissions(admissions)?;
+            }
+            self.admission
+                .on_request_completed(signal.uuid, self.now_ms)?;
+            self.progress.inc_completed();
+            self.state_mut(signal.uuid)?.mark_done();
+            return Ok(());
+        }
+
         if self.prefill_router.is_some() {
             let prefill_complete_admissions = {
                 let prefill_router = self.prefill_router.as_mut().expect("router checked above");
@@ -589,13 +612,18 @@ impl DisaggRuntime {
                 .transition_log
                 .push(DisaggTransition::WorkloadCompleted { uuid: signal.uuid });
         }
-        let state = self.state(signal.uuid)?;
-        let original = state.original_request()?;
-        let input_tokens = original.tokens.len();
-        let output_tokens = original.max_output_tokens;
-        let latencies = self.collector.request_latencies(signal.uuid);
-        self.traffic
-            .on_request(input_tokens, output_tokens, latencies);
+        // A request rejected at decode never ran, so it produced no tokens or
+        // latency — keep it out of the planner-facing traffic deltas (mirror the
+        // aggregated path). It still frees its slot, advances, and is marked done.
+        if !signal.rejected {
+            let state = self.state(signal.uuid)?;
+            let original = state.original_request()?;
+            let input_tokens = original.tokens.len();
+            let output_tokens = original.max_output_tokens;
+            let latencies = self.collector.request_latencies(signal.uuid);
+            self.traffic
+                .on_request(input_tokens, output_tokens, latencies);
+        }
         self.state_mut(signal.uuid)?.mark_done();
         #[cfg(test)]
         {
@@ -1150,6 +1178,74 @@ mod tests {
         config.prefill_args.kv_transfer_bandwidth = Some(1.0);
         config.prefill_args.kv_bytes_per_token = Some(1_000_000);
         config
+    }
+
+    fn trtllm_reject_staged_args(worker_type: WorkerType) -> MockEngineArgs {
+        // 4 GPU blocks * block_size 4 = 16-token to-completion budget per request.
+        MockEngineArgs::builder()
+            .engine_type(EngineType::Trtllm)
+            .block_size(4)
+            .num_gpu_blocks(4)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(4))
+            .enable_prefix_caching(false)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1000.0)
+            .worker_type(worker_type)
+            .build()
+            .unwrap()
+    }
+
+    fn trtllm_reject_disagg_config() -> OfflineDisaggReplayConfig {
+        OfflineDisaggReplayConfig {
+            prefill_args: trtllm_reject_staged_args(WorkerType::Prefill),
+            decode_args: trtllm_reject_staged_args(WorkerType::Decode),
+            num_prefill_workers: 1,
+            num_decode_workers: 1,
+        }
+    }
+
+    /// Disagg regression for terminal-rejection propagation. An oversized request
+    /// rejected at the prefill stage must be terminally completed there — NOT
+    /// handed off to decode, which would reject it a second time (the observed
+    /// double-reject) and book phantom traffic. The valid follower completes; the
+    /// rejected request never reaches the decode stage.
+    #[test]
+    fn trtllm_oversized_request_rejected_at_prefill_not_handed_to_decode() {
+        let oversized = Uuid::from_u128(1);
+        let valid = Uuid::from_u128(2);
+        let requests = VecDeque::from([
+            request(1, 16, 4, 0.0), // 16-token prompt -> ceil((16+4)/4)=5 > 4-block pool -> reject
+            request(2, 4, 4, 0.0),  // fits
+        ]);
+        let (collector, stats) = DisaggRuntime::new(
+            &trtllm_reject_disagg_config(),
+            None,
+            None,
+            requests,
+            ReplayMode::Concurrency { max_in_flight: 1 },
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap()
+        .run()
+        .unwrap();
+        let report = collector.finish();
+        assert_eq!(
+            report.request_counts.num_requests, 2,
+            "both requests arrived"
+        );
+        assert_eq!(
+            report.request_counts.completed_requests, 1,
+            "only the valid request completes; the rejected one is excluded"
+        );
+        assert!(
+            !stats.decode_assignments.contains_key(&oversized),
+            "a prefill-rejected request must terminally complete at prefill, never hand off to decode"
+        );
+        assert!(
+            stats.decode_assignments.contains_key(&valid),
+            "the valid request runs through the decode stage"
+        );
     }
 
     fn scaling_test_args(worker_type: WorkerType) -> MockEngineArgs {

@@ -42,7 +42,7 @@ Backend workers register themselves using the `register_model` API. For accurate
 | `--router-prefill-load-scale <float>` | `1.0` | Scale adjusted prompt-side prefill load before adding decode blocks |
 | `--router-track-prefill-tokens` / `--no-router-track-prefill-tokens` | `--router-track-prefill-tokens` | Include prompt-side load in active worker load accounting |
 | `--router-prefill-load-model <none\|aic>` | `none` | Prompt-side load model; see [Routing Concepts](router-concepts.md#active-load-modeling) and [Configuration and Tuning](router-configuration.md#aic-prefill-load-model) |
-| `--router-queue-threshold <float>` | `16.0` | Queue threshold fraction; enables priority scheduling via `priority` |
+| `--router-queue-threshold <float>` | `16.0` | Queue threshold fraction; priority hints only reorder requests while this queue is non-empty |
 | `--router-queue-policy <str>` | `fcfs` | Scheduling policy for the queue: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
 | `--serve-indexer` | `false` | Serve the Dynamo-native remote indexer from this frontend/router on the worker component |
 | `--use-remote-indexer` | `false` | Query the worker component's served remote indexer instead of maintaining a local overlap indexer |
@@ -165,7 +165,7 @@ When using KV routing, the router needs to know what each worker has cached. The
 | Topology | Workers | How It Works |
 |----------|---------|--------------|
 | **Aggregated** | Single pool (prefill + decode in one process) | All workers handle the full request lifecycle |
-| **Disaggregated** | Separate prefill and decode pools | Frontend routes to a prefill worker first, then to a decode worker; requires workers registered with `ModelType.Prefill` |
+| **Disaggregated** | Separate prefill and decode pools | Frontend routes to a prefill worker first, then to a decode worker; requires workers registered with `WorkerType.Prefill` |
 
 Disaggregated mode is activated automatically when prefill workers register alongside decode workers. See [Disaggregated Serving](router-disaggregated-serving.md) for details.
 
@@ -174,6 +174,7 @@ Disaggregated mode is activated automatically when prefill workers register alon
 - **[Routing Concepts](router-concepts.md)**: Cost model, worker selection, and routing primitives
 - **[Configuration and Tuning](router-configuration.md)**: Router flags, transport modes, load tracking, and metrics
 - **[Disaggregated Serving](router-disaggregated-serving.md)**: Prefill and decode routing setups
+- **[Topology-Aware KV Transfer](topology-aware-kv-transfer.md)**: Runtime metadata and decode routing constraints for topology-aware prefill/decode handoff
 - **[Router Operations](router-operations.md)**: Replicas, remote indexers, persistence, and recovery
 - **[Router Examples](router-examples.md)**: Python API usage, K8s examples, and custom routing patterns
 - **[Router Testing](router-testing.md)**: Recommended test layers for non-trivial router changes

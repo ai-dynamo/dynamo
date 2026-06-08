@@ -43,8 +43,8 @@ use axum::{
     response::Response,
     routing::get,
 };
-use dynamo_runtime::engine::{AsyncEngineContextProvider, RequestStream};
-use dynamo_runtime::pipeline::Context;
+use dynamo_runtime::engine::AsyncEngineContextProvider;
+use dynamo_runtime::pipeline::{Context, RequestStream};
 use futures::{SinkExt, StreamExt, stream::SplitSink};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -145,7 +145,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<service_v2::State>) {
     }
 
     let request_stream = Box::pin(ReceiverStream::new(req_rx));
-    let input = RequestStream::new(request_stream, Context::new(()).context());
+    let input = Context::new(RequestStream::new(request_stream));
 
     let mut response_stream = match engine.generate(input).await {
         Ok(s) => s,

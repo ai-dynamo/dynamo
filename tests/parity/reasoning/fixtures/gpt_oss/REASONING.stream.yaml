@@ -153,3 +153,15 @@ cases:
         normal_text: ''
       vllm: *d_s4
       sglang: *d_s4
+  REASONING.stream.2.c:
+    description: Stray end marker after a complete reasoning span, across chunks(unbalanced-tag)
+    ref: dynamo
+    spec_ref: tests/parity/README.md
+    chunks: []
+    expected:
+      dynamo:
+        unavailable: 'Pattern not applicable: gpt_oss parser does not use paired open/close markers, so the unbalanced-tag shape has no analog.'
+      vllm:
+        unavailable: 'Pattern not applicable: gpt_oss parser does not use paired open/close markers, so the unbalanced-tag shape has no analog.'
+      sglang:
+        unavailable: 'Pattern not applicable: gpt_oss parser does not use paired open/close markers, so the unbalanced-tag shape has no analog.'

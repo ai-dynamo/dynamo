@@ -307,6 +307,12 @@ async def init_prefill(
                 server_args,
                 dynamo_args,
                 input_type=ModelInput.Tokens,
+                # Prefill workers have no OpenAI surface — the role is carried
+                # by `worker_type=Prefill` below. We register the legacy
+                # `ModelType.Prefill` marker bit (not a surface) so an OLD
+                # frontend, which detects prefill via that bit, still routes
+                # disaggregated traffic during the cross-version rollout. A new
+                # frontend ignores it and dispatches off `worker_type`.
                 output_type=ModelType.Prefill,
                 readiness_gate=ready_event,
                 worker_type=WorkerType.Prefill,

@@ -102,6 +102,18 @@ class DynamoVllmArgGroup(ArgGroup):
             default=False,
             help="Enable multimodal processing. If not set, none of the multimodal components can be used.",
         )
+        # Select defaults used by RL-style token-in/token-out deployments.
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-rl",
+            env_var="DYN_ENABLE_RL",
+            default=False,
+            help=(
+                "Enable RL training support. Mirrors --enable-rl on the SGLang "
+                "backend and selects RL-friendly vLLM defaults for TITO and "
+                "per-token logprob parity."
+            ),
+        )
         add_argument(
             g,
             flag_name="--mm-prompt-template",
@@ -168,8 +180,8 @@ class DynamoVllmArgGroup(ArgGroup):
             default=False,
             help=(
                 "Enable GMS shadow/standby mode. Shadow engines skip KV cache "
-                "allocation at startup, automatically sleep after initialization, "
-                "and wake on demand when the active engine dies. "
+                "allocation at startup, automatically pause after initialization, "
+                "and resume on demand when the active engine dies. "
                 "Requires --load-format=gms."
             ),
         )
@@ -264,6 +276,8 @@ class DynamoVllmConfig(ConfigBase):
     multimodal_worker: bool
     multimodal_decode_worker: bool
     enable_multimodal: bool
+    # Enables RL-style token-in/token-out defaults.
+    enable_rl: bool = False
     mm_prompt_template: str
     frontend_decoding: bool
     embedding_transfer_mode: Union[

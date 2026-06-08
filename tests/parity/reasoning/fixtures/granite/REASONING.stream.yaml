@@ -109,3 +109,15 @@ cases:
       vllm: *d_s4
       sglang:
         unavailable: SGLang has no reasoning parser for family='granite'
+  REASONING.stream.2.c:
+    description: Stray end marker after a complete reasoning span, across chunks(unbalanced-tag)
+    ref: dynamo
+    spec_ref: tests/parity/README.md
+    chunks: []
+    expected:
+      dynamo:
+        unavailable: 'Pattern not applicable: granite parser does not use paired open/close markers, so the unbalanced-tag shape has no analog.'
+      vllm:
+        unavailable: 'Pattern not applicable: granite parser does not use paired open/close markers, so the unbalanced-tag shape has no analog.'
+      sglang:
+        unavailable: "UNAVAILABLE: SGLang has no reasoning parser for family='granite'"

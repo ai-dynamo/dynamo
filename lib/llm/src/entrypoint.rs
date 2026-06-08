@@ -91,6 +91,7 @@ pub enum EngineConfig {
         engine: ExecutionContext,
         model: Box<LocalModel>,
         is_prefill: bool,
+        is_decode: bool,
     },
 }
 

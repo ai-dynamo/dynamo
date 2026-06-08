@@ -127,9 +127,9 @@ class GMSProcessManager:
 
 
 class GMSEngineProcess(EngineProcess, ABC):
-    """Backend process wrapper with a common quiesce/resume surface."""
+    """Backend process wrapper with a common pause/resume surface."""
 
-    quiesce_route: str
+    pause_route: str
     resume_route: str
 
     def __init__(
@@ -181,7 +181,7 @@ class GMSEngineProcess(EngineProcess, ABC):
         return json.dumps({"gms_read_only": True})
 
     @abstractmethod
-    def quiesce_payload(self) -> dict:
+    def pause_payload(self) -> dict:
         raise NotImplementedError
 
     def resume_payload(self) -> dict:
@@ -210,12 +210,12 @@ class GMSEngineProcess(EngineProcess, ABC):
         logger.info("%s %s: %s", self.engine_id, action, result)
         return result
 
-    def quiesce(self) -> dict:
+    def pause(self) -> dict:
         return self._request_engine(
-            self.quiesce_route,
-            self.quiesce_payload(),
+            self.pause_route,
+            self.pause_payload(),
             30,
-            "quiesce",
+            "pause",
         )
 
     def resume(self, timeout: int = 30) -> dict:
@@ -234,7 +234,7 @@ class GMSEngineProcess(EngineProcess, ABC):
 
 
 class VLLMWithGMSProcess(GMSEngineProcess):
-    quiesce_route = "sleep"
+    pause_route = "sleep"
     resume_route = "wake_up"
 
     def __init__(
@@ -300,14 +300,14 @@ class VLLMWithGMSProcess(GMSEngineProcess):
             )
         return command
 
-    def quiesce_payload(self) -> dict:
+    def pause_payload(self) -> dict:
         return {"level": 2}
 
 
 class TRTLLMWithGMSProcess(GMSEngineProcess):
-    """TensorRT-LLM engine with GMS weights + sleep/wake enabled."""
+    """TensorRT-LLM engine with GMS weights + pause/resume enabled."""
 
-    quiesce_route = "release_memory_occupation"
+    pause_route = "release_memory_occupation"
     resume_route = "resume_memory_occupation"
 
     # Override via environment variables for CI or custom setups.
@@ -390,12 +390,12 @@ class TRTLLMWithGMSProcess(GMSEngineProcess):
             command.extend(["--model-loader-extra-config", extra_config])
         return command
 
-    def quiesce_payload(self) -> dict:
+    def pause_payload(self) -> dict:
         return {}
 
 
 class SGLangWithGMSProcess(GMSEngineProcess):
-    quiesce_route = "release_memory_occupation"
+    pause_route = "release_memory_occupation"
     resume_route = "resume_memory_occupation"
 
     def __init__(
@@ -451,5 +451,5 @@ class SGLangWithGMSProcess(GMSEngineProcess):
     def env_updates(self) -> dict[str, str]:
         return {"NVCC_PREPEND_FLAGS": "-ccbin /usr/bin/g++"}
 
-    def quiesce_payload(self) -> dict:
+    def pause_payload(self) -> dict:
         return {}

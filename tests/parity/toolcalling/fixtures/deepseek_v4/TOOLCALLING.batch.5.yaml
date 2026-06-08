@@ -45,15 +45,20 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &d_5_b
-        reason: "Dynamo's DSML parser leaves <｜DSML｜…> envelope in normal_text on missing/orphan end marker (impl-defined recovery)"
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        reason: "vLLM leaks the DSML envelope into normal_text on missing/orphan end marker recovery; Dynamo recovers the complete bare <｜DSML｜invoke> call and strips the orphan DSML marker tail."
         calls: []
         normal_text: |-
           <｜DSML｜invoke name="get_weather">
           <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
           </｜DSML｜invoke>
           </｜DSML｜tool_calls>
-      vllm: *d_5_b
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
   TOOLCALLING.batch.5.c:
@@ -142,3 +147,68 @@ cases:
           <｜DSML｜invoke name="get_weather">
           <｜DSML｜parameter name="location" string="true">New York
         reason: "vLLM leaks the unterminated DSML block into normal_text on the recovery path"
+  TOOLCALLING.batch.5.f:
+    description: Bare valid invoke before a complete wrapped call
+    ref: dynamo
+    model_text: |-
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜tool_calls>
+      <｜DSML｜tool_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">Boston</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜tool_calls>
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: ''
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: |
+          <｜DSML｜invoke name="get_weather">
+          <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+          </｜DSML｜invoke>
+          </｜DSML｜tool_calls>
+        reason: "vLLM preserves the bare DSML invoke before the first <｜DSML｜tool_calls> as content, including the trailing newline; Dynamo recovers it as the first structured call before parsing the wrapped call."
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
+  TOOLCALLING.batch.5.g:
+    description: Closing </｜DSML｜tool_calls> without matching open after prefix prose
+    ref: dynamo
+    model_text: |-
+      I will check that. <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜tool_calls>
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: I will check that.
+      vllm:
+        calls: []
+        normal_text: |-
+          I will check that. <｜DSML｜invoke name="get_weather">
+          <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+          </｜DSML｜invoke>
+          </｜DSML｜tool_calls>
+        reason: "vLLM leaks the DSML envelope into normal_text on orphan close-marker recovery; Dynamo preserves the prefix prose, recovers the complete bare <｜DSML｜invoke> call, and strips the orphan DSML marker tail."
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'

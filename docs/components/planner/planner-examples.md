@@ -4,7 +4,7 @@
 title: Planner Examples
 ---
 
-Practical examples for deploying the Planner with throughput-based scaling. All examples below use the DGDR workflow with pre-deployment profiling. For deployment concepts, see the [Planner Guide](planner-guide.md). For a quick overview, see the [Planner README](README.md).
+Practical examples for deploying the Planner with throughput-based scaling. The DGDR workflow can use native AIC estimates, optional bootstrap profiling data, or live FPM warmup depending on the model/backend combination. For deployment concepts, see the [Planner Guide](planner-guide.md). For a quick overview, see the [Planner README](README.md).
 
 ## Basic Examples
 
@@ -231,7 +231,8 @@ Pass planner-specific settings through the DGDR:
 ```yaml
 features:
   planner:
-    plannerMinEndpoint: 2
+    optimization_target: sla
+    min_endpoint: 2
 ```
 
 ### Review Before Deploy (autoApply: false)

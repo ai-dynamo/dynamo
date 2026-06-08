@@ -33,9 +33,9 @@ pub use disagg::DisaggregationMode;
 pub use engine::{
     AsyncEngineContext, BootstrapInfo, CompletionUsage, ComponentSnapshot, EngineConfig,
     FinishReason, GenerateContext, HEALTH_CHECK_KEY, KvEventPublisher, KvEventSource, LLMEngine,
-    LLMEngineOutput, LLMEngineOutputExt, Metrics, MetricsBindings, MetricsCtx, OnPublisherReady,
-    OnSnapshotPublisherReady, OutputOptions, PrefillResult, PreprocessedRequest, SamplingOptions,
-    StopConditions, chunk, usage,
+    LLMEngineOutput, LLMEngineOutputExt, LogProbs, Metrics, MetricsBindings, MetricsCtx,
+    OnPublisherReady, OnSnapshotPublisherReady, OutputOptions, PrefillResult, PreprocessedRequest,
+    SamplingOptions, StopConditions, TopLogprob, TopLogprobs, chunk, usage,
 };
 pub use error::{BackendError, DynamoError, ErrorType};
 pub use metrics::{ComponentGauges, EngineMetrics, LifecycleGauges};

@@ -770,13 +770,21 @@ pub struct TypedEventSubscriber<T> {
 impl<T: DeserializeOwned + Send + 'static> TypedEventSubscriber<T> {
     /// Get the next typed event with its envelope.
     pub async fn next(&mut self) -> Option<Result<(EventEnvelope, T)>> {
-        let envelope = self.stream.next().await?;
-        match envelope {
-            Ok(env) => match self.codec.decode_payload(&env.payload) {
-                Ok(typed) => Some(Ok((env, typed))),
-                Err(e) => Some(Err(e)),
-            },
-            Err(e) => Some(Err(e)),
+        std::future::poll_fn(|cx| self.poll_next(cx)).await
+    }
+
+    /// Poll for the next typed event.
+    pub fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<(EventEnvelope, T)>>> {
+        match self.stream.as_mut().poll_next(cx) {
+            Poll::Ready(Some(envelope)) => Poll::Ready(Some(match envelope {
+                Ok(env) => match self.codec.decode_payload(&env.payload) {
+                    Ok(typed) => Ok((env, typed)),
+                    Err(e) => Err(e),
+                },
+                Err(e) => Err(e),
+            })),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
     }
 }

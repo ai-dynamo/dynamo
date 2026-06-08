@@ -3,7 +3,6 @@
 
 """Dynamo Snapshot integration for SGLang workers."""
 
-
 import gc
 import logging
 import time
@@ -12,7 +11,7 @@ import sglang as sgl
 
 from dynamo.common.utils.snapshot import CheckpointConfig, EngineSnapshotController
 
-from .request_handlers.handler_base import SGLangEngineQuiesceController
+from .pause import SGLangEnginePauseController
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +61,7 @@ async def prepare_snapshot_engine(
 
     snapshot_controller = EngineSnapshotController(
         engine=engine,
-        quiesce_controller=SGLangEngineQuiesceController(engine),
+        pause_controller=SGLangEnginePauseController(engine),
         checkpoint_config=checkpoint_cfg,
     )
     if not await snapshot_controller.wait_for_restore():

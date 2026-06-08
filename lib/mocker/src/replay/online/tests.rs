@@ -58,6 +58,32 @@ fn request(uuid: u128, token: u32, arrival_timestamp_ms: Option<f64>) -> DirectR
     }
 }
 
+fn trtllm_reject_args() -> MockEngineArgs {
+    // 4 GPU blocks * block_size 4 = 16-token to-completion budget per request.
+    MockEngineArgs::builder()
+        .engine_type(EngineType::Trtllm)
+        .block_size(4)
+        .num_gpu_blocks(4)
+        .max_num_batched_tokens(Some(64))
+        .max_num_seqs(Some(4))
+        .enable_prefix_caching(false)
+        .enable_chunked_prefill(true)
+        .speedup_ratio(1000.0)
+        .build()
+        .unwrap()
+}
+
+fn reject_request(uuid: u128, prompt_tokens: u32, max_output: usize) -> DirectRequest {
+    let base = uuid as u32 * 100_000;
+    DirectRequest {
+        tokens: (base..base + prompt_tokens).collect(),
+        max_output_tokens: max_output,
+        uuid: Some(Uuid::from_u128(uuid)),
+        dp_rank: 0,
+        arrival_timestamp_ms: None,
+    }
+}
+
 struct FixedPrefillLoadEstimator {
     duration: Duration,
 }
@@ -420,6 +446,33 @@ fn test_online_concurrency_replay_respects_max_in_flight() {
 
     assert_eq!(report.request_counts.completed_requests, 4);
     assert!(stats.max_in_flight_seen <= 2);
+}
+
+/// Live-runtime regression for terminal-rejection propagation. An oversized
+/// request (footprint exceeds the whole KV pool) must reach a terminal state so
+/// its waiter is notified — otherwise the request task blocks forever on
+/// `wait_for_completion` and the live run never drains. The valid follower runs
+/// to completion; the rejected request is excluded from the report.
+#[test]
+fn trtllm_oversized_request_rejected_unblocks_follower_live() {
+    let oversized = reject_request(1, 20, 8); // 20-token prompt = 5 blocks > 4-block pool
+    let valid = reject_request(2, 4, 4); // 2 blocks, fits
+    let (report, _stats) = simulate_concurrency_requests_with_stats(
+        trtllm_reject_args(),
+        vec![oversized, valid],
+        1, // max_in_flight = 1: rejection must notify the waiter or the run hangs
+        1,
+        ReplayRouterMode::RoundRobin,
+    )
+    .unwrap();
+    assert_eq!(
+        report.request_counts.num_requests, 2,
+        "both requests arrived"
+    );
+    assert_eq!(
+        report.request_counts.completed_requests, 1,
+        "only the valid request completes; the rejected one is excluded"
+    );
 }
 
 #[test]

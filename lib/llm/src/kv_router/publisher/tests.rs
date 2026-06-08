@@ -28,8 +28,15 @@ mod test_event_processing {
         let token_ids = vec![10, 20, 30, 40];
         let blk_hash = 0xdead_beef;
 
-        let stored =
-            create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, None, None, None);
+        let stored = create_stored_block_from_parts(
+            kv_block_size,
+            blk_hash,
+            &token_ids,
+            None,
+            None,
+            None,
+            None,
+        );
 
         assert_eq!(stored.block_hash.0, blk_hash);
         let expected_hash =
@@ -58,6 +65,7 @@ mod test_event_processing {
             &Arc::new(AtomicU32::new(0)),
             None,
             None,
+            None,
         );
 
         assert_eq!(blocks.len(), 2);
@@ -80,6 +88,7 @@ mod test_event_processing {
             &block_hashes,
             None,
             &warning_count,
+            None,
             None,
             None,
         );
@@ -115,6 +124,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
+            None,
         )
         .unwrap();
         assert!(matches!(out.event.data, KvCacheEventData::Stored(_)));
@@ -159,6 +169,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
+            None,
         )
         .unwrap();
         let lora_out = convert_event(
@@ -167,6 +178,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
+            None,
         )
         .unwrap();
 
@@ -223,6 +235,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
+            None,
         )
         .unwrap();
         let out2 = convert_event(
@@ -231,6 +244,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
+            None,
         )
         .unwrap();
 
@@ -320,6 +334,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
+            None,
         )
         .unwrap();
 
@@ -336,6 +351,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
+            None,
         )
         .unwrap();
         assert!(matches!(out.event.data, KvCacheEventData::Cleared));
@@ -963,7 +979,16 @@ mod tests_startup_helpers {
         // Spawn async listener (connects to publisher bound above)
         let listener_handle = tokio::spawn({
             let token = token.clone();
-            start_zmq_listener(endpoint.to_string(), topic, 1, tx, token, 4, next_event_id)
+            start_zmq_listener(
+                endpoint.to_string(),
+                topic,
+                1,
+                tx,
+                token,
+                4,
+                next_event_id,
+                None,
+            )
         });
 
         // Build synthetic 3-frame message: [topic, seq(8B), payload]
@@ -1063,7 +1088,7 @@ mod tests_startup_helpers {
         let listener_handle = tokio::spawn({
             let token = token.clone();
             let endpoint = endpoint.clone();
-            start_zmq_listener(endpoint, topic, 1, tx, token, 4, next_event_id)
+            start_zmq_listener(endpoint, topic, 1, tx, token, 4, next_event_id, None)
         });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;

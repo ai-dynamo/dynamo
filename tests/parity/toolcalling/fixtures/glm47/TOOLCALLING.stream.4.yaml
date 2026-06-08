@@ -126,10 +126,17 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &id001
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
         calls: []
         normal_text: get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call></tool_call></tool_call>
-      vllm: *id001
+        reason: vLLM preserves the raw GLM call body as content when the opening <tool_call> marker is missing; Dynamo recovers the complete bare call body and drops close-marker spam.
       sglang:
         calls: []
         normal_text: get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value>
+        reason: SGLang strips orphan GLM close markers but does not recover the complete bare call body; Dynamo emits the recovered call.

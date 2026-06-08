@@ -5,5 +5,6 @@ mod parser;
 
 pub(crate) use parser::{TOOL_CALL_END, TOOL_CALL_START};
 pub use parser::{
-    detect_tool_call_start_gemma4, find_tool_call_end_position_gemma4, try_tool_call_parse_gemma4,
+    detect_tool_call_start_gemma4, find_tool_call_end_position_gemma4,
+    split_partial_call_prefix_gemma4, try_tool_call_parse_gemma4,
 };

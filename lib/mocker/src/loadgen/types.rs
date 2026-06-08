@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_kv_router::LocalBlockHash;
-use dynamo_kv_router::protocols::{ExternalSequenceBlockHash, WorkerId};
+use dynamo_kv_router::protocols::{
+    BlockHashOptions, ExternalSequenceBlockHash, WorkerId, compute_block_hash_for_seq,
+    compute_seq_hash_for_block,
+};
 use dynamo_tokens::SequenceHash;
 use uuid::Uuid;
 
@@ -122,6 +125,19 @@ pub struct RouterSequence {
 pub struct ReplayRequestHashes {
     pub local_block_hashes: Vec<LocalBlockHash>,
     pub sequence_hashes: Vec<SequenceHash>,
+}
+
+impl ReplayRequestHashes {
+    pub(crate) fn from_tokens(tokens: &[u32], engine_block_size: u32) -> Self {
+        let local_block_hashes =
+            compute_block_hash_for_seq(tokens, engine_block_size, BlockHashOptions::default());
+        let sequence_hashes = compute_seq_hash_for_block(&local_block_hashes);
+
+        Self {
+            local_block_hashes,
+            sequence_hashes,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

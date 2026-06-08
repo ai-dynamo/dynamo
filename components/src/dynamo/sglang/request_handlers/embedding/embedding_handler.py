@@ -60,7 +60,24 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
             request: Embedding request dictionary.
             context: Context object for cancellation handling.
         """
-        logging.debug(f"Embedding request: {request}")
+        embedding_input = request.get("input")
+        if isinstance(embedding_input, str):
+            input_type = "str"
+            input_length = len(embedding_input)
+        elif isinstance(embedding_input, list):
+            input_type = "list"
+            input_length = len(embedding_input)
+        else:
+            input_type = "other"
+            input_length = None
+
+        logging.debug(
+            "Embedding request: input_type=%s input_length=%s has_dimensions=%s has_encoding_format=%s",
+            input_type,
+            input_length,
+            "dimensions" in request,
+            "encoding_format" in request,
+        )
 
         # Parse the embedding request - should only receive EmbeddingRequest format
         embedding_request = EmbeddingRequest(**request)

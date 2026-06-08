@@ -46,6 +46,8 @@ def test_replay_cli_aic_perf_config_includes_moe_kwargs(monkeypatch):
             aic_moe_tp_size=2,
             aic_moe_ep_size=1,
             aic_attention_dp_size=1,
+            aic_nextn=None,
+            aic_nextn_accept_rates=None,
         )
     )
 
@@ -59,6 +61,8 @@ def test_replay_cli_aic_perf_config_includes_moe_kwargs(monkeypatch):
         "aic_moe_tp_size": 2,
         "aic_moe_ep_size": 1,
         "aic_attention_dp_size": 1,
+        "aic_nextn": None,
+        "aic_nextn_accept_rates": None,
     }
 
 

@@ -7,7 +7,9 @@ import json
 import logging
 import os
 import random
-from typing import TYPE_CHECKING, Any, Optional
+import threading
+import time
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import aiohttp
 import nats
@@ -55,6 +57,63 @@ def min_initial_workers_env(min_initial_workers: int):
             os.environ.pop(MIN_INITIAL_WORKERS_ENV, None)
         else:
             os.environ[MIN_INITIAL_WORKERS_ENV] = previous
+
+
+def _create_kv_router_with_timeout(
+    router_factory: Callable[[], KvRouter],
+    num_workers: int,
+    engine_workers,
+    timeout: int = 120,
+) -> KvRouter:
+    """Create KvRouter in a daemon thread with worker liveness polling.
+
+    KvRouter() is a blocking Rust FFI call that waits for min_initial_workers
+    to register.  If a worker crashes (e.g. port conflict, OOM) the call
+    blocks forever because pytest signal-based timeout cannot interrupt
+    Rust FFI.  This helper runs the call in a daemon thread and polls
+    worker liveness every 2 seconds, raising immediately if a worker dies.
+    """
+    kv_router = None
+    kv_router_error = None
+
+    def _create():
+        nonlocal kv_router, kv_router_error
+        try:
+            kv_router = router_factory()
+        except Exception as exc:
+            kv_router_error = exc
+
+    # NOTE: On timeout or worker death we raise while the daemon thread may
+    # still be blocked inside the uninterruptible KvRouter() FFI call.  This is
+    # intentional — daemon threads don't block process exit, and the next test
+    # reinitializes etcd/NATS state so residual ZMQ handles are harmless.
+    with min_initial_workers_env(num_workers):
+        router_thread = threading.Thread(target=_create, daemon=True)
+        router_thread.start()
+
+        _router_start = time.monotonic()
+
+        while router_thread.is_alive():
+            router_thread.join(timeout=2)
+            elapsed = time.monotonic() - _router_start
+            if elapsed > timeout:
+                raise RuntimeError(
+                    f"KvRouter initialization timed out after {elapsed:.0f}s "
+                    f"waiting for {num_workers} workers to register."
+                )
+            if hasattr(engine_workers, "worker_processes"):
+                for idx, wp in enumerate(engine_workers.worker_processes):
+                    if wp.proc and wp.proc.poll() is not None:
+                        raise RuntimeError(
+                            f"Worker {idx} exited with code {wp.proc.returncode} "
+                            f"while waiting for KvRouter to find "
+                            f"{num_workers} workers."
+                        )
+
+    if kv_router_error is not None:
+        raise kv_router_error
+
+    return kv_router
 
 
 async def _assert_overlap_scores(
@@ -738,13 +797,15 @@ def _test_python_router_bindings(
     # Create KvRouterConfig with default settings
     kv_router_config = KvRouterConfig()
 
-    # Create KvRouter Python object
-    with min_initial_workers_env(num_workers):
-        kv_router = KvRouter(
+    kv_router = _create_kv_router_with_timeout(
+        router_factory=lambda: KvRouter(
             endpoint=endpoint,
             block_size=block_size,
             kv_router_config=kv_router_config,
-        )
+        ),
+        num_workers=num_workers,
+        engine_workers=engine_workers,
+    )
 
     logger.info("Created KvRouter Python object")
 
@@ -1657,12 +1718,15 @@ def _test_router_indexers_sync(
             f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
         )
 
-        with min_initial_workers_env(num_workers):
-            kv_router1 = KvRouter(
+        kv_router1 = _create_kv_router_with_timeout(
+            router_factory=lambda: KvRouter(
                 endpoint=endpoint1,
                 block_size=block_size,
                 kv_router_config=kv_router_config,
-            )
+            ),
+            num_workers=num_workers,
+            engine_workers=engine_workers,
+        )
 
         # Wait for workers to be ready
         await wait_for_workers_ready(endpoint1, kv_router1, num_workers, model_name)
@@ -1766,12 +1830,15 @@ def _test_router_indexers_sync(
             f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
         )
 
-        with min_initial_workers_env(num_workers):
-            kv_router2 = KvRouter(
+        kv_router2 = _create_kv_router_with_timeout(
+            router_factory=lambda: KvRouter(
                 endpoint=endpoint2,
                 block_size=block_size,
                 kv_router_config=kv_router_config,
-            )
+            ),
+            num_workers=num_workers,
+            engine_workers=engine_workers,
+        )
 
         # Launch Indexer B alongside Router 2. Workers are passed via --workers
         # so ZMQ sockets connect before recovery, avoiding the slow-joiner problem.
@@ -2402,6 +2469,12 @@ def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
         chat_url = f"{frontend_url}/v1/chat/completions"
 
         async def run_requests() -> None:
+            await wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=decode_workers.num_workers,
+                timeout=120,
+            )
+
             runtime = get_runtime(request_plane=request_plane)
             decode_endpoint = runtime.endpoint(f"{shared_namespace}.backend.generate")
             prefill_endpoint = runtime.endpoint(f"{shared_namespace}.prefill.generate")
@@ -2411,19 +2484,74 @@ def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
                 prefill_endpoint, decode_workers.num_workers
             )
 
+            async def post_expect_status(
+                session: aiohttp.ClientSession,
+                payload: dict,
+                expected_status: int,
+                message: str,
+                retry_statuses: set[int] | None = None,
+                timeout_s: float = 30.0,
+            ) -> str:
+                retry_statuses = retry_statuses or set()
+                deadline = asyncio.get_running_loop().time() + timeout_s
+                attempt = 0
+                last_status = None
+                last_body = ""
+
+                while True:
+                    attempt += 1
+                    async with session.post(chat_url, json=payload) as response:
+                        response_body = await response.text()
+                        if response.status == expected_status:
+                            return response_body
+
+                        last_status = response.status
+                        last_body = response_body
+
+                    if (
+                        last_status not in retry_statuses
+                        or asyncio.get_running_loop().time() >= deadline
+                    ):
+                        raise AssertionError(
+                            f"{message}, got status={last_status} body={last_body}"
+                        )
+
+                    logger.info(
+                        "%s not ready yet: status=%s attempt=%s; retrying...",
+                        message,
+                        last_status,
+                        attempt,
+                    )
+                    await asyncio.sleep(1.0)
+
             zone_a_payload = {
                 **test_payload,
                 "nvext": {
                     "prefill_worker_id": prefill_zone_a_id,
                 },
             }
+            topology_ready_payload = {
+                **zone_a_payload,
+                "messages": [{"role": "user", "content": "test"}],
+                "max_tokens": 1,
+                "stream": False,
+            }
+            logger.info("Waiting for topology-valid frontend readiness...")
+            await wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=decode_workers.num_workers,
+                timeout=120,
+                test_payload=topology_ready_payload,
+            )
+
             async with aiohttp.ClientSession() as session:
-                async with session.post(chat_url, json=zone_a_payload) as response:
-                    response_body = await response.text()
-                    assert response.status == 200, (
-                        "Expected required KV-transfer topology match to succeed, "
-                        f"got status={response.status} body={response_body}"
-                    )
+                await post_expect_status(
+                    session,
+                    zone_a_payload,
+                    200,
+                    "Expected required KV-transfer topology match to succeed",
+                    retry_statuses={404},
+                )
 
             zone_b_payload = {
                 **test_payload,
@@ -2432,12 +2560,12 @@ def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
                 },
             }
             async with aiohttp.ClientSession() as session:
-                async with session.post(chat_url, json=zone_b_payload) as response:
-                    response_body = await response.text()
-                    assert response.status == 500, (
-                        "Expected required KV-transfer topology mismatch to fail, "
-                        f"got status={response.status} body={response_body}"
-                    )
+                await post_expect_status(
+                    session,
+                    zone_b_payload,
+                    500,
+                    "Expected required KV-transfer topology mismatch to fail",
+                )
 
         asyncio.run(run_requests())
 
@@ -2487,8 +2615,8 @@ def _test_router_decisions_disagg_round_robin_prefill_dp_rank(
                 f"{prefill_workers.namespace}.prefill.generate"
             )
 
-            with min_initial_workers_env(prefill_workers.num_workers):
-                observer_router = KvRouter(
+            observer_router = _create_kv_router_with_timeout(
+                router_factory=lambda: KvRouter(
                     endpoint=prefill_endpoint,
                     block_size=block_size,
                     kv_router_config=KvRouterConfig(
@@ -2499,7 +2627,10 @@ def _test_router_decisions_disagg_round_robin_prefill_dp_rank(
                         router_track_prefill_tokens=True,
                         router_prefill_load_model="none",
                     ),
-                )
+                ),
+                num_workers=prefill_workers.num_workers,
+                engine_workers=prefill_workers,
+            )
 
             client = await prefill_endpoint.client()
             worker_ids: list[int] = []
@@ -2594,6 +2725,7 @@ def _test_router_decisions(
     standalone_indexer_url: Optional[str] = None,
     router_aic_config: Optional[dict[str, Any]] = None,
     router_predicted_ttl_secs: Optional[float] = None,
+    initial_wait: float = 0.25,
 ):
     """Validate cross-worker routing decisions based on longest prefix match.
 
@@ -2651,13 +2783,17 @@ def _test_router_decisions(
             if router_aic_config is not None
             else None
         )
-        with min_initial_workers_env(expected_num_instances):
-            kv_router = KvRouter(
+
+        kv_router = _create_kv_router_with_timeout(
+            router_factory=lambda: KvRouter(
                 endpoint=endpoint,
                 block_size=block_size,
                 kv_router_config=kv_router_config,
                 aic_perf_config=aic_perf_config,
-            )
+            ),
+            num_workers=expected_num_instances,
+            engine_workers=engine_workers,
+        )
 
         # Wait for workers to be ready and get their instance IDs
         worker_ids = await wait_for_workers_ready(
@@ -2754,6 +2890,9 @@ def _test_router_decisions(
                 kv_python_router=kv_router,
                 model_name=model_name,
                 token_ids=token_ids,
+                # XPU workers have longer startup latency; pass as parameter
+                # to avoid affecting CUDA tests.
+                initial_wait=initial_wait,
                 stop_conditions={
                     "ignore_eos": True,
                     "max_tokens": 2,

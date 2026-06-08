@@ -209,6 +209,7 @@ def run_router_decisions_test(
     single_gpu: bool,
     test_dp_rank: bool,
     extra_process_kwargs: dict[str, Any] | None = None,
+    initial_wait: float = 0.25,
 ):
     process_kwargs = extra_process_kwargs or {}
     with engine_process_cls(
@@ -227,6 +228,7 @@ def run_router_decisions_test(
             request,
             test_dp_rank=test_dp_rank,
             block_size=block_size,
+            initial_wait=initial_wait,
         )
 
 

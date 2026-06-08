@@ -37,6 +37,9 @@ fn main() -> Result<()> {
     let output_path = expand_user_path(&args.output_file);
 
     let loaded = load_agent_trace_records(&input_paths)?;
+    if args.agentic {
+        loaded.ensure_agentic_compatible()?;
+    }
     let tool_summary = summarize_tools(&loaded.tools);
     let mut writer = MooncakeJsonlWriter::create(&output_path, None)?;
 

@@ -726,7 +726,6 @@ class TestRefreshWorkerInfoFromConnector:
                 max_num_fpm_samples=50,
                 fpm_sample_bucket_size=16,
                 load_scaling_down_sensitivity=80,
-                load_metric_samples=10,
                 load_min_observations=5,
             )
             planner = NativePlannerBase(None, config)

@@ -16,7 +16,10 @@ Dynamo operator is a Kubernetes operator that simplifies the deployment, configu
 - **Controllers:**
   - `DynamoGraphDeploymentController`: Watches `DynamoGraphDeployment` CRs and orchestrates graph deployments.
   - `DynamoComponentDeploymentController`: Watches `DynamoComponentDeployment` CRs and handles individual component deployments.
+  - `DynamoGraphDeploymentRequestController`: Watches `DynamoGraphDeploymentRequest` CRs and runs the profiling/generation flow that produces a `DynamoGraphDeployment`.
+  - `DynamoGraphDeploymentScalingAdapterController`: Watches scaling adapter CRs used by external autoscalers and Planner-driven scaling flows.
   - `DynamoModelController`: Watches `DynamoModel` CRs and manages model lifecycle (e.g., loading LoRA adapters).
+  - `DynamoCheckpointController`: Watches `DynamoCheckpoint` CRs for GPU worker checkpoint/restore workflows.
 
 - **Workflow:**
   1. A custom resource is created by the user or API server.
@@ -110,19 +113,33 @@ kubectl get lease -n my-namespace dynamo-operator-namespace-scope \
 
 ## Custom Resource Definitions (CRDs)
 
-Dynamo provides the following Custom Resources:
+Dynamo installs the following Custom Resources. The main deployment path is:
+create or generate a `DynamoGraphDeployment`, then let the operator create the
+lower-level resources that run it.
 
-- **DynamoGraphDeployment (DGD)**: Deploys complete inference pipelines
-- **DynamoComponentDeployment (DCD)**: Deploys individual components
-- **DynamoModel**: Manages model lifecycle (e.g., loading LoRA adapters)
+| Custom Resource | What it represents | Typical use |
+|---|---|---|
+| `DynamoGraphDeployment` (DGD) | The canonical live deployment for a Dynamo inference graph. | Author directly, apply a tuned recipe, or let DGDR generate it. |
+| `DynamoGraphDeploymentRequest` (DGDR) | A deploy-by-intent request that profiles a model/hardware target and generates a DGD. | Start here when you want Dynamo to choose sizing, parallelism, or Planner-enabled generated config. |
+| `DynamoComponentDeployment` (DCD) | Per-component deployments created from a DGD, such as frontend, router, prefill, decode, and planner components. | Usually inspected for debugging rather than authored directly. |
+| `DynamoModel` | Model and adapter lifecycle management layered onto a running deployment. | Load, unload, or manage model artifacts such as LoRA adapters. |
+| `DynamoCheckpoint` | Checkpoint metadata and job configuration for snapshotting GPU workers. | Use with Snapshotting GPU Workers to restore warm workers faster than cold start. |
+
+Advanced and operator-owned resources:
+
+- `DynamoGraphDeploymentScalingAdapter`: scaling interface used by Planner or external autoscalers to adjust component replicas.
+- `DynamoWorkerMetadata`: discovery metadata written for worker pods.
 
 For the complete technical API reference for Dynamo Custom Resource Definitions, see:
 
 **📖 [Dynamo CRD API Reference](./api-reference.md)**
 
-For a user-focused guide on deploying and managing models with DynamoModel, see:
+For user-focused workflows, see:
 
-**📖 [Managing Models with DynamoModel Guide](./deployment/dynamomodel-guide.md)**
+- **[Deployment Overview](./model-deployment-guide.md)** for DGD, DCD, DGDR, and recipes
+- **[DGDR Reference](./dgdr.md)** for deploy-by-intent generated deployments
+- **[Managing Models with DynamoModel Guide](./deployment/dynamomodel-guide.md)**
+- **[Snapshotting GPU Workers](./snapshot.md)** for `DynamoCheckpoint`
 
 ## Webhooks
 

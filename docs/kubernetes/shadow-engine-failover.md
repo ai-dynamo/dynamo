@@ -93,7 +93,7 @@ active and standby engines share the same weight memory boundary instead of
 loading independent copies.
 
 Direct GMS enablement is useful for backend integration testing and
-sleep/wake-style lifecycle experiments. By itself, it does not configure
+pause/resume-style lifecycle experiments. By itself, it does not configure
 active/passive failover; use the `failover` field for the shadow engine flow.
 
 ## Prerequisites

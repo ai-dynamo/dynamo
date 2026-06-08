@@ -11,5 +11,10 @@ mod live;
 pub(crate) use core::VllmCore;
 pub use live::{MockerMetrics, Scheduler};
 
+/// Re-exported for the sibling `crate::scheduler::trtllm` tests, which assert on
+/// request status through [`VllmCore::state`]; only needed in test builds.
+#[cfg(test)]
+pub(crate) use core::RequestStatus;
+
 #[cfg(test)]
 mod tests;

@@ -11,16 +11,16 @@ use tokio_util::sync::CancellationToken;
 
 use super::concurrent_radix_tree::ConcurrentRadixTree;
 use super::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
-use super::positional::PositionalIndexer;
+use super::positional::{PositionalIndexer, SearchMode};
 use super::*;
 use crate::indexer::pruning::PruneConfig;
 use crate::protocols::*;
 use crate::test_utils::{
-    assert_exact_scores, assert_no_scores, assert_score, flush_and_settle, make_clear_event,
-    make_clear_event_with_dp_rank, make_remove_event, make_remove_event_with_parent,
-    make_store_event, make_store_event_with_dp_rank, make_store_event_with_parent,
-    make_store_event_with_start_position, query_scores, remove_event, router_event,
-    snapshot_events, snapshot_tree, stored_blocks_with_sequence_hashes,
+    assert_exact_scores, assert_no_scores, assert_overlap_scores_eq, assert_score,
+    flush_and_settle, make_clear_event, make_clear_event_with_dp_rank, make_remove_event,
+    make_remove_event_with_parent, make_store_event, make_store_event_with_dp_rank,
+    make_store_event_with_parent, make_store_event_with_start_position, query_scores, remove_event,
+    router_event, snapshot_events, snapshot_tree, stored_blocks_with_sequence_hashes,
 };
 
 // ============================================================================
@@ -30,7 +30,7 @@ use crate::test_utils::{
 #[template]
 #[rstest]
 fn indexer_template(
-    #[values("single", "flat", "concurrent", "concurrent_compressed")] variant: &str,
+    #[values("single", "flat", "flat_binary", "concurrent", "concurrent_compressed")] variant: &str,
 ) {
 }
 
@@ -44,7 +44,7 @@ fn tree_size_indexer_template(
 #[template]
 #[rstest]
 fn approx_indexer_template(
-    #[values("single", "flat", "concurrent", "concurrent_compressed")] variant: &str,
+    #[values("single", "flat", "flat_binary", "concurrent", "concurrent_compressed")] variant: &str,
 ) {
 }
 
@@ -62,8 +62,16 @@ fn make_indexer_with_metrics(
 
     let indexer: Box<dyn KvIndexerInterface> = match variant {
         "single" => Box::new(KvIndexer::new(token, kv_block_size, metrics.clone())),
+        // Pin the mode explicitly (not via `new`, which reads DYN_ROUTER_POSITIONAL_SEARCH_MODE)
+        // so the matrix always exercises both strided and binary regardless of the ambient env.
         "flat" => Box::new(ThreadPoolIndexer::new_with_metrics(
-            PositionalIndexer::new(32),
+            PositionalIndexer::new_with_mode(32, SearchMode::Strided),
+            4,
+            kv_block_size,
+            Some(metrics.clone()),
+        )),
+        "flat_binary" => Box::new(ThreadPoolIndexer::new_with_metrics(
+            PositionalIndexer::new_with_mode(32, SearchMode::Binary),
             4,
             kv_block_size,
             Some(metrics.clone()),
@@ -100,8 +108,15 @@ fn make_approx_indexer(variant: &str, ttl: Duration) -> Box<dyn KvIndexerInterfa
             metrics,
             Some(prune_config),
         )),
+        // Pin the mode explicitly (see make_indexer_with_metrics) so coverage stays deterministic.
         "flat" => Box::new(ThreadPoolIndexer::new_with_pruning(
-            PositionalIndexer::new(32),
+            PositionalIndexer::new_with_mode(32, SearchMode::Strided),
+            4,
+            kv_block_size,
+            prune_config,
+        )),
+        "flat_binary" => Box::new(ThreadPoolIndexer::new_with_pruning(
+            PositionalIndexer::new_with_mode(32, SearchMode::Binary),
             4,
             kv_block_size,
             prune_config,
@@ -1104,8 +1119,9 @@ mod interface_tests {
     #[apply(indexer_template)]
     async fn test_remove_mid_chain_block(variant: &str) {
         // TODO: positional indexer has no parent-child structure, so mid-chain removal
-        // doesn't invalidate later positions — jump search skips over the gap and over-counts.
-        if variant == "flat" {
+        // doesn't invalidate later positions — search skips over the gap and over-counts.
+        // This limitation is independent of the search algorithm, so both flat variants skip.
+        if variant == "flat" || variant == "flat_binary" {
             return;
         }
 
@@ -2910,5 +2926,128 @@ mod local_indexer_tests {
             s2, s3,
             "Phase 3: non-interleaved ordering should restore tree"
         );
+    }
+}
+
+/// Differential test: the binary search mode must produce byte-identical [`OverlapScores`] to the
+/// strided mode for every query. Both indexers are fed an identical, seeded-random event stream
+/// (multiple workers sharing prefixes that diverge at and around the jump_size=32 boundaries,
+/// pure-prefix workers, and a 1300-block sequence), then queried with a curated edge-case set plus
+/// hundreds of random queries. The whole comparison is repeated after a tail removal.
+///
+/// Only contiguous-from-zero stores and tail removals are used, which preserve the monotonic
+/// subset property both searches rely on. Mid-chain removal is deliberately avoided (it is the
+/// known positional-indexer limitation skipped by `test_remove_mid_chain_block`).
+#[tokio::test]
+async fn positional_binary_matches_strided_differential() {
+    use rand::{Rng, SeedableRng, rngs::StdRng};
+
+    // Pin both modes explicitly (not via make_indexer, whose "flat" arm reads the env var) so the
+    // comparison is genuinely strided-vs-binary regardless of any ambient DYN_ROUTER_* setting.
+    let strided: Box<dyn KvIndexerInterface> = Box::new(ThreadPoolIndexer::new_with_metrics(
+        PositionalIndexer::new_with_mode(32, SearchMode::Strided),
+        4,
+        32,
+        None,
+    ));
+    let binary: Box<dyn KvIndexerInterface> = Box::new(ThreadPoolIndexer::new_with_metrics(
+        PositionalIndexer::new_with_mode(32, SearchMode::Binary),
+        4,
+        32,
+        None,
+    ));
+
+    let mut rng = StdRng::seed_from_u64(0xC0FF_EED1_FF5E_ED42);
+
+    const BASE_LEN: usize = 1300;
+    let base: Vec<u64> = (0..BASE_LEN).map(|_| rng.random::<u64>()).collect();
+
+    // Build the shared event stream once, then apply identical clones to both indexers.
+    let mut events: Vec<RouterEvent> = Vec::new();
+
+    // Worker 0 stores the entire base.
+    events.push(make_store_event(0, &base));
+
+    // Workers that share a base prefix then diverge with a unique random tail. Divergence at a
+    // position d makes such a worker drain at d for any query that follows the base past d.
+    let divergence_points = [
+        1usize, 5, 31, 32, 33, 63, 64, 65, 100, 128, 500, 999, 1024, 1299,
+    ];
+    for (i, &d) in divergence_points.iter().enumerate() {
+        let worker_id = (i + 1) as u64;
+        let tail_len = 1 + rng.random_range(0..40usize);
+        let mut seq = base[..d].to_vec();
+        seq.extend((0..tail_len).map(|_| rng.random::<u64>()));
+        events.push(make_store_event(worker_id, &seq));
+    }
+
+    // Pure-prefix workers (store only base[..d]) drain queries exactly at d.
+    let prefix_only = [10usize, 32, 64, 200, 1000];
+    for (j, &d) in prefix_only.iter().enumerate() {
+        let worker_id = (100 + j) as u64;
+        events.push(make_store_event(worker_id, &base[..d]));
+    }
+
+    for ev in &events {
+        strided.apply_event(ev.clone()).await;
+        binary.apply_event(ev.clone()).await;
+    }
+    strided.flush().await;
+    binary.flush().await;
+
+    // Build the query set, starting with edge cases.
+    let mut queries: Vec<Vec<u64>> = vec![
+        vec![],                                         // empty
+        vec![base[0]],                                  // single element (hit)
+        vec![rng.random::<u64>()],                      // single element (miss)
+        (0..50).map(|_| rng.random::<u64>()).collect(), // pure miss
+    ];
+
+    // Base prefixes of many lengths, including jump_size boundaries.
+    for len in [
+        1usize, 2, 30, 31, 32, 33, 34, 62, 63, 64, 65, 66, 96, 127, 128, 129, 256, 500, 999, 1000,
+        1024, 1100, 1300,
+    ] {
+        queries.push(base[..len.min(BASE_LEN)].to_vec());
+    }
+
+    // Queries that pass each divergence point (so the relevant worker drains there).
+    for &d in divergence_points.iter() {
+        queries.push(base[..(d + 10).min(BASE_LEN)].to_vec());
+    }
+
+    // Random divergent queries: a base prefix of random length plus a random tail.
+    for _ in 0..600 {
+        let p = rng.random_range(0..BASE_LEN);
+        let tail_len = rng.random_range(0..30usize);
+        let mut q = base[..p].to_vec();
+        q.extend((0..tail_len).map(|_| rng.random::<u64>()));
+        queries.push(q);
+    }
+
+    // Fully random queries.
+    for _ in 0..600 {
+        let len = rng.random_range(0..(BASE_LEN + 10));
+        queries.push((0..len).map(|_| rng.random::<u64>()).collect());
+    }
+
+    for q in &queries {
+        let s = query_scores(strided.as_ref(), q).await;
+        let b = query_scores(binary.as_ref(), q).await;
+        assert_overlap_scores_eq(&s, &b, &format!("len={}", q.len()));
+    }
+
+    // Tail removal: drop base[1000..1300] from worker 0, leaving it matching only base[..1000].
+    // This is a leaf/tail removal, so the subset property is preserved.
+    let remove = make_remove_event_with_parent(0, &base[..1000], &base[1000..BASE_LEN]);
+    strided.apply_event(remove.clone()).await;
+    binary.apply_event(remove).await;
+    strided.flush().await;
+    binary.flush().await;
+
+    for q in &queries {
+        let s = query_scores(strided.as_ref(), q).await;
+        let b = query_scores(binary.as_ref(), q).await;
+        assert_overlap_scores_eq(&s, &b, &format!("after-remove len={}", q.len()));
     }
 }

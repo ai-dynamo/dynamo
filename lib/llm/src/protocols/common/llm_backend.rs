@@ -136,6 +136,12 @@ pub struct BackendOutput {
     /// Dynamo does not inspect this field; it is serialized as-is into `nvext.engine_data`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_data: Option<serde_json::Value>,
+
+    /// Router-computed data handed back to the frontend (e.g. per-request timing from
+    /// a standalone router) so it joins this request's trace/metrics. Dynamo-internal,
+    /// consumed by the frontend and not surfaced to clients. See [`RoutingData`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_data: Option<crate::protocols::common::timing::RoutingData>,
 }
 
 /// The LLM engine and backnd with manage it's own state, specifically translating how a
@@ -209,6 +215,11 @@ pub struct LLMEngineOutput {
     /// Dynamo does not inspect this field; it is serialized as-is into `nvext.engine_data`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_data: Option<serde_json::Value>,
+
+    /// Router-computed data handed back to the frontend (e.g. standalone-router timing).
+    /// Dynamo-internal; consumed by the frontend. See [`RoutingData`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_data: Option<crate::protocols::common::timing::RoutingData>,
 }
 
 impl LLMEngineOutput {
@@ -230,6 +241,7 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            routing_data: None,
         }
     }
 
@@ -251,6 +263,7 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            routing_data: None,
         }
     }
 
@@ -272,6 +285,7 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            routing_data: None,
         }
     }
 
@@ -293,6 +307,7 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            routing_data: None,
         }
     }
 }

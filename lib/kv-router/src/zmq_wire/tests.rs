@@ -481,8 +481,14 @@ fn test_convert_event_bigram_emits_eagle_windows() {
         kv_cache_spec_sliding_window: None,
     };
     let warning_count = Arc::new(AtomicU32::new(0));
-    let placement_event =
-        convert_event(raw_event, 7, 2, WorkerWithDpRank::new(3, 0), &warning_count);
+    let placement_event = convert_event(
+        raw_event,
+        7,
+        2,
+        WorkerWithDpRank::new(3, 0),
+        &warning_count,
+        None,
+    );
 
     match placement_event.unwrap().event.data {
         KvCacheEventData::Stored(store_data) => {

@@ -446,9 +446,10 @@ func TestDGD_RoundTrip_SpecLevelFields(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "spec", Namespace: "ns"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
-			Annotations:      map[string]string{"a": "1"},
-			Labels:           map[string]string{"l": "v"},
-			BackendFramework: backendFrameworkSGLang,
+			Annotations:       map[string]string{"a": "1"},
+			Labels:            map[string]string{"l": "v"},
+			PriorityClassName: "high-priority",
+			BackendFramework:  backendFrameworkSGLang,
 			Env: []corev1.EnvVar{
 				{Name: "FOO", Value: "bar"},
 			},
@@ -590,7 +591,6 @@ func TestDGD_RoundTrip_MultipleServicesOrderStable(t *testing.T) {
 }
 
 func TestDGD_RoundTrip_Experimental(t *testing.T) {
-	ref := "my-checkpoint"
 	clientPodTemplate := &corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"role": "loader"}},
 		Spec: corev1.PodSpec{
@@ -623,7 +623,8 @@ func TestDGD_RoundTrip_Experimental(t *testing.T) {
 						},
 						Checkpoint: &v1beta1.ComponentCheckpointConfig{
 							Mode:                v1beta1.CheckpointModeAuto,
-							CheckpointRef:       &ref,
+							StartupPolicy:       v1beta1.CheckpointStartupPolicyWaitForCheckpoint,
+							DeletionPolicy:      v1beta1.CheckpointDeletionPolicyRetain,
 							TargetContainerName: "worker",
 							Job: &v1beta1.ComponentCheckpointJobConfig{
 								GMSClientContainers: []string{"gms-saver"},
@@ -661,7 +662,9 @@ func TestDGD_FromV1alpha1_GMSExtraClientsRoundTripsThroughHub(t *testing.T) {
 						ExtraClientContainers: []string{"gms-loader"},
 					},
 					Checkpoint: &ServiceCheckpointConfig{
-						Enabled: true,
+						Enabled:        true,
+						StartupPolicy:  CheckpointStartupPolicyWaitForCheckpoint,
+						DeletionPolicy: CheckpointDeletionPolicyRetain,
 						Identity: &DynamoCheckpointIdentity{
 							Model:            "model",
 							BackendFramework: "vllm",
@@ -913,6 +916,7 @@ func TestDGD_RoundTrip_Status(t *testing.T) {
 			Checkpoints: map[string]v1beta1.ComponentCheckpointStatus{
 				"worker": {
 					CheckpointName: "ckpt-abc",
+					CheckpointID:   "ckpt-deadbeef",
 					IdentityHash:   "sha256:deadbeef",
 					Ready:          true,
 				},
