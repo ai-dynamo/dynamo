@@ -171,7 +171,12 @@ class _DeferredAbort:
                 )
                 self._abort_task = asyncio.create_task(self._wait_and_abort())
         try:
-            await self._abort_task
+            # shield() so that if the caller (e.g. a cancelled system-route
+            # request or a disconnected client) is cancelled while awaiting, the
+            # cancellation is NOT propagated into the abort task — it really does
+            # continue in the background. A bare `await self._abort_task` would
+            # cancel the task too, silently dropping the abort.
+            await asyncio.shield(self._abort_task)
         except asyncio.CancelledError:
             logger.debug(
                 f"Deferred abort: shielded from cancellation for request "
@@ -1082,7 +1087,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         2. Abort and drain in-flight requests
         3. Sleep engine - safe once generation has stopped
         """
-        body = body or {}
+        body = body if isinstance(body, dict) else {}
         level = body.get("level", 1)
         async with self._pause_lock:
             if self._pause_controller.is_paused:
@@ -1153,7 +1158,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         already reserved by the pod, then hot-swap the expert routing table.
         No pod restart is needed.
         """
-        body = body or {}
+        body = body if isinstance(body, dict) else {}
         new_dp_size = body.get("new_data_parallel_size")
         if new_dp_size is None:
             return {
@@ -1253,7 +1258,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         1. Wake engine - restore GPU memory
         2. Re-register endpoint instance - allow frontend to route requests here again
         """
-        body = body or {}
+        body = body if isinstance(body, dict) else {}
         tags = body.get("tags")
         async with self._pause_lock:
             needs_recovery = self._pause_controller.needs_resume_recovery
@@ -1313,7 +1318,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     async def liveness_probe(self, body: dict) -> dict:
         """Engine event-loop liveness probe."""
-        body = body or {}
+        body = body if isinstance(body, dict) else {}
         try:
             if hasattr(self.engine_client, "check_health"):
                 await self.engine_client.check_health()
@@ -1328,7 +1333,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     async def pause_generation(self, body: dict) -> dict:
         """Pause generation before a weight update."""
-        body = body or {}
+        body = body if isinstance(body, dict) else {}
         mode = body.get("mode", "keep")
         clear_cache = bool(body.get("clear_cache", False))
         if mode not in ("keep", "wait", "abort"):
@@ -1364,7 +1369,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     async def resume_generation(self, body: dict) -> dict:
         """Resume generation after a weight update."""
-        body = body or {}
+        body = body if isinstance(body, dict) else {}
         # Serialize pause / resume / weight-update so a concurrent resume cannot
         # re-enable generation while an update's collective_rpc is still
         # mutating weights (dynamo-ops).
@@ -1382,20 +1387,23 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     async def flush_cache(self, body: dict) -> dict:
         """Invalidate prefix / KV cache."""
-        body = body or {}
-        try:
-            await self.engine_client.reset_prefix_cache()
-            logger.debug("[RL] Prefix cache flushed")
-            return {"status": "ok", "message": "Cache flushed"}
-        except EngineDeadError as e:
-            self._shutdown_on_engine_dead(e)
-        except Exception as e:
-            logger.error(f"[RL] Failed to flush cache: {e}")
-            return {"status": "error", "message": str(e)}
+        body = body if isinstance(body, dict) else {}
+        # Serialize under _pause_lock so a flush cannot race with a locked
+        # weight-update / pause / resume mutating engine cache state.
+        async with self._pause_lock:
+            try:
+                await self.engine_client.reset_prefix_cache()
+                logger.debug("[RL] Prefix cache flushed")
+                return {"status": "ok", "message": "Cache flushed"}
+            except EngineDeadError as e:
+                self._shutdown_on_engine_dead(e)
+            except Exception as e:
+                logger.error(f"[RL] Failed to flush cache: {e}")
+                return {"status": "error", "message": str(e)}
 
     async def abort_request(self, body: dict) -> dict:
         """Abort a single in-flight request by request_id."""
-        body = body or {}
+        body = body if isinstance(body, dict) else {}
         request_id = body.get("request_id")
         if not request_id:
             return {"status": "error", "message": "Missing 'request_id' in body"}
@@ -1419,12 +1427,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     async def get_weight_version(self, body: dict) -> dict:
         """Return the current weight version tag."""
-        body = body or {}
+        body = body if isinstance(body, dict) else {}
         return {"status": "ok", "version": getattr(self, "_weight_version", "initial")}
 
     async def update_weights_from_disk(self, body: dict) -> dict:
         """Load weights from a shared filesystem checkpoint."""
-        body = body or {}
+        body = body if isinstance(body, dict) else {}
         # Hold _pause_lock across the paused-state check and the weight RPC so a
         # concurrent resume cannot re-enable generation mid-update (dynamo-ops).
         async with self._pause_lock:
@@ -1449,6 +1457,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             )
             try:
                 await self.engine_client.collective_rpc(rpc, kwargs=kwargs)
+                # Weights changed: any prefix/KV cache computed under the old
+                # weights is now stale and must not be reused. Invalidate it
+                # while still holding _pause_lock (generation is paused).
+                await self.engine_client.reset_prefix_cache()
                 self._weight_version = version
                 logger.info(
                     f"[RL] Weights loaded from {path} (version={version}, rpc={rpc})"
@@ -1462,7 +1474,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     async def update_weights_from_distributed(self, body: dict) -> dict:
         """Receive weights via a distributed transport such as NCCL."""
-        body = body or {}
+        body = body if isinstance(body, dict) else {}
         async with self._pause_lock:
             if not getattr(self, "_paused", False):
                 return {
@@ -1482,6 +1494,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             }
             try:
                 await self.engine_client.collective_rpc(rpc, kwargs=rpc_kwargs)
+                # Weights changed: stale prefix/KV cache must be invalidated
+                # before resume so it is not reused under the new weights.
+                await self.engine_client.reset_prefix_cache()
                 self._weight_version = version
                 logger.info(
                     f"[RL] Weights received via distributed "
@@ -1496,7 +1511,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     async def update_weights_from_tensor(self, body: dict) -> dict:
         """Not implemented: in-process tensor transfer is not yet supported."""
-        body = body or {}
+        body = body if isinstance(body, dict) else {}
         return {
             "status": "error",
             "message": "update_weights_from_tensor is not implemented",
@@ -1504,7 +1519,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     async def init_weights_update_group(self, body: dict) -> dict:
         """Initialize the distributed weight-update communication group."""
-        body = body or {}
+        body = body if isinstance(body, dict) else {}
         rpc = body.get("engine_rpc", "init_broadcaster")
         kwargs = {k: v for k, v in body.items() if k != "engine_rpc"}
         async with self._pause_lock:
@@ -1520,7 +1535,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     async def destroy_weights_update_group(self, body: dict) -> dict:
         """Tear down the distributed weight-update communication group."""
-        body = body or {}
+        body = body if isinstance(body, dict) else {}
         rpc = body.get("engine_rpc", "destroy_broadcaster")
         kwargs = {k: v for k, v in body.items() if k != "engine_rpc"}
         async with self._pause_lock:
@@ -1829,18 +1844,39 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         try:
                             await self.engine_client.reset_prefix_cache()
                         except Exception as e:
-                            # The adapter was already swapped, but the prefix cache
-                            # still holds entries computed under the previous
-                            # weights — same-name prefixes could be reused
-                            # incorrectly. Roll our tracking back to old_info so we
-                            # don't report/serve the swap as clean (CodeRabbit).
+                            # The new adapter is already active in the engine, but
+                            # the prefix cache still holds entries computed under
+                            # the old adapter and could be reused incorrectly.
+                            # Roll the ENGINE back to old_info (remove new, re-add
+                            # old) so engine state and our tracking stay consistent
+                            # — a metadata-only rollback would leave the new adapter
+                            # live while we report/route the old one (codex).
+                            rolled_back = "tracking only"
                             if old_info is not None:
-                                self.loaded_loras[lora_name] = old_info
+                                try:
+                                    await self.engine_client.remove_lora(lora_id)
+                                    await self.engine_client.add_lora(
+                                        LoRARequest(
+                                            lora_name=lora_name,
+                                            lora_int_id=old_info.id,
+                                            lora_path=old_info.path,
+                                        )
+                                    )
+                                    self.loaded_loras[lora_name] = old_info
+                                    rolled_back = "engine+tracking"
+                                except Exception as rollback_error:
+                                    # Engine is in an indeterminate adapter state;
+                                    # drop tracking so we never claim a clean swap.
+                                    self.loaded_loras.pop(lora_name, None)
+                                    logger.exception(
+                                        f"LoRA '{lora_name}' hot-swap engine "
+                                        f"rollback failed: {rollback_error}"
+                                    )
                             else:
                                 self.loaded_loras.pop(lora_name, None)
                             logger.error(
-                                f"LoRA '{lora_name}' hot-swap rolled back: prefix "
-                                f"cache reset failed: {e}"
+                                f"LoRA '{lora_name}' hot-swap rolled back "
+                                f"({rolled_back}): prefix cache reset failed: {e}"
                             )
                             yield {
                                 "status": "error",
@@ -3175,7 +3211,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         trace_headers = context.trace_headers()
 
-        async with self._abort_monitor(context, request_id):
+        # Mirror _generate_token_mode: in disagg decode mode route aborts through
+        # the per-request deferred guard so engine_client.abort() never fires in
+        # the unsafe pre-first-token window, and the admin abort_request route can
+        # reach this request via self._deferred_aborts.
+        is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
+        async with _deferred_abort_guard(
+            self.engine_client, request_id, is_decode_only, self._deferred_aborts
+        ) as abort_guard, self._abort_monitor(
+            context, request_id, abort_guard=abort_guard
+        ):
             try:
                 gen = self.engine_client.generate(
                     prompt,
@@ -3204,6 +3249,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         break
 
                     for output in res.outputs:
+                        if abort_guard is not None:
+                            abort_guard.signal_first_token()
                         output_idx = getattr(output, "index", 0) or 0
                         previous_text = previous_text_per_choice.get(output_idx, "")
                         # Calculate the delta text (new text since last chunk)
