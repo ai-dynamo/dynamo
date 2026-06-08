@@ -1,17 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 from io import BytesIO
 
 import pytest
 from pytest_httpserver import HTTPServer
 
+from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.serve.lora_utils import MinioLoraConfig, MinioService
 from tests.utils.port_utils import allocate_port, deallocate_port
 
 # Shared constants for multimodal testing
 IMAGE_SERVER_PORT = allocate_port(8765)
 MULTIMODAL_IMG_URL = f"http://localhost:{IMAGE_SERVER_PORT}/llm-graphic.png"
+MULTIMODAL_VIDEO_PATH = os.path.join(
+    WORKSPACE_DIR, "lib/llm/tests/data/media/240p_10.mp4"
+)
 
 
 def get_multimodal_test_image_bytes() -> bytes:
@@ -87,6 +92,15 @@ def image_server(httpserver: HTTPServer):
         return Response(image_data, status=200, content_type="image/png")
 
     httpserver.expect_request("/llm-graphic.png").respond_with_handler(_handler)
+
+    # Serve video file for multimodal video tests (guard against LFS pointers)
+    if os.path.isfile(MULTIMODAL_VIDEO_PATH):
+        with open(MULTIMODAL_VIDEO_PATH, "rb") as vf:
+            video_data = vf.read()
+        if not video_data.startswith(b"version "):
+            httpserver.expect_request("/240p_10.mp4").respond_with_data(
+                video_data, content_type="video/mp4"
+            )
 
     return httpserver
 

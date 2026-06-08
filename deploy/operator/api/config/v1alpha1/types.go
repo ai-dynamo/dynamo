@@ -332,6 +332,10 @@ type CheckpointConfiguration struct {
 	// behavior of discovering storage from a snapshot-agent DaemonSet in the
 	// workload namespace.
 	Storage CheckpointStorageConfiguration `json:"storage"`
+	// CleanupImage is the image used by best-effort artifact cleanup Jobs for
+	// automatically-created checkpoints. It must provide a POSIX shell and `rm`.
+	// +kubebuilder:default="busybox:1.36"
+	CleanupImage string `json:"cleanupImage,omitempty"`
 }
 
 // CheckpointSeccompConfiguration controls the localhost seccomp profile applied

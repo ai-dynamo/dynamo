@@ -21,7 +21,7 @@ from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_embedding_cache_metrics,
 )
-from dynamo.llm import ModelInput, ModelType, WorkerType
+from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 
 from .args import Config
@@ -35,7 +35,12 @@ from .handlers import (
     PrefillWorkerHandler,
     get_dp_range_for_worker,
 )
-from .health_check import VllmHealthCheckPayload, VllmPrefillHealthCheckPayload
+from .health_check import (
+    VllmEmbeddingHealthCheckPayload,
+    VllmHealthCheckPayload,
+    VllmPrefillHealthCheckPayload,
+)
+from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .multimodal_handlers import EncodeWorkerHandler
 from .publisher import StatLoggerFactory
 
@@ -50,7 +55,9 @@ EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, Optional[LLMBackendMet
 
 async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> dict:
     """Wait for benchmark result files and aggregate across DP ranks."""
-    base_path = Path(bench_cfg["output_path"])
+    base_path = Path(
+        os.environ.get(ENV_FPM_BENCHMARK_OUTPUT_PATH, bench_cfg["output_path"])
+    )
     timeout = int(bench_cfg.get("timeout", 300))
 
     try:
@@ -81,7 +88,7 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
         while not p.exists():
             if _time.monotonic() > deadline:
                 raise TimeoutError(
-                    f"Benchmark did not complete within {timeout}s. " f"Missing: {p}"
+                    f"Benchmark did not complete within {timeout}s. Missing: {p}"
                 )
             await asyncio.sleep(0.1)
 
@@ -191,9 +198,28 @@ class WorkerFactory:
         shutdown_endpoints[:] = [generate_endpoint]
 
         handler = EncodeWorkerHandler(
-            config.engine_args, config.embedding_transfer_mode  # type: ignore[arg-type]
+            config.engine_args,
+            config.embedding_transfer_mode,  # type: ignore[arg-type]
         )
         await handler.async_init(runtime)
+
+        # Encode workers register a model card so the frontend's
+        # serving-readiness gate can count them. The card carries no OpenAI
+        # surface (`ModelType.Empty`) — the encode endpoint isn't routed by
+        # the OpenAI dispatch. `needs` is the DNF for an encode worker:
+        # either a P+D pair or a single Aggregated peer.
+        await register_model(
+            ModelInput.Tokens,
+            ModelType.Empty,
+            generate_endpoint,
+            config.model,
+            model_name=config.served_model_name or config.model,
+            worker_type=WorkerType.Encode,
+            needs=[
+                [WorkerType.Prefill, WorkerType.Decode],
+                [WorkerType.Aggregated],
+            ],
+        )
         logger.info("Starting to serve the encode worker endpoint...")
 
         try:
@@ -282,12 +308,17 @@ class WorkerFactory:
             shutdown_event=shutdown_event,
         )
 
+        embedding_health_check_payload = VllmEmbeddingHealthCheckPayload(
+            model_name=config.served_model_name or config.model
+        ).to_dict()
+
         logger.info("Starting to serve the embedding worker endpoint...")
         try:
             await asyncio.gather(
                 generate_endpoint.serve_endpoint(
                     handler.generate,
                     metrics_labels=[("model", config.model)],
+                    health_check_payload=embedding_health_check_payload,
                 ),
                 self.register_vllm_model(
                     ModelInput.Text,
@@ -320,7 +351,7 @@ class WorkerFactory:
         if not config.gms_shadow_mode:
             return
 
-        await handler._quiesce_controller.quiesce(1)
+        await handler._pause_controller.pause(1)
 
         runtime.set_health_status(True)
         logger.info(
@@ -335,8 +366,8 @@ class WorkerFactory:
         await lock.acquire(engine_id=f"engine-{engine_id}")
         logger.info("[Shadow] Lock acquired, waking engine")
 
-        await handler._quiesce_controller.resume()
-        handler._quiesce_controller.mark_resumed()
+        await handler._pause_controller.resume()
+        handler._pause_controller.mark_resumed()
         logger.info("[Shadow] Engine awake, registering with discovery")
 
     async def _create_decode_worker(
@@ -393,7 +424,7 @@ class WorkerFactory:
                 prometheus_temp_dir,
                 component_gauges,
             ) = snapshot_engine
-            vllm_config.additional_config["fpm_worker_id"] = fpm_worker_id
+            os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
             # Factory is created after unpack so component_gauges is available
             factory = StatLoggerFactory(
                 endpoint=generate_endpoint,
@@ -516,7 +547,11 @@ class WorkerFactory:
                 bench_cfg, vllm_config
             )
 
-        # What the worker is advertising itself as, and what other worker it needs to serve traffic.
+        # Model-serving-readiness role.
+        # _create_decode_worker handles both DECODE and AGGREGATED disaggregation modes.
+        # `--route-to-encoder` adds Encode to the AND-set of required peers
+        # (encode workers register their own card in
+        # `_create_multimodal_encode_worker`).
         if config.disaggregation_mode == DisaggregationMode.DECODE:
             worker_type = WorkerType.Decode
             needs_set: list[WorkerType] = [WorkerType.Prefill]
@@ -524,6 +559,8 @@ class WorkerFactory:
             # AGGREGATED
             worker_type = WorkerType.Aggregated
             needs_set = []
+        if config.route_to_encoder:
+            needs_set.append(WorkerType.Encode)
         needs: list[list[WorkerType]] = [needs_set] if needs_set else []
 
         await self.register_vllm_model(
@@ -639,7 +676,7 @@ class WorkerFactory:
             # because the engine was forked before the runtime existed.
             # Propagating the new ID to the child requires shared memory or
             # a restart of the EngineCore process.
-            vllm_config.additional_config["fpm_worker_id"] = fpm_worker_id
+            os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
         else:
             (
                 engine_client,
@@ -729,19 +766,30 @@ class WorkerFactory:
         )
         shutdown_endpoints[:] = [generate_endpoint, clear_endpoint, perf_endpoint]
 
-        # Register prefill model with ModelType.Prefill
-        model_input = (
-            ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
-        )
+        # Prefill workers expose no OpenAI surface — the role is carried by
+        # `worker_type=Prefill`. We register the legacy `ModelType.Prefill`
+        # marker bit (not a surface) so an OLD frontend, which detects prefill
+        # via that bit, still routes disaggregated traffic to this worker
+        # during the cross-version rollout. A new frontend ignores the bit and
+        # dispatches off `worker_type`. When
+        # --route-to-encoder is set, Encode joins the AND-set of needs.
+        # ModelInput here is the inter-worker contract, not an engine-local
+        # tokenization preference: prefill only ever receives token IDs from
+        # its decode peer, so this is Tokens regardless of
+        # config.use_vllm_tokenizer (which only swaps the frontend↔decode
+        # boundary and the engine-local health-check payload below).
+        prefill_needs_set: list[WorkerType] = [WorkerType.Decode]
+        if config.route_to_encoder:
+            prefill_needs_set.append(WorkerType.Encode)
         await self.register_vllm_model(
-            model_input,
+            ModelInput.Tokens,
             ModelType.Prefill,
             generate_endpoint,
             config,
             engine_client,
             vllm_config,
             worker_type=WorkerType.Prefill,
-            needs=[[WorkerType.Decode]],
+            needs=[prefill_needs_set],
         )
 
         health_check_payload = VllmPrefillHealthCheckPayload(

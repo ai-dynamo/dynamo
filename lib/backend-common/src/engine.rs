@@ -22,7 +22,9 @@ use tokio::sync::watch;
 use crate::error::DynamoError;
 
 pub use dynamo_llm::kv_router::publisher::KvEventPublisher;
-pub use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
+pub use dynamo_llm::protocols::common::llm_backend::{
+    LLMEngineOutput, LogProbs, TopLogprob, TopLogprobs,
+};
 pub use dynamo_llm::protocols::common::preprocessor::{
     BootstrapInfo, PrefillResult, PreprocessedRequest,
 };
@@ -322,6 +324,27 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// and fully replace this value when set.
     async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
         Ok(None)
+    }
+
+    /// Semantic engine controls this engine supports. Empty by default.
+    ///
+    /// Engines advertise control keys and implement them via
+    /// [`LLMEngine::engine_control`]. Mapping those keys onto runtime routes is
+    /// owned by the unified backend layer.
+    async fn supported_controls(&self) -> Result<Vec<String>, DynamoError> {
+        Ok(Vec::new())
+    }
+
+    /// Handle one semantic engine-control request.
+    async fn engine_control(
+        &self,
+        control: String,
+        _body: serde_json::Value,
+    ) -> Result<serde_json::Value, DynamoError> {
+        Ok(serde_json::json!({
+            "status": "error",
+            "message": format!("unsupported engine control: {control}"),
+        }))
     }
 }
 

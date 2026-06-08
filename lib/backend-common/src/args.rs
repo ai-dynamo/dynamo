@@ -51,8 +51,9 @@ pub struct CommonArgs {
     pub custom_jinja_template: Option<PathBuf>,
 
     /// Disaggregation role: `agg` (default), `prefill`, or `decode`.
-    /// Prefill workers register as `ModelType::Prefill` regardless of
-    /// `endpoint_types`; decode workers do not advertise a local KV indexer.
+    /// Prefill workers register with `ModelType::empty()` and
+    /// `WorkerType::Prefill` regardless of `endpoint_types`; decode workers
+    /// do not advertise a local KV indexer.
     #[arg(
         long,
         value_enum,

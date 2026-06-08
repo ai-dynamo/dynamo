@@ -3,6 +3,8 @@
 
 //! Shared components used across all engine implementations.
 
+#[cfg(feature = "aic-forward-pass")]
+pub mod engine_perf;
 pub mod kv_cache_trace;
 pub mod perf_model;
 pub mod protocols;

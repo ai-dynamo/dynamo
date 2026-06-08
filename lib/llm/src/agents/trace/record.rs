@@ -105,6 +105,7 @@ mod tests {
                 session_id: "run-non-finite".to_string(),
                 trajectory_id: "run-non-finite:agent".to_string(),
                 parent_trajectory_id: None,
+                trajectory_final: None,
             },
             AgentRequestMetrics {
                 request_id: "req-non-finite".to_string(),
@@ -124,6 +125,7 @@ mod tests {
                 queue_depth: None,
                 worker: None,
                 replay: None,
+                finish_reason_metadata: None,
             },
         );
 
@@ -159,6 +161,7 @@ mod tests {
                 session_id: "run-1".to_string(),
                 trajectory_id: "run-1:agent".to_string(),
                 parent_trajectory_id: None,
+                trajectory_final: None,
             },
             request: None,
             tool: Some(AgentToolEvent {

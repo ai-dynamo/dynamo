@@ -4,7 +4,7 @@
 """Pure discrete-event state machine for planner scaling decisions.
 
 ``PlannerStateMachine`` receives events (``ScheduledTick`` + ``TickInput``),
-updates internal state (regression models, load predictors, worker inventory),
+updates internal state (perf models, load predictors, worker inventory),
 and returns effects (``PlannerEffects``: optional scaling decision + next tick).
 
 This module contains **zero I/O** -- no runtime, connector, subscriber, asyncio,
@@ -29,11 +29,7 @@ from dynamo.planner.core.budget import (
 )
 from dynamo.planner.core.load.predictors import LOAD_PREDICTORS
 from dynamo.planner.core.load_scaling import LoadScalingMixin
-from dynamo.planner.core.perf_model import (
-    AggRegressionModel,
-    DecodeRegressionModel,
-    PrefillRegressionModel,
-)
+from dynamo.planner.core.perf_model import PlannerEnginePerfModel
 from dynamo.planner.core.throughput_scaling import ThroughputScalingMixin
 from dynamo.planner.core.types import (
     FpmObservations,
@@ -55,7 +51,7 @@ logger = logging.getLogger(__name__)
 class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
     """Discrete-event state machine for all planner modes.
 
-    Owns regression models, load predictors, throughput lower bounds,
+    Owns perf models, load predictors, throughput lower bounds,
     and all scaling decision logic.  Receives events, returns effects.
     Has no runtime dependencies.
     """
@@ -73,26 +69,26 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         self._has_decode = config.mode in ("disagg", "decode", "agg")
         self._is_easy = config.optimization_target != "sla"
 
-        # Easy mode uses static thresholds -- no regression or predictors needed
+        # Easy mode uses static thresholds -- no perf models or predictors needed
         if not self._is_easy:
             if self._is_agg:
-                self._agg_regression = AggRegressionModel(
-                    max_num_fpm_samples=config.max_num_fpm_samples,
-                    min_observations=config.load_min_observations,
-                    bucket_count=config.fpm_sample_bucket_size,
+                self._agg_regression = PlannerEnginePerfModel(
+                    worker_type="aggregated",
+                    config=config,
+                    capabilities=self._capabilities.decode,
                 )
             else:
                 if self._has_prefill:
-                    self._prefill_regression = PrefillRegressionModel(
-                        max_num_fpm_samples=config.max_num_fpm_samples,
-                        min_observations=config.load_min_observations,
-                        bucket_count=config.fpm_sample_bucket_size,
+                    self._prefill_regression = PlannerEnginePerfModel(
+                        worker_type="prefill",
+                        config=config,
+                        capabilities=self._capabilities.prefill,
                     )
                 if self._has_decode:
-                    self._decode_regression = DecodeRegressionModel(
-                        max_num_fpm_samples=config.max_num_fpm_samples,
-                        min_observations=config.load_min_observations,
-                        bucket_count=config.fpm_sample_bucket_size,
+                    self._decode_regression = PlannerEnginePerfModel(
+                        worker_type="decode",
+                        config=config,
+                        capabilities=self._capabilities.decode,
                     )
 
             predictor_cls = LOAD_PREDICTORS[config.load_predictor]
@@ -145,6 +141,22 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
     def update_capabilities(self, capabilities: WorkerCapabilities) -> None:
         """Replace the current worker capabilities."""
         self._capabilities = capabilities
+        if self._is_easy:
+            return
+        if self._is_agg and hasattr(self, "_agg_regression"):
+            self._agg_regression.update_capabilities(self._capabilities.decode)
+        if (
+            self._has_prefill
+            and not self._is_agg
+            and hasattr(self, "_prefill_regression")
+        ):
+            self._prefill_regression.update_capabilities(self._capabilities.prefill)
+        if (
+            self._has_decode
+            and not self._is_agg
+            and hasattr(self, "_decode_regression")
+        ):
+            self._decode_regression.update_capabilities(self._capabilities.decode)
 
     def initial_tick(self, start_s: float) -> ScheduledTick:
         self._next_load_s = start_s + self._config.load_adjustment_interval_seconds
@@ -165,15 +177,15 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             return
         if agg_fpms and self._is_agg:
             self._agg_regression.load_benchmark_fpms(agg_fpms)
-            logger.info(f"Bootstrapped agg regression with {len(agg_fpms)} FPMs")
+            logger.info(f"Bootstrapped agg perf model with {len(agg_fpms)} FPMs")
         if prefill_fpms and self._has_prefill and not self._is_agg:
             self._prefill_regression.load_benchmark_fpms(prefill_fpms)
             logger.info(
-                f"Bootstrapped prefill regression with {len(prefill_fpms)} FPMs"
+                f"Bootstrapped prefill perf model with {len(prefill_fpms)} FPMs"
             )
         if decode_fpms and self._has_decode and not self._is_agg:
             self._decode_regression.load_benchmark_fpms(decode_fpms)
-            logger.info(f"Bootstrapped decode regression with {len(decode_fpms)} FPMs")
+            logger.info(f"Bootstrapped decode perf model with {len(decode_fpms)} FPMs")
 
     def warm_load_predictors(self, observations: list[TrafficObservation]) -> None:
         if self._is_easy:
@@ -342,18 +354,15 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
     def _observe_fpm(self, obs: FpmObservations) -> None:
         if self._is_agg:
             if obs.decode:
-                for fpm in obs.decode.values():
-                    self._agg_regression.add_observation(fpm)
+                self._agg_regression.add_observations(obs.decode)
                 logger.info(f"FPM load stats: {len(obs.decode)} agg engines observed")
             return
 
         if obs.prefill and self._has_prefill:
-            for fpm in obs.prefill.values():
-                self._prefill_regression.add_observation(fpm)
+            self._prefill_regression.add_observations(obs.prefill)
             logger.info(f"FPM load stats: {len(obs.prefill)} prefill engines observed")
         if obs.decode and self._has_decode:
-            for fpm in obs.decode.values():
-                self._decode_regression.add_observation(fpm)
+            self._decode_regression.add_observations(obs.decode)
             logger.info(f"FPM load stats: {len(obs.decode)} decode engines observed")
 
     def _observe_traffic(self, traffic: TrafficObservation) -> None:
@@ -479,23 +488,23 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
     # ------------------------------------------------------------------
 
     @property
-    def prefill_regression(self) -> PrefillRegressionModel:
+    def prefill_regression(self) -> PlannerEnginePerfModel:
         if not self._has_prefill:
             raise AttributeError(f"No prefill regression in mode={self._config.mode}")
         return self._prefill_regression
 
     @property
-    def decode_regression(self) -> DecodeRegressionModel:
+    def decode_regression(self) -> PlannerEnginePerfModel:
         if not self._has_decode or self._is_agg:
             raise AttributeError(f"No decode regression in mode={self._config.mode}")
         return self._decode_regression
 
     @property
-    def agg_regression(self) -> AggRegressionModel:
+    def agg_regression(self) -> PlannerEnginePerfModel:
         if not self._is_agg:
             raise AttributeError(f"No agg regression in mode={self._config.mode}")
         return self._agg_regression
 
     @property
-    def regression(self) -> AggRegressionModel:
+    def regression(self) -> PlannerEnginePerfModel:
         return self.agg_regression

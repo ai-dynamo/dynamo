@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	dumpLogFilename  = "dump.log"
-	criuConfFilename = "criu.conf"
+	dumpLogFilename    = "dump.log"
+	criuConfFilename   = "criu.conf"
+	dumpLogTailMaxSize = 16 * 1024
 )
 
 // BuildDumpOptions creates CRIU options from the container snapshot and settings.
@@ -110,10 +111,13 @@ func ExecuteDump(
 	}
 	if err := criuClient.Dump(criuOpts, nil); err != nil {
 		dumpDuration := time.Since(criuDumpStart)
+		dumpLogPath := filepath.Join(checkpointDir, dumpLogFilename)
 		log.Error(err, "CRIU dump failed",
 			"duration", dumpDuration,
 			"checkpoint_dir", checkpointDir,
-			"dump_log_path", fmt.Sprintf("%s/%s", checkpointDir, dumpLogFilename),
+			"dump_log_path", dumpLogPath,
+			"skip_mnt", criuOpts.GetSkipMnt(),
+			"dump_log_tail", readLogTail(dumpLogPath),
 		)
 		return 0, fmt.Errorf("CRIU dump failed: %w", err)
 	}
@@ -121,6 +125,17 @@ func ExecuteDump(
 	criuDumpDuration := time.Since(criuDumpStart)
 	log.Info("CRIU dump completed", "duration", criuDumpDuration)
 	return criuDumpDuration, nil
+}
+
+func readLogTail(path string) string {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Sprintf("failed to read dump log: %v", err)
+	}
+	if len(content) <= dumpLogTailMaxSize {
+		return string(content)
+	}
+	return "...<truncated>...\n" + string(content[len(content)-dumpLogTailMaxSize:])
 }
 
 func buildCRIUConf(c *types.CRIUSettings) string {
