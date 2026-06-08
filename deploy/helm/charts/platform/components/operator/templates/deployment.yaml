@@ -76,7 +76,7 @@ spec:
           - "--version={{ .Chart.AppVersion }}"
           - --webhook-service={{ include "dynamo-operator.fullname" . }}-webhook-service
         {{- if .Values.webhook.certManager.enabled }}
-          - --webhook-cert={{ include "dynamo-operator.fullname" . }}-serving-cert
+          - --webhook-cert={{ .Release.Namespace }}/{{ include "dynamo-operator.fullname" . }}-serving-cert
         {{- end }}
         {{- if and (not .Values.webhook.certManager.enabled) .Values.webhook.certificateSecret.external }}
           - --webhook-ca

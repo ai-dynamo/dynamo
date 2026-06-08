@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"os"
@@ -102,7 +103,12 @@ func main() {
 				crd.Annotations[caAnnotation] = *webhookCert
 			}
 			if webhookCA != nil && *webhookCA != "" {
-				crd.Spec.Conversion.Webhook.ClientConfig.CABundle = []byte(*webhookCA)
+				caBundle, err := base64.StdEncoding.DecodeString(*webhookCA)
+				if err != nil {
+					log.Error(err, "unable to decode the webhook-ca")
+					os.Exit(1)
+				}
+				crd.Spec.Conversion.Webhook.ClientConfig.CABundle = caBundle
 			}
 		}
 
