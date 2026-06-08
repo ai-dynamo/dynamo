@@ -286,7 +286,29 @@ def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) ->
 
 
 def pip_check(venv_python: Path) -> None:
-    run([str(venv_python), "-m", "pip", "check"])
+    command = [str(venv_python), "-m", "pip", "check"]
+    print("+", " ".join(command), flush=True)
+    proc = subprocess.run(
+        command,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    print(proc.stdout)
+    # `pip check` flags a package when its internal WHEEL tag is disjoint from the
+    # platform's supported tags ("<pkg> is not supported on this platform"). NVIDIA's
+    # CUDA wheels (pulled transitively via torch) tag arm64 as `sbsa`, which trips this
+    # heuristic even though the wheel installed and works. Ignore those and fail only on
+    # genuine dependency problems (missing or conflicting requirements).
+    conflicts = [
+        line
+        for line in proc.stdout.splitlines()
+        if "which is not installed." in line or "but you have" in line
+    ]
+    if conflicts:
+        details = "\n".join(f"  {line}" for line in conflicts)
+        raise AssertionError(f"pip check found dependency conflicts:\n{details}")
 
 
 def direct_url_for(venv_python: Path, dist_name: str) -> dict[str, object]:
