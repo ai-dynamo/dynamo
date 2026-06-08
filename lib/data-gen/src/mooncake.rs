@@ -197,9 +197,10 @@ pub fn try_hash_token_blocks(mapper: &mut RollingHashIdMapper, tokens: &[u32]) -
         .try_into()
         .context("block_size does not fit u32")?;
     let request = Request::builder().tokens(tokens.to_vec()).build()?;
-    let mut sequence_hashes = request.sequence_hashes(block_size)?;
+    let salt_hash = request.salt_hash()?;
+    let mut sequence_hashes = request.into_sequence_hashes(block_size)?;
     if let Some(partial_hash) =
-        trailing_partial_sequence_hash(&request, mapper.block_size, tokens, &sequence_hashes)?
+        trailing_partial_sequence_hash(salt_hash, mapper.block_size, tokens, &sequence_hashes)
     {
         sequence_hashes.push(partial_hash);
     }
@@ -207,14 +208,14 @@ pub fn try_hash_token_blocks(mapper: &mut RollingHashIdMapper, tokens: &[u32]) -
 }
 
 fn trailing_partial_sequence_hash(
-    request: &Request,
+    salt_hash: u64,
     block_size: usize,
     tokens: &[u32],
     complete_sequence_hashes: &[u64],
-) -> Result<Option<u64>> {
+) -> Option<u64> {
     let tail_len = tokens.len() % block_size;
     if tail_len == 0 {
-        return Ok(None);
+        return None;
     }
 
     let tail = &tokens[tokens.len() - tail_len..];
@@ -222,11 +223,11 @@ fn trailing_partial_sequence_hash(
     for token in tail {
         tail_bytes.extend_from_slice(&token.to_ne_bytes());
     }
-    let tail_block_hash = compute_hash_v2(&tail_bytes, request.salt_hash()?);
-    Ok(Some(match complete_sequence_hashes.last().copied() {
+    let tail_block_hash = compute_hash_v2(&tail_bytes, salt_hash);
+    Some(match complete_sequence_hashes.last().copied() {
         Some(parent) => compute_next_sequence_hash(parent, tail_block_hash),
         None => tail_block_hash,
-    }))
+    })
 }
 
 /// Map stable sequence hashes to compact Mooncake IDs with a shared mapper.
