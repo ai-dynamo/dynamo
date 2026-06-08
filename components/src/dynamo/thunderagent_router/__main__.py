@@ -25,6 +25,7 @@ from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
+    WorkerType,
     register_model,
 )
 from dynamo.runtime import DistributedRuntime, dynamo_worker
@@ -273,6 +274,9 @@ async def worker(runtime: DistributedRuntime) -> None:
             model_path=model_path,
             model_name=config.model_name,
             runtime_config=runtime_cfg,
+            # The router is the serving entry point (front door) exposing the
+            # OpenAI surface; it has no mandatory peer-role dependency.
+            worker_type=WorkerType.Aggregated,
         )
 
     try:

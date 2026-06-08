@@ -18,7 +18,7 @@ use crate::protocols::{
     BlockHashOptions, LocalBlockHash, StorageTier, WorkerId, compute_block_hash_for_seq,
 };
 
-use super::indexer::Indexer;
+use super::backend::Indexer;
 use super::registry::{IndexerKey, ListenerControlError, WorkerRegistry};
 
 /// We need to fit one million tokens as JSON text, this should do it.
@@ -433,8 +433,7 @@ fn listener_control_error_response(
     let status = match &error {
         ListenerControlError::WorkerNotFound { .. }
         | ListenerControlError::ListenerNotFound { .. } => StatusCode::NOT_FOUND,
-        ListenerControlError::DiscoveryManaged { .. }
-        | ListenerControlError::InvalidPauseState { .. }
+        ListenerControlError::InvalidPauseState { .. }
         | ListenerControlError::InvalidResumeState { .. } => StatusCode::CONFLICT,
     };
     (
@@ -589,8 +588,8 @@ fn build_router(state: Arc<AppState>, test_endpoints: bool) -> Router {
 mod tests {
     use super::*;
     use crate::indexer::KvIndexerInterface;
-    use crate::standalone_indexer::indexer::create_indexer;
-    use crate::standalone_indexer::indexer::test_util::store_event;
+    use crate::services::indexer::backend::create_indexer;
+    use crate::services::indexer::backend::test_util::store_event;
     use axum::body::Body;
     use axum::http::{Request, StatusCode, header};
     use tower::ServiceExt;

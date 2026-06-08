@@ -18,9 +18,9 @@ use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
 #[cfg(feature = "kv-indexer")]
-use dynamo_kv_router::standalone_indexer::{self, IndexerConfig};
+use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "slot-tracker")]
-use dynamo_kv_router::standalone_slot_tracker::{self, SlotTrackerConfig};
+use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
@@ -89,7 +89,7 @@ where
         init_standalone_logging();
 
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(standalone_indexer::run_server(IndexerConfig {
+        rt.block_on(indexer::run_server(IndexerConfig {
             block_size: cli.block_size,
             port: cli.port,
             threads: cli.threads,
@@ -119,6 +119,18 @@ struct SlotTrackerCli {
     /// HTTP server port
     #[arg(long, default_value_t = 8091)]
     port: u16,
+
+    /// ZMQ PUB endpoint for replica-sync events
+    #[arg(long)]
+    replica_sync_bind: Option<String>,
+
+    /// Externally reachable local replica-sync endpoint
+    #[arg(long)]
+    replica_sync_advertise: Option<String>,
+
+    /// Comma-separated ZMQ PUB endpoints for peer slot trackers
+    #[arg(long, value_delimiter = ',')]
+    replica_sync_peers: Vec<String>,
 }
 
 pub fn run_slot_tracker_cli<I, T>(args: I) -> anyhow::Result<()>
@@ -136,8 +148,11 @@ where
         init_standalone_logging();
 
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(standalone_slot_tracker::run_server(SlotTrackerConfig {
+        rt.block_on(slot_tracker::run_server(SlotTrackerConfig {
             port: cli.port,
+            replica_sync_bind: cli.replica_sync_bind,
+            replica_sync_advertise: cli.replica_sync_advertise,
+            replica_sync_peers: cli.replica_sync_peers,
         }))
     }
 
@@ -297,7 +312,7 @@ impl KvEventPublisher {
     ///         ``0`` is treated as ``None`` (also disables batching).
     ///         Maximum allowed is 15_000 (15 seconds); larger values are capped.
     #[new]
-    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS))]
+    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
@@ -308,10 +323,12 @@ impl KvEventPublisher {
         zmq_endpoint: Option<String>,
         zmq_topic: Option<String>,
         batching_timeout_ms: Option<u64>,
+        image_token_id: Option<u32>,
     ) -> PyResult<Self> {
         let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
             endpoint: ep,
             topic: zmq_topic.unwrap_or_default(),
+            image_token_id,
         });
 
         if kv_block_size == 0 {
@@ -382,6 +399,7 @@ impl KvEventPublisher {
                         &warning_count,
                         mm_infos.as_deref(),
                         is_eagle,
+                        None, // image_token_id: publish path keeps caller-supplied mm_infos
                     ),
                 }),
                 dp_rank,

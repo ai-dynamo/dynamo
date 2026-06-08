@@ -8,7 +8,13 @@ import os
 import pytest
 import uvloop
 
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
+from dynamo.llm import (
+    ModelInput,
+    ModelRuntimeConfig,
+    ModelType,
+    WorkerType,
+    register_model,
+)
 from dynamo.runtime import DistributedRuntime
 
 TEST_END_TO_END = os.environ.get("TEST_END_TO_END", 0)
@@ -45,6 +51,7 @@ async def test_register(runtime: DistributedRuntime):
         endpoint,
         "tensor",  # model_path (used as display name for tensor-based models)
         runtime_config=runtime_config,
+        worker_type=WorkerType.Aggregated,
     )
 
     if TEST_END_TO_END:

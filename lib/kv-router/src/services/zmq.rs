@@ -4,14 +4,18 @@
 use std::collections::VecDeque;
 use std::future::poll_fn;
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 
 use anyhow::{Result, anyhow};
-use tokio::{io::unix::AsyncFd, sync::Mutex};
+#[cfg(feature = "standalone-indexer")]
+use std::sync::Arc;
+use tokio::io::unix::AsyncFd;
+#[cfg(feature = "standalone-indexer")]
+use tokio::sync::Mutex;
 
-pub(super) type MultipartMessage = Vec<Vec<u8>>;
-pub(super) type SharedSocket = Arc<Mutex<ZmqSocket>>;
+pub(crate) type MultipartMessage = Vec<Vec<u8>>;
+#[cfg(feature = "standalone-indexer")]
+pub(crate) type SharedSocket = Arc<Mutex<ZmqSocket>>;
 
 const ZMQ_RCVTIMEOUT_MS: i32 = 100;
 const ZMQ_SNDTIMEOUT_MS: i32 = 0;
@@ -43,7 +47,7 @@ impl AsRawFd for SocketWrapper {
     }
 }
 
-pub(super) struct ZmqSocket(AsyncFd<SocketWrapper>);
+pub(crate) struct ZmqSocket(AsyncFd<SocketWrapper>);
 
 impl ZmqSocket {
     fn new(socket: zmq::Socket) -> Result<Self> {
@@ -52,6 +56,17 @@ impl ZmqSocket {
 
     fn socket(&self) -> &zmq::Socket {
         &self.0.get_ref().socket
+    }
+
+    pub(crate) fn connect(&self, endpoint: &str) -> Result<()> {
+        self.socket().connect(endpoint)?;
+        Ok(())
+    }
+
+    #[cfg(any(feature = "standalone-slot-tracker", test))]
+    pub(crate) fn disconnect(&self, endpoint: &str) -> Result<()> {
+        self.socket().disconnect(endpoint)?;
+        Ok(())
     }
 
     fn poll_socket_event(
@@ -132,6 +147,18 @@ impl ZmqSocket {
 
         Poll::Ready(Ok(()))
     }
+
+    pub(crate) async fn recv_multipart(&mut self) -> Result<MultipartMessage> {
+        poll_fn(|cx| self.poll_recv_multipart(cx)).await
+    }
+
+    pub(crate) async fn send_multipart(&mut self, frames: MultipartMessage) -> Result<()> {
+        let mut buffer = frames
+            .into_iter()
+            .map(zmq::Message::from)
+            .collect::<VecDeque<_>>();
+        poll_fn(|cx| self.poll_send_multipart(cx, &mut buffer)).await
+    }
 }
 
 fn configure_common_socket(socket: &zmq::Socket) -> Result<()> {
@@ -151,13 +178,14 @@ fn configure_receive_socket(socket: &zmq::Socket) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "standalone-indexer")]
 fn configure_bidirectional_socket(socket: &zmq::Socket) -> Result<()> {
     configure_receive_socket(socket)?;
     socket.set_sndtimeo(ZMQ_SNDTIMEOUT_MS)?;
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(feature = "standalone-slot-tracker", test))]
 fn configure_send_socket(socket: &zmq::Socket) -> Result<()> {
     configure_common_socket(socket)?;
     socket.set_sndtimeo(ZMQ_SNDTIMEOUT_MS)?;
@@ -174,16 +202,23 @@ where
     ZmqSocket::new(socket)
 }
 
-pub(super) fn connect_sub_socket(endpoint: &str) -> Result<SharedSocket> {
-    Ok(Arc::new(Mutex::new(build_socket(zmq::SUB, |socket| {
+pub(crate) fn create_sub_socket(topic: &[u8]) -> Result<ZmqSocket> {
+    build_socket(zmq::SUB, |socket| {
         configure_receive_socket(socket)?;
-        socket.set_subscribe(b"")?;
-        socket.connect(endpoint)?;
+        socket.set_subscribe(topic)?;
         Ok(())
-    })?)))
+    })
 }
 
-pub(super) fn connect_dealer_socket(endpoint: &str) -> Result<SharedSocket> {
+#[cfg(feature = "standalone-indexer")]
+pub(crate) fn connect_sub_socket(endpoint: &str) -> Result<SharedSocket> {
+    let socket = create_sub_socket(b"")?;
+    socket.connect(endpoint)?;
+    Ok(Arc::new(Mutex::new(socket)))
+}
+
+#[cfg(feature = "standalone-indexer")]
+pub(crate) fn connect_dealer_socket(endpoint: &str) -> Result<SharedSocket> {
     Ok(Arc::new(Mutex::new(build_socket(zmq::DEALER, |socket| {
         configure_bidirectional_socket(socket)?;
         socket.connect(endpoint)?;
@@ -191,25 +226,72 @@ pub(super) fn connect_dealer_socket(endpoint: &str) -> Result<SharedSocket> {
     })?)))
 }
 
-#[cfg(test)]
-pub(super) fn bind_pub_socket(endpoint: &str) -> Result<SharedSocket> {
-    Ok(Arc::new(Mutex::new(build_socket(zmq::PUB, |socket| {
+#[cfg(any(feature = "standalone-slot-tracker", test))]
+pub(crate) fn create_bound_pub_socket(endpoint: &str) -> Result<ZmqSocket> {
+    build_socket(zmq::PUB, |socket| {
         configure_send_socket(socket)?;
         socket.bind(endpoint)?;
         Ok(())
-    })?)))
+    })
 }
 
-pub(super) async fn recv_multipart(socket: &SharedSocket) -> Result<MultipartMessage> {
-    let mut socket = socket.lock().await;
-    poll_fn(|cx| socket.poll_recv_multipart(cx)).await
+#[cfg(all(test, feature = "standalone-indexer"))]
+pub(crate) fn bind_pub_socket(endpoint: &str) -> Result<SharedSocket> {
+    Ok(Arc::new(Mutex::new(create_bound_pub_socket(endpoint)?)))
 }
 
-pub(super) async fn send_multipart(socket: &SharedSocket, frames: MultipartMessage) -> Result<()> {
+#[cfg(feature = "standalone-indexer")]
+pub(crate) async fn recv_multipart(socket: &SharedSocket) -> Result<MultipartMessage> {
     let mut socket = socket.lock().await;
-    let mut buffer = frames
-        .into_iter()
-        .map(zmq::Message::from)
-        .collect::<VecDeque<_>>();
-    poll_fn(|cx| socket.poll_send_multipart(cx, &mut buffer)).await
+    socket.recv_multipart().await
+}
+
+#[cfg(feature = "standalone-indexer")]
+pub(crate) async fn send_multipart(socket: &SharedSocket, frames: MultipartMessage) -> Result<()> {
+    let mut socket = socket.lock().await;
+    socket.send_multipart(frames).await
+}
+
+pub(crate) fn validate_endpoint(endpoint: &str) -> Result<()> {
+    let (scheme, address) = endpoint
+        .split_once("://")
+        .ok_or_else(|| anyhow!("invalid ZMQ endpoint `{endpoint}`: missing scheme"))?;
+
+    if address.is_empty() {
+        return Err(anyhow!(
+            "invalid ZMQ endpoint `{endpoint}`: missing address"
+        ));
+    }
+
+    match scheme {
+        "tcp" => {
+            let (host, port) = address
+                .rsplit_once(':')
+                .ok_or_else(|| anyhow!("invalid ZMQ endpoint `{endpoint}`: missing TCP port"))?;
+            if host.is_empty() {
+                return Err(anyhow!(
+                    "invalid ZMQ endpoint `{endpoint}`: missing TCP host"
+                ));
+            }
+            if host.starts_with('[') {
+                if !host.ends_with(']') {
+                    return Err(anyhow!(
+                        "invalid ZMQ endpoint `{endpoint}`: missing closing `]`"
+                    ));
+                }
+            } else if host.contains(':') {
+                return Err(anyhow!(
+                    "invalid ZMQ endpoint `{endpoint}`: missing TCP port"
+                ));
+            }
+            port.parse::<u16>().map_err(|error| {
+                anyhow!("invalid ZMQ endpoint `{endpoint}`: invalid TCP port: {error}")
+            })?;
+            Ok(())
+        }
+        "ipc" | "inproc" => Ok(()),
+        other => Err(anyhow!(
+            "invalid ZMQ endpoint `{endpoint}`: unsupported scheme `{other}`"
+        )),
+    }
 }
