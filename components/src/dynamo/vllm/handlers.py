@@ -1319,42 +1319,49 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "status": "error",
                 "message": f"Invalid mode '{mode}'; expected keep|wait|abort",
             }
-        try:
+        async with self._pause_lock:
             try:
-                await self.engine_client.pause_generation(
-                    mode=mode, clear_cache=clear_cache
+                try:
+                    await self.engine_client.pause_generation(
+                        mode=mode, clear_cache=clear_cache
+                    )
+                except TypeError:
+                    await self.engine_client.pause_generation()
+                    if clear_cache:
+                        await self.engine_client.reset_prefix_cache()
+                self._paused = True
+                logger.info(
+                    f"[RL] Engine paused (mode={mode}, clear_cache={clear_cache})"
                 )
-            except TypeError:
-                await self.engine_client.pause_generation()
-                if clear_cache:
-                    await self.engine_client.reset_prefix_cache()
-            self._paused = True
-            logger.info(f"[RL] Engine paused (mode={mode}, clear_cache={clear_cache})")
-            return {
-                "status": "ok",
-                "message": "Engine paused",
-                "mode": mode,
-                "clear_cache": clear_cache,
-            }
-        except EngineDeadError as e:
-            self._shutdown_on_engine_dead(e)
-        except Exception as e:
-            logger.error(f"[RL] Failed to pause: {e}")
-            return {"status": "error", "message": str(e)}
+                return {
+                    "status": "ok",
+                    "message": "Engine paused",
+                    "mode": mode,
+                    "clear_cache": clear_cache,
+                }
+            except EngineDeadError as e:
+                self._shutdown_on_engine_dead(e)
+            except Exception as e:
+                logger.error(f"[RL] Failed to pause: {e}")
+                return {"status": "error", "message": str(e)}
 
     async def resume_generation(self, body: dict) -> dict:
         """Resume generation after a weight update."""
         body = body or {}
-        try:
-            await self.engine_client.resume_generation()
-            self._paused = False
-            logger.info("[RL] Engine resumed")
-            return {"status": "ok", "message": "Engine resumed"}
-        except EngineDeadError as e:
-            self._shutdown_on_engine_dead(e)
-        except Exception as e:
-            logger.error(f"[RL] Failed to resume: {e}")
-            return {"status": "error", "message": str(e)}
+        # Serialize pause / resume / weight-update so a concurrent resume cannot
+        # re-enable generation while an update's collective_rpc is still
+        # mutating weights (dynamo-ops).
+        async with self._pause_lock:
+            try:
+                await self.engine_client.resume_generation()
+                self._paused = False
+                logger.info("[RL] Engine resumed")
+                return {"status": "ok", "message": "Engine resumed"}
+            except EngineDeadError as e:
+                self._shutdown_on_engine_dead(e)
+            except Exception as e:
+                logger.error(f"[RL] Failed to resume: {e}")
+                return {"status": "error", "message": str(e)}
 
     async def flush_cache(self, body: dict) -> dict:
         """Invalidate prefix / KV cache."""
@@ -1393,65 +1400,74 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     async def update_weights_from_disk(self, body: dict) -> dict:
         """Load weights from a shared filesystem checkpoint."""
         body = body or {}
-        if not getattr(self, "_paused", False):
-            return {
-                "status": "error",
-                "message": (
-                    "Worker must be paused via pause_generation() before updating "
-                    "weights. Call pause_generation() first, then update, then "
-                    "resume_generation()."
-                ),
-            }
-        path = body.get("model_path")
-        if not path:
-            return {"status": "error", "message": "Missing 'model_path' in body"}
-        version = body.get("weight_version", "unknown")
-        rpc = body.get("engine_rpc", "reload_weights")
-        kwargs = (
-            {"weights_path": path} if rpc == "reload_weights" else {"weight_path": path}
-        )
-        try:
-            await self.engine_client.collective_rpc(rpc, kwargs=kwargs)
-            self._weight_version = version
-            logger.info(
-                f"[RL] Weights loaded from {path} (version={version}, rpc={rpc})"
+        # Hold _pause_lock across the paused-state check and the weight RPC so a
+        # concurrent resume cannot re-enable generation mid-update (dynamo-ops).
+        async with self._pause_lock:
+            if not getattr(self, "_paused", False):
+                return {
+                    "status": "error",
+                    "message": (
+                        "Worker must be paused via pause_generation() before "
+                        "updating weights. Call pause_generation() first, then "
+                        "update, then resume_generation()."
+                    ),
+                }
+            path = body.get("model_path")
+            if not path:
+                return {"status": "error", "message": "Missing 'model_path' in body"}
+            version = body.get("weight_version", "unknown")
+            rpc = body.get("engine_rpc", "reload_weights")
+            kwargs = (
+                {"weights_path": path}
+                if rpc == "reload_weights"
+                else {"weight_path": path}
             )
-            return {"status": "ok", "version": version}
-        except EngineDeadError as e:
-            self._shutdown_on_engine_dead(e)
-        except Exception as e:
-            logger.error(f"[RL] update_weights_from_disk failed: {e}")
-            return {"status": "error", "message": str(e)}
+            try:
+                await self.engine_client.collective_rpc(rpc, kwargs=kwargs)
+                self._weight_version = version
+                logger.info(
+                    f"[RL] Weights loaded from {path} (version={version}, rpc={rpc})"
+                )
+                return {"status": "ok", "version": version}
+            except EngineDeadError as e:
+                self._shutdown_on_engine_dead(e)
+            except Exception as e:
+                logger.error(f"[RL] update_weights_from_disk failed: {e}")
+                return {"status": "error", "message": str(e)}
 
     async def update_weights_from_distributed(self, body: dict) -> dict:
         """Receive weights via a distributed transport such as NCCL."""
         body = body or {}
-        if not getattr(self, "_paused", False):
-            return {
-                "status": "error",
-                "message": (
-                    "Worker must be paused via pause_generation() before updating "
-                    "weights. Call pause_generation() first, then update, then "
-                    "resume_generation()."
-                ),
+        async with self._pause_lock:
+            if not getattr(self, "_paused", False):
+                return {
+                    "status": "error",
+                    "message": (
+                        "Worker must be paused via pause_generation() before "
+                        "updating weights. Call pause_generation() first, then "
+                        "update, then resume_generation()."
+                    ),
+                }
+            version = body.get("weight_version", "unknown")
+            rpc = body.get("engine_rpc", "update_weights_from_path")
+            rpc_kwargs = {
+                k: v
+                for k, v in body.items()
+                if k not in ("engine_rpc", "weight_version")
             }
-        version = body.get("weight_version", "unknown")
-        rpc = body.get("engine_rpc", "update_weights_from_path")
-        rpc_kwargs = {
-            k: v for k, v in body.items() if k not in ("engine_rpc", "weight_version")
-        }
-        try:
-            await self.engine_client.collective_rpc(rpc, kwargs=rpc_kwargs)
-            self._weight_version = version
-            logger.info(
-                f"[RL] Weights received via distributed (version={version}, rpc={rpc})"
-            )
-            return {"status": "ok", "version": version}
-        except EngineDeadError as e:
-            self._shutdown_on_engine_dead(e)
-        except Exception as e:
-            logger.error(f"[RL] update_weights_from_distributed failed: {e}")
-            return {"status": "error", "message": str(e)}
+            try:
+                await self.engine_client.collective_rpc(rpc, kwargs=rpc_kwargs)
+                self._weight_version = version
+                logger.info(
+                    f"[RL] Weights received via distributed "
+                    f"(version={version}, rpc={rpc})"
+                )
+                return {"status": "ok", "version": version}
+            except EngineDeadError as e:
+                self._shutdown_on_engine_dead(e)
+            except Exception as e:
+                logger.error(f"[RL] update_weights_from_distributed failed: {e}")
+                return {"status": "error", "message": str(e)}
 
     async def update_weights_from_tensor(self, body: dict) -> dict:
         """Not implemented: in-process tensor transfer is not yet supported."""
@@ -1466,30 +1482,32 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         body = body or {}
         rpc = body.get("engine_rpc", "init_broadcaster")
         kwargs = {k: v for k, v in body.items() if k != "engine_rpc"}
-        try:
-            await self.engine_client.collective_rpc(rpc, kwargs=kwargs)
-            logger.info(f"[RL] Weight update group initialized (rpc={rpc})")
-            return {"status": "ok", "message": "Weight update group initialized"}
-        except EngineDeadError as e:
-            self._shutdown_on_engine_dead(e)
-        except Exception as e:
-            logger.error(f"[RL] init_weights_update_group failed: {e}")
-            return {"status": "error", "message": str(e)}
+        async with self._pause_lock:
+            try:
+                await self.engine_client.collective_rpc(rpc, kwargs=kwargs)
+                logger.info(f"[RL] Weight update group initialized (rpc={rpc})")
+                return {"status": "ok", "message": "Weight update group initialized"}
+            except EngineDeadError as e:
+                self._shutdown_on_engine_dead(e)
+            except Exception as e:
+                logger.error(f"[RL] init_weights_update_group failed: {e}")
+                return {"status": "error", "message": str(e)}
 
     async def destroy_weights_update_group(self, body: dict) -> dict:
         """Tear down the distributed weight-update communication group."""
         body = body or {}
         rpc = body.get("engine_rpc", "destroy_broadcaster")
         kwargs = {k: v for k, v in body.items() if k != "engine_rpc"}
-        try:
-            await self.engine_client.collective_rpc(rpc, kwargs=kwargs)
-            logger.info(f"[RL] Weight update group destroyed (rpc={rpc})")
-            return {"status": "ok", "message": "Weight update group destroyed"}
-        except EngineDeadError as e:
-            self._shutdown_on_engine_dead(e)
-        except Exception as e:
-            logger.error(f"[RL] destroy_weights_update_group failed: {e}")
-            return {"status": "error", "message": str(e)}
+        async with self._pause_lock:
+            try:
+                await self.engine_client.collective_rpc(rpc, kwargs=kwargs)
+                logger.info(f"[RL] Weight update group destroyed (rpc={rpc})")
+                return {"status": "ok", "message": "Weight update group destroyed"}
+            except EngineDeadError as e:
+                self._shutdown_on_engine_dead(e)
+            except Exception as e:
+                logger.error(f"[RL] destroy_weights_update_group failed: {e}")
+                return {"status": "error", "message": str(e)}
 
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
