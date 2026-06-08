@@ -52,7 +52,7 @@ trtllm =[
 
 vllm = [
     "uvloop",
-    "nixl[cu12]==1.1.0",
+    "nixl[cu13]==1.1.0",
     "vllm[flashinfer,runai,otel]==0.22.1",
     # vllm-omni is not part of ai-dynamo[vllm]: container builds inherit the
     # framework stack from vllm/vllm-openai, and pip/uv dependency resolution
@@ -69,7 +69,7 @@ sglang = [
     "sglang[diffusion]==0.5.12.post1",
     # sglang[diffusion] dropped accelerate in 0.5.12; diffusers still needs it.
     "accelerate>=0.17.0",
-    "nixl[cu12]>=1.0.0,<1.1.0",
+    "nixl[cu13]>=1.0.0,<1.1.0",
     "cupy-cuda12x>=13.0.0",
 ]
 
