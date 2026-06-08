@@ -86,8 +86,12 @@ func main() {
 		}
 
 		if val, ok := crd.Annotations[addConvAnnotation]; ok && val == "true" {
-			crd.Spec.Conversion.Webhook.ClientConfig.Service.Name = *webhookService
-			crd.Spec.Conversion.Webhook.ClientConfig.Service.Namespace = *namespace
+			if webhookService != nil && *webhookService != "" {
+				crd.Spec.Conversion.Webhook.ClientConfig.Service.Name = *webhookService
+			}
+			if namespace != nil && *namespace != "" {
+				crd.Spec.Conversion.Webhook.ClientConfig.Service.Namespace = *namespace
+			}
 		}
 
 		patchData, err := yaml.Marshal(crd)
