@@ -235,7 +235,7 @@ These crates use repository `https://github.com/ai-dynamo/dynamo.git`. The table
 
 | Version | Release Date | GitHub | Docs | Notes |
 |---------|--------------|--------|------|-------|
-| `v1.3.0-dev.1` | TBD | [Tag](https://github.com/ai-dynamo/dynamo/releases/tag/v1.3.0-dev.1) | — | Pre-Release (in progress; see Pre-Release Artifacts) |
+| `v1.3.0-dev.1` | Jun 8, 2026 | [Tag](https://github.com/ai-dynamo/dynamo/releases/tag/v1.3.0-dev.1) | — | Pre-Release (in progress; see Pre-Release Artifacts) |
 | `v1.2.0-deepseek-v4-dev.3` | May 9, 2026 | [Tag](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0-deepseek-v4-dev.3) | — | Experimental (DeepSeek-V4-Flash / V4-Pro Blackwell preview; vLLM + SGLang containers only) |
 | `v1.2.0-deepseek-v4-dev.2` | May 1, 2026 | [Tag](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0-deepseek-v4-dev.2) | — | Experimental (DeepSeek-V4-Flash / V4-Pro Blackwell preview; vLLM + SGLang containers only) |
 | `v1.1.1` | May 5, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.1) | [Docs](https://docs.dynamo.nvidia.com/dynamo) | |
