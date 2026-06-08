@@ -123,13 +123,13 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-dev.1
     - name: VllmDecodeWorker
       podTemplate:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-dev.1
               resources:
                 limits:
                   nvidia.com/gpu: "3"
