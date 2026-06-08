@@ -1420,11 +1420,17 @@ class ModelInput:
 
 
 class ModelType:
-    """What type of request this model needs: Chat, Completions, Embedding, Tensor, Images, Videos, Realtime or Prefill"""
+    """What type of request this model supports: Chat, Completions, Embedding, Tensor, Images, Videos, Realtime, or Empty (no OpenAI surface)"""
+    # No OpenAI surface — used by prefill / encode workers whose role is
+    # carried by WorkerType. Symmetric with the other ModelType.Foo members.
+    Empty: ModelType
     Chat: ModelType
     Completions: ModelType
     Embedding: ModelType
     TensorBased: ModelType
+    # Legacy prefill marker (no OpenAI surface). Dual-emitted by new prefill
+    # workers for cross-version compat so an old frontend still detects them;
+    # the role is otherwise carried by WorkerType.Prefill. Compat window only.
     Prefill: ModelType
     Images: ModelType
     Audios: ModelType
@@ -2044,8 +2050,6 @@ class WorkerType:
     (a list of alternative AND-sets) — for example, an encode worker that
     needs (Prefill AND Decode) OR a single Aggregated peer is expressed as
     `[[WorkerType.Prefill, WorkerType.Decode], [WorkerType.Aggregated]]`.
-
-    See `docs/proposals/health-disagg-readiness.md`.
     """
 
     Prefill: "WorkerType"
@@ -2062,6 +2066,8 @@ async def register_model(
     endpoint: Endpoint,
     model_path: str,
     model_name: Optional[str] = None,
+    *,
+    worker_type: WorkerType,
     context_length: Optional[int] = None,
     kv_cache_block_size: Optional[int] = None,
     router_mode: Optional[RouterMode] = None,
@@ -2072,7 +2078,6 @@ async def register_model(
     media_fetcher: Optional[MediaFetcher] = None,
     lora_name: Optional[str] = None,
     base_model_path: Optional[str] = None,
-    worker_type: Optional[WorkerType] = None,
     needs: Optional[List[List[WorkerType]]] = None,
 ) -> None:
     """
@@ -2087,13 +2092,11 @@ async def register_model(
     and a minimal model card is registered directly. Use model_path as the display name
     for these models.
 
-    Topology readiness:
+    Model serving readiness:
         `worker_type` and `needs` describe the worker's processing stage and
         peer dependencies. `needs` is a DNF list — each inner list is an
-        AND-set, the outer list is OR. When omitted, the card is registered
-        with `worker_type = None` and `needs = []`; readers apply a
-        temporary missing-field shim. Backends are expected to declare
-        these literally at each call site.
+        AND-set, the outer list is OR. `worker_type` is required; backends
+        declare it literally at each call site.
     """
     ...
 
@@ -2738,6 +2741,7 @@ class EntrypointArgs:
         namespace: Optional[str] = None,
         namespace_prefix: Optional[str] = None,
         is_prefill: bool = False,
+        is_decode: bool = False,
         migration_limit: int = 0,
         chat_engine_factory: Optional[Callable] = None,
         aic_perf_config: Optional[AicPerfConfig] = None,
@@ -2765,6 +2769,7 @@ class EntrypointArgs:
             namespace: Dynamo namespace for model discovery scoping
             namespace_prefix: Optional namespace prefix
             is_prefill: Whether this is a prefill worker
+            is_decode: Whether this is a decode worker (disaggregated); pairs with a prefill peer for readiness
             migration_limit: Maximum number of request migrations (0=disabled)
             chat_engine_factory: Optional Python chat completions engine factory callback
             aic_perf_config: Optional AIC perf-model configuration for default KV routing
@@ -2884,8 +2889,8 @@ class backend:
     class DisaggregationMode:
         # Mirrors `dynamo_backend_common::DisaggregationMode`. Engines consult
         # this on the WorkerConfig to switch their per-mode protocol behavior;
-        # the Rust Worker reads it for registration (Prefill→ModelType::Prefill,
-        # Decode→disable local indexer).
+        # the Rust Worker reads it for registration (Prefill → ModelType.Empty
+        # + WorkerType.Prefill, Decode → disable local indexer).
         Aggregated: "backend.DisaggregationMode"
         Prefill: "backend.DisaggregationMode"
         Decode: "backend.DisaggregationMode"

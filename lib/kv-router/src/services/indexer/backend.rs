@@ -17,9 +17,9 @@ use crate::protocols::{KvCacheEventData, LocalBlockHash, OverlapScores, RouterEv
 /// Block-content indexer wrapping a primary device-tier backend plus a
 /// per-tier registry of lower-tier indexers (host-pinned, disk, …).
 ///
-/// Both standalone-indexer variants own a `lower_tier: LowerTierIndexers` so
-/// tier-tagged events get routed alongside device events and tier-aware
-/// queries can return per-tier hit counts.
+/// The service owns a `lower_tier: LowerTierIndexers` so tier-tagged events
+/// get routed alongside device events and tier-aware queries can return
+/// per-tier hit counts.
 #[derive(Clone)]
 pub enum Indexer {
     Single {

@@ -204,6 +204,7 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
             runtime_config=runtime_config,
             kv_cache_block_size=kv_cache_block_size,
             is_prefill=args.is_prefill_worker,
+            is_decode=args.is_decode_worker,
         )
 
         # Create the engine with this worker's isolated runtime
