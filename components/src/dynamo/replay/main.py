@@ -443,6 +443,8 @@ def _run_planner_replay(
                     moe_ep_size=ref_args.aic_moe_ep_size,
                     attention_dp_size=ref_args.aic_attention_dp_size,
                     nextn=d_args.aic_nextn,
+                    # Model the full verification round; real conditional rates
+                    # are consumed only by the mocker's burst sampler.
                     nextn_accept_rates=(
                         ",".join(["0"] * d_args.aic_nextn)
                         if d_args.aic_nextn is not None

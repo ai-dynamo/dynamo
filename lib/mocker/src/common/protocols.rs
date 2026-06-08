@@ -272,11 +272,11 @@ impl FromStr for PreemptionMode {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
+        match value.to_ascii_lowercase().as_str() {
             "lifo" => Ok(Self::Lifo),
             "fifo" => Ok(Self::Fifo),
-            other => Err(format!(
-                "Invalid preemption_mode: '{other}'. Must be 'lifo' or 'fifo'."
+            _ => Err(format!(
+                "Invalid preemption_mode: '{value}'. Must be 'lifo' or 'fifo'."
             )),
         }
     }
@@ -300,12 +300,12 @@ impl FromStr for EngineType {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
+        match value.to_ascii_lowercase().as_str() {
             "vllm" => Ok(Self::Vllm),
             "sglang" => Ok(Self::Sglang),
             "trtllm" => Ok(Self::Trtllm),
-            other => Err(format!(
-                "Invalid engine_type '{other}'. Must be 'vllm', 'sglang', or 'trtllm'."
+            _ => Err(format!(
+                "Invalid engine_type '{value}'. Must be 'vllm', 'sglang', or 'trtllm'."
             )),
         }
     }
@@ -342,12 +342,12 @@ impl FromStr for WorkerType {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
+        match value.to_ascii_lowercase().as_str() {
             "aggregated" => Ok(Self::Aggregated),
             "prefill" => Ok(Self::Prefill),
             "decode" => Ok(Self::Decode),
-            other => Err(format!(
-                "Invalid worker_type '{other}'. Must be 'aggregated', 'prefill', or 'decode'."
+            _ => Err(format!(
+                "Invalid worker_type '{value}'. Must be 'aggregated', 'prefill', or 'decode'."
             )),
         }
     }
@@ -1288,6 +1288,24 @@ mod tests {
         assert_eq!(restored.worker_type, WorkerType::Decode);
         assert_eq!(restored.max_num_seqs, None);
         assert_eq!(restored.max_num_batched_tokens, None);
+    }
+
+    #[test]
+    fn test_mock_engine_args_accepts_legacy_enum_case_and_writes_lowercase() {
+        let args = MockEngineArgs::from_json_str(
+            &json!({
+                "engine_type": "Vllm",
+                "worker_type": "Aggregated",
+                "preemption_mode": "Lifo",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let serialized = serde_json::to_value(args).unwrap();
+        assert_eq!(serialized["engine_type"], "vllm");
+        assert_eq!(serialized["worker_type"], "aggregated");
+        assert_eq!(serialized["preemption_mode"], "lifo");
     }
 
     #[test]

@@ -34,7 +34,6 @@ pub(crate) fn normalize_conditional_accept_rates(
     }
 
     parsed.resize(nextn, 0.0);
-    parsed.truncate(nextn);
     Ok(parsed)
 }
 
