@@ -1307,3 +1307,56 @@ class TestPadMmHashesTo64:
         h64 = "f" * 64
         assert mod._pad_mm_hashes_to_64([]) == []
         assert mod._pad_mm_hashes_to_64(["abc", h64]) == ["abc" + "0" * 61, h64]
+
+
+class TestRLAdminRouteHardening:
+    """Regressions for the codex round-2 RL admin fixes."""
+
+    @pytest.mark.asyncio
+    async def test_admin_rejects_non_dict_body(self):
+        handler = _make_handler()
+        handler.engine_client = MagicMock()
+        for body in ([], "x", 5, ["pause"]):
+            for fn in (
+                handler.pause_generation,
+                handler.resume_generation,
+                handler.flush_cache,
+                handler.abort_request,
+            ):
+                resp = await fn(body)
+                assert resp["status"] == "error", (fn.__name__, body, resp)
+                assert "JSON object" in resp["message"]
+
+    @pytest.mark.asyncio
+    async def test_abort_request_surfaces_deferred_abort_failure(self):
+        handler = _make_handler()
+        handler.engine_client = MagicMock()
+
+        class _FailingGuard:
+            def __init__(self):
+                self._abort_exc = RuntimeError("engine abort boom")
+
+            async def abort(self):
+                return None
+
+        handler._deferred_aborts = {"req-x": _FailingGuard()}
+        resp = await handler.abort_request({"request_id": "req-x"})
+        assert resp["status"] == "error"
+        assert "boom" in resp["message"]
+
+    @pytest.mark.asyncio
+    async def test_abort_request_ok_when_deferred_clean(self):
+        handler = _make_handler()
+        handler.engine_client = MagicMock()
+
+        class _CleanGuard:
+            def __init__(self):
+                self._abort_exc = None
+
+            async def abort(self):
+                return None
+
+        handler._deferred_aborts = {"req-y": _CleanGuard()}
+        resp = await handler.abort_request({"request_id": "req-y"})
+        assert resp["status"] == "ok"
+        assert resp["request_id"] == "req-y"

@@ -146,6 +146,9 @@ class _DeferredAbort:
         # garbage collected mid-execution (asyncio.create_task only holds a
         # weak reference via the event loop).
         self._abort_task: Optional[asyncio.Task] = None
+        # Exception the real engine abort raised (if it has run), so the admin
+        # abort_request route can report failure instead of a false "ok".
+        self._abort_exc: Optional[BaseException] = None
 
     def signal_first_token(self) -> None:
         """Called when the first engine output for the request is received."""
@@ -189,6 +192,9 @@ class _DeferredAbort:
             await self._engine_client.abort(self._request_id)
             logger.debug(f"Aborted Request ID: {self._request_id}")
         except Exception as e:
+            # Record so abort_request can report the failure (and escalate
+            # EngineDeadError) rather than returning a false success.
+            self._abort_exc = e
             logger.warning(
                 f"Deferred abort: engine abort raised for request "
                 f"{self._request_id}: {e}"
@@ -224,7 +230,10 @@ class _DeferredAbort:
             self._abort_task.cancel()
 
         try:
-            await self._abort_task
+            # shield so that if cleanup is awaiting a real post-first-token abort
+            # and the caller is cancelled, the abort still completes (the
+            # pre-first-token path was cancelled just above and resolves here).
+            await asyncio.shield(self._abort_task)
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -1087,7 +1096,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         2. Abort and drain in-flight requests
         3. Sleep engine - safe once generation has stopped
         """
-        body = body if isinstance(body, dict) else {}
+        if body is None:
+            body = {}
+        elif not isinstance(body, dict):
+            return {
+                "status": "error",
+                "message": "request body must be a JSON object",
+            }
         level = body.get("level", 1)
         async with self._pause_lock:
             if self._pause_controller.is_paused:
@@ -1158,7 +1173,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         already reserved by the pod, then hot-swap the expert routing table.
         No pod restart is needed.
         """
-        body = body if isinstance(body, dict) else {}
+        if body is None:
+            body = {}
+        elif not isinstance(body, dict):
+            return {
+                "status": "error",
+                "message": "request body must be a JSON object",
+            }
         new_dp_size = body.get("new_data_parallel_size")
         if new_dp_size is None:
             return {
@@ -1258,7 +1279,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         1. Wake engine - restore GPU memory
         2. Re-register endpoint instance - allow frontend to route requests here again
         """
-        body = body if isinstance(body, dict) else {}
+        if body is None:
+            body = {}
+        elif not isinstance(body, dict):
+            return {
+                "status": "error",
+                "message": "request body must be a JSON object",
+            }
         tags = body.get("tags")
         async with self._pause_lock:
             needs_recovery = self._pause_controller.needs_resume_recovery
@@ -1318,7 +1345,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     async def liveness_probe(self, body: dict) -> dict:
         """Engine event-loop liveness probe."""
-        body = body if isinstance(body, dict) else {}
+        if body is None:
+            body = {}
+        elif not isinstance(body, dict):
+            return {
+                "status": "error",
+                "message": "request body must be a JSON object",
+            }
         try:
             if hasattr(self.engine_client, "check_health"):
                 await self.engine_client.check_health()
@@ -1333,7 +1366,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     async def pause_generation(self, body: dict) -> dict:
         """Pause generation before a weight update."""
-        body = body if isinstance(body, dict) else {}
+        if body is None:
+            body = {}
+        elif not isinstance(body, dict):
+            return {
+                "status": "error",
+                "message": "request body must be a JSON object",
+            }
         mode = body.get("mode", "keep")
         clear_cache = bool(body.get("clear_cache", False))
         if mode not in ("keep", "wait", "abort"):
@@ -1369,7 +1408,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     async def resume_generation(self, body: dict) -> dict:
         """Resume generation after a weight update."""
-        body = body if isinstance(body, dict) else {}
+        if body is None:
+            body = {}
+        elif not isinstance(body, dict):
+            return {
+                "status": "error",
+                "message": "request body must be a JSON object",
+            }
         # Serialize pause / resume / weight-update so a concurrent resume cannot
         # re-enable generation while an update's collective_rpc is still
         # mutating weights (dynamo-ops).
@@ -1387,7 +1432,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     async def flush_cache(self, body: dict) -> dict:
         """Invalidate prefix / KV cache."""
-        body = body if isinstance(body, dict) else {}
+        if body is None:
+            body = {}
+        elif not isinstance(body, dict):
+            return {
+                "status": "error",
+                "message": "request body must be a JSON object",
+            }
         # Serialize under _pause_lock so a flush cannot race with a locked
         # weight-update / pause / resume mutating engine cache state.
         async with self._pause_lock:
@@ -1403,7 +1454,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     async def abort_request(self, body: dict) -> dict:
         """Abort a single in-flight request by request_id."""
-        body = body if isinstance(body, dict) else {}
+        if body is None:
+            body = {}
+        elif not isinstance(body, dict):
+            return {
+                "status": "error",
+                "message": "request body must be a JSON object",
+            }
         request_id = body.get("request_id")
         if not request_id:
             return {"status": "error", "message": "Missing 'request_id' in body"}
@@ -1415,6 +1472,19 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 # until the first token, never firing during an in-flight NIXL
                 # KV transfer (which can crash EngineCore).
                 await guard.abort()
+                # If the abort already ran (post-first-token) and failed, report
+                # it instead of a false "ok"; escalate engine death like the
+                # direct path does. (Pre-first-token aborts are queued and have
+                # no result yet, so they correctly report accepted/ok.)
+                abort_exc = guard._abort_exc
+                if abort_exc is not None:
+                    if isinstance(abort_exc, EngineDeadError):
+                        self._shutdown_on_engine_dead(abort_exc)
+                    return {
+                        "status": "error",
+                        "request_id": request_id,
+                        "message": f"abort failed: {abort_exc}",
+                    }
             else:
                 await self.engine_client.abort(request_id)
             logger.debug(f"[RL] Aborted request {request_id}")
@@ -1427,12 +1497,24 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     async def get_weight_version(self, body: dict) -> dict:
         """Return the current weight version tag."""
-        body = body if isinstance(body, dict) else {}
+        if body is None:
+            body = {}
+        elif not isinstance(body, dict):
+            return {
+                "status": "error",
+                "message": "request body must be a JSON object",
+            }
         return {"status": "ok", "version": getattr(self, "_weight_version", "initial")}
 
     async def update_weights_from_disk(self, body: dict) -> dict:
         """Load weights from a shared filesystem checkpoint."""
-        body = body if isinstance(body, dict) else {}
+        if body is None:
+            body = {}
+        elif not isinstance(body, dict):
+            return {
+                "status": "error",
+                "message": "request body must be a JSON object",
+            }
         # Hold _pause_lock across the paused-state check and the weight RPC so a
         # concurrent resume cannot re-enable generation mid-update (dynamo-ops).
         async with self._pause_lock:
@@ -1474,7 +1556,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     async def update_weights_from_distributed(self, body: dict) -> dict:
         """Receive weights via a distributed transport such as NCCL."""
-        body = body if isinstance(body, dict) else {}
+        if body is None:
+            body = {}
+        elif not isinstance(body, dict):
+            return {
+                "status": "error",
+                "message": "request body must be a JSON object",
+            }
         async with self._pause_lock:
             if not getattr(self, "_paused", False):
                 return {
@@ -1511,7 +1599,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     async def update_weights_from_tensor(self, body: dict) -> dict:
         """Not implemented: in-process tensor transfer is not yet supported."""
-        body = body if isinstance(body, dict) else {}
+        if body is None:
+            body = {}
+        elif not isinstance(body, dict):
+            return {
+                "status": "error",
+                "message": "request body must be a JSON object",
+            }
         return {
             "status": "error",
             "message": "update_weights_from_tensor is not implemented",
@@ -1519,7 +1613,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     async def init_weights_update_group(self, body: dict) -> dict:
         """Initialize the distributed weight-update communication group."""
-        body = body if isinstance(body, dict) else {}
+        if body is None:
+            body = {}
+        elif not isinstance(body, dict):
+            return {
+                "status": "error",
+                "message": "request body must be a JSON object",
+            }
         rpc = body.get("engine_rpc", "init_broadcaster")
         kwargs = {k: v for k, v in body.items() if k != "engine_rpc"}
         async with self._pause_lock:
@@ -1535,7 +1635,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     async def destroy_weights_update_group(self, body: dict) -> dict:
         """Tear down the distributed weight-update communication group."""
-        body = body if isinstance(body, dict) else {}
+        if body is None:
+            body = {}
+        elif not isinstance(body, dict):
+            return {
+                "status": "error",
+                "message": "request body must be a JSON object",
+            }
         rpc = body.get("engine_rpc", "destroy_broadcaster")
         kwargs = {k: v for k, v in body.items() if k != "engine_rpc"}
         async with self._pause_lock:
