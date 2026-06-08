@@ -1,11 +1,10 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Contribution Guide
 subtitle: How to contribute to Dynamo
 max-toc-depth: 3
 ---
-
-# Contribution Guide
 
 Dynamo is an open-source distributed inference platform, built by a growing community of contributors. The project is licensed under [Apache 2.0](https://github.com/ai-dynamo/dynamo/blob/v1.1.1/LICENSE) and welcomes contributions of all sizes -- from typo fixes to major features. Community contributions have shaped core areas of Dynamo including backend integrations, documentation, deployment tooling, and performance improvements.
 

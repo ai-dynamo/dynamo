@@ -5,8 +5,6 @@ title: Topology-Aware KV Transfer
 subtitle: Keep disaggregated prefill and decode KV-cache transfers within a selected topology domain
 ---
 
-# Topology-Aware KV Transfer
-
 Topology-aware KV transfer lets a disaggregated Dynamo deployment route decode requests toward workers that share the selected prefill worker's topology domain, such as zone or rack. This reduces slow cross-domain KV-cache transfers when prefill and decode workers exchange KV data over NIXL.
 
 Use this feature when:

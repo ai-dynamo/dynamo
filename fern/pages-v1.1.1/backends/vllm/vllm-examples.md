@@ -4,8 +4,6 @@
 title: Examples
 ---
 
-# vLLM Examples
-
 For quick start instructions, see the [vLLM README](README.md). This document provides all deployment patterns for running vLLM with Dynamo, including aggregated, disaggregated, KV-routed, and expert-parallel configurations.
 
 ## Table of Contents
