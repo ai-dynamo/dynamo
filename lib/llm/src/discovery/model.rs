@@ -416,8 +416,13 @@ impl Model {
                     let Some(wt) = wt else { continue };
                     // A typed role with no live workers is itself missing — record
                     // it so the reason isn't an empty "missing worker types: ".
+                    // Only when the role is absent entirely: another live WorkerSet
+                    // of the same role makes it present, so fall through to the
+                    // `needs` check instead of falsely flagging it missing.
                     if *count == 0 {
-                        missing.insert(wt.as_str().to_string());
+                        if !present.contains(wt) {
+                            missing.insert(wt.as_str().to_string());
+                        }
                         continue;
                     }
                     if needs.is_empty() {
@@ -1470,6 +1475,39 @@ mod tests {
         let ns = &topo.namespaces["ns1"];
         assert!(!ns.ready);
         assert!(ns.present.is_empty());
+        assert_eq!(ns.missing_worker_types, vec!["prefill".to_string()]);
+        assert_eq!(ns.reason.as_deref(), Some("missing worker types: prefill"));
+    }
+
+    #[test]
+    fn topology_zero_worker_role_not_missing_when_present_elsewhere() {
+        // Two WorkerSets of the same role in one namespace: one live, one with
+        // zero workers. The role is present via the live set, so it must NOT be
+        // reported missing; the real gap (its unsatisfied peer) must surface.
+        let model = Model::new("llama".to_string());
+        let (d_live, _tl) = ws_with_role(
+            "ns1",
+            "mdc-d-live",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![1, 2],
+        );
+        let (d_dead, _td) = ws_with_role(
+            "ns1",
+            "mdc-d-dead",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![], // zero live workers, same role
+        );
+        model.add_worker_set("ns1".to_string(), d_live);
+        model.add_worker_set("ns1:dead".to_string(), d_dead);
+
+        let topo = model.namespace_topology();
+        assert!(!topo.ready);
+        let ns = &topo.namespaces["ns1"];
+        assert!(!ns.ready);
+        assert_eq!(ns.present, vec!["decode".to_string()]);
+        // decode is present (live set) → not missing; prefill is the real gap.
         assert_eq!(ns.missing_worker_types, vec!["prefill".to_string()]);
         assert_eq!(ns.reason.as_deref(), Some("missing worker types: prefill"));
     }
