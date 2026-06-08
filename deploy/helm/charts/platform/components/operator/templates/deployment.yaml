@@ -74,7 +74,7 @@ spec:
         args:
           - "--crds-dir=/opt/dynamo-operator/crds/"
           - "--version={{ .Chart.AppVersion }}"
-          - --webhook-service="{{ include "dynamo-operator.fullname" . }}-webhook-service"
+          - --webhook-service={{ include "dynamo-operator.fullname" . }}-webhook-service
           - --namespace={{ .Release.Namespace }}
       {{- end }}
       containers:
