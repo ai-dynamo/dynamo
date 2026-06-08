@@ -10,7 +10,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from dynamo.llm import EngineType, EntrypointArgs, MockEngineArgs
+from dynamo.llm import EngineType, EntrypointArgs
+from dynamo.mocker import MockEngineArgs
 
 MODULE_PATH = Path(__file__).resolve().parents[2] / "config.py"
 SPEC = importlib.util.spec_from_file_location("dynamo_mocker_config", MODULE_PATH)

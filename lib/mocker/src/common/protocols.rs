@@ -5,6 +5,7 @@ use derive_builder::Builder;
 use dynamo_kv_router::config::RouterQueuePolicy;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 use uuid::Uuid;
 use validator::{Validate, ValidationError};
@@ -244,7 +245,14 @@ impl PrefillCost {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputSignal {
     pub uuid: Uuid,
+    /// Terminal flag: the request's lifecycle has ended. Replay drivers free
+    /// resources and advance/notify on this.
     pub completed: bool,
+    /// Set with `completed` when the request was rejected without ever running
+    /// (its footprint exceeds the whole KV pool); drivers free/advance but
+    /// exclude it from token/latency/throughput stats.
+    #[serde(default)]
+    pub rejected: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff_delay_ms: Option<f64>,
 }
@@ -259,6 +267,20 @@ pub enum PreemptionMode {
     Fifo,
 }
 
+impl FromStr for PreemptionMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "lifo" => Ok(Self::Lifo),
+            "fifo" => Ok(Self::Fifo),
+            other => Err(format!(
+                "Invalid preemption_mode: '{other}'. Must be 'lifo' or 'fifo'."
+            )),
+        }
+    }
+}
+
 /// Engine type for selecting scheduling and KV cache simulation behavior
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum EngineType {
@@ -270,6 +292,21 @@ pub enum EngineType {
     /// TensorRT-LLM-style scheduling. Reuses the vLLM scheduler
     /// core with a TensorRT-LLM-style admission policy.
     Trtllm,
+}
+
+impl FromStr for EngineType {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "vllm" => Ok(Self::Vllm),
+            "sglang" => Ok(Self::Sglang),
+            "trtllm" => Ok(Self::Trtllm),
+            other => Err(format!(
+                "Invalid engine_type '{other}'. Must be 'vllm', 'sglang', or 'trtllm'."
+            )),
+        }
+    }
 }
 
 /// Scheduling policy applied by the shared vLLM scheduler core.
@@ -296,6 +333,21 @@ pub enum WorkerType {
     Prefill,
     /// Dedicated decode worker in disaggregated mode
     Decode,
+}
+
+impl FromStr for WorkerType {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "aggregated" => Ok(Self::Aggregated),
+            "prefill" => Ok(Self::Prefill),
+            "decode" => Ok(Self::Decode),
+            other => Err(format!(
+                "Invalid worker_type '{other}'. Must be 'aggregated', 'prefill', or 'decode'."
+            )),
+        }
+    }
 }
 
 /// Configuration for reasoning/thinking token output in the mocker.
@@ -458,38 +510,6 @@ struct MockEngineArgsSerde {
     trtllm: OptionalConfigValue<TrtllmArgs>,
     #[serde(rename = "has_perf_model")]
     _has_perf_model: OptionalConfigValue<serde_json::Value>,
-}
-
-fn parse_engine_type(value: &str) -> Result<EngineType, String> {
-    match value {
-        "vllm" => Ok(EngineType::Vllm),
-        "sglang" => Ok(EngineType::Sglang),
-        "trtllm" => Ok(EngineType::Trtllm),
-        other => Err(format!(
-            "Invalid engine_type '{other}'. Must be 'vllm', 'sglang', or 'trtllm'."
-        )),
-    }
-}
-
-fn parse_worker_type(value: &str) -> Result<WorkerType, String> {
-    match value {
-        "aggregated" => Ok(WorkerType::Aggregated),
-        "prefill" => Ok(WorkerType::Prefill),
-        "decode" => Ok(WorkerType::Decode),
-        other => Err(format!(
-            "Invalid worker_type '{other}'. Must be 'aggregated', 'prefill', or 'decode'."
-        )),
-    }
-}
-
-fn parse_preemption_mode(value: &str) -> Result<PreemptionMode, String> {
-    match value {
-        "lifo" => Ok(PreemptionMode::Lifo),
-        "fifo" => Ok(PreemptionMode::Fifo),
-        other => Err(format!(
-            "Invalid preemption_mode: '{other}'. Must be 'lifo' or 'fifo'."
-        )),
-    }
 }
 
 fn load_perf_model(path: &Path) -> Arc<PerfModel> {
@@ -861,7 +881,7 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         let mut builder = Self::builder();
 
         if let Some(engine_type) = compat.engine_type.into_non_null("engine_type")? {
-            builder = builder.engine_type(parse_engine_type(&engine_type)?);
+            builder = builder.engine_type(engine_type.parse()?);
         }
         if let Some(Some(num_gpu_blocks)) = compat.num_gpu_blocks.into_nullable() {
             builder = builder.num_gpu_blocks(num_gpu_blocks);
@@ -906,7 +926,7 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         let worker_type = if let Some(worker_type) =
             compat.worker_type.into_non_null("worker_type")?
         {
-            parse_worker_type(&worker_type)?
+            worker_type.parse()?
         } else {
             let is_prefill = compat
                 .is_prefill
@@ -1035,7 +1055,7 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
             builder = builder.zmq_replay_port(zmq_replay_port);
         }
         if let Some(preemption_mode) = compat.preemption_mode.into_non_null("preemption_mode")? {
-            builder = builder.preemption_mode(parse_preemption_mode(&preemption_mode)?);
+            builder = builder.preemption_mode(preemption_mode.parse()?);
         }
         if let Some(router_queue_policy) = compat.router_queue_policy.into_nullable() {
             let router_queue_policy = router_queue_policy

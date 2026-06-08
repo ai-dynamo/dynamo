@@ -161,6 +161,36 @@ def test_build_sampling_params_passes_n_for_token_requests():
     assert sampling_params["max_new_tokens"] == 8
 
 
+def test_build_sampling_params_forwards_repetition_controls_for_token_requests():
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {
+                "presence_penalty": 0.1,
+                "frequency_penalty": 0.2,
+                "repetition_penalty": 1.05,
+                "temperature": 1.0,
+                "top_p": 0.95,
+                "top_k": 40,
+                "min_p": 0.01,
+                "seed": 1234,
+            },
+            "stop_conditions": {"max_tokens": 8},
+        }
+    )
+
+    assert sampling_params["presence_penalty"] == 0.1
+    assert sampling_params["frequency_penalty"] == 0.2
+    assert sampling_params["repetition_penalty"] == 1.05
+    assert sampling_params["temperature"] == 1.0
+    assert sampling_params["top_p"] == 0.95
+    assert sampling_params["top_k"] == 40
+    assert sampling_params["min_p"] == 0.01
+    assert sampling_params["sampling_seed"] == 1234
+    assert "seed" not in sampling_params
+
+
 def test_build_sampling_params_passes_n_for_sglang_tokenizer_requests():
     handler = _new_decode_handler(use_sglang_tokenizer=True)
 
@@ -178,6 +208,34 @@ def test_build_sampling_params_passes_n_for_sglang_tokenizer_requests():
     assert sampling_params["temperature"] == 0.2
     assert sampling_params["max_new_tokens"] == 8
     assert sampling_params["stop_token_ids"] == [32, 34]
+
+
+def test_build_sampling_params_forwards_repetition_controls_for_openai_requests():
+    handler = _new_decode_handler(use_sglang_tokenizer=True)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.2,
+            "repetition_penalty": 1.05,
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "top_k": 40,
+            "min_p": 0.01,
+            "seed": 1234,
+            "max_tokens": 8,
+        }
+    )
+
+    assert sampling_params["presence_penalty"] == 0.1
+    assert sampling_params["frequency_penalty"] == 0.2
+    assert sampling_params["repetition_penalty"] == 1.05
+    assert sampling_params["temperature"] == 1.0
+    assert sampling_params["top_p"] == 0.95
+    assert sampling_params["top_k"] == 40
+    assert sampling_params["min_p"] == 0.01
+    assert sampling_params["sampling_seed"] == 1234
+    assert "seed" not in sampling_params
 
 
 def test_build_logprob_kwargs_allows_chosen_token_logprobs(monkeypatch):

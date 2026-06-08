@@ -175,10 +175,15 @@ type ServiceCheckpointStatus struct {
 	// CheckpointName is the name of the associated Checkpoint CR
 	// +optional
 	CheckpointName string `json:"checkpointName,omitempty"`
+	// CheckpointID is the artifact ID used by the snapshot protocol
+	// +optional
+	CheckpointID string `json:"checkpointID,omitempty"`
 	// IdentityHash is the computed hash of the checkpoint identity
+	// Deprecated: automatic checkpoints use CheckpointID. This field is retained
+	// for older status consumers.
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
-	// Ready indicates if the checkpoint was visible to the worker at startup
+	// Ready indicates the checkpoint artifact is ready for future pods to restore.
 	// +optional
 	Ready bool `json:"ready,omitempty"`
 }

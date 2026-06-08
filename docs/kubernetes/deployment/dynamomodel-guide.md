@@ -107,7 +107,7 @@ DynamoModel requires just a few key fields to deploy a model or adapter:
 | `modelName` | Yes | Model identifier | `my-custom-lora` |
 | `baseModelName` | Yes | Links to DGD modelRef | `Qwen/Qwen3-0.6B` |
 | `modelType` | No | Type: base/lora/adapter | `lora` (default: `base`) |
-| `source.uri` | For LoRA | Model location | `s3://bucket/path` or `hf://org/model` |
+| `source.uri` | For LoRA | Model location | `s3://bucket/path`, `hf://org/model`, or `file:///mnt/loras/path` |
 
 **Example minimal LoRA configuration:**
 ```yaml
@@ -210,7 +210,57 @@ spec:
       # ... rest of config
 ```
 
-### Use Case 3: Multiple LoRAs on Same Base Model
+### Use Case 3: Local / Shared-Volume LoRA Adapter
+
+Deploy a LoRA adapter from a path that is already present on the worker pods, for
+example a shared volume (NFS, PVC, hostPath) mounted into the serving containers.
+Use the `file:///` scheme with an absolute path (note the three slashes,
+followed by the absolute path). Only the `file:///` form is supported.
+
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoModel
+metadata:
+  name: shared-volume-lora
+  namespace: dynamo-system
+spec:
+  modelName: shared-volume-adapter
+  baseModelName: Qwen/Qwen3-0.6B
+  modelType: lora
+  source:
+    uri: file:///mnt/loras/qwen-shared-lora
+```
+
+**Prerequisites:**
+- The path must be **mounted and readable from the serving worker pods**. The
+  operator does not copy the adapter — each worker loads it directly from the
+  given path, so the volume must be mounted at the same path on every pod that
+  serves `baseModelName`.
+- Base model `Qwen/Qwen3-0.6B` running via DGD/DCD.
+
+**Mounting the volume:** Add the volume and mount to your DGD/DCD worker so the
+adapter path exists inside the container:
+
+```yaml
+# In your DGD/DCD worker service
+extraPodSpec:
+  volumes:
+    - name: loras
+      persistentVolumeClaim:
+        claimName: loras-pvc
+  mainContainer:
+    volumeMounts:
+      - name: loras
+        mountPath: /mnt/loras
+        readOnly: true
+```
+
+> **Note:** Because no remote fetch happens, the path in `source.uri` must match
+> the in-container mount path exactly, and the files must be readable by every
+> worker replica. If a replica cannot see the path, that endpoint will fail to
+> become ready.
+
+### Use Case 4: Multiple LoRAs on Same Base Model
 
 Deploy multiple LoRA adapters on the same base model deployment.
 
@@ -435,6 +485,9 @@ status:
    **Solution:**
    - For S3: Verify bucket permissions, IAM role, credentials
    - For HuggingFace: Verify token is valid, repo exists and is accessible
+   - For `file:///` (local/shared volume): Verify the path is mounted and readable
+     on every worker pod, the mount path matches the URI exactly, and the volume
+     is attached to all worker replicas
 
 2. **Invalid LoRA format**
    **Solution:** Ensure your LoRA weights are in the format expected by your backend framework (SGLang, vLLM, etc.)

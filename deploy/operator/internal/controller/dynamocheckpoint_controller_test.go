@@ -32,6 +32,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -446,6 +447,7 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhasePending, updated.Status.Phase)
+		assert.Equal(t, testHash, updated.Status.CheckpointID)
 		assert.Equal(t, testHash, updated.Status.IdentityHash)
 		assert.Empty(t, updated.Status.Message)
 		assert.Equal(t, testHash, updated.Labels[snapshotprotocol.CheckpointIDLabel])
@@ -497,6 +499,7 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: friendlyCheckpointName, Namespace: testNamespace}, updated))
 		assert.Equal(t, testHash, updated.Labels[snapshotprotocol.CheckpointIDLabel])
+		assert.Equal(t, testHash, updated.Status.CheckpointID)
 		assert.Equal(t, testHash, updated.Status.IdentityHash)
 	})
 
@@ -553,6 +556,115 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: duplicate.Name, Namespace: testNamespace}, updated))
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed, updated.Status.Phase)
 		assert.Contains(t, updated.Status.Message, primary.Name)
+	})
+}
+
+func TestCheckpointReconciler_FinalizeResourceCleansRetainedAutoCheckpointOnCRDelete(t *testing.T) {
+	ctx := context.Background()
+	s := checkpointTestScheme()
+
+	cfg := checkpointTestConfig()
+	cfg.Checkpoint.Storage = configv1alpha1.CheckpointStorageConfiguration{
+		Type: snapshotprotocol.StorageTypePVC,
+		PVC: configv1alpha1.CheckpointPVCConfig{
+			PVCName:  "snapshot-pvc",
+			BasePath: "/checkpoints",
+		},
+	}
+
+	t.Run("creates cleanup job and keeps finalizer pending", func(t *testing.T) {
+		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhaseReady)
+		ckpt.Labels = map[string]string{snapshotprotocol.CheckpointIDLabel: testHash}
+		ckpt.Annotations = map[string]string{
+			consts.CheckpointAutoAnnotation:           consts.KubeLabelValueTrue,
+			consts.CheckpointDeletionPolicyAnnotation: string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain),
+		}
+		r := makeCheckpointReconciler(s, ckpt)
+		r.Config = cfg
+
+		err := r.FinalizeResource(ctx, ckpt)
+		require.ErrorIs(t, err, errCheckpointCleanupPending)
+
+		current := &batchv1.Job{}
+		require.NoError(t, r.Get(ctx, types.NamespacedName{
+			Name:      "checkpoint-cleanup-" + testHash,
+			Namespace: testNamespace,
+		}, current))
+		assert.Equal(t, testHash, current.Labels[snapshotprotocol.CheckpointIDLabel])
+	})
+
+	t.Run("running cleanup job keeps finalizer pending", func(t *testing.T) {
+		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhaseReady)
+		ckpt.Labels = map[string]string{snapshotprotocol.CheckpointIDLabel: testHash}
+		ckpt.Annotations = map[string]string{
+			consts.CheckpointAutoAnnotation:           consts.KubeLabelValueTrue,
+			consts.CheckpointDeletionPolicyAnnotation: string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain),
+		}
+		job, err := buildCheckpointCleanupJob(cfg, ckpt, testHash, snapshotprotocol.Storage{
+			Type:     snapshotprotocol.StorageTypePVC,
+			PVCName:  "snapshot-pvc",
+			BasePath: "/checkpoints",
+		})
+		require.NoError(t, err)
+		r := makeCheckpointReconciler(s, ckpt, job)
+		r.Config = cfg
+
+		err = r.FinalizeResource(ctx, ckpt)
+		require.ErrorIs(t, err, errCheckpointCleanupPending)
+	})
+
+	t.Run("failed cleanup job is deleted for retry", func(t *testing.T) {
+		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhaseReady)
+		ckpt.Labels = map[string]string{snapshotprotocol.CheckpointIDLabel: testHash}
+		ckpt.Annotations = map[string]string{
+			consts.CheckpointAutoAnnotation:           consts.KubeLabelValueTrue,
+			consts.CheckpointDeletionPolicyAnnotation: string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain),
+		}
+		job, err := buildCheckpointCleanupJob(cfg, ckpt, testHash, snapshotprotocol.Storage{
+			Type:     snapshotprotocol.StorageTypePVC,
+			PVCName:  "snapshot-pvc",
+			BasePath: "/checkpoints",
+		})
+		require.NoError(t, err)
+		job.Status.Conditions = []batchv1.JobCondition{{
+			Type:    batchv1.JobFailed,
+			Status:  corev1.ConditionTrue,
+			Message: "boom",
+		}}
+		r := makeCheckpointReconciler(s, ckpt, job)
+		r.Config = cfg
+
+		err = r.FinalizeResource(ctx, ckpt)
+		require.ErrorIs(t, err, errCheckpointCleanupPending)
+		current := &batchv1.Job{}
+		err = r.Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, current)
+		require.True(t, apierrors.IsNotFound(err), "expected failed cleanup job to be deleted, got %v", err)
+	})
+
+	t.Run("completed cleanup job is removed and finalizer may finish", func(t *testing.T) {
+		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhaseReady)
+		ckpt.Labels = map[string]string{snapshotprotocol.CheckpointIDLabel: testHash}
+		ckpt.Annotations = map[string]string{
+			consts.CheckpointAutoAnnotation:           consts.KubeLabelValueTrue,
+			consts.CheckpointDeletionPolicyAnnotation: string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain),
+		}
+		job, err := buildCheckpointCleanupJob(cfg, ckpt, testHash, snapshotprotocol.Storage{
+			Type:     snapshotprotocol.StorageTypePVC,
+			PVCName:  "snapshot-pvc",
+			BasePath: "/checkpoints",
+		})
+		require.NoError(t, err)
+		job.Status.Conditions = []batchv1.JobCondition{{
+			Type:   batchv1.JobComplete,
+			Status: corev1.ConditionTrue,
+		}}
+		r := makeCheckpointReconciler(s, ckpt, job)
+		r.Config = cfg
+
+		require.NoError(t, r.FinalizeResource(ctx, ckpt))
+		current := &batchv1.Job{}
+		err = r.Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, current)
+		require.True(t, apierrors.IsNotFound(err), "expected completed cleanup job to be removed, got %v", err)
 	})
 }
 

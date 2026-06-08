@@ -14,6 +14,7 @@ use super::load::{LoadedAgentTrace, RequestEntry, ToolEntry};
 pub fn build_agentic_mooncake_rows(
     mut loaded: LoadedAgentTrace,
 ) -> Result<(usize, Vec<AgenticMooncakeRow>)> {
+    loaded.ensure_agentic_compatible()?;
     let global_start_ms = loaded
         .requests
         .iter()
@@ -464,6 +465,7 @@ mod tests {
                 contextual_request("r2", "root", None, 1_300, 1_400, vec![11, 22]),
             ],
             tools: vec![tool("root", "call-1", "ls", 1_150, 1_250)],
+            contains_request_trace: false,
         };
 
         let (_, rows) = build_agentic_mooncake_rows(loaded).unwrap();
@@ -484,6 +486,22 @@ mod tests {
     }
 
     #[test]
+    fn agentic_converter_rejects_request_trace_schema() {
+        let loaded = LoadedAgentTrace {
+            requests: vec![request("r1", 1_000, 1_100, vec![11])],
+            tools: Vec::new(),
+            contains_request_trace: true,
+        };
+
+        let error = build_agentic_mooncake_rows(loaded).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot be converted with --agentic")
+        );
+    }
+
+    #[test]
     fn agentic_converter_attaches_parallel_tool_events_with_union_wait() {
         let loaded = LoadedAgentTrace {
             requests: vec![
@@ -497,6 +515,7 @@ mod tests {
                 tool("root", "call-2", "read", 1_150, 1_250),
                 tool("root", "call-3", "find", 1_200, 1_250),
             ],
+            contains_request_trace: false,
         };
 
         let (_, rows) = build_agentic_mooncake_rows(loaded).unwrap();
@@ -521,6 +540,7 @@ mod tests {
                 contextual_request("parent-2", "root", None, 1_500, 1_600, vec![11, 22]),
             ],
             tools: Vec::new(),
+            contains_request_trace: false,
         };
 
         let (_, rows) = build_agentic_mooncake_rows(loaded).unwrap();
@@ -543,6 +563,7 @@ mod tests {
                 contextual_request("child-2", "child", Some("root-b"), 1_200, 1_300, vec![22]),
             ],
             tools: Vec::new(),
+            contains_request_trace: false,
         };
 
         let err = build_agentic_mooncake_rows(loaded).unwrap_err();
@@ -560,6 +581,7 @@ mod tests {
                 contextual_request("parent-3", "root", None, 2_000, 2_100, vec![11, 22, 33]),
             ],
             tools: Vec::new(),
+            contains_request_trace: false,
         };
 
         let (_, rows) = build_agentic_mooncake_rows(loaded).unwrap();

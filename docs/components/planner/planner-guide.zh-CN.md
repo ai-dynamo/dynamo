@@ -123,7 +123,6 @@ features:
 | `max_num_fpm_samples` | int | `64` | 为在线调优或回归保留的 FPM 观测最大数量。 |
 | `fpm_sample_bucket_size` | int | `16` | 用于观测淘汰的 bucket 数量（必须是完全平方数）。 |
 | `load_scaling_down_sensitivity` | int | `80` | 缩容敏感度 0-100（0=永不，100=激进）。 |
-| `load_metric_samples` | int | `10` | 每次决策要收集的指标样本数。 |
 | `load_min_observations` | int | `5` | 做出扩缩容决策前所需的最少观测数。 |
 
 ### 通用设置

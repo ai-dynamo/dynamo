@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nemotron-ultra-model-validate
+  labels:
+    app.kubernetes.io/name: nemotron-ultra-model-validate
+    app.kubernetes.io/part-of: nemotron-ultra
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nemotron-ultra-model-validate
+        app.kubernetes.io/part-of: nemotron-ultra
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: validate
+          image: python:3.10-slim
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -Eeuo pipefail
+              required=(
+                config.json
+                tokenizer.json
+                tokenizer_config.json
+                generation_config.json
+                ultra_v3_reasoning_parser.py
+              )
+              MODEL_PATH="/opt/models/patched/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"
+              if [ ! -d "${MODEL_PATH}" ]; then
+                echo "MODEL_VALIDATE_FAIL class=model_path_missing path=${MODEL_PATH}"
+                echo "Run model-download.yaml or bind a platform shared-model-cache PVC containing the patched Ultra model view."
+                exit 42
+              fi
+              for rel in "${required[@]}"; do
+                if [ ! -r "${MODEL_PATH}/${rel}" ]; then
+                  echo "MODEL_VALIDATE_FAIL class=model_required_file_missing path=${MODEL_PATH}/${rel}"
+                  echo "Run model-download.yaml or fix the platform shared-model-cache contents."
+                  exit 43
+                fi
+              done
+              python3 - <<'PY'
+              import json
+              from pathlib import Path
+              model_path = Path("/opt/models/patched/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4")
+              config = json.loads((model_path / "config.json").read_text())
+              print(
+                  "MODEL_VALIDATE_PASS",
+                  "hf_model=nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+                  "model_type=" + str(config.get("model_type")),
+                  "path=" + str(model_path),
+              )
+              PY
+          volumeMounts:
+            - name: shared-model-cache
+              mountPath: /opt/models
+              readOnly: true
+      volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache

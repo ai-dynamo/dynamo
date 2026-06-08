@@ -25,6 +25,7 @@ from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 from dynamo._core import Context
+from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend import telemetry
 from dynamo.common.backend.disagg import require_prefill_result
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
@@ -46,7 +47,7 @@ from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, Zm
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import ModelInput
-from dynamo.vllm.args import parse_args
+from dynamo.vllm.args import configure_rl_logprobs_mode, parse_args
 from dynamo.vllm.cache_info import (
     configure_kv_event_block_size,
     get_configured_kv_event_block_size,
@@ -140,11 +141,13 @@ class VllmLLMEngine(LLMEngine):
         disaggregation_mode: DisaggregationMode,
         served_model_name: str,
         component: str,
+        enable_rl: bool = False,
     ):
         self.engine_args = engine_args
         self.disaggregation_mode = disaggregation_mode
         self._served_model_name = served_model_name
         self._component = component
+        self.enable_rl = enable_rl
         self.engine_client: AsyncLLM | None = None
         self._vllm_config: Any = None
         self._default_sampling_params: Any = None
@@ -177,6 +180,8 @@ class VllmLLMEngine(LLMEngine):
                 config.engine_args.served_model_name
             ) = config.model
 
+        configure_rl_logprobs_mode(config)
+
         # _resolve_disaggregation_mode() in DynamoVllmConfig has already
         # promoted the field to a DisaggregationMode enum; the field type
         # is still the input union, so narrow it here for mypy (cast
@@ -187,6 +192,7 @@ class VllmLLMEngine(LLMEngine):
             mode,
             served_model_name=config.served_model_name or config.model,
             component=config.component,
+            enable_rl=config.enable_rl,
         )
         worker_config = WorkerConfig.from_runtime_config(
             config,
@@ -266,7 +272,10 @@ class VllmLLMEngine(LLMEngine):
 
         # TODO: remove dict() once build_sampling_params accepts GenerateRequest
         sampling_params = build_sampling_params(
-            dict(request), self._default_sampling_params, self._model_max_len
+            dict(request),
+            self._default_sampling_params,
+            self._model_max_len,
+            enable_rl=self.enable_rl,
         )
 
         # vLLM's KV transfer is internal to NixlConnector
@@ -294,9 +303,13 @@ class VllmLLMEngine(LLMEngine):
             sampling_params.min_tokens = 1
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
             prefill_result = require_prefill_result(request, self.disaggregation_mode)
-            kv_params = prefill_result.get("disaggregated_params", {}).get(
-                "kv_transfer_params"
-            )
+            # `disaggregated_params` may be present-but-None (prefill error path
+            # / _build_disaggregated_params returning None), so use `or {}` — a
+            # .get default only applies when the key is absent. A None value then
+            # falls through to the kv_params ValueError below instead of raising
+            # AttributeError on None.get(...).
+            disaggregated_params = prefill_result.get("disaggregated_params") or {}
+            kv_params = disaggregated_params.get("kv_transfer_params")
             if kv_params is None:
                 raise ValueError(
                     "decode worker received prefill_result without "
@@ -327,6 +340,15 @@ class VllmLLMEngine(LLMEngine):
         )
 
         is_prefill = self.disaggregation_mode == DisaggregationMode.PREFILL
+        tokenizer = getattr(self.engine_client, "tokenizer", None)
+        # vLLM emits a selected-token logprob dict even at `logprobs=0`,
+        # so the top-k suppression happens below, not at the engine.
+        (
+            requested_logprobs_count,
+            requested_prompt_logprobs_count,
+        ) = _shared_logprobs.parse_logprob_options(
+            request.get("output_options", {}) or {}
+        )
 
         total_output_tokens_by_index: dict[int, int] = {}
         async for res in gen:
@@ -348,16 +370,46 @@ class VllmLLMEngine(LLMEngine):
                 finish_reason = getattr(output, "finish_reason", None)
                 if not token_ids and not finish_reason:
                     continue
-                prepared_outputs.append((output_idx, token_ids, finish_reason))
+                prepared_outputs.append((output, output_idx, token_ids, finish_reason))
 
-            for output_idx, token_ids, finish_reason in prepared_outputs:
+            for output, output_idx, token_ids, finish_reason in prepared_outputs:
                 out: GenerateChunk = {
                     "index": output_idx,
                     "token_ids": token_ids,
                 }
 
+                # `build_sampling_params` forces DELTA output → offset 0.
+                # `fallback_to_first_on_missing=True` matches legacy
+                # vLLM handler: always emit when vLLM returned a dict.
+                (
+                    log_probs,
+                    top_logprobs,
+                ) = _shared_logprobs.extract_from_completion_output(
+                    output,
+                    0,
+                    tokenizer=tokenizer,
+                    fallback_to_first_on_missing=True,
+                    include_bytes=True,
+                )
+                if log_probs is not None:
+                    out["log_probs"] = log_probs
+                if (
+                    top_logprobs is not None
+                    and requested_logprobs_count is not None
+                    and requested_logprobs_count > 0
+                ):
+                    out["top_logprobs"] = top_logprobs
+
                 if finish_reason:
                     out["finish_reason"] = str(finish_reason)
+                    # vLLM hangs prompt_logprobs off `RequestOutput`, not
+                    # `CompletionOutput` — read from `res`.
+                    if requested_prompt_logprobs_count is not None:
+                        prompt_payload = _shared_logprobs.extract_prompt_logprobs_from_completion_output(
+                            res, tokenizer=tokenizer
+                        )
+                        if prompt_payload is not None:
+                            out["engine_data"] = {"prompt_logprobs": prompt_payload}
                     prompt_tokens = (
                         len(res.prompt_token_ids) if res.prompt_token_ids else 0
                     )

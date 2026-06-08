@@ -153,7 +153,7 @@ impl L1Cache {
     /// extends the cached tokens with a fresh encode of `input[byte_offset..]`;
     /// `deepest_boundary` is the deepest special-token boundary in `input` (end-exclusive),
     /// handed back so [`extend_after_match`] need not rescan the input for it.
-    pub fn longest_prefix_match(&self, input: &str) -> Option<(Vec<TokenIdType>, usize, usize)> {
+    pub fn longest_prefix_match(&self, input: &str) -> Option<(Arc<[TokenIdType]>, usize, usize)> {
         let boundaries = self.boundaries(input);
 
         if boundaries.is_empty() {
@@ -188,7 +188,10 @@ impl L1Cache {
                 if let Some(cb) = &self.on_hit {
                     cb();
                 }
-                return Some((tokens.to_vec(), boundary_pos, deepest_boundary));
+                // Return the shared `Arc` directly — the caller decides whether to
+                // materialize a `Vec` (and reserves exact capacity when it does),
+                // avoiding a clone of the (large) cached prefix on every hit.
+                return Some((tokens, boundary_pos, deepest_boundary));
             }
         }
 
@@ -304,7 +307,7 @@ impl L1Cache {
     pub fn extend_after_match<E: Encoder + ?Sized>(
         &self,
         input: &str,
-        prefix_tokens: Vec<TokenIdType>,
+        prefix_tokens: Arc<[TokenIdType]>,
         prefix_len: usize,
         deepest_boundary: usize,
         tokenizer: &E,
@@ -318,9 +321,11 @@ impl L1Cache {
 
         let Some(deepest) = deepest else {
             // No new boundary in the suffix — nothing worth caching. Encode the suffix
-            // once and merge, identical to the non-extend hit path.
+            // once and merge, identical to the non-extend hit path. Reserve exact capacity
+            // so the prefix isn't re-copied by a Vec grow-realloc.
             let suffix_enc = tokenizer.encode(&input[prefix_len..])?;
-            let mut merged = prefix_tokens;
+            let mut merged = Vec::with_capacity(prefix_tokens.len() + suffix_enc.token_ids().len());
+            merged.extend_from_slice(&prefix_tokens);
             merged.extend_from_slice(suffix_enc.token_ids());
             return Ok(merged);
         };
@@ -328,8 +333,15 @@ impl L1Cache {
         // Cumulative tokens up to `deepest` = matched prefix + the spanning segment.
         // Both `prefix_len` and `deepest` are special-token boundaries, so encoding the
         // span as one chunk and concatenating preserves the merge invariant.
+        // Encode both segments up front so `cumulative` can be reserved to its final
+        // size (prefix + seg_a + seg_b) — this eliminates the two grow-reallocs (each of
+        // which re-copied the whole large prefix) the previous Vec-append path incurred.
         let seg_a = tokenizer.encode(&input[prefix_len..deepest])?;
-        let mut cumulative = prefix_tokens;
+        let seg_b = tokenizer.encode(&input[deepest..])?;
+        let mut cumulative = Vec::with_capacity(
+            prefix_tokens.len() + seg_a.token_ids().len() + seg_b.token_ids().len(),
+        );
+        cumulative.extend_from_slice(&prefix_tokens);
         cumulative.extend_from_slice(seg_a.token_ids());
 
         // Key is blake3 of input[0..deepest]. Built with the same streaming idiom as
@@ -339,14 +351,15 @@ impl L1Cache {
         hasher.update(&input.as_bytes()[..deepest]);
         let hash_bytes: Blake3Hash = *hasher.finalize().as_bytes();
 
+        // Snapshot prefix+seg_a (`as_slice().into()` copies only the populated len, not the
+        // reserved capacity) and cache it.
         let tokens: Arc<[TokenIdType]> = cumulative.as_slice().into();
         self.cache.insert(hash_bytes, tokens);
 
-        // Tokenize the trailing segment after `deepest` for the returned result.
-        let seg_b = tokenizer.encode(&input[deepest..])?;
-        let mut merged = cumulative;
-        merged.extend_from_slice(seg_b.token_ids());
-        Ok(merged)
+        // Append the trailing segment for the returned result — no realloc, capacity was
+        // reserved above.
+        cumulative.extend_from_slice(seg_b.token_ids());
+        Ok(cumulative)
     }
 
     /// Number of live entries. Flushes moka's deferred maintenance first so the count is
@@ -505,7 +518,8 @@ mod tests {
 
         let suffix = &target[prefix_len..];
         let suffix_enc = tokenizer.encode(suffix).unwrap();
-        let mut merged = prefix_tokens.clone();
+        // longest_prefix_match returns the shared `Arc<[u32]>`; copy into a Vec to append the suffix.
+        let mut merged = prefix_tokens.to_vec();
         merged.extend_from_slice(suffix_enc.token_ids());
 
         let plain = tokenizer.encode(&target).unwrap();
@@ -758,7 +772,7 @@ mod tests {
         );
         let expected = tok.encode(&turns[1][..deepest]).unwrap();
         assert_eq!(
-            saved_tokens,
+            &*saved_tokens,
             expected.token_ids(),
             "persisted entry tokens must equal the uncached encode of the cached prefix"
         );

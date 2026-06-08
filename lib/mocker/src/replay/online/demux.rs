@@ -21,13 +21,17 @@ async fn process_output_signal(
     router: &ReplayRouter,
     stats: &SharedLiveRuntimeStats,
 ) {
-    collector.on_token(output.uuid, batch_time_ms);
+    // Rejected requests never ran: skip the phantom token / prefill-mark, but
+    // still fall through to the completion path to notify the waiter below.
+    if !output.rejected {
+        collector.on_token(output.uuid, batch_time_ms);
+    }
 
     let Some(state) = requests.get(&output.uuid) else {
         return;
     };
 
-    if state.mark_first_token_once() {
+    if !output.rejected && state.mark_first_token_once() {
         tracing::debug!(uuid = %output.uuid, "replay_diag: demux on_first_token start");
         match router.on_first_token(output.uuid).await {
             Ok(true) => stats.record_prefill_marked(),

@@ -198,6 +198,12 @@ func (v *SharedSpecValidator) validateCheckpointConfig() error {
 		v.spec.Checkpoint.Mode != nvidiacomv1alpha1.CheckpointModeAuto {
 		return fmt.Errorf("%s.checkpoint.job can only be set in Auto mode", v.fieldPath)
 	}
+	if v.spec.Checkpoint.Enabled &&
+		v.spec.Checkpoint.Mode == nvidiacomv1alpha1.CheckpointModeManual &&
+		(v.spec.Checkpoint.CheckpointRef == nil || *v.spec.Checkpoint.CheckpointRef == "") &&
+		v.spec.Checkpoint.Identity == nil {
+		return fmt.Errorf("%s.checkpoint: Manual mode requires checkpointRef or identity to be set", v.fieldPath)
+	}
 	if v.spec.Checkpoint.TargetContainerName != "" {
 		if errs := k8svalidation.IsDNS1123Label(v.spec.Checkpoint.TargetContainerName); len(errs) > 0 {
 			return fmt.Errorf(
