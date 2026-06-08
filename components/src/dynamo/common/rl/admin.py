@@ -59,18 +59,18 @@ def require_lora_load_request(request: Mapping[str, Any] | None) -> tuple[str, s
         )
 
     lora_name = request.get("lora_name")
-    if not lora_name:
-        raise RLAdminValidationError("'lora_name' is required in request")
+    if not isinstance(lora_name, str) or not lora_name:
+        raise RLAdminValidationError("'lora_name' is required and must be a string")
 
     source = request.get("source")
     if not source or not isinstance(source, Mapping):
         raise RLAdminValidationError("'source' object is required in request")
 
     lora_uri = source.get("uri")
-    if not lora_uri:
-        raise RLAdminValidationError("'source.uri' is required in request")
+    if not isinstance(lora_uri, str) or not lora_uri:
+        raise RLAdminValidationError("'source.uri' is required and must be a string")
 
-    return str(lora_name), str(lora_uri)
+    return lora_name, lora_uri
 
 
 def require_lora_unload_request(request: Mapping[str, Any] | None) -> str:
@@ -79,10 +79,10 @@ def require_lora_unload_request(request: Mapping[str, Any] | None) -> str:
         raise RLAdminValidationError("Request is required with 'lora_name' field")
 
     lora_name = request.get("lora_name")
-    if not lora_name:
-        raise RLAdminValidationError("'lora_name' is required in request")
+    if not isinstance(lora_name, str) or not lora_name:
+        raise RLAdminValidationError("'lora_name' is required and must be a string")
 
-    return str(lora_name)
+    return lora_name
 
 
 class RLRouteRegistry:

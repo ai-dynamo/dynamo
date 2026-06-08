@@ -123,6 +123,30 @@ def test_lora_unload_request_validation() -> None:
     try:
         require_lora_unload_request({})
     except RLAdminValidationError as exc:
-        assert str(exc) == "'lora_name' is required in request"
+        assert str(exc) == "'lora_name' is required and must be a string"
     else:
         raise AssertionError("expected validation error")
+
+    # Non-string scalars must be rejected, not str()-coerced.
+    for bad in ([], {}, 123, ["adapter"]):
+        try:
+            require_lora_unload_request({"lora_name": bad})
+        except RLAdminValidationError:
+            pass
+        else:
+            raise AssertionError(f"expected validation error for lora_name={bad!r}")
+
+
+def test_lora_load_request_rejects_non_string_fields() -> None:
+    # lora_name / source.uri must be strings (no str() coercion of lists/dicts).
+    for req in (
+        {"lora_name": ["a"], "source": {"uri": "file:///x"}},
+        {"lora_name": "a", "source": {"uri": {}}},
+        {"lora_name": "a", "source": {"uri": ["file:///x"]}},
+    ):
+        try:
+            require_lora_load_request(req)
+        except RLAdminValidationError:
+            pass
+        else:
+            raise AssertionError(f"expected validation error for {req!r}")
