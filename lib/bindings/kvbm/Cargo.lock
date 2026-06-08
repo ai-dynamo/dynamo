@@ -2907,6 +2907,7 @@ name = "kvbm-config"
 version = "1.2.0"
 dependencies = [
  "anyhow",
+ "dynamo-device",
  "figment",
  "kvbm-common",
  "nix 0.30.1",
