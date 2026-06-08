@@ -15,6 +15,39 @@ inputs:
 runs:
   using: "composite"
   steps:
+    - name: Stop vCluster port-forward watchdog
+      shell: bash
+      run: |
+        echo "::group::Stop vCluster port-forward watchdog"
+        set -euo pipefail
+
+        for pid_file in \
+          "${{ github.workspace }}/.vcluster-port-forward-watchdog.pid" \
+          "${{ github.workspace }}/.vcluster-port-forward.pid"; do
+          if [ ! -f "${pid_file}" ]; then
+            continue
+          fi
+
+          pid="$(cat "${pid_file}")"
+          if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+            echo "Stopping process ${pid} from ${pid_file}"
+            kill "${pid}" 2>/dev/null || true
+            for _ in $(seq 1 10); do
+              if ! kill -0 "${pid}" 2>/dev/null; then
+                break
+              fi
+              sleep 1
+            done
+            if kill -0 "${pid}" 2>/dev/null; then
+              echo "Process ${pid} did not exit after SIGTERM; sending SIGKILL"
+              kill -9 "${pid}" 2>/dev/null || true
+            fi
+          fi
+          rm -f "${pid_file}"
+        done
+
+        echo "::endgroup::"
+
     - name: Setup host kubeconfig
       if: inputs.kubeconfig_base64 != ''
       shell: bash

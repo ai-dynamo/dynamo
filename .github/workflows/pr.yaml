@@ -197,7 +197,15 @@ jobs:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files]
     # `sample` is here because sample tests piggyback on this image and run as part of vllm-test.
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true' || needs.changed-files.outputs.sample == 'true'
+    # `operator` and `snapshot` are here because DynamoCheckpoint deploy tests
+    # build a snapshot placeholder from the CI-built vLLM runtime image.
+    if: |
+      needs.changed-files.outputs.core == 'true' ||
+      needs.changed-files.outputs.vllm == 'true' ||
+      needs.changed-files.outputs.deploy == 'true' ||
+      needs.changed-files.outputs.sample == 'true' ||
+      needs.changed-files.outputs.operator == 'true' ||
+      needs.changed-files.outputs.snapshot == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
@@ -600,7 +608,11 @@ jobs:
     needs: [changed-files, vllm-build]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.core == 'true' ||
+       needs.changed-files.outputs.vllm == 'true' ||
+       needs.changed-files.outputs.deploy == 'true' ||
+       needs.changed-files.outputs.operator == 'true' ||
+       needs.changed-files.outputs.snapshot == 'true') &&
       needs.vllm-build.result == 'success'
     uses: ./.github/workflows/shared-copy.yml
     with:
@@ -656,7 +668,7 @@ jobs:
           extra_tags: |
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-placeholder
           extra_build_args: |
-            BASE_IMAGE=${{ needs.vllm-copy-to-acr.result == 'success' && format('{0}/ai-dynamo/dynamo:{1}-vllm-runtime', secrets.AZURE_ACR_HOSTNAME, github.sha) || 'nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1' }}
+            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime
 
   sglang-copy-to-acr:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
