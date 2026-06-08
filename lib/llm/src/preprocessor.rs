@@ -1963,16 +1963,17 @@ impl OpenAIPreprocessor {
         stream: S,
         generator: Box<dyn DeltaGeneratorExt<Resp>>,
         context: Arc<dyn AsyncEngineContext>,
+        emit_audit_usage_chunk: bool,
         trace_tokens_enabled: bool,
         trace_finish_reason_metadata: Option<crate::agents::trace::SharedFinishReasonMetadata>,
     ) -> impl Stream<Item = Annotated<Resp>> + Send
     where
         S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
-        Resp: Send + Sync + 'static + std::fmt::Debug,
+        Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
     {
         struct State<Resp>
         where
-            Resp: Send + Sync + 'static + std::fmt::Debug,
+            Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
         {
             response_stream: Pin<Box<dyn Stream<Item = Annotated<BackendOutput>> + Send>>,
             response_generator: Box<dyn DeltaGeneratorExt<Resp>>,
@@ -1981,7 +1982,11 @@ impl OpenAIPreprocessor {
             cumulative_output_tokens: usize,
             finish_reason_sent: bool,
             usage_chunk_sent: bool,
+            /// Buffered plain usage chunk to send to the client after the audit
+            /// chunk (ANNOTATION_LLM_METRICS). Only Some when is_usage_enabled().
+            pending_client_usage: Option<Annotated<Resp>>,
             finished: bool,
+            emit_audit_usage_chunk: bool,
             trace_tokens_enabled: bool,
             trace_finish_reason_metadata: Option<crate::agents::trace::SharedFinishReasonMetadata>,
         }
@@ -1994,7 +1999,9 @@ impl OpenAIPreprocessor {
             cumulative_output_tokens: 0,
             finish_reason_sent: false,
             usage_chunk_sent: false,
+            pending_client_usage: None,
             finished: false,
+            emit_audit_usage_chunk,
             trace_tokens_enabled,
             trace_finish_reason_metadata,
         };
@@ -2003,7 +2010,21 @@ impl OpenAIPreprocessor {
 
         stream::unfold(state, |mut inner| {
             async move {
-                // If already finished, return None immediately
+                // Drain the buffered client-facing plain usage chunk first.
+                // This MUST come before the `finished` guard: the stream-end
+                // handler sets inner.finished = true before returning the audit
+                // chunk, so on the very next iteration the finished guard would
+                // terminate before we ever emit the client chunk.
+                if let Some(client_chunk) = inner.pending_client_usage.take() {
+                    inner.finished = true;
+                    // Respect cancellation even for the trailing usage chunk.
+                    if inner.cancelled {
+                        return None;
+                    }
+                    return Some((client_chunk, inner));
+                }
+
+                // If already finished (and no pending client chunk), stop.
                 if inner.finished {
                     return None;
                 }
@@ -2124,11 +2145,12 @@ impl OpenAIPreprocessor {
                     }
 
                     if let Ok(metrics_annotated) = llm_metrics.to_annotation::<()>() {
-                        // Only set event if not already set to avoid overriding existing events (like errors)
-                        if response.event.is_none() {
-                            response.event = metrics_annotated.event;
-                            response.comment = metrics_annotated.comment;
-                        }
+                        // Per-chunk: only attach comment (stripped by EventConverter; tracing only).
+                        // Do NOT set event here — "llm_metrics" event is reserved for the
+                        // final ANNOTATION_LLM_METRICS usage chunk so EventConverter can
+                        // suppress its data from the client stream. Setting event on every
+                        // content chunk would cause EventConverter to strip all content data.
+                        response.comment = metrics_annotated.comment;
                     }
 
                     // Mark if we've seen a finish_reason
@@ -2212,28 +2234,53 @@ impl OpenAIPreprocessor {
                             Annotated::<()>::from_data(())
                         });
 
-                        // Send the usage chunk if needed
-                        let data = if inner.response_generator.is_usage_enabled() {
-                            Some(usage_chunk)
+                        let client_usage = inner.response_generator.is_usage_enabled().then(|| {
+                            Annotated::<Resp> {
+                                id: None,
+                                data: Some(usage_chunk.clone()),
+                                event: None,
+                                comment: None,
+                                error: None,
+                            }
+                        });
+
+                        // When the client requested include_usage, buffer a separate
+                        // plain SSE data chunk (no event). EventConverter emits this
+                        // to the client on the next iteration, after the audit chunk.
+                        if inner.emit_audit_usage_chunk {
+                            if let Some(client_chunk) = client_usage {
+                                inner.pending_client_usage = Some(client_chunk);
+                            }
+
+                            // ANNOTATION_LLM_METRICS chunk: carries usage for the audit
+                            // DeltaAggregator. EventConverter always strips its `data`
+                            // before forwarding to the client (audit-only path).
+                            let annotated_usage = Annotated::<Resp> {
+                                id: None,
+                                data: Some(usage_chunk),
+                                event: Some(ANNOTATION_LLM_METRICS.to_string()),
+                                comment: annotation.comment,
+                                error: None,
+                            };
+
+                            tracing::trace!(
+                                request_id = inner.context.id(),
+                                "Sending final audit usage chunk, annotated_usage: {:?}",
+                                annotated_usage
+                            );
+
+                            Some((annotated_usage, inner))
+                        } else if let Some(client_chunk) = client_usage {
+                            tracing::trace!(
+                                request_id = inner.context.id(),
+                                "Sending final usage chunk for OpenAI compliance, client_chunk: {:?}",
+                                client_chunk
+                            );
+
+                            Some((client_chunk, inner))
                         } else {
                             None
-                        };
-
-                        let annotated_usage = Annotated::<Resp> {
-                            id: None,
-                            data,
-                            event: Some(ANNOTATION_LLM_METRICS.to_string()),
-                            comment: annotation.comment,
-                            error: None,
-                        };
-
-                        tracing::trace!(
-                            request_id = inner.context.id(),
-                            "Sending final usage chunk for OpenAI compliance, annotated_usage: {:?}",
-                            annotated_usage
-                        );
-
-                        Some((annotated_usage, inner))
+                        }
                     } else {
                         // stream closed
                         None
@@ -2837,11 +2884,28 @@ impl
         let request_id = context.id().to_string();
         let original_stream_flag = request.inner.stream.unwrap_or(false);
 
-        // Build audit handle (None if no DYN_AUDIT_SINKS)
-        let mut audit_handle = crate::audit::handle::create_handle(&request, &request_id);
+        // Build audit handle (None if no DYN_AUDIT_SINKS). Publish the request
+        // record immediately, before worker dispatch — this lets downstream
+        // observers see hung or canceled requests that never produce a response.
+        let audit_http_headers = if crate::audit::config::otel_sink_capture_enabled() {
+            context
+                .get::<crate::audit::handle::AuditHttpRequestHeaders>(
+                    crate::audit::handle::OTEL_HTTP_HEADERS_CONTEXT_KEY,
+                )
+                .ok()
+        } else {
+            None
+        };
+        let audit_handle =
+            crate::audit::handle::create_handle(&request, &request_id, audit_http_headers);
 
-        if let Some(ref mut h) = audit_handle {
-            h.set_request(std::sync::Arc::new(request.clone()));
+        // Publish request-side audit records on a detached task so audit bus
+        // fan-out and sink wakeups do not delay worker dispatch.
+        if let Some(h) = audit_handle.clone() {
+            let audit_request = std::sync::Arc::new(request.clone());
+            tokio::spawn(async move {
+                h.emit_request(audit_request);
+            });
         }
 
         // For non-streaming requests (stream=false), enable usage by default
@@ -2915,6 +2979,7 @@ impl
             response_stream,
             response_generator,
             context.clone(),
+            audit_handle.is_some(),
             trace_tokens_enabled,
             trace_finish_reason_metadata,
         );
@@ -2929,7 +2994,7 @@ impl
         // Apply audit aggregation strategy.
         // The audit branch already returns Pin<Box<...>> from scan/fold_aggregate_with_future,
         // while the non-audit branch boxes the impl Stream from postprocessor_parsing_stream.
-        let final_stream = if let Some(mut audit) = audit_handle {
+        let final_stream = if let Some(audit) = audit_handle {
             let (stream, agg_fut) = if audit.streaming() {
                 // Streaming: apply scan (pass-through + parallel aggregation)
                 crate::audit::stream::scan_aggregate_with_future(transformed_stream)
@@ -2938,11 +3003,18 @@ impl
                 crate::audit::stream::fold_aggregate_with_future(transformed_stream)
             };
 
-            // Spawn audit task
+            // Spawn the response-side audit task. The future resolves to None on
+            // client cancel or aggregation failure; in that case the request
+            // record (already published above) stands alone and we skip the
+            // response emit.
             tokio::spawn(async move {
-                let final_resp = agg_fut.await;
-                audit.set_response(Arc::new(final_resp));
-                audit.emit();
+                match agg_fut.await {
+                    Some(final_resp) => audit.emit_response(Arc::new(final_resp)),
+                    None => tracing::debug!(
+                        request_id = %audit.request_id(),
+                        "audit: response record skipped (client cancel or aggregation error)"
+                    ),
+                }
             });
 
             stream
@@ -3079,6 +3151,7 @@ impl
             response_stream,
             response_generator,
             context.clone(),
+            false,
             trace_tokens_enabled,
             trace_finish_reason_metadata,
         );
