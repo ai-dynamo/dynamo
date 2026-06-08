@@ -5,9 +5,9 @@ title: Agent Tracing
 subtitle: Attach trajectory identity and export Dynamo request and tool-event telemetry
 ---
 
-Agent tracing records **who** called (`nvext.agent_context`), **what Dynamo measured** on each LLM request (`request_end`), and optional **harness tool spans** (`tool_*`). Context is passive—it does not steer routing or caching. Output is best-effort profiling data, not an audit log.
+Agent tracing records **who** called (`nvext.agent_context`) and **what Dynamo measured** on each LLM request (`request_end`). Tool-call understanding is built in: Dynamo **autodetects** tool calls and finish reasons from the response stream and records them as `finish_reason_metadata` on every request — no harness instrumentation. Richer **harness tool spans** (`tool_*`: tool timing, status, output sizes) are an optional add-on. Context is passive—it does not steer routing or caching. Output is best-effort profiling data, not an audit log.
 
-**Flow:** Harness sends chat completions with `agent_context` → Dynamo emits `request_end` to trace sinks. Harness sends tool events over ZMQ → same sinks.
+**Flow:** Harness sends chat completions with `agent_context` → Dynamo emits `request_end` (with autodetected `finish_reason_metadata`) to trace sinks. *Optionally*, a harness also publishes its own tool events over ZMQ → same sinks.
 
 ## Adding trace context to each LLM call
 
@@ -53,27 +53,7 @@ unflagged, so a post-hoc close is the robust contract.) Because a backend that a
 the marker may skip generation entirely, the request body is just a carrier — keep it
 minimal.
 
-**OpenAI client:** merge into `extra_body` / `extra_headers`:
-
-```python
-import uuid
-
-def instrument_llm_request(kwargs, agent_context):
-    body = dict(kwargs.get("extra_body") or {})
-    nvext = dict(body.get("nvext") or {})
-    nvext["agent_context"] = dict(agent_context)
-    body["nvext"] = nvext
-
-    headers = dict(kwargs.get("extra_headers") or {})
-    headers.setdefault("x-request-id", str(uuid.uuid4()))
-
-    out = dict(kwargs)
-    out["extra_body"] = body
-    out["extra_headers"] = headers
-    return out
-```
-
-`x-request-id` is your logical per-call id; Dynamo stores it as `request.x_request_id` (distinct from Dynamo's internal `request_id`). No Dynamo imports are required in the harness. Keep context in a contextvar, attach before each completion, and propagate across threads/processes when those paths call the model or emit tools.
+No Dynamo imports are required in the harness — `agent_context` is plain JSON under `nvext`; just propagate it across threads/processes wherever those paths call the model.
 
 ## Enable output
 
@@ -83,10 +63,13 @@ The fast path is one environment variable:
 export DYN_AGENT_TRACE=1
 ```
 
-That picks `jsonl_gz` output at `/tmp/dynamo-agent-trace.*.jsonl.gz` and binds
-the harness tool-event ZMQ endpoint at `tcp://127.0.0.1:20390`. Any of the
-per-knob variables below still wins when set explicitly, so you only need to
-reach for them to relocate output, add `stderr`, or tune buffers.
+That picks `jsonl_gz` output at `/tmp/dynamo-agent-trace.*.jsonl.gz`. Tool-call
+understanding works immediately from `request_end` finish metadata — no harness
+tooling. (It also binds the optional tool-event ZMQ endpoint at
+`tcp://127.0.0.1:20390` for harnesses that publish their own tool spans; it stays
+idle otherwise.) Any of the per-knob variables below still wins when set
+explicitly, so you only need to reach for them to relocate output, add `stderr`,
+or tune buffers.
 
 To relocate captures only:
 
@@ -117,7 +100,14 @@ take effect once the master switch is on.
 
 </details>
 
-## Tool events (ZMQ)
+## Tool events (ZMQ) — optional
+
+Dynamo already captures tool-call **names** and finish reasons per request via
+`finish_reason_metadata` (see [the `request_end` record](#dynamo-request_end-record)) with
+zero harness work. Publish explicit tool events **only** when you need what autodetection
+cannot give: tool **timing** (`started_at_unix_ms` / `ended_at_unix_ms` / `duration_ms`),
+`status`, and output sizes — e.g. to attribute tool-wait time between dependent LLM calls in
+agentic replay.
 
 Wire format: `[topic, seq_be_u64, msgpack(AgentTraceRecord)]`. To publish to Dynamo, use a background publisher, bounded queue, monotonic sequence, and PUSH with HWM. **Terminal** `tool_end` / `tool_error` rows should carry timing (`started_at_unix_ms`, `ended_at_unix_ms`, `duration_ms`) even if `tool_start` was dropped.
 
@@ -151,7 +141,14 @@ Optional `tool` keys: `output_tokens`, `output_bytes`, `tool_name_hash`, `error_
 
 ## Dynamo `request_end` record
 
-Emitted after the response stream finishes or is dropped. Omitted keys were not recorded on that path; see `AgentTraceRecord` / `AgentRequestMetrics` in `lib/llm/src/agents/trace/types.rs` for the full Rust schema.
+Emitted after the response stream finishes or is dropped. Carries `agent_context`,
+`output_tokens`, and the autodetected `finish_reason_metadata` (tool-call names +
+finish reasons). `request_id` correlates with audit rows; the `replay` block feeds
+Mooncake replay (disable with `DYN_AGENT_TRACE_REPLAY_HASHES=0`). Tool-call metadata
+is ids and names only — arguments are intentionally not stored.
+
+<details>
+<summary>Full <code>request_end</code> record</summary>
 
 ```json
 {
@@ -167,7 +164,6 @@ Emitted after the response stream finishes or is dropped. Omitted keys were not 
   },
   "request": {
     "request_id": "dynamo-request-id",
-    "x_request_id": "llm-call-42",
     "model": "my-model",
     "output_tokens": 16,
     "finish_reason_metadata": {
@@ -200,15 +196,15 @@ Emitted after the response stream finishes or is dropped. Omitted keys were not 
 }
 ```
 
-`finish_reason_metadata` is optional. `backend_finish_reason` and `stop_reason`
-come from the backend/token stop path; `finish_reason` is the final
-OpenAI-compatible finish reason after parser rewrites, such as `tool_calls`.
-Top-level finish fields summarize the common single-choice case; `choices`
-keeps per-choice finish fields when `n > 1`. Tool-call metadata includes ids and
-names only; arguments are intentionally not stored in agent traces.
-For chat streams, final finish metadata is recorded after parser/jail rewrites;
-completion streams record the final OpenAI-compatible completion finish reason
-from the completion response choices.
+`finish_reason_metadata` is optional. `finish_reason` is the final OpenAI-compatible
+reason after parser rewrites (e.g. `tool_calls`); `backend_finish_reason` /
+`stop_reason` come from the backend stop path. Top-level finish fields summarize the
+single-choice case; `choices` keeps per-choice finish fields when `n > 1`. For chat
+streams, finish metadata is recorded after parser/jail rewrites; completion streams
+record the final OpenAI-compatible completion finish reason. See `AgentTraceRecord` /
+`AgentRequestMetrics` in `lib/llm/src/agents/trace/types.rs` for the full Rust schema.
+
+</details>
 
 By default we do not save the input/ouput payloads. In order to view these, use the built in Dynamo `audit_sink` functionality.
 
