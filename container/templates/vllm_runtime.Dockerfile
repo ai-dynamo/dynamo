@@ -165,6 +165,28 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
         if [ -n "$GMS_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$GMS_WHEEL"; fi; \
     fi
 
+# Install the ModelExpress (P2P weight transfer) client when enabled. Uses the same
+# {{ pip_target }} as the Dynamo wheels above so it lands in the runtime's Python
+# environment (system site-packages for the cuda runtime, where `dynamo.vllm` imports
+# from). MODELEXPRESS_REF may point at a fork/branch ref (e.g. an MX-refit fork);
+# the ref must be reachable on github.com/ai-dynamo/modelexpress. The git+ install
+# needs a git executable, which the upstream vLLM runtime base does not ship, so
+# install git first (only when enabled; removed-after via apt list cleanup).
+ARG ENABLE_MODELEXPRESS_P2P
+ARG MODELEXPRESS_REF
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    if [ "${ENABLE_MODELEXPRESS_P2P}" = "true" ]; then \
+        echo "Installing ModelExpress from ref: ${MODELEXPRESS_REF}" && \
+        if ! command -v git >/dev/null 2>&1; then \
+            apt-get update && \
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git && \
+            rm -rf /var/lib/apt/lists/*; \
+        fi && \
+        uv pip install {{ pip_target }} --no-deps \
+            "modelexpress @ git+https://github.com/ai-dynamo/modelexpress.git@${MODELEXPRESS_REF}#subdirectory=modelexpress_client/python"; \
+    fi
+
 # vLLM-Omni's audio helpers shell out to SoX, and the launch script examples use
 # jq for readable curl output just like the upstream omni image does.
 RUN set -eux; \
