@@ -51,17 +51,33 @@ in the roadmap below.
 
 ## Goals / Non-Goals
 
+**Primary objective.** Make **standalone vanilla `vllm serve` deployments** first-class in the
+Dynamo EPP/router: a team already running stock vLLM behind a Kubernetes gateway gets Dynamo's
+KV/load-aware routing — *and* P/D disaggregation — by adding only an `InferencePool` and the EPP,
+**without adopting the Dynamo runtime, the Dynamo worker, or the Dynamo control plane**.
+
 **Goals**
-- Dynamo EPP is a drop-in `InferencePool.endpointPickerRef` for any GAIE-compatible gateway.
+- Dynamo EPP is a drop-in `InferencePool.endpointPickerRef` for any GAIE-compatible gateway,
+  serving **standalone vanilla `vllm serve` fleets** and Dynamo-managed workers from one binary.
 - Token-aware **precise KV** routing for vanilla `vllm serve` and Dynamo workers.
+- **Runtime-less P/D disaggregation for vanilla vLLM**: the EPP selects the prefill and decode
+  workers (KV-aware) and emits the prefill endpoint; a decode-side P/D routing sidecar executes
+  vLLM's KV-transfer handshake — no Dynamo worker required.
 - A single, version-matched, published EPP artifact — no user builds the EPP.
 - Intent-driven setup via DGDR (`features.inferenceGateway`) that generates the EPP config,
   `InferencePool`, sidecar, and `HTTPRoute`.
 - Routing decisions and failure modes visible from `kubectl`.
 
 **Non-Goals**
-- Requiring the Dynamo control plane / Planner to get routing value.
+- Requiring the Dynamo control plane / Planner / runtime to get routing value.
 - Replacing the customer's gateway.
+- **Runtime-less P/D disaggregation for SGLang or TRT-LLM.** Their KV transfer is engine-coupled
+  (a bootstrap-room rendezvous; an opaque context→generation handshake) and is not drivable by a
+  generic external prefill-endpoint header, so disaggregation for those engines is done by the
+  Dynamo worker/runtime. Vanilla-vLLM disagg is in scope precisely because vLLM's
+  `kv_transfer_params` handshake *is* externally orchestrable from a sidecar.
+- Owning, shipping, or forking the P/D routing sidecar, or re-implementing any engine's
+  KV-transfer protocol inside the EPP.
 - Cross-region request migration or global KV continuity.
 - Hand-authored EPP plugin graphs or pool grids on the golden path.
 
@@ -118,6 +134,7 @@ and **no per-engine translation shim is required**.
 - [x] **gaie-4 (MR4, [PR #10339](https://github.com/ai-dynamo/dynamo/pull/10339))** `feat(ext-proc): native EPP for vanilla vLLM` — external/GIE mode (InferencePool discovery + Ready filter), sidecar tokenization, per-pod KV-event consumption.
 - [x] **gaie-5 (MR5, [PR #10340](https://github.com/ai-dynamo/dynamo/pull/10340))** `docs(ext-proc): vanilla-vLLM InferencePool example`.
 - [x] **gaie-6 (MR6, [PR #10341](https://github.com/ai-dynamo/dynamo/pull/10341))** `docs(ext-proc): GIE-packaged Dynamo worker examples (vLLM + SGLang)`.
+- [x] **gaie-epp-replica-sync (MR7, [PR #10388](https://github.com/ai-dynamo/dynamo/pull/10388))** — runtime-free cross-replica in-flight-load sync (EndpointSlice + ZMQ) for multi-replica EPP parity, `/metrics`, K8s-native disagg prefill discovery via Dynamo role labels, OSL plumbing, and **`x-prefiller-host-port` emission for runtime-less vanilla-vLLM P/D disaggregation** via a decode-side routing sidecar, plus the `vanilla-vllm-disagg/` example. Branches off gaie-4.
 
 ## Validation (live)
 
@@ -127,6 +144,7 @@ and **no per-engine translation shim is required**.
 - [x] Dynamo **vLLM** worker (GIE-packaged) ← native EPP — HTTP 200, precise KV (logit 0.8 → 6.1).
 - [x] Dynamo **SGLang** worker (GIE-packaged) ← native EPP — HTTP 200, precise KV from SGLang's own KV events (predict-off logit 6.25); no translation shim.
 - [x] **Scale-up scorer risk** — if the KV scorer always picks the warm replica, scale-up does nothing; confirmed the scorer **blends KV overlap with live load under concurrency** so new replicas receive traffic.
+- [x] **Runtime-less vanilla-vLLM P/D disaggregation on real GPUs** — stock `vllm serve` prefill + decode (NixlConnector), EPP selects decode+prefill and emits `x-prefiller-host-port`, a decode-side routing sidecar runs the handshake: HTTP 200 with real NIXL KV transfer (decode-pod `KV Transfer metrics: Num successful transfers>0`), **no Dynamo runtime**. Scaled to 2 prefill + 2 decode (EPP discovers new workers at runtime); comprehensive suite — 9/9 functional+edge (short/long-multiblock/repeat-prefix/chat/unicode/stop-seq/streaming) + clean 4xx on malformed/unknown-model + **200/200 under concurrency 48** — load balanced across decode workers, prefill KV-aware selected, 0 prefill-routing failures, 0 aggregated fallbacks.
 
 ## Roadmap / tracker
 
