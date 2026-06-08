@@ -485,14 +485,22 @@ impl AsyncEngine<ManyIn<serde_json::Value>, ManyOut<Annotated<serde_json::Value>
         // dispatching task; needed when constructing the Python `Context`.
         let current_trace_context = get_distributed_tracing_context();
 
-        // Forwarder: pull `serde_json::Value` frames off the inbound
-        // stream, pythonize each, and hand the resulting `PyObject` to the
-        // Python iterator. No cancellation arm; the channel close on the
-        // consumer side is the natural exit signal.
+        // Forwarder: pull `serde_json::Value` frames off the inbound stream,
+        // pythonize each, and hand the resulting `PyObject` to the Python
+        // iterator. The `frame_tx.closed()` arm cancels the forwarder as soon
+        // as the Python iterator drops the receiver, so it shuts down promptly
+        // instead of blocking on the next inbound frame.
         let (frame_tx, frame_rx) = mpsc::channel::<PyObject>(BIDIRECTIONAL_INPUT_CHANNEL_DEPTH);
         let forwarder_request_id = request_id.clone();
         tokio::spawn(async move {
-            while let Some(value) = inbound.next().await {
+            loop {
+                let value = tokio::select! {
+                    _ = frame_tx.closed() => break,
+                    value = inbound.next() => value,
+                };
+                let Some(value) = value else {
+                    break;
+                };
                 let pyobj = match Python::with_gil(|py| {
                     pythonize(py, &value).map(|bound| bound.unbind())
                 }) {
