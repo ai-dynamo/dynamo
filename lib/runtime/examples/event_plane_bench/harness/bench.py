@@ -257,13 +257,15 @@ def worker_distribution(p, nnodes, gpus_per_node):
 def res_snapshot(lr, transport, idx, snap_label):
     """Fire ressample.py on EVERY node (host-level), wait, return list of snaps.
 
-    Each sampler writes a tiny JSON to a node-local path; we read them back via
-    a final `cat` srun so the orchestrator (which may not share the node fs)
-    can collect them. Cheap: one ss + two /proc passes per node. Returns a list
-    of per-node snapshot dicts (best-effort; missing/failed nodes are skipped).
+    The sampler also echoes its JSON snapshot to stdout; srun streams that back
+    to node0's local LOGDIR (`--output`/Popen stdout), so the orchestrator reads
+    the snapshots from those echoed logs even though the sampler's --out file
+    lives on the (unreadable-from-here) remote node's local fs. Cheap: one ss +
+    two /proc passes per node. Returns a list of per-node snapshot dicts
+    (best-effort; missing/failed nodes are skipped).
     """
     sampler = f"{HERE}/ressample.py"
-    procs, outs = [], []
+    procs = []
     for node_idx in range(lr.nnodes):
         node = lr.nodes[node_idx] if hasattr(lr, "nodes") else "localhost"
         outp = f"{LOGDIR}/res_{idx}_{snap_label}_n{node_idx}.json"
