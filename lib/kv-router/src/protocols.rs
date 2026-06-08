@@ -502,7 +502,7 @@ pub enum RouterResponse {
     PotentialLoads {
         // loads of every worker tracked by the scheduler.
         loads: Vec<crate::scheduling::PotentialLoad>,
-        // the queue sizes for this specfic router instance.
+        // the queue sizes for this specific router instance.
         #[serde(default)]
         pending_count: usize,
         #[serde(default)]
