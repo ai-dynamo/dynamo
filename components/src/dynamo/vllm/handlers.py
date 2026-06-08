@@ -231,7 +231,10 @@ class _DeferredAbort:
 
 @asynccontextmanager
 async def _deferred_abort_guard(
-    engine_client: Any, request_id: str, is_decode_only: bool
+    engine_client: Any,
+    request_id: str,
+    is_decode_only: bool,
+    registry: Optional[dict[str, "_DeferredAbort"]] = None,
 ) -> AsyncIterator[Optional[_DeferredAbort]]:
     """Own the _DeferredAbort lifecycle for a single request.
 
@@ -240,12 +243,21 @@ async def _deferred_abort_guard(
     when generation finishes without producing output (case 1b). close() is
     specifically designed not to call engine_client.abort() in the unsafe
     pre-first-token window.
+
+    When `registry` is provided, the guard registers itself under `request_id`
+    for the request's lifetime so out-of-band callers (the admin abort_request
+    route) can route their abort through this same deferred path instead of
+    calling engine_client.abort() directly in the unsafe window.
     """
     guard = _DeferredAbort(engine_client, request_id) if is_decode_only else None
+    if guard is not None and registry is not None:
+        registry[request_id] = guard
     try:
         yield guard
     finally:
         if guard is not None:
+            if registry is not None:
+                registry.pop(request_id, None)
             await guard.close()
 
 
@@ -956,6 +968,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
         self._pause_controller = VllmEnginePauseController(self.engine_client)
         self._pause_lock = asyncio.Lock()
+        # Maps request_id -> _DeferredAbort for in-flight decode-only requests so
+        # admin abort_request can route through the deferred-abort path instead
+        # of calling engine_client.abort() during the unsafe pre-first-token
+        # NIXL-KV-transfer window.
+        self._deferred_aborts: dict[str, _DeferredAbort] = {}
         self._mm_kwargs_receiver: MmKwargsNixlReceiver | None = None
 
         # Some models (Kimi-K2.5) declare their image modality as
@@ -1383,7 +1400,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         if not request_id:
             return {"status": "error", "message": "Missing 'request_id' in body"}
         try:
-            await self.engine_client.abort(request_id)
+            guard = self._deferred_aborts.get(request_id)
+            if guard is not None:
+                # Route through the per-request deferred-abort guard so that in
+                # disaggregated decode mode the real engine abort is deferred
+                # until the first token, never firing during an in-flight NIXL
+                # KV transfer (which can crash EngineCore).
+                await guard.abort()
+            else:
+                await self.engine_client.abort(request_id)
             logger.debug(f"[RL] Aborted request {request_id}")
             return {"status": "ok", "request_id": request_id}
         except EngineDeadError as e:
@@ -3065,7 +3090,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # any deferred-abort waiter spawned by the monitor is in a stable
         # state when close() is awaited.
         async with _deferred_abort_guard(
-            self.engine_client, request_id, is_decode_only
+            self.engine_client, request_id, is_decode_only, self._deferred_aborts
         ) as abort_guard:
             async with self._abort_monitor(
                 context, request_id, abort_guard=abort_guard

@@ -89,6 +89,9 @@ def _make_handler(
             encode_worker_client=encode_worker_client,
         )
     handler.model_config = model_config
+    # BaseWorkerHandler.__init__ is bypassed above; the decode generate path
+    # registers per-request deferred-abort guards here.
+    handler._deferred_aborts = {}
     return handler
 
 
@@ -555,6 +558,7 @@ def _make_decode_handler(
     handler.otel_tracing_enabled = False
     handler.input_param_manager = MagicMock()
     handler.input_param_manager.get_extra_params.return_value = {}
+    handler._deferred_aborts = {}
     return handler
 
 
