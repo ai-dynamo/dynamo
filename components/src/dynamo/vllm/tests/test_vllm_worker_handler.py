@@ -1360,3 +1360,31 @@ class TestRLAdminRouteHardening:
         resp = await handler.abort_request({"request_id": "req-y"})
         assert resp["status"] == "ok"
         assert resp["request_id"] == "req-y"
+
+    @pytest.mark.asyncio
+    async def test_deferred_abort_does_not_block_before_first_token(self):
+        # abort() before the first token must return promptly (the real abort is
+        # deferred to a background task), not hang on the first-token event.
+        guard = mod._DeferredAbort(MagicMock(), "req-z")
+        await asyncio.wait_for(guard.abort(), timeout=1.0)
+        assert guard._abort_exc is None
+        await guard.close()
+
+    @pytest.mark.asyncio
+    async def test_deferred_abort_escalates_engine_dead(self):
+        from vllm.v1.engine.exceptions import EngineDeadError
+
+        escalated = []
+
+        async def boom(_request_id):
+            raise EngineDeadError("engine dead")
+
+        engine = MagicMock()
+        engine.abort = boom
+        guard = mod._DeferredAbort(
+            engine, "req-d", on_engine_dead=lambda e: escalated.append(e)
+        )
+        guard.signal_first_token()  # post-first-token -> immediate abort path
+        await guard.abort()
+        assert len(escalated) == 1
+        assert isinstance(escalated[0], EngineDeadError)

@@ -137,9 +137,19 @@ class _DeferredAbort:
     abort.
     """
 
-    def __init__(self, engine_client: Any, request_id: str):
+    def __init__(
+        self,
+        engine_client: Any,
+        request_id: str,
+        on_engine_dead: Optional[Any] = None,
+    ):
         self._engine_client = engine_client
         self._request_id = request_id
+        # Escalation hook invoked if the (possibly deferred/background) engine
+        # abort hits EngineDeadError, so engine death shuts the runtime down even
+        # when the abort runs outside the request's own error handling (the
+        # disconnect-monitor or deferred-after-first-token path).
+        self._on_engine_dead = on_engine_dead
         self._first_token_received = False
         self._first_token_event = asyncio.Event()
         # Strong reference to the deferred-abort background task so it is not
@@ -173,6 +183,13 @@ class _DeferredAbort:
                     f"{self._request_id}, spawning background task"
                 )
                 self._abort_task = asyncio.create_task(self._wait_and_abort())
+        # Only block on completion when the abort runs immediately (post first
+        # token). A pre-first-token deferred abort fires in the background when
+        # the first token arrives; awaiting it here would hang the caller (admin
+        # route or disconnect monitor) until — or unless — generation produces
+        # output. _abort_task keeps the background task alive; close() reaps it.
+        if not self._first_token_received:
+            return
         try:
             # shield() so that if the caller (e.g. a cancelled system-route
             # request or a disconnected client) is cancelled while awaiting, the
@@ -192,13 +209,17 @@ class _DeferredAbort:
             await self._engine_client.abort(self._request_id)
             logger.debug(f"Aborted Request ID: {self._request_id}")
         except Exception as e:
-            # Record so abort_request can report the failure (and escalate
-            # EngineDeadError) rather than returning a false success.
+            # Record so abort_request can report the failure rather than a false
+            # success. Also escalate engine death here, since a deferred or
+            # disconnect-monitor abort runs in the background with no caller
+            # awaiting the result to handle EngineDeadError.
             self._abort_exc = e
             logger.warning(
                 f"Deferred abort: engine abort raised for request "
                 f"{self._request_id}: {e}"
             )
+            if isinstance(e, EngineDeadError) and self._on_engine_dead is not None:
+                self._on_engine_dead(e)
 
     async def _wait_and_abort(self) -> None:
         """Background task: wait for first token, then abort."""
@@ -249,6 +270,7 @@ async def _deferred_abort_guard(
     request_id: str,
     is_decode_only: bool,
     registry: Optional[dict[str, "_DeferredAbort"]] = None,
+    on_engine_dead: Optional[Any] = None,
 ) -> AsyncIterator[Optional[_DeferredAbort]]:
     """Own the _DeferredAbort lifecycle for a single request.
 
@@ -263,7 +285,11 @@ async def _deferred_abort_guard(
     route) can route their abort through this same deferred path instead of
     calling engine_client.abort() directly in the unsafe window.
     """
-    guard = _DeferredAbort(engine_client, request_id) if is_decode_only else None
+    guard = (
+        _DeferredAbort(engine_client, request_id, on_engine_dead)
+        if is_decode_only
+        else None
+    )
     if guard is not None and registry is not None:
         registry[request_id] = guard
     try:
@@ -3232,7 +3258,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # any deferred-abort waiter spawned by the monitor is in a stable
         # state when close() is awaited.
         async with _deferred_abort_guard(
-            self.engine_client, request_id, is_decode_only, self._deferred_aborts
+            self.engine_client,
+            request_id,
+            is_decode_only,
+            self._deferred_aborts,
+            self._shutdown_on_engine_dead,
         ) as abort_guard:
             async with self._abort_monitor(
                 context, request_id, abort_guard=abort_guard
@@ -3323,7 +3353,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # reach this request via self._deferred_aborts.
         is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
         async with _deferred_abort_guard(
-            self.engine_client, request_id, is_decode_only, self._deferred_aborts
+            self.engine_client,
+            request_id,
+            is_decode_only,
+            self._deferred_aborts,
+            self._shutdown_on_engine_dead,
         ) as abort_guard, self._abort_monitor(
             context, request_id, abort_guard=abort_guard
         ):
