@@ -124,6 +124,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # This removes the bulk of the per-token CPU overhead that
         # streaming + coalescing imposes (~70% of the wall-clock overhead in
         # Miles' measurements for 0.5B + GSM8K rollouts).
+        # Set DYN_RL_DISABLE_FAST_PATH=1 to force the old streaming path even
+        # under --enable-rl + AGGREGATED. Used for A/B benchmarking streaming
+        # overhead on larger models where the win may shrink.
+        import os
         self._rl_nonstream_fast_path = (
             self.serving_mode == DisaggregationMode.AGGREGATED
             and getattr(
@@ -131,6 +135,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "enable_rl",
                 False,
             )
+            and not os.getenv("DYN_RL_DISABLE_FAST_PATH")
         )
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
