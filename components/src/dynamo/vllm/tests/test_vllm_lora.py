@@ -21,6 +21,7 @@ pytest.importorskip("vllm.v1.engine.async_llm")
 
 from dynamo.common.constants import DisaggregationMode  # noqa: E402
 from dynamo.common.lora.manager import LoRAInfo  # noqa: E402
+from dynamo.llm import ModelType, WorkerType  # noqa: E402
 from dynamo.vllm import llm_engine as llm_engine_mod  # noqa: E402
 from dynamo.vllm.llm_engine import VllmLLMEngine  # noqa: E402
 
@@ -49,6 +50,7 @@ def _make_lora_engine(enable_lora: bool = True, endpoint=None) -> VllmLLMEngine:
         remove_lora=AsyncMock(),
     )
     engine.disaggregation_mode = DisaggregationMode.AGGREGATED
+    engine._kv_event_block_size = 16
     engine._endpoint = endpoint
     engine._dyn_tool_call_parser = None
     engine._dyn_reasoning_parser = None
@@ -237,6 +239,54 @@ async def test_load_lora_happy_path(monkeypatch):
     register.assert_awaited_once()
     assert register.await_args.kwargs["lora_name"] == "adapterA"
     assert engine.loaded_loras["adapterA"].id == 123
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode, expected_model_type, expected_worker_type, expected_needs",
+    [
+        (
+            DisaggregationMode.AGGREGATED,
+            ModelType.Chat | ModelType.Completions,
+            WorkerType.Aggregated,
+            [],
+        ),
+        (
+            DisaggregationMode.DECODE,
+            ModelType.Chat | ModelType.Completions,
+            WorkerType.Decode,
+            [[WorkerType.Prefill]],
+        ),
+        (
+            DisaggregationMode.PREFILL,
+            ModelType.Prefill,
+            WorkerType.Prefill,
+            [[WorkerType.Decode]],
+        ),
+    ],
+)
+async def test_load_lora_publishes_disagg_topology(
+    monkeypatch, mode, expected_model_type, expected_worker_type, expected_needs
+):
+    # The LoRA MDC must match the base-model registration topology so the
+    # frontend builds the pipeline against the right component. A prefill worker
+    # publishing the adapter as decode-capable chat/completions would make the
+    # frontend route chat traffic straight to prefill.
+    engine = _make_lora_engine(endpoint=object())
+    engine.disaggregation_mode = mode
+    engine._dyn_tool_call_parser = "hermes"
+    engine._dyn_reasoning_parser = "deepseek_r1"
+    register, _ = _patch_discovery(monkeypatch)
+
+    result = await engine.load_lora(
+        {"lora_name": "adapterA", "source": {"uri": "file:///x"}}
+    )
+
+    assert result["status"] == "success"
+    kwargs = register.await_args.kwargs
+    assert kwargs["model_type"] == expected_model_type
+    assert kwargs["worker_type"] == expected_worker_type
+    assert kwargs["needs"] == expected_needs
 
 
 @pytest.mark.asyncio

@@ -53,10 +53,12 @@ from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
+    WorkerType,
     lora_name_to_id,
     register_model,
     unregister_model,
 )
+from dynamo.runtime import Endpoint
 from dynamo.vllm.args import parse_args
 from dynamo.vllm.cache_info import (
     configure_kv_event_block_size,
@@ -181,7 +183,7 @@ class VllmLLMEngine(LLMEngine):
         # Dynamic LoRA state. `_endpoint` is set by `on_endpoint_ready` before
         # serving begins; LoRA discovery (register_model/unregister_model)
         # publishes against it.
-        self._endpoint = None
+        self._endpoint: Optional[Endpoint] = None
         self.loaded_loras: dict[str, LoRAInfo] = {}
         # Adapters whose discovery ModelDeploymentCard is currently published.
         # Tracked separately from `loaded_loras` because the engine load and the
@@ -233,7 +235,7 @@ class VllmLLMEngine(LLMEngine):
         )
         return engine, worker_config
 
-    async def on_endpoint_ready(self, endpoint) -> None:
+    async def on_endpoint_ready(self, endpoint: Endpoint) -> None:
         """Stash the serving endpoint for dynamic-LoRA discovery publishing."""
         self._endpoint = endpoint
 
@@ -605,14 +607,27 @@ class VllmLLMEngine(LLMEngine):
         failure so callers can roll back or retry; on success the caller is
         responsible for recording ``lora_name`` in ``self._published_loras``.
         """
+        assert self._endpoint is not None
+
         user_data = {
             "lora_adapter": True,
             "lora_id": lora_id,
         }
 
+        # Match the base-model registration topology (see main.py
+        # register_vllm_model + worker_factory) so the frontend builds the LoRA
+        # pipeline against the right component. Without this, a prefill worker
+        # would publish the adapter as a decode-capable chat/completions model
+        # and the frontend would route chat traffic straight to prefill, which
+        # then waits forever for a KV transfer.
+        model_type, worker_type, needs = self._lora_registration_topology()
+
         runtime_config = ModelRuntimeConfig()
-        runtime_config.tool_call_parser = self._dyn_tool_call_parser
-        runtime_config.reasoning_parser = self._dyn_reasoning_parser
+        # Prefill workers don't run tool/reasoning parsing (mirrors the base
+        # model registration in main.py:register_vllm_model).
+        if model_type != ModelType.Prefill:
+            runtime_config.tool_call_parser = self._dyn_tool_call_parser
+            runtime_config.reasoning_parser = self._dyn_reasoning_parser
 
         # Publish the effective KV-event block size (computed in start() and
         # used by the base-model MDC) so LoRA block hashes match vLLM's emitted
@@ -626,7 +641,7 @@ class VllmLLMEngine(LLMEngine):
 
         await register_model(
             model_input=ModelInput.Tokens,
-            model_type=ModelType.Chat | ModelType.Completions,
+            model_type=model_type,
             endpoint=self._endpoint,
             model_path=self.engine_args.model,
             kv_cache_block_size=kv_cache_block_size,
@@ -634,7 +649,27 @@ class VllmLLMEngine(LLMEngine):
             user_data=user_data,
             lora_name=lora_name,
             base_model_path=self.engine_args.model,
+            worker_type=worker_type,
+            needs=needs,
         )
+
+    def _lora_registration_topology(
+        self,
+    ) -> tuple[ModelType, WorkerType, list[list[WorkerType]]]:
+        """Map the worker's disaggregation role to the LoRA MDC topology.
+
+        Returns ``(model_type, worker_type, needs)`` matching how the base
+        model registers (main.py:register_vllm_model + worker_factory).
+        """
+        if self.disaggregation_mode == DisaggregationMode.PREFILL:
+            return ModelType.Prefill, WorkerType.Prefill, [[WorkerType.Decode]]
+        if self.disaggregation_mode == DisaggregationMode.DECODE:
+            return (
+                ModelType.Chat | ModelType.Completions,
+                WorkerType.Decode,
+                [[WorkerType.Prefill]],
+            )
+        return ModelType.Chat | ModelType.Completions, WorkerType.Aggregated, []
 
     async def load_lora(self, body: dict) -> dict:
         """Load a LoRA adapter dynamically into vLLM's AsyncLLM engine.
