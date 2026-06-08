@@ -71,6 +71,19 @@ LOGDIR = os.environ.get(
     f"/tmp/dis2172-logs-{os.environ.get('SLURM_JOB_ID', os.getpid())}",
 )
 
+# CHANGE #3 (DIS-2172): event-plane RESOURCE-COST sampling. During each cell's
+# measurement window we take a few lightweight per-node snapshots (established
+# TCP count + per-process CPU/RSS/fd for mocker/sub/nats-server/frontend) via
+# ressample.py run on the node HOST. This quantifies the ZMQ direct-mesh
+# O(p×s) connection blow-up vs NATS O(p+s)-to-broker, and the nats-server
+# broker CPU/RSS cost (active during NATS cells, ~idle during ZMQ cells).
+# Gate with DYN_BENCH_RESSAMPLE=0 to disable; default ON. Number of snapshots
+# per cell via DYN_BENCH_RESSAMPLE_N (default 2). The sampler is stdlib-only and
+# runs with the HOST python (NOT the container venv) since it scans host /proc.
+RESSAMPLE = os.environ.get("DYN_BENCH_RESSAMPLE", "1") not in ("0", "", "false")
+RESSAMPLE_N = int(os.environ.get("DYN_BENCH_RESSAMPLE_N", "2"))
+HOST_PY = os.environ.get("HOST_PY", "python3")
+
 
 # --------------------------------------------------------------------------- #
 # Launchers: the ONLY thing that differs between single-node and multi-node.
@@ -81,6 +94,16 @@ class Launcher:
 
     def popen(self, argv, env, logpath, node_idx=0):
         raise NotImplementedError
+
+    def popen_host(self, argv, env, logpath, node_idx=0):
+        """Run argv on the node HOST (never inside the pyxis container).
+
+        Used by the resource sampler so a host-level `ss`/`/proc` scan sees
+        every process on the node (enroot runs in the host PID/net namespace)
+        and counts ALL of the node's established TCP connections. Defaults to
+        the same as popen() for launchers without a container layer (local).
+        """
+        return self.popen(argv, env, logpath, node_idx)
 
     def addr(self, node_idx=0):
         """Routable address of a node (for etcd/nats/frontend endpoints)."""
@@ -170,6 +193,20 @@ class SlurmLauncher(Launcher):
         return subprocess.Popen(srun, env=env, stdout=open(logpath, "w"),
                                 stderr=subprocess.STDOUT)
 
+    def popen_host(self, argv, env, logpath, node_idx=0):
+        """srun onto the node HOST with NO --container-* flags.
+
+        The resource sampler must run on the host (not in pyxis) so its `ss`
+        sees ALL of the node's established TCP and its /proc scan sees the
+        enroot-launched mocker/sub/nats processes (host PID namespace). Uses
+        the orchestrator's host python; ressample.py is stdlib-only.
+        """
+        node = self.nodes[node_idx % len(self.nodes)]
+        srun = ["srun", "--nodes=1", "--ntasks=1", "--overlap",
+                f"--nodelist={node}", "--"] + argv
+        return subprocess.Popen(srun, env=env, stdout=open(logpath, "w"),
+                                stderr=subprocess.STDOUT)
+
     def addr(self, node_idx=0):
         return self.nodes[node_idx]  # hostname, resolvable across the allocation
 
@@ -215,6 +252,104 @@ def worker_distribution(p, nnodes, gpus_per_node):
             remaining -= per
             i += 1
     return placements
+
+
+def res_snapshot(lr, transport, idx, snap_label):
+    """Fire ressample.py on EVERY node (host-level), wait, return list of snaps.
+
+    Each sampler writes a tiny JSON to a node-local path; we read them back via
+    a final `cat` srun so the orchestrator (which may not share the node fs)
+    can collect them. Cheap: one ss + two /proc passes per node. Returns a list
+    of per-node snapshot dicts (best-effort; missing/failed nodes are skipped).
+    """
+    sampler = f"{HERE}/ressample.py"
+    procs, outs = [], []
+    for node_idx in range(lr.nnodes):
+        node = lr.nodes[node_idx] if hasattr(lr, "nodes") else "localhost"
+        outp = f"{LOGDIR}/res_{idx}_{snap_label}_n{node_idx}.json"
+        argv = [HOST_PY, sampler, "--out", outp, "--node", str(node),
+                "--transport", transport, "--cell", str(idx), "--snap", snap_label]
+        try:
+            procs.append((lr.popen_host(argv, dict(os.environ),
+                                        f"{LOGDIR}/ressampler_{idx}_{snap_label}_n{node_idx}.log",
+                                        node_idx), outp, node))
+        except Exception:
+            pass
+    snaps = []
+    for (pp, outp, node) in procs:
+        try:
+            pp.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            try:
+                pp.kill()
+            except Exception:
+                pass
+    # The sampler echoes its JSON to stdout, which srun --output streams back to
+    # node0's local LOGDIR regardless of which node it ran on -> read THAT (the
+    # per-node --out file lives on the remote node's local fs, unreadable here).
+    for node_idx in range(lr.nnodes):
+        node = lr.nodes[node_idx] if hasattr(lr, "nodes") else "localhost"
+        logp = f"{LOGDIR}/ressampler_{idx}_{snap_label}_n{node_idx}.log"
+        try:
+            with open(logp) as f:
+                txt = f.read().strip()
+            # last non-empty line is the JSON object
+            line = [ln for ln in txt.splitlines() if ln.strip().startswith("{")]
+            if line:
+                snaps.append(json.loads(line[-1]))
+        except Exception:
+            pass
+    return snaps
+
+
+def summarize_res(snaps):
+    """Fold a cell's per-node snapshots into compact summary stats.
+
+    Returns dict with node-level totals/peaks so report.py / a reader can show
+    the O(p×s) vs O(p+s) connection blow-up and the per-class CPU/RSS/fd cost
+    without re-parsing every snapshot.
+    """
+    if not snaps:
+        return {}
+    classes = ("mocker", "sub", "nats", "frontend", "zmq_broker", "loadgen")
+    # established_tcp: peak across snapshots, plus per-node breakdown.
+    tcp_by_node = {}
+    for s in snaps:
+        n = s.get("node", "?")
+        tcp = s.get("established_tcp")
+        if tcp is None:
+            continue
+        tcp_by_node[n] = max(tcp_by_node.get(n, 0), tcp)
+    est_tcp_total_peak = sum(tcp_by_node.values()) if tcp_by_node else None
+    est_tcp_node_peak = max(tcp_by_node.values()) if tcp_by_node else None
+
+    proc = {}
+    for cls in classes:
+        cpu_vals, rss_vals, fd_vals, nproc_vals = [], [], [], []
+        for s in snaps:
+            p = s.get("procs", {}).get(cls)
+            if not p or not p.get("nproc"):
+                continue
+            cpu_vals.append(p.get("cpu_pct", 0.0))
+            rss_vals.append(p.get("rss_kb", 0))
+            fd_vals.append(p.get("fds", 0))
+            nproc_vals.append(p.get("nproc", 0))
+        if not nproc_vals:
+            continue
+        proc[cls] = {
+            "cpu_pct_peak": round(max(cpu_vals), 1),
+            "rss_kb_peak": max(rss_vals),
+            "rss_mb_peak": round(max(rss_vals) / 1024.0, 1),
+            "fds_peak": max(fd_vals),
+            "nproc_peak": max(nproc_vals),
+        }
+    return {
+        "established_tcp_total_peak": est_tcp_total_peak,
+        "established_tcp_node_peak": est_tcp_node_peak,
+        "established_tcp_by_node": tcp_by_node,
+        "procs": proc,
+        "n_snapshots": len(snaps),
+    }
 
 
 def teardown(procs):
@@ -318,11 +453,38 @@ def run_cell(lr, transport, p, s, topics, gpus_per_node, duration, warmup,
              "--duration", str(duration + warmup + 4 + EXTRACT_PAD)],
             {**env, "LOADGEN_HOST": fe_addr}, log(f"load{li}"), li))
 
+    # CHANGE #3: take resource-cost snapshots DURING the measurement window in a
+    # background thread, so the foreground sub.wait() is unperturbed. Snapshots
+    # are spread across ~[warmup .. warmup+duration] (mid-window). Each fires a
+    # cheap host-level ressample.py on every node. Collected after the subs join.
+    res_snaps = []
+    res_thread = None
+    if RESSAMPLE and RESSAMPLE_N > 0:
+        import threading
+
+        def _sampler_loop():
+            # Wait out warmup, then space N snapshots across the measure window.
+            time.sleep(min(warmup + 2, duration + warmup))
+            span = max(duration - 2, 1)
+            step = span / max(RESSAMPLE_N, 1)
+            for k in range(RESSAMPLE_N):
+                try:
+                    res_snaps.extend(res_snapshot(lr, transport, idx, f"s{k}"))
+                except Exception:
+                    pass
+                if k < RESSAMPLE_N - 1:
+                    time.sleep(step)
+
+        res_thread = threading.Thread(target=_sampler_loop, daemon=True)
+        res_thread.start()
+
     for (pp, _o, _t, _s) in subs:
         try:
             pp.wait(timeout=duration + warmup + 60 + EXTRACT_PAD)
         except subprocess.TimeoutExpired:
             pp.kill()
+    if res_thread is not None:
+        res_thread.join(timeout=40)
     # Subscribers have finished measuring; the loadgens are just the load source
     # (their --duration is padded by EXTRACT_PAD and they are almost always still
     # running here). Tear them all down at once -- do NOT wait 15s on each, which
@@ -340,6 +502,26 @@ def run_cell(lr, transport, p, s, topics, gpus_per_node, duration, warmup,
         except Exception:
             pass
 
+    # CHANGE #3: fold the cell's resource snapshots into a compact summary, write
+    # the per-cell *_res.json (raw snapshots + summary), and attach the summary
+    # to every row so it lands in summary.json for report.py / readers.
+    res_summary = summarize_res(res_snaps) if RESSAMPLE else {}
+    if RESSAMPLE:
+        resp = f"{outdir}/{transport}_p{p}_s{s}_t{trial}_res.json"
+        try:
+            with open(resp, "w") as f:
+                json.dump({"mode": transport, "n_workers": p, "n_subs": s,
+                           "trial": trial, "topics": topics, "nnodes": lr.nnodes,
+                           "summary": res_summary, "snapshots": res_snaps}, f, indent=2)
+        except Exception as e:
+            print(f"    [res] write failed: {e}", flush=True)
+        sm = res_summary
+        print(f"    [res] est_tcp node_peak={sm.get('established_tcp_node_peak')} "
+              f"total_peak={sm.get('established_tcp_total_peak')} "
+              f"nats_rss_mb={sm.get('procs',{}).get('nats',{}).get('rss_mb_peak')} "
+              f"nats_cpu%={sm.get('procs',{}).get('nats',{}).get('cpu_pct_peak')} "
+              f"snaps={sm.get('n_snapshots')}", flush=True)
+
     rows = []
     for (pp, outp, topic, si) in subs:
         try:
@@ -349,6 +531,8 @@ def run_cell(lr, transport, p, s, topics, gpus_per_node, duration, warmup,
             r = {"error": "no_output", "topic": topic}
         r.update(mode=transport, n_workers=p, n_subs=s, sub_idx=si, trial=trial,
                  launcher=lr.name, clock=lr.clock, nnodes=lr.nnodes)
+        if RESSAMPLE and res_summary:
+            r["res"] = res_summary
         rows.append(r)
     teardown(procs)
     return rows
@@ -402,7 +586,8 @@ def main():
     meta = dict(launcher=lr.name, nodes=lr.nodes, clock=lr.clock, infra_addr=infra_addr,
                 transports=transports, workers=workers, subs=subs, topics=topics,
                 gpus_per_node=a.gpus_per_node, duration=a.duration, trials=a.trials,
-                concurrency=a.concurrency, loadgen_procs=a.loadgen_procs)
+                concurrency=a.concurrency, loadgen_procs=a.loadgen_procs,
+                ressample=RESSAMPLE, ressample_n=RESSAMPLE_N)
     with open(f"{a.out}/meta.json", "w") as f:
         json.dump(meta, f, indent=2)
     print(f"[bench] launcher={lr.name} nodes={lr.nnodes} clock={lr.clock} "
