@@ -57,7 +57,10 @@ class GenerateChunk(TypedDict, total=False):
     Use ``index=0`` for single-choice responses. The final chunk must
     additionally include ``finish_reason`` and ``completion_usage``.
     Prefill terminals carry ``disaggregated_params`` for the
-    PrefillRouter to forward to the decode peer.
+    PrefillRouter to forward to the decode peer. When the caller
+    requested logprobs, chunks may also carry ``log_probs`` and
+    ``top_logprobs`` aligned to ``token_ids`` — see
+    :mod:`dynamo.common.backend.logprobs`.
     """
 
     token_ids: Required[list[int]]
@@ -65,6 +68,11 @@ class GenerateChunk(TypedDict, total=False):
     finish_reason: str
     completion_usage: dict[str, int]
     disaggregated_params: dict[str, Any]
+    log_probs: list[float]
+    top_logprobs: list[list[dict[str, Any]]]
+    # Forwarded verbatim to Rust `LLMEngineOutput.engine_data` as a
+    # JSON object. Carries `prompt_logprobs` on the final chunk.
+    engine_data: dict[str, Any]
 
 
 @dataclass

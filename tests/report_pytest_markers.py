@@ -86,6 +86,21 @@ STUB_MODULES = [
     "kr8s.objects",
     "tritonclient",
     "tritonclient.grpc",
+    # gRPC core + generated protobuf modules — required by planner
+    # plugin framework test files (test_gateway / test_transport_contract
+    # / test_external_plugin_e2e and friends).  CI's pre-commit env
+    # doesn't install grpcio / protobuf, so collection-time
+    # ``import grpc`` would fail without these stubs.
+    "grpc",
+    "grpc.aio",
+    "google",
+    "google.protobuf",
+    "google.protobuf.message",
+    # msgspec — used by FPM encoding in engine_adapter and by perf metric
+    # ingestion in monitoring/perf_metrics; not in the pre-commit env.
+    "msgspec",
+    "msgspec.msgpack",
+    "msgspec.json",
     "aiohttp",
     "aiofiles",
     "httpx",

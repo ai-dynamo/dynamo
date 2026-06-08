@@ -191,7 +191,6 @@ class VllmProcessor:
             mm_routing_info = build_mm_routing_info_from_features(
                 vllm_preproc.mm_features,
                 prompt_token_ids=list(vllm_preproc.prompt_token_ids),
-                block_size=self.block_size,
             )
             # Forward mm_hashes to backend for hash consistency — the backend
             # will use these directly instead of recomputing.

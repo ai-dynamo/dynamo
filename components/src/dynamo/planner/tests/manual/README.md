@@ -52,7 +52,7 @@ This directory contains comprehensive tests for validating the SLA planner's sca
 
 ### Test Types
 
-1. **Unit Tests** (`components/src/dynamo/planner/tests/unit/test_replica_calculation.py`) - Test the mathematical formulas for calculating prefill and decode replicas in isolation
+1. **Unit Tests** (`components/src/dynamo/planner/tests/unit/test_load_based_scaling.py` + `test_state_machine.py`) - Test the mathematical formulas for calculating prefill and decode replicas in isolation
 2. **End-to-End Tests** (`scaling/run_scaling_test.sh`) - Test complete workflow including Kubernetes deployment, load generation, and pod scaling validation
 3. **End-to-End Perf Tests** (see instructions below) - Compare performance (goodput and goodput/GPU) on deployments with and without sla planner
 
@@ -63,7 +63,7 @@ This directory contains comprehensive tests for validating the SLA planner's sca
 Test the replica calculation logic without requiring Kubernetes:
 
 ```bash
-PYTHONPATH=components/src python -m pytest components/src/dynamo/planner/tests/unit/test_replica_calculation.py -v
+PYTHONPATH=components/src python -m pytest components/src/dynamo/planner/tests/unit/test_load_based_scaling.py components/src/dynamo/planner/tests/unit/test_state_machine.py -v
 ```
 
 **Note**: The unit tests automatically mock external dependencies (prometheus_client, runtime modules) to ensure they can run in isolation without requiring the full Dynamo environment.
@@ -111,6 +111,7 @@ In this test, we compare performance (goodput and goodput/GPU) on deployments on
 - Config 3 with inefficient parallelization mapping: 1xTP2P_1xTP2D_4GPU
  `./perf_test_configs/disagg_8b_tp2.yaml`
 - Config 4 with sla planner: `./perf_test_configs/disagg_8b_planner.yaml`
+- Config 4b same as Config 4 but using the **plugin-based orchestrator** tick engine (PR 7+ cutover): `./perf_test_configs/disagg_8b_planner_orchestrator.yaml`. Decisions track PSM at the decision level (cadence + tick-merge parity is locked by `tests/plugins/orchestrator/test_engine_adapter.py`); the difference is observability — extra `dynamo_planner_*` Prometheus series and structured `AUDIT` log events.
 
 To run the test on each configuration, first deploy the corresponding DynamoGraphDeployment by
 

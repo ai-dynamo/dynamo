@@ -149,7 +149,7 @@ impl Encoder for CachedTokenizer {
         {
             let suffix = &input[prefix_len..];
             if suffix.is_empty() {
-                return Ok(Encoding::Sp(prefix_tokens));
+                return Ok(Encoding::Sp(prefix_tokens.to_vec()));
             }
             if self.extend_on_hit {
                 // Cache the new suffix at its deepest boundary so the next turn hits
@@ -164,7 +164,11 @@ impl Encoder for CachedTokenizer {
                 )?));
             }
             let suffix_enc = self.inner.encode(suffix)?;
-            let mut merged: Vec<TokenIdType> = prefix_tokens;
+            // Reserve exact capacity so appending the suffix doesn't grow-realloc and
+            // re-copy the (large) cached prefix.
+            let mut merged: Vec<TokenIdType> =
+                Vec::with_capacity(prefix_tokens.len() + suffix_enc.token_ids().len());
+            merged.extend_from_slice(&prefix_tokens);
             merged.extend_from_slice(suffix_enc.token_ids());
             return Ok(Encoding::Sp(merged));
         }

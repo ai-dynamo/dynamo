@@ -11,7 +11,7 @@
 //!
 //! The Preprocessor will accept any IngressRequest and transform it to a BackendRequest.
 
-#[cfg(feature = "lightseek-mm")]
+#[cfg(feature = "mm-routing")]
 pub mod lightseek_mm;
 pub mod media;
 pub mod prompt;
@@ -42,7 +42,7 @@ use std::borrow::Cow;
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
-#[cfg(feature = "lightseek-mm")]
+#[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
 use crate::preprocessor::media::MediaLoader;
@@ -189,7 +189,7 @@ pub struct MmImageEntry {
 /// and contains the other artifacts MM-aware routing reads at startup
 /// (`tokenizer.json`, `processor_config.json`, `preprocessor_config.json`).
 /// Returns `None` for cards built from non-disk sources.
-#[cfg(feature = "lightseek-mm")]
+#[cfg(feature = "mm-routing")]
 fn mdc_model_dir(mdc: &ModelDeploymentCard) -> Option<std::path::PathBuf> {
     let ModelInfoType::HfConfigJson(cf) = mdc.model_info.as_ref()?;
     cf.path()?.parent().map(std::path::PathBuf::from)
@@ -206,11 +206,11 @@ fn mdc_model_dir(mdc: &ModelDeploymentCard) -> Option<std::path::PathBuf> {
 /// init / env-misconfig failures at deployment time, not on the first MM
 /// request 20 minutes in. Text-only deployments skip the force, leaving
 /// the LazyLock dormant.
-#[cfg(feature = "lightseek-mm")]
+#[cfg(feature = "mm-routing")]
 static DIM_FETCH_MEDIA_FETCHER: std::sync::LazyLock<crate::preprocessor::media::MediaFetcher> =
     std::sync::LazyLock::new(crate::preprocessor::media::MediaFetcher::from_env);
 
-#[cfg(feature = "lightseek-mm")]
+#[cfg(feature = "mm-routing")]
 static DIM_FETCH_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
     std::sync::LazyLock::new(|| {
         DIM_FETCH_MEDIA_FETCHER
@@ -224,100 +224,6 @@ pub(crate) const PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY: &str =
 #[derive(Clone, Copy, Debug, Default)]
 struct PreprocessRequestOptions {
     preserve_omitted_max_tokens: bool,
-}
-
-/// Backend-specific MM-routing wire shape. Resolved once from
-/// `runtime_config.backend_framework`; unknown values disable MM
-/// routing (text-prefix fallback).
-///
-/// TODO(mm-routing): collapse the 16-vs-64-char split. Blocked on
-/// kv-router's `parse_mm_hash_from_extra_key` using 64-char length as
-/// the MM-hash type tag in vLLM `BlockStored` extra_keys.
-#[cfg(feature = "lightseek-mm")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MmRoutingProtocol {
-    /// SGLang: image positions filled with `pad_value(mm_hash)`; no
-    /// `block_mm_infos` emitted (matches sglang's `BlockStored` event bytes).
-    Sglang,
-    /// vLLM: image positions filled with `image_token_id`; per-image
-    /// 64-char-hex mm_hashes forwarded via `multi_modal_uuids` in
-    /// `extra_args` (matches vLLM's mm_uuid event format).
-    Vllm,
-}
-
-/// Mirror of sglang's `MultimodalItem._compute_pad_value` constants from
-/// `python/sglang/srt/managers/multimodal_processor.py`. The pad_value
-/// shoved into routing-side block hashes for each image must match what
-/// sglang publishes via its `BlockStored` KV events — if either constant
-/// drifts from upstream, our pad_value diverges and routing silently
-/// degrades to text-prefix.
-///
-/// Pinned by `mm_pad_value_matches_sglang_protocol` in `mod tests`.
-#[cfg(feature = "lightseek-mm")]
-const MM_PAD_SHIFT_VALUE: u64 = 1_000_000;
-#[cfg(feature = "lightseek-mm")]
-const MM_PAD_HASH_MASK: u64 = (1 << 30) - 1;
-
-/// Compute the sglang per-image pad_value from a routing-side mm_hash.
-/// Wrapping the formula in a function (not just an inline closure) lets
-/// the test in `mod tests` pin both the constants and the formula
-/// directly.
-#[cfg(feature = "lightseek-mm")]
-fn pad_value_for_sglang(mm_hash: u64) -> crate::protocols::TokenIdType {
-    (MM_PAD_SHIFT_VALUE + (mm_hash & MM_PAD_HASH_MASK)) as crate::protocols::TokenIdType
-}
-
-#[cfg(feature = "lightseek-mm")]
-impl MmRoutingProtocol {
-    /// Resolve from `runtime_config.backend_framework`. Returns `None` for
-    /// missing or unrecognized values so MM-aware routing disables itself
-    /// (text-prefix fallback) instead of silently picking a wire shape.
-    fn from_backend_framework(value: Option<&str>) -> Option<Self> {
-        match value {
-            Some(s) if s.eq_ignore_ascii_case("sglang") => Some(Self::Sglang),
-            Some(s) if s.eq_ignore_ascii_case("vllm") => Some(Self::Vllm),
-            other => {
-                tracing::warn!(
-                    target: "mm_routing",
-                    backend_framework = ?other,
-                    "backend_framework missing or unrecognized; \
-                     MM-aware routing disabled (text-prefix fallback)."
-                );
-                None
-            }
-        }
-    }
-
-    /// Hex-encode `mm_hash` for `extra_args["mm_hashes"]`. Length is
-    /// load-bearing: sglang reads `int(hex, 16)` for pad_value, vLLM's
-    /// `BlockStored` parser uses 64-char as the MM-hash type tag.
-    fn format_mm_hash_hex(&self, mm_hash: u64) -> String {
-        const HEX_PAD: &str = "000000000000000000000000000000000000000000000000";
-        match self {
-            Self::Sglang => format!("{mm_hash:016x}"),
-            Self::Vllm => format!("{mm_hash:016x}{HEX_PAD}"),
-        }
-    }
-
-    /// Fill token at image positions in the routing-side `token_ids`.
-    /// sglang: `pad_value(mm_hash)` to match RadixAttention cache key.
-    /// vLLM: `find_token_id` (what the HF processor emits).
-    fn image_fill_token(
-        &self,
-        mm_hash: u64,
-        find_token_id: crate::protocols::TokenIdType,
-    ) -> crate::protocols::TokenIdType {
-        match self {
-            Self::Sglang => pad_value_for_sglang(mm_hash),
-            Self::Vllm => find_token_id,
-        }
-    }
-
-    /// Emit per-block MM-info? vLLM consumes it; sglang's pad_value
-    /// already encodes `mm_hash` in the bytes the router hashes.
-    fn emits_block_mm_infos(&self) -> bool {
-        matches!(self, Self::Vllm)
-    }
 }
 
 pub struct OpenAIPreprocessor {
@@ -334,15 +240,10 @@ pub struct OpenAIPreprocessor {
     media_loader: Option<MediaLoader>,
     /// Max context length (in tokens) this model can handle, from ModelDeploymentCard
     context_length: u32,
-    /// Backend protocol the MM-routing fill path matches against. `None`
-    /// when `runtime_config.backend_framework` is missing or unrecognized
-    /// — MM-aware routing then falls back to text-prefix routing.
-    #[cfg(feature = "lightseek-mm")]
-    mm_routing_protocol: Option<MmRoutingProtocol>,
     /// Per-image token-count engine. `None` when the feature is disabled, the
     /// model isn't covered by the registry, or `preprocessor_config.json` is
     /// unreadable.
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     image_token_counter: Option<lightseek_mm::LightseekMmCounter>,
     /// Image-placeholder token id the routing-side sequence fills per image.
     /// Resolved from `config.json`'s `image_token_id` field when present,
@@ -353,21 +254,21 @@ pub struct OpenAIPreprocessor {
     ///
     /// `None` disables MM-aware routing for this model and the router falls
     /// back to text-prefix routing.
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     routing_image_token_id: Option<crate::protocols::TokenIdType>,
     /// Per-family flatten-time image placeholder template (e.g.
     /// `"<|image_{n}|>"` for Phi-3, `"<image>"` for LLaVA-1.5). Threaded
     /// through from the formatter so the routing path can reverse the
     /// BPE-encoded numbered form (Phi-3) back into single placeholder
     /// tokens when the chat template uses numbered markers.
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     image_placeholder_template: Option<&'static str>,
     /// BOS token id to prepend to the routing-side sequence so per-block
     /// hashes match the backend's HF processor output on models with
     /// `add_bos_token: true` (Phi-3-vision and other `LlamaTokenizer`
     /// families). `None` when the model doesn't need it or `bos_token`
     /// doesn't round-trip to a single id.
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     routing_prepend_bos: Option<crate::protocols::TokenIdType>,
 }
 
@@ -492,24 +393,17 @@ impl OpenAIPreprocessor {
         let runtime_config = mdc.runtime_config.clone();
         let kv_cache_block_size = mdc.kv_cache_block_size as usize;
 
-        // Resolve the backend label once at startup; used by the MM-routing
-        // hot path to pick between sglang pad_value substitution and vLLM
-        // mm_hashes forwarding without re-checking per request.
-        #[cfg(feature = "lightseek-mm")]
-        let mm_routing_protocol =
-            MmRoutingProtocol::from_backend_framework(runtime_config.backend_framework.as_deref());
-
         // Capture MM-routing inputs before mdc is partially moved into MediaLoader.
         // model_type comes from config.json (e.g. "qwen3_vl") and lets the
-        // lightseek registry resolve fine-tunes loaded from custom-named
-        // directories where the family substring isn't in the path.
-        #[cfg(feature = "lightseek-mm")]
+        // image-processor registry resolve fine-tunes loaded from
+        // custom-named directories where the family substring isn't in the path.
+        #[cfg(feature = "mm-routing")]
         let model_dir_for_routing: Option<std::path::PathBuf> = mdc_model_dir(&mdc);
         // TODO(mm-routing): fastokens lacks a special-token mutator, so it
         // can't merge tokenizer_config.json specials and would BPE-shatter
         // placeholders (e.g. Qwen2-VL `<|image_pad|>`). Disable MM-routing
         // here; remove once fastokens upstream exposes the mutator.
-        #[cfg(feature = "lightseek-mm")]
+        #[cfg(feature = "mm-routing")]
         let image_token_inputs: Option<(String, String, std::path::PathBuf)> = {
             let fastokens_active = std::env::var("DYN_TOKENIZER").as_deref() == Ok("fastokens");
             if fastokens_active && model_dir_for_routing.is_some() {
@@ -537,7 +431,7 @@ impl OpenAIPreprocessor {
 
         let context_length = mdc.context_length;
 
-        #[cfg(feature = "lightseek-mm")]
+        #[cfg(feature = "mm-routing")]
         let (image_token_counter, routing_image_token_id, bos_token_string) =
             match image_token_inputs {
                 Some((model_id, model_type, model_dir)) => {
@@ -555,8 +449,8 @@ impl OpenAIPreprocessor {
                         Err(e) => (None, Some(e.to_string())),
                     };
                     // One-shot config/tokenizer_config read for all
-                    // routing-side token info. Parsing lives in
-                    // `lightseek_mm`, next to the spec resolution.
+                    // routing-side token info. Parsing lives next to the
+                    // spec resolution in the MM-routing module.
                     let routing_tokens =
                         lightseek_mm::resolve_routing_tokens(&model_id, &model_dir);
                     // `chat_placeholder_token_id` already prefers config.json's
@@ -613,16 +507,16 @@ impl OpenAIPreprocessor {
                 }
             };
 
-        #[cfg(feature = "lightseek-mm")]
+        #[cfg(feature = "mm-routing")]
         let image_placeholder_template = formatter.image_placeholder_template();
 
         // Force the dim-fetch HTTP client to build at startup for any
         // MM-routable preprocessor, so TLS / env-var / reqwest-init
         // failures fail the deployment instead of crashing the first
         // MM request 20 minutes in. Text-only preprocessors skip the
-        // force (both lightseek hooks resolved to `None`) — no point
+        // force (both MM-routing hooks resolved to `None`) — no point
         // building a client they'll never use.
-        #[cfg(feature = "lightseek-mm")]
+        #[cfg(feature = "mm-routing")]
         if image_token_counter.is_some() || routing_image_token_id.is_some() {
             std::sync::LazyLock::force(&DIM_FETCH_MEDIA_FETCHER);
             std::sync::LazyLock::force(&DIM_FETCH_HTTP_CLIENT);
@@ -633,7 +527,7 @@ impl OpenAIPreprocessor {
         // when the configured `bos_token` round-trips to a single id. The
         // BOS string was harvested above by `resolve_routing_tokens` from
         // the same `tokenizer_config.json` pass.
-        #[cfg(feature = "lightseek-mm")]
+        #[cfg(feature = "mm-routing")]
         let routing_prepend_bos = match bos_token_string {
             Some(bos_text) => match tokenizer.encode(&bos_text) {
                 Ok(enc) if enc.token_ids().len() == 1 => {
@@ -679,15 +573,13 @@ impl OpenAIPreprocessor {
             tool_call_parser,
             media_loader,
             context_length,
-            #[cfg(feature = "lightseek-mm")]
-            mm_routing_protocol,
-            #[cfg(feature = "lightseek-mm")]
+            #[cfg(feature = "mm-routing")]
             image_token_counter,
-            #[cfg(feature = "lightseek-mm")]
+            #[cfg(feature = "mm-routing")]
             routing_image_token_id,
-            #[cfg(feature = "lightseek-mm")]
+            #[cfg(feature = "mm-routing")]
             image_placeholder_template,
-            #[cfg(feature = "lightseek-mm")]
+            #[cfg(feature = "mm-routing")]
             routing_prepend_bos,
         }))
     }
@@ -772,7 +664,7 @@ impl OpenAIPreprocessor {
         // Build the MM-aware view (expanded routing_token_ids + per-block
         // mm_hashes) for the KV router. No-op when no images are present or
         // the model has no resolved image-placeholder.
-        #[cfg(feature = "lightseek-mm")]
+        #[cfg(feature = "mm-routing")]
         self.gather_mm_exact_routing_info(
             &mut builder,
             &_mm_image_entries,
@@ -1021,10 +913,10 @@ impl OpenAIPreprocessor {
         let mut media_map: MultimodalDataMap = HashMap::new();
         let mut fetch_tasks: Vec<(String, &ChatCompletionRequestUserMessageContentPart)> =
             Vec::new();
-        // Per-image (mm_hash, width, height) for the lightseek MM-routing path.
+        // Per-image (mm_hash, width, height) for the MM-routing path.
         // Accumulated in message order so we don't walk messages twice.
         // Cleared and returned to the caller; empty for non-image / text-only requests.
-        #[cfg(feature = "lightseek-mm")]
+        #[cfg(feature = "mm-routing")]
         let mut mm_image_entries: Vec<MmImageEntry> = Vec::new();
         // Total `image_url` content parts in the request. Bumped at every
         // image part regardless of which fetch path handles it. Used at
@@ -1038,12 +930,12 @@ impl OpenAIPreprocessor {
         // the request. The decoded path (`has_media_loader`) propagates
         // any dim-fetch failure via `?`, so the request errors out before
         // mm_hashes forwarding is even considered.
-        #[cfg(feature = "lightseek-mm")]
+        #[cfg(feature = "mm-routing")]
         let mut total_image_count: usize = 0;
         // For the URL-passthrough case (media_loader is None) we collect image
         // URLs here and resolve dims via header-only HTTP after the loop so we
         // can issue all fetches in parallel.
-        #[cfg(feature = "lightseek-mm")]
+        #[cfg(feature = "mm-routing")]
         let mut url_passthrough_images: Vec<(u64, String)> = Vec::new();
 
         let Some(messages) = request.typed_messages() else {
@@ -1067,7 +959,7 @@ impl OpenAIPreprocessor {
                         ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => "audio_url",
                         _ => continue,
                     };
-                    #[cfg(feature = "lightseek-mm")]
+                    #[cfg(feature = "mm-routing")]
                     if type_str == "image_url" {
                         total_image_count += 1;
                     }
@@ -1085,7 +977,7 @@ impl OpenAIPreprocessor {
                         }
                         _ => continue,
                     };
-                    #[cfg(feature = "lightseek-mm")]
+                    #[cfg(feature = "mm-routing")]
                     if type_str == "image_url" {
                         total_image_count += 1;
                         let mm_hash = Self::hash_image_url(url.as_str());
@@ -1115,8 +1007,8 @@ impl OpenAIPreprocessor {
                 let rdma_descriptor = result?;
 
                 // Decoded RDMA descriptor carries shape `[H, W, C]`.
-                // Image-only; lightseek doesn't cover audio/video.
-                #[cfg(feature = "lightseek-mm")]
+                // Image-only; MM-routing doesn't cover audio/video.
+                #[cfg(feature = "mm-routing")]
                 if type_str == "image_url" {
                     let shape = &rdma_descriptor.tensor_info.shape;
                     if shape.len() >= 2 {
@@ -1151,7 +1043,7 @@ impl OpenAIPreprocessor {
                                 tokens = n,
                                 mm_hash = mm_hash,
                                 source = hash_source,
-                                "lightseek image-token count"
+                                "image-token count"
                             );
                         }
                         mm_image_entries.push(MmImageEntry {
@@ -1173,7 +1065,7 @@ impl OpenAIPreprocessor {
         // parallel to get (W, H) per image without downloading the full bytes.
         // Enables MM-aware routing for backends that register
         // `media_decoder: null` and decode images on the worker.
-        #[cfg(feature = "lightseek-mm")]
+        #[cfg(feature = "mm-routing")]
         if !url_passthrough_images.is_empty() {
             let dim_results = futures::future::join_all(
                 url_passthrough_images
@@ -1194,7 +1086,7 @@ impl OpenAIPreprocessor {
                                 tokens = n,
                                 mm_hash = mm_hash,
                                 source = "url_passthrough_header_fetch",
-                                "lightseek image-token count"
+                                "image-token count"
                             );
                         }
                         mm_image_entries.push(MmImageEntry {
@@ -1219,7 +1111,7 @@ impl OpenAIPreprocessor {
                             target: "mm_routing",
                             url = %url_for_log,
                             error = %e,
-                            "lightseek: failed to fetch image dims; MM routing entry skipped"
+                            "mm-routing: failed to fetch image dims; MM routing entry skipped"
                         );
                     }
                 }
@@ -1263,38 +1155,39 @@ impl OpenAIPreprocessor {
 
             // Forward routing-side mm_hashes in `extra_args["mm_hashes"]` so the
             // backend's KV events publish under the same key the router computes.
-            // Each backend's hex format is owned by `MmRoutingProtocol::format_mm_hash_hex`
-            // (sglang 16-char, vLLM 64-char — both are protocol-load-bearing).
+            // Always the canonical 16-char hex (u64); each backend adapts it:
+            // sglang reads `int(hex, 16)` as-is, vLLM pads to its 64-char
+            // BlockStored form. No information is lost — both carry the same u64.
             //
             // Skip forwarding entirely if any image failed dim resolution —
             // a shorter `mm_hashes` list would misalign with the image
             // positions the backend derives from `multi_modal_data`, and
             // the wrong UUIDs would get injected onto the wrong images.
-            #[cfg(feature = "lightseek-mm")]
-            if let Some(protocol) = self.mm_routing_protocol
+            #[cfg(feature = "mm-routing")]
+            if self.routing_image_token_id.is_some()
                 && !mm_image_entries.is_empty()
                 && mm_image_entries.len() == total_image_count
             {
                 let hexes: Vec<serde_json::Value> = mm_image_entries
                     .iter()
-                    .map(|e| serde_json::Value::String(protocol.format_mm_hash_hex(e.mm_hash)))
+                    .map(|e| serde_json::Value::String(format!("{:016x}", e.mm_hash)))
                     .collect();
                 extra_args["mm_hashes"] = serde_json::Value::Array(hexes);
-            } else if !mm_image_entries.is_empty() && self.mm_routing_protocol.is_some() {
+            } else if !mm_image_entries.is_empty() && self.routing_image_token_id.is_some() {
                 tracing::warn!(
                     target: "mm_routing",
                     resolved = mm_image_entries.len(),
                     expected = total_image_count,
-                    "lightseek: not all images resolved an MM-routing entry; skipping mm_hashes forwarding"
+                    "mm-routing: not all images resolved an MM-routing entry; skipping mm_hashes forwarding"
                 );
             }
 
             builder.extra_args(Some(extra_args));
         }
 
-        #[cfg(feature = "lightseek-mm")]
+        #[cfg(feature = "mm-routing")]
         return Ok(mm_image_entries);
-        #[cfg(not(feature = "lightseek-mm"))]
+        #[cfg(not(feature = "mm-routing"))]
         Ok(Vec::new())
     }
 
@@ -1304,7 +1197,7 @@ impl OpenAIPreprocessor {
     /// templates; single-special-token families (Qwen-VL, LLaVA) ignore it.
     /// Returns `Ok(())` with no work performed on any precondition miss
     /// (caller falls back to text-prefix routing).
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     pub fn gather_mm_exact_routing_info(
         &self,
         builder: &mut PreprocessedRequestBuilder,
@@ -1313,18 +1206,10 @@ impl OpenAIPreprocessor {
         formatted_prompt: Option<&str>,
     ) -> Result<()> {
         use crate::protocols::common::preprocessor::MmRoutingInfo;
-        use dynamo_kv_router::protocols::{RequestExtraInfo, RequestMmObjectInfo};
 
         if mm_image_entries.is_empty() {
             return Ok(());
         }
-        let Some(protocol) = self.mm_routing_protocol else {
-            tracing::debug!(
-                target: "mm_routing",
-                "mm_routing_protocol unset; skipping MM routing info"
-            );
-            return Ok(());
-        };
         let Some(find_token_id) = self.routing_image_token_id else {
             tracing::debug!(
                 target: "mm_routing",
@@ -1393,15 +1278,18 @@ impl OpenAIPreprocessor {
                 return Ok(());
             };
 
-        // Compute per-image N via lightseek + run the expansion.
+        // Compute per-image N via the registry + run the expansion.
         let n_tokens: Vec<usize> = mm_image_entries
             .iter()
             .map(|e| counter.count_tokens(e.width, e.height))
             .collect();
         let n_total: usize = n_tokens.iter().sum();
 
-        // Per-protocol image-position fill (see `MmRoutingProtocol::image_fill_token`).
-        // sglang's pad_value formula is pinned by `mm_pad_value_matches_sglang_protocol`.
+        // Canonical pad_value fill at image positions for ALL backends. sglang
+        // consumes pad_value natively; vLLM events are normalized to pad_value
+        // in the kv-router (see `create_stored_blocks`), so the frontend stays
+        // backend-agnostic. pad_value formula pinned by
+        // `pad_value_matches_sglang_protocol` in dynamo_kv_router.
         //
         // BOS ownership: when the Phi-3 splice helper produced
         // `normalized_token_ids` (Cow::Owned), it has already emitted the
@@ -1416,15 +1304,12 @@ impl OpenAIPreprocessor {
         if !splice_owns_bos && let Some(bos) = self.routing_prepend_bos {
             expanded.push(bos);
         }
-        let mut img_ranges: Vec<(usize, usize)> = Vec::with_capacity(mm_image_entries.len());
         let mut i = 0usize;
         for &t in normalized_token_ids.iter() {
             if t == find_token_id && i < mm_image_entries.len() {
-                let start = expanded.len();
                 let fill_token =
-                    protocol.image_fill_token(mm_image_entries[i].mm_hash, find_token_id);
+                    dynamo_kv_router::protocols::pad_value_for_mm_hash(mm_image_entries[i].mm_hash);
                 expanded.extend(std::iter::repeat_n(fill_token, n_tokens[i]));
-                img_ranges.push((start, start + n_tokens[i]));
                 i += 1;
             } else {
                 expanded.push(t);
@@ -1442,35 +1327,21 @@ impl OpenAIPreprocessor {
             expanded.resize(total_tokens, 0);
         }
 
-        // Build request-level MM info, then derive per-block info. In sglang
-        // mode skip block_mm_infos: pad_value already encodes mm_hash in the
-        // bytes the router hashes; sglang's events carry no extra_keys.
-        let block_mm_infos = if !protocol.emits_block_mm_infos() {
-            Vec::new()
-        } else {
-            let mm_objects: Vec<RequestMmObjectInfo> = mm_image_entries
-                .iter()
-                .zip(img_ranges.iter())
-                .map(|(entry, &(s, e))| RequestMmObjectInfo {
-                    mm_hash: entry.mm_hash,
-                    offsets: vec![(s, e)],
-                })
-                .collect();
-            RequestExtraInfo { mm_objects }.to_block_level(block_size, total_tokens)
-        };
-
+        // pad_value already encodes mm_hash in the routing tokens the router
+        // hashes, so block_mm_infos is always empty (the canonical scheme for
+        // both backends). The mm identity rides in the token stream, not a
+        // side channel.
         tracing::debug!(
             target: "mm_routing",
             n_images = mm_image_entries.len(),
             block_size,
             total_tokens,
-            n_blocks = block_mm_infos.len(),
-            "lightseek MmRoutingInfo built (exact)"
+            "MmRoutingInfo built (exact, pad_value)"
         );
 
         builder.mm_routing_info(Some(MmRoutingInfo {
             routing_token_ids: expanded,
-            block_mm_infos,
+            block_mm_infos: Vec::new(),
         }));
         Ok(())
     }
@@ -1504,7 +1375,7 @@ impl OpenAIPreprocessor {
     /// caller does NOT prepend its own BOS when this helper succeeds.
     /// Returns `None` (caller falls back to text-prefix routing) when the
     /// family guard trips or on any tokenize/decode failure.
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     fn splice_phi3_numbered_placeholders_at_token_level(
         &self,
         prompt: &str,
@@ -1573,7 +1444,7 @@ impl OpenAIPreprocessor {
     /// Azure SAS) should use `--frontend-decoding`: that path hashes the
     /// decoded RGB bytes instead, so cross-URL cache reuse is restored
     /// without depending on URL conventions.
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     fn hash_image_url(url: &str) -> u64 {
         xxhash_rust::xxh3::xxh3_64(url.as_bytes())
     }
@@ -1588,7 +1459,7 @@ impl OpenAIPreprocessor {
     /// (typical of multi-turn / session workloads) hit the cache and skip the
     /// HTTP fetch entirely. Without this cache, sticky-routing workloads pay
     /// 4–5× HTTP Range fetches per request just to compute routing tokens.
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     async fn fetch_image_dims(mm_hash: u64, url: &str) -> Result<(u32, u32)> {
         use moka::future::Cache;
         use std::sync::LazyLock;
@@ -1633,7 +1504,7 @@ impl OpenAIPreprocessor {
             .map_err(|e| anyhow::anyhow!("fetch_image_dims failed: {}", e))
     }
 
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     async fn fetch_image_dims_uncached(url: &str) -> Result<(u32, u32)> {
         use image::ImageReader;
         use std::io::Cursor;
@@ -3003,7 +2874,7 @@ impl
         )?;
 
         tracing::trace!(request = ?common_request, prompt_injected_reasoning, "Pre-processed request");
-        let trace_state = crate::agents::trace::build_agent_trace_request_end_state(
+        let trace_state = crate::request_trace::build_request_end_trace_state(
             &common_request,
             &tracker,
             &context,
@@ -3011,7 +2882,7 @@ impl
         );
         let trace_tokens_enabled = trace_state.is_some();
         let trace_finish_reason_metadata =
-            crate::agents::trace::finish_reason_metadata_handle(&trace_state);
+            crate::request_trace::finish_reason_metadata_handle(&trace_state);
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
@@ -3088,7 +2959,7 @@ impl
             &self.tokenizer,
         );
 
-        let final_stream = crate::agents::trace::wrap_agent_trace_chat_request_end_stream(
+        let final_stream = crate::request_trace::wrap_chat_request_end_stream(
             final_stream,
             trace_state,
             request_id,
@@ -3165,7 +3036,7 @@ impl
 
         let mut common_request = builder.build()?;
 
-        let trace_state = crate::agents::trace::build_agent_trace_request_end_state(
+        let trace_state = crate::request_trace::build_request_end_trace_state(
             &common_request,
             &tracker,
             &context,
@@ -3173,7 +3044,7 @@ impl
         );
         let trace_tokens_enabled = trace_state.is_some();
         let trace_finish_reason_metadata =
-            crate::agents::trace::finish_reason_metadata_handle(&trace_state);
+            crate::request_trace::finish_reason_metadata_handle(&trace_state);
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
@@ -3212,7 +3083,7 @@ impl
             trace_finish_reason_metadata,
         );
 
-        let stream = crate::agents::trace::wrap_agent_trace_completion_request_end_stream(
+        let stream = crate::request_trace::wrap_completion_request_end_stream(
             Box::pin(stream),
             trace_state,
             request_id,
@@ -3777,7 +3648,7 @@ mod tests {
     /// the identity. For signed-URL workloads where rotation actually
     /// hides a stable object, `--frontend-decoding` hashes the decoded
     /// bytes instead.
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     #[test]
     fn hash_image_url_distinguishes_query_strings() {
         let base = "https://cdn.example.com/img.jpg";
@@ -3793,7 +3664,7 @@ mod tests {
     /// routing for signed-URL workloads — `--frontend-decoding` is the
     /// recommended mode there because it hashes the decoded image bytes
     /// regardless of how the URL was signed.
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     #[test]
     fn hash_image_url_distinguishes_rotating_signatures() {
         let base = "https://bucket.s3.amazonaws.com/img.jpg";
@@ -3811,7 +3682,7 @@ mod tests {
 
     /// Identical URLs must hash to the same value (the basic identity
     /// guarantee that makes URL-passthrough routing useful at all).
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     #[test]
     fn hash_image_url_is_deterministic_for_identical_urls() {
         let url = "https://cdn.example.com/img.jpg?width=256";
@@ -3823,7 +3694,7 @@ mod tests {
 
     /// data: URIs hash the entire URI string. Same payload → same hash;
     /// different payload → different hash.
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     #[test]
     fn hash_image_url_data_uri_content_addressed() {
         let same = "data:image/png;base64,AAAA";
@@ -3840,7 +3711,7 @@ mod tests {
     }
 
     /// Non-HTTP / non-data schemes (s3://, gs://, file://) hash as-is.
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     #[test]
     fn hash_image_url_other_schemes_passthrough() {
         let s3a = OpenAIPreprocessor::hash_image_url("s3://bucket/key?v=1");
@@ -3848,40 +3719,6 @@ mod tests {
         assert_ne!(
             s3a, s3b,
             "s3:// query params identify objects and must not collide"
-        );
-    }
-
-    /// Pin the sglang pad_value protocol constants and formula against
-    /// upstream `MultimodalItem._compute_pad_value`. If sglang bumps
-    /// either constant in a new release, this test fails — without it
-    /// the routing-side pad_value would silently diverge from sglang's
-    /// `BlockStored` event bytes and MM-routing would degrade to text-
-    /// prefix without any error.
-    #[cfg(feature = "lightseek-mm")]
-    #[test]
-    fn mm_pad_value_matches_sglang_protocol() {
-        // Constant pins (upstream:
-        // python/sglang/srt/managers/multimodal_processor.py).
-        assert_eq!(MM_PAD_SHIFT_VALUE, 1_000_000);
-        assert_eq!(MM_PAD_HASH_MASK, (1u64 << 30) - 1);
-
-        // Formula pins. Three cases: zero, a value that exactly fits the
-        // 30-bit mask, and a value that overflows it (verifies the mask
-        // is actually applied, not just additively combined).
-        assert_eq!(
-            pad_value_for_sglang(0),
-            MM_PAD_SHIFT_VALUE as crate::protocols::TokenIdType
-        );
-        let fits = (1u64 << 30) - 1;
-        assert_eq!(
-            pad_value_for_sglang(fits),
-            (MM_PAD_SHIFT_VALUE + fits) as crate::protocols::TokenIdType
-        );
-        let overflow = (1u64 << 30) | 0xCAFE;
-        assert_eq!(
-            pad_value_for_sglang(overflow),
-            (MM_PAD_SHIFT_VALUE + 0xCAFE) as crate::protocols::TokenIdType,
-            "high bits above the 30-bit mask must be discarded"
         );
     }
 }

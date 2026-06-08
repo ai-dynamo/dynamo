@@ -33,6 +33,7 @@ from sglang.srt.managers.io_struct import (
 from sglang.srt.utils.network import get_local_ip_auto, get_zmq_socket
 
 from dynamo._core import Context
+from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend import telemetry
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
@@ -331,6 +332,20 @@ class SglangLLMEngine(LLMEngine):
 
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
+        # Prefill discards engine output (it only yields bootstrap info) —
+        # asking SGLang to compute logprobs there would be wasted work,
+        # especially with prompt_logprobs which forces a full prompt pass.
+        logprob_kwargs = (
+            {}
+            if self.serving_mode == DisaggregationMode.PREFILL
+            else _shared_logprobs.build_sglang_logprob_kwargs(
+                request.get("output_options", {}) or {},
+                allow_top_logprobs=_shared_logprobs.sglang_top_logprobs_allowed(),
+            )
+        )
+        return_tokens_as_token_ids = bool(
+            (request.get("output_options") or {}).get("return_tokens_as_token_ids")
+        )
 
         # No-op for PREFILL / hook-off (gating returns []). Resolve the uid
         # only when there's something to activate.
@@ -376,6 +391,7 @@ class SglangLLMEngine(LLMEngine):
             ),
             **bootstrap_kwargs,
             **logits_kwargs,
+            **logprob_kwargs,
         )
 
         # ORDER MATTERS: async_generate must register the room (the await
@@ -426,6 +442,10 @@ class SglangLLMEngine(LLMEngine):
             task.add_done_callback(self._prefill_consume_tasks.discard)
             return
 
+        # SGLang's logprob arrays are cumulative per choice and `n > 1`
+        # requests interleave choices on the stream, so the offset is
+        # keyed by `output_idx`, not a single scalar.
+        num_logprobs_per_choice: dict[int, int] = {}
         async for res in stream:
             # SGLang sets index when n>1; default to 0 otherwise.
             output_idx = res.get("index") or 0
@@ -434,6 +454,22 @@ class SglangLLMEngine(LLMEngine):
             finish_reason = meta_info["finish_reason"]
 
             output_ids = res.get("output_ids", [])
+            if output_ids or finish_reason:
+                (
+                    log_probs,
+                    top_logprobs,
+                    next_total,
+                ) = _shared_logprobs.extract_from_sglang_meta(
+                    meta_info,
+                    num_logprobs_per_choice.get(output_idx, 0),
+                    return_tokens_as_token_ids=return_tokens_as_token_ids,
+                )
+                num_logprobs_per_choice[output_idx] = next_total
+                if log_probs is not None:
+                    out["log_probs"] = log_probs
+                if top_logprobs is not None:
+                    out["top_logprobs"] = top_logprobs
+
             if not output_ids and not finish_reason:
                 if context.is_stopped():
                     prompt_tokens = meta_info.get("prompt_tokens", 0)
@@ -462,20 +498,25 @@ class SglangLLMEngine(LLMEngine):
                     "completion_tokens": completion_tokens,
                     "total_tokens": prompt_tokens + completion_tokens,
                 }
+                prompt_payload = (
+                    _shared_logprobs.extract_prompt_logprobs_from_sglang_meta(meta_info)
+                )
+                if prompt_payload is not None:
+                    out["engine_data"] = {"prompt_logprobs": prompt_payload}
 
             if context.is_stopped():
+                # Mutate `out` instead of building a fresh dict so any
+                # logprobs we already extracted for this chunk's tokens
+                # ride along with the cancellation terminal.
                 prompt_tokens = meta_info.get("prompt_tokens", 0)
                 completion_tokens = meta_info.get("completion_tokens", 0)
-                yield {
-                    "token_ids": output_ids,
-                    "index": output_idx,
-                    "finish_reason": "cancelled",
-                    "completion_usage": {
-                        "prompt_tokens": prompt_tokens,
-                        "completion_tokens": completion_tokens,
-                        "total_tokens": prompt_tokens + completion_tokens,
-                    },
+                out["finish_reason"] = "cancelled"
+                out["completion_usage"] = {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
                 }
+                yield out
                 break
 
             yield out

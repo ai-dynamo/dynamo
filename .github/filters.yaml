@@ -73,6 +73,7 @@ ignore:
   # validation passes on the deletion diff without triggering trtllm CI.
   - 'container/build_trtllm_wheel.sh'
   - 'container/deps/trtllm/**'
+  - 'scripts/dco_check.py'
 
 ci: &ci
   - '.github/workflows/**'

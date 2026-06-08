@@ -109,11 +109,6 @@ impl ModelRuntimeConfig {
     }
 
     #[setter]
-    fn set_backend_framework(&mut self, backend_framework: Option<String>) {
-        self.inner.backend_framework = backend_framework;
-    }
-
-    #[setter]
     fn set_data_parallel_start_rank(&mut self, data_parallel_start_rank: u32) {
         self.inner.data_parallel_start_rank = data_parallel_start_rank;
     }
@@ -208,11 +203,6 @@ impl ModelRuntimeConfig {
     #[getter]
     fn reasoning_parser(&self) -> Option<String> {
         self.inner.reasoning_parser.clone()
-    }
-
-    #[getter]
-    fn backend_framework(&self) -> Option<String> {
-        self.inner.backend_framework.clone()
     }
 
     #[getter]

@@ -21,7 +21,7 @@ from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_embedding_cache_metrics,
 )
-from dynamo.llm import ModelInput, ModelType, WorkerType
+from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 
 from .args import Config
@@ -202,6 +202,24 @@ class WorkerFactory:
             config.embedding_transfer_mode,  # type: ignore[arg-type]
         )
         await handler.async_init(runtime)
+
+        # Encode workers register a model card so the frontend's
+        # serving-readiness gate can count them. The card carries no OpenAI
+        # surface (`ModelType.Empty`) — the encode endpoint isn't routed by
+        # the OpenAI dispatch. `needs` is the DNF for an encode worker:
+        # either a P+D pair or a single Aggregated peer.
+        await register_model(
+            ModelInput.Tokens,
+            ModelType.Empty,
+            generate_endpoint,
+            config.model,
+            model_name=config.served_model_name or config.model,
+            worker_type=WorkerType.Encode,
+            needs=[
+                [WorkerType.Prefill, WorkerType.Decode],
+                [WorkerType.Aggregated],
+            ],
+        )
         logger.info("Starting to serve the encode worker endpoint...")
 
         try:
@@ -529,7 +547,11 @@ class WorkerFactory:
                 bench_cfg, vllm_config
             )
 
-        # What the worker is advertising itself as, and what other worker it needs to serve traffic.
+        # Model-serving-readiness role.
+        # _create_decode_worker handles both DECODE and AGGREGATED disaggregation modes.
+        # `--route-to-encoder` adds Encode to the AND-set of required peers
+        # (encode workers register their own card in
+        # `_create_multimodal_encode_worker`).
         if config.disaggregation_mode == DisaggregationMode.DECODE:
             worker_type = WorkerType.Decode
             needs_set: list[WorkerType] = [WorkerType.Prefill]
@@ -537,6 +559,8 @@ class WorkerFactory:
             # AGGREGATED
             worker_type = WorkerType.Aggregated
             needs_set = []
+        if config.route_to_encoder:
+            needs_set.append(WorkerType.Encode)
         needs: list[list[WorkerType]] = [needs_set] if needs_set else []
 
         await self.register_vllm_model(
@@ -742,19 +766,30 @@ class WorkerFactory:
         )
         shutdown_endpoints[:] = [generate_endpoint, clear_endpoint, perf_endpoint]
 
-        # Register prefill model with ModelType.Prefill
-        model_input = (
-            ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
-        )
+        # Prefill workers expose no OpenAI surface — the role is carried by
+        # `worker_type=Prefill`. We register the legacy `ModelType.Prefill`
+        # marker bit (not a surface) so an OLD frontend, which detects prefill
+        # via that bit, still routes disaggregated traffic to this worker
+        # during the cross-version rollout. A new frontend ignores the bit and
+        # dispatches off `worker_type`. When
+        # --route-to-encoder is set, Encode joins the AND-set of needs.
+        # ModelInput here is the inter-worker contract, not an engine-local
+        # tokenization preference: prefill only ever receives token IDs from
+        # its decode peer, so this is Tokens regardless of
+        # config.use_vllm_tokenizer (which only swaps the frontend↔decode
+        # boundary and the engine-local health-check payload below).
+        prefill_needs_set: list[WorkerType] = [WorkerType.Decode]
+        if config.route_to_encoder:
+            prefill_needs_set.append(WorkerType.Encode)
         await self.register_vllm_model(
-            model_input,
+            ModelInput.Tokens,
             ModelType.Prefill,
             generate_endpoint,
             config,
             engine_client,
             vllm_config,
             worker_type=WorkerType.Prefill,
-            needs=[[WorkerType.Decode]],
+            needs=[prefill_needs_set],
         )
 
         health_check_payload = VllmPrefillHealthCheckPayload(
