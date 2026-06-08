@@ -1,10 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Documentation Style Guide
 subtitle: How to write and structure Dynamo docs, examples, and recipes
 ---
-
-# Documentation Style Guide
 
 This is the documentation standard for NVIDIA Dynamo. Follow it for every page under `docs/`, and for
 the READMEs and configuration under `examples/` and `recipes/`. Consistent structure, accurate
@@ -16,32 +15,33 @@ guide takes precedence; for anything it doesn't cover, defer to the
 [Google developer documentation style guide](https://developers.google.com/style), then the
 [Microsoft Writing Style Guide](https://learn.microsoft.com/style-guide).
 
-**Must-fix vs guidance.** The bot enforces five things as must-fix: an SPDX header, a body `# H1`
-title, a nav entry for every new page, the link rules, and no internal references. Treat everything
-else here as guidance, and deviate with a reason.
+**Must-fix vs guidance.** The bot enforces five things as must-fix: an SPDX header, frontmatter with
+at least one metadata key (and **no** stray body `# H1`), a nav entry for every new page, the link
+rules, and no internal references. Treat everything else here as guidance, and deviate with a reason.
 
 ## Frontmatter and title
 
-Put the **page title in a body `# H1`**, not in frontmatter; it renders on GitHub and as the page
-title on the Fern site. Frontmatter holds the SPDX header plus metadata, and **must contain at least
-one real YAML key**, or the SPDX `#` comments are read as body content and render as H1s.
+Fern generates the page H1 from the nav `page:` value (`docs/index.yml` and the versioned navs), so
+**do not add a body `# H1`** — it renders a second, duplicate title. Start the body at `##`.
+Frontmatter holds the SPDX header plus metadata, and **must contain at least one real YAML key**, or
+the SPDX `#` comments are read as body content and render as H1s.
 
 ```yaml
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Configuration and Tuning
 subtitle: Router flags, event transport, and tuning guidance
 ---
 
-# Configuration and Tuning
-
-Intro paragraph, then `##` sections.
+Intro paragraph (no body `# H1`), then `##` sections.
 ```
 
+- `title`: sets the page H1, the browser-tab `<title>`, and the sidebar label. Optional — if omitted,
+  Fern uses the nav `page:` value as the H1. Set it when the heading should differ from a short nav
+  label (e.g. nav "Introduction", H1 "Introduction to Dynamo"), and pair with `sidebar-title`.
 - `subtitle` (**recommended**): renders as a visible subtitle under the H1 (and as the meta description).
-- `sidebar-title`: optional short label for the sidebar nav.
-- `title`: optional; sets only the browser-tab `<title>`, **not** the visible page H1. Add it only
-  when you need a tab title different from the H1.
+- `sidebar-title`: short label for the sidebar nav; use when the title is long.
 - Optional: `description`, `keywords` (search), `last-updated`, `max-toc-depth`.
 
 ## SPDX headers
@@ -78,7 +78,7 @@ the KV router architecture, is the most common docs smell. Split it and cross-li
 
 ## Headings and structure
 
-- One body `# H1` (the page title; see Frontmatter and title), then a short intro, then `##` sections.
+- Start the body at `##` — Fern generates the page H1 from the nav, so a body `# H1` duplicates it (see Frontmatter and title). Open with a short intro paragraph, then `##` sections.
 - Use a logical hierarchy (`##` → `###`); do not skip levels.
 - Headings use **Title Case** ("Routing Behavior", "KV Event Transport and Persistence"). This is a
   deliberate Dynamo deviation from the Google/Microsoft sentence-case default, for consistency with
@@ -232,7 +232,7 @@ These are checked automatically on every docs/examples/recipes pull request; res
 merge:
 
 - [ ] SPDX header present, correct form for the file type, `2025-2026` range
-- [ ] Body `# H1` page title (Title Case); frontmatter has SPDX + at least one key (subtitle/sidebar-title)
+- [ ] No body `# H1` (Fern renders the title from the nav `page:`); frontmatter has SPDX + at least one key (`title`/`subtitle`/`sidebar-title`)
 - [ ] New, moved, or deleted page reflected in the right index (`docs/index.yml`, `*-examples.md`, or
       `recipes/README.md`)
 - [ ] Links: relative + extension within docs, absolute GitHub URL outside docs (no `../` escapes);

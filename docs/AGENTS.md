@@ -10,8 +10,9 @@ When creating or editing files under `docs/`, `examples/`, or `recipes/`, follow
 
 - SPDX header on every file: frontmatter `#` form for Fern docs, `<!-- -->` for plain READMEs,
   full Apache block for code/config; copyright range `2025-2026`.
-- Fern docs need `---` frontmatter with a `title:`; do **not** add a body `# H1` (it duplicates
-  the rendered title).
+- Fern docs: `---` frontmatter with SPDX + at least one metadata key (`title`/`subtitle`/
+  `sidebar-title`). Fern renders the page H1 from the nav `page:`, so do **not** add a body `# H1`
+  (it duplicates the title); start the body at `##`.
 - Admonitions GitHub-style (`> [!NOTE]`); the Fern build converts them — don't hand-write `<Note>`.
 - Links: relative + extension within `docs/`; absolute `github.com/ai-dynamo/dynamo` URLs for
   targets outside `docs/` (no `../` escapes).
