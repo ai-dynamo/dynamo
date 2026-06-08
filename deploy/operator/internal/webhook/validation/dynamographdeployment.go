@@ -494,6 +494,14 @@ func (v *DynamoGraphDeploymentValidator) isGrovePathway() bool {
 		strings.ToLower(v.deployment.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse
 }
 
+func (v *DynamoGraphDeploymentValidator) grovePathwayRequiredError(subject string) error {
+	if !v.groveEnabled {
+		return fmt.Errorf("%s requires the Grove pathway, but Grove is disabled at the operator level (global.grove.enabled=false)", subject)
+	}
+	return fmt.Errorf("%s requires the Grove pathway; remove or unset the %q annotation (currently %q)",
+		subject, consts.KubeAnnotationEnableGrove, v.deployment.Annotations[consts.KubeAnnotationEnableGrove])
+}
+
 // validatePVCs validates the PVC configurations.
 func (v *DynamoGraphDeploymentValidator) validatePVCs() error {
 	for i, pvc := range v.deployment.Spec.PVCs {
@@ -978,15 +986,7 @@ func (v *DynamoGraphDeploymentValidator) validateKvTransferPolicy(ctx context.Co
 				fieldPath, kvt.ClusterTopologyName, strings.Join(nameErrs, "; ")))
 		}
 		if !v.isGrovePathway() {
-			if !v.groveEnabled {
-				errs = append(errs, fmt.Errorf(
-					"%s.clusterTopologyName requires the Grove pathway, but Grove is disabled at the operator level (global.grove.enabled=false)",
-					fieldPath))
-			} else {
-				errs = append(errs, fmt.Errorf(
-					"%s.clusterTopologyName requires the Grove pathway; remove or unset the %q annotation (currently %q)",
-					fieldPath, consts.KubeAnnotationEnableGrove, v.deployment.Annotations[consts.KubeAnnotationEnableGrove]))
-			}
+			errs = append(errs, v.grovePathwayRequiredError("spec.experimental.kvTransferPolicy.clusterTopologyName"))
 		}
 	}
 
