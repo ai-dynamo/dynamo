@@ -20,14 +20,10 @@ export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
 uv pip uninstall vllm-omni
 
-git clone -b release/v0.17.0rc1 https://github.com/vllm-project/vllm-omni
+git clone -b release/v0.21.0rc1 https://github.com/vllm-project/vllm-omni
 cd vllm-omni
 
 uv pip install --no-cache-dir ".[dev]" --no-build-isolation
-
-# fix triton
-uv pip uninstall triton triton-xpu
-uv pip install triton-xpu==3.6.0 --extra-index-url=https://download.pytorch.org/whl/test/xpu
 
 # remove torch bundled oneccl to avoid conflicts
 uv pip uninstall oneccl oneccl-devel

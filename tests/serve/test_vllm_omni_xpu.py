@@ -245,6 +245,12 @@ vllm_omni_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(1200),
+            pytest.mark.skip(
+                reason=(
+                    "vLLM-Omni Qwen3-TTS XPU code predictor still hard-codes "
+                    "CUDA graph capture and fails at runtime"
+                )
+            ),
         ],
         model="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
         request_payloads=[
