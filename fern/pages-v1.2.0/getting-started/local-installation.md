@@ -9,8 +9,6 @@ description: Install and run Dynamo on a local machine or VM with containers or 
   <a href="./local-installation.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
 </p>
 
-# Local Installation
-
 This guide walks through installing and running Dynamo on a local machine or VM with one or more GPUs. By the end, you'll have a working OpenAI-compatible endpoint serving a model.
 
 For production multi-node clusters, see the [Kubernetes Deployment Guide](../kubernetes/README.md). To build from source for development, see [Building from Source](building-from-source.md).
