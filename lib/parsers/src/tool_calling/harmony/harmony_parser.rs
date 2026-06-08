@@ -24,8 +24,13 @@ fn commentary_block_regex() -> &'static Regex {
         // Args end at either `<|call|>` (normal close) or end-of-string
         // (`\z`, the bare-envelope PARSER.batch.5 variant where the model never
         // emitted `<|call|>` before EOS / max_tokens).
+        // A `to=functions.X` recipient is the real tool-call signal regardless of
+        // channel: gpt-oss/trtllm emits a large fraction of calls on the
+        // `analysis` channel (with a bare `code` constraint) instead of the
+        // canonical `commentary`. Match either; the `.*?` already tolerates the
+        // optional ` code` / ` <|constrain|>json` between recipient and message.
         Regex::new(
-            r"(?s)<\|channel\|>commentary to=functions\.(?P<name>[\w.\-]+).*?<\|message\|>(?P<args>.*?)(?:<\|call\|>|\z)",
+            r"(?s)<\|channel\|>(?:commentary|analysis) to=functions\.(?P<name>[\w.\-]+).*?<\|message\|>(?P<args>.*?)(?:<\|call\|>|\z)",
         )
         .expect("commentary block regex")
     })
@@ -156,8 +161,12 @@ pub async fn parse_tool_calls_harmony_complete(
         let channel = message.channel.as_deref();
         let recipient = message.recipient.as_deref().unwrap_or_default();
 
-        // Handle commentary channel
-        if channel == Some("commentary") && recipient.starts_with("functions.") {
+        // A directed call (to=functions.*) is a tool call regardless of channel.
+        // gpt-oss/trtllm emits many calls on the `analysis` channel instead of
+        // the canonical `commentary`; key on the recipient, not the label.
+        let is_directed_tool_call = recipient.starts_with("functions.")
+            && matches!(channel, Some("commentary") | Some("analysis"));
+        if is_directed_tool_call {
             let Some(fname) = message
                 .recipient
                 .as_ref()
@@ -221,6 +230,14 @@ pub fn detect_tool_call_start_harmony(
     let trimmed = chunk.trim();
     if trimmed.is_empty() {
         return false;
+    }
+
+    let has_complete_end_token = config
+        .tool_call_end_tokens
+        .iter()
+        .any(|token| !token.is_empty() && trimmed.contains(token));
+    if has_complete_end_token {
+        return true;
     }
 
     if strict {
@@ -586,6 +603,24 @@ mod detect_parser_tests {
         };
         let result = detect_tool_call_start_harmony(text, &config, false);
         assert!(result);
+    }
+
+    #[tokio::test]
+    async fn test_parse_harmony_orphan_call_marker_does_not_leak() {
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<|start|>assistant<|channel|>commentary".to_string()],
+            tool_call_end_tokens: vec!["<|call|>".to_string()],
+            ..Default::default()
+        };
+
+        assert!(detect_tool_call_start_harmony("<|call|>", &config, false));
+        assert!(detect_tool_call_start_harmony("<|call|>", &config, true));
+
+        let (tool_calls, normal) = parse_tool_calls_harmony_complete("<|call|>", &config, None)
+            .await
+            .unwrap();
+        assert!(tool_calls.is_empty());
+        assert_eq!(normal, Some("".to_string()));
     }
 
     #[test] // helper, PARSER.stream.3

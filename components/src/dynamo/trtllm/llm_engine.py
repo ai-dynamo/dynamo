@@ -162,6 +162,8 @@ class TrtllmLLMEngine(LLMEngine):
         elif self.max_seq_len is not None:
             sampling_params.max_tokens = max(1, self.max_seq_len - len(token_ids))
 
+        # TODO: mirror visible/hidden stop-token handling from the disagg
+        # path (handler_base.py) into a shared helper. See PR #9778.
         ignore_eos = stop_conditions.get("ignore_eos")
         if ignore_eos:
             sampling_params.ignore_eos = ignore_eos

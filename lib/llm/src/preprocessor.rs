@@ -46,7 +46,9 @@ use crate::protocols::common::preprocessor::{
 use crate::protocols::common::timing::RequestTracker;
 use crate::tokenizers::Encoding;
 
-use dynamo_parsers::{ReasoningParser, ReasoningParserType};
+use dynamo_parsers::{
+    ReasoningParser, ReasoningParserType, tool_calling::parsers::get_tool_parser_map,
+};
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
 use dynamo_runtime::pipeline::{
     AsyncEngineContext, Error, ManyOut, Operator, SingleIn, async_trait,
@@ -54,6 +56,7 @@ use dynamo_runtime::pipeline::{
 use dynamo_runtime::protocols::annotated::{Annotated, AnnotationsProvider};
 
 use crate::protocols::{
+    TokenIdType,
     common::{OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
     openai::{
         DeltaGeneratorExt,
@@ -293,21 +296,44 @@ impl OpenAIPreprocessor {
         builder.model(request.model());
 
         let mut stop_conditions = request.extract_stop_conditions()?;
+        let eos_token_ids = self.model_info.eos_token_ids();
+        let hidden_eos_token_ids = eos_token_ids.clone();
         if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
-            for eos_token in self.model_info.eos_token_ids() {
-                if !stop_tokens.contains(&eos_token) {
-                    stop_tokens.push(eos_token);
+            for eos_token_id in hidden_eos_token_ids {
+                if !stop_tokens.contains(&eos_token_id) {
+                    stop_tokens.push(eos_token_id);
                 }
             }
         } else {
-            stop_conditions.stop_token_ids_hidden = Some(self.model_info.eos_token_ids());
+            stop_conditions.stop_token_ids_hidden = Some(hidden_eos_token_ids);
+        }
+        // Some tool-call parsers terminate on a token that is also a model
+        // EOS (e.g. Harmony's `<|call|>` for gpt-oss). Left in the hidden
+        // set, the engine stops AND strips it, so the parser sees a
+        // truncated envelope and drops the call. Move such tokens to the
+        // visible set so the engine still stops on them but the token
+        // survives into output for the parser to consume. See PR #9778.
+        let mut visible_tool_parser_end_token_ids = Vec::new();
+        if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
+            visible_tool_parser_end_token_ids =
+                self.remove_tool_parser_end_tokens_from_hidden_stops(request, stop_tokens)?;
+        }
+        if !visible_tool_parser_end_token_ids.is_empty() {
+            let visible_stops = stop_conditions
+                .stop_token_ids_visible
+                .get_or_insert_with(Vec::new);
+            for token_id in visible_tool_parser_end_token_ids {
+                if !visible_stops.contains(&token_id) {
+                    visible_stops.push(token_id);
+                }
+            }
         }
 
         // apply ignore eos if not already set
         stop_conditions.apply_ignore_eos();
 
         if !stop_conditions.ignore_eos.unwrap_or(false) {
-            builder.eos_token_ids(self.model_info.eos_token_ids());
+            builder.eos_token_ids(eos_token_ids);
         }
 
         builder.stop_conditions(stop_conditions);
@@ -370,6 +396,81 @@ impl OpenAIPreprocessor {
         builder.mm_processor_kwargs(request.mm_processor_kwargs().cloned());
 
         Ok(builder)
+    }
+
+    fn remove_tool_parser_end_tokens_from_hidden_stops<R: OAIChatLikeRequest>(
+        &self,
+        request: &R,
+        hidden_stop_token_ids: &mut Vec<TokenIdType>,
+    ) -> Result<Vec<TokenIdType>> {
+        let has_tools = request
+            .tools()
+            .as_ref()
+            .and_then(|tools| tools.len())
+            .is_some_and(|len| len > 0);
+        let tool_choice_none = request
+            .tool_choice()
+            .as_ref()
+            .and_then(|tool_choice| tool_choice.as_str())
+            == Some("none");
+
+        if !Self::should_keep_tool_parser_end_tokens_visible(has_tools, tool_choice_none) {
+            return Ok(Vec::new());
+        }
+
+        let Some(tool_call_parser) = self.tool_call_parser.as_deref().filter(|p| !p.is_empty())
+        else {
+            return Ok(Vec::new());
+        };
+        let Some(tool_call_config) = get_tool_parser_map().get(tool_call_parser) else {
+            return Ok(Vec::new());
+        };
+
+        let mut visible_stop_token_ids = Vec::new();
+        for end_token in tool_call_config.parser_config.tool_call_end_tokens() {
+            if end_token.is_empty() {
+                continue;
+            }
+            let encoded = self.tokenizer.encode(&end_token).with_context(|| {
+                format!(
+                    "Failed to encode tool-call end token {end_token:?} for parser {tool_call_parser:?}"
+                )
+            })?;
+            let was_hidden_eos =
+                Self::remove_single_token_marker(hidden_stop_token_ids, encoded.token_ids());
+            if !was_hidden_eos {
+                tracing::debug!(
+                    token_ids = ?encoded.token_ids(),
+                    end_token,
+                    parser = tool_call_parser,
+                    "Tool-call end token was not a single hidden EOS token"
+                );
+                continue;
+            }
+            if let [token_id] = encoded.token_ids()
+                && !visible_stop_token_ids.contains(token_id)
+            {
+                visible_stop_token_ids.push(*token_id);
+            }
+        }
+
+        Ok(visible_stop_token_ids)
+    }
+
+    fn should_keep_tool_parser_end_tokens_visible(has_tools: bool, tool_choice_none: bool) -> bool {
+        has_tools && !tool_choice_none
+    }
+
+    fn remove_single_token_marker(
+        hidden_eos_token_ids: &mut Vec<TokenIdType>,
+        marker_token_ids: &[TokenIdType],
+    ) -> bool {
+        let [marker_token_id] = marker_token_ids else {
+            return false;
+        };
+        let before = hidden_eos_token_ids.len();
+        hidden_eos_token_ids.retain(|token_id| token_id != marker_token_id);
+        hidden_eos_token_ids.len() != before
     }
 
     pub fn apply_template<
@@ -694,9 +795,24 @@ impl OpenAIPreprocessor {
             Cow::Borrowed(prompt)
         };
         let encoding = self.tokenizer.encode(prompt.as_ref())?;
+        let tokenize_ms = encode_start.elapsed().as_secs_f64() * 1000.0;
         if let Some(t) = tracker {
             t.record_tokenize_latency(encode_start.elapsed());
         }
+        // [TTFT-TRACE] HF tokenizer encode finished. This is the actual
+        // tokenize cost; chat-template rendering happens upstream in
+        // preprocess_request and is captured by the
+        // preprocessor_entered → tokenize_done delta together with any
+        // request-shape conversion.
+        tracing::info!(
+            tokenize_ms = tokenize_ms,
+            num_tokens = encoding.token_ids().len(),
+            epoch_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            "[TTFT-TRACE] stage=tokenize_done"
+        );
         Ok(encoding)
     }
 
@@ -895,6 +1011,10 @@ impl OpenAIPreprocessor {
             usage_chunk_sent: bool,
             finished: bool,
             trace_tokens_enabled: bool,
+            // [TTFT-TRACE] Fires once when the first chunk with tokens is
+            // converted to the public response type. This is the closest
+            // user-space signal to "first token detokenized on the frontend".
+            first_detokenize_logged: bool,
         }
 
         let state = State {
@@ -907,6 +1027,7 @@ impl OpenAIPreprocessor {
             usage_chunk_sent: false,
             finished: false,
             trace_tokens_enabled,
+            first_detokenize_logged: false,
         };
 
         // transform the common response stream into a chat response stream
@@ -969,6 +1090,25 @@ impl OpenAIPreprocessor {
                             })
                             .map_err(|e| e.to_string())
                     });
+
+                    // [TTFT-TRACE] First chunk with tokens just got
+                    // detokenized + assembled into the public response
+                    // shape. Diff against kv_push_router_first_token to
+                    // measure detokenize + parse overhead, and against
+                    // first_sse_chunk_emitted to measure remaining
+                    // postprocessor + SSE-convert cost.
+                    if !inner.first_detokenize_logged && chunk_tokens > 0 {
+                        inner.first_detokenize_logged = true;
+                        tracing::info!(
+                            request_id = inner.context.id(),
+                            chunk_tokens = chunk_tokens,
+                            epoch_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as u64)
+                                .unwrap_or(0),
+                            "[TTFT-TRACE] stage=first_chunk_detokenized"
+                        );
+                    }
 
                     // Create LLM metrics annotation with prefill/decode worker info from tracker.
                     // Worker types are stored at routing time to avoid expensive MDC lookup.
@@ -1456,6 +1596,20 @@ impl
         // Preserve original inbound streaming flag before any internal overrides
         let request_id = context.id().to_string();
         let original_stream_flag = request.inner.stream.unwrap_or(false);
+
+        // [TTFT-TRACE] OpenAIPreprocessor entered — pair with
+        // `http_handler_entered` to measure HTTP validation + engine-lookup
+        // overhead, and pair with the tracker's request_received epoch (set
+        // ~30 lines below at response_generator construction) to measure the
+        // sub-stages.
+        tracing::info!(
+            request_id = %request_id,
+            epoch_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            "[TTFT-TRACE] stage=preprocessor_entered"
+        );
 
         // Build audit handle (None if no DYN_AUDIT_SINKS)
         let mut audit_handle = crate::audit::handle::create_handle(&request, &request_id);

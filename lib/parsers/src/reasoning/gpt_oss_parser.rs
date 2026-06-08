@@ -216,9 +216,21 @@ impl ReasoningParser for GptOssReasoningParser {
                 // `last_content_delta` only exposes the newest token slice, so we forward
                 // `final`/`analysis` chunks immediately; commentary is reconstructed in the
                 // fallback path below because it needs the stripped metadata.
+                let current_recipient = parser.current_recipient();
+                let is_functions_recipient = current_recipient
+                    .as_deref()
+                    .is_some_and(|r| r.starts_with("functions."));
                 match channel.as_str() {
                     "final" => normal_delta.push_str(&delta),
-                    "analysis" => reasoning_delta.push_str(&delta),
+                    // Analysis is reasoning UNLESS it carries a `functions.*`
+                    // recipient — that is a (malformed) directed tool call, which
+                    // we defer to the reconstruction path below (like commentary)
+                    // so its payload reaches the tool parser. Recipientless
+                    // analysis AND analysis directed at non-functions recipients
+                    // (e.g. `to=python`/`to=browser.*` built-in tools) are kept as
+                    // reasoning_content rather than dropped.
+                    "analysis" if !is_functions_recipient => reasoning_delta.push_str(&delta),
+                    "analysis" => {}
                     "commentary" => {}
                     _ => {}
                 }
@@ -238,8 +250,19 @@ impl ReasoningParser for GptOssReasoningParser {
         }
 
         if let Some(channel) = parser.current_channel() {
-            if channel == "commentary" {
-                tracing::debug!("In commentary channel, recovering full content");
+            // A directed tool call (functions recipient) on EITHER the canonical
+            // commentary channel or the malformed analysis channel is recovered
+            // the same way: reconstruct the envelope from the token buffer so the
+            // downstream tool parser receives the channel/recipient/constraint
+            // metadata together with the payload.
+            let is_directed_tool_call = channel == "commentary"
+                || (channel == "analysis"
+                    && parser
+                        .current_recipient()
+                        .as_deref()
+                        .is_some_and(|r| r.starts_with("functions.")));
+            if is_directed_tool_call {
+                tracing::debug!("In directed tool-call channel, recovering full content");
                 // If we're in the commentary channel, we should return raw token content and recover content that has been consumed by the parser
                 // so that the tool parser can process it properly
                 if let Ok(enc) = get_harmony_encoding() {

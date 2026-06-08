@@ -262,6 +262,13 @@ impl
                             // System EOS token - no stop_reason (user didn't request this stop)
                             (Some(FinishReason::Stop), None)
                         }
+                        Some(StopTrigger::VisibleStopTokenDetected(token_id)) => {
+                            // Token stop included in output.
+                            (
+                                Some(FinishReason::Stop),
+                                Some(StopReason::Int((*token_id).into())),
+                            )
+                        }
                         Some(StopTrigger::HiddenStopSequenceDetected(seq)) => {
                             // User-provided stop sequence (hidden from output)
                             (
@@ -435,6 +442,9 @@ pub struct Decoder {
     // minimum number of tokens have been generated
     hidden_stop_ids: HashSet<TokenIdType>,
 
+    // single tokens that if found in the response will trigger a stop condition and be returned
+    visible_stop_ids: HashSet<TokenIdType>,
+
     // text sequences that if found in the response will trigger a stop condition after the
     // minimum number of tokens have been generated (excluded from output)
     hidden_stop_sequences: Vec<String>,
@@ -461,6 +471,7 @@ pub struct Decoder {
 pub enum StopTrigger {
     MaxTokensLimit,
     HiddenStopTokenDetected(TokenIdType),
+    VisibleStopTokenDetected(TokenIdType),
     HiddenStopSequenceDetected(String),
     VisibleStopSequenceDetected(String),
 }
@@ -507,6 +518,12 @@ impl Decoder {
             .iter()
             .copied()
             .collect();
+        let visible_stop_ids: HashSet<TokenIdType> = stop_condition
+            .stop_token_ids_visible
+            .unwrap_or_default()
+            .iter()
+            .copied()
+            .collect();
 
         // Categorize stop sequences based on include_stop_str_in_output:
         // - When true: user-provided stop sequences go to visible (included in output)
@@ -529,6 +546,7 @@ impl Decoder {
             decode_stream,
             tracker,
             hidden_stop_ids,
+            visible_stop_ids,
             hidden_stop_sequences,
             visible_stop_sequences,
             min_tokens: stop_condition.min_tokens.unwrap_or(0),
@@ -563,6 +581,14 @@ impl Decoder {
         // stop conditions to not apply until the minimum number of tokens have been generated
         if self.generated_tokens < self.min_tokens {
             return Ok(StepResult::ok(token));
+        }
+
+        // Check token stops. Visible token IDs are included in output.
+        if self.visible_stop_ids.contains(&token_id) {
+            return Ok(StepResult::with_stop_trigger(
+                token,
+                StopTrigger::VisibleStopTokenDetected(token_id),
+            ));
         }
 
         // check for hidden stop tokens - eos takes precedence
