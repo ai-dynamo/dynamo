@@ -53,8 +53,10 @@ cases:
         - name: get_time
           arguments:
             timezone: EST
-        normal_text: 'Both:'
-      vllm:
+        normal_text: 'Both: '
+      vllm: *id004
+      sglang:
+        reason: SGLang trims trailing whitespace from normal_text that precedes hermes tool-call blocks.
         calls:
         - name: get_weather
           arguments:
@@ -62,8 +64,7 @@ cases:
         - name: get_time
           arguments:
             timezone: EST
-        normal_text: 'Both: '
-      sglang: *id004
+        normal_text: 'Both:'
   TOOLCALLING.batch.2.d:
     description: Same-name twice
     ref: dynamo

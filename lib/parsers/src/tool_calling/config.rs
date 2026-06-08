@@ -64,6 +64,49 @@ pub struct JsonParserConfig {
     /// trailing marker as leaked text on the next chunk.
     #[serde(default)]
     pub strip_markup_on_recovery: bool,
+
+    /// Keep the narration before a tool call verbatim instead of trimming it,
+    /// to match vLLM. Per-family rather than token-keyed because hermes and
+    /// qwen2.5 share `<tool_call>` but only hermes keeps the space.
+    #[serde(default)]
+    pub preserve_normal_text_whitespace: bool,
+
+    /// Brace-balance a truncated JSON body and retry the parse on the finalize
+    /// path. Default `true` keeps the recovery used by most JSON families;
+    /// hermes sets `false` to drop a malformed body, as vLLM/SGLang do.
+    #[serde(default = "default_true")]
+    pub repair_truncated_body: bool,
+
+    /// Drop a fully-framed wrapper whose body is complete valid JSON but not a
+    /// usable call (no name, or no arguments/parameters) instead of leaking the
+    /// wrapper into normal_text (4.c / 6.c). A non-JSON or truncated body is not
+    /// a complete object, so it is unaffected here. Default `false`.
+    #[serde(default)]
+    pub drop_unusable_json_wrapper: bool,
+
+    /// Suppress an unterminated tool-call buffer on the recovery path: when an
+    /// opener has no closing end-token and no call is recovered, hide the
+    /// dangling markup (empty normal_text) instead of leaking it. Default
+    /// `false`.
+    #[serde(default)]
+    pub drop_partial_markup_on_stream_finalize: bool,
+
+    /// Recover a final unclosed call with a complete body that follows closed
+    /// calls (5.d). Default `false`; hermes leaves it off and drops the trailing
+    /// call, like its per-wrapper peers (kimi/glm/deepseek).
+    #[serde(default)]
+    pub recover_trailing_unclosed_call: bool,
+
+    /// Recover a single call whose body is complete but whose end-token never
+    /// arrived, via EOF recovery. Default `true` keeps the universal recovery;
+    /// hermes sets `false` to drop an unfinished single call (deliberate, not
+    /// vLLM/SGLang parity).
+    #[serde(default = "default_true")]
+    pub recover_unclosed_single_call: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for JsonParserConfig {
@@ -78,6 +121,12 @@ impl Default for JsonParserConfig {
             bare_json_mode: false,
             allow_eof_recovery: false,
             strip_markup_on_recovery: false,
+            preserve_normal_text_whitespace: false,
+            repair_truncated_body: true,
+            drop_unusable_json_wrapper: false,
+            drop_partial_markup_on_stream_finalize: false,
+            recover_trailing_unclosed_call: false,
+            recover_unclosed_single_call: true,
         }
     }
 }
@@ -387,6 +436,17 @@ impl ToolCallConfig {
             parser_config: ParserConfig::Json(JsonParserConfig {
                 tool_call_start_tokens: vec!["<tool_call>".to_string()],
                 tool_call_end_tokens: vec!["</tool_call>".to_string()],
+                // Hermes keeps narration verbatim like vLLM, and otherwise
+                // refuses to invent calls from incomplete input: it drops
+                // malformed bodies, unusable wrappers, and any unterminated
+                // call (single, trailing, or mid-stream) rather than recovering
+                // or leaking. See each flag's doc for the cross-impl rationale.
+                preserve_normal_text_whitespace: true,
+                repair_truncated_body: false,
+                drop_unusable_json_wrapper: true,
+                drop_partial_markup_on_stream_finalize: true,
+                recover_trailing_unclosed_call: false,
+                recover_unclosed_single_call: false,
                 ..Default::default()
             }),
             structural_tag_builder: Some(StructuralTagBuilder::TriggeredTags(

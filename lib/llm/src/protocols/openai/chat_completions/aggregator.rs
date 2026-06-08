@@ -1569,9 +1569,12 @@ mod tests {
         assert!(result.is_ok());
         let response = result.unwrap();
         let choice = &response.inner.choices[0];
+        // hermes preserves the narration before a tool call verbatim (to match
+        // vLLM), so the newline separating "hello" from the <tool_call> opener
+        // is kept rather than trimmed.
         assert_eq!(
             choice.message.content,
-            Some(ChatCompletionMessageContent::Text("hello".to_string()))
+            Some(ChatCompletionMessageContent::Text("hello\n".to_string()))
         );
         assert_eq!(
             choice.finish_reason,

@@ -22,14 +22,15 @@ cases:
         - name: get_weather
           arguments:
             location: NYC
-        normal_text: I will check the weather.
-      vllm:
+        normal_text: 'I will check the weather. '
+      vllm: *id001
+      sglang:
+        reason: SGLang trims trailing whitespace from normal_text that precedes hermes tool-call blocks.
         calls:
         - name: get_weather
           arguments:
             location: NYC
-        normal_text: 'I will check the weather. '
-      sglang: *id001
+        normal_text: I will check the weather.
   TOOLCALLING.batch.8.b:
     description: Narration after tool call only
     ref: dynamo
@@ -59,14 +60,15 @@ cases:
         - name: get_weather
           arguments:
             location: NYC
-        normal_text: I will check the weather.
-      vllm:
+        normal_text: 'I will check the weather. '
+      vllm: *id004
+      sglang:
+        reason: SGLang trims trailing whitespace from normal_text that precedes hermes tool-call blocks.
         calls:
         - name: get_weather
           arguments:
             location: NYC
-        normal_text: 'I will check the weather. '
-      sglang: *id004
+        normal_text: I will check the weather.
   TOOLCALLING.batch.8.d:
     description: Narration between multiple tool calls
     ref: dynamo
@@ -83,8 +85,10 @@ cases:
         - name: get_weather
           arguments:
             location: LA
-        normal_text: I will check the weather.
-      vllm:
+        normal_text: 'I will check the weather. '
+      vllm: *id005
+      sglang:
+        reason: SGLang trims trailing whitespace from normal_text that precedes hermes tool-call blocks.
         calls:
         - name: get_weather
           arguments:
@@ -92,5 +96,4 @@ cases:
         - name: get_weather
           arguments:
             location: LA
-        normal_text: 'I will check the weather. '
-      sglang: *id005
+        normal_text: I will check the weather.

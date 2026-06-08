@@ -43,12 +43,15 @@ cases:
     tools:
     - *id002
     expected:
-      dynamo: &id004
-        reason: "Dynamo's hermes parser leaves <tool_call> tag in normal_text on minimal/no-body case"
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        reason: vLLM leaks the wrapper for a name-only body; hermes drops it (no arguments key).
         calls: []
         normal_text: '<tool_call>{"name": "get_time"}</tool_call>'
-      vllm: *id004
       sglang:
+        reason: SGLang coerces a name-only body into an empty-args call; hermes drops it.
         calls:
         - name: get_time
           arguments: {}

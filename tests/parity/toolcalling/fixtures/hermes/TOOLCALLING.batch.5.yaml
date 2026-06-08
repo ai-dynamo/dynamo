@@ -17,13 +17,16 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &id001
+      dynamo:
+        reason: Hermes drops an unfinished single call (no closing </tool_call>) and hides the buffer; vLLM and SGLang recover it (deliberate non-parity).
+        calls: []
+        normal_text: ''
+      vllm: &id001
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
-      vllm: *id001
       sglang: *id001
   TOOLCALLING.batch.5.b:
     description: Closing </tool_call> without matching <tool_call> open
@@ -45,12 +48,14 @@ cases:
     tools:
     - *id002
     expected:
-      dynamo: &id004
-        reason: "Dynamo's hermes parser leaves closing </tool_call> tag plus the JSON body in normal_text when opening <tool_call> marker is missing (impl-defined recovery)"
+      dynamo:
+        reason: Hermes drops a tool call truncated mid-argument and hides the buffer; vLLM and SGLang leave the raw buffer (deliberate non-parity).
+        calls: []
+        normal_text: ''
+      vllm: &id005c
         calls: []
         normal_text: '<tool_call>{"name": "get_weather", "arguments": {"loc'
-      vllm: *id004
-      sglang: *id004
+      sglang: *id005c
   TOOLCALLING.batch.5.d:
     description: Multi-call, last call missing only end marker (body complete)
     ref: dynamo
@@ -65,7 +70,8 @@ cases:
           arguments:
             location: Boston
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
-      vllm:
+      vllm: &id006
+        reason: vLLM and SGLang recover the unterminated trailing call; hermes drops it, like kimi/glm/deepseek.
         calls:
         - name: get_weather
           arguments:
@@ -74,15 +80,7 @@ cases:
           arguments:
             location: New York
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
-      sglang:
-        calls:
-        - name: get_weather
-          arguments:
-            location: Boston
-        - name: get_weather
-          arguments:
-            location: New York
-        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+      sglang: *id006
   TOOLCALLING.batch.5.e:
     description: Multi-call, last call truncated mid-arg-value
     ref: dynamo
@@ -98,11 +96,13 @@ cases:
             location: Boston
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
       vllm:
+        reason: vLLM drops everything and leaks when the trailing call is truncated; hermes keeps the complete leading call, no leak.
         calls: []
         normal_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<tool_call>{"name":
           "get_weather", "arguments": {"location": "Boston"}}</tool_call><tool_call>{"name": "get_weather", "arguments": {"location":
           "New York'
       sglang:
+        reason: SGLang drops everything and leaks when the trailing call is truncated; hermes keeps the complete leading call, no leak.
         calls: []
         normal_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<tool_call>{"name":
           "get_weather", "arguments": {"location": "Boston"}}</tool_call><tool_call>{"name": "get_weather", "arguments": {"location":

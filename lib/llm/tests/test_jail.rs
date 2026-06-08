@@ -1383,17 +1383,22 @@ mod tests {
             "Inner response created should carry forward from real stream chunks, not be 0"
         );
 
-        // Verify accumulated content is returned
+        // The hermes parser drops an unterminated tool-call buffer on stream
+        // finalize rather than leaking it (the call never completed). The
+        // released chunk therefore carries the preserved metadata above but no
+        // leaked `<tool_call>` markup or partial body in its content.
         let content = &inner.inner.choices[0].delta.content;
-        assert!(content.is_some(), "Should have accumulated content");
-        let content = content.as_ref().unwrap();
+        let text = content
+            .as_ref()
+            .map(|c| test_utils::extract_text(c).to_string())
+            .unwrap_or_default();
         assert!(
-            test_utils::extract_text(content).contains("<tool_call>"),
-            "Should contain jail start marker in accumulated content"
+            !text.contains("<tool_call>"),
+            "Partial tool-call markup must not leak into content on stream end; got {text:?}"
         );
         assert!(
-            test_utils::extract_text(content).contains("incomplete_call"),
-            "Should contain accumulated incomplete content"
+            !text.contains("incomplete_call"),
+            "Incomplete tool-call body must not leak into content on stream end; got {text:?}"
         );
     }
 

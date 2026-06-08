@@ -20,13 +20,16 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &id001
+      dynamo:
+        reason: Hermes drops an unfinished single call and hides the buffer; vLLM and SGLang recover it (deliberate non-parity).
+        calls: []
+        normal_text: ''
+      sglang: &id001
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
-      sglang: *id001
       vllm: *id001
   TOOLCALLING.stream.4.b:
     description: Stream terminates mid-call body before the in-flight argument payload is complete
@@ -46,13 +49,15 @@ cases:
     expected:
       dynamo:
         calls: []
-        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"loc'
+        normal_text: ''
       sglang:
+        reason: SGLang emits an empty-args call here; hermes drops the incomplete call and hides the buffer.
         calls:
         - name: get_weather
           arguments: {}
         normal_text: ''
       vllm:
+        reason: vLLM emits a partial-args call here; hermes drops the incomplete call and hides the buffer.
         calls:
         - name: get_weather
           arguments: '{"loc'
@@ -78,5 +83,6 @@ cases:
         normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call></tool_call></tool_call>'
       vllm: *id002
       sglang:
+        reason: No opening <tool_call>, so it was never a framed call; hermes and vLLM pass it through; SGLang strips the trailing close markers.
         calls: []
         normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}'
