@@ -27,6 +27,7 @@ from sglang.srt.utils.network import NetworkAddress, get_local_ip_auto
 
 from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.gms_failover import release_attached_gms_failover_lock
 from dynamo.common.lora.manager import get_lora_manager
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.input_params import InputParamManager
@@ -752,11 +753,27 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
                 }
 
             try:
-                # Stop new requests and drain in-flight work before releasing memory.
+                # Stop new requests before memory or ownership transitions.
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.unregister_endpoint_instance()
 
+                if body.get("handoff"):
+                    lock_released = await release_attached_gms_failover_lock(
+                        self, backend_name="sglang"
+                    )
+                    return {
+                        "status": "ok",
+                        "message": "Failover handoff released",
+                        "failover_lock_released": lock_released,
+                    }
+
                 await self._quiesce_controller.quiesce(tags)
+
+                lock_released = False
+                if body.get("release_failover_lock"):
+                    lock_released = await release_attached_gms_failover_lock(
+                        self, backend_name="sglang"
+                    )
 
                 return {
                     "status": "ok",
@@ -765,6 +782,7 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
                         if tags is not None
                         else "Memory released"
                     ),
+                    "failover_lock_released": lock_released,
                 }
             except Exception as e:
                 logging.error(f"Failed to release memory occupation: {e}")
@@ -1021,6 +1039,9 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
 
     def cleanup(self) -> None:
         """Cleanup resources. Override in subclasses as needed."""
+        watchdog = getattr(self, "_gms_failover_child_watchdog", None)
+        if watchdog is not None:
+            watchdog.stop()
         if self.publisher is not None:
             self.publisher.cleanup()
 

@@ -11,10 +11,16 @@ import sglang as sgl
 from sglang.srt.observability.trace import set_global_trace_level
 
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.gms_failover import (
+    acquire_gms_failover_lock_before_init,
+    prepare_gms_failover,
+    run_gms_failover_promotion_warmup,
+)
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
+from dynamo.sglang.failover_watchdog import maybe_start_gms_failover_child_watchdog
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangHealthCheckPayload,
@@ -27,6 +33,96 @@ from dynamo.sglang.publisher import (
 )
 from dynamo.sglang.register import register_model_with_readiness_gate
 from dynamo.sglang.request_handlers import DecodeWorkerHandler, PrefillWorkerHandler
+from dynamo.sglang.request_handlers.handler_base import SGLangEngineQuiesceController
+
+
+def _truthy_env(name: str, *, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
+def _private_bootstrap_shadow_prewarm_enabled() -> bool:
+    return _truthy_env("DYN_SGLANG_GMS_SHADOW_PREWARM", default=False)
+
+
+def _is_private_bootstrap_shadow() -> bool:
+    if not _truthy_env("DYN_GMS_FAILOVER_SHADOW_MODE"):
+        return False
+    if not _truthy_env("DYN_SGLANG_GMS_PRIVATE_BOOTSTRAP_KV"):
+        return False
+    engine_id = os.environ.get("ENGINE_ID", "0")
+    primary_engine_id = os.environ.get("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
+    return engine_id != primary_engine_id
+
+
+class _NonLeaderFailoverController:
+    """Rank-local failover controller for SGLang non-leader nodes."""
+
+    def __init__(self, engine: sgl.Engine) -> None:
+        self._delegate = (
+            SGLangEngineQuiesceController(engine)
+            if getattr(engine, "tokenizer_manager", None) is not None
+            else None
+        )
+        self._is_quiesced = False
+
+    async def quiesce(self, tags: Optional[list[str]] = None) -> bool:
+        if self._delegate is not None:
+            return await self._delegate.quiesce(tags)
+        if self._is_quiesced:
+            return False
+        logging.info(
+            "[GMS failover] sglang non-leader rank has no tokenizer manager; "
+            "using lock-only quiesce"
+        )
+        self._is_quiesced = True
+        return True
+
+    async def resume(self, tags: Optional[list[str]] = None) -> bool:
+        if self._delegate is not None:
+            return await self._delegate.resume(tags)
+        if not self._is_quiesced:
+            return False
+        self._is_quiesced = False
+        return True
+
+    def mark_resumed(self) -> None:
+        if self._delegate is not None:
+            self._delegate.mark_resumed()
+        self._is_quiesced = False
+
+
+class _NonLeaderFailoverOwner:
+    """Failover owner for SGLang multinode ranks that do not publish endpoints."""
+
+    def __init__(self, engine: sgl.Engine) -> None:
+        self._quiesce_controller = _NonLeaderFailoverController(engine)
+
+
+async def _prepare_non_leader_failover(
+    engine: sgl.Engine,
+    runtime: DistributedRuntime,
+    early_failover_activation,
+) -> _NonLeaderFailoverOwner | None:
+    owner = _NonLeaderFailoverOwner(engine)
+    if early_failover_activation is not None and early_failover_activation.enabled:
+        early_failover_activation.attach_to(owner)
+        maybe_start_gms_failover_child_watchdog(owner, engine)
+        return owner
+
+    failover_activation = await prepare_gms_failover(
+        owner,
+        runtime,
+        backend_name="sglang",
+        promotion_warmup=None,
+    )
+    if not failover_activation.enabled:
+        return None
+    failover_activation.attach_to(owner)
+    maybe_start_gms_failover_child_watchdog(owner, engine)
+    return owner
 
 
 async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
@@ -57,6 +153,13 @@ async def init_decode(
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
+
+    early_failover_activation = None
+    lock_before_init = os.environ.get("DYN_SGLANG_GMS_LOCK_BEFORE_INIT", "1").lower()
+    if lock_before_init not in {"0", "false", "no", "off"}:
+        early_failover_activation = await acquire_gms_failover_lock_before_init(
+            backend_name="sglang"
+        )
 
     # Use pre-created engine if provided (snapshot mode)
     if snapshot_engine is not None:
@@ -101,6 +204,12 @@ async def init_decode(
     logging.debug(f"SGLang model load time: {load_time:.2f}s")
 
     if server_args.node_rank >= 1:
+        non_leader_failover_owner = await _prepare_non_leader_failover(
+            engine, runtime, early_failover_activation
+        )
+        # Keep the owner alive for the non-leader loop. Its attached lock fd is
+        # the local primary/shadow fencing token.
+        _ = non_leader_failover_owner
         await handle_non_leader_node(engine, publisher, metrics_task)
         return
 
@@ -124,6 +233,37 @@ async def init_decode(
         health_check_payload = SglangHealthCheckPayload(
             engine, use_text_input=dynamo_args.use_sglang_tokenizer
         ).to_dict()
+
+    async def promotion_warmup() -> None:
+        await run_gms_failover_promotion_warmup(
+            handler.generate, health_check_payload, backend_name="sglang"
+        )
+
+    if early_failover_activation is not None and early_failover_activation.enabled:
+        early_failover_activation.attach_to(handler)
+        await promotion_warmup()
+    else:
+        shadow_prewarmed = False
+        if (
+            _private_bootstrap_shadow_prewarm_enabled()
+            and _is_private_bootstrap_shadow()
+        ):
+            logging.info(
+                "[GMS failover] sglang private-bootstrap shadow prewarm starting"
+            )
+            await promotion_warmup()
+            shadow_prewarmed = True
+            logging.info(
+                "[GMS failover] sglang private-bootstrap shadow prewarm complete"
+            )
+        failover_activation = await prepare_gms_failover(
+            handler,
+            runtime,
+            backend_name="sglang",
+            promotion_warmup=None if shadow_prewarmed else promotion_warmup,
+        )
+        failover_activation.attach_to(handler)
+    maybe_start_gms_failover_child_watchdog(handler, engine)
 
     logging.info(f"Registering model with endpoint types: {dynamo_args.endpoint_types}")
     if dynamo_args.custom_jinja_template and "chat" not in dynamo_args.endpoint_types:
