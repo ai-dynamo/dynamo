@@ -200,6 +200,7 @@ class ThroughputScalingMixin:
             ttft_sla_ms=self._config.ttft_ms,
             itl_sla_ms=self._config.itl_ms,
             kv_hit_rate=kv_hit_rate,
+            accept_length=self._current_decode_accept_length(),
         )
         engine_rps = capacity.rps if capacity is not None else 0.0
         if engine_rps <= 0:
@@ -277,10 +278,12 @@ class ThroughputScalingMixin:
     def _compute_decode_replicas(
         self, demand_rps: float, isl: float, osl: float
     ) -> Optional[int]:
+        accept_length = self._current_decode_accept_length()
         capacity = self._decode_regression.find_engine_capacity_rps(
             isl=isl,
             osl=osl,
             itl_sla_ms=self._config.itl_ms,
+            accept_length=accept_length,
         )
         engine_rps = capacity.rps if capacity is not None else 0.0
         if engine_rps <= 0:
@@ -297,6 +300,7 @@ class ThroughputScalingMixin:
 
         result = max(math.ceil(demand_rps / engine_rps), self._config.min_endpoint)
         logger.info(
-            f"Decode: {demand_rps:.2f} rps / {engine_rps:.2f} = {result}, est_itl={itl_ms:.1f}ms"
+            f"Decode: {demand_rps:.2f} rps / {engine_rps:.2f} = {result}, "
+            f"est_itl={itl_ms:.1f}ms, accept_length={accept_length:.2f}"
         )
         return result

@@ -25,6 +25,9 @@ use crate::common::protocols::{ForwardPassSnapshot, MockEngineArgs, WorkerType};
 const DEFAULT_AIC_SYSTEM: &str = "h200_sxm";
 const MAX_CAPACITY_SEARCH_CANDIDATES: u32 = 128;
 const MAX_KV_HIT_RATE_DISCOUNT: f64 = 0.95;
+const AIC_NEXTN_KEY: &str = "nextn";
+const AIC_NEXTN_ACCEPT_RATES_KEY: &str = "nextn_accept_rates";
+const RAW_AIC_NEXTN_ACCEPT_RATES: &str = "0,0,0,0,0";
 
 /// Engine limits needed by planner/router-level queries.
 ///
@@ -95,6 +98,18 @@ impl AicEngineConfig {
             extra: self.extra,
         })
     }
+}
+
+fn aic_config_for_raw_iteration_time(mut config: EngineConfig) -> EngineConfig {
+    config.extra.insert(
+        AIC_NEXTN_ACCEPT_RATES_KEY.to_string(),
+        RAW_AIC_NEXTN_ACCEPT_RATES.to_string(),
+    );
+    config
+}
+
+fn aic_engine_config_for_raw_iteration_time(config: AicEngineConfig) -> Result<EngineConfig> {
+    Ok(aic_config_for_raw_iteration_time(config.into_aic_config()?))
 }
 
 impl EnginePerfLimits {
@@ -333,7 +348,7 @@ impl EnginePerfModel {
         let options = resolve_options(inputs.options, &limits);
         let load_averages = AggLoadAverages::new(options.max_observations);
         let aic_config = match inputs.aic_config {
-            Some(config) => Some(config.into_aic_config()?),
+            Some(config) => Some(aic_engine_config_for_raw_iteration_time(config)?),
             None => inputs
                 .engine_args
                 .as_ref()
@@ -387,7 +402,7 @@ impl EnginePerfModel {
         limits: EnginePerfLimits,
         options: Option<ForwardPassPerfOptions>,
     ) -> Result<Self> {
-        let aic_config = aic_config.into_aic_config()?;
+        let aic_config = aic_engine_config_for_raw_iteration_time(aic_config)?;
         let attention_dp_size = aic_config.attention_dp_size.unwrap_or(1).max(1) as usize;
         limits.validate().context("invalid engine perf limits")?;
         let resolved_options = resolve_options(options, &limits);
@@ -990,7 +1005,15 @@ pub fn aic_config_from_mock_engine_args(args: &MockEngineArgs) -> Result<Option<
     let Some(model_name) = args.aic_model_path.clone() else {
         bail!("aic_model_path is required when aic_backend is set");
     };
-    Ok(Some(EngineConfig {
+    let mut extra = BTreeMap::new();
+    if let Some(nextn) = args.aic_nextn {
+        extra.insert(AIC_NEXTN_KEY.to_string(), nextn.to_string());
+    }
+    extra.insert(
+        AIC_NEXTN_ACCEPT_RATES_KEY.to_string(),
+        RAW_AIC_NEXTN_ACCEPT_RATES.to_string(),
+    );
+    Ok(Some(aic_config_for_raw_iteration_time(EngineConfig {
         schema_version: ENGINE_CONFIG_SCHEMA_VERSION,
         model_name,
         model_arch: None,
@@ -1019,8 +1042,8 @@ pub fn aic_config_from_mock_engine_args(args: &MockEngineArgs) -> Result<Option<
         activation_dtype: None,
         kv_cache_dtype: None,
         kv_block_size: Some(to_u32(args.block_size, "block_size")?),
-        extra: BTreeMap::new(),
-    }))
+        extra,
+    })))
 }
 
 fn resolve_worker_type(
@@ -1445,6 +1468,63 @@ mod tests {
             extra: extra.clone(),
         };
         assert_eq!(config.into_aic_config().unwrap().extra, extra);
+    }
+
+    #[test]
+    fn raw_iteration_time_aic_config_forces_zero_accept_rates() {
+        let mut extra = BTreeMap::new();
+        extra.insert(AIC_NEXTN_KEY.to_string(), "3".to_string());
+        extra.insert(
+            AIC_NEXTN_ACCEPT_RATES_KEY.to_string(),
+            "0.85,0.3,0,0,0".to_string(),
+        );
+        let config = AicEngineConfig {
+            model_name: "model".to_string(),
+            model_arch: Some("arch".to_string()),
+            system_name: "h200_sxm".to_string(),
+            backend: "vllm".to_string(),
+            backend_version: None,
+            tp_size: 1,
+            pp_size: 1,
+            moe_tp_size: None,
+            moe_ep_size: None,
+            attention_dp_size: Some(1),
+            weight_dtype: None,
+            moe_dtype: None,
+            activation_dtype: None,
+            kv_cache_dtype: None,
+            kv_block_size: None,
+            extra,
+        };
+
+        let config = aic_engine_config_for_raw_iteration_time(config).unwrap();
+
+        assert_eq!(config.extra.get(AIC_NEXTN_KEY), Some(&"3".to_string()));
+        assert_eq!(
+            config.extra.get(AIC_NEXTN_ACCEPT_RATES_KEY),
+            Some(&RAW_AIC_NEXTN_ACCEPT_RATES.to_string())
+        );
+    }
+
+    #[test]
+    fn mock_engine_args_aic_config_forces_zero_accept_rates() {
+        let args = MockEngineArgs::builder()
+            .aic_backend(Some("vllm".to_string()))
+            .aic_model_path(Some("model".to_string()))
+            .aic_nextn(Some(2))
+            .aic_nextn_accept_rates(Some("0.85,0.3,0,0,0".to_string()))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+
+        let config = aic_config_from_mock_engine_args(&args).unwrap().unwrap();
+
+        assert_eq!(config.extra.get(AIC_NEXTN_KEY), Some(&"2".to_string()));
+        assert_eq!(
+            config.extra.get(AIC_NEXTN_ACCEPT_RATES_KEY),
+            Some(&RAW_AIC_NEXTN_ACCEPT_RATES.to_string())
+        );
     }
 
     #[test]

@@ -65,10 +65,11 @@ from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
 )
-from dynamo.trtllm.utils.trtllm_utils import deep_update
+from dynamo.trtllm.utils.trtllm_utils import deep_update, get_spec_decode_runtime_data
 
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 100_000
+SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 
 
 def build_kv_connector_config(config: Config):
@@ -558,6 +559,17 @@ async def init_llm_worker(
 
         # Set topology and KV transfer policy for topology-aware routing
         apply_topology_config(runtime_config)
+
+        spec_decode_runtime_data = get_spec_decode_runtime_data(engine_args)
+        if spec_decode_runtime_data is not None:
+            runtime_config.set_engine_specific(
+                SPEC_DECODE_RUNTIME_KEY,
+                json.dumps(spec_decode_runtime_data),
+            )
+            logging.info(
+                "Published TRT-LLM spec decode runtime metadata: %s",
+                spec_decode_runtime_data,
+            )
 
         logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
         logging.info(

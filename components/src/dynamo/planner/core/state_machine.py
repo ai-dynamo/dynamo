@@ -114,6 +114,9 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         # across ticks because load-scaling and throughput-scaling cadences
         # may differ. ``None`` means "no observation yet" -> no discount.
         self._last_kv_hit_rate: Optional[float] = None
+        # Most recent speculative decode accept length. This is planner-side
+        # scaling metadata only; FPM observations remain raw per-forward data.
+        self._last_accept_length: float = 1.0
 
         self._next_load_s: float = float("inf")
         self._next_throughput_s: float = float("inf")
@@ -141,6 +144,7 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
     def update_capabilities(self, capabilities: WorkerCapabilities) -> None:
         """Replace the current worker capabilities."""
         self._capabilities = capabilities
+        self._last_accept_length = self._clamp_accept_length(self._last_accept_length)
         if self._is_easy:
             return
         if self._is_agg and hasattr(self, "_agg_regression"):
@@ -385,6 +389,25 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
                 # Load-only mode: there is no predictor path, the load tick
                 # consumes the freshly observed average directly.
                 self._last_kv_hit_rate = traffic.kv_hit_rate
+
+        self._last_accept_length = self._clamp_accept_length(traffic.accept_length)
+
+    def _effective_speculative_nextn(self) -> int:
+        d_caps = self._capabilities.decode
+        if d_caps and d_caps.speculative_nextn and d_caps.speculative_nextn > 0:
+            return d_caps.speculative_nextn
+        return max(0, int(self._config.speculative_nextn))
+
+    def _clamp_accept_length(self, accept_length: Optional[float]) -> float:
+        nextn = self._effective_speculative_nextn()
+        if nextn <= 0:
+            return 1.0
+        if accept_length is None or not math.isfinite(accept_length):
+            return 1.0
+        return min(max(float(accept_length), 1.0), float(nextn + 1))
+
+    def _current_decode_accept_length(self) -> float:
+        return self._clamp_accept_length(self._last_accept_length)
 
     # ------------------------------------------------------------------
     # Budget
