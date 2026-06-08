@@ -6,7 +6,6 @@
 mod kv_event_sink;
 #[path = "sglang/mod.rs"]
 pub mod sglang;
-mod trtllm;
 pub mod vllm;
 
 pub use crate::common::protocols::ForwardPassSnapshot;
