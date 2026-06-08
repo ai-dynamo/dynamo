@@ -90,16 +90,16 @@ impl WorkerMetricsPublisher {
                         }
 
                         let metrics = rx.borrow_and_update().clone();
-                        let has_changed = last_metrics.as_ref() != Some(&metrics);
-
-                        if has_changed {
-                            pending_publish = Some(metrics.clone());
-                            last_metrics = Some(metrics);
-                            publish_timer.as_mut().reset(
-                                tokio::time::Instant::now()
-                                    + tokio::time::Duration::from_millis(1)
-                            );
+                        if last_metrics.as_ref() == Some(&metrics) {
+                            continue;
                         }
+
+                        pending_publish = Some(metrics.clone());
+                        last_metrics = Some(metrics);
+                        publish_timer.as_mut().reset(
+                            tokio::time::Instant::now()
+                                + tokio::time::Duration::from_millis(1)
+                        );
                     }
                     _ = &mut publish_timer, if pending_publish.is_some() => {
                         if let Some(metrics) = pending_publish.take() {
