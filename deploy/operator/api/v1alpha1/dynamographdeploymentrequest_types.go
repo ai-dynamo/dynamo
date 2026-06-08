@@ -64,7 +64,7 @@ type ProfilingConfigSpec struct {
 
 	// ProfilerImage specifies the container image to use for profiling jobs.
 	// This image contains the profiler code and dependencies needed for SLA-based profiling.
-	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0"
+	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.0"
 	// +kubebuilder:validation:Required
 	ProfilerImage string `json:"profilerImage"`
 
