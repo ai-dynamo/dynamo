@@ -25,6 +25,10 @@ use dynamo_backend_common::{
     MetricsCtx, OnPublisherReady, PreprocessedRequest, RuntimeConfig as RsRuntimeConfig,
     SnapshotPublisher as RsSnapshotPublisher, Worker as RsWorker, WorkerConfig as RsWorkerConfig,
 };
+use dynamo_llm::local_model::runtime_config::{
+    StructuralTagMode as RsStructuralTagMode, StructuralTagSchemaMode as RsStructuralTagSchemaMode,
+    StructuralTagScope as RsStructuralTagScope,
+};
 use dynamo_llm::model_type::ModelInput as RsModelInput;
 use dynamo_runtime as rs;
 use dynamo_runtime::logging::{DistributedTraceContext, get_distributed_tracing_context};
@@ -274,6 +278,9 @@ impl WorkerConfig {
         runtime = None,
         disaggregation_mode = DisaggregationMode::Aggregated,
         health_check_payload = None,
+        structural_tag_mode = "off".to_string(),
+        structural_tag_scope = "auto".to_string(),
+        structural_tag_schema = "auto".to_string(),
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -295,6 +302,9 @@ impl WorkerConfig {
         runtime: Option<RuntimeConfig>,
         disaggregation_mode: DisaggregationMode,
         health_check_payload: Option<PyObject>,
+        structural_tag_mode: String,
+        structural_tag_scope: String,
+        structural_tag_schema: String,
     ) -> PyResult<Self> {
         // Delegating to the same conversion used by `register_model`.
         let model_input_rs = match model_input {
@@ -322,6 +332,33 @@ impl WorkerConfig {
             }
             _ => None,
         };
+        let st_mode = match structural_tag_mode.as_str() {
+            "off" => RsStructuralTagMode::Off,
+            "on" => RsStructuralTagMode::On,
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid structural_tag_mode: {other}. Expected 'off' or 'on'."
+                )));
+            }
+        };
+        let st_scope = match structural_tag_scope.as_str() {
+            "auto" => RsStructuralTagScope::Auto,
+            "always" => RsStructuralTagScope::Always,
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid structural_tag_scope: {other}. Expected 'auto' or 'always'."
+                )));
+            }
+        };
+        let st_schema = match structural_tag_schema.as_str() {
+            "auto" => RsStructuralTagSchemaMode::Auto,
+            "strict" => RsStructuralTagSchemaMode::Strict,
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid structural_tag_schema: {other}. Expected 'auto' or 'strict'."
+                )));
+            }
+        };
         Ok(Self {
             inner: RsWorkerConfig {
                 namespace,
@@ -340,6 +377,9 @@ impl WorkerConfig {
                 metrics_labels,
                 disaggregation_mode: disaggregation_mode.into(),
                 health_check_payload,
+                structural_tag_mode: st_mode,
+                structural_tag_scope: st_scope,
+                structural_tag_schema: st_schema,
                 runtime: runtime.map(|r| r.inner).unwrap_or_default(),
             },
         })
@@ -894,6 +934,83 @@ impl LLMEngine for PyLLMEngine {
             dp_ranks,
             on_publisher_ready: Some(on_publisher_ready),
         })
+    }
+
+    async fn supported_controls(&self) -> Result<Vec<String>, DynamoError> {
+        let engine = self.engine.clone();
+        let join = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<Vec<String>> {
+                let result = engine.bind(py).call_method0("supported_controls")?;
+                let mut controls = Vec::new();
+                for item in result.try_iter()? {
+                    controls.push(item?.extract()?);
+                }
+                Ok(controls)
+            })
+        })
+        .await;
+
+        match join {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(py_err_to_dynamo(e)),
+            Err(join_err) => Err(DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!(
+                    "supported_controls spawn_blocking join failed: {join_err}"
+                ))
+                .build()),
+        }
+    }
+
+    async fn engine_control(
+        &self,
+        control: String,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, DynamoError> {
+        let engine = self.engine.clone();
+        let event_loop = self.event_loop.clone();
+        let py_future = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| {
+                let py_body = pythonize(py, &body).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Failed to convert engine control request body to Python: {e}"
+                    ))
+                })?;
+                let coroutine = engine
+                    .bind(py)
+                    .call_method1("engine_control", (control, py_body))?;
+                let locals = TaskLocals::new(event_loop.bind(py).clone());
+                pyo3_async_runtimes::into_future_with_locals(&locals, coroutine)
+            })
+        })
+        .await
+        .map_err(|e| {
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!("engine_control offload error: {e}"))
+                .build()
+        })?
+        .map_err(py_err_to_dynamo)?;
+
+        let py_result = py_future.await.map_err(py_err_to_dynamo)?;
+
+        tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| {
+                depythonize::<serde_json::Value>(py_result.bind(py)).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Failed to serialize engine control response: {e}"
+                    ))
+                })
+            })
+        })
+        .await
+        .map_err(|e| {
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!("engine_control response offload error: {e}"))
+                .build()
+        })?
+        .map_err(py_err_to_dynamo)
     }
 }
 

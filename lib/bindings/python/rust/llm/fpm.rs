@@ -174,6 +174,7 @@ impl FpmDirectPublisher {
             sum_queued_decode_kv_tokens: queued_sum_decode_kv_tokens,
             var_queued_decode_kv_tokens: 0.0,
             wall_time_secs,
+            ..Default::default()
         };
         self.publishers[idx].publish(snapshot).map_err(to_pyerr)
     }

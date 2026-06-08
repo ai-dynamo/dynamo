@@ -176,16 +176,6 @@ def run_serve_deployment(
                 str(gib_to_bytes),
             )
 
-    # Stagger engine startup under xdist to avoid vLLM profiling race
-    # (vLLM bug #10643: concurrent profilers miscount each other's memory).
-    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "")
-    if worker_id.startswith("gw"):
-        worker_num = int(worker_id.removeprefix("gw"))
-        if worker_num > 0:
-            stagger_s = worker_num * 15
-            logger.info("Staggering startup by %ds (xdist %s)", stagger_s, worker_id)
-            time.sleep(stagger_s)
-
     if ports is not None:
         dynamic_frontend_port = int(ports.frontend_port)
         dynamic_system_ports = [int(p) for p in ports.system_ports]
@@ -220,6 +210,10 @@ def run_serve_deployment(
         # Unique ZMQ port for vLLM KV event publishing (avoids xdist collisions).
         if ports.kv_event_port:
             merged_env["DYN_VLLM_KV_EVENT_PORT"] = str(ports.kv_event_port)
+
+        # Per-worker NIXL side-channel ports, indexed to match DYN_SYSTEM_PORT{idx}.
+        for idx, port in enumerate(ports.nixl_side_channel_ports, start=1):
+            merged_env[f"DYN_VLLM_NIXL_SIDE_CHANNEL_PORT{idx}"] = str(port)
 
         # Ensure EngineProcess health checks hit the correct frontend port.
         config = dataclasses.replace(config, frontend_port=dynamic_frontend_port)

@@ -259,6 +259,7 @@ mod tests {
                 output_signals: vec![OutputSignal {
                     uuid: Uuid::from_u128(7),
                     completed: true,
+                    rejected: false,
                     handoff_delay_ms: None,
                 }],
                 kv_events: Vec::new(),
@@ -275,6 +276,7 @@ mod tests {
                 output_signals: vec![OutputSignal {
                     uuid: Uuid::from_u128(8),
                     completed: false,
+                    rejected: false,
                     handoff_delay_ms: None,
                 }],
                 kv_events: Vec::new(),

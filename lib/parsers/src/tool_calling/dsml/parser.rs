@@ -28,17 +28,20 @@ use super::super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 pub fn detect_tool_call_start_dsml(chunk: &str, config: &DsmlParserConfig) -> bool {
     let start_token = &config.block_start;
 
-    // Check for complete start token
-    if chunk.contains(start_token.as_str()) {
+    // Check for complete outer block start, or a bare invoke when the outer
+    // wrapper opener is missing.
+    if chunk.contains(start_token.as_str()) || chunk.contains(config.invoke_start_prefix.as_str()) {
         return true;
     }
 
-    // Check for partial match at the end (streaming scenario)
-    let start_chars: Vec<char> = start_token.chars().collect();
-    for i in 1..start_chars.len() {
-        let partial: String = start_chars[..i].iter().collect();
-        if chunk.ends_with(&partial) {
-            return true;
+    // Check for partial match at the end (streaming scenario).
+    for token in [start_token, &config.invoke_start_prefix] {
+        let chars: Vec<char> = token.chars().collect();
+        for i in 1..chars.len() {
+            let partial: String = chars[..i].iter().collect();
+            if chunk.ends_with(&partial) {
+                return true;
+            }
         }
     }
 
@@ -80,11 +83,37 @@ pub fn try_tool_call_parse_dsml(
         return Ok((vec![], Some(String::new())));
     }
 
-    // Check if tool call block exists
-    let start_idx = trimmed.find(&config.block_start);
-    if start_idx.is_none() {
+    let Some(start_idx) = trimmed.find(&config.block_start) else {
+        if let Some(marker_idx) = first_orphan_dsml_marker_index(trimmed, config) {
+            let marker_tail = &trimmed[marker_idx..];
+            if marker_tail.starts_with(config.invoke_start_prefix.as_str())
+                && (marker_tail.contains(config.block_end.as_str()) || config.allow_eof_recovery)
+            {
+                let tool_calls = extract_invokes(marker_tail, config)?;
+                if !tool_calls.is_empty() {
+                    tracing::warn!(
+                        why = "bare_invoke_recovery",
+                        recovered_calls = tool_calls.len(),
+                        recovered_bytes = marker_tail.len(),
+                        kept_prefix_bytes = marker_idx,
+                        "DSML recovery: recovered complete bare invoke(s) without outer block_start"
+                    );
+                    return Ok((
+                        tool_calls,
+                        Some(trimmed[..marker_idx].trim_end().to_string()),
+                    ));
+                }
+            }
+            let stripped = &trimmed[marker_idx..];
+            tracing::warn!(
+                why = "DSML tool-call marker found without the outer block_start; dropping orphan marker tail so wire tags do not leak into normal_text",
+                stripped_bytes = stripped.len(),
+                "DSML strip (orphan markers)"
+            );
+            return Ok((vec![], Some(trimmed[..marker_idx].trim_end().to_string())));
+        }
         return Ok((vec![], Some(trimmed.to_string())));
-    }
+    };
 
     // Extract tool calls blocks. Finalize paths can opt into EOF recovery so
     // a missing outer block end still yields any complete inner invokes.
@@ -93,9 +122,11 @@ pub fn try_tool_call_parse_dsml(
     // Whether or not invokes parsed, normal_text is the prefix before the
     // first block_start — mirrors vLLM's success path. On no-invokes the
     // markup-leak warning still fires for the diagnostic trail.
-    let pre_block_text = start_idx
-        .map(|idx| trimmed[..idx].to_string())
-        .unwrap_or_default();
+    let pre_block_span = &trimmed[..start_idx];
+    let pre_block_text = first_orphan_dsml_marker_index(pre_block_span, config)
+        .filter(|idx| pre_block_span[*idx..].starts_with(config.invoke_start_prefix.as_str()))
+        .map(|idx| pre_block_span[..idx].trim_end().to_string())
+        .unwrap_or_else(|| pre_block_span.to_string());
 
     if tool_calls.is_empty() {
         // A block-start was detected but no valid invokes parsed. Do NOT leak
@@ -105,16 +136,14 @@ pub fn try_tool_call_parse_dsml(
         // Note: an unterminated block-start here means `block_regex` finds no
         // match at all, so any valid block *after* the unterminated one is
         // lost. This matches the pre-existing conservative P1-3 contract.
-        if let Some(idx) = start_idx {
-            let failed = &trimmed[idx..];
-            let prefix: String = failed.chars().take(120).collect();
-            tracing::warn!(
-                why = "no_invokes_parsed",
-                stripped_bytes = failed.len(),
-                "DSML strip (recovery): block_start detected but extract_tool_calls returned 0 invokes; suppressing all bytes from block_start onward so tool-call markup never bleeds into normal_text. preview={:?}",
-                prefix
-            );
-        }
+        let failed = &trimmed[start_idx..];
+        let prefix: String = failed.chars().take(120).collect();
+        tracing::warn!(
+            why = "no_invokes_parsed",
+            stripped_bytes = failed.len(),
+            "DSML strip (recovery): block_start detected but extract_tool_calls returned 0 invokes; suppressing all bytes from block_start onward so tool-call markup never bleeds into normal_text. preview={:?}",
+            prefix
+        );
         return Ok((vec![], Some(pre_block_text)));
     }
 
@@ -122,22 +151,33 @@ pub fn try_tool_call_parse_dsml(
     // onward (the block(s) themselves plus any inter-block / trailing narration)
     // is stripped from normal_text. Mirrors vLLM's
     // `content = model_output[:content_end]`.
-    if let Some(idx) = start_idx {
-        let stripped = &trimmed[idx..];
-        if !stripped.is_empty() {
-            let preview: String = stripped.chars().take(120).collect();
-            tracing::debug!(
-                why = "prefix_only_contract",
-                n_calls = tool_calls.len(),
-                kept_prefix_bytes = pre_block_text.len(),
-                stripped_bytes = stripped.len(),
-                "DSML strip (success): kept prefix before first block_start; dropped parsed-block(s) + any inter-block / trailing narration. preview={:?}",
-                preview
-            );
-        }
+    let stripped = &trimmed[start_idx..];
+    if !stripped.is_empty() {
+        let preview: String = stripped.chars().take(120).collect();
+        tracing::debug!(
+            why = "prefix_only_contract",
+            n_calls = tool_calls.len(),
+            kept_prefix_bytes = pre_block_text.len(),
+            stripped_bytes = stripped.len(),
+            "DSML strip (success): kept prefix before first block_start; dropped parsed-block(s) + any inter-block / trailing narration. preview={:?}",
+            preview
+        );
     }
 
     Ok((tool_calls, Some(pre_block_text)))
+}
+
+fn first_orphan_dsml_marker_index(text: &str, config: &DsmlParserConfig) -> Option<usize> {
+    [
+        config.block_end.as_str(),
+        config.invoke_start_prefix.as_str(),
+        config.invoke_end.as_str(),
+        config.parameter_prefix.as_str(),
+        config.parameter_end.as_str(),
+    ]
+    .into_iter()
+    .filter_map(|marker| text.find(marker))
+    .min()
 }
 
 /// Extract all tool calls from DSML formatted text.
@@ -150,9 +190,21 @@ fn extract_tool_calls(
 
     while cursor < text.len() {
         let Some(rel_start) = text[cursor..].find(config.block_start.as_str()) else {
+            if let Some((_, mut recovered)) =
+                recover_orphan_invokes_in_span(&text[cursor..], config)?
+            {
+                tool_calls.append(&mut recovered);
+            }
             break;
         };
-        let block_content_start = cursor + rel_start + config.block_start.len();
+        let abs_start = cursor + rel_start;
+        if let Some((_, mut recovered)) =
+            recover_orphan_invokes_in_span(&text[cursor..abs_start], config)?
+        {
+            tool_calls.append(&mut recovered);
+        }
+
+        let block_content_start = abs_start + config.block_start.len();
         let after_start = &text[block_content_start..];
 
         let (block, next_cursor) =
@@ -174,6 +226,39 @@ fn extract_tool_calls(
     }
 
     Ok(tool_calls)
+}
+
+fn recover_orphan_invokes_in_span(
+    span: &str,
+    config: &DsmlParserConfig,
+) -> anyhow::Result<Option<(String, Vec<ToolCallResponse>)>> {
+    let Some(marker_idx) = first_orphan_dsml_marker_index(span, config) else {
+        return Ok(None);
+    };
+    let marker_tail = &span[marker_idx..];
+    if !marker_tail.starts_with(config.invoke_start_prefix.as_str()) {
+        return Ok(None);
+    }
+    if !marker_tail.contains(config.block_end.as_str()) && !config.allow_eof_recovery {
+        return Ok(None);
+    }
+
+    let tool_calls = extract_invokes(marker_tail, config)?;
+    if tool_calls.is_empty() {
+        return Ok(None);
+    }
+
+    tracing::warn!(
+        why = "bare_invoke_gap_recovery",
+        recovered_calls = tool_calls.len(),
+        recovered_bytes = marker_tail.len(),
+        kept_prefix_bytes = marker_idx,
+        "DSML recovery: recovered complete bare invoke(s) before a later outer block"
+    );
+    Ok(Some((
+        span[..marker_idx].trim_end().to_string(),
+        tool_calls,
+    )))
 }
 
 /// Extract individual invoke blocks from function_calls content

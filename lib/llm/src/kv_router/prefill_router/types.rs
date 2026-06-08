@@ -4,7 +4,7 @@
 use dynamo_kv_router::config::RouterConfigOverride;
 use dynamo_kv_router::protocols::RouterBackpressureReason;
 
-use crate::protocols::common::preprocessor::{BootstrapInfo, PrefillResult};
+use crate::protocols::common::preprocessor::{BootstrapInfo, PrefillResult, TraceLink};
 
 /// Errors that can occur during prefill routing
 #[derive(Debug, thiserror::Error)]
@@ -28,14 +28,20 @@ pub enum PrefillError {
 
 /// Result of the prefill phase in `generate()`.
 pub(super) enum PrefillOutcome {
-    /// Bootstrap optimization: prefill spawned in background, bootstrap info ready
-    Bootstrap(BootstrapInfo),
-    /// Synchronous prefill completed with result. `worker_link` carries the
-    /// prefill worker's `engine.generate` span pointer for the decode side
-    /// to render as an OTel `Link` via `PreprocessedRequest.migration_link`.
+    /// Bootstrap optimization: prefill spawned in background, bootstrap info ready.
+    Bootstrap {
+        bootstrap_info: BootstrapInfo,
+        /// Prefill worker ID used for topology-aware decode routing.
+        worker_id: u64,
+    },
+    /// Synchronous prefill completed with result.
     Completed {
         result: PrefillResult,
-        worker_link: Option<crate::protocols::common::preprocessor::TraceLink>,
+        /// Prefill worker ID when available for topology-aware decode routing.
+        worker_id: Option<u64>,
+        /// Prefill worker's `engine.generate` span pointer for the decode side
+        /// to render as an OTel `Link` via `PreprocessedRequest.migration_link`.
+        worker_link: Option<TraceLink>,
     },
 }
 
@@ -47,7 +53,13 @@ pub(super) enum PrefillResolveDecision {
     },
     Unavailable,
     NotActivated,
-    NoBootstrapEndpoint,
+    /// Bootstrap endpoint unavailable after a worker was selected.
+    /// Carries the peeked worker so the synchronous prefill path can commit
+    /// that selection instead of re-entering router selection.
+    NoBootstrapEndpoint {
+        worker_id: u64,
+        dp_rank: Option<u32>,
+    },
     Backpressure {
         reason: RouterBackpressureReason,
         queued_isl_tokens: usize,

@@ -23,6 +23,7 @@ CASE_KEYS = {
     "model_text",
     "chunks",
     "chat_template_kwargs",
+    "force_reasoning",
     "expected",
     "reason",
     "dynamo_leak",
