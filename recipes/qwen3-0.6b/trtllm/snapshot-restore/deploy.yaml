@@ -1,0 +1,208 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Experimental Dynamo Snapshot restore recipe for Qwen3-0.6B with TensorRT-LLM.
+#
+# This is the restore-side DGD shape used for the TRTLLM snapshot smoke test. It
+# assumes a DynamoCheckpoint named `qwen3-0.6b-trtllm-snapshot` already exists
+# and is Ready. The checkpoint capture pod must use the same worker command,
+# image, mounts, and environment below so the restored process sees the same
+# runtime layout.
+#
+# The ConfigMaps referenced here are runtime overlays from the validated
+# checkpoint/restore run:
+# - trtllm-qwen3-criu-vanilla: conservative TRTLLM engine config
+# - trtllm-snapoverlay1-py: Dynamo TRTLLM snapshot lifecycle overlay
+# - trtllm-{sitecustomize,common,mpi-session}-no-mpi: single-process/no-MPI
+#   TRTLLM overlays for cuda-checkpoint
+# - trtllm-qwen3-unfused-py: disables Qwen3 fused_qk_norm_rope on A100 until
+#   the TRTLLM fused op ships an A100-compatible device image
+# - trtllm-exit-hook: captures process-exit diagnostics during restore testing
+#
+# Replace the images with the runtime and placeholder tags produced by the
+# build-on-demand workflow for the Dynamo/TRTLLM revision being tested.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-0.6b-trtllm-snapshot-restore
+  annotations:
+    nvidia.com/enable-grove: "false"
+spec:
+  backendFramework: trtllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          imagePullSecrets:
+            - name: ngc-secret
+          containers:
+            - name: main
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:8fdad46b155cf97b8727c5dacc85c31ae398ffa1-trtllm-runtime
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: NATS_SERVER
+                  value: nats://dynamo-platform-nats:4222
+                - name: DYN_DISCOVERY_BACKEND
+                  value: kubernetes
+                - name: DYN_REQUEST_PLANE
+                  value: nats
+                - name: DYN_TCP_RPC_HOST
+                  value: 127.0.0.1
+    - name: TRTLLMWorker
+      type: worker
+      replicas: 1
+      experimental:
+        checkpoint:
+          mode: Auto
+          checkpointRef: qwen3-0.6b-trtllm-snapshot
+          targetContainerName: main
+      podTemplate:
+        spec:
+          runtimeClassName: nvidia
+          nodeSelector:
+            nvidia.com/gpu.present: "true"
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Exists
+              effect: NoSchedule
+          imagePullSecrets:
+            - name: ngc-secret
+          securityContext:
+            fsGroup: 1000
+            fsGroupChangePolicy: OnRootMismatch
+          volumes:
+            - name: hf-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+            - name: criu-work
+              emptyDir: {}
+            - name: vanilla-engine-config
+              configMap:
+                name: trtllm-qwen3-criu-vanilla
+            - name: trtllm-main-py
+              configMap:
+                name: trtllm-snapoverlay1-py
+            - name: trtllm-worker-py
+              configMap:
+                name: trtllm-snapoverlay1-py
+            - name: dev-net-tun
+              hostPath:
+                path: /dev/net/tun
+                type: CharDevice
+            - name: trtllm-exit-hook
+              configMap:
+                name: trtllm-exit-hook
+            - name: trtllm-sitecustomize-no-mpi
+              configMap:
+                name: trtllm-sitecustomize-no-mpi
+            - name: trtllm-common-no-mpi
+              configMap:
+                name: trtllm-common-no-mpi
+            - name: trtllm-mpi-session-no-mpi
+              configMap:
+                name: trtllm-mpi-session-no-mpi
+            - name: trtllm-qwen3-unfused-py
+              configMap:
+                name: trtllm-qwen3-unfused-py
+          containers:
+            - name: main
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:8fdad46b155cf97b8727c5dacc85c31ae398ffa1-trtllm-placeholder
+              imagePullPolicy: IfNotPresent
+              workingDir: /workspace/
+              command:
+                - /usr/local/sbin/cuda-checkpoint
+                - --launch-job
+                - python3
+                - -m
+                - dynamo.trtllm
+              args:
+                - --model-path
+                - Qwen/Qwen3-0.6B
+                - --served-model-name
+                - Qwen/Qwen3-0.6B
+                - --extra-engine-args
+                - /workspace/trtllm-qwen3-criu-vanilla.yaml
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              env:
+                - name: HF_HOME
+                  value: /home/dynamo/.cache/huggingface
+                - name: HF_HUB_OFFLINE
+                  value: "0"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "0"
+                - name: NVIDIA_DRIVER_CAPABILITIES
+                  value: all
+                - name: NCCL_DEBUG
+                  value: INFO
+                - name: TOKENIZERS_PARALLELISM
+                  value: "false"
+                - name: NATS_SERVER
+                  value: nats://dynamo-platform-nats:4222
+                - name: DYN_DISCOVERY_BACKEND
+                  value: kubernetes
+                - name: DYN_REQUEST_PLANE
+                  value: nats
+                - name: DYN_TCP_RPC_HOST
+                  value: 127.0.0.1
+                # Keep TRTLLM in one worker process for cuda-checkpoint.
+                - name: TLLM_WORKER_USE_SINGLE_PROCESS
+                  value: "1"
+                # Force OpenMPI/UCX onto local/TCP transports only; the
+                # single-GPU snapshot path should not create RDMA/NVLink IPC.
+                - name: OMPI_MCA_pml
+                  value: ob1
+                - name: OMPI_MCA_btl
+                  value: self,tcp,vader
+                - name: OMPI_MCA_osc
+                  value: pt2pt
+                - name: OMPI_MCA_btl_base_warn_component_unused
+                  value: "0"
+                - name: UCX_TLS
+                  value: tcp,self
+                # The no-MPI ConfigMap overlays honor this flag to avoid
+                # importing/initializing mpi4py in the restored process.
+                - name: TLLM_SKIP_MPI_IMPORT
+                  value: "1"
+                - name: LD_PRELOAD
+                  value: /workspace/libexit_hook.so
+              resources:
+                requests:
+                  nvidia.com/gpu: "1"
+                  ephemeral-storage: 10Gi
+                limits:
+                  nvidia.com/gpu: "1"
+              volumeMounts:
+                - name: hf-cache
+                  mountPath: /home/dynamo/.cache/huggingface
+                - name: criu-work
+                  mountPath: /var/criu-work
+                - name: vanilla-engine-config
+                  mountPath: /workspace/trtllm-qwen3-criu-vanilla.yaml
+                  subPath: trtllm-qwen3-criu-vanilla.yaml
+                - name: trtllm-main-py
+                  mountPath: /opt/dynamo/venv/lib/python3.12/site-packages/dynamo/trtllm/main.py
+                  subPath: main.py
+                - name: trtllm-worker-py
+                  mountPath: /opt/dynamo/venv/lib/python3.12/site-packages/dynamo/trtllm/workers/llm_worker.py
+                  subPath: llm_worker.py
+                - name: trtllm-exit-hook
+                  mountPath: /workspace/libexit_hook.so
+                  subPath: libexit_hook.so
+                - name: trtllm-sitecustomize-no-mpi
+                  mountPath: /etc/python3.12/sitecustomize.py
+                  subPath: sitecustomize.py
+                - name: trtllm-common-no-mpi
+                  mountPath: /usr/local/lib/python3.12/dist-packages/tensorrt_llm/_common.py
+                  subPath: _common.py
+                - name: trtllm-mpi-session-no-mpi
+                  mountPath: /usr/local/lib/python3.12/dist-packages/tensorrt_llm/llmapi/mpi_session.py
+                  subPath: mpi_session.py
+                - name: trtllm-qwen3-unfused-py
+                  mountPath: /usr/local/lib/python3.12/dist-packages/tensorrt_llm/_torch/models/modeling_qwen3.py
+                  subPath: modeling_qwen3.py
+                - name: dev-net-tun
+                  mountPath: /dev/net/tun
