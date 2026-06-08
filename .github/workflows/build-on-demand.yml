@@ -18,10 +18,26 @@ on:
         description: 'Build and push trtllm image, tagged with branch name'
         type: boolean
         default: false
+      build_snapshot:
+        description: 'Build and push snapshot-agent image, tagged with branch name'
+        type: boolean
+        default: false
+      build_placeholder:
+        description: 'Build and push TRTLLM placeholder image from the freshly built TRTLLM runtime'
+        type: boolean
+        default: false
       build_operator:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
         default: false
+      trtllm_source_ref:
+        description: 'TensorRT-LLM git ref/SHA to build as the upstream runtime base when build_trtllm is true'
+        type: string
+        default: 'main'
+      trtllm_cuda_archs:
+        description: 'TensorRT-LLM CUDA architectures for source wheel build'
+        type: string
+        default: '100-real'
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -57,7 +73,7 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      cuda_version: '["13.0"]'
+      cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.init.outputs.builder_name }}
       build_timeout_minutes: 60
@@ -71,24 +87,124 @@ jobs:
     with:
       framework: sglang
       target: runtime
-      cuda_version: '["13.0"]'
+      cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.init.outputs.builder_name }}
       build_timeout_minutes: 60
     secrets: inherit
 
+  trtllm-source-base:
+    name: trtllm-upstream-main-base
+    needs: [init]
+    if: inputs.build_trtllm
+    runs-on: prod-builder-v3
+    timeout-minutes: 360
+    env:
+      IMAGE_REGISTRY: ai-dynamo
+      IMAGE_REPOSITORY: dynamo
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    outputs:
+      trtllm_commit: ${{ steps.resolve-ref.outputs.trtllm_commit }}
+      trtllm_version: ${{ steps.resolve-ref.outputs.trtllm_version }}
+      image_tag: ${{ steps.image-tags.outputs.image_tag }}
+      ecr_image: ${{ steps.image-tags.outputs.ecr_image }}
+      acr_image: ${{ steps.image-tags.outputs.acr_image }}
+    steps:
+      - name: Checkout Dynamo code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Initialize BuildKit builder
+        uses: ./.github/actions/init-dynamo-builder
+        with:
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          flavor: trtllm
+          arch: linux/amd64
+          cuda_version: '13.0'
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Checkout TensorRT-LLM
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: NVIDIA/TensorRT-LLM
+          ref: ${{ inputs.trtllm_source_ref }}
+          path: TensorRT-LLM
+          lfs: true
+          submodules: recursive
+      - name: Resolve TensorRT-LLM commit
+        id: resolve-ref
+        shell: bash
+        working-directory: TensorRT-LLM
+        env:
+          TRTLLM_SOURCE_REF: ${{ inputs.trtllm_source_ref }}
+        run: |
+          set -euo pipefail
+          TRTLLM_COMMIT="$(git rev-parse HEAD)"
+          TRTLLM_COMMIT_SHORT="${TRTLLM_COMMIT:0:12}"
+          SANITIZED_REF="$(echo "${TRTLLM_SOURCE_REF}" | sed 's/[^a-zA-Z0-9._-]/-/g' | sed 's/^-//;s/-$//' | cut -c1-40)"
+          TRTLLM_VERSION="${SANITIZED_REF:-source}-${TRTLLM_COMMIT_SHORT}"
+          echo "trtllm_commit=${TRTLLM_COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "trtllm_version=${TRTLLM_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved TensorRT-LLM ${{ inputs.trtllm_source_ref }} to ${TRTLLM_COMMIT}"
+      - name: Calculate TensorRT-LLM base image tags
+        id: image-tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          ECR_REPO="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+          IMAGE_TAG="${{ github.sha }}-trtllm-upstream-main"
+          ECR_IMAGE="${ECR_REPO}:${IMAGE_TAG}"
+          ACR_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${IMAGE_TAG}"
+          echo "ecr_repo=${ECR_REPO}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "ecr_image=${ECR_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "acr_image=${ACR_IMAGE}" >> "$GITHUB_OUTPUT"
+      - name: Build and push TensorRT-LLM upstream release base
+        shell: bash
+        working-directory: TensorRT-LLM
+        run: |
+          set -euo pipefail
+          echo "Building TensorRT-LLM from commit ${{ steps.resolve-ref.outputs.trtllm_commit }}"
+          docker buildx build --push \
+            --progress=plain \
+            --platform linux/amd64 \
+            --target release \
+            --build-arg BUILD_WHEEL_ARGS="--clean --benchmarks --job_count 8 --cuda_architectures ${{ inputs.trtllm_cuda_archs }}" \
+            --build-arg GIT_COMMIT="${{ steps.resolve-ref.outputs.trtllm_commit }}" \
+            --build-arg TRT_LLM_VER="${{ steps.resolve-ref.outputs.trtllm_version }}" \
+            --tag "${{ steps.image-tags.outputs.ecr_image }}" \
+            --tag "${{ steps.image-tags.outputs.acr_image }}" \
+            --file docker/Dockerfile.multi .
+          {
+            echo "### TensorRT-LLM Upstream Base"
+            echo ""
+            echo "- TensorRT-LLM ref: \`${{ inputs.trtllm_source_ref }}\`"
+            echo "- TensorRT-LLM commit: \`${{ steps.resolve-ref.outputs.trtllm_commit }}\`"
+            echo "- TensorRT-LLM version arg: \`${{ steps.resolve-ref.outputs.trtllm_version }}\`"
+            echo "- CUDA archs: \`${{ inputs.trtllm_cuda_archs }}\`"
+            echo "- ECR image: \`${{ steps.image-tags.outputs.ecr_image }}\`"
+            echo "- ACR image: \`${{ steps.image-tags.outputs.acr_image }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   trtllm-build:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [init]
+    needs: [init, trtllm-source-base]
     if: inputs.build_trtllm
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
       target: runtime
       cuda_version: '["13.1"]'
-      platform: 'linux/amd64,linux/arm64'
+      platform: 'linux/amd64'
       builder_name: ${{ needs.init.outputs.builder_name }}
-      build_timeout_minutes: 60
+      build_timeout_minutes: 120
+      extra_build_args: |
+        RUNTIME_IMAGE=dynamoci.azurecr.io/ai-dynamo/dynamo
+        RUNTIME_IMAGE_TAG=${{ needs.trtllm-source-base.outputs.image_tag }}
     secrets: inherit
 
   vllm-copy-to-acr:
@@ -97,10 +213,86 @@ jobs:
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.0"]'
+      cuda_version: '["12.9", "13.0"]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
+
+  # ============================================================================
+  # SNAPSHOT AGENT AND PLACEHOLDER
+  # ============================================================================
+
+  snapshot-agent:
+    needs: [init]
+    if: inputs.build_snapshot
+    name: Snapshot Agent
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Build and push snapshot agent
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          image_tag: ${{ github.sha }}-snapshot-agent
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+
+  trtllm-placeholder:
+    needs: [init, trtllm-build]
+    if: inputs.build_placeholder
+    name: TRTLLM Placeholder
+    runs-on: prod-default-v2
+    env:
+      IMAGE_REGISTRY: ai-dynamo
+      IMAGE_REPOSITORY: dynamo
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Initialize Dynamo Builder
+        uses: ./.github/actions/init-dynamo-builder
+        with:
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          flavor: general
+          arch: linux/amd64
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Build and push placeholder
+        shell: bash
+        working-directory: ./deploy/snapshot
+        run: |
+          set -euo pipefail
+          RUNTIME_IMAGE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${{ github.sha }}-trtllm-runtime"
+          ECR_PLACEHOLDER="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${{ github.sha }}-trtllm-placeholder"
+          ACR_PLACEHOLDER="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${{ github.sha }}-trtllm-placeholder"
+          docker buildx build --push \
+            --platform linux/amd64 \
+            --target placeholder \
+            --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+            --build-arg BASE_IMAGE="${RUNTIME_IMAGE}" \
+            --tag "${ECR_PLACEHOLDER}" \
+            --tag "${ACR_PLACEHOLDER}" \
+            -f Dockerfile .
+          {
+            echo "### TRTLLM Placeholder"
+            echo ""
+            echo "- Base runtime: \`${RUNTIME_IMAGE}\`"
+            echo "- ECR image: \`${ECR_PLACEHOLDER}\`"
+            echo "- ACR image: \`${ACR_PLACEHOLDER}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   sglang-copy-to-acr:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
@@ -108,7 +300,7 @@ jobs:
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["13.0"]'
+      cuda_version: '["12.9", "13.0"]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
@@ -194,7 +386,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, operator]
+    needs: [init, vllm-build, sglang-build, trtllm-source-base, trtllm-build, operator, snapshot-agent, trtllm-placeholder]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
