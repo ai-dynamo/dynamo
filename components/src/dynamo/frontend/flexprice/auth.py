@@ -31,9 +31,7 @@ class AuthCtx:
     token_uuid: str = ""
 
 
-# ---------------------------------------------------------------------------
 # Internal JWT helpers
-# ---------------------------------------------------------------------------
 
 def _b64url_decode(data: str) -> bytes:
     """Decode a base64url-encoded string (no padding required)."""
@@ -100,9 +98,7 @@ def _verify_jwt(token: str, secret_keys: List[str]) -> Dict:
     return claims
 
 
-# ---------------------------------------------------------------------------
 # Public API
-# ---------------------------------------------------------------------------
 
 def authenticate(
     auth_header: str,

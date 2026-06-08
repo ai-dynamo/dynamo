@@ -88,9 +88,7 @@ class DynamoProxy:
         if self._session:
             await self._session.close()
 
-    # ------------------------------------------------------------------
     # Main handler
-    # ------------------------------------------------------------------
 
     async def handle(self, request: web.Request) -> web.StreamResponse:
         # ---- 1. Authentication (always required) ----------------------
@@ -175,9 +173,7 @@ class DynamoProxy:
             logger.warning("Proxy error on %s: %s", path, exc)
             return _json_error(502, "Bad Gateway")
 
-    # ------------------------------------------------------------------
     # Streaming response
-    # ------------------------------------------------------------------
 
     async def _handle_stream(
         self,
@@ -224,9 +220,7 @@ class DynamoProxy:
 
         return response
 
-    # ------------------------------------------------------------------
     # Buffered (non-streaming) response
-    # ------------------------------------------------------------------
 
     async def _handle_buffered(
         self,
@@ -260,9 +254,7 @@ class DynamoProxy:
 
         return response
 
-    # ------------------------------------------------------------------
     # Usage emission (enqueued — never blocks the request path)
-    # ------------------------------------------------------------------
 
     def _emit_usage(
         self,
@@ -302,9 +294,7 @@ class DynamoProxy:
         )
 
 
-# ------------------------------------------------------------------
 # Utility functions
-# ------------------------------------------------------------------
 
 
 def _extract_usage_from_json(body: bytes) -> Optional[Dict[str, Any]]:
@@ -336,9 +326,7 @@ def _parse_usage_from_sse(
     return current
 
 
-# ------------------------------------------------------------------
 # Server entrypoint
-# ------------------------------------------------------------------
 
 
 async def run_proxy(
