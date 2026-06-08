@@ -22,7 +22,6 @@ from typing import List, Optional
 import torch
 from gpu_memory_service.client.memory_manager import StaleMemoryLayoutError
 from gpu_memory_service.client.torch.allocator import (
-    ensure_scratch_disabled,
     get_gms_client_memory_manager,
     get_or_create_gms_client_memory_manager,
     get_or_create_scratch_manager,
@@ -224,9 +223,10 @@ class GMSWorker(Worker):
         """Allocate KV cache backing.
 
         In scratch-KV mode the tensors are allocated over scratch-aliased
-        backing client-side; wake_up promotes to real per-tensor backing via
-        the standard reallocate+remap path. With enable_sleep_mode the manager
-        connects RW at init and allocates real backing immediately.
+        backing client-side; wake_up drops scratch backing and installs fresh
+        server backing via the standard reallocate+remap path. With
+        enable_sleep_mode the manager connects RW at init and allocates real
+        backing immediately.
         """
         from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 
@@ -236,7 +236,7 @@ class GMSWorker(Worker):
         socket = get_socket_path(device, "kv_cache")
         if is_scratch_kv_enabled():
             # Client-local scratch only — no GMS server session at init.
-            # wake_up will connect RW and migrate to real backing.
+            # wake_up will connect RW and allocate fresh server backing.
             get_or_create_scratch_manager(socket, device, tag="kv_cache")
             with gms_use_mem_pool("kv_cache", torch.device(f"cuda:{device}")):
                 self.model_runner.initialize_kv_cache(kv_cache_config)
@@ -374,17 +374,16 @@ class GMSWorker(Worker):
                 kv_cache_manager is not None
             ), "GMS kv_cache client is not initialized"
             # Capture scratch state BEFORE the flip so we know whether to
-            # migrate and whether to replay the deferred NIXL registration.
+            # move bookkeeping and whether to replay the deferred NIXL
+            # registration.
             was_scratch = is_scratch(kv_cache_manager)
             assert kv_cache_manager.is_unmapped, "GMS kv_cache is not unmapped"
             kv_cache_manager.connect(RequestedLockType.RW)
             if was_scratch:
-                # Move scratch entries from _scratch_mappings into _mappings
-                # as preserved-VA records, then flip routing to server-backed
-                # so subsequent torch allocations on this mempool go through
-                # create_mapping. Order matters: migrate first, flip second.
+                # Move scratch bookkeeping from _scratch_mappings into _mappings
+                # as preserved-VA records and flip subsequent allocations on
+                # this mempool to server-backed create_mapping.
                 kv_cache_manager.prepare_scratch_for_reallocation()
-                ensure_scratch_disabled(kv_cache_manager)
             kv_cache_manager.reallocate_all_handles(tag="kv_cache")
             kv_cache_manager.remap_all_vas()
             self.model_runner.post_kv_cache_wake_up()

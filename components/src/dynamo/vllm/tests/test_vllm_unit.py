@@ -3,6 +3,7 @@
 
 """Unit tests for vLLM backend components."""
 
+import asyncio
 import json
 import re
 import socket
@@ -19,6 +20,7 @@ from dynamo.vllm.args import (
     _is_routable,
     _uses_dynamo_connector,
     _uses_nixl_connector,
+    configure_rl_logprobs_mode,
     ensure_side_channel_host,
     get_host_ip,
     parse_args,
@@ -332,6 +334,120 @@ def test_headless_namespace_has_required_fields(mock_vllm_cli):
     # Core engine fields must survive the round-trip
     assert hasattr(ns, "model")
     assert hasattr(ns, "tensor_parallel_size")
+
+
+def test_rl_logprobs_force_converts_raw_mode():
+    config = SimpleNamespace(
+        enable_rl=True,
+        engine_args=SimpleNamespace(logprobs_mode="raw_logprobs"),
+    )
+
+    configure_rl_logprobs_mode(config)
+
+    assert config.engine_args.logprobs_mode == "processed_logprobs"
+
+
+def test_rl_logprobs_keeps_processed_mode():
+    config = SimpleNamespace(
+        enable_rl=True,
+        engine_args=SimpleNamespace(logprobs_mode="processed_logprobs"),
+    )
+
+    configure_rl_logprobs_mode(config)
+
+    assert config.engine_args.logprobs_mode == "processed_logprobs"
+
+
+def test_rl_logprobs_rejects_logits_modes():
+    config = SimpleNamespace(
+        enable_rl=True,
+        engine_args=SimpleNamespace(logprobs_mode="raw_logits"),
+    )
+
+    with pytest.raises(ValueError, match="processed_logprobs"):
+        configure_rl_logprobs_mode(config)
+
+
+def test_parse_args_does_not_track_logprobs_mode_presence(mock_vllm_cli):
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
+    config = parse_args()
+    assert not hasattr(config, "logprobs_mode_explicitly_set")
+
+
+def test_unified_from_args_applies_rl_logprobs_default(monkeypatch):
+    from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
+    from dynamo.vllm import llm_engine
+
+    config = SimpleNamespace(
+        enable_rl=True,
+        engine_args=SimpleNamespace(
+            logprobs_mode="raw_logprobs",
+            served_model_name=["Qwen/Qwen3-0.6B"],
+        ),
+        served_model_name="Qwen/Qwen3-0.6B",
+        model="Qwen/Qwen3-0.6B",
+        disaggregation_mode=CommonDisaggregationMode.AGGREGATED,
+        component="backend",
+    )
+    worker_config = object()
+
+    monkeypatch.setattr(llm_engine, "parse_args", lambda argv: config)
+    monkeypatch.setattr(
+        llm_engine.WorkerConfig,
+        "from_runtime_config",
+        lambda *args, **kwargs: worker_config,
+    )
+
+    async def run_from_args():
+        return await llm_engine.VllmLLMEngine.from_args(["--enable-rl"])
+
+    engine, result_worker_config = asyncio.run(run_from_args())
+
+    assert config.engine_args.logprobs_mode == "processed_logprobs"
+    assert engine.enable_rl is True
+    assert result_worker_config is worker_config
+
+
+def test_unified_generate_passes_enable_rl_to_sampling_params(monkeypatch):
+    from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
+    from dynamo.vllm import llm_engine
+
+    captured: dict[str, bool] = {}
+
+    def fake_build_sampling_params(
+        request, default_sampling_params, model_max_len=None, *, enable_rl=False
+    ):
+        captured["enable_rl"] = enable_rl
+        return SimpleNamespace(extra_args=None)
+
+    async def empty_generation():
+        if False:
+            yield None
+
+    def fake_generate(*args, **kwargs):
+        return empty_generation()
+
+    engine = llm_engine.VllmLLMEngine(
+        SimpleNamespace(),
+        CommonDisaggregationMode.AGGREGATED,
+        served_model_name="test-model",
+        component="backend",
+        enable_rl=True,
+    )
+    engine.engine_client = SimpleNamespace(generate=fake_generate)
+    engine._default_sampling_params = {}
+    engine._model_max_len = 4096
+
+    monkeypatch.setattr(llm_engine, "build_sampling_params", fake_build_sampling_params)
+
+    async def run_generate():
+        context = SimpleNamespace(id=lambda: "req", trace_headers=lambda: None)
+        async for _ in engine.generate({"token_ids": [1, 2, 3]}, context):
+            pass
+
+    asyncio.run(run_generate())
+
+    assert captured["enable_rl"] is True
 
 
 # --disaggregation-mode tests
