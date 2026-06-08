@@ -15,10 +15,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::protocols::SharedCacheHits;
 
-/// Endpoint name for the shared KV cache query service (request plane).
-/// Matches the constant in `lib/llm/src/kv_router/shared_cache.rs`.
-pub const SHARED_KV_CACHE_QUERY_ENDPOINT: &str = "shared_kv_cache_query";
-
 // ---------------------------------------------------------------------------
 // Wire protocol types (shared with lib/llm/src/kv_router/shared_cache.rs)
 // ---------------------------------------------------------------------------
@@ -33,28 +29,6 @@ pub struct SharedCacheQueryRequest {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SharedCacheQueryResponse {
     pub ranges: Vec<[u32; 2]>,
-}
-
-#[cfg(feature = "indexer-runtime")]
-impl crate::indexer::MaybeError for SharedCacheQueryResponse {
-    fn from_err(err: impl std::error::Error + 'static) -> Self {
-        tracing::warn!("SharedCacheQueryResponse::from_err: {err}");
-        Self { ranges: vec![] }
-    }
-    fn err(&self) -> Option<Box<dyn std::error::Error + Send + Sync>> {
-        None
-    }
-}
-
-#[cfg(feature = "indexer-runtime")]
-impl dynamo_runtime::protocols::maybe_error::MaybeError for SharedCacheQueryResponse {
-    fn from_err(err: impl std::error::Error + 'static) -> Self {
-        tracing::warn!("SharedCacheQueryResponse::from_err: {err}");
-        Self { ranges: vec![] }
-    }
-    fn err(&self) -> Option<dynamo_runtime::error::DynamoError> {
-        None
-    }
 }
 
 /// Request to store block hashes (for populating the dummy cache).
@@ -76,6 +50,12 @@ pub struct RemoveRequest {
 /// Thread-safe set of block hashes that exist in the "shared cache".
 pub struct SharedCacheStore {
     blocks: DashSet<u64>,
+}
+
+impl Default for SharedCacheStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SharedCacheStore {
@@ -112,6 +92,10 @@ impl SharedCacheStore {
     /// Number of blocks currently stored.
     pub fn len(&self) -> usize {
         self.blocks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
     }
 }
 
@@ -187,39 +171,6 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/health", get(health))
         .route("/stats", get(stats))
         .with_state(state)
-}
-
-// ---------------------------------------------------------------------------
-// Request-plane engine (for Dynamo runtime integration)
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "indexer-runtime")]
-pub struct SharedCacheQueryEngine {
-    pub store: Arc<SharedCacheStore>,
-}
-
-#[cfg(feature = "indexer-runtime")]
-#[dynamo_runtime::pipeline::async_trait]
-impl
-    dynamo_runtime::pipeline::AsyncEngine<
-        dynamo_runtime::pipeline::SingleIn<SharedCacheQueryRequest>,
-        dynamo_runtime::pipeline::ManyOut<SharedCacheQueryResponse>,
-        anyhow::Error,
-    > for SharedCacheQueryEngine
-{
-    async fn generate(
-        &self,
-        request: dynamo_runtime::pipeline::SingleIn<SharedCacheQueryRequest>,
-    ) -> anyhow::Result<dynamo_runtime::pipeline::ManyOut<SharedCacheQueryResponse>> {
-        use dynamo_runtime::pipeline::{AsyncEngineContextProvider, ResponseStream};
-
-        let (req, ctx) = request.into_parts();
-        let hits = self.store.check_blocks(&req.block_hashes);
-        let ranges: Vec<[u32; 2]> = hits.ranges.iter().map(|r| [r.start, r.end]).collect();
-        let response = SharedCacheQueryResponse { ranges };
-        let stream = dynamo_runtime::stream::iter(vec![response]);
-        Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
-    }
 }
 
 // ---------------------------------------------------------------------------

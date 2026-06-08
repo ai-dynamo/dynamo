@@ -4,8 +4,8 @@
 //! Disaggregated-serving mode for unified backends.
 //!
 //! [`DisaggregationMode`] is metadata carried on [`crate::WorkerConfig`]. The
-//! [`crate::Worker`] consumes it for two registration-time decisions
-//! (`ModelType::Prefill` vs the parsed `endpoint_types`, and whether the model
+//! [`crate::Worker`] consumes it for two registration-time decisions (the
+//! `worker_type` / `ModelType` pair to register with, and whether the model
 //! advertises a local KV indexer). Engines consult it to switch their per-mode
 //! protocol divergence (KV-transfer config, bootstrap handshake,
 //! `disaggregated_params` codec) inside `generate` and `drain`.
@@ -31,8 +31,8 @@ pub enum DisaggregationMode {
     #[value(name = "agg", alias = "aggregated")]
     Aggregated,
     /// Worker only runs the prefill phase and hands off KV cache to a decode
-    /// peer. Registered as `ModelType::Prefill` so the frontend's prefill
-    /// router targets it.
+    /// peer. Registered with `ModelType::empty()` and `WorkerType::Prefill`
+    /// so the frontend's prefill router targets it via `worker_type`.
     Prefill,
     /// Worker only runs the decode phase, consuming KV cache produced by a
     /// prefill peer. Does not advertise a local KV indexer.

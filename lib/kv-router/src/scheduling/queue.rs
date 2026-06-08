@@ -27,6 +27,7 @@ use super::types::{
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, RouterBackpressureReason, WorkerConfigLike, WorkerId,
 };
+use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
@@ -273,22 +274,21 @@ impl<
     /// `(0, 1)` for workers not yet known to discovery.
     pub fn register_workers(&self, worker_ids: &std::collections::HashSet<u64>) {
         let discovery_workers = self.workers_with_configs.borrow();
-        let dp_range: std::collections::HashMap<u64, (u32, u32)> = worker_ids
-            .iter()
-            .map(|&id| {
-                let (dp_start, dp_size) = discovery_workers
-                    .get(&id)
-                    .map(|runtime_config| {
-                        (
-                            runtime_config.data_parallel_start_rank(),
-                            runtime_config.data_parallel_size(),
-                        )
-                    })
-                    .unwrap_or((0, 1));
-                (id, (dp_start, dp_size))
-            })
-            .collect();
-        self.slots.register_external_workers(&dp_range);
+        for &worker_id in worker_ids {
+            let (dp_start, dp_size) = discovery_workers
+                .get(&worker_id)
+                .map(|runtime_config| {
+                    (
+                        runtime_config.data_parallel_start_rank(),
+                        runtime_config.data_parallel_size(),
+                    )
+                })
+                .unwrap_or((0, 1));
+            let range = WorkerDpRange::new(worker_id, dp_start, dp_size);
+            if let Err(error) = self.slots.upsert_worker(range) {
+                tracing::warn!(worker_id, %error, "Invalid externally-provided worker topology");
+            }
+        }
     }
 
     /// Enqueue a new request.
@@ -1722,10 +1722,8 @@ mod tests {
         );
 
         // Lazily register two workers in the slot tracker (EPP supplies pod list)
-        let mut dp_range = std::collections::HashMap::new();
-        dp_range.insert(100_u64, (0_u32, 1_u32));
-        dp_range.insert(200_u64, (0_u32, 1_u32));
-        slots.register_external_workers(&dp_range);
+        slots.upsert_worker(WorkerDpRange::new(100, 0, 1)).unwrap();
+        slots.upsert_worker(WorkerDpRange::new(200, 0, 1)).unwrap();
 
         // Also update the config watch so the selector can see these workers
         let mut configs = HashMap::new();
@@ -1771,9 +1769,7 @@ mod tests {
         let (queue, slots, cfg_tx) = make_queue_with_sender(0, block_size, isl, None, None);
 
         // Register worker 10 in slots and config
-        let mut dp1 = std::collections::HashMap::new();
-        dp1.insert(10_u64, (0_u32, 1_u32));
-        slots.register_external_workers(&dp1);
+        slots.upsert_worker(WorkerDpRange::new(10, 0, 1)).unwrap();
 
         let mut configs = HashMap::new();
         configs.insert(
@@ -1786,9 +1782,7 @@ mod tests {
         cfg_tx.send(configs.clone()).unwrap();
 
         // Register worker 20 (worker 10 must NOT be evicted)
-        let mut dp2 = std::collections::HashMap::new();
-        dp2.insert(20_u64, (0_u32, 1_u32));
-        slots.register_external_workers(&dp2);
+        slots.upsert_worker(WorkerDpRange::new(20, 0, 1)).unwrap();
 
         configs.insert(
             20_u64,
@@ -1829,11 +1823,11 @@ mod tests {
         let (queue, slots, cfg_tx) = make_queue_with_sender(0, block_size, isl, None, None);
 
         // Register three workers
-        let mut dp = std::collections::HashMap::new();
-        dp.insert(1_u64, (0_u32, 1_u32));
-        dp.insert(2_u64, (0_u32, 1_u32));
-        dp.insert(3_u64, (0_u32, 1_u32));
-        slots.register_external_workers(&dp);
+        for worker_id in 1..=3 {
+            slots
+                .upsert_worker(WorkerDpRange::new(worker_id, 0, 1))
+                .unwrap();
+        }
 
         let mut configs = HashMap::new();
         for &id in &[1_u64, 2_u64, 3_u64] {

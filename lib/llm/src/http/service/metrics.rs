@@ -252,7 +252,7 @@ struct MetricsHandlerState {
 pub struct Metrics {
     request_started_counter: IntCounterVec,
     request_counter: IntCounterVec,
-    /// Deprecated: use `active_requests_gauge`. Kept for backwards compatibility until Phase 3.
+    /// Deprecated: use `active_requests_gauge`. Kept for backwards compatibility.
     inflight_gauge: IntGaugeVec,
     active_requests_gauge: IntGaugeVec,
     client_disconnect_gauge: prometheus::IntGauge,

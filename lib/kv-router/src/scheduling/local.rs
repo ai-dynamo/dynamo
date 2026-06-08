@@ -21,6 +21,7 @@ use super::types::{
 };
 use crate::protocols::RoutingConstraints;
 use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{
     ActiveSequencesMultiWorker, PrefillTokenDeltas, SequenceError, SequencePublisher,
     SequenceRequest,
@@ -55,14 +56,11 @@ where
     Sel: WorkerSelector<C> + Send + Sync + 'static,
     RF: OverlapScoresRefresh + 'static,
 {
-    fn worker_dp_range(workers: &HashMap<WorkerId, C>) -> HashMap<WorkerId, (u32, u32)> {
+    fn worker_dp_ranges(workers: &HashMap<WorkerId, C>) -> Vec<WorkerDpRange> {
         workers
             .iter()
             .map(|(&id, cfg)| {
-                (
-                    id,
-                    (cfg.data_parallel_start_rank(), cfg.data_parallel_size()),
-                )
+                WorkerDpRange::new(id, cfg.data_parallel_start_rank(), cfg.data_parallel_size())
             })
             .collect()
     }
@@ -113,8 +111,11 @@ where
                         continue;
                     }
 
-                    let dp_range = Self::worker_dp_range(&current_workers);
-                    slots_monitor.update_workers(&dp_range);
+                    let dp_ranges = Self::worker_dp_ranges(&current_workers);
+                    if let Err(error) = slots_monitor.reconcile_workers(dp_ranges) {
+                        tracing::error!(%error, "Invalid worker topology update");
+                        continue;
+                    }
                     last_workers = current_workers;
                 }
             });
