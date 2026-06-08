@@ -16,8 +16,7 @@
 //! deserialization. Dynamo-produced traces always emit the canonical names.
 
 use anyhow::{Context, Result, bail};
-use dynamo_kv_hashing::{Request, compute_hash_v2};
-use dynamo_tokens::compute_next_sequence_hash;
+use dynamo_kv_hashing::{Request, compute_hash_v2, compute_next_sequence_hash};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
