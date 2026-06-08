@@ -9,9 +9,11 @@
 name: On-Demand Release
 
 on:
-  # TEMPORARY: push to the dev branch runs the test/0.0.0 flow (push events have
-  # no inputs, so prepare-branch falls back to test defaults and the publish jobs
-  # skip — see github.event_name guards below). Remove before merging.
+  # TEMPORARY: push to the dev branch runs the throwaway test flow — push events
+  # have no inputs, so prepare-branch falls back to creating release/0.0.0test
+  # (stamped 0.0.0). That branch matches release/*.*.* so post-merge + the other
+  # release-branch checks run on it; this workflow's publish jobs skip (they're
+  # gated on workflow_dispatch + a real release/X.Y.Z branch). Remove before merging.
   push:
     branches:
       - pvijayakrish/on-demand-release
@@ -23,14 +25,14 @@ on:
         type: string
         default: main
       release_version:
-        description: 'New release version X.Y.Z[.postN]. Creates branch <branch_prefix>/<version>.'
+        description: 'Version to STAMP into the tree, X.Y.Z[.postN] (must be valid SemVer/PEP 440, e.g. 0.0.0). Not the branch name.'
         required: true
         type: string
-      branch_prefix:
-        description: 'Branch namespace to create. Use "test" for a throwaway run (test/<version> does not trigger post-merge); "release" for a real release.'
+      release_branch:
+        description: 'Branch to create (default release/<version>). For a throwaway run use e.g. release/0.0.0test — it still matches release/*.*.* so post-merge + release-branch checks run, but the publish jobs skip.'
         required: false
         type: string
-        default: release
+        default: ''
       artifacts:
         description: 'Artifacts to release (comma-separated): crate,container,wheel,helm.'
         required: false
@@ -66,20 +68,21 @@ jobs:
     outputs:
       branch: ${{ steps.bump.outputs.branch }}
       bump_sha: ${{ steps.bump.outputs.bump_sha }}
+      is_test: ${{ steps.bump.outputs.is_test }}
     steps:
       - name: Validate inputs
         env:
           RELEASE_VERSION: ${{ inputs.release_version || '0.0.0' }}
           SOURCE_REF: ${{ inputs.source_ref || 'main' }}
-          BRANCH_PREFIX: ${{ inputs.branch_prefix || 'test' }}
+          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/0.0.0test' || '') }}
         run: |
           set -euo pipefail
           if [[ ! "${RELEASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?$ ]]; then
             echo "::error::release_version must be X.Y.Z[.postN] (got '${RELEASE_VERSION}')"
             exit 1
           fi
-          if [[ ! "${BRANCH_PREFIX}" =~ ^(release|test)$ ]]; then
-            echo "::error::branch_prefix must be 'release' or 'test' (got '${BRANCH_PREFIX}')"
+          if [[ -n "${RELEASE_BRANCH}" && ! "${RELEASE_BRANCH}" =~ ^release/[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::release_branch must look like release/<name> (got '${RELEASE_BRANCH}')"
             exit 1
           fi
           if [[ ! "${SOURCE_REF}" =~ ^(main|release/[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?|[0-9a-f]{40})$ ]]; then
@@ -92,22 +95,32 @@ jobs:
         with:
           ref: ${{ inputs.source_ref || 'main' }}
           fetch-depth: 0
-          # Real releases need RELEASE_AUTOMATION_TOKEN so the push triggers
-          # post-merge CI; falls back to github.token for test/<version> runs
-          # (test/* doesn't trigger post-merge anyway).
+          # RELEASE_AUTOMATION_TOKEN (a PAT/App) is REQUIRED for the branch push
+          # to trigger post-merge CI + the release-branch checks — a push by the
+          # default github.token does not trigger workflows (recursion guard). The
+          # github.token fallback only lets the branch be created when the secret
+          # is absent; post-merge will NOT run in that case.
           token: ${{ secrets.RELEASE_AUTOMATION_TOKEN || github.token }}
 
       - name: Set version and create branch
         id: bump
         env:
           RELEASE_VERSION: ${{ inputs.release_version || '0.0.0' }}
-          BRANCH_PREFIX: ${{ inputs.branch_prefix || 'test' }}
+          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/0.0.0test' || '') }}
         run: |
           set -euo pipefail
 
-          BRANCH="${BRANCH_PREFIX}/${RELEASE_VERSION}"
+          BRANCH="${RELEASE_BRANCH:-release/${RELEASE_VERSION}}"
+          # A pure release/X.Y.Z[.postN] branch is a real release; anything else
+          # (e.g. release/0.0.0test) is a throwaway test branch.
+          if [[ "${BRANCH}" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?$ ]]; then
+            IS_TEST=false
+          else
+            IS_TEST=true
+          fi
+
           if git ls-remote --exit-code --heads origin "${BRANCH}" >/dev/null 2>&1; then
-            if [[ "${BRANCH_PREFIX}" == "test" ]]; then
+            if [[ "${IS_TEST}" == "true" ]]; then
               echo "Test branch ${BRANCH} exists; deleting it for a clean re-run"
               git push origin --delete "${BRANCH}"
             else
@@ -135,7 +148,8 @@ jobs:
 
           echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
           echo "bump_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "Created ${BRANCH} @ $(git rev-parse HEAD)"
+          echo "is_test=${IS_TEST}" >> "$GITHUB_OUTPUT"
+          echo "Created ${BRANCH} @ $(git rev-parse HEAD) (is_test=${IS_TEST})"
 
   # ============================================================================
   # WAIT FOR POST-MERGE CI
@@ -145,7 +159,7 @@ jobs:
   await-post-merge:
     name: Wait for post-merge CI
     needs: [prepare-branch]
-    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && inputs.branch_prefix != 'test' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && needs.prepare-branch.outputs.is_test != 'true' }}
     runs-on: prod-default-small-v2
     permissions:
       contents: read
@@ -189,7 +203,7 @@ jobs:
   release-approval:
     name: Release approval gate
     needs: [prepare-branch, await-post-merge]
-    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && inputs.branch_prefix != 'test' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && needs.prepare-branch.outputs.is_test != 'true' }}
     runs-on: prod-default-small-v2
     environment: manual-release-approval
     permissions:
@@ -204,7 +218,7 @@ jobs:
   invoke-release:
     name: Stage release
     needs: [prepare-branch, await-post-merge, release-approval]
-    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && inputs.branch_prefix != 'test' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && needs.prepare-branch.outputs.is_test != 'true' }}
     uses: ./.github/workflows/release.yml
     with:
       commit_sha: ${{ needs.prepare-branch.outputs.bump_sha }}
