@@ -1,0 +1,94 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: Pod
+metadata:
+  name: epp-vanilla-pd-prefill-b
+  namespace: mkhadkevich-dev
+  labels:
+    app: epp-vanilla-vllm
+    nvidia.com/dynamo-component-type: prefill
+    owner: claude-epp
+spec:
+  restartPolicy: Never
+  tolerations:
+  - key: nvidia.com/gpu
+    value: "true"
+    effect: NoSchedule
+  containers:
+  - name: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+    command: ["vllm", "serve", "Qwen/Qwen3-0.6B"]
+    args:
+    - --port=8000
+    - --gpu-memory-utilization=0.45
+    - --max-model-len=8192
+    - --enable-prefix-caching
+    - --kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_both"}
+    - --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557"}
+    env:
+    - name: POD_IP
+      valueFrom: {fieldRef: {fieldPath: status.podIP}}
+    - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+      value: "$(POD_IP)"
+    - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+      value: "5600"
+    - name: UCX_TLS
+      value: "tcp,cuda_copy,cuda_ipc,sm,self"
+    - name: UCX_NET_DEVICES
+      value: "eth0"
+    ports:
+    - {containerPort: 8000}
+    - {containerPort: 5557}
+    - {containerPort: 5600}
+    resources:
+      limits: {nvidia.com/gpu: "1"}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: epp-vanilla-pd-decode-b
+  namespace: mkhadkevich-dev
+  labels:
+    app: epp-vanilla-vllm
+    nvidia.com/dynamo-component-type: decode
+    owner: claude-epp
+spec:
+  restartPolicy: Never
+  tolerations:
+  - key: nvidia.com/gpu
+    value: "true"
+    effect: NoSchedule
+  containers:
+  - name: sidecar
+    image: ghcr.io/llm-d/llm-d-routing-sidecar:v0.3.0
+    args: ["-port=8000", "-vllm-port=8001", "-connector=nixlv2", "-secure-proxy=false"]
+    ports:
+    - {containerPort: 8000}
+  - name: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+    command: ["vllm", "serve", "Qwen/Qwen3-0.6B"]
+    args:
+    - --port=8001
+    - --gpu-memory-utilization=0.45
+    - --max-model-len=8192
+    - --enable-prefix-caching
+    - --kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_both"}
+    - --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557"}
+    env:
+    - name: POD_IP
+      valueFrom: {fieldRef: {fieldPath: status.podIP}}
+    - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+      value: "$(POD_IP)"
+    - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+      value: "5600"
+    - name: UCX_TLS
+      value: "tcp,cuda_copy,cuda_ipc,sm,self"
+    - name: UCX_NET_DEVICES
+      value: "eth0"
+    ports:
+    - {containerPort: 8001}
+    - {containerPort: 5557}
+    - {containerPort: 5600}
+    resources:
+      limits: {nvidia.com/gpu: "1"}
