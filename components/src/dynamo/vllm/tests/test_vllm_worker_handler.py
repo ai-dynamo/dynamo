@@ -824,16 +824,15 @@ class TestDeferredAbort:
         engine_client.abort = AsyncMock()
         guard = mod._DeferredAbort(engine_client, "req-1")
 
-        abort_task = asyncio.create_task(guard.abort())
-        # Yield so the deferred waiter is scheduled and parks on
-        # _first_token_event.wait().
-        await asyncio.sleep(0)
+        # abort() before first token returns promptly; the real abort is
+        # deferred to a background task and engine.abort is NOT called yet.
+        await asyncio.wait_for(guard.abort(), timeout=1.0)
         engine_client.abort.assert_not_called()
-        assert not abort_task.done()
+        assert guard._abort_task is not None
+        assert not guard._abort_task.done()
 
-        # Cleanup: close() cancels the deferred waiter, which unblocks abort_task.
+        # Cleanup: close() cancels the parked deferred waiter without firing abort.
         await guard.close()
-        await abort_task
         engine_client.abort.assert_not_called()
 
     @pytest.mark.asyncio
@@ -856,15 +855,15 @@ class TestDeferredAbort:
         engine_client.abort = AsyncMock()
         guard = mod._DeferredAbort(engine_client, "req-3")
 
-        abort_task = asyncio.create_task(guard.abort())
-        await asyncio.sleep(0)
+        # abort() returns promptly (deferred); engine.abort not called yet.
+        await asyncio.wait_for(guard.abort(), timeout=1.0)
         engine_client.abort.assert_not_called()
-        assert not abort_task.done()
+        assert guard._abort_task is not None
+        assert not guard._abort_task.done()
 
-        # Signalling first token wakes the deferred waiter, which then runs
-        # engine.abort() and unblocks abort_task.
+        # Signalling first token wakes the deferred waiter, which runs abort().
         guard.signal_first_token()
-        await abort_task
+        await guard._abort_task
 
         engine_client.abort.assert_awaited_once_with("req-3")
 
@@ -1003,10 +1002,9 @@ class TestDeferredAbort:
         engine_client.abort = AsyncMock()
         guard = mod._DeferredAbort(engine_client, "req-close-done")
 
-        abort_task = asyncio.create_task(guard.abort())
-        await asyncio.sleep(0)
+        await asyncio.wait_for(guard.abort(), timeout=1.0)
         guard.signal_first_token()
-        await abort_task
+        await guard._abort_task
 
         assert guard._abort_task is not None
         assert guard._abort_task.done()
@@ -1048,8 +1046,8 @@ class TestDeferredAbort:
         created_guards: list[mod._DeferredAbort] = []
         real_deferred_abort = mod._DeferredAbort
 
-        def _capture(engine_client, request_id):
-            g = real_deferred_abort(engine_client, request_id)
+        def _capture(engine_client, request_id, on_engine_dead=None):
+            g = real_deferred_abort(engine_client, request_id, on_engine_dead)
             g.close = AsyncMock(wraps=g.close)
             created_guards.append(g)
             return g
