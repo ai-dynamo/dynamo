@@ -149,19 +149,7 @@ func topologyLabelCopyBecameNeeded(oldObj, newObj client.Object) bool {
 	if topologySourceAnnotationChanged(oldPod, newPod) {
 		return true
 	}
-
-	oldLabelKey := oldPod.GetAnnotations()[consts.KubeAnnotationTopologyLabelKey]
-	if oldLabelKey != "" {
-		_, oldHadLabel := oldPod.GetLabels()[oldLabelKey]
-		_, newHasLabel := newPod.GetLabels()[oldLabelKey]
-		if oldHadLabel && !newHasLabel {
-			return true
-		}
-	}
-
-	return oldPod.GetAnnotations()[consts.KubeAnnotationTopologyClusterTopologyName] != "" &&
-		!clusterTopologyLabelCopyNeeded(oldPod) &&
-		clusterTopologyLabelCopyNeeded(newPod)
+	return false
 }
 
 func topologySourceAnnotationChanged(oldPod, newPod *corev1.Pod) bool {
@@ -178,44 +166,29 @@ func needsTopologyLabelCopy(obj client.Object) bool {
 	if !ok || pod == nil {
 		return false
 	}
-	if _, ok := topologyLabelCopyTarget(pod); ok {
-		return true
-	}
-	return clusterTopologyLabelCopyNeeded(pod)
-}
-
-func topologyLabelCopyTarget(pod *corev1.Pod) (string, bool) {
-	if pod == nil || !isDynamoComponentPod(pod) {
-		return "", false
+	if !isDynamoComponentPod(pod) {
+		return false
 	}
 
 	labelKey := pod.GetAnnotations()[consts.KubeAnnotationTopologyLabelKey]
-	if labelKey == "" {
-		return "", false
+	clusterTopologyName := pod.GetAnnotations()[consts.KubeAnnotationTopologyClusterTopologyName]
+	if labelKey == "" && clusterTopologyName == "" {
+		return false
 	}
-
-	if _, exists := pod.GetLabels()[labelKey]; exists {
-		return "", false
-	}
-
 	if pod.Spec.NodeName == "" {
-		return "", false
+		return false
 	}
-
-	return labelKey, true
+	if labelKey != "" {
+		return !keyExists(pod, labelKey)
+	}
+	return !missingDynamoTopologyLabel(pod)
 }
 
-func clusterTopologyLabelCopyNeeded(pod *corev1.Pod) bool {
-	if pod == nil || !isDynamoComponentPod(pod) {
+func keyExists(pod *corev1.Pod, key string) bool {
+	if pod == nil {
 		return false
 	}
-	if pod.GetAnnotations()[consts.KubeAnnotationTopologyClusterTopologyName] == "" {
-		return false
-	}
-	if pod.Spec.NodeName == "" {
-		return false
-	}
-	return missingDynamoTopologyLabel(pod)
+	return pod.GetLabels()[key] != ""
 }
 
 type topologyLabelCopyTargetSpec struct {
@@ -229,7 +202,7 @@ func (r *TopologyLabelReconciler) topologyLabelCopyTargets(ctx context.Context, 
 	}
 
 	var targets []topologyLabelCopyTargetSpec
-	if labelKey, ok := topologyLabelCopyTarget(pod); ok {
+	if labelKey := pod.GetAnnotations()[consts.KubeAnnotationTopologyLabelKey]; labelKey != "" {
 		targets = append(targets, topologyLabelCopyTargetSpec{
 			sourceLabelKey: labelKey,
 			targetLabelKey: labelKey,
