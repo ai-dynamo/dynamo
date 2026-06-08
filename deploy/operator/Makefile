@@ -90,6 +90,11 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 	for file in config/crd/bases/*.yaml; do \
 		$(YQ) eval '(.. | select(has("parameters")) | .parameters | select(has("format") and .format == "byte")) |= (del(.format) | del(.type) | .x-kubernetes-preserve-unknown-fields = true)' -i --indent 2 $$file || exit 1; \
 	done
+	echo "Add conversion webhook"
+	$(YQ) eval-all -i '(... comments="" | select(fileIndex == 1)) * select(fileIndex == 0)' \
+		config/crd/bases/nvidia.com_dynamographdeployments.yaml \
+		config/crd/convert-patch.yaml
+
 	echo "Adding NVIDIA header to CRD files"
 	for file in config/crd/bases/*.yaml; do \
 		if ! head -20 "$$file" | grep -q "NVIDIA CORPORATION"; then \
@@ -107,8 +112,6 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 			$(YQ) eval '.metadata.annotations."helm.sh/resource-policy" = "keep"' -i "$$file"; \
 		fi; \
 	done
-	echo "Add conversion webhook"
-	yq -i '. *= load("config/crd/convert-patch.yaml")' config/crd/bases/nvidia.com_dynamographdeployments.yaml
 	echo "Copying CRD files to operator Helm chart crds/ directory"
 	mkdir -p ../helm/charts/platform/components/operator/crds/
 	cp config/crd/bases/*.yaml ../helm/charts/platform/components/operator/crds/
