@@ -59,6 +59,11 @@ TEST_PROMPT = "Reply with one short sentence confirming this restored worker can
 DEFAULT_MAX_TOKENS = 24
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_REQUEST_TIMEOUT = 120
+CHECKPOINT_READY_TIMEOUT = 300
+RESTORE_READY_TIMEOUT = 300
+DECODE_SCALE_TIMEOUT = 180
+DGD_READY_TIMEOUT = 300
+TEST_TIMEOUT = 1200
 
 
 def _component(spec: dict[str, Any], name: str) -> dict[str, Any]:
@@ -182,10 +187,8 @@ async def _wait_for_checkpoint_ready(
     value = await _wait_for(
         "DGD auto checkpoint to become Ready",
         fetch_status,
-        lambda result: result["checkpoint"] is not None
-        and result["checkpoint"].get("status", {}).get("phase") == "Ready"
-        and bool(result["checkpoint"].get("status", {}).get("identityHash")),
-        timeout_s=900,
+        _checkpoint_is_ready,
+        timeout_s=CHECKPOINT_READY_TIMEOUT,
         interval_s=5,
     )
     checkpoint = value["checkpoint"]
@@ -193,6 +196,22 @@ async def _wait_for_checkpoint_ready(
     checkpoint_name = checkpoint["metadata"]["name"]
     logger.info("Checkpoint is Ready: %s (%s)", checkpoint_name, identity_hash)
     return checkpoint_name, identity_hash
+
+
+def _checkpoint_is_ready(result: dict[str, Any]) -> bool:
+    checkpoint = result["checkpoint"]
+    if checkpoint is None:
+        return False
+
+    status = checkpoint.get("status", {})
+    phase = status.get("phase")
+    if phase == "Failed":
+        raise AssertionError(
+            "checkpoint failed before becoming Ready: "
+            f"dgd_status={result['dgd_status']!r}; "
+            f"checkpoint_status={status!r}"
+        )
+    return phase == "Ready" and bool(status.get("identityHash"))
 
 
 def _runtime_decode_pods(deployment: ManagedDeployment) -> list[Any]:
@@ -283,7 +302,7 @@ async def _wait_for_restored_decode_pod(
         "replacement decode pod to restore from checkpoint",
         find_restored,
         lambda result: not isinstance(result, list),
-        timeout_s=900,
+        timeout_s=RESTORE_READY_TIMEOUT,
         interval_s=5,
     )
     logger.info("Restored decode pod: %s", restored.name)
@@ -355,7 +374,7 @@ def _assert_inference(base_url: str, endpoint: str, model: str) -> None:
 @pytest.mark.post_merge
 @pytest.mark.e2e
 @pytest.mark.gpu_1
-@pytest.mark.timeout(1800)
+@pytest.mark.timeout(TEST_TIMEOUT)
 async def test_dgd_checkpoint_restore_deploy(
     namespace: str,
     image: str | None,
@@ -408,12 +427,14 @@ async def test_dgd_checkpoint_restore_deploy(
         _, checkpoint_hash = await _wait_for_checkpoint_ready(deployment)
 
         old_decode_pods = await _wait_for_decode_runtime_pod_count(
-            deployment, expected=1, timeout_s=300
+            deployment, expected=1, timeout_s=DECODE_SCALE_TIMEOUT
         )
         old_pod_names = {pod.name for pod in old_decode_pods}
         logger.info("Scaling decode down from pods: %s", sorted(old_pod_names))
         await _scale_decode_component(deployment, replicas=0)
-        await _wait_for_decode_runtime_pod_count(deployment, expected=0, timeout_s=300)
+        await _wait_for_decode_runtime_pod_count(
+            deployment, expected=0, timeout_s=DECODE_SCALE_TIMEOUT
+        )
 
         logger.info("Scaling decode back up to trigger restore")
         await _scale_decode_component(deployment, replicas=1)
@@ -422,7 +443,7 @@ async def test_dgd_checkpoint_restore_deploy(
             old_pod_names=old_pod_names,
             checkpoint_hash=checkpoint_hash,
         )
-        await deployment._wait_for_ready(timeout=900)
+        await deployment._wait_for_ready(timeout=DGD_READY_TIMEOUT)
 
         logger.info("Validating inference after restore")
         _assert_inference(base_url, deployment_spec.endpoint, VLLM_MODEL)
