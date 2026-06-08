@@ -2,7 +2,7 @@
 
 **Author:** Jie Hao
 **Date:** 2026-03-24 (updated 2026-05-22)
-**Status:** Approved — See [DEP-0014](https://github.com/ai-dynamo/enhancements/deps/0014-health-endpoint-disagg-readiness.md) and tracking issue [#7787](https://github.com/ai-dynamo/dynamo/issues/7787). PR 1, PR 2a–d landed; PR 3 in progress.
+**Status:** Approved — See tracking issue [DEP-0014 (#7787)](https://github.com/ai-dynamo/dynamo/issues/7787). PR 1, PR 2a–d landed; PR 3 in progress.
 
 ## Problem
 
