@@ -471,18 +471,39 @@ class CachedTokensChatPayload(ChatPayload):
 
         # Check usage field for cached tokens
         # Expected structure: usage.prompt_tokens_details.cached_tokens
-        usage = result.get("usage", {})
-        prompt_tokens_details = usage.get("prompt_tokens_details") or {}
+        usage = result.get("usage")
+        prompt_tokens_details = (usage or {}).get("prompt_tokens_details") or {}
         cached_tokens = prompt_tokens_details.get("cached_tokens", 0) or 0
+        prompt_tokens = (usage or {}).get("prompt_tokens")
 
         logger.info(
-            f"Request {self._request_count}: prompt_tokens={usage.get('prompt_tokens')}, "
+            f"Request {self._request_count}: prompt_tokens={prompt_tokens}, "
             f"cached_tokens={cached_tokens}, prompt_tokens_details={prompt_tokens_details}"
         )
 
         # For requests after the first one, we expect cached tokens > 0
-        # (since identical prompts should hit the prefix cache)
-        if self._request_count > 1:
+        # (since identical prompts should hit the prefix cache).
+        #
+        # Fail closed on absent usage evidence: a response with no usage
+        # block, no prompt_tokens, or no cached_tokens key cannot prove a
+        # cache hit OR a cache miss. Defaulting those to zero (the old
+        # behavior) silently turned "no evidence" into "cache miss", letting
+        # a backend that doesn't report usage pass the gate by luck. Require
+        # the fields to be present before drawing any conclusion.
+        if self._request_count > 1 and self.min_cached_tokens > 0:
+            if usage is None or prompt_tokens is None or prompt_tokens <= 0:
+                raise AssertionError(
+                    f"Request {self._request_count}: response carried no usage "
+                    f"evidence (usage={usage!r}); cannot validate cached tokens. "
+                    f"Expected usage.prompt_tokens > 0 and "
+                    f"usage.prompt_tokens_details.cached_tokens to be present."
+                )
+            if "cached_tokens" not in prompt_tokens_details:
+                raise AssertionError(
+                    f"Request {self._request_count}: usage.prompt_tokens_details "
+                    f"has no 'cached_tokens' field ({prompt_tokens_details!r}); "
+                    f"cannot validate prefix-cache reuse."
+                )
             if cached_tokens >= self.min_cached_tokens:
                 self._cached_tokens_found = True
                 logger.info(
