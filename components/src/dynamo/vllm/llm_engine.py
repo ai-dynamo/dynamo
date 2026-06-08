@@ -59,7 +59,7 @@ from dynamo.llm import (
     unregister_model,
 )
 from dynamo.runtime import Endpoint
-from dynamo.vllm.args import parse_args
+from dynamo.vllm.args import configure_rl_logprobs_mode, parse_args
 from dynamo.vllm.cache_info import (
     configure_kv_event_block_size,
     get_configured_kv_event_block_size,
@@ -155,6 +155,7 @@ class VllmLLMEngine(LLMEngine):
         component: str,
         dyn_tool_call_parser: Optional[str] = None,
         dyn_reasoning_parser: Optional[str] = None,
+        enable_rl: bool = False,
     ):
         self.engine_args = engine_args
         self.disaggregation_mode = disaggregation_mode
@@ -162,6 +163,7 @@ class VllmLLMEngine(LLMEngine):
         self._component = component
         self._dyn_tool_call_parser = dyn_tool_call_parser
         self._dyn_reasoning_parser = dyn_reasoning_parser
+        self.enable_rl = enable_rl
         self.engine_client: AsyncLLM | None = None
         self._vllm_config: Any = None
         self._default_sampling_params: Any = None
@@ -214,6 +216,8 @@ class VllmLLMEngine(LLMEngine):
                 config.engine_args.served_model_name
             ) = config.model
 
+        configure_rl_logprobs_mode(config)
+
         # _resolve_disaggregation_mode() in DynamoVllmConfig has already
         # promoted the field to a DisaggregationMode enum; the field type
         # is still the input union, so narrow it here for mypy (cast
@@ -226,6 +230,7 @@ class VllmLLMEngine(LLMEngine):
             component=config.component,
             dyn_tool_call_parser=config.dyn_tool_call_parser,
             dyn_reasoning_parser=config.dyn_reasoning_parser,
+            enable_rl=config.enable_rl,
         )
         worker_config = WorkerConfig.from_runtime_config(
             config,
@@ -310,7 +315,10 @@ class VllmLLMEngine(LLMEngine):
 
         # TODO: remove dict() once build_sampling_params accepts GenerateRequest
         sampling_params = build_sampling_params(
-            dict(request), self._default_sampling_params, self._model_max_len
+            dict(request),
+            self._default_sampling_params,
+            self._model_max_len,
+            enable_rl=self.enable_rl,
         )
 
         # vLLM's KV transfer is internal to NixlConnector
@@ -338,9 +346,13 @@ class VllmLLMEngine(LLMEngine):
             sampling_params.min_tokens = 1
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
             prefill_result = require_prefill_result(request, self.disaggregation_mode)
-            kv_params = prefill_result.get("disaggregated_params", {}).get(
-                "kv_transfer_params"
-            )
+            # `disaggregated_params` may be present-but-None (prefill error path
+            # / _build_disaggregated_params returning None), so use `or {}` — a
+            # .get default only applies when the key is absent. A None value then
+            # falls through to the kv_params ValueError below instead of raising
+            # AttributeError on None.get(...).
+            disaggregated_params = prefill_result.get("disaggregated_params") or {}
+            kv_params = disaggregated_params.get("kv_transfer_params")
             if kv_params is None:
                 raise ValueError(
                     "decode worker received prefill_result without "
@@ -592,7 +604,14 @@ class VllmLLMEngine(LLMEngine):
         return None
 
     def _get_lora_lock(self, lora_name: str) -> asyncio.Lock:
-        """Get/create the per-LoRA lock without eagerly allocating a new lock each call."""
+        """Get/create the per-LoRA lock without eagerly allocating a new lock each call.
+
+        Locks persist for the process lifetime: every load/unload for a given
+        ``lora_name`` must serialize on the *same* ``asyncio.Lock``. Evicting a
+        lock while another coroutine is still queued on it would let a later
+        caller create a second lock for the same name and run concurrently,
+        breaking mutual exclusion. The per-name memory cost is negligible.
+        """
         with self._lora_load_locks_guard:
             lock = self._lora_load_locks.get(lora_name)
             if lock is None:
@@ -716,138 +735,124 @@ class VllmLLMEngine(LLMEngine):
             # Serialize load/unload operations per lora_name.
             lock = self._get_lora_lock(lora_name)
             async with lock:
-                try:
-                    # Idempotency check after acquiring the lock: a concurrent
-                    # request may have loaded this LoRA while we waited.
-                    if lora_name in self.loaded_loras:
-                        lora_id = self.loaded_loras[lora_name].id
-                        # The adapter is loaded into the engine, but its
-                        # discovery card may be missing (a prior publish failed
-                        # and the engine-side rollback also failed). Reconcile by
-                        # retrying the publish instead of reporting early success.
-                        if (
-                            self._endpoint is not None
-                            and lora_name not in self._published_loras
-                        ):
-                            logger.info(
-                                f"LoRA '{lora_name}' loaded but unpublished; "
-                                f"retrying discovery publish"
-                            )
-                            try:
-                                await self._publish_lora_card(lora_name, lora_id)
-                                self._published_loras.add(lora_name)
-                            except Exception as e:
-                                logger.exception(
-                                    f"Failed to publish LoRA {lora_name} ModelDeploymentCard: {e}"
-                                )
-                                return {
-                                    "status": "error",
-                                    "message": f"LoRA '{lora_name}' is loaded but discovery publish failed: {str(e)}",
-                                    "lora_name": lora_name,
-                                }
+                # Idempotency check after acquiring the lock: a concurrent
+                # request may have loaded this LoRA while we waited.
+                if lora_name in self.loaded_loras:
+                    lora_id = self.loaded_loras[lora_name].id
+                    # The adapter is loaded into the engine, but its
+                    # discovery card may be missing (a prior publish failed
+                    # and the engine-side rollback also failed). Reconcile by
+                    # retrying the publish instead of reporting early success.
+                    if (
+                        self._endpoint is not None
+                        and lora_name not in self._published_loras
+                    ):
                         logger.info(
-                            f"LoRA adapter already loaded (concurrent request completed): "
-                            f"{lora_name} with ID {lora_id}"
-                        )
-                        return {
-                            "status": "success",
-                            "message": f"LoRA adapter '{lora_name}' already loaded",
-                            "lora_name": lora_name,
-                            "lora_id": lora_id,
-                        }
-
-                    logger.info(
-                        f"Downloading LoRA adapter: {lora_name} from {lora_uri}"
-                    )
-                    download_result = await lora_manager.download_lora(lora_uri)
-
-                    if download_result["status"] != "success":
-                        return {
-                            "status": "error",
-                            "message": f"Failed to download LoRA: {download_result.get('message', 'Unknown error')}",
-                        }
-
-                    lora_path = download_result["local_path"]
-                    logger.debug(f"LoRA downloaded to: {lora_path}")
-
-                    # Deterministic ID from lora_name before using it.
-                    lora_id = lora_name_to_id(lora_name)
-
-                    await self.engine_client.add_lora(
-                        LoRARequest(
-                            lora_name=lora_name,
-                            lora_int_id=lora_id,
-                            lora_path=lora_path,
-                        )
-                    )
-
-                    self.loaded_loras[lora_name] = LoRAInfo(id=lora_id, path=lora_path)
-                    logger.info(
-                        f"Successfully loaded LoRA adapter: {lora_name} with ID {lora_id}"
-                    )
-
-                    # Publish the LoRA as a ModelDeploymentCard so the frontend
-                    # can discover it and route to this worker instance.
-                    if self._endpoint is not None:
-                        logger.debug(
-                            f"Publishing LoRA '{lora_name}' ModelDeploymentCard to {self._endpoint}"
+                            f"LoRA '{lora_name}' loaded but unpublished; "
+                            f"retrying discovery publish"
                         )
                         try:
                             await self._publish_lora_card(lora_name, lora_id)
                             self._published_loras.add(lora_name)
-                            logger.info(
-                                f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
-                            )
                         except Exception as e:
                             logger.exception(
                                 f"Failed to publish LoRA {lora_name} ModelDeploymentCard: {e}"
                             )
-
-                            # Rollback: remove the LoRA from the engine to keep
-                            # engine state and discovery consistent. If the
-                            # rollback itself fails, the entry stays in
-                            # `loaded_loras` but absent from `_published_loras`,
-                            # so a retried load reconciles the publish.
-                            try:
-                                logger.debug(
-                                    f"Rolling back: removing LoRA '{lora_name}' from engine"
-                                )
-                                await self.engine_client.remove_lora(lora_id)
-                                self.loaded_loras.pop(lora_name, None)
-                                logger.debug(
-                                    f"Successfully rolled back LoRA '{lora_name}'"
-                                )
-                            except Exception as rollback_error:
-                                logger.exception(
-                                    f"Failed to rollback LoRA {lora_name}: {rollback_error}"
-                                )
-                            self._published_loras.discard(lora_name)
-
                             return {
                                 "status": "error",
-                                "message": f"Failed to register LoRA '{lora_name}' in discovery registry: {str(e)}",
+                                "message": f"LoRA '{lora_name}' is loaded but discovery publish failed: {str(e)}",
                                 "lora_name": lora_name,
                             }
-                    else:
-                        logger.debug(
-                            f"Cannot publish LoRA '{lora_name}': serving endpoint not ready"
-                        )
-
+                    logger.info(
+                        f"LoRA adapter already loaded (concurrent request completed): "
+                        f"{lora_name} with ID {lora_id}"
+                    )
                     return {
                         "status": "success",
-                        "message": f"LoRA adapter '{lora_name}' loaded successfully",
+                        "message": f"LoRA adapter '{lora_name}' already loaded",
                         "lora_name": lora_name,
                         "lora_id": lora_id,
                     }
-                finally:
-                    # Avoid lock-map growth on failed loads: if this attempt did
-                    # not leave the LoRA loaded, drop the lock entry (best-effort).
-                    with self._lora_load_locks_guard:
-                        if (
-                            lora_name not in self.loaded_loras
-                            and self._lora_load_locks.get(lora_name) is lock
-                        ):
-                            self._lora_load_locks.pop(lora_name, None)
+
+                logger.info(f"Downloading LoRA adapter: {lora_name} from {lora_uri}")
+                download_result = await lora_manager.download_lora(lora_uri)
+
+                if download_result["status"] != "success":
+                    return {
+                        "status": "error",
+                        "message": f"Failed to download LoRA: {download_result.get('message', 'Unknown error')}",
+                    }
+
+                lora_path = download_result["local_path"]
+                logger.debug(f"LoRA downloaded to: {lora_path}")
+
+                # Deterministic ID from lora_name before using it.
+                lora_id = lora_name_to_id(lora_name)
+
+                await self.engine_client.add_lora(
+                    LoRARequest(
+                        lora_name=lora_name,
+                        lora_int_id=lora_id,
+                        lora_path=lora_path,
+                    )
+                )
+
+                self.loaded_loras[lora_name] = LoRAInfo(id=lora_id, path=lora_path)
+                logger.info(
+                    f"Successfully loaded LoRA adapter: {lora_name} with ID {lora_id}"
+                )
+
+                # Publish the LoRA as a ModelDeploymentCard so the frontend
+                # can discover it and route to this worker instance.
+                if self._endpoint is not None:
+                    logger.debug(
+                        f"Publishing LoRA '{lora_name}' ModelDeploymentCard to {self._endpoint}"
+                    )
+                    try:
+                        await self._publish_lora_card(lora_name, lora_id)
+                        self._published_loras.add(lora_name)
+                        logger.info(
+                            f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
+                        )
+                    except Exception as e:
+                        logger.exception(
+                            f"Failed to publish LoRA {lora_name} ModelDeploymentCard: {e}"
+                        )
+
+                        # Rollback: remove the LoRA from the engine to keep
+                        # engine state and discovery consistent. If the
+                        # rollback itself fails, the entry stays in
+                        # `loaded_loras` but absent from `_published_loras`,
+                        # so a retried load reconciles the publish.
+                        try:
+                            logger.debug(
+                                f"Rolling back: removing LoRA '{lora_name}' from engine"
+                            )
+                            await self.engine_client.remove_lora(lora_id)
+                            self.loaded_loras.pop(lora_name, None)
+                            logger.debug(f"Successfully rolled back LoRA '{lora_name}'")
+                        except Exception as rollback_error:
+                            logger.exception(
+                                f"Failed to rollback LoRA {lora_name}: {rollback_error}"
+                            )
+                        self._published_loras.discard(lora_name)
+
+                        return {
+                            "status": "error",
+                            "message": f"Failed to register LoRA '{lora_name}' in discovery registry: {str(e)}",
+                            "lora_name": lora_name,
+                        }
+                else:
+                    logger.debug(
+                        f"Cannot publish LoRA '{lora_name}': serving endpoint not ready"
+                    )
+
+                return {
+                    "status": "success",
+                    "message": f"LoRA adapter '{lora_name}' loaded successfully",
+                    "lora_name": lora_name,
+                    "lora_id": lora_id,
+                }
         except Exception as e:
             logger.exception(f"Failed to load LoRA adapter: {e}")
             return {"status": "error", "message": str(e)}
@@ -871,61 +876,20 @@ class VllmLLMEngine(LLMEngine):
             # Serialize load/unload operations per lora_name.
             lock = self._get_lora_lock(lora_name)
             async with lock:
-                try:
-                    # Check existence *after* waiting for any in-progress load.
-                    lora = self.loaded_loras.get(lora_name)
-                    if lora is None:
-                        # The adapter is gone from the engine but may still have
-                        # a stale discovery card (a prior unload's unregister
-                        # failed and the re-add rollback also failed). Reconcile
-                        # by retrying the unregister so discovery converges.
-                        if (
-                            self._endpoint is not None
-                            and lora_name in self._published_loras
-                        ):
-                            logger.info(
-                                f"LoRA '{lora_name}' not loaded but still published; "
-                                f"retrying discovery unregister"
-                            )
-                            try:
-                                await unregister_model(
-                                    endpoint=self._endpoint,
-                                    lora_name=lora_name,
-                                )
-                                self._published_loras.discard(lora_name)
-                                return {
-                                    "status": "success",
-                                    "message": f"LoRA adapter '{lora_name}' discovery card removed",
-                                    "lora_name": lora_name,
-                                }
-                            except Exception as e:
-                                logger.exception(
-                                    f"Failed to unregister stale LoRA {lora_name} ModelDeploymentCard: {e}"
-                                )
-                                return {
-                                    "status": "error",
-                                    "message": f"Failed to unregister stale LoRA '{lora_name}' from discovery registry: {str(e)}",
-                                    "lora_name": lora_name,
-                                }
-                        return {
-                            "status": "error",
-                            "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self.loaded_loras.keys())}",
-                        }
-
-                    logger.debug(f"Unloading LoRA adapter: {lora_name}")
-                    lora_id = lora.id
-
-                    # Stop advertising the adapter *before* removing it from the
-                    # engine, so the frontend stops routing LoRA traffic here
-                    # while the adapter still exists. Removing it first would
-                    # leave a window where requests route to a worker that no
-                    # longer has the adapter (falling back to base or failing).
+                # Check existence *after* waiting for any in-progress load.
+                lora = self.loaded_loras.get(lora_name)
+                if lora is None:
+                    # The adapter is gone from the engine but may still have
+                    # a stale discovery card (a prior unload's unregister
+                    # failed and the re-add rollback also failed). Reconcile
+                    # by retrying the unregister so discovery converges.
                     if (
                         self._endpoint is not None
                         and lora_name in self._published_loras
                     ):
-                        logger.debug(
-                            f"Unregistering LoRA '{lora_name}' ModelDeploymentCard"
+                        logger.info(
+                            f"LoRA '{lora_name}' not loaded but still published; "
+                            f"retrying discovery unregister"
                         )
                         try:
                             await unregister_model(
@@ -933,64 +897,93 @@ class VllmLLMEngine(LLMEngine):
                                 lora_name=lora_name,
                             )
                             self._published_loras.discard(lora_name)
-                            logger.info(
-                                f"Successfully unregistered LoRA '{lora_name}' ModelDeploymentCard"
-                            )
+                            return {
+                                "status": "success",
+                                "message": f"LoRA adapter '{lora_name}' discovery card removed",
+                                "lora_name": lora_name,
+                            }
                         except Exception as e:
-                            # Nothing mutated yet: the engine still has the
-                            # adapter and discovery still advertises it
-                            # (consistent and still routable). Surface the error
-                            # and leave state intact for a retry.
                             logger.exception(
-                                f"Failed to unregister LoRA {lora_name} ModelDeploymentCard: {e}"
+                                f"Failed to unregister stale LoRA {lora_name} ModelDeploymentCard: {e}"
                             )
                             return {
                                 "status": "error",
-                                "message": f"Failed to unregister LoRA '{lora_name}' from discovery registry: {str(e)}",
+                                "message": f"Failed to unregister stale LoRA '{lora_name}' from discovery registry: {str(e)}",
                                 "lora_name": lora_name,
                             }
-                    elif self._endpoint is None:
-                        logger.debug(
-                            f"Cannot unregister LoRA '{lora_name}': serving endpoint not ready"
-                        )
+                    return {
+                        "status": "error",
+                        "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self.loaded_loras.keys())}",
+                    }
 
-                    # Discovery no longer routes to this adapter; remove it from
-                    # the engine.
+                logger.debug(f"Unloading LoRA adapter: {lora_name}")
+                lora_id = lora.id
+
+                # Stop advertising the adapter *before* removing it from the
+                # engine, so the frontend stops routing LoRA traffic here
+                # while the adapter still exists. Removing it first would
+                # leave a window where requests route to a worker that no
+                # longer has the adapter (falling back to base or failing).
+                if self._endpoint is not None and lora_name in self._published_loras:
+                    logger.debug(
+                        f"Unregistering LoRA '{lora_name}' ModelDeploymentCard"
+                    )
                     try:
-                        await self.engine_client.remove_lora(lora_id)
+                        await unregister_model(
+                            endpoint=self._endpoint,
+                            lora_name=lora_name,
+                        )
+                        self._published_loras.discard(lora_name)
+                        logger.info(
+                            f"Successfully unregistered LoRA '{lora_name}' ModelDeploymentCard"
+                        )
                     except Exception as e:
-                        # The discovery card is already gone but the engine still
-                        # holds the adapter (loaded-but-unpublished). Leave it in
-                        # loaded_loras so a retried unload skips the unregister
-                        # and retries only the engine removal.
+                        # Nothing mutated yet: the engine still has the
+                        # adapter and discovery still advertises it
+                        # (consistent and still routable). Surface the error
+                        # and leave state intact for a retry.
                         logger.exception(
-                            f"Failed to remove LoRA {lora_name} from engine: {e}"
+                            f"Failed to unregister LoRA {lora_name} ModelDeploymentCard: {e}"
                         )
                         return {
                             "status": "error",
-                            "message": f"Failed to remove LoRA '{lora_name}' from engine: {str(e)}",
+                            "message": f"Failed to unregister LoRA '{lora_name}' from discovery registry: {str(e)}",
                             "lora_name": lora_name,
                         }
+                elif self._endpoint is None:
+                    logger.debug(
+                        f"Cannot unregister LoRA '{lora_name}': serving endpoint not ready"
+                    )
 
-                    del self.loaded_loras[lora_name]
-
-                    logger.info(
-                        f"Successfully unloaded LoRA adapter: {lora_name} with ID {lora_id}"
+                # Discovery no longer routes to this adapter; remove it from
+                # the engine.
+                try:
+                    await self.engine_client.remove_lora(lora_id)
+                except Exception as e:
+                    # The discovery card is already gone but the engine still
+                    # holds the adapter (loaded-but-unpublished). Leave it in
+                    # loaded_loras so a retried unload skips the unregister
+                    # and retries only the engine removal.
+                    logger.exception(
+                        f"Failed to remove LoRA {lora_name} from engine: {e}"
                     )
                     return {
-                        "status": "success",
-                        "message": f"LoRA adapter '{lora_name}' unloaded successfully",
+                        "status": "error",
+                        "message": f"Failed to remove LoRA '{lora_name}' from engine: {str(e)}",
                         "lora_name": lora_name,
-                        "lora_id": lora_id,
                     }
-                finally:
-                    # Remove lock entry once the LoRA is not loaded (or never was).
-                    with self._lora_load_locks_guard:
-                        if (
-                            lora_name not in self.loaded_loras
-                            and self._lora_load_locks.get(lora_name) is lock
-                        ):
-                            self._lora_load_locks.pop(lora_name, None)
+
+                del self.loaded_loras[lora_name]
+
+                logger.info(
+                    f"Successfully unloaded LoRA adapter: {lora_name} with ID {lora_id}"
+                )
+                return {
+                    "status": "success",
+                    "message": f"LoRA adapter '{lora_name}' unloaded successfully",
+                    "lora_name": lora_name,
+                    "lora_id": lora_id,
+                }
         except Exception as e:
             logger.exception(f"Failed to unload LoRA adapter: {e}")
             return {"status": "error", "message": str(e)}

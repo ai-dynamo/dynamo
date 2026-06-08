@@ -29,7 +29,6 @@ pub mod metrics;
 pub mod recovery;
 pub mod registry;
 pub mod server;
-mod zmq;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,6 +37,7 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::min_initial_workers_from_env;
+use crate::services::zmq::validate_endpoint as validate_zmq_endpoint;
 use registry::WorkerRegistry;
 use server::{AppState, create_router};
 
@@ -49,42 +49,6 @@ pub struct IndexerConfig {
     pub model_name: String,
     pub tenant_id: String,
     pub peers: Option<String>,
-}
-
-pub(super) fn validate_zmq_endpoint(endpoint: &str) -> anyhow::Result<()> {
-    let (scheme, address) = endpoint
-        .split_once("://")
-        .ok_or_else(|| anyhow::anyhow!("invalid ZMQ endpoint `{endpoint}`: missing scheme"))?;
-
-    if address.is_empty() {
-        anyhow::bail!("invalid ZMQ endpoint `{endpoint}`: missing address");
-    }
-
-    match scheme {
-        "tcp" => {
-            let (host, port) = address.rsplit_once(':').ok_or_else(|| {
-                anyhow::anyhow!("invalid ZMQ endpoint `{endpoint}`: missing TCP port")
-            })?;
-            if host.is_empty() {
-                anyhow::bail!("invalid ZMQ endpoint `{endpoint}`: missing TCP host");
-            }
-            if host.starts_with('[') {
-                if !host.ends_with(']') {
-                    anyhow::bail!("invalid ZMQ endpoint `{endpoint}`: missing closing `]`");
-                }
-            } else if host.contains(':') {
-                anyhow::bail!("invalid ZMQ endpoint `{endpoint}`: missing TCP port");
-            }
-            port.parse::<u16>().map_err(|error| {
-                anyhow::anyhow!("invalid ZMQ endpoint `{endpoint}`: invalid TCP port: {error}")
-            })?;
-            Ok(())
-        }
-        "ipc" | "inproc" => Ok(()),
-        other => Err(anyhow::anyhow!(
-            "invalid ZMQ endpoint `{endpoint}`: unsupported scheme `{other}`"
-        )),
-    }
 }
 
 pub(super) fn validate_listener_endpoints(

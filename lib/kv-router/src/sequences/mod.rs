@@ -9,7 +9,7 @@ mod prompt_registry;
 mod replica_sync;
 mod request_maps;
 pub mod single;
-mod topology;
+pub mod topology;
 
 pub use multi_worker::*;
 pub use prefill_tracker::PrefillTokenDeltas;

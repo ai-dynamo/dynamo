@@ -351,13 +351,52 @@ fn register_model<'p>(
     needs: Option<Vec<Vec<WorkerType>>>,
     self_host_metadata: Option<bool>,
 ) -> PyResult<Bound<'p, PyAny>> {
-    // Validate Prefill model type requirements
-    if model_type.inner == llm_rs::model_type::ModelType::Prefill
-        && !matches!(model_input, ModelInput::Tokens)
-    {
+    // Every worker registers with an explicit `worker_type`. Reject `None`
+    // outright — a missing role would produce a card whose readiness math
+    // is undefined and whose ws_key would collide with other Aggregated
+    // workers in the same namespace.
+    let Some(worker_type_unwrapped) = worker_type else {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "ModelType::Prefill requires model_input to be ModelInput::Tokens",
+            "register_model: `worker_type` is required. Pass one of \
+             WorkerType.Prefill / Decode / Encode / Aggregated.",
         ));
+    };
+
+    // Prefill and Encode workers receive pre-tokenized requests (their engines
+    // preprocess externally), so both require `ModelInput::Tokens`.
+    if matches!(
+        worker_type_unwrapped,
+        WorkerType::Prefill | WorkerType::Encode
+    ) && !matches!(model_input, ModelInput::Tokens)
+    {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "register_model: worker_type={:?} requires model_input=ModelInput::Tokens",
+            worker_type_unwrapped
+        )));
+    }
+
+    // Prefill workers never expose an OpenAI surface — they are reached only
+    // through the dedicated prefill router, never by the frontend. They MAY,
+    // however, carry the legacy `ModelType.Prefill` *marker* bit, which new
+    // prefill workers dual-emit so an old frontend still detects them during
+    // the cross-version rollout (see `ModelType::Prefill`). So the only thing we
+    // reject here is a genuine OpenAI *surface* on a prefill card. Encode
+    // workers MAY carry a surface: an sglang multimodal encode worker is the
+    // OpenAI front door that delegates generation to an internal worker,
+    // whereas a vLLM-style encode helper registers Empty. Serving is driven by
+    // `ModelType` (the OpenAI surface); the topology role is by `worker_type`.
+    if matches!(worker_type_unwrapped, WorkerType::Prefill) {
+        // Strip the allowed Prefill marker bit; whatever remains is a surface.
+        let surface = model_type.inner - llm_rs::model_type::ModelType::Prefill;
+        if !surface.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "register_model: worker_type={:?} must not expose an OpenAI surface \
+                 (got model_type={:?}). Use ModelType.Empty or ModelType.Prefill; \
+                 the prefill role is carried by worker_type, and ModelType only \
+                 describes the OpenAI surface, which prefill workers don't expose.",
+                worker_type_unwrapped, model_type.inner
+            )));
+        }
     }
 
     let model_input = match model_input {
@@ -372,14 +411,32 @@ fn register_model<'p>(
 
     let model_type_obj = model_type.inner;
 
-    // Normalize the topology readiness fields `worker_type` and `needs` for
-    // the MDC. `worker_type = None` and `needs = []` is the pre-strict
-    // default — readers apply the missing-field shim. Backends are expected
-    // to pass explicit values (one of the four `WorkerType` variants and a
-    // DNF `needs` list); enforced strictly in a follow-up.
-    let worker_type_value: Option<llm_rs::worker_type::WorkerType> = worker_type.map(|w| w.into());
-    let needs_value: Vec<Vec<llm_rs::worker_type::WorkerType>> = needs
-        .unwrap_or_default()
+    // Model-serving-readiness fields on the MDC. `worker_type` is required
+    // (see the check above). Non-Aggregated workers must declare their peers
+    // explicitly — an empty `needs` would make them immediately ready with
+    // no dependencies, which is only correct for Aggregated.
+    let worker_type_value: Option<llm_rs::worker_type::WorkerType> =
+        Some(worker_type_unwrapped.into());
+    let raw_needs: Vec<Vec<WorkerType>> = match (worker_type_unwrapped, needs) {
+        (WorkerType::Aggregated, None) => Vec::new(),
+        (WorkerType::Aggregated, Some(n)) => n,
+        (_, None) => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "register_model: worker_type={:?} requires a non-empty `needs` \
+                 (at least one peer worker type the role depends on)",
+                worker_type_unwrapped
+            )));
+        }
+        (_, Some(n)) if n.is_empty() => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "register_model: worker_type={:?} requires a non-empty `needs` \
+                 (at least one peer worker type the role depends on)",
+                worker_type_unwrapped
+            )));
+        }
+        (_, Some(n)) => n,
+    };
+    let needs_value: Vec<Vec<llm_rs::worker_type::WorkerType>> = raw_needs
         .into_iter()
         .map(|alt| alt.into_iter().map(|w| w.into()).collect())
         .collect();
@@ -634,6 +691,16 @@ struct ModelType {
 #[pymethods]
 #[allow(non_upper_case_globals)]
 impl ModelType {
+    /// Empty value — no OpenAI surface. Used by prefill / encode workers
+    /// whose role is carried by `WorkerType` rather than by a ModelType bit.
+    /// (Name is `Empty` rather than `None` because `None` is reserved in
+    /// Python; `Empty` is also symmetric with the other `ModelType.Foo`
+    /// values.)
+    #[classattr]
+    const Empty: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::empty(),
+    };
+
     #[classattr]
     const Chat: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Chat,
@@ -650,6 +717,10 @@ impl ModelType {
     const TensorBased: Self = ModelType {
         inner: llm_rs::model_type::ModelType::TensorBased,
     };
+    /// Legacy prefill marker (no OpenAI surface). The prefill role is
+    /// expressed via `WorkerType::Prefill`; this bit is dual-emitted by new
+    /// prefill workers for cross-version compatibility so an old frontend
+    /// still detects them. Retained only for the cross-version compatibility window.
     #[classattr]
     const Prefill: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Prefill,
@@ -892,6 +963,22 @@ impl DistributedRuntime {
 
     fn event_loop(&self) -> PyObject {
         self.event_loop.clone()
+    }
+
+    /// Return the local system status server URL if this runtime started one.
+    ///
+    /// Workers use this in their RL request-plane route descriptor so the
+    /// frontend does not need to derive worker system URLs from static env vars.
+    fn system_status_server_url(&self) -> Option<String> {
+        self.inner.system_status_server_info().map(|info| {
+            let socket_addr = info.socket_addr;
+            if socket_addr.ip().is_unspecified() {
+                let host = dynamo_runtime::utils::ip_resolver::local_ip_for_advertise();
+                format!("http://{host}:{}", socket_addr.port())
+            } else {
+                format!("http://{socket_addr}")
+            }
+        })
     }
 
     /// Register an async Python callback for /engine/{route_name}
