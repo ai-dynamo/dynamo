@@ -76,17 +76,10 @@ impl WorkerMetricsPublisher {
             let mut rx = nats_rx;
             let mut last_metrics: Option<WorkerMetrics> = None;
             let mut pending_publish: Option<WorkerMetrics> = None;
-            let mut publish_deadline: Option<tokio::time::Instant> = None;
+            let publish_timer = tokio::time::sleep(tokio::time::Duration::ZERO);
+            tokio::pin!(publish_timer);
 
             loop {
-                let publish_ready = async move {
-                    if let Some(deadline) = publish_deadline {
-                        tokio::time::sleep_until(deadline).await;
-                    } else {
-                        std::future::pending::<()>().await;
-                    }
-                };
-
                 tokio::select! {
                     result = rx.changed() => {
                         if result.is_err() {
@@ -102,14 +95,13 @@ impl WorkerMetricsPublisher {
                         if has_changed {
                             pending_publish = Some(metrics.clone());
                             last_metrics = Some(metrics);
-                            publish_deadline = Some(
+                            publish_timer.as_mut().reset(
                                 tokio::time::Instant::now()
-                                    + tokio::time::Duration::from_millis(1),
+                                    + tokio::time::Duration::from_millis(1)
                             );
                         }
                     }
-                    _ = publish_ready => {
-                        publish_deadline = None;
+                    _ = &mut publish_timer, if pending_publish.is_some() => {
                         if let Some(metrics) = pending_publish.take() {
                             let active_load = ActiveLoad {
                                 worker_id,
