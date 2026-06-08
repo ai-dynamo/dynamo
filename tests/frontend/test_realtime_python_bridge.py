@@ -84,9 +84,15 @@ def realtime_frontend(request, monkeypatch, dynamo_dynamic_ports: ServicePorts):
     frontend_port = dynamo_dynamic_ports.frontend_port
     with tempfile.TemporaryDirectory(prefix="dyn_realtime_kv_") as file_kv:
         # Set before launching so both subprocesses (which copy os.environ at
-        # spawn) point at the same file discovery store. monkeypatch restores
-        # the prior value on teardown without clobbering external state.
+        # spawn) inherit them. monkeypatch restores prior values on teardown
+        # without clobbering external state.
+        #   DYN_FILE_KV     — shared file discovery store for both processes.
+        #   DYN_EVENT_PLANE — force zmq so the runtime does not try to connect
+        #                     to NATS (file discovery otherwise resolves the
+        #                     event plane to NATS); keeps the test free of
+        #                     etcd and nats.
         monkeypatch.setenv("DYN_FILE_KV", file_kv)
+        monkeypatch.setenv("DYN_EVENT_PLANE", "zmq")
         with DynamoFrontendProcess(
             request,
             frontend_port=frontend_port,
