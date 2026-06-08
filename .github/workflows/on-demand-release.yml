@@ -129,7 +129,11 @@ jobs:
             fi
           fi
 
-          python3 .github/scripts/apply_dev_version.py --set-version "${RELEASE_VERSION}"
+          # Run the version-set script from THIS workflow's commit (GITHUB_SHA),
+          # not from source_ref — source_ref (main, or an old release/* branch)
+          # may predate the --set-version support. Applied to the source tree (.).
+          git show "${GITHUB_SHA}:.github/scripts/apply_dev_version.py" > "${RUNNER_TEMP}/apply_dev_version.py"
+          python3 "${RUNNER_TEMP}/apply_dev_version.py" "" . --set-version "${RELEASE_VERSION}"
 
           if ! command -v cargo >/dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 --retry 5 --retry-delay 2 -sSf https://sh.rustup.rs \
