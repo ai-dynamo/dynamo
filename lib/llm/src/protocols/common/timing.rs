@@ -633,6 +633,25 @@ impl RequestTracker {
         let _ = self.external_query_token_ids.set(token_ids);
     }
 
+    /// Overlay worker attribution forwarded by a standalone router (on the first chunk's
+    /// `routing_data.worker_id`) onto this tracker so `get_worker_info`, the metrics
+    /// annotation, and `build_response_nvext` surface it on the split-router path.
+    /// First-write-wins per field: this process's own recordings take precedence.
+    pub fn set_external_worker_info(&self, info: WorkerIdInfo) {
+        if let Some(id) = info.prefill_worker_id {
+            Self::record_once_u64(&self.prefill_worker_id, id, "prefill_worker_id");
+        }
+        if let Some(rank) = info.prefill_dp_rank {
+            Self::record_once_u32(&self.prefill_dp_rank, rank, "prefill_dp_rank");
+        }
+        if let Some(id) = info.decode_worker_id {
+            Self::record_once_u64(&self.decode_worker_id, id, "decode_worker_id");
+        }
+        if let Some(rank) = info.decode_dp_rank {
+            Self::record_once_u32(&self.decode_dp_rank, rank, "decode_dp_rank");
+        }
+    }
+
     /// The query-only tokenized prompt forwarded from a standalone router, if any.
     pub fn query_token_ids(&self) -> Option<&[u32]> {
         self.external_query_token_ids.get().map(Vec::as_slice)
@@ -871,6 +890,50 @@ mod tests {
         // First-write-wins: a later forward does not clobber.
         tracker.set_external_query_token_ids(vec![44, 55]);
         assert_eq!(tracker.query_token_ids(), Some(&[11u32, 22, 33][..]));
+    }
+
+    #[test]
+    fn test_set_external_worker_info_round_trip() {
+        let tracker = RequestTracker::new();
+        assert!(tracker.get_worker_info().is_none());
+
+        // Forwarded from a standalone router on routing_data.worker_id (split-router path).
+        tracker.set_external_worker_info(WorkerIdInfo {
+            prefill_worker_id: Some(7),
+            prefill_dp_rank: Some(1),
+            decode_worker_id: Some(9),
+            decode_dp_rank: Some(2),
+        });
+        assert_eq!(
+            tracker.get_worker_info(),
+            Some(WorkerIdInfo {
+                prefill_worker_id: Some(7),
+                prefill_dp_rank: Some(1),
+                decode_worker_id: Some(9),
+                decode_dp_rank: Some(2),
+            })
+        );
+    }
+
+    #[test]
+    fn test_local_worker_recording_wins_over_forwarded() {
+        let tracker = RequestTracker::new();
+        // Default phase is Aggregated, so this records both prefill and decode locally.
+        tracker.record_worker(42, Some(0), WORKER_TYPE_PREFILL);
+
+        // A later forward from a standalone router must not clobber local attribution
+        // (OnceLock first-write-wins).
+        tracker.set_external_worker_info(WorkerIdInfo {
+            prefill_worker_id: Some(7),
+            prefill_dp_rank: Some(1),
+            decode_worker_id: Some(9),
+            decode_dp_rank: Some(2),
+        });
+
+        assert_eq!(tracker.prefill_worker_id(), Some(42));
+        assert_eq!(tracker.prefill_dp_rank(), Some(0));
+        assert_eq!(tracker.decode_worker_id(), Some(42));
+        assert_eq!(tracker.decode_dp_rank(), Some(0));
     }
 
     #[test]

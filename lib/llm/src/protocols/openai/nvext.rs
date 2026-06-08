@@ -935,6 +935,22 @@ mod tests {
         tracker
     }
 
+    /// Tracker seeded the way the split-router query-only (`query_instance_id`) path does: a
+    /// standalone router forwards `WorkerIdInfo` on `routing_data.worker_id`, which the
+    /// frontend drains onto the tracker via `set_external_worker_info`.
+    fn tracker_with_forwarded_worker_info()
+    -> std::sync::Arc<crate::protocols::common::timing::RequestTracker> {
+        use crate::protocols::common::timing::RequestTracker;
+        let tracker = std::sync::Arc::new(RequestTracker::new());
+        tracker.set_external_worker_info(WorkerIdInfo {
+            prefill_worker_id: Some(7),
+            prefill_dp_rank: Some(1),
+            decode_worker_id: Some(9),
+            decode_dp_rank: Some(2),
+        });
+        tracker
+    }
+
     // ---------------------------------------------------------------------
 
     #[test]
@@ -969,6 +985,33 @@ mod tests {
         assert!(out.timing.is_none());
         assert!(out.token_ids.is_none());
         assert!(out.routed_experts.is_none());
+    }
+
+    #[test]
+    fn test_build_response_nvext_surfaces_forwarded_split_router_worker_id() {
+        // Regression: split-router query_instance_id responses forward worker attribution on
+        // `routing_data.worker_id`. The frontend drains it onto the tracker, so nvext must
+        // carry the forwarded IDs. Previously the worker_id was dropped and nvext.worker_id
+        // came back None, losing worker attribution on the query-only path.
+        let sel = NvExtResponseFieldSelection {
+            worker_id: true,
+            ..Default::default()
+        };
+        let tracker = tracker_with_forwarded_worker_info();
+
+        let out = sel
+            .build_response_nvext(Some(&tracker), false, None, None, None, None)
+            .expect("forwarded worker_id should surface in nvext");
+
+        assert_eq!(
+            out.worker_id,
+            Some(WorkerIdInfo {
+                prefill_worker_id: Some(7),
+                prefill_dp_rank: Some(1),
+                decode_worker_id: Some(9),
+                decode_dp_rank: Some(2),
+            })
+        );
     }
 
     #[test]

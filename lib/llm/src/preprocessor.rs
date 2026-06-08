@@ -160,9 +160,10 @@ impl LLMMetricAnnotation {
 }
 
 /// Drain a standalone router's forwarded `routing_data` onto this request's tracker so the
-/// frontend's timing/token surfaces populate, then drop the field to keep it off the client
-/// wire. `worker_id` is intentionally not drained here: the prefill router reads it from the
-/// raw output instead.
+/// frontend's timing/worker/token surfaces populate, then drop the field to keep it off the
+/// client wire. Worker attribution is drained so `build_response_nvext` can surface it on the
+/// split-router query-only (`query_instance_id`) path; it is first-write-wins, so the
+/// frontend's own recordings (when present) take precedence over the forwarded values.
 fn drain_router_routing_data(
     data: &mut Option<BackendOutput>,
     tracker: Option<&std::sync::Arc<crate::protocols::common::timing::RequestTracker>>,
@@ -175,6 +176,9 @@ fn drain_router_routing_data(
     };
     if let Some(timing) = routing_data.timing {
         tracker.set_external_timing(timing);
+    }
+    if let Some(worker_id) = routing_data.worker_id {
+        tracker.set_external_worker_info(worker_id);
     }
     if let Some(token_ids) = routing_data.token_ids {
         tracker.set_external_query_token_ids(token_ids);

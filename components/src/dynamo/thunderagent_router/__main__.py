@@ -220,7 +220,14 @@ class ThunderAgentRouterHandler:
             return None
         info = routing_data.get("worker_id")
         if isinstance(info, dict):
-            worker_id = info.get("worker_id")
+            # ``WorkerIdInfo`` carries prefill/decode IDs (and DP ranks); there is no
+            # nested ``worker_id`` key. The sticky pin is applied as
+            # ``backend_instance_id``, which the frontend resolves to the decode/backend
+            # worker, so prefer ``decode_worker_id`` and fall back to ``prefill_worker_id``
+            # (identical in aggregated mode).
+            worker_id = info.get("decode_worker_id")
+            if not isinstance(worker_id, int):
+                worker_id = info.get("prefill_worker_id")
             if isinstance(worker_id, int):
                 return worker_id
         self._warn_unexpected_chunk_shape("worker_id payload shape changed")
