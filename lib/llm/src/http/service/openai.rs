@@ -2426,10 +2426,10 @@ async fn get_model_openai(
     // `get_model` — NOT `model_display_names()`, which filters to displayable
     // (ready) models. The whole point of this endpoint is to diagnose models
     // that are registered but not yet ready, so it must find them too.
-    if let Some(base) = model_id.strip_suffix("/readiness") {
-        if state.manager().get_model(base).is_some() {
-            return get_model_readiness(&state, base);
-        }
+    if let Some(base) = model_id.strip_suffix("/readiness")
+        && state.manager().get_model(base).is_some()
+    {
+        return get_model_readiness(&state, base);
     }
 
     Err(ErrorMessage::model_not_found())
