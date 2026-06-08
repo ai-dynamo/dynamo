@@ -2469,6 +2469,12 @@ def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
         chat_url = f"{frontend_url}/v1/chat/completions"
 
         async def run_requests() -> None:
+            await wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=decode_workers.num_workers,
+                timeout=120,
+            )
+
             runtime = get_runtime(request_plane=request_plane)
             decode_endpoint = runtime.endpoint(f"{shared_namespace}.backend.generate")
             prefill_endpoint = runtime.endpoint(f"{shared_namespace}.prefill.generate")
