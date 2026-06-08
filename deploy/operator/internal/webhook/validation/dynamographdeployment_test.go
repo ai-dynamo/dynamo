@@ -2162,7 +2162,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator := NewDynamoGraphDeploymentValidator(tt.deployment, tt.groveEnabled)
+			validator := NewDynamoGraphDeploymentValidator(tt.deployment, nil, tt.groveEnabled)
 			_, err := validator.Validate(context.Background())
 
 			if (err != nil) != tt.wantErr {
@@ -2254,11 +2254,8 @@ func TestDynamoGraphDeploymentValidator_KvTransferPolicyClusterTopology(t *testi
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator := &DynamoGraphDeploymentValidator{
-				deployment:   tt.deployment,
-				client:       fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tt.objects...).Build(),
-				groveEnabled: true,
-			}
+			client := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tt.objects...).Build()
+			validator := NewDynamoGraphDeploymentValidator(tt.deployment, client, true)
 			_, err := validator.Validate(context.Background())
 			if tt.wantErr == "" {
 				if err != nil {
@@ -3041,7 +3038,7 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator := NewDynamoGraphDeploymentValidator(tt.newDeployment, true)
+			validator := NewDynamoGraphDeploymentValidator(tt.newDeployment, nil, true)
 			// Pass nil userInfo and empty operatorPrincipal - these tests don't modify replicas, so it's safe
 			warnings, err := validator.ValidateUpdate(tt.oldDeployment, nil, "")
 

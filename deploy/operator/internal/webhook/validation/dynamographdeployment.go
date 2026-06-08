@@ -53,30 +53,37 @@ const (
 // This validator can be used by both webhooks and controllers for consistent validation.
 type DynamoGraphDeploymentValidator struct {
 	deployment   *nvidiacomv1alpha1.DynamoGraphDeployment
-	mgr          ctrl.Manager // Optional: for API group detection via discovery client
-	client       ctrlclient.Client
+	mgr          ctrl.Manager      // Optional: for API group detection via discovery client
+	client       ctrlclient.Client // Optional: for ClusterTopology lookups
 	groveEnabled bool
 }
 
 // NewDynamoGraphDeploymentValidator creates a new validator for DynamoGraphDeployment.
 // groveEnabled should reflect the operator's runtime Grove configuration.
-func NewDynamoGraphDeploymentValidator(deployment *nvidiacomv1alpha1.DynamoGraphDeployment, groveEnabled bool) *DynamoGraphDeploymentValidator {
+func NewDynamoGraphDeploymentValidator(deployment *nvidiacomv1alpha1.DynamoGraphDeployment, client ctrlclient.Client, groveEnabled bool) *DynamoGraphDeploymentValidator {
 	return &DynamoGraphDeploymentValidator{
 		deployment:   deployment,
+		client:       client,
 		groveEnabled: groveEnabled,
 	}
 }
 
 // NewDynamoGraphDeploymentValidatorWithManager creates a validator with a manager for API group detection.
 func NewDynamoGraphDeploymentValidatorWithManager(deployment *nvidiacomv1alpha1.DynamoGraphDeployment, mgr ctrl.Manager, groveEnabled bool) *DynamoGraphDeploymentValidator {
+	var client ctrlclient.Client
+	if mgr != nil {
+		client = mgr.GetClient()
+	}
+
 	return &DynamoGraphDeploymentValidator{
 		deployment:   deployment,
 		mgr:          mgr,
+		client:       client,
 		groveEnabled: groveEnabled,
 	}
 }
 
-func (v *DynamoGraphDeploymentValidator) kubeClient() ctrlclient.Client {
+func (v *DynamoGraphDeploymentValidator) validationClient() ctrlclient.Client {
 	if v.client != nil {
 		return v.client
 	}
@@ -703,7 +710,7 @@ func (v *DynamoGraphDeploymentValidator) validateTopologyConstraints(ctx context
 	// Validate domains and hierarchy against the framework's topology CRD (CREATE only).
 	// On UPDATE (Generation > 1) this is skipped because TAS fields are immutable.
 	// Skip when prior validation errors exist to avoid redundant "domain not found" messages.
-	if len(errs) == 0 && v.mgr != nil && v.isGrovePathway() && v.deployment.Generation == 1 {
+	if len(errs) == 0 && v.validationClient() != nil && v.isGrovePathway() && v.deployment.Generation == 1 {
 		if err := v.validateTopologyDomainsAgainstGroveClusterTopology(ctx); err != nil {
 			errs = append(errs, err)
 		}
@@ -721,7 +728,7 @@ func (v *DynamoGraphDeploymentValidator) validateTopologyDomainsAgainstGroveClus
 		return nil
 	}
 
-	cl := v.mgr.GetClient()
+	cl := v.validationClient()
 	ct := &grovev1alpha1.ClusterTopology{}
 	err := cl.Get(ctx, types.NamespacedName{Name: profileName}, ct)
 	if err != nil {
@@ -1029,7 +1036,7 @@ func (v *DynamoGraphDeploymentValidator) validateKvTransferPolicy(ctx context.Co
 }
 
 func (v *DynamoGraphDeploymentValidator) validateKvTransferPolicyAgainstGroveClusterTopology(ctx context.Context, kvt *nvidiacomv1alpha1.KvTransferPolicy) error {
-	cl := v.kubeClient()
+	cl := v.validationClient()
 	if cl == nil {
 		return nil
 	}
