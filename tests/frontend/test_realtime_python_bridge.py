@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import tempfile
 
 import aiohttp
@@ -73,7 +72,7 @@ class RealtimeEchoWorkerProcess(ManagedProcess):
 
 
 @pytest.fixture(scope="function")
-def realtime_frontend(request, dynamo_dynamic_ports: ServicePorts):
+def realtime_frontend(request, monkeypatch, dynamo_dynamic_ports: ServicePorts):
     """Launch the frontend + realtime worker; yield the frontend port once discovered.
 
     Coordinates over file-based discovery (``DYN_FILE_KV`` points both processes
@@ -85,21 +84,19 @@ def realtime_frontend(request, dynamo_dynamic_ports: ServicePorts):
     frontend_port = dynamo_dynamic_ports.frontend_port
     with tempfile.TemporaryDirectory(prefix="dyn_realtime_kv_") as file_kv:
         # Set before launching so both subprocesses (which copy os.environ at
-        # spawn) point at the same file discovery store.
-        os.environ["DYN_FILE_KV"] = file_kv
-        try:
-            with DynamoFrontendProcess(
-                request,
-                frontend_port=frontend_port,
-                extra_args=["--discovery-backend", "file", "--request-plane", "tcp"],
-                terminate_all_matching_process_names=False,
-            ):
-                logger.info("Frontend started on port %s", frontend_port)
-                with RealtimeEchoWorkerProcess(request, frontend_port=frontend_port):
-                    logger.info("Realtime echo worker registered model %s", MODEL_NAME)
-                    yield frontend_port
-        finally:
-            os.environ.pop("DYN_FILE_KV", None)
+        # spawn) point at the same file discovery store. monkeypatch restores
+        # the prior value on teardown without clobbering external state.
+        monkeypatch.setenv("DYN_FILE_KV", file_kv)
+        with DynamoFrontendProcess(
+            request,
+            frontend_port=frontend_port,
+            extra_args=["--discovery-backend", "file", "--request-plane", "tcp"],
+            terminate_all_matching_process_names=False,
+        ):
+            logger.info("Frontend started on port %s", frontend_port)
+            with RealtimeEchoWorkerProcess(request, frontend_port=frontend_port):
+                logger.info("Realtime echo worker registered model %s", MODEL_NAME)
+                yield frontend_port
 
 
 async def _recv_json(ws: aiohttp.ClientWebSocketResponse, timeout_s: float) -> dict:
