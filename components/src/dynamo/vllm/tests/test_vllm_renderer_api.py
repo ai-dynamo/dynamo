@@ -369,6 +369,7 @@ class TestVllmRendererApi:
             "cache_salt",
             "data_parallel_rank",
             "prompt_embeds",
+            "prompt_is_token_ids",
             "client_index",
             "current_wave",
             "priority",
@@ -378,14 +379,18 @@ class TestVllmRendererApi:
             "reasoning_ended",
         )
         reasoning_request_fields = (*base_request_fields, "reasoning_parser_kwargs")
+        abort_request_fields = (*reasoning_request_fields, "abort_immediately")
         # vllm-omni monkey-patches EngineCoreRequest with an extra field
         # (only installed on amd64, not arm64)
         omni_fields = (*reasoning_request_fields, "additional_information")
+        abort_omni_fields = (*abort_request_fields, "additional_information")
         valid_request_fields = (
             base_request_fields,
             reasoning_request_fields,
+            abort_request_fields,
             (*base_request_fields, "additional_information"),
             omni_fields,
+            abort_omni_fields,
         )
         actual_request_fields = EngineCoreRequest.__struct_fields__
         assert actual_request_fields in valid_request_fields, (

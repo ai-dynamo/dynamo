@@ -537,7 +537,7 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
         if env_max_model_len is not None:
             max_model_len = int(env_max_model_len)
         elif gpu_blocks is not None:
-            # vLLM 0.20.1 validates max_model_len against explicit KV block
+            # Since ver 0.20.1 vLLM validates max_model_len against explicit KV block
             # overrides during engine init. These tests intentionally use tiny
             # GPU caches, so default the sequence limit to that cache budget.
             max_model_len = int(gpu_blocks) * block_size

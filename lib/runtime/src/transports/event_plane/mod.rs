@@ -41,7 +41,7 @@ use crate::discovery::{
     Discovery, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, EventChannelQuery, EventTransport,
 };
 use crate::traits::DistributedRuntimeProvider;
-use crate::utils::ip_resolver::get_local_ip_for_advertise;
+use crate::utils::local_ip_for_advertise;
 
 /// Scope of the event plane - determines the subject prefix for pub/sub.
 #[derive(Debug, Clone)]
@@ -409,7 +409,7 @@ impl EventPublisher {
                         .next()
                         .and_then(|s| s.parse().ok())
                         .expect("Failed to parse port from bind endpoint");
-                    let local_ip = get_local_ip_for_advertise();
+                    let local_ip = local_ip_for_advertise();
                     let public_endpoint = format!("tcp://{}:{}", local_ip, actual_port);
 
                     let codec = Arc::new(Codec::Msgpack(MsgpackCodec));
