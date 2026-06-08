@@ -149,7 +149,7 @@ impl ReplicaPublisher {
 /// [`SequenceSubscriber`] backed by an mpsc channel that the peer SUB pump
 /// feeds with decoded peer events.
 pub struct ReplicaSubscriber {
-    rx: mpsc::UnboundedReceiver<ActiveSequenceEvent>,
+    rx: mpsc::Receiver<ActiveSequenceEvent>,
 }
 
 impl SequenceSubscriber for ReplicaSubscriber {
@@ -157,6 +157,11 @@ impl SequenceSubscriber for ReplicaSubscriber {
         self.rx.recv().await.map(Ok)
     }
 }
+
+/// Bound on buffered peer events; under a burst or a stalled sequence-sync
+/// consumer the newest events are dropped (with a warning) rather than growing
+/// memory without limit.
+const REPLICA_SYNC_EVENT_BUFFER: usize = 8192;
 
 /// Start peer discovery (EndpointSlice reflector) plus the ZMQ SUB pump and
 /// return a [`ReplicaSubscriber`] yielding peer events. Wire the returned
@@ -170,7 +175,7 @@ pub async fn spawn_peer_sync(
 ) -> Result<ReplicaSubscriber> {
     let peers_rx =
         spawn_endpointslice_reflector(service_name, namespace, self_pod_ip, port).await?;
-    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let (event_tx, event_rx) = mpsc::channel(REPLICA_SYNC_EVENT_BUFFER);
     tokio::spawn(sub_manager(peers_rx, event_tx, cancel));
     Ok(ReplicaSubscriber { rx: event_rx })
 }
@@ -225,18 +230,29 @@ fn compute_peers(
     let mut peers = HashSet::new();
     for slice in store.state() {
         for endpoint in slice.endpoints.iter() {
+            // Kubernetes treats a missing `ready` condition as ready.
             let ready = endpoint
                 .conditions
                 .as_ref()
                 .and_then(|c| c.ready)
-                .unwrap_or(false);
+                .unwrap_or(true);
             if !ready {
                 continue;
             }
             for addr in endpoint.addresses.iter() {
-                if addr != self_pod_ip {
-                    peers.insert(format!("tcp://{addr}:{port}"));
+                if addr == self_pod_ip {
+                    continue;
                 }
+                // Bracket IPv6 literals so the ZMQ `tcp://` endpoint is valid.
+                let endpoint = match addr.parse::<std::net::IpAddr>() {
+                    Ok(std::net::IpAddr::V6(v6)) => format!("tcp://[{v6}]:{port}"),
+                    Ok(std::net::IpAddr::V4(v4)) => format!("tcp://{v4}:{port}"),
+                    Err(_) => {
+                        tracing::warn!(addr, "skipping unparsable peer address");
+                        continue;
+                    }
+                };
+                peers.insert(endpoint);
             }
         }
     }
@@ -249,7 +265,7 @@ fn compute_peers(
 /// into `event_tx`.
 async fn sub_manager(
     mut peers_rx: watch::Receiver<Vec<String>>,
-    event_tx: mpsc::UnboundedSender<ActiveSequenceEvent>,
+    event_tx: mpsc::Sender<ActiveSequenceEvent>,
     cancel: CancellationToken,
 ) {
     let ctx = Context::new();
@@ -301,7 +317,7 @@ fn build_sub(ctx: &Context, peers: &[String]) -> Result<Subscribe> {
 }
 
 /// Read multipart frames, decode the payload, and forward events.
-async fn pump_sub(mut sub: Subscribe, event_tx: mpsc::UnboundedSender<ActiveSequenceEvent>) {
+async fn pump_sub(mut sub: Subscribe, event_tx: mpsc::Sender<ActiveSequenceEvent>) {
     while let Some(result) = sub.next().await {
         let msg = match result {
             Ok(m) => m,
@@ -314,11 +330,13 @@ async fn pump_sub(mut sub: Subscribe, event_tx: mpsc::UnboundedSender<ActiveSequ
             continue;
         };
         match serde_json::from_slice::<ActiveSequenceEvent>(&payload[..]) {
-            Ok(event) => {
-                if event_tx.send(event).is_err() {
-                    break; // subscriber dropped
+            Ok(event) => match event_tx.try_send(event) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!("replica-sync event buffer full; dropping peer event");
                 }
-            }
+                Err(mpsc::error::TrySendError::Closed(_)) => break, // subscriber dropped
+            },
             Err(e) => tracing::debug!(error = %e, "failed to decode replica-sync event"),
         }
     }
