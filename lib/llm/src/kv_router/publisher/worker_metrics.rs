@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
+use std::time::Duration;
 
 use dynamo_kv_router::protocols::{ActiveLoad, DpRank};
 use dynamo_runtime::component::{Component, Namespace};
@@ -74,57 +75,47 @@ impl WorkerMetricsPublisher {
                 };
 
             let mut rx = nats_rx;
-            let mut last_metrics: Option<WorkerMetrics> = None;
-            let mut pending_publish: Option<WorkerMetrics> = None;
-            let mut publish_deadline: Option<tokio::time::Instant> = None;
+            let mut last_published: Option<WorkerMetrics> = None;
 
             loop {
-                let publish_ready = async move {
-                    if let Some(deadline) = publish_deadline {
-                        tokio::time::sleep_until(deadline).await;
-                    } else {
-                        std::future::pending::<()>().await;
-                    }
-                };
+                if rx.changed().await.is_err() {
+                    tracing::debug!(
+                        "Metrics publisher sender dropped, stopping NATS background task"
+                    );
+                    break;
+                }
 
-                tokio::select! {
-                    result = rx.changed() => {
-                        if result.is_err() {
+                let mut metrics = rx.borrow_and_update().clone();
+
+                loop {
+                    match tokio::time::timeout(Duration::from_millis(1), rx.changed()).await {
+                        Ok(Ok(())) => metrics = rx.borrow_and_update().clone(),
+                        Ok(Err(_)) => {
                             tracing::debug!(
                                 "Metrics publisher sender dropped, stopping NATS background task"
                             );
-                            break;
+                            return;
                         }
-
-                        let metrics = rx.borrow_and_update().clone();
-                        let has_changed = last_metrics.as_ref() != Some(&metrics);
-
-                        if has_changed {
-                            pending_publish = Some(metrics.clone());
-                            last_metrics = Some(metrics);
-                            publish_deadline = Some(
-                                tokio::time::Instant::now()
-                                    + tokio::time::Duration::from_millis(1),
-                            );
-                        }
-                    }
-                    _ = publish_ready => {
-                        publish_deadline = None;
-                        if let Some(metrics) = pending_publish.take() {
-                            let active_load = ActiveLoad {
-                                worker_id,
-                                dp_rank: metrics.dp_rank,
-                                active_decode_blocks: metrics.active_decode_blocks,
-                                active_prefill_tokens: None,
-                                kv_used_blocks: metrics.kv_used_blocks,
-                            };
-
-                            if let Err(e) = event_publisher.publish(&active_load).await {
-                                tracing::warn!("Failed to publish metrics: {}", e);
-                            }
-                        }
+                        Err(_) => break,
                     }
                 }
+
+                if last_published.as_ref() == Some(&metrics) {
+                    continue;
+                }
+
+                let active_load = ActiveLoad {
+                    worker_id,
+                    dp_rank: metrics.dp_rank,
+                    active_decode_blocks: metrics.active_decode_blocks,
+                    active_prefill_tokens: None,
+                    kv_used_blocks: metrics.kv_used_blocks,
+                };
+
+                if let Err(e) = event_publisher.publish(&active_load).await {
+                    tracing::warn!("Failed to publish metrics: {}", e);
+                }
+                last_published = Some(metrics);
             }
         });
     }
