@@ -1055,6 +1055,13 @@ class HandlerBase(BaseGenerativeHandler):
         visible_stop_token_ids = set(
             stop_conditions.get("stop_token_ids_visible") or []
         )
+        # TRT-LLM PyTorch backend has no per-token "visible stop" hook, so
+        # visible stop tokens (e.g. Harmony's `<|call|>` for gpt-oss) are
+        # stripped before Dynamo sees them. Force `ignore_eos=True` to disable
+        # engine-side stopping and let backend.rs (`VisibleStopTokenDetected` /
+        # `HiddenStopTokenDetected`) own all stopping.
+        #
+        # TODO: revisit once TRT-LLM exposes a per-token visible-stop hook.
         if ignore_eos or visible_stop_token_ids:
             sampling_params.ignore_eos = True
 

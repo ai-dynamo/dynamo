@@ -648,6 +648,12 @@ impl OpenAIPreprocessor {
         } else {
             stop_conditions.stop_token_ids_hidden = Some(hidden_eos_token_ids);
         }
+        // Some tool-call parsers terminate on a token that is also a model
+        // EOS (e.g. Harmony's `<|call|>` for gpt-oss). Left in the hidden
+        // set, the engine stops AND strips it, so the parser sees a
+        // truncated envelope and drops the call. Move such tokens to the
+        // visible set so the engine still stops on them but the token
+        // survives into output for the parser to consume. See PR #9778.
         let mut visible_tool_parser_end_token_ids = Vec::new();
         if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
             visible_tool_parser_end_token_ids =
