@@ -284,7 +284,10 @@ async def test_load_lora_publishes_disagg_topology(
 
     assert result["status"] == "success"
     kwargs = register.await_args.kwargs
-    assert kwargs["model_type"] == expected_model_type
+    # ModelType is a Rust bitflags pyclass without Python __eq__, so combined
+    # flags (Chat | Completions) compare by identity and never match a freshly
+    # built copy. Compare the deterministic str() form instead.
+    assert str(kwargs["model_type"]) == str(expected_model_type)
     assert kwargs["worker_type"] == expected_worker_type
     assert kwargs["needs"] == expected_needs
 
