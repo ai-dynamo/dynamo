@@ -27,12 +27,15 @@ const (
 	fieldManager      = "dynamo-crd-apply"
 	versionAnnotation = "dynamo.nvidia.com/operator-version"
 	addConvAnnotation = "dynamo.nvidia.com/add-conversion"
+	caAnnotation      = "cert-manager.io/inject-ca-from"
 )
 
 func main() {
 	crdsDir := flag.String("crds-dir", "/opt/dynamo-operator/crds/", "Directory containing CRD YAML files")
 	version := flag.String("version", "", "Operator version to stamp on CRDs")
 	webhookService := flag.String("webhook-service", "", "Operator webhook service name")
+	webhookCert := flag.String("webhook-cert", "", "Webhook certificate")
+	webhookCA := flag.String("webhook-ca", "", "The CA bundle when using external CA")
 	namespace := flag.String("namespace", "", "Operator webhook namespace")
 	flag.Parse()
 
@@ -91,6 +94,15 @@ func main() {
 			}
 			if namespace != nil && *namespace != "" {
 				crd.Spec.Conversion.Webhook.ClientConfig.Service.Namespace = *namespace
+			}
+			if webhookCert != nil && *webhookCert != "" {
+				if crd.Annotations == nil {
+					crd.Annotations = make(map[string]string)
+				}
+				crd.Annotations[caAnnotation] = *webhookCert
+			}
+			if webhookCA != nil && *webhookCA != "" {
+				crd.Spec.Conversion.Webhook.ClientConfig.CABundle = []byte(*webhookCA)
 			}
 		}
 

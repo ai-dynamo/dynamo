@@ -75,6 +75,13 @@ spec:
           - "--crds-dir=/opt/dynamo-operator/crds/"
           - "--version={{ .Chart.AppVersion }}"
           - --webhook-service={{ include "dynamo-operator.fullname" . }}-webhook-service
+        {{- if .Values.webhook.certManager.enabled }}
+          - --webhook-cert={{ include "dynamo-operator.fullname" . }}-serving-cert
+        {{- end }}
+        {{- if and (not .Values.webhook.certManager.enabled) .Values.webhook.certificateSecret.external }}
+          - --webhook-ca
+          - "{{ .Values.webhook.caBundle }}"
+        {{- end }}
           - --namespace={{ .Release.Namespace }}
       {{- end }}
       containers:
