@@ -856,6 +856,7 @@ impl OpenAIPreprocessor {
                 strict_priority,
                 priority,
                 lora_name,
+                cache_namespace: nvext.cache_salt.clone(),
                 allowed_worker_ids: None,
                 routing_constraints: nvext
                     .routing_constraints

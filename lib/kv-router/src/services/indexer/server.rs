@@ -127,8 +127,7 @@ pub struct QueryRequest {
     pub tenant_id: String,
     #[serde(default)]
     pub lora_name: Option<String>,
-    /// Optional per-request cache salt (Mooncake RFC #1403). Currently accepted
-    /// but not yet mixed into hashes — engines apply their own internally.
+    /// Optional per-request cache salt (Mooncake RFC #1403), mixed into `/query` hashes.
     #[serde(default)]
     pub cache_salt: Option<String>,
 }
@@ -139,8 +138,8 @@ pub struct QueryByHashRequest {
     pub model_name: String,
     #[serde(default = "default_tenant")]
     pub tenant_id: String,
-    /// Optional per-request cache salt (Mooncake RFC #1403). Currently accepted
-    /// but not yet mixed into hashes — engines apply their own internally.
+    /// Optional per-request cache salt (Mooncake RFC #1403). For `/query_by_hash`, callers
+    /// must precompute `block_hashes` with the same salt.
     #[serde(default)]
     pub cache_salt: Option<String>,
 }
@@ -339,6 +338,7 @@ async fn query(State(state): State<Arc<AppState>>, Json(req): Json<QueryRequest>
         block_size,
         BlockHashOptions {
             lora_name: req.lora_name.as_deref(),
+            cache_namespace: req.cache_salt.as_deref(),
             ..Default::default()
         },
     );

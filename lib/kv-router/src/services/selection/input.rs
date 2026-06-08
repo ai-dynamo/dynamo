@@ -130,6 +130,7 @@ fn normalize_tokens(
         BlockHashOptions {
             block_mm_infos,
             lora_name,
+            cache_namespace: None,
             is_eagle: Some(is_eagle),
         },
     );

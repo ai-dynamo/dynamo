@@ -18,7 +18,7 @@ import re
 import sys
 import threading
 import time
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Mapping
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -105,6 +105,23 @@ _TRTLLM_TO_COMMON_DISAGG = {
     DisaggregationMode.PREFILL: CommonDisaggregationMode.PREFILL,
     DisaggregationMode.DECODE: CommonDisaggregationMode.DECODE,
 }
+
+
+def _request_cache_salt(request: Mapping[str, Any]) -> Optional[str]:
+    routing = request.get("routing") or {}
+    if isinstance(routing, dict):
+        cache_salt = routing.get("cache_salt")
+        if cache_salt is not None:
+            return cache_salt
+
+    extra_args = request.get("extra_args") or {}
+    nvext = extra_args.get("nvext") if isinstance(extra_args, dict) else None
+    if isinstance(nvext, dict):
+        cache_salt = nvext.get("cache_salt")
+        if cache_salt is not None:
+            return cache_salt
+
+    return None
 
 
 def _to_signed_i64(value: int | None) -> int | None:
@@ -587,6 +604,7 @@ class TrtllmLLMEngine(LLMEngine):
                 block_hashes,
                 parent_hash,
                 lora_name=data.get("lora_name"),
+                cache_salt=data.get("cache_salt"),
             )
         elif kind == "removed":
             partial = self._partial_block_hashes_by_rank.get(rank)
@@ -844,12 +862,14 @@ class TrtllmLLMEngine(LLMEngine):
         # Prefill returns one non-streaming chunk carrying the handoff -
         # matches the legacy disagg wire format.
         streaming = not is_prefill
+        cache_salt = _request_cache_salt(request)
         generation_result = self._engine.llm.generate_async(
             inputs=token_ids,
             sampling_params=sampling_params,
             streaming=streaming,
             disaggregated_params=disaggregated_params,
             scheduling_params=scheduling_params,
+            cache_salt=cache_salt,
             **telemetry.engine_trace_kwargs(context),
         )
 

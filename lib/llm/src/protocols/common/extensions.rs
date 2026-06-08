@@ -242,6 +242,7 @@ pub const HEADER_DP_RANK: &str = "x-dynamo-dp-rank";
 pub const HEADER_PREFILL_DP_RANK: &str = "x-dynamo-prefill-dp-rank";
 pub const HEADER_REQUEST_PRIORITY: &str = "x-dynamo-request-priority";
 pub const HEADER_REQUEST_STRICT_PRIORITY: &str = "x-dynamo-request-strict-priority";
+pub const HEADER_TENANT_ID: &str = "x-tenant-id";
 // Compatibility aliases for the original unprefixed names. Future agents may remove these after
 // the deprecation window.
 pub const HEADER_WORKER_INSTANCE_ID_ALIAS: &str = "x-worker-instance-id";
@@ -299,6 +300,7 @@ pub fn session_affinity_from_headers(headers: &HeaderMap) -> Option<SessionAffin
 /// - `x-dynamo-prefill-dp-rank` -> `prefill_dp_rank`
 /// - `x-dynamo-request-priority` -> `agent_hints.priority`
 /// - `x-dynamo-request-strict-priority` -> `agent_hints.strict_priority`
+/// - `x-tenant-id` -> `cache_salt`
 ///
 /// Routing headers take priority over existing nvext values when present.
 /// If no headers are present, returns the original nvext unchanged.
@@ -338,6 +340,11 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         .get(HEADER_REQUEST_STRICT_PRIORITY)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u32>().ok());
+    let tenant_id = headers
+        .get(HEADER_TENANT_ID)
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
 
     if worker_id.is_none()
         && prefill_id.is_none()
@@ -345,6 +352,7 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         && prefill_dp_rank.is_none()
         && priority.is_none()
         && strict_priority.is_none()
+        && tenant_id.is_none()
     {
         return nvext;
     }
@@ -371,6 +379,9 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         if let Some(strict_priority) = strict_priority {
             hints.strict_priority = Some(strict_priority);
         }
+    }
+    if let Some(salt) = tenant_id {
+        ext.cache_salt = Some(salt);
     }
     Some(ext)
 }
@@ -804,6 +815,25 @@ mod tests {
         assert_eq!(hints.priority, Some(-3));
         assert_eq!(hints.strict_priority, Some(2));
         assert_eq!(hints.osl, Some(99));
+    }
+
+    #[test]
+    fn apply_header_routing_overrides_sets_cache_salt_from_tenant_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_TENANT_ID, "tenant-a".parse().unwrap());
+
+        let nvext = apply_header_routing_overrides(None, &headers).unwrap();
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-a"));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_TENANT_ID, "tenant-header".parse().unwrap());
+        let nvext = NvExt {
+            cache_salt: Some("tenant-body".to_string()),
+            ..Default::default()
+        };
+
+        let nvext = apply_header_routing_overrides(Some(nvext), &headers).unwrap();
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-header"));
     }
 
     #[test]

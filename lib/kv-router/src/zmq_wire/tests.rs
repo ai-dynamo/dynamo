@@ -4,7 +4,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use rmp_serde::{from_slice, to_vec};
+use rmp_serde::{from_slice, to_vec, to_vec_named};
+use serde::Serialize;
 
 use crate::protocols::{
     BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, ExternalSequenceBlockHash,
@@ -48,6 +49,80 @@ fn test_deserialize_bigram_block_stored_sequence() {
         }
         other => panic!("expected BlockStored, got {other:?}"),
     }
+}
+
+#[derive(Serialize)]
+struct MapBlockStoredFixture {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    block_hashes: Vec<BlockHashValue>,
+    parent_block_hash: Option<BlockHashValue>,
+    token_ids: Vec<u32>,
+    block_size: usize,
+    medium: Option<String>,
+    lora_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_salt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extra_keys: Option<Vec<Option<Vec<String>>>>,
+}
+
+impl Default for MapBlockStoredFixture {
+    fn default() -> Self {
+        Self {
+            event_type: "BlockStored",
+            block_hashes: vec![BlockHashValue::Unsigned(11)],
+            parent_block_hash: None,
+            token_ids: vec![10, 11],
+            block_size: 2,
+            medium: None,
+            lora_name: None,
+            cache_salt: None,
+            extra_keys: None,
+        }
+    }
+}
+
+#[test]
+fn test_deserialize_map_block_stored_cache_salt() {
+    let encoded = to_vec_named(&MapBlockStoredFixture {
+        cache_salt: Some("tenant-a".to_string()),
+        ..Default::default()
+    })
+    .unwrap();
+    let event: RawKvEvent = from_slice(&encoded).unwrap();
+
+    let RawKvEvent::BlockStored {
+        cache_namespace, ..
+    } = event
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+}
+
+#[test]
+fn test_deserialize_extra_keys_cache_namespace_fallback() {
+    let mm_hash = "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210";
+    let encoded = to_vec_named(&MapBlockStoredFixture {
+        lora_name: Some("adapter-a".to_string()),
+        extra_keys: Some(vec![Some(vec![
+            mm_hash.to_string(),
+            "adapter-a".to_string(),
+            "tenant-a".to_string(),
+        ])]),
+        ..Default::default()
+    })
+    .unwrap();
+    let event: RawKvEvent = from_slice(&encoded).unwrap();
+
+    let RawKvEvent::BlockStored {
+        cache_namespace, ..
+    } = event
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
 }
 
 fn block_stored_sequence(
@@ -432,6 +507,51 @@ fn test_normalizer_does_not_learn_metadata_from_remove_events() {
 }
 
 #[test]
+fn test_normalizer_propagates_cache_namespace_from_parent() {
+    let worker = WorkerWithDpRank::new(7, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2);
+    let parent = RawKvEvent::BlockStored {
+        block_hashes: vec![BlockHashValue::Unsigned(1)],
+        parent_block_hash: None,
+        token_ids: vec![10, 11],
+        block_size: 2,
+        medium: None,
+        lora_name: None,
+        cache_namespace: Some("tenant-a".to_string()),
+        block_mm_infos: None,
+        is_eagle: Some(false),
+        group_idx: None,
+        kv_cache_spec_kind: None,
+        kv_cache_spec_sliding_window: None,
+    };
+    let child = RawKvEvent::BlockStored {
+        block_hashes: vec![BlockHashValue::Unsigned(2)],
+        parent_block_hash: Some(BlockHashValue::Unsigned(1)),
+        token_ids: vec![12, 13],
+        block_size: 2,
+        medium: None,
+        lora_name: None,
+        cache_namespace: None,
+        block_mm_infos: None,
+        is_eagle: Some(false),
+        group_idx: None,
+        kv_cache_spec_kind: None,
+        kv_cache_spec_sliding_window: None,
+    };
+
+    assert!(normalizer.preprocess(parent, worker).is_some());
+    let child = normalizer.preprocess(child, worker).unwrap();
+
+    let RawKvEvent::BlockStored {
+        cache_namespace, ..
+    } = child
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+}
+
+#[test]
 fn test_normalizer_ignores_non_main_attention_kind_with_group_idx_zero() {
     let raw_event: RawKvEvent = from_slice(&sequence_with_cache_spec_kind(
         TestEventKind::BlockStored,
@@ -457,6 +577,7 @@ fn test_convert_event_bigram_emits_eagle_windows() {
         block_size: 2,
         medium: None,
         lora_name: None,
+        cache_namespace: None,
         block_mm_infos: None,
         is_eagle: Some(true),
         group_idx: None,
@@ -529,6 +650,7 @@ fn cpu_block_stored(fixture: CpuBlockStoredFixture<'_>) -> RawKvEvent {
         block_size: fixture.block_size,
         medium: Some("CPU".to_string()),
         lora_name: None,
+        cache_namespace: None,
         block_mm_infos: None,
         is_eagle: None,
         group_idx: None,

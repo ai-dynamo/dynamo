@@ -32,6 +32,7 @@ fn bs_event(
         block_size,
         lora_name,
         medium: None,
+        cache_namespace: None,
         block_mm_infos: None,
         is_eagle: None,
         group_idx: None,

@@ -18,7 +18,7 @@ import dataclasses
 import logging
 import os
 import re
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, Optional, Protocol, Union
@@ -62,6 +62,23 @@ if TYPE_CHECKING:
 configure_dynamo_logging()
 
 logger = logging.getLogger(__name__)
+
+
+def _request_cache_salt(request: Mapping[str, Any]) -> Optional[str]:
+    routing = request.get("routing") or {}
+    if isinstance(routing, dict):
+        cache_salt = routing.get("cache_salt")
+        if cache_salt is not None:
+            return cache_salt
+
+    extra_args = request.get("extra_args") or {}
+    nvext = extra_args.get("nvext") if isinstance(extra_args, dict) else None
+    if isinstance(nvext, dict):
+        cache_salt = nvext.get("cache_salt")
+        if cache_salt is not None:
+            return cache_salt
+
+    return None
 
 
 class TRTLLMEnginePauseController:
@@ -1110,6 +1127,7 @@ class HandlerBase(BaseGenerativeHandler):
 
         # Priority is a float in [0.0, 1.0]; health checks use 1.0. Default is 0.5.
         priority = request.get("priority", DEFAULT_REQUEST_PRIORITY)
+        cache_salt = _request_cache_salt(request)
 
         try:
             # NEW: Updated engine call to include multimodal data
@@ -1121,6 +1139,7 @@ class HandlerBase(BaseGenerativeHandler):
                 trace_headers=trace_headers,
                 scheduling_params=scheduling_params,
                 priority=priority,
+                cache_salt=cache_salt,
             )
 
             # In disagg decode mode, wrap abort() to defer until first token

@@ -160,6 +160,7 @@ class ZmqKvEventPublisher:
         block_mm_infos: Optional[list[dict | None]] = None,
         attention_dp_rank: int = 0,
         lora_name: Optional[str] = None,
+        cache_salt: Optional[str] = None,
     ) -> None:
         """Publish a BlockStored event.
 
@@ -182,6 +183,8 @@ class ZmqKvEventPublisher:
         }
         if lora_name is not None:
             event["lora_name"] = lora_name
+        if cache_salt is not None:
+            event["cache_salt"] = cache_salt
 
         # Add multimodal info if present
         if block_mm_infos is not None:
@@ -868,16 +871,18 @@ class Publisher:
                     block_mm_infos.append(None)
 
             lora_name = data.get("lora_name")
+            cache_salt = data.get("cache_salt")
 
             logger.debug(
                 "Publishing stored KV event: engine_event_id=%s "
-                "attention_dp_rank=%s blocks=%s tokens=%s lora_name=%s "
+                "attention_dp_rank=%s blocks=%s tokens=%s lora_name=%s cache_salt=%s "
                 "has_parent=%s",
                 event_id,
                 attention_dp_rank,
                 len(block_hashes),
                 len(token_ids),
                 lora_name,
+                cache_salt,
                 parent_hash is not None,
             )
             # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
@@ -892,6 +897,7 @@ class Publisher:
                     block_mm_infos,
                     attention_dp_rank,
                     lora_name,
+                    cache_salt,
                 )
             elif self.kv_event_publishers:
                 # No consolidator: publish to NATS (router subscribes directly)
@@ -905,6 +911,7 @@ class Publisher:
                         parent_hash,
                         block_mm_infos,
                         lora_name=lora_name,
+                        cache_salt=cache_salt,
                     )
                 else:
                     logging.warning(

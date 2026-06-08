@@ -17,6 +17,44 @@ pub fn parse_mm_hash_from_extra_key(s: &str) -> Option<u64> {
     None
 }
 
+fn cache_namespace_candidate<'a>(value: &'a str, lora_name: Option<&str>) -> Option<&'a str> {
+    if value.is_empty() {
+        return None;
+    }
+    if lora_name.is_some_and(|name| name == value) {
+        return None;
+    }
+    if parse_mm_hash_from_extra_key(value).is_some() {
+        return None;
+    }
+    Some(value)
+}
+
+/// Extract a vLLM cache salt from `extra_keys` when a producer does not emit
+/// top-level `cache_salt`. vLLM aligns `extra_keys` with blocks and includes
+/// request-wide extras in each block, so the first block is enough.
+pub fn extra_keys_to_cache_namespace(
+    extra_keys: Option<&[Option<Vec<ExtraKeyItem>>]>,
+    lora_name: Option<&str>,
+) -> Option<String> {
+    let first_block = extra_keys?.first()?.as_ref()?;
+    first_block.iter().find_map(|key| match key {
+        ExtraKeyItem::Hash(hash)
+        | ExtraKeyItem::HashWithSignedOffset((hash, _))
+        | ExtraKeyItem::HashWithUnsignedOffset((hash, _)) => {
+            cache_namespace_candidate(hash, lora_name).map(str::to_owned)
+        }
+        ExtraKeyItem::Bytes(bytes) => std::str::from_utf8(bytes)
+            .ok()
+            .and_then(|value| cache_namespace_candidate(value, lora_name))
+            .map(str::to_owned),
+        ExtraKeyItem::Signed(_)
+        | ExtraKeyItem::Unsigned(_)
+        | ExtraKeyItem::Float(_)
+        | ExtraKeyItem::Bool(_) => None,
+    })
+}
+
 /// Convert vLLM BlockStored extra_keys to block-level MM infos.
 /// extra_keys is a list aligned with blocks:
 /// - None => no MM content in that block

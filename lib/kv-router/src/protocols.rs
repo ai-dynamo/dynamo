@@ -21,6 +21,8 @@ pub const KV_EVENT_SUBJECT: &str = "kv-events";
 
 /// Seed for XXH3 hashing, consistent with indexer.rs
 pub const XXH3_SEED: u64 = 1337;
+const LORA_HASH_SEED: u64 = XXH3_SEED ^ 0x9e37_79b1_85eb_ca87;
+const CACHE_NAMESPACE_HASH_SEED: u64 = XXH3_SEED ^ 0xc2b2_ae3d_27d4_eb4f;
 
 /// Compute the hash of a local block.
 pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
@@ -31,7 +33,22 @@ pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
 pub struct BlockHashOptions<'a> {
     pub block_mm_infos: Option<&'a [Option<BlockExtraInfo>]>,
     pub lora_name: Option<&'a str>,
+    pub cache_namespace: Option<&'a str>,
     pub is_eagle: Option<bool>,
+}
+
+fn block_hash_seed(options: BlockHashOptions<'_>) -> u64 {
+    let mut seed = XXH3_SEED;
+    if let Some(name) = options.lora_name.filter(|n| !n.is_empty()) {
+        seed = seed.wrapping_add(xxh3::xxh3_64_with_seed(name.as_bytes(), LORA_HASH_SEED));
+    }
+    if let Some(namespace) = options.cache_namespace.filter(|n| !n.is_empty()) {
+        seed = seed.wrapping_add(xxh3::xxh3_64_with_seed(
+            namespace.as_bytes(),
+            CACHE_NAMESPACE_HASH_SEED,
+        ));
+    }
+    seed
 }
 
 #[inline]
@@ -70,18 +87,16 @@ pub fn pad_value_for_mm_hash(mm_hash: u64) -> u32 {
     (MM_PAD_SHIFT_VALUE + (mm_hash & MM_PAD_HASH_MASK)) as u32
 }
 
-/// Compute the hash for a sequence of tokens, optionally including multimodal metadata
-/// and LoRA adapter identity.
+/// Compute the hash for a sequence of tokens, optionally including multimodal metadata,
+/// LoRA adapter identity, and cache namespace.
 ///
 /// When multimodal extra info is provided, the mm_hashes are included in the hash computation
 /// to ensure that blocks with identical tokens but different multimodal objects produce
 /// different hashes.
 ///
-/// When `lora_name` is provided, the adapter name is mixed into the XXH3 seed so that
-/// blocks cached under different LoRA adapters (or the base model) produce distinct hashes.
-/// Because LoRA identity applies uniformly to every block in a sequence, encoding it in the
-/// seed is more efficient than appending per-block bytes and matches the approach used by
-/// KVBM's `SaltHash`.
+/// When `lora_name` or `cache_namespace` is provided, those request-wide identities are
+/// mixed into the XXH3 seed so blocks cached under different adapters or namespaces produce
+/// distinct hashes. Empty strings are treated as absent.
 pub fn compute_block_hash_for_seq(
     tokens: &[u32],
     kv_block_size: u32,
@@ -91,10 +106,7 @@ pub fn compute_block_hash_for_seq(
         return Vec::new();
     }
 
-    let seed = match options.lora_name.filter(|n| !n.is_empty()) {
-        Some(name) => XXH3_SEED.wrapping_add(xxh3::xxh3_64(name.as_bytes())),
-        None => XXH3_SEED,
-    };
+    let seed = block_hash_seed(options);
     let is_eagle_flag = options.is_eagle.unwrap_or(false);
     let stride = kv_block_size as usize;
     let window_size = if is_eagle_flag { stride + 1 } else { stride };
@@ -444,6 +456,8 @@ pub enum RouterRequest {
         strict_priority: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lora_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_namespace: Option<String>,
     },
     PotentialLoads {
         tokens: Vec<Token>,
@@ -451,6 +465,8 @@ pub enum RouterRequest {
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lora_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_namespace: Option<String>,
     },
     MarkPrefill {
         // once prefill completes, the frontend might not be allowed to send a
@@ -475,6 +491,7 @@ impl Default for RouterRequest {
             priority_jump: 0.0,
             strict_priority: 0,
             lora_name: None,
+            cache_namespace: None,
         }
     }
 }
@@ -1033,6 +1050,7 @@ pub struct TokensWithHashes {
     block_size: u32,
     block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
     lora_name: Option<String>,
+    cache_namespace: Option<String>,
     block_hashes: Option<Vec<LocalBlockHash>>,
     seq_hashes: Option<Vec<SequenceHash>>,
     is_eagle: Option<bool>,
@@ -1046,6 +1064,7 @@ impl TokensWithHashes {
             block_size,
             block_mm_infos: None,
             lora_name: None,
+            cache_namespace: None,
             block_hashes: None,
             seq_hashes: None,
             is_eagle: None,
@@ -1062,6 +1081,13 @@ impl TokensWithHashes {
     /// Sets the LoRA adapter name for hash computation.
     pub fn with_lora_name(mut self, name: String) -> Self {
         self.lora_name = Some(name);
+        self.invalidate_hashes();
+        self
+    }
+
+    /// Sets the cache namespace for hash computation.
+    pub fn with_cache_namespace(mut self, namespace: String) -> Self {
+        self.cache_namespace = Some(namespace);
         self.invalidate_hashes();
         self
     }
@@ -1122,6 +1148,7 @@ impl TokensWithHashes {
                 BlockHashOptions {
                     block_mm_infos: self.block_mm_infos.as_deref(),
                     lora_name: self.lora_name.as_deref(),
+                    cache_namespace: self.cache_namespace.as_deref(),
                     is_eagle: self.is_eagle,
                 },
             ));
@@ -1296,6 +1323,62 @@ mod tests {
     }
 
     #[test]
+    fn test_cache_namespace_produces_different_hash() {
+        let tokens: Vec<u32> = (0..4).collect();
+        let base = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
+        let namespace_a = compute_block_hash_for_seq(
+            &tokens,
+            4,
+            BlockHashOptions {
+                cache_namespace: Some("tenant-a"),
+                ..Default::default()
+            },
+        );
+        let namespace_b = compute_block_hash_for_seq(
+            &tokens,
+            4,
+            BlockHashOptions {
+                cache_namespace: Some("tenant-b"),
+                ..Default::default()
+            },
+        );
+        let lora_a = compute_block_hash_for_seq(
+            &tokens,
+            4,
+            BlockHashOptions {
+                lora_name: Some("tenant-a"),
+                ..Default::default()
+            },
+        );
+
+        assert_ne!(base[0], namespace_a[0]);
+        assert_ne!(base[0], namespace_b[0]);
+        assert_ne!(namespace_a[0], namespace_b[0]);
+        assert_ne!(
+            namespace_a[0], lora_a[0],
+            "namespace and lora salts must use independent seed domains"
+        );
+    }
+
+    #[test]
+    fn test_cache_namespace_empty_string_normalized_to_none() {
+        let tokens: Vec<u32> = (0..4).collect();
+        let base = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
+        let empty = compute_block_hash_for_seq(
+            &tokens,
+            4,
+            BlockHashOptions {
+                cache_namespace: Some(""),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            base, empty,
+            "empty cache_namespace should be treated as absent"
+        );
+    }
+
+    #[test]
     fn test_tokens_with_hashes_lora() {
         let tokens: Vec<u32> = (0..8).collect();
 
@@ -1367,6 +1450,47 @@ mod tests {
         assert_eq!(actual_block_hashes, expected_block_hashes);
         assert_eq!(actual_sequence_hashes, expected_sequence_hashes);
         assert_ne!(actual_sequence_hashes, text_sequence_hashes);
+    }
+
+    #[test]
+    fn test_tokens_with_hashes_cache_namespace() {
+        let tokens: Vec<u32> = (0..8).collect();
+
+        let mut base = TokensWithHashes::new(tokens.clone(), 4);
+        let base_hashes = base.get_or_compute_block_hashes().to_vec();
+
+        let mut with_namespace =
+            TokensWithHashes::new(tokens, 4).with_cache_namespace("tenant-a".to_string());
+        let namespace_hashes = with_namespace.get_or_compute_block_hashes().to_vec();
+
+        assert_eq!(base_hashes.len(), namespace_hashes.len());
+        for (base, namespaced) in base_hashes.iter().zip(namespace_hashes.iter()) {
+            assert_ne!(base, namespaced);
+        }
+    }
+
+    #[test]
+    fn test_tokens_with_hashes_cache_namespace_change_recomputes_cached_hashes() {
+        let tokens: Vec<u32> = (0..8).collect();
+        let mut with_hashes = TokensWithHashes::new(tokens.clone(), 4);
+        let base_sequence_hashes = with_hashes.get_or_compute_seq_hashes().to_vec();
+
+        let mut with_hashes = with_hashes.with_cache_namespace("tenant-a".to_string());
+        let actual_block_hashes = with_hashes.get_or_compute_block_hashes().to_vec();
+        let actual_sequence_hashes = with_hashes.get_or_compute_seq_hashes().to_vec();
+        let expected_block_hashes = compute_block_hash_for_seq(
+            &tokens,
+            4,
+            BlockHashOptions {
+                cache_namespace: Some("tenant-a"),
+                ..Default::default()
+            },
+        );
+        let expected_sequence_hashes = compute_seq_hash_for_block(&expected_block_hashes);
+
+        assert_eq!(actual_block_hashes, expected_block_hashes);
+        assert_eq!(actual_sequence_hashes, expected_sequence_hashes);
+        assert_ne!(actual_sequence_hashes, base_sequence_hashes);
     }
 
     #[test]
@@ -1607,6 +1731,7 @@ mod tests {
             priority_jump: 5.0,
             strict_priority: 0,
             lora_name: None,
+            cache_namespace: None,
         };
 
         let serialized = serde_json::to_string(&request).unwrap();
@@ -1634,6 +1759,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             lora_name: Some("adapter-a".to_string()),
+            cache_namespace: None,
         };
 
         let serialized = serde_json::to_string(&request).unwrap();
@@ -1677,6 +1803,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 4,
             lora_name: None,
+            cache_namespace: None,
         };
 
         let serialized = serde_json::to_string(&request).unwrap();
@@ -1702,6 +1829,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             lora_name: None,
+            cache_namespace: None,
         };
         assert_eq!(
             serde_json::to_string(&zero).unwrap(),
@@ -1710,11 +1838,41 @@ mod tests {
     }
 
     #[test]
+    fn test_router_request_new_serialization_with_cache_namespace() {
+        let request = RouterRequest::New {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            routing_constraints: RoutingConstraints::default(),
+            priority_jump: 0.0,
+            strict_priority: 0,
+            lora_name: None,
+            cache_namespace: Some("tenant-a".to_string()),
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            serialized,
+            r#"{"method":"new","tokens":[1,2,3],"priority_jump":0.0,"cache_namespace":"tenant-a"}"#
+        );
+        assert!(matches!(
+            deserialized,
+            RouterRequest::New {
+                tokens,
+                cache_namespace: Some(ref cache_namespace),
+                ..
+            } if tokens == vec![1, 2, 3] && cache_namespace == "tenant-a"
+        ));
+    }
+
+    #[test]
     fn test_router_request_potential_loads_serialization_with_lora_name() {
         let request = RouterRequest::PotentialLoads {
             tokens: vec![1, 2, 3],
             block_mm_infos: None,
             lora_name: Some("adapter-a".to_string()),
+            cache_namespace: None,
         };
 
         let serialized = serde_json::to_string(&request).unwrap();
@@ -1730,7 +1888,34 @@ mod tests {
                 tokens,
                 block_mm_infos: None,
                 lora_name: Some(ref lora_name),
+                cache_namespace: None,
             } if tokens == vec![1, 2, 3] && lora_name == "adapter-a"
+        ));
+    }
+
+    #[test]
+    fn test_router_request_potential_loads_serialization_with_cache_namespace() {
+        let request = RouterRequest::PotentialLoads {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            lora_name: None,
+            cache_namespace: Some("tenant-a".to_string()),
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            serialized,
+            r#"{"method":"potential_loads","tokens":[1,2,3],"cache_namespace":"tenant-a"}"#
+        );
+        assert!(matches!(
+            deserialized,
+            RouterRequest::PotentialLoads {
+                tokens,
+                cache_namespace: Some(ref cache_namespace),
+                ..
+            } if tokens == vec![1, 2, 3] && cache_namespace == "tenant-a"
         ));
     }
 
@@ -1745,6 +1930,7 @@ mod tests {
                 tokens,
                 block_mm_infos: None,
                 lora_name: None,
+                cache_namespace: None,
             } if tokens == vec![1, 2, 3]
         ));
     }

@@ -23,8 +23,12 @@ mod filter;
 mod tests;
 mod types;
 
-pub use convert::{convert_event, create_stored_block_from_parts, create_stored_blocks};
-pub use extra_keys::{extra_keys_to_block_mm_infos, parse_mm_hash_from_extra_key};
+pub use convert::{
+    StoredBlockOptions, convert_event, create_stored_block_from_parts, create_stored_blocks,
+};
+pub use extra_keys::{
+    extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace, parse_mm_hash_from_extra_key,
+};
 pub use filter::KvCacheSpecKind;
 pub use types::{BlockHashValue, ExtraKeyItem, KvEventBatch, KvTokenIds, RawKvEvent};
 
@@ -43,6 +47,7 @@ pub struct ZmqEventNormalizer {
     image_token_id: Option<u32>,
     warning_count: Arc<AtomicU32>,
     group_metadata: FxHashMap<(DpRank, u32), KvCacheGroupMetadata>,
+    cache_namespaces: FxHashMap<u64, String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -79,6 +84,7 @@ impl ZmqEventNormalizer {
             image_token_id: None,
             warning_count: Arc::new(AtomicU32::new(0)),
             group_metadata: FxHashMap::default(),
+            cache_namespaces: FxHashMap::default(),
         }
     }
 
@@ -88,6 +94,7 @@ impl ZmqEventNormalizer {
             image_token_id: None,
             warning_count,
             group_metadata: FxHashMap::default(),
+            cache_namespaces: FxHashMap::default(),
         }
     }
 
@@ -105,7 +112,7 @@ impl ZmqEventNormalizer {
 
     pub fn preprocess_with_reason(
         &mut self,
-        raw: RawKvEvent,
+        mut raw: RawKvEvent,
         worker: WorkerWithDpRank,
     ) -> Result<RawKvEvent, ZmqEventFilterReason> {
         if raw.is_ignored() {
@@ -119,6 +126,7 @@ impl ZmqEventNormalizer {
         if let Some(reason) = self.filter_reason(metadata, worker.dp_rank) {
             return Err(reason);
         }
+        self.propagate_cache_namespace(&mut raw);
         Ok(raw)
     }
 
@@ -161,6 +169,45 @@ impl ZmqEventNormalizer {
                 sliding_window: metadata.kv_cache_spec_sliding_window,
             },
         );
+    }
+
+    fn propagate_cache_namespace(&mut self, raw: &mut RawKvEvent) {
+        match raw {
+            RawKvEvent::BlockStored {
+                block_hashes,
+                parent_block_hash,
+                cache_namespace,
+                ..
+            } => {
+                if cache_namespace.is_none()
+                    && let Some(parent) = parent_block_hash.as_ref()
+                    && let Some(namespace) =
+                        self.cache_namespaces.get(&(*parent).into_u64()).cloned()
+                {
+                    *cache_namespace = Some(namespace);
+                }
+
+                if let Some(namespace) = cache_namespace.as_ref().filter(|ns| !ns.is_empty()) {
+                    for block_hash in block_hashes.iter() {
+                        self.cache_namespaces
+                            .insert((*block_hash).into_u64(), namespace.clone());
+                    }
+                } else {
+                    for block_hash in block_hashes.iter() {
+                        self.cache_namespaces.remove(&(*block_hash).into_u64());
+                    }
+                }
+            }
+            RawKvEvent::BlockRemoved { block_hashes, .. } => {
+                for block_hash in block_hashes.iter() {
+                    self.cache_namespaces.remove(&(*block_hash).into_u64());
+                }
+            }
+            RawKvEvent::AllBlocksCleared => {
+                self.cache_namespaces.clear();
+            }
+            RawKvEvent::Ignored => {}
+        }
     }
 
     fn filter_reason(

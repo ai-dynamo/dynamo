@@ -368,6 +368,63 @@ def test_publisher_initialize_constructs_fpm_direct_publisher_when_fpm_enabled(
     assert pub.fpm_publisher is not None
 
 
+def _publisher_for_kv_event_test():
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub.additional_metrics = None
+    pub._last_engine_event_id_by_rank = {}
+    pub.processing_initial_created_events = False
+    pub.partial_block_hashes = set()
+    pub.kv_block_size = 4
+    pub.max_window_size = None
+    return pub
+
+
+def _stored_kv_event(cache_salt="tenant-a"):
+    return {
+        "event_id": 1,
+        "attention_dp_rank": 0,
+        "data": {
+            "type": "stored",
+            "parent_hash": None,
+            "cache_salt": cache_salt,
+            "blocks": [
+                {
+                    "block_hash": 123,
+                    "tokens": [
+                        {"token_id": 1},
+                        {"token_id": 2},
+                        {"token_id": 3},
+                        {"token_id": 4},
+                    ],
+                }
+            ],
+        },
+    }
+
+
+def test_handle_kv_event_forwards_cache_salt_to_direct_publisher():
+    pub = _publisher_for_kv_event_test()
+    publisher = MagicMock()
+    pub.zmq_kv_event_publisher = None
+    pub.kv_event_publishers = {0: publisher}
+
+    pub._handle_kv_event(_stored_kv_event())
+
+    publisher.publish_stored.assert_called_once()
+    assert publisher.publish_stored.call_args.kwargs["cache_salt"] == "tenant-a"
+
+
+def test_handle_kv_event_forwards_cache_salt_to_zmq_publisher():
+    pub = _publisher_for_kv_event_test()
+    pub.zmq_kv_event_publisher = MagicMock()
+    pub.kv_event_publishers = None
+
+    pub._handle_kv_event(_stored_kv_event())
+
+    pub.zmq_kv_event_publisher.publish_stored.assert_called_once()
+    assert pub.zmq_kv_event_publisher.publish_stored.call_args.args[-1] == "tenant-a"
+
+
 def test_publisher_initializes_fpm_publisher_under_attention_dp(monkeypatch):
     """Under attention-DP (attention_dp_size > 1), Publisher.initialize()
     constructs one FpmDirectPublisher channel per attention-DP rank."""
