@@ -413,8 +413,14 @@ impl Model {
             let mut missing: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
             if !has_legacy {
                 for (wt, needs, count) in &wsets {
-                    let Some(_wt) = wt else { continue };
-                    if *count == 0 || needs.is_empty() {
+                    let Some(wt) = wt else { continue };
+                    // A typed role with no live workers is itself missing — record
+                    // it so the reason isn't an empty "missing worker types: ".
+                    if *count == 0 {
+                        missing.insert(wt.as_str().to_string());
+                        continue;
+                    }
+                    if needs.is_empty() {
                         continue;
                     }
                     let satisfied = needs
@@ -1441,6 +1447,29 @@ mod tests {
         let ns = &topo.namespaces["ns1"];
         assert!(!ns.ready);
         assert_eq!(ns.present, vec!["decode".to_string()]);
+        assert_eq!(ns.missing_worker_types, vec!["prefill".to_string()]);
+        assert_eq!(ns.reason.as_deref(), Some("missing worker types: prefill"));
+    }
+
+    #[test]
+    fn topology_zero_worker_role_reported_missing() {
+        // A typed role registered with no live workers must surface as missing,
+        // not produce an empty "missing worker types: " reason.
+        let model = Model::new("llama".to_string());
+        let (p, _tp) = ws_with_role(
+            "ns1",
+            "mdc-p",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![], // registered, but zero live workers
+        );
+        model.add_worker_set("ns1".to_string(), p);
+
+        let topo = model.namespace_topology();
+        assert!(!topo.ready);
+        let ns = &topo.namespaces["ns1"];
+        assert!(!ns.ready);
+        assert!(ns.present.is_empty());
         assert_eq!(ns.missing_worker_types, vec!["prefill".to_string()]);
         assert_eq!(ns.reason.as_deref(), Some("missing worker types: prefill"));
     }
