@@ -103,11 +103,13 @@ pub struct TcpStreamServer {
 struct RequestedSendConnection {
     context: Arc<dyn AsyncEngineContext>,
     connection: oneshot::Sender<Result<StreamSender, String>>,
+    buffer_count: usize,
 }
 
 struct RequestedRecvConnection {
     context: Arc<dyn AsyncEngineContext>,
     connection: oneshot::Sender<Result<StreamReceiver, String>>,
+    buffer_count: usize,
 }
 
 // /// When registering a new TcpStream on the server, the registration method will return a [`Connections`] object.
@@ -396,6 +398,7 @@ impl ResponseService for TcpStreamServer {
             let connection_info = RequestedSendConnection {
                 context: options.context.clone(),
                 connection: pending_sender_tx,
+                buffer_count: options.send_buffer_count,
             };
 
             let mut state = self.state.lock().await;
@@ -443,6 +446,7 @@ impl ResponseService for TcpStreamServer {
             let connection_info = RequestedRecvConnection {
                 context: options.context.clone(),
                 connection: pending_recver_tx,
+                buffer_count: options.recv_buffer_count,
             };
 
             let mut state = self.state.lock().await;
@@ -652,11 +656,10 @@ async fn tcp_listener(
         let RequestedSendConnection {
             context,
             connection,
+            buffer_count,
         } = request_stream;
 
-        // Buffer size matches `process_response_stream`; both should be driven
-        // by the registration options rather than hard-coded. See #10293.
-        let (request_tx, request_rx) = mpsc::channel(64);
+        let (request_tx, request_rx) = mpsc::channel(buffer_count);
 
         if connection
             .send(Ok(crate::pipeline::network::StreamSender {
@@ -769,6 +772,7 @@ async fn tcp_listener(
         let RequestedRecvConnection {
             context,
             connection,
+            buffer_count,
         } = response_stream;
 
         // the [`Prologue`]
@@ -807,9 +811,7 @@ async fn tcp_listener(
             return Err(error!("Received error prologue: {}", error));
         }
 
-        // Buffer size should be driven by the registration options rather than
-        // hard-coded; the same applies to `process_request_stream`. See #10293.
-        let (response_tx, response_rx) = mpsc::channel(64);
+        let (response_tx, response_rx) = mpsc::channel(buffer_count);
 
         if connection
             .send(Ok(crate::pipeline::network::StreamReceiver {
@@ -1139,6 +1141,56 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_register_records_stream_buffer_counts() {
+        let server = test_server().await;
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(true)
+            .enable_response_stream(true)
+            .send_buffer_count(3)
+            .recv_buffer_count(5)
+            .build()
+            .unwrap();
+
+        let pending = server.register(options).await;
+        let send_info: TcpStreamConnectionInfo = pending
+            .send_stream
+            .as_ref()
+            .unwrap()
+            .connection_info
+            .clone()
+            .try_into()
+            .unwrap();
+        let recv_info: TcpStreamConnectionInfo = pending
+            .recv_stream
+            .as_ref()
+            .unwrap()
+            .connection_info
+            .clone()
+            .try_into()
+            .unwrap();
+
+        let state = server.state.lock().await;
+        assert_eq!(
+            state
+                .tx_subjects
+                .get(&send_info.subject)
+                .expect("request stream should be registered")
+                .buffer_count,
+            3
+        );
+        assert_eq!(
+            state
+                .rx_subjects
+                .get(&recv_info.subject)
+                .expect("response stream should be registered")
+                .buffer_count,
+            5
+        );
     }
 
     /// Helper: register a response stream and extract its subject string.
