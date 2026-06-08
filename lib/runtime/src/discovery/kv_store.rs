@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use super::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
     DiscoverySpec, DiscoveryStream, EndpointInstanceId, EventChannelInstanceId,
-    ModelCardInstanceId,
+    ModelCardInstanceId, resolve_logical_instance_id,
 };
 use crate::storage::kv;
 
@@ -24,13 +24,18 @@ const EVENT_CHANNELS_BUCKET: &str = "v1/event_channels";
 pub struct KVStoreDiscovery {
     store: Arc<kv::Manager>,
     cancel_token: CancellationToken,
+    instance_id: u64,
 }
 
 impl KVStoreDiscovery {
     pub fn new(store: kv::Manager, cancel_token: CancellationToken) -> Self {
+        let physical_instance_id = store.connection_id();
+        let instance_id = resolve_logical_instance_id(physical_instance_id)
+            .expect("invalid logical discovery instance identity");
         Self {
             store: Arc::new(store),
             cancel_token,
+            instance_id,
         }
     }
 
@@ -153,7 +158,7 @@ impl KVStoreDiscovery {
 #[async_trait]
 impl Discovery for KVStoreDiscovery {
     fn instance_id(&self) -> u64 {
-        self.store.connection_id()
+        self.instance_id
     }
 
     async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {

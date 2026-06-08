@@ -7,11 +7,13 @@
 //! providing a consistent interface across all transport types.
 
 use super::unified_client::{ClientStats, Headers, RequestPlaneClient};
+use crate::config::environment_names::nats::DYN_NATS_REQUEST_TIMEOUT_MS;
 use crate::error::{DynamoError, ErrorType};
 use crate::metrics::transport_metrics::NATS_ERRORS_TOTAL;
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
+use std::time::Duration;
 
 /// Client-facing message for oversized request payloads.
 ///
@@ -20,6 +22,19 @@ use bytes::Bytes;
 /// diagnostics (subject, payload_bytes, max_payload_bytes) live in logs and
 /// the `nats_errors_total` metric instead.
 const MAX_PAYLOAD_USER_MESSAGE: &str = "Request payload is too large for this deployment. Reduce the input size or metadata size and retry.";
+const DEFAULT_NATS_REQUEST_TIMEOUT_MS: u64 = 2_000;
+
+fn request_timeout_from_value(value: Option<&str>) -> Duration {
+    value
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|&millis| millis > 0)
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_millis(DEFAULT_NATS_REQUEST_TIMEOUT_MS))
+}
+
+fn request_timeout_from_env() -> Duration {
+    request_timeout_from_value(std::env::var(DYN_NATS_REQUEST_TIMEOUT_MS).ok().as_deref())
+}
 
 /// NATS implementation of RequestPlaneClient
 ///
@@ -28,6 +43,7 @@ const MAX_PAYLOAD_USER_MESSAGE: &str = "Request payload is too large for this de
 pub struct NatsRequestClient {
     client: async_nats::Client,
     max_payload: usize,
+    request_timeout: Duration,
 }
 
 impl NatsRequestClient {
@@ -45,6 +61,7 @@ impl NatsRequestClient {
         Self {
             client,
             max_payload,
+            request_timeout: request_timeout_from_env(),
         }
     }
 
@@ -90,25 +107,50 @@ impl RequestPlaneClient for NatsRequestClient {
             nats_headers.insert(key.as_str(), value.as_str());
         }
 
-        // Send request with headers
-        let response = self
-            .client
-            .request_with_headers(address.clone(), nats_headers, payload)
-            .await
-            .map_err(|e| {
+        // Send request with headers. The response is only the request-plane
+        // acknowledgment; generation output arrives over the response stream.
+        let request_timeout = self.request_timeout;
+        let response = tokio::time::timeout(
+            request_timeout,
+            self.client
+                .request_with_headers(address.clone(), nats_headers, payload),
+        )
+        .await;
+
+        match response {
+            Ok(Ok(response)) => Ok(response.payload),
+            Ok(Err(e)) => {
                 NATS_ERRORS_TOTAL
                     .with_label_values(&["request_failed"])
                     .inc();
-                anyhow::anyhow!(
+                Err(anyhow::anyhow!(
                     DynamoError::builder()
                         .error_type(ErrorType::CannotConnect)
                         .message(format!("NATS request to {address} failed"))
                         .cause(e)
                         .build()
-                )
-            })?;
-
-        Ok(response.payload)
+                ))
+            }
+            Err(_) => {
+                NATS_ERRORS_TOTAL
+                    .with_label_values(&["request_timeout"])
+                    .inc();
+                tracing::warn!(
+                    address = %address,
+                    timeout_ms = request_timeout.as_millis(),
+                    "NATS request-plane ack timed out"
+                );
+                Err(anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::CannotConnect)
+                        .message(format!(
+                            "NATS request to {address} timed out after {}ms",
+                            request_timeout.as_millis()
+                        ))
+                        .build()
+                ))
+            }
+        }
     }
 
     fn transport_name(&self) -> &'static str {
@@ -157,5 +199,29 @@ mod tests {
         assert!(!err.message().contains("max_payload"));
         assert!(!err.message().contains("payload_bytes"));
         assert!(!err.message().contains("nats-server"));
+    }
+
+    #[test]
+    fn request_timeout_value_uses_default_for_missing_or_invalid_values() {
+        assert_eq!(
+            request_timeout_from_value(None),
+            Duration::from_millis(DEFAULT_NATS_REQUEST_TIMEOUT_MS)
+        );
+        assert_eq!(
+            request_timeout_from_value(Some("0")),
+            Duration::from_millis(DEFAULT_NATS_REQUEST_TIMEOUT_MS)
+        );
+        assert_eq!(
+            request_timeout_from_value(Some("not-a-number")),
+            Duration::from_millis(DEFAULT_NATS_REQUEST_TIMEOUT_MS)
+        );
+    }
+
+    #[test]
+    fn request_timeout_value_accepts_positive_millis() {
+        assert_eq!(
+            request_timeout_from_value(Some("750")),
+            Duration::from_millis(750)
+        );
     }
 }

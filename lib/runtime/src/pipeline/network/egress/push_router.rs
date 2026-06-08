@@ -61,6 +61,24 @@ fn response_inactivity_timeout() -> Option<std::time::Duration> {
         .map(std::time::Duration::from_secs)
 }
 
+fn no_instances_error(endpoint: &EndpointId) -> anyhow::Error {
+    DynamoError::builder()
+        .error_type(ErrorType::CannotConnect)
+        .message(format!("no instances found for endpoint {endpoint}"))
+        .build()
+        .into()
+}
+
+fn no_selected_device_group_error(endpoint: &EndpointId) -> anyhow::Error {
+    DynamoError::builder()
+        .error_type(ErrorType::CannotConnect)
+        .message(format!(
+            "no instances in selected device group for endpoint {endpoint}"
+        ))
+        .build()
+        .into()
+}
+
 struct OccupancyPermit {
     state: Arc<RoutingOccupancyState>,
     instance_id: u64,
@@ -353,12 +371,18 @@ fn spawn_instance_removal_watcher(
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
+                                if cancel_token.is_cancelled() {
+                                    break 'reconnect;
+                                }
                                 tracing::warn!(
                                     endpoint = %endpoint_name,
                                     "Instance removal watcher stream error: {e}"
                                 );
                             }
                             None => {
+                                if cancel_token.is_cancelled() {
+                                    break 'reconnect;
+                                }
                                 tracing::warn!(
                                     endpoint = %endpoint_name,
                                     "Instance removal watcher stream ended; reconnecting"

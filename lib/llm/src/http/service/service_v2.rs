@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::env::var;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -37,8 +38,75 @@ use dynamo_runtime::metrics::{
 };
 use std::net::SocketAddr;
 use tokio::task::JoinHandle;
+use tokio::time::{Instant, sleep};
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
+
+const DYN_HTTP_MODEL_FAILOVER_WAIT_MS: &str = "DYN_HTTP_MODEL_FAILOVER_WAIT_MS";
+pub(super) const MODEL_FAILOVER_WAIT_POLL_MS: u64 = 50;
+
+pub(super) fn model_failover_wait() -> Duration {
+    static WAIT: OnceLock<Duration> = OnceLock::new();
+    *WAIT.get_or_init(|| {
+        std::env::var(DYN_HTTP_MODEL_FAILOVER_WAIT_MS)
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_millis)
+            .unwrap_or_default()
+    })
+}
+
+fn should_wait_for_endpoint_failover(endpoint_type: EndpointType) -> bool {
+    matches!(
+        endpoint_type,
+        EndpointType::Chat | EndpointType::Completion | EndpointType::Responses
+    )
+}
+
+async fn endpoint_enabled_or_wait(state: &State, endpoint_type: EndpointType) -> bool {
+    if state.flags.get(&endpoint_type) {
+        return true;
+    }
+
+    let wait = model_failover_wait();
+    if wait.is_zero() || !should_wait_for_endpoint_failover(endpoint_type) {
+        return false;
+    }
+
+    let deadline = Instant::now() + wait;
+    let mut attempts = 0_u32;
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            if attempts > 0 {
+                tracing::warn!(
+                    endpoint = endpoint_type.as_str(),
+                    attempts,
+                    wait_ms = wait.as_millis(),
+                    "Endpoint remained disabled after HTTP failover wait"
+                );
+            }
+            return state.flags.get(&endpoint_type);
+        }
+
+        attempts += 1;
+        sleep(std::cmp::min(
+            Duration::from_millis(MODEL_FAILOVER_WAIT_POLL_MS),
+            deadline - now,
+        ))
+        .await;
+
+        if state.flags.get(&endpoint_type) {
+            tracing::info!(
+                endpoint = endpoint_type.as_str(),
+                attempts,
+                wait_ms = wait.as_millis(),
+                "Endpoint became enabled during HTTP failover wait"
+            );
+            return true;
+        }
+    }
+}
 
 /// Middleware that echoes `x-request-id` from request to response headers.
 async fn echo_request_id_header(
@@ -707,7 +775,7 @@ impl HttpServiceConfigBuilder {
                     let state: Arc<State> = state_route.clone();
                     async move {
                         // Check if the endpoint is enabled
-                        let enabled = state.flags.get(&endpoint_type);
+                        let enabled = endpoint_enabled_or_wait(&state, endpoint_type).await;
                         if enabled {
                             Ok(next.run(req).await)
                         } else {
@@ -728,6 +796,21 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn test_endpoint_failover_wait_scope() {
+        assert!(should_wait_for_endpoint_failover(EndpointType::Chat));
+        assert!(should_wait_for_endpoint_failover(EndpointType::Completion));
+        assert!(should_wait_for_endpoint_failover(EndpointType::Responses));
+
+        assert!(!should_wait_for_endpoint_failover(EndpointType::Embedding));
+        assert!(!should_wait_for_endpoint_failover(EndpointType::Images));
+        assert!(!should_wait_for_endpoint_failover(EndpointType::Videos));
+        assert!(!should_wait_for_endpoint_failover(EndpointType::Audios));
+        assert!(!should_wait_for_endpoint_failover(
+            EndpointType::AnthropicMessages
+        ));
+    }
 
     #[tokio::test]
     async fn test_liveness_endpoint_reflects_cancellation() {

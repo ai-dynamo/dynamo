@@ -125,6 +125,9 @@ pub mod nats {
     /// NATS server address (e.g., "nats://localhost:4222")
     pub const NATS_SERVER: &str = "NATS_SERVER";
 
+    /// Request-plane ack timeout in milliseconds for NATS requests.
+    pub const DYN_NATS_REQUEST_TIMEOUT_MS: &str = "DYN_NATS_REQUEST_TIMEOUT_MS";
+
     /// NATS authentication environment variables (checked in priority order)
     pub mod auth {
         /// Username for NATS authentication (use with NATS_AUTH_PASSWORD)
@@ -521,6 +524,15 @@ pub mod discovery {
 
     /// Kube discovery mode: "pod" (default) or "container" (each container registers independently)
     pub const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
+
+    /// Kube discovery daemon debounce window in milliseconds (default: 500).
+    pub const DYN_KUBE_DISCOVERY_DEBOUNCE_MS: &str = "DYN_KUBE_DISCOVERY_DEBOUNCE_MS";
+
+    /// Explicit logical discovery instance id shared by a failover cohort.
+    pub const DYN_DISCOVERY_LOGICAL_INSTANCE_ID: &str = "DYN_DISCOVERY_LOGICAL_INSTANCE_ID";
+
+    /// Stable logical discovery key hashed into an instance id shared by a failover cohort.
+    pub const DYN_DISCOVERY_LOGICAL_INSTANCE_KEY: &str = "DYN_DISCOVERY_LOGICAL_INSTANCE_KEY";
 }
 
 /// CUDA and GPU environment variables
@@ -602,6 +614,7 @@ mod tests {
             worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT,
             // NATS
             nats::NATS_SERVER,
+            nats::DYN_NATS_REQUEST_TIMEOUT_MS,
             nats::auth::NATS_AUTH_USERNAME,
             nats::auth::NATS_AUTH_PASSWORD,
             nats::auth::NATS_AUTH_TOKEN,

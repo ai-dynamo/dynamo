@@ -16,6 +16,7 @@ container infrastructure (tail -f, sleep in docker-init, etc.).
 Always use unique markers scoped to the test invocation.
 """
 
+import logging
 import os
 import signal
 import subprocess
@@ -353,3 +354,104 @@ class TestSigtermGracePeriod:
         assert os.path.exists(
             marker_file
         ), "Process was SIGKILLed before SIGTERM handler could run"
+
+
+# ---------------------------------------------------------------------------
+# Scenario 7: parent-first graceful teardown
+# ---------------------------------------------------------------------------
+class TestParentOnlyFirstTeardown:
+    def test_parent_only_signal_lets_parent_cleanup_child(self, tmp_path):
+        parent_marker = str(tmp_path / "parent_sigterm")
+        child_marker = str(tmp_path / "child_cleaned")
+        ready_file = str(tmp_path / "ready")
+        child_pid_file = str(tmp_path / "child_pid")
+        script = "\n".join(
+            [
+                "import pathlib, signal, subprocess, sys, time",
+                f"parent_marker = pathlib.Path({parent_marker!r})",
+                f"child_marker = pathlib.Path({child_marker!r})",
+                f"ready = pathlib.Path({ready_file!r})",
+                f"child_pid_file = pathlib.Path({child_pid_file!r})",
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])",
+                "child_pid_file.write_text(str(child.pid))",
+                "def on_term(*_):",
+                "    parent_marker.touch()",
+                "    child.terminate()",
+                "    child.wait(timeout=5)",
+                "    child_marker.touch()",
+                "    raise SystemExit(0)",
+                "signal.signal(signal.SIGTERM, on_term)",
+                "ready.touch()",
+                "while True:",
+                "    time.sleep(0.1)",
+            ]
+        )
+        mp = ManagedProcess(
+            command=["python3", "-c", script],
+            timeout=10,
+            display_output=False,
+            terminate_all_matching_process_names=False,
+            terminate_parent_only_first=True,
+            graceful_shutdown_timeout=5.0,
+            log_dir=str(tmp_path),
+        )
+
+        child_pid = None
+        with mp:
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not os.path.exists(ready_file):
+                time.sleep(0.05)
+            assert os.path.exists(ready_file)
+            child_pid = int(open(child_pid_file, encoding="utf-8").read())
+            assert _pid_alive(child_pid)
+
+        assert os.path.exists(parent_marker)
+        assert os.path.exists(child_marker)
+        assert child_pid is not None
+        assert _wait_for_pid_death(child_pid, timeout=5)
+
+    def test_parent_only_ignores_zombie_child_process_group(self, tmp_path, caplog):
+        ready_file = str(tmp_path / "ready")
+        child_pid_file = str(tmp_path / "child_pid")
+        script = "\n".join(
+            [
+                "import os, pathlib, time",
+                f"ready = pathlib.Path({ready_file!r})",
+                f"child_pid_file = pathlib.Path({child_pid_file!r})",
+                "pid = os.fork()",
+                "if pid == 0:",
+                "    os.setpgid(0, 0)",
+                "    os._exit(0)",
+                "child_pid_file.write_text(str(pid))",
+                "ready.touch()",
+                "while True:",
+                "    time.sleep(0.1)",
+            ]
+        )
+        mp = ManagedProcess(
+            command=["python3", "-c", script],
+            timeout=10,
+            display_output=False,
+            terminate_all_matching_process_names=False,
+            terminate_parent_only_first=True,
+            graceful_shutdown_timeout=0.5,
+            log_dir=str(tmp_path),
+        )
+
+        with caplog.at_level(logging.WARNING, logger="ManagedProcess"):
+            with mp:
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline and not os.path.exists(ready_file):
+                    time.sleep(0.05)
+                assert os.path.exists(ready_file)
+                child_pid = int(open(child_pid_file, encoding="utf-8").read())
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline:
+                    try:
+                        if psutil.Process(child_pid).status() == psutil.STATUS_ZOMBIE:
+                            break
+                    except psutil.NoSuchProcess:
+                        break
+                    time.sleep(0.05)
+
+        assert "child process groups are still live" not in caplog.text

@@ -4,14 +4,12 @@
 use anyhow::Result;
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
-use std::collections::hash_map::DefaultHasher;
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 use crate::config::environment_names::discovery;
+use crate::discovery::{DISCOVERY_INSTANCE_ID_MASK, hash_logical_instance_key};
 
-const INSTANCE_ID_MASK: u64 = 0x001F_FFFF_FFFF_FFFFu64;
 const MAIN_CONTAINER_NAME: &str = "main";
 
 /// Kube discovery mode.
@@ -60,9 +58,7 @@ impl KubeDiscoveryTarget {
 
     /// Deterministic instance ID derived from cr_name.
     pub fn instance_id(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.cr_name().hash(&mut hasher);
-        hasher.finish() & INSTANCE_ID_MASK
+        hash_logical_instance_key(&self.cr_name()) & DISCOVERY_INSTANCE_ID_MASK
     }
 
     pub fn pod_name(&self) -> &str {
@@ -76,9 +72,7 @@ impl KubeDiscoveryTarget {
 ///
 /// Used by C bindings (EPP) for pod-level worker ID mapping.
 pub fn hash_pod_name(pod_name: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    pod_name.hash(&mut hasher);
-    hasher.finish() & INSTANCE_ID_MASK
+    hash_logical_instance_key(pod_name) & DISCOVERY_INSTANCE_ID_MASK
 }
 
 /// Extract (instance_id, pod_name) tuples from an EndpointSlice for ready endpoints.
