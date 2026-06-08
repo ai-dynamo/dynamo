@@ -379,8 +379,10 @@ impl SlotTrackerRegistry {
             Some(sequence_hashes),
             &PrefillTokenDeltas::uniform(new_isl_tokens),
         );
+        let active_requests = entry.tracker.active_request_counts();
         let mut workers: FxHashSet<_> = decode_blocks.keys().copied().collect();
         workers.extend(prefill_tokens.keys().copied());
+        workers.extend(active_requests.keys().copied());
         Ok(workers
             .into_iter()
             .map(|worker| PotentialLoad {
@@ -388,6 +390,7 @@ impl SlotTrackerRegistry {
                 dp_rank: worker.dp_rank,
                 potential_prefill_tokens: prefill_tokens.get(&worker).copied().unwrap_or(0),
                 potential_decode_blocks: decode_blocks.get(&worker).copied().unwrap_or(0),
+                active_requests: active_requests.get(&worker).copied().unwrap_or(0),
             })
             .collect())
     }

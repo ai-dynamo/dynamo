@@ -2618,6 +2618,7 @@ class KvRouter:
                 - dp_rank: The data parallel rank
                 - potential_prefill_tokens: Number of tokens that would need prefill
                 - potential_decode_blocks: Number of blocks currently in decode phase
+                - active_requests: Number of active requests tracked on the worker
 
         Note:
             Each (worker_id, dp_rank) pair is returned as a separate entry.

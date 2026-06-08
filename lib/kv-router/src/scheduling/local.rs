@@ -365,10 +365,12 @@ where
             &prefill_token_deltas,
             decay_now,
         );
+        let active_requests = self.slots.active_request_counts();
 
         let mut workers: FxHashSet<WorkerWithDpRank> = FxHashSet::default();
         workers.extend(decode_blocks.keys().copied());
         workers.extend(prefill_tokens.keys().copied());
+        workers.extend(active_requests.keys().copied());
 
         let mut loads = Vec::with_capacity(workers.len());
         for worker in workers {
@@ -380,6 +382,7 @@ where
                     .copied()
                     .unwrap_or(isl_tokens),
                 potential_decode_blocks: decode_blocks.get(&worker).copied().unwrap_or(0),
+                active_requests: active_requests.get(&worker).copied().unwrap_or(0),
             });
         }
 
@@ -654,6 +657,12 @@ mod tests {
             scheduler.get_active_lora_counts(),
             HashMap::from([(String::from("adapter-a"), 1)])
         );
+        let loads = scheduler.get_potential_loads(Some(vec![1, 2, 3, 4]), 64, HashMap::new(), true);
+        let worker_load = loads
+            .iter()
+            .find(|load| load.worker_id == response.best_worker.worker_id && load.dp_rank == 0)
+            .expect("scheduled worker should appear in potential loads");
+        assert_eq!(worker_load.active_requests, 1);
 
         cancel_token.cancel();
     }
@@ -1139,6 +1148,7 @@ mod tests {
                 dp_rank: worker.dp_rank,
                 potential_prefill_tokens: prefill_tokens.get(worker).copied().unwrap_or(128),
                 potential_decode_blocks: decode_blocks.get(worker).copied().unwrap_or(0),
+                active_requests: 0,
             })
             .collect();
         expected.sort_by_key(|load| (load.worker_id, load.dp_rank));
@@ -1158,6 +1168,7 @@ mod tests {
                 actual.potential_decode_blocks,
                 expected.potential_decode_blocks
             );
+            assert_eq!(actual.active_requests, expected.active_requests);
         }
 
         cancel_token.cancel();

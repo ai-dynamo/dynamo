@@ -579,6 +579,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.request_index.active_lora_counts()
     }
 
+    pub fn active_request_counts(&self) -> HashMap<WorkerWithDpRank, usize> {
+        self.request_index.active_request_counts()
+    }
+
     /// Force expire stale requests across all workers (one-shot).
     ///
     /// This is necessary because worker expiration otherwise only runs as a side-effect
