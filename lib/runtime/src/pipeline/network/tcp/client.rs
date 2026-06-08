@@ -239,7 +239,10 @@ impl TcpClient {
             cancellation_counter,
         ));
 
-        Ok(StreamReceiver { rx: bytes_rx })
+        Ok(StreamReceiver {
+            rx: bytes_rx,
+            terminal: None,
+        })
     }
 }
 

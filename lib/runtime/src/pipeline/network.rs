@@ -340,6 +340,13 @@ impl StreamSender {
 
 pub struct StreamReceiver {
     rx: tokio::sync::mpsc::Receiver<Bytes>,
+    terminal: Option<tokio::sync::oneshot::Receiver<StreamTerminal>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamTerminal {
+    Clean,
+    Truncated,
 }
 
 /// Connection Info is encoded as JSON and then again serialized has part of the Transport

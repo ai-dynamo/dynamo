@@ -40,7 +40,7 @@ use crate::engine::AsyncEngineContext;
 use crate::pipeline::{
     PipelineError,
     network::{
-        ResponseService, ResponseStreamPrologue,
+        ResponseService, ResponseStreamPrologue, StreamTerminal,
         codec::{TwoPartMessage, TwoPartMessageType},
         tcp::StreamType,
     },
@@ -810,10 +810,12 @@ async fn tcp_listener(
         // Buffer size should be driven by the registration options rather than
         // hard-coded; the same applies to `process_request_stream`. See #10293.
         let (response_tx, response_rx) = mpsc::channel(64);
+        let (terminal_tx, terminal_rx) = oneshot::channel();
 
         if connection
             .send(Ok(crate::pipeline::network::StreamReceiver {
                 rx: response_rx,
+                terminal: Some(terminal_rx),
             }))
             .is_err()
         {
@@ -834,6 +836,7 @@ async fn tcp_listener(
             reader,
             response_tx,
             control_tx,
+            terminal_tx,
             context.clone(),
         ));
 
@@ -850,22 +853,26 @@ async fn tcp_listener(
         mut framed_reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
         response_tx: mpsc::Sender<Bytes>,
         control_tx: mpsc::Sender<ControlMessage>,
+        terminal_tx: oneshot::Sender<StreamTerminal>,
         context: Arc<dyn AsyncEngineContext>,
     ) {
         // loop over reading the tcp stream and checking if the writer is closed
         let mut can_stop = true;
+        let mut terminal_tx = Some(terminal_tx);
         loop {
             tokio::select! {
                 biased;
 
                 _ = response_tx.closed() => {
                     tracing::trace!("response channel closed before the client finished writing data");
+                    send_stream_terminal(&mut terminal_tx, StreamTerminal::Truncated);
                     let _ = control_tx.send(ControlMessage::Kill).await;
                     break;
                 }
 
                 _ = context.killed() => {
                     tracing::trace!("context kill signal received; shutting down");
+                    send_stream_terminal(&mut terminal_tx, StreamTerminal::Truncated);
                     let _ = control_tx.send(ControlMessage::Kill).await;
                     break;
                 }
@@ -873,6 +880,7 @@ async fn tcp_listener(
                 _ = context.stopped(), if can_stop => {
                     tracing::trace!("context stop signal received; shutting down");
                     can_stop = false;
+                    send_stream_terminal(&mut terminal_tx, StreamTerminal::Truncated);
                     let _ = control_tx.send(ControlMessage::Stop).await;
                 }
 
@@ -894,16 +902,19 @@ async fn tcp_listener(
                                                 data_len = data.len(),
                                                 "client sent Sentinel with data (protocol violation); killing stream"
                                             );
+                                            send_stream_terminal(&mut terminal_tx, StreamTerminal::Truncated);
                                             let _ = control_tx.send(ControlMessage::Kill).await;
                                             break;
                                         }
                                         tracing::trace!("received sentinel message; shutting down");
+                                        send_stream_terminal(&mut terminal_tx, StreamTerminal::Clean);
                                         break;
                                     }
                                     Err(e) => {
                                         // Malformed control message — kill only
                                         // this stream.
                                         tracing::warn!(err = ?e, "malformed control message, closing connection");
+                                        send_stream_terminal(&mut terminal_tx, StreamTerminal::Truncated);
                                         let _ = control_tx.send(ControlMessage::Kill).await;
                                         break;
                                     }
@@ -913,6 +924,7 @@ async fn tcp_listener(
                             if !data.is_empty()
                                 && let Err(err) = response_tx.send(data).await {
                                     tracing::debug!(?err, "forwarding body/data to response channel failed");
+                                    send_stream_terminal(&mut terminal_tx, StreamTerminal::Truncated);
                                     let _ = control_tx.send(ControlMessage::Kill).await;
                                     break;
                                 };
@@ -921,22 +933,28 @@ async fn tcp_listener(
                             // TCP RST or decode error from worker — kill only
                             // this stream.
                             tracing::warn!(err = ?e, "tcp stream read error from worker, closing connection");
+                            send_stream_terminal(&mut terminal_tx, StreamTerminal::Truncated);
                             let _ = control_tx.send(ControlMessage::Kill).await;
                             break;
                         }
                         None => {
-                            // this is allowed but we try to avoid it
-                            // the logic is that the client will tell us when its is done and the server
-                            // will close the connection naturally when the sentinel message is received
-                            // the client closing early represents a transport error outside the control of the
-                            // transport library
-                            tracing::trace!("tcp stream was closed by client");
+                            tracing::trace!("tcp response stream closed before Sentinel");
+                            send_stream_terminal(&mut terminal_tx, StreamTerminal::Truncated);
                             break;
                         }
                     }
                 }
 
             }
+        }
+    }
+
+    fn send_stream_terminal(
+        terminal_tx: &mut Option<oneshot::Sender<StreamTerminal>>,
+        terminal: StreamTerminal,
+    ) {
+        if let Some(tx) = terminal_tx.take() {
+            let _ = tx.send(terminal);
         }
     }
 
@@ -1756,6 +1774,19 @@ mod tests {
         serde_json::from_slice(header.expect("control header missing").as_ref()).unwrap()
     }
 
+    async fn recv_stream_terminal(receiver: &mut StreamReceiver) -> StreamTerminal {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            receiver
+                .terminal
+                .take()
+                .expect("response stream should carry a terminal marker"),
+        )
+        .await
+        .expect("terminal marker should arrive")
+        .expect("terminal marker sender should not be dropped")
+    }
+
     /// Sending an unexpected control message (Stop or Kill from the data
     /// direction) is a protocol violation. The server's
     /// network_receive_handler must reply with ControlMessage::Kill on
@@ -1819,6 +1850,97 @@ mod tests {
             recv_control_message(&mut framed_reader).await,
             ControlMessage::Kill,
             "Sentinel with data should kill only this stream"
+        );
+    }
+
+    /// A header-only Sentinel from the worker is the clean response-stream
+    /// terminator: payload frames already delivered stay readable, then the
+    /// StreamReceiver closes.
+    #[tokio::test]
+    async fn test_tcp_stream_server_closes_response_receiver_on_clean_sentinel() {
+        let (_framed_reader, mut framed_writer, mut receiver) =
+            open_registered_response_stream().await;
+
+        framed_writer
+            .send(TwoPartMessage::from_data(Bytes::from_static(
+                b"final chunk",
+            )))
+            .await
+            .unwrap();
+        framed_writer
+            .send(TwoPartMessage::from_header(
+                serde_json::to_vec(&ControlMessage::Sentinel)
+                    .unwrap()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+
+        let data = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.rx.recv())
+            .await
+            .expect("response data should arrive")
+            .expect("receiver should not close before data");
+        assert_eq!(data.as_ref(), b"final chunk");
+
+        let end = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.rx.recv())
+            .await
+            .expect("receiver should close after clean Sentinel");
+        assert!(end.is_none(), "clean Sentinel should close the receiver");
+        assert_eq!(
+            recv_stream_terminal(&mut receiver).await,
+            StreamTerminal::Clean,
+            "clean Sentinel should mark the response stream as clean"
+        );
+    }
+
+    /// TCP EOF without a header-only Sentinel is a truncated response stream.
+    /// This matters even when data was delivered first: the typed response
+    /// decoder must not confuse app-level complete bytes with the wire-level
+    /// terminal frame.
+    #[tokio::test]
+    async fn test_tcp_stream_server_marks_response_eof_without_sentinel_truncated() {
+        let (_framed_reader, mut framed_writer, mut receiver) =
+            open_registered_response_stream().await;
+
+        framed_writer
+            .send(TwoPartMessage::from_data(Bytes::from_static(
+                b"complete-final-like-bytes",
+            )))
+            .await
+            .unwrap();
+        let mut raw_writer = framed_writer.into_inner();
+        raw_writer.shutdown().await.unwrap();
+
+        let data = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.rx.recv())
+            .await
+            .expect("response data should arrive")
+            .expect("receiver should not close before data");
+        assert_eq!(data.as_ref(), b"complete-final-like-bytes");
+
+        let end = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.rx.recv())
+            .await
+            .expect("receiver should close after TCP EOF");
+        assert!(end.is_none(), "TCP EOF should close the receiver");
+        assert_eq!(
+            recv_stream_terminal(&mut receiver).await,
+            StreamTerminal::Truncated,
+            "TCP EOF without Sentinel must be visible as truncation"
+        );
+    }
+
+    /// If the response consumer is dropped while the worker is still attached,
+    /// the server must notify that worker with Kill so it can stop producing
+    /// into an abandoned stream.
+    #[tokio::test]
+    async fn test_tcp_stream_server_sends_kill_when_response_receiver_dropped() {
+        let (mut framed_reader, _framed_writer, receiver) = open_registered_response_stream().await;
+
+        drop(receiver);
+
+        assert_eq!(
+            recv_control_message(&mut framed_reader).await,
+            ControlMessage::Kill,
+            "dropping response receiver should notify the worker with Kill"
         );
     }
 
