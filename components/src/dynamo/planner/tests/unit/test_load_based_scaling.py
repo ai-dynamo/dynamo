@@ -460,6 +460,29 @@ class TestDecodeRegressionModel:
         )
         assert rps > 0 and actual_itl > 0 and actual_itl <= 50.0
 
+    def test_find_best_engine_decode_rps_discounts_itl(self):
+        model = DecodeRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
+        self._train_thpt_model(model)
+        base_rps, base_itl = model.find_best_engine_decode_rps(
+            itl=50.0,
+            context_length=1000.0,
+            osl=150.0,
+            accept_length=1.0,
+            max_num_seqs=1,
+        )
+        spec_rps, spec_itl = model.find_best_engine_decode_rps(
+            itl=50.0,
+            context_length=1000.0,
+            osl=150.0,
+            accept_length=2.0,
+            max_num_seqs=1,
+        )
+
+        assert spec_itl == pytest.approx(base_itl / 2)
+        assert spec_rps == pytest.approx(base_rps * 2)
+
     def test_find_best_engine_decode_rps_zero_context(self):
         model = DecodeRegressionModel(
             max_num_fpm_samples=50, min_observations=3, bucket_count=16
@@ -543,6 +566,31 @@ class TestAggRegressionModel:
             itl_sla=50.0,
         )
         assert thpt > 0 and actual_ttft >= 0 and actual_itl >= 0
+
+    def test_find_best_engine_agg_rps_discounts_itl(self):
+        model = AggRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
+        self._train_agg(model)
+        base_rps, _, base_itl = model.find_best_engine_agg_rps(
+            isl=2048.0,
+            osl=150.0,
+            max_num_batched_tokens=4096,
+            ttft_sla=500.0,
+            itl_sla=50.0,
+            accept_length=1.0,
+        )
+        spec_rps, _, spec_itl = model.find_best_engine_agg_rps(
+            isl=2048.0,
+            osl=150.0,
+            max_num_batched_tokens=4096,
+            ttft_sla=500.0,
+            itl_sla=50.0,
+            accept_length=2.0,
+        )
+
+        assert spec_itl < base_itl
+        assert spec_rps > base_rps
 
     def test_find_best_engine_agg_rps_insufficient_data(self):
         model = AggRegressionModel(
@@ -815,3 +863,19 @@ class TestRefreshWorkerInfoFromConnector:
         planner._refresh_worker_info_from_connector()
         assert planner.prefill_worker_info.max_num_batched_tokens is None
         assert planner.decode_worker_info.max_num_batched_tokens == 4096
+
+    async def test_load_only_accept_length_missing_returns_observation(self):
+        planner = self._make_planner(require_prefill=False, require_decode=True)
+        planner.model_name = "Qwen/Qwen3"
+        planner.decode_worker_info = WorkerInfo(component_name="backend")
+        planner.prometheus_traffic_client = Mock()
+        planner.prometheus_traffic_client.get_avg_kv_hit_rate.return_value = None
+        planner.prometheus_traffic_client.get_avg_spec_decode_accept_length.return_value = (
+            None
+        )
+
+        obs = await planner._collect_kv_hit_rate_observation(duration_s=5)
+
+        assert obs is not None
+        assert obs.kv_hit_rate is None
+        assert obs.accept_length is None

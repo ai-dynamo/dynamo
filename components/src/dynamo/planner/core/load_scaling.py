@@ -500,6 +500,7 @@ class LoadScalingMixin:
         consolidation = num_workers / (num_workers - 1) if num_workers > 1 else 1.0
         d_caps = self._capabilities.decode
         max_kv = d_caps.max_kv_tokens if d_caps else None
+        accept_length = self._current_decode_accept_length()
 
         estimates: list[float] = []
         # Consolidation-aware scale-down. Two safety checks per worker:
@@ -520,11 +521,12 @@ class LoadScalingMixin:
                 queued_decode_kv=queued_kv,
             )
             if est is not None:
-                est_ms = est * 1000
+                est_ms = est * 1000 / accept_length
                 estimates.append(est_ms)
                 logger.info(
                     f"Decode engine {wid}:dp{dp}: estimated ITL {est_ms:.2f}ms "
-                    f"(sched_kv={sched_kv}, queued_kv={queued_kv})"
+                    f"(sched_kv={sched_kv}, queued_kv={queued_kv}, "
+                    f"accept_length={accept_length:.2f})"
                 )
 
             if can_scale_down:
@@ -541,7 +543,7 @@ class LoadScalingMixin:
                 )
                 if post_itl is None:
                     can_scale_down = False
-                elif post_itl * 1000 >= self._config.itl_ms * sensitivity:
+                elif post_itl * 1000 / accept_length >= self._config.itl_ms * sensitivity:
                     can_scale_down = False
                     consolidation_refused = True
 
@@ -652,6 +654,7 @@ class LoadScalingMixin:
         consolidation = num_workers / (num_workers - 1) if num_workers > 1 else 1.0
         d_caps = self._capabilities.decode
         max_kv = d_caps.max_kv_tokens if d_caps else None
+        accept_length = self._current_decode_accept_length()
 
         estimates: list[float] = []
         # Agg-decode consolidation. Combined cache pressure (sched_decode_kv
@@ -672,7 +675,7 @@ class LoadScalingMixin:
                 queued_decode_kv=queued_kv,
             )
             if est is not None:
-                estimates.append(est * 1000)
+                estimates.append(est * 1000 / accept_length)
 
             if can_scale_down:
                 post_combined_kv = int(
@@ -690,7 +693,7 @@ class LoadScalingMixin:
                 )
                 if post_itl is None:
                     can_scale_down = False
-                elif post_itl * 1000 >= self._config.itl_ms * sensitivity:
+                elif post_itl * 1000 / accept_length >= self._config.itl_ms * sensitivity:
                     can_scale_down = False
                     consolidation_refused = True
 

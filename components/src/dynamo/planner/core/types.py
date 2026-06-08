@@ -49,6 +49,7 @@ class TrafficObservation:
     isl: float
     osl: float
     kv_hit_rate: Optional[float] = None
+    accept_length: Optional[float] = None
 
 
 @dataclass
@@ -148,6 +149,7 @@ class EngineCapabilities:
     max_num_seqs: Optional[int] = None
     context_length: Optional[int] = None
     max_kv_tokens: Optional[int] = None
+    speculative_nextn: Optional[int] = None
 
 
 @dataclass

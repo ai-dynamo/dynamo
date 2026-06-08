@@ -137,6 +137,58 @@ def _make_agg_core(config=None, caps=None, **config_overrides) -> PlannerStateMa
     return PlannerStateMachine(cfg, caps or _agg_caps())
 
 
+def test_accept_length_clamp_uses_config_fallback_nextn():
+    core = _make_core(speculative_nextn=2)
+    core._observe_traffic(
+        TrafficObservation(
+            duration_s=60, num_req=1, isl=1000, osl=150, accept_length=4.5
+        )
+    )
+    assert core._current_decode_accept_length() == 3.0
+
+
+def test_accept_length_clamp_uses_mdc_nextn_before_config():
+    caps = WorkerCapabilities(
+        decode=EngineCapabilities(
+            num_gpu=1, max_num_batched_tokens=2048, speculative_nextn=1
+        )
+    )
+    core = _make_core(caps=caps, speculative_nextn=4)
+    core._observe_traffic(
+        TrafficObservation(
+            duration_s=60, num_req=1, isl=1000, osl=150, accept_length=4.5
+        )
+    )
+    assert core._current_decode_accept_length() == 2.0
+
+
+def test_accept_length_forced_to_one_without_spec_decode():
+    core = _make_core()
+    core._observe_traffic(
+        TrafficObservation(
+            duration_s=60, num_req=1, isl=1000, osl=150, accept_length=2.0
+        )
+    )
+    assert core._current_decode_accept_length() == 1.0
+
+
+def test_missing_accept_length_resets_to_one():
+    core = _make_core(speculative_nextn=2)
+    core._observe_traffic(
+        TrafficObservation(
+            duration_s=60, num_req=1, isl=1000, osl=150, accept_length=2.5
+        )
+    )
+    assert core._current_decode_accept_length() == 2.5
+
+    core._observe_traffic(
+        TrafficObservation(
+            duration_s=60, num_req=1, isl=1000, osl=150, accept_length=None
+        )
+    )
+    assert core._current_decode_accept_length() == 1.0
+
+
 def _train_prefill_regression(core: PlannerStateMachine) -> None:
     fpms = [
         _make_fpm(

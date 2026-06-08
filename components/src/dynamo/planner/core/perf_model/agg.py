@@ -133,6 +133,7 @@ class AggRegressionModel(_BaseRegressionModel):
         max_kv_tokens: Optional[int] = None,
         max_num_seqs: Optional[int] = None,
         kv_hit_rate: Optional[float] = None,
+        accept_length: float = 1.0,
     ) -> tuple[float, float, float]:
         """Find the maximum agg engine request rate under both SLA targets.
 
@@ -178,6 +179,7 @@ class AggRegressionModel(_BaseRegressionModel):
             or max_num_batched_tokens <= 0
         ):
             return (0.0, 0.0, 0.0)
+        accept_length = max(1.0, float(accept_length))
 
         prefill_scale = 1.0 - _clamp_kv_hit_rate(kv_hit_rate)
         effective_isl = isl * prefill_scale
@@ -228,7 +230,7 @@ class AggRegressionModel(_BaseRegressionModel):
                 bs * effective_isl / max(1.0, osl), max_num_batched_tokens
             )
             wt = self._predict_2d(prefill_per_iter, decode_kv)
-            itl_ms = wt * 1000.0
+            itl_ms = wt * 1000.0 / accept_length
 
             # ``estimate_next_ttft`` applies the same discount internally to
             # both the queued portion and the avg_isl portion. To keep the
@@ -253,11 +255,12 @@ class AggRegressionModel(_BaseRegressionModel):
                         f"ITL={itl_ms:.1f}ms (target {itl_sla:.1f}ms)"
                     )
                     best_rps = 1.0 / (osl * wt)
+                    best_rps *= accept_length
                     best_ttft_ms = ttft_ms
                     best_itl_ms = itl_ms
                 break
 
-            best_rps = bs / (osl * wt)
+            best_rps = bs / (osl * (wt / accept_length))
             best_ttft_ms = ttft_ms
             best_itl_ms = itl_ms
 

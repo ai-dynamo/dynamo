@@ -3,6 +3,7 @@
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import tempfile
@@ -47,11 +48,13 @@ from .cache_info import get_configured_kv_event_block_size
 from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
+from .runtime_metadata import get_metrics_model_name, get_spec_decode_runtime_data
 from .snapshot import prepare_snapshot_engine
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 shutdown_endpoints: list = []
+SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 
 
 def build_headless_namespace(config: Config) -> argparse.Namespace:
@@ -198,6 +201,7 @@ def setup_metrics_collection(
         injected into engine metrics to align Python metrics with Rust auto-labels.
         Additional labels can be provided via inject_labels parameter.
     """
+    metrics_model_name = get_metrics_model_name(config)
     if config.engine_args.disable_log_stats is False:
         # Register the dedicated dynamo_component registry callback
         # IMPORTANT: We do NOT use MultiProcessCollector for DYNAMO_COMPONENT_REGISTRY
@@ -231,7 +235,7 @@ def setup_metrics_collection(
                     namespace_name=config.namespace,
                     component_name=config.component,
                     endpoint_name=config.endpoint,
-                    model_name=config.model,
+                    model_name=metrics_model_name,
                 )
             except ValueError as e:
                 # Conflict: metrics already in REGISTRY, MultiProcessCollector tries to add same metrics from .db files
@@ -251,7 +255,7 @@ def setup_metrics_collection(
                     namespace_name=config.namespace,
                     component_name=config.component,
                     endpoint_name=config.endpoint,
-                    model_name=config.model,
+                    model_name=metrics_model_name,
                 )
                 # Multiproc registry has .db file metrics (lmcache, possibly vllm duplicates)
                 register_engine_metrics_callback(
@@ -261,7 +265,7 @@ def setup_metrics_collection(
                     namespace_name=config.namespace,
                     component_name=config.component,
                     endpoint_name=config.endpoint,
-                    model_name=config.model,
+                    model_name=metrics_model_name,
                 )
         else:
             if multiproc_dir:
@@ -277,7 +281,7 @@ def setup_metrics_collection(
                 namespace_name=config.namespace,
                 component_name=config.component,
                 endpoint_name=config.endpoint,
-                model_name=config.model,
+                model_name=metrics_model_name,
             )
 
 
@@ -650,6 +654,13 @@ async def register_vllm_model(
     stream_interval = getattr(config.engine_args, "stream_interval", None)
     if stream_interval is not None:
         runtime_config.set_engine_specific("stream_interval", str(stream_interval))
+
+    spec_decode = get_spec_decode_runtime_data(config, vllm_config)
+    if spec_decode is not None:
+        runtime_config.set_engine_specific(
+            SPEC_DECODE_RUNTIME_KEY, json.dumps(spec_decode)
+        )
+        logging.info("Published vLLM spec decode runtime metadata: %s", spec_decode)
 
     # Get data_parallel_size from vllm_config (defaults to 1)
     dp_range = get_dp_range_for_worker(vllm_config)

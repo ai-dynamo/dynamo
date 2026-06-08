@@ -208,6 +208,7 @@ class ThroughputScalingMixin:
             max_kv_tokens=d_caps.max_kv_tokens if d_caps else None,
             max_num_seqs=d_caps.max_num_seqs if d_caps else None,
             kv_hit_rate=kv_hit_rate,
+            accept_length=self._current_decode_accept_length(),
         )
         if engine_rps <= 0:
             logger.warning("Agg perf model not ready, skipping throughput scaling")
@@ -281,12 +282,14 @@ class ThroughputScalingMixin:
         self, demand_rps: float, isl: float, osl: float
     ) -> Optional[int]:
         d_caps = self._capabilities.decode
+        accept_length = self._current_decode_accept_length()
         engine_rps, itl_ms = self._decode_regression.find_best_engine_decode_rps(
             itl=self._config.itl_ms,
             context_length=isl + osl / 2,
             osl=osl,
             max_kv_tokens=d_caps.max_kv_tokens if d_caps else None,
             max_num_seqs=d_caps.max_num_seqs if d_caps else None,
+            accept_length=accept_length,
         )
         if engine_rps <= 0:
             logger.warning("Decode perf model not ready, skipping throughput scaling")
@@ -301,6 +304,7 @@ class ThroughputScalingMixin:
 
         result = max(math.ceil(demand_rps / engine_rps), self._config.min_endpoint)
         logger.info(
-            f"Decode: {demand_rps:.2f} rps / {engine_rps:.2f} = {result}, est_itl={itl_ms:.1f}ms"
+            f"Decode: {demand_rps:.2f} rps / {engine_rps:.2f} = {result}, "
+            f"est_itl={itl_ms:.1f}ms, accept_length={accept_length:.2f}"
         )
         return result

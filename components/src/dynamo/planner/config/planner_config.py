@@ -214,6 +214,15 @@ class PlannerConfig(BaseModel):
     )
     load_metric_samples: int = SLAPlannerDefaults.load_metric_samples
     load_min_observations: int = SLAPlannerDefaults.load_min_observations
+    speculative_nextn: int = Field(
+        default=SLAPlannerDefaults.speculative_nextn,
+        ge=0,
+        description=(
+            "Manual fallback speculative decoding depth. Worker MDC "
+            "runtime_config.runtime_data.spec_decode.nextn takes precedence "
+            "when present."
+        ),
+    )
 
     # Advisory mode: compute and log decisions without executing scaling
     advisory: bool = SLAPlannerDefaults.advisory
