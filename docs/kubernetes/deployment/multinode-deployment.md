@@ -100,11 +100,12 @@ metadata:
   name: my-multinode-deployment
   annotations:
     nvidia.com/kai-scheduler-queue: "dynamo"
+    nvidia.com/kai-scheduler-node-pool: "worker-nodes"
 spec:
   # ... your deployment spec
 ```
 
-> **Note:** The `nvidia.com/kai-scheduler-queue` annotation defaults to `"dynamo"`. If you specify a custom queue name, ensure the queue exists in your cluster before deploying. You can verify available queues with `kubectl get queues`.
+> **Note:** The `nvidia.com/kai-scheduler-queue` annotation defaults to `"dynamo"`. If you specify a custom queue name, ensure the queue exists in your cluster before deploying. In multi-shard KAI-Scheduler clusters, set the node-pool annotation to the shard that owns the selected queue.
 
 **Force LWS usage:**
 ```yaml

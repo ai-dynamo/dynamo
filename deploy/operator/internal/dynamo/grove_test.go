@@ -116,11 +116,21 @@ func TestResolveKaiSchedulerQueue(t *testing.T) {
 	}
 }
 
+func TestResolveKaiSchedulerNodePool(t *testing.T) {
+	result := ResolveKaiSchedulerNodePool(map[string]string{
+		commonconsts.KubeAnnotationKaiSchedulerNodePool: "  worker-nodes  ",
+	})
+	if result != "worker-nodes" {
+		t.Errorf("ResolveKaiSchedulerNodePool() = %v, expected worker-nodes", result)
+	}
+}
+
 func TestInjectKaiSchedulerIfEnabled(t *testing.T) {
 	tests := []struct {
 		name               string
 		runtimeConfig      *controller_common.RuntimeConfig
 		validatedQueueName string
+		nodePoolName       string
 		initialClique      *grovev1alpha1.PodCliqueTemplateSpec
 		expectedScheduler  string
 		expectedQueueLabel string
@@ -187,15 +197,17 @@ func TestInjectKaiSchedulerIfEnabled(t *testing.T) {
 			shouldInject:       true,
 		},
 		{
-			name: "inject with existing labels",
+			name: "inject with node-pool and existing labels",
 			runtimeConfig: &controller_common.RuntimeConfig{
 				GroveEnabled:        true,
 				KaiSchedulerEnabled: true,
 			},
 			validatedQueueName: "custom-queue",
+			nodePoolName:       "worker-nodes",
 			initialClique: &grovev1alpha1.PodCliqueTemplateSpec{
 				Labels: map[string]string{
 					"existing-label": "existing-value",
+					commonconsts.KubeLabelKaiSchedulerNodePool: "stale-node-pool",
 				},
 				Spec: grovev1alpha1.PodCliqueSpec{
 					PodSpec: corev1.PodSpec{},
@@ -213,7 +225,7 @@ func TestInjectKaiSchedulerIfEnabled(t *testing.T) {
 			clique := tt.initialClique.DeepCopy()
 
 			// Call the function
-			injectKaiSchedulerIfEnabled(clique, tt.runtimeConfig, tt.validatedQueueName)
+			injectKaiSchedulerIfEnabled(clique, tt.runtimeConfig, tt.validatedQueueName, tt.nodePoolName)
 
 			if tt.shouldInject {
 				// Verify scheduler name is injected
@@ -231,9 +243,22 @@ func TestInjectKaiSchedulerIfEnabled(t *testing.T) {
 					}
 				}
 
+				if tt.nodePoolName != "" {
+					nodePoolLabel := clique.Labels[commonconsts.KubeLabelKaiSchedulerNodePool]
+					if nodePoolLabel != tt.nodePoolName {
+						t.Errorf("expected node-pool label %v, got %v", tt.nodePoolName, nodePoolLabel)
+					}
+				} else if clique.Labels[commonconsts.KubeLabelKaiSchedulerNodePool] != "" {
+					t.Errorf("node-pool label should not have been added")
+				}
+
 				// Verify existing labels are preserved
 				if tt.initialClique.Labels != nil {
 					for key, value := range tt.initialClique.Labels {
+						if key == commonconsts.KubeLabelKaiSchedulerQueue ||
+							key == commonconsts.KubeLabelKaiSchedulerNodePool {
+							continue
+						}
 						if clique.Labels[key] != value {
 							t.Errorf("existing label %s=%s was not preserved, got %s", key, value, clique.Labels[key])
 						}

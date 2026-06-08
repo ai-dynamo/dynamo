@@ -2037,6 +2037,7 @@ type cliqueParams struct {
 	restartState                *RestartState
 	existingRestartAnnotations  map[string]string
 	validatedQueueName          string
+	nodePoolName                string
 	kubeClient                  ctrlclient.Client
 	ctx                         context.Context
 	groveClusterTopologyDomains []v1beta1.TopologyDomain
@@ -2170,7 +2171,7 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	annotations = applyRestartAnnotation(annotations, p.componentName, p.restartState, p.existingRestartAnnotations)
 	clique.Annotations = annotations
 
-	injectKaiSchedulerIfEnabled(clique, p.runtimeConfig, p.validatedQueueName)
+	injectKaiSchedulerIfEnabled(clique, p.runtimeConfig, p.validatedQueueName, p.nodePoolName)
 	return clique, nil
 }
 
@@ -2273,6 +2274,7 @@ func GenerateGrovePodCliqueSet(
 
 	// Validate kai-scheduler queue once if kai-scheduler is enabled
 	var validatedQueueName string
+	nodePoolName := ResolveKaiSchedulerNodePool(dynamoDeployment.Annotations)
 	if runtimeConfig.GroveEnabled && runtimeConfig.KaiSchedulerEnabled {
 		var err error
 		validatedQueueName, err = DetermineKaiSchedulerQueue(ctx, dynamoDeployment.Annotations)
@@ -2349,6 +2351,7 @@ func GenerateGrovePodCliqueSet(
 				restartState:                restartState,
 				existingRestartAnnotations:  existingRestartAnnotations,
 				validatedQueueName:          validatedQueueName,
+				nodePoolName:                nodePoolName,
 				kubeClient:                  kubeClient,
 				ctx:                         ctx,
 				groveClusterTopologyDomains: groveClusterTopologyDomains,

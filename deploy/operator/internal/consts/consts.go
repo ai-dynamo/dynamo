@@ -187,10 +187,12 @@ const (
 	DefaultVLLMCacheMountPoint = "/root/.cache/vllm"
 
 	// Kai-scheduler related constants
-	KubeAnnotationKaiSchedulerQueue = "nvidia.com/kai-scheduler-queue" // User-provided annotation to specify queue name
-	KubeLabelKaiSchedulerQueue      = "kai.scheduler/queue"            // Label injected into pods for kai-scheduler
-	KaiSchedulerName                = "kai-scheduler"                  // Scheduler name for kai-scheduler
-	DefaultKaiSchedulerQueue        = "dynamo"                         // Default queue name when none specified
+	KubeAnnotationKaiSchedulerQueue    = "nvidia.com/kai-scheduler-queue"     // User-provided annotation to specify queue name
+	KubeAnnotationKaiSchedulerNodePool = "nvidia.com/kai-scheduler-node-pool" // User-provided annotation to specify node-pool name
+	KubeLabelKaiSchedulerQueue         = "kai.scheduler/queue"                // Label injected into pods for kai-scheduler
+	KubeLabelKaiSchedulerNodePool      = "kai.scheduler/node-pool"            // Label injected into pods for kai-scheduler node-pool
+	KaiSchedulerName                   = "kai-scheduler"                      // Scheduler name for kai-scheduler
+	DefaultKaiSchedulerQueue           = "dynamo"                             // Default queue name when none specified
 
 	// Grove multinode role suffixes
 	GroveRoleSuffixLeader = "ldr"

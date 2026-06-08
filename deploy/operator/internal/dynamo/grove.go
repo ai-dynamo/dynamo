@@ -345,11 +345,22 @@ func ResolveKaiSchedulerQueue(annotations map[string]string) string {
 	return resolveKaiSchedulerQueueName(annotations)
 }
 
+// ResolveKaiSchedulerNodePool returns the optional node-pool annotation.
+func ResolveKaiSchedulerNodePool(annotations map[string]string) string {
+	if annotations != nil {
+		if nodePool, exists := annotations[commonconsts.KubeAnnotationKaiSchedulerNodePool]; exists && strings.TrimSpace(nodePool) != "" {
+			return strings.TrimSpace(nodePool)
+		}
+	}
+	return ""
+}
+
 // injectKaiSchedulerIfEnabled injects kai-scheduler settings into a clique if kai-scheduler is enabled and grove is enabled
 func injectKaiSchedulerIfEnabled(
 	clique *grovev1alpha1.PodCliqueTemplateSpec,
 	runtimeConfig *controller_common.RuntimeConfig,
 	validatedQueueName string,
+	nodePoolName string,
 ) {
 	// Only proceed if grove is enabled, kai-scheduler is enabled, and no manual schedulerName is set
 	if !runtimeConfig.GroveEnabled || !runtimeConfig.KaiSchedulerEnabled {
@@ -372,4 +383,7 @@ func injectKaiSchedulerIfEnabled(
 		clique.Labels = make(map[string]string)
 	}
 	clique.Labels[commonconsts.KubeLabelKaiSchedulerQueue] = queueName
+	if nodePoolName != "" {
+		clique.Labels[commonconsts.KubeLabelKaiSchedulerNodePool] = nodePoolName
+	}
 }
