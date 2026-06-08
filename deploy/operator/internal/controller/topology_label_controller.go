@@ -207,23 +207,36 @@ func (r *TopologyLabelReconciler) topologyLabelCopyTargets(ctx context.Context, 
 		return nil, nil
 	}
 
-	var targets []topologyLabelCopyTargetSpec
-	if labelKey := pod.GetAnnotations()[consts.KubeAnnotationTopologyLabelKey]; labelKey != "" && !keyExists(pod, labelKey) {
+	annotations := pod.GetAnnotations()
+	labelKey := annotations[consts.KubeAnnotationTopologyLabelKey]
+	clusterTopologyName := annotations[consts.KubeAnnotationTopologyClusterTopologyName]
+
+	targetsCapacity := 0
+	if labelKey != "" {
+		targetsCapacity++
+	}
+
+	var ct *grovev1alpha1.ClusterTopology
+	if clusterTopologyName != "" {
+		ct = &grovev1alpha1.ClusterTopology{}
+		if err := r.Get(ctx, types.NamespacedName{Name: clusterTopologyName}, ct); err != nil {
+			return nil, fmt.Errorf("get ClusterTopology %s: %w", clusterTopologyName, err)
+		}
+		targetsCapacity += len(ct.Spec.Levels)
+	}
+
+	targets := make([]topologyLabelCopyTargetSpec, 0, targetsCapacity)
+	if labelKey != "" && !keyExists(pod, labelKey) {
 		targets = append(targets, topologyLabelCopyTargetSpec{
 			sourceLabelKey: labelKey,
 			targetLabelKey: labelKey,
 		})
 	}
 
-	clusterTopologyName := pod.GetAnnotations()[consts.KubeAnnotationTopologyClusterTopologyName]
-	if clusterTopologyName == "" {
+	if ct == nil {
 		return targets, nil
 	}
 
-	ct := &grovev1alpha1.ClusterTopology{}
-	if err := r.Get(ctx, types.NamespacedName{Name: clusterTopologyName}, ct); err != nil {
-		return nil, fmt.Errorf("get ClusterTopology %s: %w", clusterTopologyName, err)
-	}
 	for _, level := range ct.Spec.Levels {
 		targetLabelKey := consts.DynamoTopologyLabelKey(string(level.Domain))
 		if _, exists := pod.GetLabels()[targetLabelKey]; exists {
@@ -290,19 +303,6 @@ func expectedDynamoTopologyLabelKeys(pod *corev1.Pod) []string {
 		}
 	}
 	return labelKeys
-}
-
-func clusterTopologyLabelCopyNeeded(pod *corev1.Pod) bool {
-	if pod == nil || !isDynamoComponentPod(pod) {
-		return false
-	}
-	if pod.GetAnnotations()[consts.KubeAnnotationTopologyClusterTopologyName] == "" {
-		return false
-	}
-	if pod.Spec.NodeName == "" {
-		return false
-	}
-	return missingDynamoTopologyLabel(pod)
 }
 
 func isDynamoComponentPod(pod *corev1.Pod) bool {
