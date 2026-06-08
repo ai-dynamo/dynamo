@@ -42,12 +42,10 @@ async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
 
 
 def _session_control_enabled(server_args) -> bool:
-    """The session_control endpoint (open/close) is needed for streaming sessions
-    OR for session-radix-cache sessions (--enable-session-radix-cache), which use
-    it for close-driven KV release without the streaming-session slot cache."""
-    return bool(getattr(server_args, "enable_streaming_session", False)) or bool(
-        getattr(server_args, "enable_session_radix_cache", False)
-    )
+    """The session_control endpoint (close only) is needed for session-radix-cache
+    sessions (--enable-session-radix-cache): close triggers bulk KV release. Open
+    is implicit -- the first tagged generate creates the session's KV."""
+    return bool(getattr(server_args, "enable_session_radix_cache", False))
 
 
 async def init_decode(

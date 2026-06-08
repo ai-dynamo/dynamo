@@ -897,48 +897,8 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             "new_version": req.new_version,
         }
 
-    async def open_session(self, body: dict) -> dict:
-        """Open a session for subagent KV isolation.
-
-        With --enable-session-radix-cache on the worker, the session holds
-        ordinary evictable radix KV (tagged + floor-priority + bulk-evicted on
-        close) and `streaming` is forced off; otherwise it uses the streaming slot.
-
-        Args:
-            body: Dict with "session_id", optional "timeout" (default 120),
-                  and optional "capacity_of_str_len" (default 65536).
-        """
-        from sglang.srt.managers.io_struct import OpenSessionReqInput
-
-        session_id = body.get("session_id")
-        if not session_id:
-            return {"status": "error", "message": "session_id required"}
-        timeout = body.get("timeout", 120)
-        capacity = body.get("capacity_of_str_len", 65536)
-        radix_native = getattr(
-            self.config.server_args, "enable_session_radix_cache", False
-        )
-        try:
-            obj = OpenSessionReqInput(
-                capacity_of_str_len=capacity,
-                session_id=session_id,
-                streaming=not radix_native,
-                timeout=float(timeout),
-            )
-            result = await self.engine.tokenizer_manager.open_session(obj, None)
-            if result is None:
-                return {
-                    "status": "ok",
-                    "session_id": session_id,
-                    "message": "Session already exists",
-                }
-            return {"status": "ok", "session_id": result}
-        except Exception as e:
-            logging.error(f"Failed to open session {session_id}: {e}")
-            return {"status": "error", "message": str(e)}
-
     async def close_session(self, body: dict) -> dict:
-        """Close a streaming session and release its KV resources.
+        """Close a session: triggers bulk release of its tagged radix KV.
 
         Args:
             body: Dict with "session_id".
@@ -957,23 +917,21 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             return {"status": "error", "message": str(e)}
 
     async def session_control(self, request, context=None):
-        """Service mesh endpoint for session lifecycle operations.
+        """Service mesh endpoint for session lifecycle. Radix-native sessions only
+        need close (open is implicit -- the first tagged generate creates the KV).
 
         Args:
-            request: Dict with "action" key ("open_session" or "close_session")
-                     and action-specific parameters.
+            request: Dict with "action" == "close_session" and "session_id".
             context: Optional Dynamo context (unused but required by protocol).
 
         Yields:
             Single dict with operation result.
         """
         action = request.get("action")
-        if action == "open_session":
-            result = await self.open_session(request)
-        elif action == "close_session":
+        if action == "close_session":
             result = await self.close_session(request)
         else:
-            result = {"status": "error", "message": f"Unknown action: {action}"}
+            result = {"status": "error", "message": f"Unsupported action: {action}"}
         yield result
 
     def register_engine_routes(self, runtime: DistributedRuntime) -> None:
@@ -1039,21 +997,16 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         }
 
     def _session_kwargs(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        # Both session modes need the session id on each generate: streaming
-        # sessions for slot routing, session-radix-cache for KV tagging.
+        # session-radix-cache needs the session id on each generate so the engine
+        # tags that turn's KV (req.session_id); released in bulk on close.
         sa = self.config.server_args
-        if not (
-            getattr(sa, "enable_streaming_session", False)
-            or getattr(sa, "enable_session_radix_cache", False)
-        ):
+        if not getattr(sa, "enable_session_radix_cache", False):
             return {}
         routing = request.get("routing") or {}
         session_control = routing.get("session_control") or {}
         session_id = session_control.get("session_id")
         if not session_id:
             return {}
-
-        # Sessions only need the session identifier on each turn.
         return {"session_params": {"id": session_id}}
 
     @staticmethod

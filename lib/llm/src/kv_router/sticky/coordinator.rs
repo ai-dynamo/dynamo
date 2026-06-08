@@ -99,7 +99,7 @@ impl StickySessionCoordinator {
         &self,
         request: &PreprocessedRequest,
         worker: WorkerWithDpRank,
-        context_id: &str,
+        _context_id: &str,
     ) -> Result<SessionRoutingResult> {
         let sc = request
             .routing
@@ -121,29 +121,20 @@ impl StickySessionCoordinator {
 
         match action {
             SessionAction::Open => {
-                let opened = self
-                    .lifecycle
-                    .open_session(&sc.session_id, sc.timeout, worker.worker_id, context_id)
-                    .await?;
-                let rollback = if opened {
-                    let binding_token = self.router.bind(
-                        &sc.session_id,
-                        worker,
-                        Duration::from_secs(sc.timeout),
-                        AffinityKind::EngineBacked,
-                    );
-                    let close_opened_session = self
-                        .lifecycle
-                        .deferred_close(sc.session_id.clone(), worker.worker_id)
-                        .await;
-                    Some(SessionRoutingRollback {
-                        session_id: sc.session_id.clone(),
-                        binding_token,
-                        close_opened_session,
-                    })
-                } else {
-                    None
-                };
+                // Radix-native sessions need no engine open: the first tagged
+                // generate creates the KV. Bind affinity only; rollback unbinds
+                // if dispatch fails before the request reaches the backend.
+                let binding_token = self.router.bind(
+                    &sc.session_id,
+                    worker,
+                    Duration::from_secs(sc.timeout),
+                    AffinityKind::EngineBacked,
+                );
+                let rollback = Some(SessionRoutingRollback {
+                    session_id: sc.session_id.clone(),
+                    binding_token,
+                    close_opened_session: None,
+                });
                 Ok(SessionRoutingResult {
                     deferred_close: None,
                     rollback,

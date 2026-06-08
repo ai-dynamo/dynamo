@@ -3,19 +3,19 @@
 
 //! Session lifecycle controller for backend KV sessions.
 //!
-//! Manages open/close RPCs to workers via the event plane. Session affinity
+//! Manages the close RPC to workers via the event plane. Session affinity
 //! (routing the same session to the same worker) is handled separately by
-//! [`super::router::StickySessionRouter`].
+//! [`super::router::StickySessionRouter`]. There is no open RPC: radix-native
+//! sessions are implicit on the worker (the first tagged generate creates the KV).
 //!
 //! The controller:
 //! - Lazily initializes a session_control event plane client
-//! - Fires `open_session` inline (fail-fast if the client can't connect)
-//! - Captures a deferred `SessionCloseAction` for execution after generation
+//! - Captures a deferred `SessionCloseAction` (close_session) for execution after
+//!   generation completes
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
 use dynamo_runtime::{
     component::Component,
     pipeline::{PushRouter, RouterMode, SingleIn},
@@ -26,11 +26,6 @@ use tokio::sync::OnceCell;
 
 /// Untyped event plane client for session_control endpoint.
 pub type EventPlaneClient = PushRouter<serde_json::Value, Annotated<serde_json::Value>>;
-
-/// Default capacity for session KV slots (characters).
-const DEFAULT_SESSION_CAPACITY: u64 = 65_536;
-/// Extra worker-side timeout so router affinity expiry closes sessions first.
-const SESSION_TIMEOUT_FALLBACK_BUFFER_SECS: u64 = 30;
 
 /// Deferred session close, executed after generation completes.
 pub struct SessionCloseAction {
@@ -109,44 +104,6 @@ impl SessionLifecycleController {
         });
     }
 
-    /// Open a backend session on a selected worker before generation starts.
-    pub async fn open_session(
-        &self,
-        session_id: &str,
-        timeout_secs: u64,
-        instance_id: u64,
-        context_id: &str,
-    ) -> Result<bool> {
-        let Some(client) = self.get_session_control_client().await else {
-            return Ok(false);
-        };
-        let worker_timeout_secs = timeout_secs.saturating_add(SESSION_TIMEOUT_FALLBACK_BUFFER_SECS);
-
-        // Open session synchronously -- the session must exist on the worker
-        // before the first generate request arrives.
-        let request = serde_json::json!({
-            "action": "open_session",
-            "session_id": session_id,
-            "timeout": worker_timeout_secs,
-            "capacity_of_str_len": DEFAULT_SESSION_CAPACITY,
-        });
-        let resp = send_session_request(
-            &client,
-            request,
-            instance_id,
-            session_id,
-            context_id,
-            "open_session",
-        )
-        .await;
-
-        let resp =
-            resp.ok_or_else(|| anyhow!("open_session RPC failed for session {session_id}"))?;
-        ensure_session_open_succeeded(&resp, session_id)?;
-
-        Ok(true)
-    }
-
     /// Build a deferred close action for RequestGuard::finish().
     pub async fn deferred_close(
         &self,
@@ -178,14 +135,14 @@ impl SessionLifecycleController {
                 };
                 // Wait briefly for at least one worker to register its
                 // session_control endpoint. If none appear, session control
-                // is unavailable (worker not launched with --enable-streaming-session).
+                // is unavailable (worker not launched with --enable-session-radix-cache).
                 match tokio::time::timeout(Duration::from_secs(5), c.wait_for_instances()).await {
                     Ok(Ok(_)) => {}
                     _ => {
                         tracing::warn!(
                             "No session_control endpoint registered. \
                              Session control will be ignored. \
-                             To enable, launch the backend with --enable-streaming-session."
+                             To enable, launch the backend with --enable-session-radix-cache."
                         );
                         return None;
                     }
@@ -206,41 +163,9 @@ impl SessionLifecycleController {
     }
 }
 
-fn ensure_session_open_succeeded(
-    response: &Annotated<serde_json::Value>,
-    session_id: &str,
-) -> Result<()> {
-    if response.is_error() {
-        return Err(anyhow!(
-            "open_session returned annotated error for session {session_id}"
-        ));
-    }
-
-    let body = response.data.as_ref().ok_or_else(|| {
-        anyhow!("open_session returned no response body for session {session_id}")
-    })?;
-
-    let status = body.get("status").and_then(|value| value.as_str());
-    match status {
-        Some("ok") => Ok(()),
-        Some(other) => {
-            let message = body
-                .get("message")
-                .and_then(|value| value.as_str())
-                .unwrap_or("unknown error");
-            Err(anyhow!(
-                "open_session failed for session {session_id}: status={other}, message={message}"
-            ))
-        }
-        None => Err(anyhow!(
-            "open_session returned malformed response for session {session_id}: missing status"
-        )),
-    }
-}
-
 /// Send a session lifecycle request to a specific worker and return the first response.
 ///
-/// Used by both synchronous (open_session) and fire-and-forget (close_session) paths.
+/// Used by the fire-and-forget close_session paths.
 async fn send_session_request(
     client: &EventPlaneClient,
     request: serde_json::Value,
