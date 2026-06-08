@@ -50,7 +50,7 @@ const (
 var _ schedtypes.Scorer = &DynDecodeScorer{}
 var _ plugins.Plugin = &DynDecodeScorer{}
 var _ rc.PreRequest = &DynDecodeScorer{}
-var _ rc.ResponseBodyProcessor = &DynDecodeScorer{}
+var _ rc.ResponseBody = &DynDecodeScorer{}
 
 // DecodeRoutingState holds routing information passed from Score() to PreRequest().
 type DecodeRoutingState struct {
@@ -131,7 +131,7 @@ func (s *DynDecodeScorer) Category() schedtypes.ScorerCategory {
 }
 
 // Score scores endpoints for decode suitability.
-func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.CycleState, req *schedtypes.InferenceRequest, endpoints []schedtypes.Endpoint) map[schedtypes.Endpoint]float64 {
+func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.CycleState, req *schedtypes.LLMRequest, endpoints []schedtypes.Endpoint) map[schedtypes.Endpoint]float64 {
 	logger := log.FromContext(ctx)
 
 	isDisaggregated := readPrefillEnabled(cycleState)
@@ -199,7 +199,7 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 }
 
 // PreRequest registers the request with the Dynamo router's bookkeeping.
-func (s *DynDecodeScorer) PreRequest(ctx context.Context, request *schedtypes.InferenceRequest, _ *schedtypes.SchedulingResult) {
+func (s *DynDecodeScorer) PreRequest(ctx context.Context, request *schedtypes.LLMRequest, _ *schedtypes.SchedulingResult) {
 	logger := log.FromContext(ctx)
 
 	if request == nil || request.RequestId == "" {
@@ -247,7 +247,7 @@ func (s *DynDecodeScorer) PreRequest(ctx context.Context, request *schedtypes.In
 
 // ResponseBody handles streaming chunks and end-of-stream cleanup.
 // On the first token it marks prefill as complete; on EndOfStream it frees the request.
-func (s *DynDecodeScorer) ResponseBody(ctx context.Context, request *schedtypes.InferenceRequest, response *rc.Response, _ *fwkdl.EndpointMetadata) {
+func (s *DynDecodeScorer) ResponseBody(ctx context.Context, request *schedtypes.LLMRequest, response *rc.Response, _ *fwkdl.EndpointMetadata) {
 	if request == nil || request.RequestId == "" {
 		return
 	}
