@@ -208,7 +208,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--block-size",
         type=int,
         default=None,
-        help="Token block size for KV cache blocks (default: 64)",
+        help="Token block size for KV cache blocks. When unset, the default "
+        "depends on engine: vLLM 64, SGLang 1, TRTLLM 32.",
     )
     parser.add_argument(
         "--max-num-seqs",
@@ -315,6 +316,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "(default: 0.88).",
     )
     parser.add_argument(
+        "--free-gpu-memory-fraction",
+        type=float,
+        default=None,
+        help="Fraction of free GPU memory (after model load) for the KV cache, "
+        "for AIC KV capacity estimation with TRT-LLM (default: 0.9).",
+    )
+    parser.add_argument(
         "--aic-system",
         type=str,
         default=None,
@@ -334,8 +342,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--aic-backend-version",
         type=str,
         default=None,
-        help="AIC backend engine version (e.g., '0.14.0' for vLLM, '0.5.6.post2' for SGLang). "
-        "If not set, uses the default version for the backend.",
+        help="AIC backend engine version (e.g., '0.19.0' for vLLM, '0.5.10' for SGLang, "
+        "'1.3.0rc10' for TRT-LLM). If not set, uses the default version for the backend.",
     )
     parser.add_argument(
         "--aic-tp-size",
@@ -388,8 +396,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--engine-type",
         type=str,
         default="vllm",
-        choices=["vllm", "sglang"],
-        help="Engine simulation type: 'vllm' (default) or 'sglang'.",
+        choices=["vllm", "sglang", "trtllm"],
+        help="Engine simulation type: 'vllm' (default), 'sglang', or 'trtllm'.",
     )
 
     # SGLang-specific configuration
@@ -429,6 +437,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=None,
         help="SGLang schedule conservativeness factor 0.0-1.0 (default: 1.0).",
+    )
+
+    # TensorRT-LLM-specific configuration
+    parser.add_argument(
+        "--trtllm-capacity-scheduler-policy",
+        type=str,
+        default=None,
+        choices=["guaranteed_no_evict"],
+        help="TRT-LLM capacity scheduler policy. v1 supports only "
+        "'guaranteed_no_evict' (default).",
     )
 
     # Legacy support - allow direct JSON file specification

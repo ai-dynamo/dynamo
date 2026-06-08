@@ -27,6 +27,25 @@ use crate::types::{
     },
 };
 
+/// Emit a one-time deprecation warning when serving-readiness falls back to
+/// the legacy path because a namespace still contains a legacy card (a
+/// worker with no declared `worker_type`). Logged once per process to avoid
+/// spamming the per-request readiness hot path. Remove with the compat shim.
+fn warn_legacy_readiness_once(model: &str, namespace: &str) {
+    static LEGACY_READINESS_WARNED: std::sync::Once = std::sync::Once::new();
+    LEGACY_READINESS_WARNED.call_once(|| {
+        tracing::warn!(
+            model = model,
+            namespace = namespace,
+            "Serving-readiness is using the legacy compat path: a worker registered \
+             without a `worker_type` (legacy binary). Disaggregated topology \
+             gating is disabled for such namespaces until all workers are upgraded \
+             to register a worker_type. This compatibility shim will be removed in a \
+             future release."
+        );
+    });
+}
+
 /// A named model backed by one or more WorkerSets.
 pub struct Model {
     name: String,
@@ -165,25 +184,24 @@ impl Model {
             .any(|entry| entry.value().has_realtime_engine())
     }
 
-    // -- Topology readiness --
+    // -- Model serving readiness --
     //
-    // A *topology* is the set of WorkerSets in this Model that share the same
-    // `namespace` string and collectively serve traffic for one deployment.
-    // A worker's `needs` is in DNF: a list of alternative AND-sets of
-    // required peer worker types. The topology is ready when, for every
-    // WorkerSet in it, at least one alternative is fully covered by the
-    // worker types currently present in the topology (workers with
-    // worker_count > 0).
+    // The set of WorkerSets in this Model that share the same `namespace`
+    // string collectively serve traffic for one deployment. A worker's
+    // `needs` is in DNF: a list of alternative AND-sets of required peer
+    // worker types. The namespace is ready when, for every WorkerSet in it,
+    // at least one alternative is fully covered by the worker types
+    // currently present (workers with worker_count > 0).
     //
-    // The design target is that every worker registers an explicit
-    // `worker_type` and `needs`. A temporary shim in [`ws_role_and_needs`]
-    // reads `worker_type = None` as `Aggregated` with no `needs` so that the
-    // frontend can keep serving existing deployments while backends are
-    // being updated. The shim is removed once backend-side registration is
-    // strict; see `docs/proposals/health-disagg-readiness.md` (Phase 3).
+    // New workers register an explicit `worker_type` and `needs`
+    // (`register_model` rejects a missing `worker_type`). A card with no
+    // `worker_type` therefore comes from an old (pre-`worker_type`) worker;
+    // a namespace containing such a legacy card falls back to the
+    // cross-version compat path in `is_workers_ready` (ready if any worker is
+    // live) rather than being strictly topology-gated. See that method.
 
     /// Distinct namespaces represented by this model's WorkerSets, sorted.
-    /// Each namespace identifies one topology in the model.
+    /// Each namespace identifies one deployment of the model.
     pub fn distinct_namespaces_sorted(&self) -> Vec<String> {
         let mut ns: Vec<String> = self
             .worker_sets
@@ -195,57 +213,83 @@ impl Model {
         ns
     }
 
-    /// Return `(worker_type, needs)` for this WorkerSet, applying the
-    /// temporary missing-field shim.
-    ///
-    /// TEMPORARY: contains a shim for `worker_type = None`, removed once
-    /// every backend registers explicit values.
+    /// Return `(worker_type, needs)` for this WorkerSet, or `None` if the
+    /// card has no declared `worker_type` (a legacy card from an old,
+    /// pre-`worker_type` worker). The readiness path treats `None` as the
+    /// signal to fall back to the cross-version compat path — see
+    /// `is_workers_ready`.
     fn ws_role_and_needs(
         ws: &WorkerSet,
-    ) -> (
+    ) -> Option<(
         crate::worker_type::WorkerType,
         Vec<Vec<crate::worker_type::WorkerType>>,
-    ) {
+    )> {
         let card = ws.card();
-        match card.worker_type {
-            Some(wt) => (wt, card.needs.clone()),
-            None => {
-                // TEMPORARY shim: missing worker_type → treat as Aggregated
-                // with no peer needs. Removed when backend-side registration
-                // is strict and missing means "misconfigured".
-                (crate::worker_type::WorkerType::Aggregated, Vec::new())
-            }
-        }
+        card.worker_type.map(|wt| (wt, card.needs.clone()))
     }
 
     /// Whether the workers in the given namespace are ready to serve traffic.
     ///
     /// Iterates the WorkerSets sharing this namespace and checks that every
     /// WorkerSet's `needs` (DNF) has at least one alternative fully covered
-    /// by the present worker types. Returns false for an unknown namespace
-    /// or one with no WorkerSets.
+    /// by the present worker types. Returns false for an unknown namespace or
+    /// one with no WorkerSets.
+    ///
+    /// **Cross-version compat:** if the namespace still contains a legacy card
+    /// (a worker with no declared `worker_type`, i.e. an old pre-`worker_type`
+    /// binary), its disaggregated topology cannot be reconstructed — old decode
+    /// and old aggregated workers are indistinguishable on the wire. Rather than
+    /// hide the model, we fall back to legacy behavior and report ready as long
+    /// as some worker is live. Strict topology gating resumes automatically once
+    /// every worker in the namespace carries a `worker_type`. Remove this branch
+    /// when the compat shim is retired.
     pub fn is_workers_ready(&self, namespace: &str) -> bool {
         let mut present: std::collections::HashSet<crate::worker_type::WorkerType> =
             std::collections::HashSet::new();
         let mut wsets: Vec<std::sync::Arc<WorkerSet>> = Vec::new();
+        let mut has_legacy = false;
+        let mut has_live_worker = false;
         for entry in self.worker_sets.iter() {
             let ws = entry.value();
             if ws.namespace() != namespace {
                 continue;
             }
-            let (wt, _needs) = Self::ws_role_and_needs(ws);
+            match Self::ws_role_and_needs(ws) {
+                Some((wt, _needs)) => {
+                    if ws.worker_count() > 0 {
+                        present.insert(wt);
+                    }
+                }
+                // No declared worker_type → legacy card.
+                None => has_legacy = true,
+            }
             if ws.worker_count() > 0 {
-                present.insert(wt);
+                has_live_worker = true;
             }
             wsets.push(ws.clone());
         }
         if wsets.is_empty() {
             return false;
         }
-        // Every WorkerSet's needs (DNF) must have at least one alternative
-        // (AND-set) fully present.
+
+        // COMPAT branch: legacy card present → preserve legacy behavior.
+        if has_legacy {
+            warn_legacy_readiness_once(&self.name, namespace);
+            return has_live_worker;
+        }
+
+        // Strict path: every WorkerSet must (a) have at least one live worker
+        // of its own role, and (b) have its `needs` DNF satisfied by the
+        // present roles. (a) is what rejects an Aggregated WorkerSet with
+        // worker_count == 0: its `needs` is empty, but without a live worker
+        // the namespace cannot serve traffic.
         for ws in &wsets {
-            let (_wt, needs) = Self::ws_role_and_needs(ws);
+            let Some((wt, needs)) = Self::ws_role_and_needs(ws) else {
+                return false;
+            };
+            if !present.contains(&wt) {
+                return false;
+            }
             if needs.is_empty() {
                 continue;
             }
@@ -876,13 +920,13 @@ mod tests {
         );
     }
 
-    // -- Topology readiness --
+    // -- Model serving readiness --
     //
     // These tests exercise the live-compute readiness methods on `Model`.
     // They construct WorkerSets with specific `worker_type` / `needs` values
     // on their cards and verify DNF readiness math, including the encode
-    // worker's two-alternative needs and the temporary missing-field shim
-    // in `ws_role_and_needs`.
+    // worker's two-alternative needs and the rejection of cards with no
+    // declared `worker_type`.
 
     use crate::worker_type::WorkerType;
 
@@ -1095,19 +1139,105 @@ mod tests {
         assert!(model.is_workers_ready("dynamo"));
     }
 
-    #[test]
-    fn readiness_missing_worker_type_field_treated_as_aggregated() {
-        // TEMPORARY: verifies the shim in `ws_role_and_needs` that maps a
-        // missing worker_type (None) to Aggregated with no needs while
-        // backends are being updated to populate the field. This test (and
-        // the shim itself) are removed once every worker registers an
-        // explicit worker_type.
-        let model = Model::new("llama".to_string());
-        // Default card → worker_type is None.
-        let (_ws, _tx) = make_worker_set_with_count("dynamo", "mdc-agg", vec![1]);
-        model.add_worker_set("dynamo".to_string(), _ws);
+    // -- Cross-version compat: legacy cards (no worker_type) --
+    //
+    // A new frontend may see cards from old (pre-`worker_type`) workers that
+    // carry no `worker_type`. Their disaggregated topology can't be
+    // reconstructed (old
+    // decode and old aggregated workers are wire-indistinguishable), so a
+    // namespace containing any legacy card falls back to legacy behavior:
+    // ready iff some worker is live. Strict topology gating resumes once every
+    // worker carries a worker_type.
 
-        assert!(model.is_workers_ready("dynamo"));
+    #[test]
+    fn readiness_legacy_card_with_live_worker_is_ready() {
+        // COMPAT: old aggregated worker (no worker_type) upgraded-frontend case.
+        let model = Model::new("llama".to_string());
+        let (ws, _tx) = make_worker_set_with_count("dynamo", "mdc-default", vec![1]);
+        model.add_worker_set("dynamo".to_string(), ws);
+
+        assert!(
+            model.is_workers_ready("dynamo"),
+            "a legacy card with a live worker must be ready under the compat shim"
+        );
+    }
+
+    #[test]
+    fn readiness_legacy_card_with_no_live_worker_is_not_ready() {
+        // Even under compat, an empty namespace can't serve.
+        let model = Model::new("llama".to_string());
+        let (ws, _tx) = make_worker_set_with_count("dynamo", "mdc-default", vec![]);
+        model.add_worker_set("dynamo".to_string(), ws);
+
+        assert!(
+            !model.is_workers_ready("dynamo"),
+            "a legacy card with no live worker must not be ready"
+        );
+    }
+
+    #[test]
+    fn readiness_legacy_disagg_pd_is_ready() {
+        // COMPAT: old disaggregated deployment (prefill + decode, both legacy
+        // and cardless of worker_type) seen by a new frontend. The topology
+        // can't be reconstructed, so the namespace is ready as long as workers
+        // are live — matching legacy behavior.
+        let model = Model::new("llama".to_string());
+        let (p, _tp) = make_worker_set_with_count("dynamo", "mdc-p", vec![1]);
+        let (d, _td) = make_worker_set_with_count("dynamo", "mdc-d", vec![2]);
+        model.add_worker_set("dynamo:prefill".to_string(), p);
+        model.add_worker_set("dynamo".to_string(), d);
+
+        assert!(
+            model.is_workers_ready("dynamo"),
+            "a legacy disagg namespace with live workers must be ready under compat"
+        );
+    }
+
+    #[test]
+    fn readiness_mixed_legacy_and_typed_uses_legacy_path() {
+        // A namespace containing even one legacy card drops to the compat path
+        // (ready iff live), rather than strict-gating on the typed cards.
+        let model = Model::new("llama".to_string());
+        // Typed decode that, under strict rules, needs a Prefill peer (absent).
+        let (decode, _td) = ws_with_role(
+            "dynamo",
+            "mdc-d",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![2],
+        );
+        // Legacy card alongside it.
+        let (legacy, _tl) = make_worker_set_with_count("dynamo", "mdc-legacy", vec![3]);
+        model.add_worker_set("dynamo".to_string(), decode);
+        model.add_worker_set("dynamo:legacy".to_string(), legacy);
+
+        // Strict rules would say not-ready (decode's Prefill need unmet), but
+        // the legacy card forces the compat path → ready because workers live.
+        assert!(
+            model.is_workers_ready("dynamo"),
+            "a namespace with a legacy card must use the compat (live) path"
+        );
+    }
+
+    #[test]
+    fn readiness_aggregated_zero_workers_not_ready() {
+        // An Aggregated WorkerSet with `worker_count() == 0` must NOT be
+        // considered ready: its `needs` is empty, but with no live worker
+        // the namespace can't serve traffic.
+        let model = Model::new("llama".to_string());
+        let (agg, _tx) = ws_with_role(
+            "dynamo",
+            "mdc-a",
+            WorkerType::Aggregated,
+            vec![],
+            vec![], // zero workers
+        );
+        model.add_worker_set("dynamo".to_string(), agg);
+
+        assert!(
+            !model.is_workers_ready("dynamo"),
+            "an Aggregated worker set with zero live workers must NOT be ready"
+        );
     }
 
     // -- is_ready_to_serve tests --

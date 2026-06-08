@@ -10,7 +10,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from dynamo.llm import KvRouterConfig, MockEngineArgs
+from dynamo.llm import KvRouterConfig
+from dynamo.mocker import MockEngineArgs
 
 MOONCAKE_TRACE_FIRST20 = """{"timestamp": 0, "input_length": 6755, "output_length": 500, "hash_ids": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]}
 {"timestamp": 0, "input_length": 7319, "output_length": 490, "hash_ids": [0, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]}
