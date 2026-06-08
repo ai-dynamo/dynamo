@@ -233,9 +233,10 @@ class Endpoint:
         """
         Serve a bidirectional (streaming-input, streaming-output) endpoint.
 
-        The handler is an `async def generate(request_stream)` or
-        `async def generate(request_stream, context)` coroutine that returns
-        an async generator of response frames. `request_stream` is a
+        The handler is an async generator function — `async def
+        generate(request_stream)` or `async def generate(request_stream,
+        context)` — so calling it returns an async iterator of response frames
+        directly (it is not awaited). `request_stream` is a
         `PyAsyncRequestStream` yielding inbound frames as JSON-like Python
         objects; the generator yields response frames as JSON-like Python
         objects.
