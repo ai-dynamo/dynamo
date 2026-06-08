@@ -266,7 +266,16 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 timeout_s=500,
                 profiled_vram_gib=22.0,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
-                env={"SINGLE_GPU": "true"},
+                # Phi-3-vision uses sliding-window attention with
+                # `window == max_model_len` (effectively full). Opt into
+                # SWA KV-event admission via the env var — vLLM 0.22 emits
+                # `kv_cache_spec_kind="sliding_window"` and the default
+                # router allowlist excludes it. Without this the router
+                # silently falls back to text-prefix routing.
+                env={
+                    "SINGLE_GPU": "true",
+                    "DYN_KV_ROUTER_ACCEPT_EVENT_KINDS": "sliding_window",
+                },
                 tests=[
                     MmCase(
                         payload=make_image_payload_cached_tokens(

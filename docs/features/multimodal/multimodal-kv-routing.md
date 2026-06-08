@@ -165,6 +165,8 @@ Key environment variables:
 | `DYN_LOG` | `info,mm_routing=debug,...` | Frontend log filter |
 | `VLLM_EXTRA_ARGS` | (unset) | Pass-through args to `python -m dynamo.vllm`. Set `--frontend-decoding` to enable content-addressed `mm_hash` (cross-URL KV-cache reuse). |
 
+> **Phi-3-vision:** set `DYN_KV_ROUTER_ACCEPT_EVENT_KINDS=sliding_window` on the frontend. Phi-3 declares sliding-window attention with `window == max_model_len`, so KV-event admission must be opted in. Without it the router silently falls back to text-prefix routing.
+
 To opt into frontend image decoding (so the frontend downloads + decodes once and `mm_hash` becomes content-addressed instead of URL-addressed):
 
 ```bash

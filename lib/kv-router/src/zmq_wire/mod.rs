@@ -169,7 +169,7 @@ impl ZmqEventNormalizer {
         dp_rank: DpRank,
     ) -> Option<ZmqEventFilterReason> {
         if let Some(kind) = metadata.kv_cache_spec_kind {
-            if kind.is_main_attention() {
+            if kind.is_admitted() {
                 return None;
             }
             if kind == KvCacheSpecKind::Unknown {
@@ -182,7 +182,7 @@ impl ZmqEventNormalizer {
 
         if let Some(metadata) = self.group_metadata.get(&(dp_rank, group_idx)) {
             let _sliding_window = metadata.sliding_window;
-            if metadata.kind.is_main_attention() {
+            if metadata.kind.is_admitted() {
                 return None;
             }
             if metadata.kind == KvCacheSpecKind::Unknown {
