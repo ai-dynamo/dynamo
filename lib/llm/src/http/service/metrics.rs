@@ -1663,6 +1663,13 @@ impl<T> From<crate::types::Annotated<T>> for EventConverter<T> {
     }
 }
 
+fn sse_json_data<T: Serialize>(event: Event, data: &T) -> Result<Event, axum::Error> {
+    // serde_json escapes literal LF/CR in string content, so the resulting JSON
+    // is one SSE data line and can avoid Axum json_data's per-write filtering.
+    let json = serde_json::to_string(data).map_err(axum::Error::new)?;
+    Ok(event.data(json))
+}
+
 /// Process streaming response with event conversion for SSE
 ///
 /// This function handles metrics collection, http_queue_guard management, and converts
@@ -1717,7 +1724,7 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
     let mut event = Event::default();
 
     if let Some(ref data) = annotated.data {
-        event = event.json_data(data)?;
+        event = sse_json_data(event, data)?;
     }
 
     if let Some(ref msg) = annotated.event {
@@ -2844,6 +2851,96 @@ mod tests {
         )
     }
 
+    fn run_chat_stream_event_converter(
+        annotated: crate::types::Annotated<
+            crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
+        >,
+    ) -> Result<Option<Event>, axum::Error> {
+        let metrics = Arc::new(Metrics::new());
+        let mut collector = ResponseMetricCollector::new(metrics, "test-model".to_string());
+        let mut http_queue_guard: Option<HttpQueueGuard> = None;
+        process_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(annotated),
+            &mut collector,
+            &mut http_queue_guard,
+        )
+    }
+
+    fn make_chat_stream_annotated(
+        content: &str,
+    ) -> crate::types::Annotated<
+        crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
+    > {
+        use dynamo_protocols::types::{
+            ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta,
+            CreateChatCompletionStreamResponse,
+        };
+
+        #[allow(deprecated)]
+        let choice = ChatChoiceStream {
+            index: 0,
+            delta: ChatCompletionStreamResponseDelta {
+                content: Some(ChatCompletionMessageContent::Text(content.to_string())),
+                function_call: None,
+                tool_calls: None,
+                role: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: None,
+            logprobs: None,
+        };
+
+        crate::types::Annotated {
+            id: Some("test-id".to_string()),
+            data: Some(
+                crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
+                    inner: CreateChatCompletionStreamResponse {
+                        id: "test-id".to_string(),
+                        choices: vec![choice],
+                        created: 0,
+                        model: "test-model".to_string(),
+                        system_fingerprint: None,
+                        object: "chat.completion.chunk".to_string(),
+                        usage: None,
+                        service_tier: None,
+                    },
+                    nvext: None,
+                },
+            ),
+            event: None,
+            comment: None,
+            error: None,
+        }
+    }
+
+    fn extract_sse_data_json(event: Event) -> serde_json::Value {
+        let body = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+            .block_on(async move {
+                use axum::{
+                    body::to_bytes,
+                    response::{IntoResponse, Sse},
+                };
+                let stream = futures::stream::iter(vec![Ok::<Event, axum::Error>(event)]);
+                let response = Sse::new(stream).into_response();
+                let bytes = to_bytes(response.into_body(), 1 << 20)
+                    .await
+                    .expect("body bytes");
+                String::from_utf8(bytes.to_vec()).expect("utf8 body")
+            });
+
+        let data = body
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("SSE data line");
+        serde_json::from_str(data).unwrap_or_else(|e| {
+            panic!("failed to parse JSON from SSE data: {e}\nbody: {body}\ndata: {data}")
+        })
+    }
+
     fn error_annotated(
         error: Option<dynamo_runtime::error::DynamoError>,
         comment: Option<Vec<String>>,
@@ -2891,6 +2988,29 @@ mod tests {
     }
 
     #[test]
+    fn test_event_converter_serializes_chat_stream_response_as_json_data() {
+        let event = run_chat_stream_event_converter(make_chat_stream_annotated("hello"))
+            .unwrap()
+            .expect("chat stream response should produce an SSE event");
+
+        let json = extract_sse_data_json(event);
+        assert_eq!(json["id"], "test-id");
+        assert_eq!(json["object"], "chat.completion.chunk");
+        assert_eq!(json["choices"][0]["delta"]["content"], "hello");
+    }
+
+    #[test]
+    fn test_event_converter_json_data_round_trips_escaped_content() {
+        let content = "line1\nline2\r\"quoted\" \\\\ slash 你好 🚀";
+        let event = run_chat_stream_event_converter(make_chat_stream_annotated(content))
+            .unwrap()
+            .expect("chat stream response should produce an SSE event");
+
+        let json = extract_sse_data_json(event);
+        assert_eq!(json["choices"][0]["delta"]["content"], content);
+    }
+
+    #[test]
     fn test_comment_newlines_sanitized() {
         let annotated = crate::types::Annotated::<String> {
             data: Some("test".to_string()),
@@ -2899,7 +3019,14 @@ mod tests {
             comment: Some(vec!["line1\nline2\r\nline3".into()]),
             error: None,
         };
-        assert!(run_event_converter(annotated).is_ok());
+        let event = run_event_converter(annotated)
+            .unwrap()
+            .expect("data event with comment should be returned");
+        let debug = format!("{:?}", event);
+        assert!(
+            debug.contains(": line1 line2  line3\\n"),
+            "comment newlines should be replaced before Event::comment: {debug}"
+        );
     }
 
     #[test]
