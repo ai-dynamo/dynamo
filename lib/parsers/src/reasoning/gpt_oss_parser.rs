@@ -452,6 +452,11 @@ impl ReasoningParser for GptOssReasoningParser {
         let parser: &mut StreamableParser = &mut self.parser;
         let mut normal_delta = String::new();
         let mut reasoning_delta = String::new();
+        // Tracks whether at least one directed call envelope was reconstructed inside
+        // the per-token loop below. When true the post-loop `has_call_marker` branch
+        // must not reconstruct again (it would pick the wrong `<|channel|>` token
+        // because the cumulative buffer by then includes post-`<|call|>` tokens).
+        let mut call_reconstructed_in_loop = false;
 
         for (i, token_id) in token_ids.iter().enumerate() {
             tracing::debug!(
@@ -481,6 +486,37 @@ impl ReasoningParser for GptOssReasoningParser {
             {
                 self.last_directed_channel = current_channel.clone();
                 self.last_directed_recipient = current_recipient.clone();
+            }
+
+            // Reconstruct each directed tool-call envelope the moment `<|call|>`
+            // resets the parser channel to None (detected by the directed→None
+            // channel transition while `last_directed_channel` is set).
+            //
+            // Doing this here — not in the post-loop section — is critical: at this
+            // point `parser.tokens()` ends exactly at the `<|call|>` token, so
+            // `reconstruct_directed_envelope`'s `rposition` scan finds the correct
+            // `<|channel|>` token for this call.  If we waited until after all
+            // tokens in the chunk were processed, subsequent tokens (e.g. a
+            // `<|channel|>final` that arrived in the same chunk) would have been
+            // appended to the buffer first, making `rposition` return the wrong
+            // index and corrupting the reconstructed envelope.
+            //
+            // If reconstruction returns None (encoding unavailable), `last_directed_channel`
+            // is left set so the post-loop fallback can flush `pending_tool_call_text`.
+            if self.last_directed_channel.is_some()
+                && previous_channel.is_some()
+                && current_channel.is_none()
+                && let Some(env) = reconstruct_directed_envelope(
+                    parser,
+                    self.last_directed_channel.as_deref(),
+                    self.last_directed_recipient.as_deref(),
+                )
+            {
+                self.pending_tool_call_text.clear();
+                normal_delta.push_str(&env);
+                self.last_directed_channel = None;
+                self.last_directed_recipient = None;
+                call_reconstructed_in_loop = true;
             }
 
             if previous_channel.as_deref() != Some("analysis")
@@ -565,39 +601,43 @@ impl ReasoningParser for GptOssReasoningParser {
             // semantics: directed commentary/analysis tool payloads must become
             // tool calls, not assistant `content`.
             if has_call_marker {
-                // The tool call terminated in this chunk. Reconstruct the complete,
-                // clean envelope from the cumulative parser token buffer (it starts
-                // exactly at the tool call's `<|channel|>` token). This both handles
-                // a channel header that was split across chunks AND supersedes any
-                // raw text accumulated in `pending_tool_call_text` — which can carry
-                // a leading `<|end|>` (and other markup) from a preceding reasoning
-                // message that would otherwise leak into `response_text`.
-                //
-                // `parser.current_channel()` is None here because `<|call|>` resets
-                // the parser state, so we use the channel/recipient persisted on
-                // `self` during the per-token loop (possibly from a prior chunk).
-                let reconstructed = reconstruct_directed_envelope(
-                    parser,
-                    self.last_directed_channel.as_deref(),
-                    self.last_directed_recipient.as_deref(),
-                );
-                match reconstructed {
-                    Some(env) => {
-                        self.pending_tool_call_text.clear();
-                        normal_delta.push_str(&env);
+                if call_reconstructed_in_loop {
+                    // The per-token loop already reconstructed every directed
+                    // envelope in this chunk at the correct buffer position (right
+                    // after each `<|call|>` token).  Nothing more to do here —
+                    // attempting another reconstruction now would use a stale
+                    // `rposition` over a buffer that includes post-`<|call|>` tokens
+                    // and would produce the wrong envelope or duplicate content.
+                } else {
+                    // Fallback: in-loop reconstruction was not attempted (encoding
+                    // unavailable) or did not complete.  Use the post-loop path,
+                    // which may produce a slightly wrong result when trailing tokens
+                    // follow `<|call|>` in the same chunk, but is still better than
+                    // silently dropping the tool call.
+                    let reconstructed = reconstruct_directed_envelope(
+                        parser,
+                        self.last_directed_channel.as_deref(),
+                        self.last_directed_recipient.as_deref(),
+                    );
+                    match reconstructed {
+                        Some(env) => {
+                            self.pending_tool_call_text.clear();
+                            normal_delta.push_str(&env);
+                        }
+                        None if !self.pending_tool_call_text.is_empty() => {
+                            // Fallback: no clean reconstruction available; flush the
+                            // accumulated raw text plus this chunk.
+                            self.pending_tool_call_text.push_str(&raw_input_text);
+                            normal_delta
+                                .push_str(&std::mem::take(&mut self.pending_tool_call_text));
+                        }
+                        None => normal_delta.push_str(&raw_input_text),
                     }
-                    None if !self.pending_tool_call_text.is_empty() => {
-                        // Fallback: no clean reconstruction available; flush the
-                        // accumulated raw text plus this chunk.
-                        self.pending_tool_call_text.push_str(&raw_input_text);
-                        normal_delta.push_str(&std::mem::take(&mut self.pending_tool_call_text));
-                    }
-                    None => normal_delta.push_str(&raw_input_text),
+                    // Clear the persisted context so the next call (or trailing
+                    // reasoning) starts fresh.
+                    self.last_directed_channel = None;
+                    self.last_directed_recipient = None;
                 }
-                // The directed tool call terminated; clear the persisted context so
-                // the next call (or trailing reasoning) starts fresh.
-                self.last_directed_channel = None;
-                self.last_directed_recipient = None;
             } else if !self.pending_tool_call_text.is_empty()
                 || starts_directed_harmony_tool_call(&raw_input_text)
             {
@@ -949,6 +989,80 @@ mod tests {
             // no <|call|> terminator → no complete envelope → no normal_text.
             assert_eq!(normal_text_incr, "");
         }
+    }
+
+    /// `<|call|>` and the following `final` text arrive in the **same chunk**.
+    /// Before the fix, `reconstruct_directed_envelope` ran after the whole token
+    /// loop and `rposition` would find the `final` channel's `<|channel|>` token
+    /// (the last one in the buffer) instead of the tool call's, producing the wrong
+    /// envelope.  The in-loop reconstruction fixes this by calling
+    /// `reconstruct_directed_envelope` the moment `<|call|>` resets the parser,
+    /// before any subsequent tokens are appended to the buffer.
+    #[test] // TOOLCALLING.harmony.same-chunk-call-and-final
+    fn test_gpt_oss_streaming_call_and_final_in_same_chunk() {
+        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+        let chunks = vec![
+            "<|channel|>analysis to=functions.search code<|message|>",
+            // `<|call|>` and `<|channel|>final` land in one chunk — this is the
+            // scenario that the original post-loop reconstruction mis-handled.
+            r#"{"q":"foo"}<|call|><|start|>assistant<|channel|>final<|message|>done"#,
+        ];
+        let mut normal_text = String::new();
+        let mut reasoning_text = String::new();
+        for chunk in chunks {
+            let result = parser.parse_reasoning_streaming_incremental(chunk, &[]);
+            normal_text.push_str(&result.normal_text);
+            reasoning_text.push_str(&result.reasoning_text);
+        }
+        assert_eq!(reasoning_text, "");
+        assert!(
+            normal_text.contains("analysis to=functions.search"),
+            "tool call envelope must be present: {normal_text:?}"
+        );
+        assert!(
+            normal_text.contains("<|call|>"),
+            "call terminator must be present: {normal_text:?}"
+        );
+        assert!(
+            normal_text.ends_with("done"),
+            "final text must follow tool call: {normal_text:?}"
+        );
+        let call_pos = normal_text.find("<|call|>").unwrap();
+        let done_pos = normal_text.find("done").unwrap();
+        assert!(call_pos < done_pos, "tool call must precede final text in output");
+    }
+
+    /// Two directed tool calls arriving in a single chunk.  The original code had
+    /// only one post-loop reconstruction path, so the second `<|call|>` clobbered
+    /// the first.  The in-loop per-`<|call|>` reconstruction handles each
+    /// terminator independently and preserves both envelopes.
+    #[test] // TOOLCALLING.harmony.two-calls-one-chunk
+    fn test_gpt_oss_streaming_two_calls_in_one_chunk() {
+        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+        let chunks = vec![
+            // Both tool calls arrive together.
+            "<|channel|>analysis to=functions.search code<|message|>{\"q\":\"x\"}<|call|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"city\":\"SF\"}<|call|>",
+        ];
+        let mut normal_text = String::new();
+        let mut reasoning_text = String::new();
+        for chunk in chunks {
+            let result = parser.parse_reasoning_streaming_incremental(chunk, &[]);
+            normal_text.push_str(&result.normal_text);
+            reasoning_text.push_str(&result.reasoning_text);
+        }
+        assert_eq!(reasoning_text, "");
+        assert!(
+            normal_text.contains("analysis to=functions.search"),
+            "first tool call must be present: {normal_text:?}"
+        );
+        assert!(
+            normal_text.contains("commentary to=functions.get_weather"),
+            "second tool call must be present: {normal_text:?}"
+        );
+        // First call must precede second call in the output.
+        let first_pos = normal_text.find("search").unwrap();
+        let second_pos = normal_text.find("get_weather").unwrap();
+        assert!(first_pos < second_pos, "calls must appear in stream order");
     }
 
     #[test] // REASONING.stream.4.d
