@@ -592,6 +592,7 @@ func TestDCD_RoundTrip_Experimental(t *testing.T) {
 						}},
 					},
 					Checkpoint: &v1beta1.ComponentCheckpointConfig{
+						Enabled:             true,
 						Mode:                v1beta1.CheckpointModeAuto,
 						TargetContainerName: "worker",
 						Identity: &v1beta1.DynamoCheckpointIdentity{
@@ -666,7 +667,8 @@ func TestDCD_ExperimentalModeValuesAreValidForIntermediateVersion(t *testing.T) 
 					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod},
 					Failover:         &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeInterPod},
 					Checkpoint: &v1beta1.ComponentCheckpointConfig{
-						Mode: v1beta1.CheckpointModeAuto,
+						Enabled: true,
+						Mode:    v1beta1.CheckpointModeAuto,
 						Identity: &v1beta1.DynamoCheckpointIdentity{
 							Model:            "model",
 							BackendFramework: "vllm",
