@@ -482,6 +482,19 @@ jobs:
     secrets: inherit
 
   # ============================================================================
+  # XPU TEST JOBS
+  # ============================================================================
+
+  vllm-test-xpu:
+    name: vllm-xpu
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
+    uses: ./.github/workflows/xpu-ci.yaml
+    with:
+      framework: vllm
+      pytest_markers: '(pre_merge or post_merge) and vllm and xpu_1'
+
+  # ============================================================================
   # IMAGE COMPLIANCE JOBS
   # ============================================================================
 

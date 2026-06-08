@@ -290,6 +290,8 @@ navigation:
             path: backends/sglang/sglang-diffusion.md
           - page: Frontend Processor Fallback
             path: backends/sglang/sglang-chat-processor.md
+          - page: Logits Processing
+            path: backends/sglang/sglang-logits-processing.md
           - page: Observability
             path: backends/sglang/sglang-observability.md
           - page: Agentic Workloads
@@ -314,6 +316,8 @@ navigation:
             path: backends/vllm/vllm-reference-guide.md
           - page: Frontend Processor Fallback
             path: backends/vllm/vllm-chat-processor.md
+          - page: Logits Processing
+            path: backends/vllm/vllm-logits-processing.md
           - page: Examples
             path: backends/vllm/vllm-examples.md
           - page: KV Cache Offloading
