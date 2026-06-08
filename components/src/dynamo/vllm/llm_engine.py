@@ -709,6 +709,19 @@ class VllmLLMEngine(LLMEngine):
                     "message": "'lora_name' is required in request",
                 }
 
+            # Reject names that collide with the base model. A LoRA card shares
+            # the frontend model key with its name, so an adapter named after the
+            # base model would shadow it and make _resolve_lora_request route
+            # plain base-model requests through the adapter.
+            if lora_name in (self._served_model_name, self.engine_args.model):
+                return {
+                    "status": "error",
+                    "message": (
+                        f"LoRA name '{lora_name}' collides with the base model; "
+                        "choose a different adapter name"
+                    ),
+                }
+
             logger.debug(f"load_lora request keys: {list(request.keys())}")
 
             source = request.get("source")

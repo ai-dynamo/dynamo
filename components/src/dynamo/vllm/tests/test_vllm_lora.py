@@ -9,7 +9,6 @@ add_lora<->register_model rollback couplings), and the on_endpoint_ready
 handoff. Everything is mocked: no GPU, no real AsyncLLM, no real discovery.
 """
 
-import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -36,28 +35,28 @@ pytestmark = [
 def _make_lora_engine(enable_lora: bool = True, endpoint=None) -> VllmLLMEngine:
     """Build a VllmLLMEngine with only the LoRA-relevant state populated.
 
-    ``__init__`` is bypassed (it would build a real AsyncLLM); we hand-set the
-    attributes the LoRA methods read.
+    Calls the real ``__init__`` (side-effect-free: only attribute assignment
+    and lock creation; AsyncLLM is built later in ``start()``), so new engine
+    attributes get their real defaults automatically and this helper does not
+    silently drift from the constructor. Only the fields ``__init__`` leaves
+    None/unset that the LoRA paths read are overridden below.
     """
-    engine = VllmLLMEngine.__new__(VllmLLMEngine)
-    engine.engine_args = SimpleNamespace(
-        enable_lora=enable_lora,
-        model="/models/base",
-        block_size=16,
+    engine = VllmLLMEngine(
+        engine_args=SimpleNamespace(
+            enable_lora=enable_lora,
+            model="/models/base",
+            block_size=16,
+        ),
+        disaggregation_mode=DisaggregationMode.AGGREGATED,
+        served_model_name="base-model",
+        component="test",
     )
     engine.engine_client = SimpleNamespace(
         add_lora=AsyncMock(),
         remove_lora=AsyncMock(),
     )
-    engine.disaggregation_mode = DisaggregationMode.AGGREGATED
     engine._kv_event_block_size = 16
     engine._endpoint = endpoint
-    engine._dyn_tool_call_parser = None
-    engine._dyn_reasoning_parser = None
-    engine.loaded_loras = {}
-    engine._published_loras = set()
-    engine._lora_load_locks = {}
-    engine._lora_load_locks_guard = threading.Lock()
     return engine
 
 
@@ -239,6 +238,28 @@ async def test_load_lora_happy_path(monkeypatch):
     register.assert_awaited_once()
     assert register.await_args.kwargs["lora_name"] == "adapterA"
     assert engine.loaded_loras["adapterA"].id == 123
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("collision", ["base-model", "/models/base"])
+async def test_load_lora_rejects_base_model_name_collision(monkeypatch, collision):
+    # An adapter named after the base model would shadow its frontend model key
+    # and route plain base-model requests through the adapter. Reject it before
+    # touching the download/engine/discovery path.
+    engine = _make_lora_engine(endpoint=object())
+    manager = SimpleNamespace(download_lora=AsyncMock())
+    register, _ = _patch_discovery(monkeypatch, manager=manager)
+
+    result = await engine.load_lora(
+        {"lora_name": collision, "source": {"uri": "file:///x"}}
+    )
+
+    assert result["status"] == "error"
+    assert "collides" in result["message"]
+    manager.download_lora.assert_not_awaited()
+    engine.engine_client.add_lora.assert_not_awaited()
+    register.assert_not_awaited()
+    assert collision not in engine.loaded_loras
 
 
 @pytest.mark.asyncio
