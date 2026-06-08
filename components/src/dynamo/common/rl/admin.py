@@ -34,10 +34,21 @@ async def first_endpoint_response(
     endpoint_handler: EndpointGenerator,
     body: dict[str, Any],
 ) -> dict[str, Any]:
-    """Return the first response from an async-generator endpoint handler."""
-    async for response in endpoint_handler(body):
-        return response or {"status": "ok"}
-    return {"status": "ok"}
+    """Return the first response from an async-generator endpoint handler.
+
+    The generator is explicitly closed before returning so handlers that hold
+    resources across their yield (e.g. load_lora/unload_lora holding a per-LoRA
+    lock) release them promptly rather than waiting for garbage collection.
+    """
+    gen = endpoint_handler(body)
+    try:
+        async for response in gen:
+            return response or {"status": "ok"}
+        return {"status": "ok"}
+    finally:
+        aclose = getattr(gen, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
 
 def require_lora_load_request(request: Mapping[str, Any] | None) -> tuple[str, str]:
