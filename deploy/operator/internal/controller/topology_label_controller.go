@@ -193,7 +193,8 @@ func keyExists(pod *corev1.Pod, key string) bool {
 	if pod == nil {
 		return false
 	}
-	return pod.GetLabels()[key] != ""
+	_, exists := pod.GetLabels()[key]
+	return exists
 }
 
 type topologyLabelCopyTargetSpec struct {
@@ -207,7 +208,7 @@ func (r *TopologyLabelReconciler) topologyLabelCopyTargets(ctx context.Context, 
 	}
 
 	var targets []topologyLabelCopyTargetSpec
-	if labelKey := pod.GetAnnotations()[consts.KubeAnnotationTopologyLabelKey]; labelKey != "" {
+	if labelKey := pod.GetAnnotations()[consts.KubeAnnotationTopologyLabelKey]; labelKey != "" && !keyExists(pod, labelKey) {
 		targets = append(targets, topologyLabelCopyTargetSpec{
 			sourceLabelKey: labelKey,
 			targetLabelKey: labelKey,

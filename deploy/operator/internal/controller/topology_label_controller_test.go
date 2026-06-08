@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
@@ -294,151 +295,236 @@ func TestTopologyLabelReconciler_SkipsNonDynamoComponentPod(t *testing.T) {
 	assert.NotContains(t, unchanged.Labels, "topology.kubernetes.io/zone")
 }
 
-func TestTopologyLabelPredicate(t *testing.T) {
-	const labelKey = "topology.kubernetes.io/zone"
-	const otherLabelKey = "topology.kubernetes.io/rack"
+const (
+	topologyPredicateLabelKey      = "topology.kubernetes.io/zone"
+	topologyPredicateOtherLabelKey = "topology.kubernetes.io/rack"
+)
 
-	pod := func(nodeName string, annotations map[string]string, labels map[string]string) *corev1.Pod {
-		return &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:        "worker-abc",
-				Namespace:   "default",
-				Annotations: annotations,
-				Labels:      dynamoComponentPodLabels(labels),
-			},
-			Spec: corev1.PodSpec{NodeName: nodeName},
-		}
+func topologyPredicatePod(nodeName string, annotations map[string]string, labels map[string]string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "worker-abc",
+			Namespace:   "default",
+			Annotations: annotations,
+			Labels:      dynamoComponentPodLabels(labels),
+		},
+		Spec: corev1.PodSpec{NodeName: nodeName},
 	}
-	clusterPod := func(nodeName string, annotations map[string]string, labels map[string]string) *corev1.Pod {
-		p := pod(nodeName, annotations, labels)
-		p.Spec.Volumes = []corev1.Volume{
-			{
-				Name: "topology-labels",
-				VolumeSource: corev1.VolumeSource{
-					DownwardAPI: &corev1.DownwardAPIVolumeSource{
-						Items: []corev1.DownwardAPIVolumeFile{
-							{
-								Path: "zone",
-								FieldRef: &corev1.ObjectFieldSelector{
-									FieldPath: "metadata.labels['" + consts.DynamoTopologyLabelKey("zone") + "']",
-								},
-							},
-							{
-								Path: "rack",
-								FieldRef: &corev1.ObjectFieldSelector{
-									FieldPath: "metadata.labels['" + consts.DynamoTopologyLabelKey("rack") + "']",
-								},
-							},
-						},
-					},
-				},
-			},
-		}
-		return p
-	}
+}
 
-	predicate := topologyLabelPredicate()
-	needsLabelCopy := pod("node-1", map[string]string{
-		consts.KubeAnnotationTopologyLabelKey: labelKey,
-	}, nil)
-	needsClusterTopologyCopy := clusterPod("node-1", map[string]string{
+func topologyPredicateClusterPod(nodeName string, labels map[string]string) *corev1.Pod {
+	p := topologyPredicatePod(nodeName, map[string]string{
 		consts.KubeAnnotationTopologyClusterTopologyName: "grove-topology",
-	}, nil)
-
-	assert.True(t, predicate.Create(event.CreateEvent{Object: needsLabelCopy}))
-	assert.True(t, predicate.Create(event.CreateEvent{Object: needsClusterTopologyCopy}))
-	assert.True(t, predicate.Update(event.UpdateEvent{
-		ObjectOld: pod("", map[string]string{consts.KubeAnnotationTopologyLabelKey: labelKey}, nil),
-		ObjectNew: needsLabelCopy,
-	}))
-	assert.True(t, predicate.Update(event.UpdateEvent{
-		ObjectOld: pod("node-1", nil, nil),
-		ObjectNew: needsLabelCopy,
-	}))
-	assert.True(t, predicate.Update(event.UpdateEvent{
-		ObjectOld: pod("node-1", map[string]string{consts.KubeAnnotationTopologyLabelKey: otherLabelKey}, nil),
-		ObjectNew: needsLabelCopy,
-	}))
-	assert.True(t, predicate.Update(event.UpdateEvent{
-		ObjectOld: pod("node-1", map[string]string{consts.KubeAnnotationTopologyLabelKey: labelKey}, map[string]string{
-			labelKey: "us-east-1a",
-		}),
-		ObjectNew: needsLabelCopy,
-	}))
-	assert.True(t, predicate.Update(event.UpdateEvent{
-		ObjectOld: pod("", map[string]string{consts.KubeAnnotationTopologyClusterTopologyName: "grove-topology"}, nil),
-		ObjectNew: needsClusterTopologyCopy,
-	}))
-	assert.True(t, predicate.Update(event.UpdateEvent{
-		ObjectOld: pod("node-1", nil, nil),
-		ObjectNew: needsClusterTopologyCopy,
-	}))
-	assert.True(t, predicate.Update(event.UpdateEvent{
-		ObjectOld: pod("node-1", map[string]string{consts.KubeAnnotationTopologyClusterTopologyName: "old-topology"}, nil),
-		ObjectNew: needsClusterTopologyCopy,
-	}))
-	assert.False(t, predicate.Create(event.CreateEvent{
-		Object: pod("", map[string]string{consts.KubeAnnotationTopologyLabelKey: labelKey}, nil),
-	}))
-	assert.False(t, predicate.Create(event.CreateEvent{
-		Object: pod("node-1", nil, nil),
-	}))
-	assert.False(t, predicate.Create(event.CreateEvent{
-		Object: pod("node-1", map[string]string{consts.KubeAnnotationTopologyLabelKey: labelKey}, map[string]string{
-			labelKey: "us-east-1a",
-		}),
-	}))
-	assert.False(t, predicate.Create(event.CreateEvent{
-		Object: clusterPod("node-1", map[string]string{consts.KubeAnnotationTopologyClusterTopologyName: "grove-topology"}, map[string]string{
-			consts.DynamoTopologyLabelKey("zone"): "us-east-1a",
-			consts.DynamoTopologyLabelKey("rack"): "rack-22",
-		}),
-	}))
-	assert.True(t, predicate.Create(event.CreateEvent{
-		Object: clusterPod("node-1", map[string]string{consts.KubeAnnotationTopologyClusterTopologyName: "grove-topology"}, map[string]string{
-			consts.DynamoTopologyLabelKey("zone"): "us-east-1a",
-		}),
-	}))
-	assert.False(t, predicate.Update(event.UpdateEvent{
-		ObjectOld: needsLabelCopy,
-		ObjectNew: needsLabelCopy,
-	}))
-	assert.False(t, predicate.Update(event.UpdateEvent{
-		ObjectOld: needsLabelCopy,
-		ObjectNew: pod("node-1", map[string]string{consts.KubeAnnotationTopologyLabelKey: labelKey}, map[string]string{
-			labelKey: "us-east-1a",
-		}),
-	}))
-	assert.False(t, predicate.Update(event.UpdateEvent{
-		ObjectOld: needsClusterTopologyCopy,
-		ObjectNew: needsClusterTopologyCopy,
-	}))
-	nonDynamoLabelCases := map[string]map[string]string{
-		"missing ownership labels": nil,
-		"missing DGD label": {
-			consts.KubeLabelDynamoComponent: "worker",
-		},
-		"missing component label": {
-			consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+	}, labels)
+	p.Spec.Volumes = []corev1.Volume{
+		{
+			Name: "topology-labels",
+			VolumeSource: corev1.VolumeSource{
+				DownwardAPI: &corev1.DownwardAPIVolumeSource{
+					Items: []corev1.DownwardAPIVolumeFile{
+						{
+							Path: "zone",
+							FieldRef: &corev1.ObjectFieldSelector{
+								FieldPath: "metadata.labels['" + consts.DynamoTopologyLabelKey("zone") + "']",
+							},
+						},
+						{
+							Path: "rack",
+							FieldRef: &corev1.ObjectFieldSelector{
+								FieldPath: "metadata.labels['" + consts.DynamoTopologyLabelKey("rack") + "']",
+							},
+						},
+					},
+				},
+			},
 		},
 	}
-	for name, labels := range nonDynamoLabelCases {
-		t.Run(name, func(t *testing.T) {
-			assert.False(t, predicate.Create(event.CreateEvent{
-				Object: &corev1.Pod{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "non-dynamo",
-						Namespace: "default",
-						Annotations: map[string]string{
-							consts.KubeAnnotationTopologyLabelKey: labelKey,
-						},
-						Labels: labels,
-					},
-					Spec: corev1.PodSpec{NodeName: "node-1"},
-				},
+	return p
+}
+
+func topologyPredicateNonDynamoPod(labels map[string]string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "non-dynamo",
+			Namespace: "default",
+			Annotations: map[string]string{
+				consts.KubeAnnotationTopologyLabelKey: topologyPredicateLabelKey,
+			},
+			Labels: labels,
+		},
+		Spec: corev1.PodSpec{NodeName: "node-1"},
+	}
+}
+
+func TestTopologyLabelPredicateCreate(t *testing.T) {
+	predicate := topologyLabelPredicate()
+
+	tests := []struct {
+		name string
+		pod  *corev1.Pod
+		want bool
+	}{
+		{
+			name: "labelKey scheduled missing label",
+			pod: topologyPredicatePod("node-1", map[string]string{
+				consts.KubeAnnotationTopologyLabelKey: topologyPredicateLabelKey,
+			}, nil),
+			want: true,
+		},
+		{
+			name: "cluster topology scheduled missing labels",
+			pod:  topologyPredicateClusterPod("node-1", nil),
+			want: true,
+		},
+		{
+			name: "cluster topology scheduled partially labeled",
+			pod: topologyPredicateClusterPod("node-1", map[string]string{
+				consts.DynamoTopologyLabelKey("zone"): "us-east-1a",
+			}),
+			want: true,
+		},
+		{
+			name: "unscheduled annotated pod",
+			pod: topologyPredicatePod("", map[string]string{
+				consts.KubeAnnotationTopologyLabelKey: topologyPredicateLabelKey,
+			}, nil),
+			want: false,
+		},
+		{
+			name: "scheduled pod without topology source",
+			pod:  topologyPredicatePod("node-1", nil, nil),
+			want: false,
+		},
+		{
+			name: "labelKey already present",
+			pod: topologyPredicatePod("node-1", map[string]string{
+				consts.KubeAnnotationTopologyLabelKey: topologyPredicateLabelKey,
+			}, map[string]string{
+				topologyPredicateLabelKey: "us-east-1a",
+			}),
+			want: false,
+		},
+		{
+			name: "cluster topology fully labeled",
+			pod: topologyPredicateClusterPod("node-1", map[string]string{
+				consts.DynamoTopologyLabelKey("zone"): "us-east-1a",
+				consts.DynamoTopologyLabelKey("rack"): "rack-22",
+			}),
+			want: false,
+		},
+		{
+			name: "missing Dynamo ownership labels",
+			pod:  topologyPredicateNonDynamoPod(nil),
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, predicate.Create(event.CreateEvent{Object: tt.pod}))
+		})
+	}
+}
+
+func TestTopologyLabelPredicateUpdate(t *testing.T) {
+	predicate := topologyLabelPredicate()
+
+	needsLabelCopy := topologyPredicatePod("node-1", map[string]string{
+		consts.KubeAnnotationTopologyLabelKey: topologyPredicateLabelKey,
+	}, nil)
+	labelCopyComplete := topologyPredicatePod("node-1", map[string]string{
+		consts.KubeAnnotationTopologyLabelKey: topologyPredicateLabelKey,
+	}, map[string]string{
+		topologyPredicateLabelKey: "us-east-1a",
+	})
+	needsClusterTopologyCopy := topologyPredicateClusterPod("node-1", nil)
+	clusterTopologyCopyComplete := topologyPredicateClusterPod("node-1", map[string]string{
+		consts.DynamoTopologyLabelKey("zone"): "us-east-1a",
+		consts.DynamoTopologyLabelKey("rack"): "rack-22",
+	})
+
+	tests := []struct {
+		name string
+		old  client.Object
+		new  client.Object
+		want bool
+	}{
+		{
+			name: "labelKey pod becomes scheduled",
+			old: topologyPredicatePod("", map[string]string{
+				consts.KubeAnnotationTopologyLabelKey: topologyPredicateLabelKey,
+			}, nil),
+			new:  needsLabelCopy,
+			want: true,
+		},
+		{
+			name: "labelKey topology source changes",
+			old: topologyPredicatePod("node-1", map[string]string{
+				consts.KubeAnnotationTopologyLabelKey: topologyPredicateOtherLabelKey,
+			}, nil),
+			new:  needsLabelCopy,
+			want: true,
+		},
+		{
+			name: "labelKey label removed",
+			old:  labelCopyComplete,
+			new:  needsLabelCopy,
+			want: true,
+		},
+		{
+			name: "cluster topology pod becomes scheduled",
+			old:  topologyPredicateClusterPod("", nil),
+			new:  needsClusterTopologyCopy,
+			want: true,
+		},
+		{
+			name: "cluster topology source changes",
+			old: topologyPredicatePod("node-1", map[string]string{
+				consts.KubeAnnotationTopologyClusterTopologyName: "old-topology",
+			}, nil),
+			new:  needsClusterTopologyCopy,
+			want: true,
+		},
+		{
+			name: "cluster topology label removed",
+			old:  clusterTopologyCopyComplete,
+			new: topologyPredicateClusterPod("node-1", map[string]string{
+				consts.DynamoTopologyLabelKey("zone"): "us-east-1a",
+			}),
+			want: true,
+		},
+		{
+			name: "labelKey pod still waiting",
+			old:  needsLabelCopy,
+			new:  needsLabelCopy,
+			want: false,
+		},
+		{
+			name: "cluster topology pod still waiting",
+			old:  needsClusterTopologyCopy,
+			new:  needsClusterTopologyCopy,
+			want: false,
+		},
+		{
+			name: "new pod no longer needs copy",
+			old:  needsLabelCopy,
+			new:  labelCopyComplete,
+			want: false,
+		},
+		{
+			name: "non-pod update",
+			old:  &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+			new:  &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, predicate.Update(event.UpdateEvent{
+				ObjectOld: tt.old,
+				ObjectNew: tt.new,
 			}))
 		})
 	}
-	assert.False(t, predicate.Delete(event.DeleteEvent{Object: needsLabelCopy}))
-	assert.False(t, predicate.Generic(event.GenericEvent{Object: needsLabelCopy}))
 }
