@@ -87,12 +87,6 @@ def build_kv_connector_config(config: Config):
                 connector_scheduler_class="DynamoKVBMConnectorLeader",
                 connector_worker_class="DynamoKVBMConnectorWorker",
             )
-        elif config.connector[0] == "remote_g2":
-            return KvCacheConnectorConfig(
-                connector_module="tensorrt_llm._torch.pyexecutor.connectors.remote_g2_connector",
-                connector_scheduler_class="RemoteG2KvCacheConnectorScheduler",
-                connector_worker_class="RemoteG2KvCacheConnectorWorker",
-            )
         elif config.connector[0] == "none":
             return None
         else:
@@ -470,56 +464,6 @@ async def init_llm_worker(
         component_name=config.component,
     )
 
-    # Create the endpoint BEFORE the engine. The engine subprocess inherits
-    # this process's env vars at spawn time, so remote-G2 needs the worker
-    # instance_id (== endpoint.connection_id()) available in env vars before
-    # get_llm_engine runs. The dynamo TRT-LLM connector reads these env vars
-    # inside register_kv_caches to identify the source worker the registry
-    # belongs to.
-    endpoint = runtime.endpoint(
-        f"{config.namespace}.{config.component}.{config.endpoint}"
-    )
-    if config.has_connector("remote_g2"):
-        worker_id = str(endpoint.connection_id())
-        os.environ["DYNAMO_REMOTE_G2_WORKER_ID"] = worker_id
-        os.environ["DYNAMO_REMOTE_G2_DP_RANK"] = "0"
-        # OpenMPI's orted strips arbitrary env vars when spawning ranks,
-        # so the engine subprocess won't see DYNAMO_REMOTE_G2_WORKER_ID
-        # via the env var path. Write a sidecar file keyed by this
-        # process's PID; the engine subprocess walks up its parent chain
-        # (engine → orted → dynamo worker) to find this PID and read the
-        # file.
-        # TODO production: replace with a proper TRT-LLM-aware mechanism.
-        worker_id_path = f"/tmp/dynamo_remote_g2_worker_{os.getpid()}.txt"
-        try:
-            with open(worker_id_path, "w") as f:
-                f.write(worker_id)
-        except Exception:
-            logging.exception("remote_g2: failed to write worker_id sidecar file")
-        logging.warning(
-            "PROBE remote_g2 dynamo-side env vars set: "
-            "DYNAMO_REMOTE_G2_WORKER_ID=%s DYNAMO_REMOTE_G2_DP_RANK=0 "
-            "sidecar=%s",
-            worker_id,
-            worker_id_path,
-        )
-
-    # Bind the target-side REP socket BEFORE engine subprocess startup.
-    # The engine subprocess calls maybe_start_remote_g2_target_client
-    # inside register_kv_caches and polls for this socket; if we bind
-    # later (e.g. inside get_publisher) the engine times out before the
-    # socket appears. The bind itself is synchronous and only needs the
-    # dynamo runtime, so it's safe here.
-    _remote_g2_target_handle = None
-    if config.has_connector("remote_g2"):
-        from dynamo.trtllm.kv_p2p.target_rpc_local import (
-            setup_target_rpc_local,
-        )
-
-        _remote_g2_target_handle = setup_target_rpc_local(
-            runtime, config.namespace, config.component
-        )
-
     async with get_llm_engine(
         engine_args,
         config.disaggregation_mode,
@@ -529,6 +473,10 @@ async def init_llm_worker(
         # The callback uses this to poll active request count during shutdown.
         if engine_holder is not None:
             engine_holder.append(engine)
+
+        endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}"
+        )
 
         if shutdown_endpoints is not None:
             shutdown_endpoints[:] = [endpoint]
@@ -751,28 +699,6 @@ async def init_llm_worker(
                 metrics_collector=metrics_collector,
             ) as publisher:
                 handler_config.publisher = publisher
-
-                # remote-G2 source registry is bootstrapped inside the
-                # engine subprocess (in PyExecutor, via
-                # maybe_start_remote_g2_service). It exposes a ZMQ REP
-                # socket; here we register dynamo runtime endpoints that
-                # forward to it, so other workers can reach this source
-                # via client.direct(...).
-                _remote_g2_rpc_handle = None
-                if config.has_connector("remote_g2"):
-                    from dynamo.trtllm.kv_p2p.source_rpc_server import (
-                        setup_source_rpc_endpoints,
-                    )
-
-                    # Source REP socket is bound by the engine subprocess;
-                    # the parent's REQ side waits for it to appear. The
-                    # target REP bind was already done before get_llm_engine
-                    # (see _remote_g2_target_handle above) — we keep that
-                    # reference alive but don't re-bind here.
-                    _remote_g2_rpc_handle = await setup_source_rpc_endpoints(
-                        runtime, config.namespace, config.component
-                    )
-
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
                 if config.load_format == "gms":
                     _register_memory_routes(runtime, handler)
