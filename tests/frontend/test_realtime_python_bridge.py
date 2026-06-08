@@ -83,20 +83,32 @@ def realtime_frontend(request, monkeypatch, dynamo_dynamic_ports: ServicePorts):
     """
     frontend_port = dynamo_dynamic_ports.frontend_port
     with tempfile.TemporaryDirectory(prefix="dyn_realtime_kv_") as file_kv:
-        # Set before launching so both subprocesses (which copy os.environ at
-        # spawn) inherit them. monkeypatch restores prior values on teardown
-        # without clobbering external state.
-        #   DYN_FILE_KV     — shared file discovery store for both processes.
-        #   DYN_EVENT_PLANE — force zmq so the runtime does not try to connect
-        #                     to NATS (file discovery otherwise resolves the
-        #                     event plane to NATS); keeps the test free of
-        #                     etcd and nats.
+        # Shared file discovery store for both subprocesses (which copy
+        # os.environ at spawn). monkeypatch restores it on teardown without
+        # clobbering external state.
         monkeypatch.setenv("DYN_FILE_KV", file_kv)
-        monkeypatch.setenv("DYN_EVENT_PLANE", "zmq")
+        # Drop any ambient NATS_SERVER (CI sets one for the suite). The runtime
+        # forces a NATS connection when NATS_SERVER is set and the event plane
+        # is not set via an explicit argument — which is the case for the
+        # launched frontend — so an ambient NATS_SERVER would make this
+        # otherwise-local test require a NATS the fixture never starts.
+        monkeypatch.delenv("NATS_SERVER", raising=False)
+        # `--event-plane zmq` is passed explicitly (not via DYN_EVENT_PLANE):
+        # the runtime only treats the event plane as "no nats" when the event
+        # plane is set explicitly, so an ambient NATS_SERVER (as in CI) would
+        # otherwise force a NATS connection. With file discovery + tcp request
+        # plane + explicit zmq event plane, the test needs no etcd/nats.
         with DynamoFrontendProcess(
             request,
             frontend_port=frontend_port,
-            extra_args=["--discovery-backend", "file", "--request-plane", "tcp"],
+            extra_args=[
+                "--discovery-backend",
+                "file",
+                "--request-plane",
+                "tcp",
+                "--event-plane",
+                "zmq",
+            ],
             terminate_all_matching_process_names=False,
         ):
             logger.info("Frontend started on port %s", frontend_port)

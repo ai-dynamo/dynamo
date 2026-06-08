@@ -113,7 +113,13 @@ async def main() -> None:
     Uses file-based discovery (``DYN_FILE_KV``) + the tcp request plane, so the
     worker and the launched frontend coordinate without etcd or nats.
     """
-    runtime = DistributedRuntime(asyncio.get_running_loop(), "file", "tcp")
+    # event_plane="zmq" must be passed explicitly (not just via DYN_EVENT_PLANE):
+    # the runtime's NATS gating only treats the event plane as "no nats" when the
+    # event_plane argument is set, so an ambient NATS_SERVER (as in CI) would
+    # otherwise force a NATS connection.
+    runtime = DistributedRuntime(
+        asyncio.get_running_loop(), "file", "tcp", event_plane="zmq"
+    )
     endpoint = runtime.endpoint(ENDPOINT_PATH)
     await register_model(
         ModelInput.Text,
