@@ -1804,11 +1804,24 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         try:
                             await self.engine_client.reset_prefix_cache()
                         except Exception as e:
+                            # The adapter was already swapped, but the prefix cache
+                            # still holds entries computed under the previous
+                            # weights — same-name prefixes could be reused
+                            # incorrectly. Roll our tracking back to old_info so we
+                            # don't report/serve the swap as clean (CodeRabbit).
+                            if old_info is not None:
+                                self.loaded_loras[lora_name] = old_info
+                            else:
+                                self.loaded_loras.pop(lora_name, None)
+                            logger.error(
+                                f"LoRA '{lora_name}' hot-swap rolled back: prefix "
+                                f"cache reset failed: {e}"
+                            )
                             yield {
                                 "status": "error",
                                 "message": (
-                                    f"LoRA '{lora_name}' loaded but prefix cache "
-                                    f"reset failed: {e}"
+                                    f"LoRA '{lora_name}' hot-swap aborted; prefix "
+                                    f"cache reset failed: {e}"
                                 ),
                                 "lora_name": lora_name,
                                 "lora_id": lora_id,
