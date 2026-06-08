@@ -1,7 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Snapshot
+title: Snapshotting GPU Workers
 ---
 
 > ⚠️ **Experimental Feature**: Dynamo Snapshot is currently in preview and may only be functional in some cluster setups. The `snapshot-agent` DaemonSet runs in privileged mode to perform CRIU operations. See [Limitations](#limitations) for details.
@@ -18,6 +18,9 @@ title: Snapshot
 | **Warm Start** (restore from checkpoint) | ~10 sec | Restore from a ready checkpoint directory |
 
 > ⚠️ Restore time depends on storage bandwidth, GPU model, and whether the restore stays on the same node.
+
+For more background on the snapshot architecture and startup improvements, see
+[NVIDIA Dynamo Snapshot: Fast Startup for Inference Workloads on Kubernetes](https://developer.nvidia.com/blog/nvidia-dynamo-snapshot-fast-startup-for-inference-workloads-on-kubernetes/).
 
 ## Prerequisites
 
@@ -184,9 +187,9 @@ kubectl get pods -n dynamo-system -l app.kubernetes.io/component=snapshot-agent 
 kubectl get pvc snapshot-pvc -n ${NAMESPACE}
 ```
 
-### 4. Create a `DynamoCheckpoint`
+### 4. Create a standalone `DynamoCheckpoint`
 
-The checkpoint Job pod template should match the worker container you want to checkpoint. For the snapshot flow, the important parts are the checkpoint identity, a container named `main`, and the placeholder image; the rest of the pod template should mirror your normal worker config. Extra containers are allowed, but only `main` is checkpointed.
+The checkpoint Job pod template should match the worker container you want to checkpoint. For a standalone checkpoint, the important parts are the legacy `spec.identity` metadata, a container named `main`, and the placeholder image; the rest of the pod template should mirror your normal worker config. Extra containers are allowed, but only `main` is checkpointed unless `spec.job.targetContainerName` selects another container.
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -226,7 +229,7 @@ kubectl apply -f qwen3-checkpoint.yaml -n ${NAMESPACE}
 
 ```bash
 kubectl get dckpt -n ${NAMESPACE} \
-  -o custom-columns=NAME:.metadata.name,HASH:.status.identityHash,PHASE:.status.phase
+  -o custom-columns=NAME:.metadata.name,CHECKPOINT_ID:.status.checkpointID,PHASE:.status.phase
 
 kubectl wait \
   --for=jsonpath='{.status.phase}'=Ready \
@@ -238,7 +241,8 @@ kubectl wait \
 The useful status fields are:
 
 - `status.phase`: high-level lifecycle (`Pending`, `Creating`, `Ready`, `Failed`)
-- `status.identityHash`: deterministic hash of `spec.identity`
+- `status.checkpointID`: artifact ID used by the snapshot protocol
+- `status.identityHash`: deprecated compatibility alias for `status.checkpointID`
 - `status.jobName`: checkpoint Job name
 - `status.createdAt`: timestamp recorded when the checkpoint became ready
 - `status.message`: progress or failure detail when available
@@ -285,18 +289,40 @@ The `VllmDecodeWorker` pod should restore from the ready checkpoint instead of c
 
 ## DGD Auto Flow
 
-`checkpointRef` is the most explicit path. `mode: Auto` is the higher-level path: the operator computes the checkpoint identity hash, looks for an equivalent `DynamoCheckpoint`, and creates one only when no matching checkpoint exists. If a `DynamoCheckpoint` already exists with the same identity, Auto mode reuses it. If no matching checkpoint exists yet, the first worker cold-starts and the operator creates the checkpoint in the background.
+`checkpointRef` is the most explicit path. If you set it, the DGD uses that
+existing `DynamoCheckpoint` and does not create a new automatic checkpoint for
+the component. This is the escape hatch for users who intentionally want to
+reuse a retained or pre-warmed checkpoint and accept the compatibility risk.
+Treat the pod template as a compatibility template for the same workload: once
+the checkpoint is ready, restore admission replaces the target container's
+command and args with the restore placeholder, and the restored process resumes
+from the checkpointed state rather than from newly supplied command-line or
+environment settings.
+
+Without `checkpointRef`, `mode: Auto` is the DGD-managed path: for each
+checkpoint-enabled worker generation, the DGD controller creates a DGD-owned
+`DynamoCheckpoint` and the checkpoint controller starts a checkpoint Job.
+Automatic DGD checkpoints are not reused across DGDs, even when two manifests
+are identical.
+
+The automatic checkpoint ID is derived from the DGD namespace/name/UID, component name, and active worker hash. The DGD UID prevents cross-DGD reuse; the worker hash keeps a scale down/up on the same worker generation using the same DGD-scoped checkpoint while creating a new checkpoint for a new worker generation.
+
+By default, when the DGD is deleted, the operator deletes DGD-owned automatic
+`DynamoCheckpoint` CRs. The checkpoint finalizer then removes the corresponding
+checkpoint artifact from the checkpoint PVC. Set `deletionPolicy: Retain` to
+keep the automatic checkpoint CR and stored artifact after the DGD is deleted.
+Retained checkpoints can later be used explicitly with `checkpointRef`.
+
+By default, `startupPolicy: Immediate` starts workers cold while the checkpoint job runs in the background. Once the checkpoint becomes `Ready`, only newly-created Pods restore from it. Existing Pods are not mutated or restarted just because the checkpoint became ready.
+
+If you want workers to wait for the checkpoint before starting, set `startupPolicy: WaitForCheckpoint`. That policy keeps normal worker replicas at zero until the checkpoint is `Ready`, then starts workers from the checkpoint.
 
 ```yaml
 checkpoint:
   enabled: true
   mode: Auto
-  identity:
-    model: Qwen/Qwen3-0.6B
-    backendFramework: vllm
-    tensorParallelSize: 1
-    dtype: bfloat16
-    maxModelLen: 2048
+  startupPolicy: Immediate # default; optional
+  deletionPolicy: Delete  # default; use Retain to keep CR/artifact after DGD deletion
 ```
 
 Inside a `DynamoGraphDeployment`, it looks like this:
@@ -321,12 +347,8 @@ spec:
       checkpoint:
         enabled: true
         mode: Auto
-        identity:
-          model: Qwen/Qwen3-0.6B
-          backendFramework: vllm
-          tensorParallelSize: 1
-          dtype: bfloat16
-          maxModelLen: 2048
+        startupPolicy: Immediate
+        deletionPolicy: Delete
       extraPodSpec:
         mainContainer:
           image: registry.example.com/dynamo/vllm-placeholder:1.0.0
@@ -334,18 +356,18 @@ spec:
         ...
 ```
 
-Auto mode only hashes `checkpoint.identity`. GMS-specific checkpoint behavior is not yet available.
+The legacy `checkpoint.identity` field is ignored for DGD-managed automatic checkpoints. It is retained only for API compatibility and standalone `DynamoCheckpoint` workflows.
 
 Useful inspection commands:
 
 ```bash
 kubectl get dgd vllm-auto-demo -n ${NAMESPACE} \
-  -o jsonpath='{.status.checkpoints.VllmDecodeWorker.checkpointName}{"\n"}{.status.checkpoints.VllmDecodeWorker.identityHash}{"\n"}{.status.checkpoints.VllmDecodeWorker.ready}{"\n"}'
+  -o jsonpath='{.status.checkpoints.VllmDecodeWorker.checkpointName}{"\n"}{.status.checkpoints.VllmDecodeWorker.checkpointID}{"\n"}{.status.checkpoints.VllmDecodeWorker.ready}{"\n"}'
 
 kubectl get dckpt -n ${NAMESPACE}
 ```
 
-If you want to force a new restore after the checkpoint becomes ready, scale the worker:
+If you use the default `Immediate` policy and want to create restored pods after the checkpoint becomes ready, scale the worker:
 
 ```bash
 kubectl patch dgd vllm-auto-demo -n ${NAMESPACE} --type=merge \
@@ -408,12 +430,22 @@ snapshotctl restore \
 
 This patches restore metadata onto an existing pod that is already snapshot-compatible and returns after the patch is accepted.
 
-## Checkpoint Identity
+## Checkpoint IDs and Legacy Identity
 
-Checkpoints are uniquely identified by a **16-character SHA256 hash** (64 bits) of configuration that affects runtime state:
+`status.checkpointID` is the artifact ID used by the snapshot protocol and the
+directory name under checkpoint storage. For DGD-managed automatic checkpoints,
+this ID is scoped to a single DGD/component worker generation. It is not a
+compatibility claim across DGDs, and identical manifests are not treated as
+proof that a checkpoint can be reused safely.
 
-| Field | Required | Affects Hash | Example |
-|-------|----------|-------------|---------|
+The legacy `spec.identity` shape is still required on standalone
+`DynamoCheckpoint` objects and remains the fallback for explicit/manual
+workflows. When a standalone checkpoint does not already have
+`status.checkpointID` or the checkpoint-ID label, the operator computes the
+legacy **16-character SHA256 hash** (64 bits) from these fields:
+
+| Legacy field | Required | Affects legacy hash | Example |
+|--------------|----------|---------------------|---------|
 | `model` | ✓ | ✓ | `meta-llama/Llama-3-8B` |
 | `backendFramework` | ✓ | ✓ | `vllm` |
 | `dynamoVersion` | | ✓ | `0.9.0`, `1.0.0` |
@@ -423,12 +455,17 @@ Checkpoints are uniquely identified by a **16-character SHA256 hash** (64 bits) 
 | `maxModelLen` | | ✓ | `4096`, `8192` |
 | `extraParameters` | | ✓ | custom key-value pairs |
 
-Fields that do **not** change the checkpoint hash include:
+Fields that do **not** change the legacy hash include:
 
 - replica count
 - node placement (`nodeSelector`, `affinity`, `tolerations`)
 - resource requests/limits
 - logging or observability configuration
+
+DGD-managed automatic checkpoints ignore this legacy identity as a reuse
+boundary. The DGD controller creates its own DGD-scoped checkpoint ID and
+synthesizes a legacy identity only because the v1alpha1 `DynamoCheckpoint` API
+still requires the field.
 
 ## `DynamoCheckpoint` CRD
 
@@ -460,7 +497,8 @@ The `status` block looks like:
 ```yaml
 status:
   phase: Ready
-  identityHash: 3bff874d069f0ed5
+  checkpointID: 3bff874d069f0ed5
+  identityHash: 3bff874d069f0ed5 # deprecated compatibility alias
   jobName: checkpoint-job-3bff874d069f0ed5-1
   createdAt: "2026-01-29T10:05:00Z"
   message: ""
@@ -472,6 +510,8 @@ status:
 - **Worker coverage is narrow**: specialized workers such as multimodal, embedding, and diffusion are not supported.
 - **Multi-GPU remains preview**: vLLM tensor-parallel configurations have limited validation and are not yet a broadly supported path across clusters.
 - **GMS restore remains experimental**: GMS + Snapshot is currently disabled.
+- **Admission is create-only**: with DGD `startupPolicy: Immediate`, only Pods created after a checkpoint is `Ready` are restore-shaped. Existing Pods cold-started before checkpoint readiness keep running as-is.
+- **Restore admission must be installed**: DGD restores rely on the snapshot Pod mutating webhook, so upgrade the snapshot chart/webhook configuration along with the operator and CRDs when enabling these features.
 - **Network state is sensitive**: restore is sensitive to live TCP socket state. Loopback bootstrap/control sockets are the most reliable path today.
 - **Privileged DaemonSet required**: `snapshot-agent` must run privileged to execute CRIU and `cuda-checkpoint`. Workload pods do not need to be privileged.
 
@@ -538,9 +578,8 @@ If the manifest already carries snapshot target metadata, it must agree with the
 
 ## Planned Features
 
-- Stabilize multi-GPU support
-- Additional backend support
-- Alternative storage backends
+- Stable multi-GPU and multinode support
+- TensorRT-LLM support
 
 ## Related Documentation
 

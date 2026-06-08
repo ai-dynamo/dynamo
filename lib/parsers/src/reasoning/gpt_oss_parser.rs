@@ -290,7 +290,7 @@ fn reconstruct_directed_envelope(
 ) -> Option<String> {
     let ch = channel?;
     let is_tool_ch = ch == "commentary"
-        || (ch == "analysis" && recipient.map_or(false, |r| r.starts_with("functions.")));
+        || (ch == "analysis" && recipient.is_some_and(|r| r.starts_with("functions.")));
     if !is_tool_ch {
         return None;
     }
@@ -475,13 +475,12 @@ impl ReasoningParser for GptOssReasoningParser {
             // the recipient — e.g. for short responses split into tiny chunks the
             // `<|call|>` token can be the first token of its own chunk, by which
             // point the live parser recipient is already gone.
-            if let (Some(ch), Some(rec)) = (&current_channel, &current_recipient) {
-                if (ch.as_str() == "commentary" || ch.as_str() == "analysis")
-                    && rec.starts_with("functions.")
-                {
-                    self.last_directed_channel = current_channel.clone();
-                    self.last_directed_recipient = current_recipient.clone();
-                }
+            if let (Some(ch), Some(rec)) = (&current_channel, &current_recipient)
+                && (ch.as_str() == "commentary" || ch.as_str() == "analysis")
+                && rec.starts_with("functions.")
+            {
+                self.last_directed_channel = current_channel.clone();
+                self.last_directed_recipient = current_recipient.clone();
             }
 
             if previous_channel.as_deref() != Some("analysis")
@@ -626,7 +625,7 @@ impl ReasoningParser for GptOssReasoningParser {
                     && parser
                         .current_recipient()
                         .as_deref()
-                        .map_or(false, |r| r.starts_with("functions.")));
+                        .is_some_and(|r| r.starts_with("functions.")));
 
             if is_directed_tool_call {
                 // We are mid directed-tool-call (channel + functions recipient) but

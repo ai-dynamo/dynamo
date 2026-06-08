@@ -155,6 +155,7 @@ data:
     {{- if .Values.checkpoint.enabled }}
     checkpoint:
       enabled: true
+      cleanupImage: {{ .Values.checkpoint.cleanupImage | default "busybox:1.36" | quote }}
       {{- if or .Values.checkpoint.seccomp.disabled .Values.checkpoint.seccomp.profile }}
       seccomp:
         {{- if .Values.checkpoint.seccomp.disabled }}

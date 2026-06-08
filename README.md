@@ -33,9 +33,10 @@ limitations under the License.
 
 # Dynamo
 
-<!-- TEMPORARY BANNER: remove once V4 recipes mature. -->
+<!-- TEMPORARY BANNER: remove once Nemotron Ultra 3 recipes mature. -->
 > [!NOTE]
-> **Day-0 DeepSeek-V4 recipes available.** Tested Kubernetes deployment paths for [DeepSeek-V4-Pro](recipes/deepseek-v4/deepseek-v4-pro/) and [DeepSeek-V4-Flash](recipes/deepseek-v4/deepseek-v4-flash/) are merged to main on both **vLLM** and **SGLang**, with a prebuilt SGLang container image published on NGC.
+> **Day-0 Nemotron 3 Ultra recipes available.** Tested and performance optimized Kubernetes deployment paths for [Nemotron 3 Ultra](recipes/nemotron-3-ultra/) are merged to main for **vLLM**, with a prebuilt container image published on NGC.\
+> Recipes include KV-aware routing, multi-token prediction (MTP), and disaggregated prefill/decode
 
 **The open-source, datacenter-scale inference stack.** Dynamo is the orchestration layer above inference engines — it doesn't replace SGLang, TensorRT-LLM, or vLLM, it turns them into a coordinated multi-node inference system. Disaggregated serving, intelligent routing, multi-tier KV caching, and automatic scaling work together to maximize throughput and minimize latency for LLM, reasoning, multimodal, and video generation workloads.
 
@@ -181,7 +182,7 @@ Pre-built recipes for common models:
 | DeepSeek-R1 | SGLang | Disaggregated | [View](recipes/deepseek-r1/sglang/) |
 | Qwen3-32B-FP8 | TensorRT-LLM | Aggregated | [View](recipes/qwen3-32b-fp8/trtllm/) |
 
-See [recipes/](recipes/README.md) for the full list. Cloud-specific guides: [AWS EKS](examples/deployments/EKS/) · [Google GKE](examples/deployments/GKE/)
+See [recipes/](recipes/README.md) for the full list. Cloud-specific guides: [AWS EKS](docs/kubernetes/cloud-providers/eks/eks.md) · [Google GKE](docs/kubernetes/cloud-providers/gke/gke.md) · [Azure AKS](docs/kubernetes/cloud-providers/aks/aks.md) · [Amazon ECS](docs/kubernetes/cloud-providers/ecs/ecs.md)
 
 ## Building from Source
 

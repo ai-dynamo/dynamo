@@ -235,3 +235,29 @@ cases:
           </invoke>
           </minimax:tool_call>
         reason: SGLang preserves the bare MiniMax invoke before the first <minimax:tool_call> as content, including the trailing newline; Dynamo recovers it as the first structured call before parsing the wrapped call.
+  TOOLCALLING.batch.5.g:
+    description: Closing </minimax:tool_call> without matching open after prefix prose
+    ref: dynamo
+    model_text: |-
+      I will check that. <invoke name="get_weather">
+      <parameter name="location">NYC</parameter>
+      </invoke>
+      </minimax:tool_call>
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: 'I will check that. '
+      vllm: &id003
+        reason: "vLLM and SGLang preserve orphan MiniMax invoke/parameter markers as content when opening <minimax:tool_call> is missing; Dynamo preserves the prefix prose, recovers the complete inner <invoke> call, and drops the orphan close marker."
+        calls: []
+        normal_text: |-
+          I will check that. <invoke name="get_weather">
+          <parameter name="location">NYC</parameter>
+          </invoke>
+          </minimax:tool_call>
+      sglang: *id003
