@@ -143,13 +143,18 @@ func topologyLabelCopyBecameNeeded(oldObj, newObj client.Object) bool {
 		return false
 	}
 
+	// new Pod has become scheduled
 	if oldPod.Spec.NodeName == "" && newPod.Spec.NodeName != "" {
 		return true
 	}
+
+	// labelKey or clusterTopologyName changed
 	if topologySourceAnnotationChanged(oldPod, newPod) {
 		return true
 	}
-	return false
+
+	// old Pod did not need the label copy, but new Pod does
+	return !needsTopologyLabelCopy(oldPod)
 }
 
 func topologySourceAnnotationChanged(oldPod, newPod *corev1.Pod) bool {
@@ -181,7 +186,7 @@ func needsTopologyLabelCopy(obj client.Object) bool {
 	if labelKey != "" {
 		return !keyExists(pod, labelKey)
 	}
-	return !missingDynamoTopologyLabel(pod)
+	return missingDynamoTopologyLabel(pod)
 }
 
 func keyExists(pod *corev1.Pod, key string) bool {
