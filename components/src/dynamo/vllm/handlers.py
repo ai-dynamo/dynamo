@@ -311,20 +311,55 @@ def _compute_mm_uuids(
     preimage), ensuring consistent hashing across the MM Router, vLLM
     handler, and Rust KV publisher.
     """
-    if not multi_modal_data or "image" not in multi_modal_data:
+    if not multi_modal_data:
         return None
-    images = multi_modal_data["image"]
-    # [gluo FIXME] Dict being returned when the mm data has been processed,
-    # in this case, we skip computing mm_uuids for now until we better understand
-    # what info should be hash on.
-    if isinstance(images, dict):
+    if "image" in multi_modal_data:
+        images = multi_modal_data["image"]
+        # [gluo FIXME] Dict being returned when the mm data has been processed,
+        # in this case, we skip computing mm_uuids for now until we better understand
+        # what info should be hash on.
+        if isinstance(images, dict):
+            return None
+        if not isinstance(images, list):
+            images = [images]
+        if not images:
+            return None
+        uuids = compute_mm_uuids_from_images(images)
+        return {"image": uuids}
+
+    if "vision_chunk" not in multi_modal_data:
         return None
-    if not isinstance(images, list):
-        images = [images]
+
+    vision_chunks = multi_modal_data["vision_chunk"]
+    if not isinstance(vision_chunks, list):
+        vision_chunks = [vision_chunks]
+
+    images = []
+    for item in vision_chunks:
+        if not isinstance(item, dict):
+            logger.debug(
+                "Skipping mm_uuid computation: invalid vision_chunk item type %s",
+                type(item).__name__,
+            )
+            return None
+        if item.get("type") != "image":
+            logger.debug(
+                "Skipping mm_uuid computation: unsupported vision_chunk type %r",
+                item.get("type"),
+            )
+            return None
+        image = item.get("image")
+        if image is None:
+            logger.debug(
+                "Skipping mm_uuid computation: vision_chunk item missing image"
+            )
+            return None
+        images.append(image)
+
     if not images:
         return None
-    uuids = compute_mm_uuids_from_images(images)
-    return {"image": uuids}
+
+    return {"vision_chunk": compute_mm_uuids_from_images(images)}
 
 
 # Helpers for nvext response fields requested through `nvext.extra_fields`.
@@ -2061,37 +2096,50 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         mm_map = request["multi_modal_data"]
 
         vllm_mm_data = {}
+        uses_raw_vision_chunk = (
+            self._use_unified_vision_chunk
+            or resolve_model_family(self.config.model) is ModelFamily.KIMI_K2
+        )
 
         # [gluo NOTE] If embedding loader is configured, fetch image embeddings first.
         # Still continue below so mixed image+video requests can attach `video`.
         if self.embedding_loader is not None:
-            # [gluo FIXME] couldn't simply pass 'mm_map.get(IMAGE_URL_KEY, [])' like below
-            # as currently the encode worker is using 'ImageLoader.load_image()' which doesn't
-            # support 'Decoded' variant. Need to update the encode worker to unify handling
-            image_urls = []
-            supported = True
-            for item in mm_map.get(IMAGE_URL_KEY, []):
-                if isinstance(item, dict) and "Url" in item:
-                    image_urls.append(item["Url"])
-                elif isinstance(item, dict) and "Decoded" in item:
-                    supported = False
-            if supported:
-                vllm_mm_data = await self.embedding_loader.load_multimodal_embeddings(
-                    image_urls, request_id, model=self.config.model, context=context
-                )
+            if uses_raw_vision_chunk:
                 logger.debug(
-                    f"Fetched multimodal embeddings for {len(vllm_mm_data)} items"
+                    "Skipping embedding loader because this model expects "
+                    "raw vision_chunk inputs instead of image embeddings."
                 )
+            else:
+                # [gluo FIXME] couldn't simply pass 'mm_map.get(IMAGE_URL_KEY, [])' like below
+                # as currently the encode worker is using 'ImageLoader.load_image()' which doesn't
+                # support 'Decoded' variant. Need to update the encode worker to unify handling
+                image_urls = []
+                supported = True
+                for item in mm_map.get(IMAGE_URL_KEY, []):
+                    if isinstance(item, dict) and "Url" in item:
+                        image_urls.append(item["Url"])
+                    elif isinstance(item, dict) and "Decoded" in item:
+                        supported = False
+                if supported:
+                    vllm_mm_data = (
+                        await self.embedding_loader.load_multimodal_embeddings(
+                            image_urls,
+                            request_id,
+                            model=self.config.model,
+                            context=context,
+                        )
+                    )
+                    logger.debug(
+                        f"Fetched multimodal embeddings for {len(vllm_mm_data)} items"
+                    )
 
         image_mm_items = mm_map.get(IMAGE_URL_KEY, [])
-        # Kimi-K2.5 (and any model with `use_unified_vision_chunk=True`)
+        # Kimi K2.x (and any model with `use_unified_vision_chunk=True`)
         # consumes images under the `vision_chunk` modality, not `image`,
         # and expects each item to be a `VisionChunkImage` TypedDict.
         # See chat_utils.use_unified_vision_chunk_modality for the
         # upstream rename + wrap path.
-        image_modality_key = (
-            "vision_chunk" if self._use_unified_vision_chunk else "image"
-        )
+        image_modality_key = "vision_chunk" if uses_raw_vision_chunk else "image"
         if image_modality_key not in vllm_mm_data and image_mm_items:
             with _nvtx.annotate("mm_backend:image_download", color="green"):
                 images = await self.image_loader.load_image_batch(
@@ -2099,7 +2147,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 )
 
             if images:
-                if self._use_unified_vision_chunk:
+                if uses_raw_vision_chunk:
                     # `VisionChunkImage` is a TypedDict — a plain dict
                     # with `type`/`image`/`uuid` keys is structurally
                     # equivalent. uuid=None matches vLLM's chat_utils

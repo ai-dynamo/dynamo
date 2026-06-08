@@ -10,6 +10,7 @@ import torch
 
 from dynamo.vllm.multimodal_utils.model import (
     ModelFamily,
+    construct_mm_data,
     construct_qwen_decode_mm_data,
     resolve_model_family,
 )
@@ -19,10 +20,26 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.gpu_0,
     pytest.mark.multimodal,
+    pytest.mark.unit,
 ]
 
 
 class TestMultiModalUtils:
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "moonshotai/Kimi-K2.5",
+            "moonshotai/Kimi-K2.6",
+        ],
+    )
+    def test_construct_mm_data_rejects_kimi_embeddings(self, model):
+        with pytest.raises(ValueError, match="raw vision_chunk inputs"):
+            construct_mm_data(
+                model=model,
+                embeddings_dtype=torch.float16,
+                image_embeds=torch.randn(1, 4),
+            )
+
     def test_construct_qwen_decode_mm_data(self):
         max_rounds = int(torch.finfo(torch.float16).max) + 2
         expected_image_grid_thw_tensor = torch.tensor([16, 16])
@@ -75,6 +92,16 @@ class TestResolveModelFamily:
                 "llava-hf/llava-1.5-7b-hf",
                 ModelFamily.LLAVA,
                 id="hf-id-llava",
+            ),
+            pytest.param(
+                "moonshotai/Kimi-K2.5",
+                ModelFamily.KIMI_K2,
+                id="hf-id-kimi-k2.5",
+            ),
+            pytest.param(
+                "moonshotai/Kimi-K2.6",
+                ModelFamily.KIMI_K2,
+                id="hf-id-kimi-k2.6",
             ),
             pytest.param(
                 "/root/.cache/huggingface/hub/"
@@ -130,6 +157,12 @@ class TestResolveModelFamilyOnDisk:
                 ["Qwen3_5ForConditionalGeneration"],
                 ModelFamily.QWEN_VL,
                 id="metadata-qwen3.5-unified",
+            ),
+            pytest.param(
+                "moonshotai--Kimi-K2.6/v1",
+                ["KimiK25ForConditionalGeneration"],
+                ModelFamily.KIMI_K2,
+                id="metadata-kimi-k2.6",
             ),
         ],
     )

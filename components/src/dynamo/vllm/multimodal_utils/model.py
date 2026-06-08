@@ -34,16 +34,17 @@ VLLM_ENCODER = int(os.getenv("VLLM_ENCODER", 1))
 
 
 class ModelFamily(str, Enum):
-    """Multimodal model families dynamo's encoder pipeline knows how to dispatch."""
+    """Multimodal model families with Dynamo-specific handling."""
 
     QWEN_VL = "qwen-vl"
     LLAVA = "llava"
+    KIMI_K2 = "kimi-k2"
 
 
-# Per-family registries used by `resolve_model_family`. The encoder reaches
-# into vLLM internals (`model.visual` for Qwen, `vision_tower` +
+# Per-family registries used by `resolve_model_family`. Encoder-backed
+# families reach into vLLM internals (`model.visual` for Qwen, `vision_tower` +
 # `multi_modal_projector` for LLaVA) whose attribute paths vary per family —
-# entries here must correspond to extractor logic in `encode_utils.py`.
+# those entries must correspond to extractor logic in `encode_utils.py`.
 #
 # Architectures are matched verbatim against `config.json` `architectures`.
 _FAMILY_ARCHITECTURES: Dict[ModelFamily, frozenset[str]] = {
@@ -64,6 +65,8 @@ _FAMILY_ARCHITECTURES: Dict[ModelFamily, frozenset[str]] = {
         }
     ),
     ModelFamily.LLAVA: frozenset({"LlavaForConditionalGeneration"}),
+    # Kimi-K2.6 currently uses the same HF/vLLM architecture as Kimi-K2.5.
+    ModelFamily.KIMI_K2: frozenset({"KimiK25ForConditionalGeneration"}),
 }
 
 # Name-stage substring patterns (lowercase). A new size / quantization /
@@ -84,6 +87,7 @@ _FAMILY_NAME_PATTERNS: Dict[ModelFamily, frozenset[str]] = {
         }
     ),
     ModelFamily.LLAVA: frozenset({"llava-1.5-7b-hf"}),
+    ModelFamily.KIMI_K2: frozenset({"kimi-k2.5", "kimi-k2.6"}),
 }
 
 
@@ -210,11 +214,17 @@ def construct_mm_data(
     image_embeds = image_embeds.to(embeddings_dtype)
 
     # Model-specific image handling
-    if resolve_model_family(model) is ModelFamily.QWEN_VL:
+    model_family = resolve_model_family(model)
+    if model_family is ModelFamily.QWEN_VL:
         return _construct_qwen_image_data(image_embeds, image_grid_thw)
-    else:
-        # Default image handling for other models (e.g., LLAVA_1_5_7B)
-        return {"image": image_embeds}
+    if model_family is ModelFamily.KIMI_K2:
+        raise ValueError(
+            "Kimi K2.5/K2.6 expects raw vision_chunk inputs; embedding-based "
+            "multimodal transfer is not supported yet."
+        )
+
+    # Default image handling for other models (e.g., LLAVA_1_5_7B)
+    return {"image": image_embeds}
 
 
 def _construct_qwen_image_data(
