@@ -541,8 +541,14 @@ mod tests {
         let path = std::env::var("GPTOSS_CHAT_TEMPLATE").expect(
             "set GPTOSS_CHAT_TEMPLATE to the tokenizer_config.json, chat_template.jinja, or model dir path",
         );
-        let raw = std::fs::read_to_string(&path).expect("read chat template file");
-
+        let input_path = std::path::Path::new(&path);
+        let file_path = if input_path.is_dir() {
+            // Prefer tokenizer_config.json from model dir if provided
+            input_path.join("tokenizer_config.json")
+        } else {
+            input_path.to_path_buf()
+        };
+        let raw = std::fs::read_to_string(&file_path).expect("read chat template file");
         // Resolve the actual Jinja template. gpt-oss ships its chat template in a
         // separate `chat_template.jinja` file, NOT inside tokenizer_config.json,
         // so:
