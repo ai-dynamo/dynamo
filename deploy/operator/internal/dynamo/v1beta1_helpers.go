@@ -153,6 +153,9 @@ func GetDCDKubeAnnotations(dcd *v1beta1.DynamoComponentDeployment) map[string]st
 			annotations[annotationKey] = v
 		}
 	}
+	if v := dcd.Annotations[commonconsts.KubeAnnotationTopologyClusterTopologyName]; v != "" {
+		annotations[commonconsts.KubeAnnotationTopologyClusterTopologyName] = v
+	}
 
 	return annotations
 }

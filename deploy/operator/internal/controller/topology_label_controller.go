@@ -292,6 +292,19 @@ func expectedDynamoTopologyLabelKeys(pod *corev1.Pod) []string {
 	return labelKeys
 }
 
+func clusterTopologyLabelCopyNeeded(pod *corev1.Pod) bool {
+	if pod == nil || !isDynamoComponentPod(pod) {
+		return false
+	}
+	if pod.GetAnnotations()[consts.KubeAnnotationTopologyClusterTopologyName] == "" {
+		return false
+	}
+	if pod.Spec.NodeName == "" {
+		return false
+	}
+	return missingDynamoTopologyLabel(pod)
+}
+
 func isDynamoComponentPod(pod *corev1.Pod) bool {
 	labels := pod.GetLabels()
 	return labels[consts.KubeLabelDynamoGraphDeploymentName] != "" &&
