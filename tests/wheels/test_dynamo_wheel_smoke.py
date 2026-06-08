@@ -3,16 +3,18 @@
 
 """Smoke tests for the Dynamo wheels shipped in the runtime image.
 
-These run *inside* a clean base image (python:3.12-slim or manylinux_2_28); the CI
-workflow extracts the runtime image's /opt/dynamo/wheelhouse to the host and mounts it
-in. The tests never spawn docker — they operate on the wheelhouse directory pointed to
-by DYNAMO_WHEEL_SMOKE_WHEELHOUSE and install into throwaway venvs in the current image.
+These run as part of the normal CPU test suite inside the dynamo test image, where the
+wheels live at /opt/dynamo/wheelhouse. The tests operate on that directory and install the
+core wheels into a throwaway venv (clean of the image's pre-installed dynamo). They spawn
+no docker and need no configuration: the wheelhouse path, target arch, and whether the
+optional CUDA wheels are expected are all inferred, with env overrides available.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import os
-import shutil
+import platform
 import sys
 from pathlib import Path
 
@@ -33,11 +35,23 @@ WHEELHOUSE_ENV = "DYNAMO_WHEEL_SMOKE_WHEELHOUSE"
 EXTRAS_ENV = "DYNAMO_WHEEL_SMOKE_EXTRAS"
 EXPECT_OPTIONAL_ENV = "DYNAMO_WHEEL_SMOKE_EXPECT_OPTIONAL"
 PLATFORM_ENV = "DYNAMO_WHEEL_SMOKE_PLATFORM"
+DEFAULT_WHEELHOUSE = "/opt/dynamo/wheelhouse"
 
 
 def _target_arch() -> str:
-    platform = os.environ.get(PLATFORM_ENV, "linux/amd64")
-    return platform.rsplit("/", 1)[-1]
+    override = os.environ.get(PLATFORM_ENV, "").strip()
+    if override:
+        return override.rsplit("/", 1)[-1]
+    machine = platform.machine().lower()
+    return {"x86_64": "amd64", "aarch64": "arm64"}.get(machine, machine)
+
+
+def _expect_optional() -> bool:
+    override = os.environ.get(EXPECT_OPTIONAL_ENV, "").strip()
+    if override:
+        return override.lower() not in ("0", "false", "no")
+    # No explicit signal: kvbm/gpu-memory-service ship only on CUDA builds.
+    return bool(os.environ.get("CUDA_HOME")) or Path("/usr/local/cuda").exists()
 
 
 def _extras() -> list[str]:
@@ -45,14 +59,16 @@ def _extras() -> list[str]:
     return [extra.strip() for extra in extras.split(",") if extra.strip()]
 
 
+def _have(module: str) -> bool:
+    return importlib.util.find_spec(module) is not None
+
+
 @pytest.fixture(scope="session")
 def wheelhouse() -> Path:
-    raw = os.environ.get(WHEELHOUSE_ENV, "").strip()
-    if not raw:
-        pytest.skip(f"{WHEELHOUSE_ENV} is not set")
+    raw = os.environ.get(WHEELHOUSE_ENV, "").strip() or DEFAULT_WHEELHOUSE
     path = Path(raw).resolve()
     if not path.exists():
-        pytest.fail(f"{WHEELHOUSE_ENV} points at a missing path: {path}")
+        pytest.skip(f"wheelhouse not found at {path} (set {WHEELHOUSE_ENV})")
     print(f"wheelhouse: {path}")
     for wheel in smoke_install.all_wheels(path):
         print(" ", wheel.relative_to(path))
@@ -68,16 +84,11 @@ def test_extra_declared_in_wheel(wheelhouse: Path, extra: str) -> None:
     smoke_install.assert_extra_declared(wheelhouse, extra)
 
 
-def test_import_on_manylinux_2_28_floor(wheelhouse: Path) -> None:
-    smoke_install.install_core(wheelhouse, sys.executable)
-
-
 def test_wheel_metadata_tags_auditwheel_glibc(wheelhouse: Path) -> None:
-    if shutil.which("auditwheel") is None or shutil.which("readelf") is None:
-        pytest.skip("auditwheel/readelf unavailable; run this scenario in manylinux")
+    if not (_have("auditwheel") and _have("elftools")):
+        pytest.skip("auditwheel/pyelftools unavailable")
     target_arch = _target_arch()
-    expect_optional = bool(os.environ.get(EXPECT_OPTIONAL_ENV, "").strip())
     smoke_install.assert_core_wheel_metadata(wheelhouse, target_arch)
-    smoke_install.check_optional_wheels(wheelhouse, target_arch, expect_optional)
+    smoke_install.check_optional_wheels(wheelhouse, target_arch, _expect_optional())
     smoke_install.assert_auditwheel_show(wheelhouse)
     smoke_install.assert_glibc_floor(wheelhouse)

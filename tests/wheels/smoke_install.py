@@ -182,7 +182,7 @@ def binary_wheels(wheelhouse: Path) -> list[Path]:
 def assert_auditwheel_show(wheelhouse: Path) -> None:
     for wheel in binary_wheels(wheelhouse):
         proc = run(
-            ["auditwheel", "show", str(wheel)],
+            [sys.executable, "-m", "auditwheel", "show", str(wheel)],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
         )
@@ -207,6 +207,22 @@ def parse_glibc_versions(version_info: str) -> set[tuple[int, int]]:
     return versions
 
 
+def glibc_version_needs(shared_library: Path) -> set[tuple[int, int]]:
+    from elftools.common.exceptions import ELFError
+    from elftools.elf.elffile import ELFFile
+
+    names: list[str] = []
+    try:
+        with open(shared_library, "rb") as handle:
+            section = ELFFile(handle).get_section_by_name(".gnu.version_r")
+            if section is not None and hasattr(section, "iter_versions"):
+                for _verneed, aux_iter in section.iter_versions():
+                    names.extend(aux.name for aux in aux_iter)
+    except ELFError:
+        return set()
+    return parse_glibc_versions("\n".join(names))
+
+
 def assert_glibc_floor(wheelhouse: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="dynamo-wheel-symbols-") as tmp:
         tmp_path = Path(tmp)
@@ -218,17 +234,7 @@ def assert_glibc_floor(wheelhouse: Path) -> None:
                 raise AssertionError(f"{wheel.name} is tagged binary but has no .so files")
 
             for shared_library in shared_libraries:
-                proc = subprocess.run(
-                    ["readelf", "--version-info", str(shared_library)],
-                    check=False,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                )
-                if proc.returncode != 0:
-                    print(proc.stdout)
-                    raise AssertionError(f"readelf failed for {shared_library}")
-                versions = parse_glibc_versions(proc.stdout)
+                versions = glibc_version_needs(shared_library)
                 too_new = sorted(version for version in versions if version > GLIBC_FLOOR)
                 if too_new:
                     offenders.append(

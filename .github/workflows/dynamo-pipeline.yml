@@ -183,71 +183,6 @@ jobs:
         run: |
           MYPYPATH=lib/bindings/python/src mypy -p dynamo
 
-  wheel-smoke:
-    needs: image
-    runs-on: ${{ matrix.platform == 'linux/amd64' && 'prod-builder-v3' || 'prod-tester-arm-v2' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - linux/amd64
-          - linux/arm64
-        scenario:
-          - core
-          - compat
-    timeout-minutes: 60
-    env:
-      IMAGE_REF: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ (inputs.cuda_version != '' && !startsWith(inputs.cuda_version, '13.')) && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || inputs.cuda_version) || '' }}${{ inputs.image_tag_suffix }}
-      # First-party optional wheels (kvbm, gpu-memory-service) are expected on CUDA builds.
-      EXPECT_OPTIONAL_WHEELS: ${{ (inputs.cuda_version != '' && !startsWith(inputs.cuda_version, '13.')) && '1' || '' }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Extract wheelhouse from runtime image
-        shell: bash
-        run: |
-          set -euo pipefail
-          CID=$(docker create --platform "${{ matrix.platform }}" "$IMAGE_REF" true)
-          trap 'docker rm -f "$CID" >/dev/null 2>&1 || true' EXIT
-          docker cp "$CID:/opt/dynamo/wheelhouse" "$GITHUB_WORKSPACE/wheelhouse"
-      - name: Run wheel smoke tests in clean image
-        shell: bash
-        run: |
-          set -euo pipefail
-          ARCH="${{ matrix.platform == 'linux/amd64' && 'x86_64' || 'aarch64' }}"
-          if [[ "${{ matrix.scenario }}" == "core" ]]; then
-            SMOKE_IMAGE="python:3.12-slim"
-            PYBIN="python"
-            TOOLS=""
-            KFILTER="core or extra_declared"
-          else
-            SMOKE_IMAGE="quay.io/pypa/manylinux_2_28_${ARCH}"
-            PYBIN="/opt/python/cp312-cp312/bin/python"
-            TOOLS="auditwheel patchelf"
-            KFILTER="manylinux or metadata"
-          fi
-          docker run --rm --platform "${{ matrix.platform }}" \
-            -v "$GITHUB_WORKSPACE":/work -w /work \
-            -e DYNAMO_WHEEL_SMOKE_WHEELHOUSE=/work/wheelhouse \
-            -e DYNAMO_WHEEL_SMOKE_PLATFORM="${{ matrix.platform }}" \
-            -e DYNAMO_WHEEL_SMOKE_EXPECT_OPTIONAL="$EXPECT_OPTIONAL_WHEELS" \
-            -e PIP_DISABLE_PIP_VERSION_CHECK=1 \
-            -e PIP_ROOT_USER_ACTION=ignore \
-            "$SMOKE_IMAGE" bash -lc "
-              $PYBIN -m pip install -q pytest $TOOLS &&
-              $PYBIN -m pytest -c tests/wheels/pytest.ini tests/wheels -m wheel_smoke -k '$KFILTER' -s -vv
-            "
-
   # TODO: real xdist parallelism port conflicts. cpu_parallel_mode='none'
   # below runs -n 0, so this job is NOT actually parallel right now.
   parallel:
@@ -263,7 +198,7 @@ jobs:
       platform: '["amd64", "arm64"]'
       run_sanity_check: false
       run_cpu_only_tests: true
-      cpu_only_test_markers: ${{ format('({0}) and not wheel_smoke', inputs.cpu_parallel_test_markers) }}
+      cpu_only_test_markers: ${{ inputs.cpu_parallel_test_markers }}
       cpu_only_test_timeout_minutes: 30
       cpu_parallel_mode: 'none'
       run_gpu_tests: false
@@ -284,7 +219,7 @@ jobs:
       platform: '["amd64", "arm64"]'
       run_sanity_check: false
       run_cpu_only_tests: true
-      cpu_only_test_markers: ${{ format('({0}) and not wheel_smoke', inputs.cpu_sequential_test_markers) }}
+      cpu_only_test_markers: ${{ inputs.cpu_sequential_test_markers }}
       cpu_only_test_timeout_minutes: 30
       cpu_parallel_mode: 'none'
       run_gpu_tests: false

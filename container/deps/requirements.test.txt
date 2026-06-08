@@ -3,6 +3,9 @@
 
 # Test-only dependencies — installed in test and dev containers, NOT in runtime.
 
+# For wheel smoke tests: manylinux policy + glibc-floor ELF symbol checks
+auditwheel==6.7.0
+pyelftools==0.33
 # For deploy/utils async file IO used by deploy tests and profiler deployment helpers
 aiofiles<=25.1.0
 # For Allure test reporting in CI
