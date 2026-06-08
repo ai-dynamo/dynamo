@@ -121,14 +121,53 @@ fn replace_prefix_tokens(
         model_cut_end -= 1;
     }
 
-    if template_token_ids.len() <= template_prefix_token_ids.len() {
+    // Find where the genuinely-new content (the user/tool turn appended after the
+    // last assistant message, plus the generation prompt) begins in the full
+    // template tokenization, then keep the verbatim model prefix and resume there.
+    //
+    // We must NOT key off `template_prefix_token_ids.len()`: reasoning-model chat
+    // templates (deepseek_r1 / Qwen3) KEEP the trailing assistant turn's `<think>`
+    // block when it is the final message (the prefix render, where it is
+    // `loop.last`) but STRIP it when that same turn is followed by another message
+    // (the full render). So `template_prefix_token_ids` is not a byte-prefix of
+    // `template_token_ids` and can even be LONGER than it when that reasoning block
+    // is large relative to the newly-appended turn. The old length-based logic then
+    // (a) hit `len(full) <= len(prefix)` and silently returned the raw,
+    // reasoning-stripped template — dropping `model_prefix_token_ids` entirely and
+    // breaking multi-turn token contiguity — and (b) searched the wrong range for
+    // the boundary EOS. The COUNT of turn-terminator (EOS) tokens is invariant to
+    // reasoning being kept vs stripped, so we resume at the Nth EOS of the full
+    // tokenization, where N is the EOS count of the prefix render.
+    let prefix_eos_count = template_prefix_token_ids
+        .iter()
+        .filter(|token| eos_token_ids.contains(*token))
+        .count();
+
+    if prefix_eos_count == 0 {
+        // No completed turn precedes the generation point: no history to preserve.
         return Ok(template_token_ids.to_vec());
     }
 
-    let template_cut_start = (0..template_prefix_token_ids.len())
-        .rev()
-        .find(|&pos| eos_token_ids.contains(&template_token_ids[pos]))
-        .unwrap_or(template_prefix_token_ids.len());
+    let mut eos_seen = 0usize;
+    let template_cut_start = template_token_ids
+        .iter()
+        .position(|token| {
+            if eos_token_ids.contains(token) {
+                eos_seen += 1;
+            }
+            eos_seen == prefix_eos_count
+        })
+        .with_context(|| {
+            format!(
+                "replace_prefix_tokens: full template tokenization has {} EOS token(s) but \
+                 the prefix render expects {prefix_eos_count}; refusing to silently emit a \
+                 reasoning-stripped prompt for a non-monotonically-increasing trajectory",
+                template_token_ids
+                    .iter()
+                    .filter(|t| eos_token_ids.contains(*t))
+                    .count()
+            )
+        })?;
 
     Ok([
         &model_prefix_token_ids[..model_cut_end],
@@ -3331,6 +3370,55 @@ mod strip_tests {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // Regression: reasoning-model chat templates (deepseek_r1 / Qwen3) KEEP the
+    // trailing assistant turn's <think> block in the prefix render (it is
+    // `loop.last`) but STRIP it in the full render (it is followed by another
+    // message). So `template_prefix` is not a byte-prefix of `template_token_ids`
+    // and can be LONGER than it. The splice must still honor the verbatim
+    // `model_prefix_token_ids` (reasoning intact) rather than silently returning
+    // the raw reasoning-stripped template — which broke multi-turn token
+    // contiguity and crashed SWE async-GRPO training.
+    #[test]
+    fn test_replace_prefix_tokens_preserves_history_when_prefix_longer_than_full() {
+        const EOS: u32 = 2;
+        let eos = [EOS];
+        // Verbatim history through asst1: reasoning tokens 31 (asst0) and 32 (asst1) intact.
+        let model_prefix = vec![10, 2, 31, 40, 2, 20, 2, 32, 32, 32, 32, 32, 32, 41, 2];
+        // Prefix render: asst0 stripped, asst1 (loop.last) reasoning KEPT -> 14 tokens.
+        let template_prefix = vec![10, 2, 40, 2, 20, 2, 32, 32, 32, 32, 32, 32, 41, 2];
+        // Full render: BOTH assistants stripped, + obs1 (20,2) + gen-prompt (50) -> 11 tokens.
+        let template_full = vec![10, 2, 40, 2, 20, 2, 41, 2, 20, 2, 50];
+        assert!(
+            template_full.len() <= template_prefix.len(),
+            "test setup must reproduce the prefix-longer-than-full condition"
+        );
+
+        let out = replace_prefix_tokens(&model_prefix, &template_prefix, &template_full, &eos)
+            .expect("splice should succeed");
+
+        // Verbatim history (incl. BOTH turns' reasoning) preserved, then the new
+        // observation + generation prompt appended.
+        let expected = vec![
+            10, 2, 31, 40, 2, 20, 2, 32, 32, 32, 32, 32, 32, 41, 2, 20, 2, 50,
+        ];
+        assert_eq!(out, expected, "must preserve verbatim reasoning, not strip it");
+        assert!(out.contains(&31), "asst0 reasoning token must survive");
+        assert!(out.contains(&32), "asst1 reasoning token must survive");
+    }
+
+    // The ordinary case (full render longer than prefix render) must still splice
+    // correctly — mirrors the `replace_prefix_tokens` doc example.
+    #[test]
+    fn test_replace_prefix_tokens_normal_case_appends_new_turn() {
+        let eos = [2u32];
+        let model_prefix = vec![11, 12, 13, 40, 41, 220, 17, 2];
+        let template_prefix = vec![11, 12, 13, 40, 41, 1001, 2];
+        let template_full = vec![11, 12, 13, 40, 41, 1001, 2, 21, 22, 40, 41];
+        let out = replace_prefix_tokens(&model_prefix, &template_prefix, &template_full, &eos)
+            .expect("splice should succeed");
+        assert_eq!(out, vec![11, 12, 13, 40, 41, 220, 17, 2, 21, 22, 40, 41]);
+    }
 
     /// PRE.1 — `skip_special_tokens` default. See `lib/llm/PREPROCESSOR_CASES.md`.
     #[test]
