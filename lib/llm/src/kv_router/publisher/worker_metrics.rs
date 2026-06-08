@@ -76,11 +76,17 @@ impl WorkerMetricsPublisher {
             let mut rx = nats_rx;
             let mut last_metrics: Option<WorkerMetrics> = None;
             let mut pending_publish: Option<WorkerMetrics> = None;
-            let mut publish_timer =
-                Box::pin(tokio::time::sleep(tokio::time::Duration::from_secs(0)));
-            publish_timer.as_mut().reset(tokio::time::Instant::now());
+            let mut publish_deadline: Option<tokio::time::Instant> = None;
 
             loop {
+                let publish_ready = async move {
+                    if let Some(deadline) = publish_deadline {
+                        tokio::time::sleep_until(deadline).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                };
+
                 tokio::select! {
                     result = rx.changed() => {
                         if result.is_err() {
@@ -96,13 +102,14 @@ impl WorkerMetricsPublisher {
                         if has_changed {
                             pending_publish = Some(metrics.clone());
                             last_metrics = Some(metrics);
-                            publish_timer.as_mut().reset(
+                            publish_deadline = Some(
                                 tokio::time::Instant::now()
-                                    + tokio::time::Duration::from_millis(1)
+                                    + tokio::time::Duration::from_millis(1),
                             );
                         }
                     }
-                    _ = &mut publish_timer => {
+                    _ = publish_ready => {
+                        publish_deadline = None;
                         if let Some(metrics) = pending_publish.take() {
                             let active_load = ActiveLoad {
                                 worker_id,
@@ -116,11 +123,6 @@ impl WorkerMetricsPublisher {
                                 tracing::warn!("Failed to publish metrics: {}", e);
                             }
                         }
-
-                        publish_timer.as_mut().reset(
-                            tokio::time::Instant::now()
-                                + tokio::time::Duration::from_secs(3600)
-                        );
                     }
                 }
             }
