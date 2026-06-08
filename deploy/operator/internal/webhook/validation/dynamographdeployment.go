@@ -35,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
@@ -53,6 +54,7 @@ const (
 type DynamoGraphDeploymentValidator struct {
 	deployment   *nvidiacomv1alpha1.DynamoGraphDeployment
 	mgr          ctrl.Manager // Optional: for API group detection via discovery client
+	client       ctrlclient.Client
 	groveEnabled bool
 }
 
@@ -72,6 +74,16 @@ func NewDynamoGraphDeploymentValidatorWithManager(deployment *nvidiacomv1alpha1.
 		mgr:          mgr,
 		groveEnabled: groveEnabled,
 	}
+}
+
+func (v *DynamoGraphDeploymentValidator) kubeClient() ctrlclient.Client {
+	if v.client != nil {
+		return v.client
+	}
+	if v.mgr != nil {
+		return v.mgr.GetClient()
+	}
+	return nil
 }
 
 // Validate performs validation on the DynamoGraphDeployment.
@@ -110,7 +122,7 @@ func (v *DynamoGraphDeploymentValidator) Validate(ctx context.Context) (admissio
 	}
 
 	// Validate KV transfer policy
-	if err := v.validateKvTransferPolicy(); err != nil {
+	if err := v.validateKvTransferPolicy(ctx); err != nil {
 		return nil, err
 	}
 
@@ -927,9 +939,8 @@ func (v *DynamoGraphDeploymentValidator) validateNoRestartDuringRollingUpdate(ol
 }
 
 // validateKvTransferPolicy validates the spec.experimental.kvTransferPolicy
-// configuration when set. In this phase only the `labelKey` path is supported
-// (clusterTopologyName is added in a future PR).
-func (v *DynamoGraphDeploymentValidator) validateKvTransferPolicy() error {
+// configuration when set.
+func (v *DynamoGraphDeploymentValidator) validateKvTransferPolicy(ctx context.Context) error {
 	if v.deployment.Spec.Experimental == nil {
 		return nil
 	}
@@ -941,12 +952,39 @@ func (v *DynamoGraphDeploymentValidator) validateKvTransferPolicy() error {
 	var errs []error
 	const fieldPath = "spec.experimental.kvTransferPolicy"
 
-	// labelKey is required (only supported path in this phase)
-	if kvt.LabelKey == "" {
-		errs = append(errs, fmt.Errorf("%s.labelKey is required", fieldPath))
-	} else if labelKeyErrs := k8svalidation.IsQualifiedName(kvt.LabelKey); len(labelKeyErrs) > 0 {
-		errs = append(errs, fmt.Errorf("%s.labelKey %q is not a valid Kubernetes label key: %s",
-			fieldPath, kvt.LabelKey, strings.Join(labelKeyErrs, "; ")))
+	hasLabelKey := kvt.LabelKey != ""
+	hasClusterTopologyName := kvt.ClusterTopologyName != ""
+	if hasLabelKey == hasClusterTopologyName {
+		errs = append(errs, fmt.Errorf("%s: exactly one of labelKey or clusterTopologyName is required", fieldPath))
+	}
+
+	if hasLabelKey {
+		if labelKeyErrs := k8svalidation.IsQualifiedName(kvt.LabelKey); len(labelKeyErrs) > 0 {
+			errs = append(errs, fmt.Errorf("%s.labelKey %q is not a valid Kubernetes label key: %s",
+				fieldPath, kvt.LabelKey, strings.Join(labelKeyErrs, "; ")))
+		}
+	}
+
+	if hasClusterTopologyName {
+		if nameErrs := k8svalidation.IsDNS1123Subdomain(kvt.ClusterTopologyName); len(nameErrs) > 0 {
+			errs = append(errs, fmt.Errorf("%s.clusterTopologyName %q is not a valid Kubernetes resource name: %s",
+				fieldPath, kvt.ClusterTopologyName, strings.Join(nameErrs, "; ")))
+		}
+		if !v.isGrovePathway() {
+			if !v.groveEnabled {
+				errs = append(errs, fmt.Errorf(
+					"%s.clusterTopologyName requires the Grove pathway, but Grove is disabled at the operator level (global.grove.enabled=false)",
+					fieldPath))
+			} else {
+				errs = append(errs, fmt.Errorf(
+					"%s.clusterTopologyName requires the Grove pathway; remove or unset the %q annotation (currently %q)",
+					fieldPath, consts.KubeAnnotationEnableGrove, v.deployment.Annotations[consts.KubeAnnotationEnableGrove]))
+			}
+		}
+	}
+
+	if !hasLabelKey && !hasClusterTopologyName {
+		return errors.Join(errs...)
 	}
 
 	// domain is required and must be a valid topology domain format
@@ -981,7 +1019,38 @@ func (v *DynamoGraphDeploymentValidator) validateKvTransferPolicy() error {
 		}
 	}
 
+	if len(errs) == 0 && hasClusterTopologyName && v.deployment.Generation <= 1 {
+		if err := v.validateKvTransferPolicyAgainstGroveClusterTopology(ctx, kvt); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
 	return errors.Join(errs...)
+}
+
+func (v *DynamoGraphDeploymentValidator) validateKvTransferPolicyAgainstGroveClusterTopology(ctx context.Context, kvt *nvidiacomv1alpha1.KvTransferPolicy) error {
+	cl := v.kubeClient()
+	if cl == nil {
+		return nil
+	}
+
+	ct := &grovev1alpha1.ClusterTopology{}
+	err := cl.Get(ctx, types.NamespacedName{Name: kvt.ClusterTopologyName}, ct)
+	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			return fmt.Errorf("spec.experimental.kvTransferPolicy.clusterTopologyName %q references a ClusterTopology resource that was not found",
+				kvt.ClusterTopologyName)
+		}
+		return fmt.Errorf("failed to read ClusterTopology %q for kvTransferPolicy validation: %w", kvt.ClusterTopologyName, err)
+	}
+
+	for _, level := range ct.Spec.Levels {
+		if string(level.Domain) == string(kvt.Domain) {
+			return nil
+		}
+	}
+	return fmt.Errorf("spec.experimental.kvTransferPolicy.domain %q does not exist in ClusterTopology %q; available domains: %v",
+		kvt.Domain, kvt.ClusterTopologyName, topologyLevelDomains(ct))
 }
 
 // validateFailoverRequiresDiscoveryMode checks that when any service has

@@ -131,25 +131,71 @@ const (
 	topologyMountPath  = "/etc/dynamo/topology"
 )
 
-// TopologyLabelVolume returns a Downward API volume that projects a pod label
-// into a file. The volume updates dynamically when the label is added or
-// changed, so the runtime can poll until the file has content.
-func TopologyLabelVolume(policy *v1beta1.KvTransferPolicy) corev1.Volume {
+// TopologyLabelVolume returns a Downward API volume that projects topology pod
+// labels into files. The volume updates dynamically when labels are added or
+// changed, so the runtime can poll until the files have content.
+func TopologyLabelVolume(policy *v1beta1.KvTransferPolicy, topologyDomains []v1beta1.TopologyDomain) corev1.Volume {
 	return corev1.Volume{
 		Name: topologyVolumeName,
 		VolumeSource: corev1.VolumeSource{
 			DownwardAPI: &corev1.DownwardAPIVolumeSource{
-				Items: []corev1.DownwardAPIVolumeFile{
-					{
-						Path: string(policy.Domain),
-						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: fmt.Sprintf("metadata.labels['%s']", policy.LabelKey),
-						},
-					},
-				},
+				Items: topologyLabelVolumeItems(policy, topologyDomains),
 			},
 		},
 	}
+}
+
+func topologyLabelVolumeItems(policy *v1beta1.KvTransferPolicy, topologyDomains []v1beta1.TopologyDomain) []corev1.DownwardAPIVolumeFile {
+	if policy == nil {
+		return nil
+	}
+	if policy.LabelKey != "" {
+		return []corev1.DownwardAPIVolumeFile{
+			{
+				Path: string(policy.Domain),
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: fmt.Sprintf("metadata.labels['%s']", policy.LabelKey),
+				},
+			},
+		}
+	}
+
+	domains := topologyProjectionDomains(policy, topologyDomains)
+	items := make([]corev1.DownwardAPIVolumeFile, 0, len(domains))
+	for _, domain := range domains {
+		items = append(items, corev1.DownwardAPIVolumeFile{
+			Path: string(domain),
+			FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: fmt.Sprintf("metadata.labels['%s']", commonconsts.DynamoTopologyLabelKey(string(domain))),
+			},
+		})
+	}
+	return items
+}
+
+func topologyProjectionDomains(policy *v1beta1.KvTransferPolicy, topologyDomains []v1beta1.TopologyDomain) []v1beta1.TopologyDomain {
+	if policy == nil {
+		return nil
+	}
+
+	seen := map[string]struct{}{}
+	domains := make([]v1beta1.TopologyDomain, 0, len(topologyDomains)+1)
+	addDomain := func(domain v1beta1.TopologyDomain) {
+		if domain == "" {
+			return
+		}
+		if _, ok := seen[string(domain)]; ok {
+			return
+		}
+		seen[string(domain)] = struct{}{}
+		domains = append(domains, domain)
+	}
+
+	for _, domain := range topologyDomains {
+		addDomain(domain)
+	}
+	addDomain(policy.Domain)
+	return domains
 }
 
 // TopologyLabelVolumeMount returns the volume mount for the topology label volume.

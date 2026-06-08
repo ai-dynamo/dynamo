@@ -122,6 +122,16 @@ const (
 	// corresponding node label onto the pod after scheduling.
 	KubeAnnotationTopologyLabelKey = "nvidia.com/topology-label-key"
 
+	// KubeAnnotationTopologyClusterTopologyName is set on worker pods when
+	// spec.experimental.kvTransferPolicy.clusterTopologyName is configured. The
+	// topology label controller reads the referenced Grove ClusterTopology and
+	// copies its node-label levels onto Dynamo-owned pod labels after scheduling.
+	KubeAnnotationTopologyClusterTopologyName = "nvidia.com/topology-cluster-topology-name"
+
+	// KubeLabelDynamoTopologyPrefix prefixes Dynamo-owned pod labels that mirror
+	// ClusterTopology levels for Downward API projection.
+	KubeLabelDynamoTopologyPrefix = "nvidia.com/dynamo-topology."
+
 	DynamoDeploymentConfigEnvVar      = "DYN_DEPLOYMENT_CONFIG"
 	DynamoNamespaceEnvVar             = "DYN_NAMESPACE"
 	DynamoNamespacePrefixEnvVar       = "DYN_NAMESPACE_PREFIX"
@@ -273,6 +283,12 @@ const (
 	MultinodeDeploymentTypeGrove MultinodeDeploymentType = "grove"
 	MultinodeDeploymentTypeLWS   MultinodeDeploymentType = "lws"
 )
+
+// DynamoTopologyLabelKey returns the Dynamo-owned pod label key used to expose
+// a ClusterTopology domain through the Downward API.
+func DynamoTopologyLabelKey(domain string) string {
+	return KubeLabelDynamoTopologyPrefix + domain
+}
 
 // GroupVersionResources for external APIs
 var (

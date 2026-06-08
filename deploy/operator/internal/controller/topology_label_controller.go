@@ -8,7 +8,9 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -40,6 +42,7 @@ type TopologyLabelReconciler struct {
 
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get
+// +kubebuilder:rbac:groups=grove.io,resources=clustertopologies,verbs=get
 
 func (r *TopologyLabelReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -48,8 +51,11 @@ func (r *TopologyLabelReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := r.Get(ctx, req.NamespacedName, &pod); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	labelKey, ok := topologyLabelCopyTarget(&pod)
-	if !ok {
+	copyTargets, err := r.topologyLabelCopyTargets(ctx, &pod)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if len(copyTargets) == 0 {
 		return ctrl.Result{}, nil
 	}
 
@@ -58,30 +64,39 @@ func (r *TopologyLabelReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, fmt.Errorf("get node %s: %w", pod.Spec.NodeName, err)
 	}
 
-	labelValue, exists := node.Labels[labelKey]
-	if !exists {
-		logger.Info("Node missing topology label, skipping",
-			"node", pod.Spec.NodeName, "labelKey", labelKey, "pod", req.NamespacedName)
-		if r.Recorder != nil {
-			r.Recorder.Eventf(&pod, corev1.EventTypeWarning, topologyLabelMissingReason,
-				"Node %q does not have required topology label %q; topology metadata will remain unavailable",
-				pod.Spec.NodeName, labelKey)
-		}
-		return ctrl.Result{}, nil
-	}
-
 	patch := client.MergeFrom(pod.DeepCopy())
 	if pod.Labels == nil {
 		pod.Labels = make(map[string]string)
 	}
-	pod.Labels[labelKey] = labelValue
+
+	patchedLabels := 0
+	for _, target := range copyTargets {
+		labelValue, exists := node.Labels[target.sourceLabelKey]
+		if !exists {
+			logger.Info("Node missing topology label, skipping",
+				"node", pod.Spec.NodeName, "sourceLabelKey", target.sourceLabelKey,
+				"targetLabelKey", target.targetLabelKey, "pod", req.NamespacedName)
+			if r.Recorder != nil {
+				r.Recorder.Eventf(&pod, corev1.EventTypeWarning, topologyLabelMissingReason,
+					"Node %q does not have required topology label %q; topology metadata for %q will remain unavailable",
+					pod.Spec.NodeName, target.sourceLabelKey, target.targetLabelKey)
+			}
+			continue
+		}
+		pod.Labels[target.targetLabelKey] = labelValue
+		patchedLabels++
+	}
+	if patchedLabels == 0 {
+		return ctrl.Result{}, nil
+	}
+
 	if err := r.Patch(ctx, &pod, patch); err != nil {
 		return ctrl.Result{}, fmt.Errorf("patch pod label: %w", err)
 	}
 
 	logger.Info("Copied node topology label to pod",
 		"pod", req.NamespacedName, "node", pod.Spec.NodeName,
-		"label", labelKey, "value", labelValue)
+		"labels", patchedLabels)
 	return ctrl.Result{}, nil
 }
 
@@ -130,6 +145,8 @@ func topologyLabelCopyBecameNeeded(oldObj, newObj client.Object) bool {
 
 	oldLabelKey := oldPod.GetAnnotations()[consts.KubeAnnotationTopologyLabelKey]
 	newLabelKey := newPod.GetAnnotations()[consts.KubeAnnotationTopologyLabelKey]
+	oldClusterTopologyName := oldPod.GetAnnotations()[consts.KubeAnnotationTopologyClusterTopologyName]
+	newClusterTopologyName := newPod.GetAnnotations()[consts.KubeAnnotationTopologyClusterTopologyName]
 
 	if oldPod.Spec.NodeName == "" && newPod.Spec.NodeName != "" {
 		return true
@@ -137,13 +154,21 @@ func topologyLabelCopyBecameNeeded(oldObj, newObj client.Object) bool {
 	if oldLabelKey != newLabelKey {
 		return true
 	}
-	if oldLabelKey == "" {
-		return false
+	if oldClusterTopologyName != newClusterTopologyName {
+		return true
 	}
 
-	_, oldHadLabel := oldPod.GetLabels()[oldLabelKey]
-	_, newHasLabel := newPod.GetLabels()[oldLabelKey]
-	return oldHadLabel && !newHasLabel
+	if oldLabelKey != "" {
+		_, oldHadLabel := oldPod.GetLabels()[oldLabelKey]
+		_, newHasLabel := newPod.GetLabels()[oldLabelKey]
+		if oldHadLabel && !newHasLabel {
+			return true
+		}
+	}
+
+	return oldClusterTopologyName != "" &&
+		!clusterTopologyLabelCopyNeeded(oldPod) &&
+		clusterTopologyLabelCopyNeeded(newPod)
 }
 
 func needsTopologyLabelCopy(obj client.Object) bool {
@@ -151,8 +176,10 @@ func needsTopologyLabelCopy(obj client.Object) bool {
 	if !ok || pod == nil {
 		return false
 	}
-	_, ok = topologyLabelCopyTarget(pod)
-	return ok
+	if _, ok := topologyLabelCopyTarget(pod); ok {
+		return true
+	}
+	return clusterTopologyLabelCopyNeeded(pod)
 }
 
 func topologyLabelCopyTarget(pod *corev1.Pod) (string, bool) {
@@ -174,6 +201,114 @@ func topologyLabelCopyTarget(pod *corev1.Pod) (string, bool) {
 	}
 
 	return labelKey, true
+}
+
+func clusterTopologyLabelCopyNeeded(pod *corev1.Pod) bool {
+	if pod == nil || !isDynamoComponentPod(pod) {
+		return false
+	}
+	if pod.GetAnnotations()[consts.KubeAnnotationTopologyClusterTopologyName] == "" {
+		return false
+	}
+	if pod.Spec.NodeName == "" {
+		return false
+	}
+	return missingDynamoTopologyLabel(pod)
+}
+
+type topologyLabelCopyTargetSpec struct {
+	sourceLabelKey string
+	targetLabelKey string
+}
+
+func (r *TopologyLabelReconciler) topologyLabelCopyTargets(ctx context.Context, pod *corev1.Pod) ([]topologyLabelCopyTargetSpec, error) {
+	if pod == nil || !isDynamoComponentPod(pod) || pod.Spec.NodeName == "" {
+		return nil, nil
+	}
+
+	var targets []topologyLabelCopyTargetSpec
+	if labelKey, ok := topologyLabelCopyTarget(pod); ok {
+		targets = append(targets, topologyLabelCopyTargetSpec{
+			sourceLabelKey: labelKey,
+			targetLabelKey: labelKey,
+		})
+	}
+
+	clusterTopologyName := pod.GetAnnotations()[consts.KubeAnnotationTopologyClusterTopologyName]
+	if clusterTopologyName == "" {
+		return targets, nil
+	}
+
+	ct := &grovev1alpha1.ClusterTopology{}
+	if err := r.Get(ctx, types.NamespacedName{Name: clusterTopologyName}, ct); err != nil {
+		return nil, fmt.Errorf("get ClusterTopology %s: %w", clusterTopologyName, err)
+	}
+	for _, level := range ct.Spec.Levels {
+		targetLabelKey := consts.DynamoTopologyLabelKey(string(level.Domain))
+		if _, exists := pod.GetLabels()[targetLabelKey]; exists {
+			continue
+		}
+		targets = append(targets, topologyLabelCopyTargetSpec{
+			sourceLabelKey: level.Key,
+			targetLabelKey: targetLabelKey,
+		})
+	}
+	return targets, nil
+}
+
+func hasDynamoTopologyLabel(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	for labelKey := range pod.GetLabels() {
+		if strings.HasPrefix(labelKey, consts.KubeLabelDynamoTopologyPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func missingDynamoTopologyLabel(pod *corev1.Pod) bool {
+	expectedLabels := expectedDynamoTopologyLabelKeys(pod)
+	if len(expectedLabels) == 0 {
+		return !hasDynamoTopologyLabel(pod)
+	}
+	labels := pod.GetLabels()
+	for _, labelKey := range expectedLabels {
+		if _, exists := labels[labelKey]; !exists {
+			return true
+		}
+	}
+	return false
+}
+
+func expectedDynamoTopologyLabelKeys(pod *corev1.Pod) []string {
+	if pod == nil {
+		return nil
+	}
+	const fieldPathPrefix = "metadata.labels['"
+	const fieldPathSuffix = "']"
+
+	var labelKeys []string
+	for _, volume := range pod.Spec.Volumes {
+		if volume.DownwardAPI == nil {
+			continue
+		}
+		for _, item := range volume.DownwardAPI.Items {
+			if item.FieldRef == nil {
+				continue
+			}
+			fieldPath := item.FieldRef.FieldPath
+			if !strings.HasPrefix(fieldPath, fieldPathPrefix) || !strings.HasSuffix(fieldPath, fieldPathSuffix) {
+				continue
+			}
+			labelKey := strings.TrimSuffix(strings.TrimPrefix(fieldPath, fieldPathPrefix), fieldPathSuffix)
+			if strings.HasPrefix(labelKey, consts.KubeLabelDynamoTopologyPrefix) {
+				labelKeys = append(labelKeys, labelKey)
+			}
+		}
+	}
+	return labelKeys
 }
 
 func isDynamoComponentPod(pod *corev1.Pod) bool {

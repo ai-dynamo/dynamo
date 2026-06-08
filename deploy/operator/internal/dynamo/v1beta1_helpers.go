@@ -143,11 +143,15 @@ func GetDCDKubeAnnotations(dcd *v1beta1.DynamoComponentDeployment) map[string]st
 	AddBaseModelAnnotation(annotations, dcd.Spec.ModelRef)
 	delete(annotations, commonconsts.KubeAnnotationDynamoOperatorOriginVersion)
 	delete(annotations, commonconsts.KubeAnnotationTopologyLabelKey)
+	delete(annotations, commonconsts.KubeAnnotationTopologyClusterTopologyName)
 
-	// Propagate topology label key from DCD metadata to pods so the topology
-	// label controller can discover which node label to copy.
+	// Propagate topology metadata from DCD metadata to pods so the topology
+	// label controller can discover which node labels to copy.
 	if v := dcd.Annotations[commonconsts.KubeAnnotationTopologyLabelKey]; v != "" {
 		annotations[commonconsts.KubeAnnotationTopologyLabelKey] = v
+	}
+	if v := dcd.Annotations[commonconsts.KubeAnnotationTopologyClusterTopologyName]; v != "" {
+		annotations[commonconsts.KubeAnnotationTopologyClusterTopologyName] = v
 	}
 
 	return annotations
