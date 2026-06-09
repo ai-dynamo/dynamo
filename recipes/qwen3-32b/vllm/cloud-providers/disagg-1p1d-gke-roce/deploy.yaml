@@ -71,21 +71,13 @@ spec:
         - { key: networking.gke.io.networks/rdma-3.IP,      operator: Exists, effect: NoSchedule }
         affinity:
           podAntiAffinity:
-            # Two-level anti-affinity:
-            # (1) Hard: different host (basic correctness).
-            # (2) Hard: different GCE topology block (~rack). GB200 NVL72 shares NVLink
-            #     within a rack — without rack-level separation, NIXL would short-circuit
-            #     via cuda_ipc / NVLink at ~900 GB/s, masking the actual RoCE BW we
-            #     want to measure. The gce-topology-block label is per-rack on GKE A4X.
+            # Hard anti-affinity: prefill and decode on different hosts (keeps the KV
+            # path cross-node). Cross-node NVLink (MNNVL) would require a ComputeDomain /
+            # IMEX channel, which this recipe does not provision, so KV transfer uses RoCE
+            # regardless of rack placement — no rack-level separation is needed.
             requiredDuringSchedulingIgnoredDuringExecution:
             # Operator labels worker pods with sub-component-type=prefill/decode
             # (component-type itself is "worker", which matches both — too broad).
-            - labelSelector:
-                matchExpressions:
-                - key: nvidia.com/dynamo-sub-component-type
-                  operator: In
-                  values: [prefill, decode]
-              topologyKey: cloud.google.com/gce-topology-block
             - labelSelector:
                 matchExpressions:
                 - key: nvidia.com/dynamo-sub-component-type
@@ -215,21 +207,13 @@ spec:
         - { key: networking.gke.io.networks/rdma-3.IP,      operator: Exists, effect: NoSchedule }
         affinity:
           podAntiAffinity:
-            # Two-level anti-affinity:
-            # (1) Hard: different host (basic correctness).
-            # (2) Hard: different GCE topology block (~rack). GB200 NVL72 shares NVLink
-            #     within a rack — without rack-level separation, NIXL would short-circuit
-            #     via cuda_ipc / NVLink at ~900 GB/s, masking the actual RoCE BW we
-            #     want to measure. The gce-topology-block label is per-rack on GKE A4X.
+            # Hard anti-affinity: prefill and decode on different hosts (keeps the KV
+            # path cross-node). Cross-node NVLink (MNNVL) would require a ComputeDomain /
+            # IMEX channel, which this recipe does not provision, so KV transfer uses RoCE
+            # regardless of rack placement — no rack-level separation is needed.
             requiredDuringSchedulingIgnoredDuringExecution:
             # Operator labels worker pods with sub-component-type=prefill/decode
             # (component-type itself is "worker", which matches both — too broad).
-            - labelSelector:
-                matchExpressions:
-                - key: nvidia.com/dynamo-sub-component-type
-                  operator: In
-                  values: [prefill, decode]
-              topologyKey: cloud.google.com/gce-topology-block
             - labelSelector:
                 matchExpressions:
                 - key: nvidia.com/dynamo-sub-component-type
