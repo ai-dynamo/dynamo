@@ -29,6 +29,12 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+try:
+    from aiconfigurator.sdk.task import TaskConfig, TaskRunner
+except ImportError:
+    TaskConfig = None
+    TaskRunner = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -52,9 +58,7 @@ def prefilter_prefill_candidates(
     if top_n is None or top_n <= 0 or len(candidates) <= top_n:
         return list(candidates)
 
-    try:
-        from aiconfigurator.sdk.task import TaskConfig, TaskRunner
-    except ImportError:
+    if TaskRunner is None or TaskConfig is None:
         logger.warning("aiconfigurator not available; skipping prefill pre-filter.")
         return list(candidates)
 
@@ -120,9 +124,7 @@ def prefilter_decode_candidates(
     if top_n is None or top_n <= 0 or len(candidates) <= top_n:
         return list(candidates)
 
-    try:
-        from aiconfigurator.sdk.task import TaskConfig, TaskRunner
-    except ImportError:
+    if TaskRunner is None or TaskConfig is None:
         logger.warning("aiconfigurator not available; skipping decode pre-filter.")
         return list(candidates)
 

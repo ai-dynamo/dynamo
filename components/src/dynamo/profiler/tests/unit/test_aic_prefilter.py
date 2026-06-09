@@ -27,6 +27,12 @@ from dynamo.profiler.utils.aic_prefilter import (
     prefilter_prefill_candidates,
 )
 
+pytestmark = [
+    pytest.mark.post_merge,
+    pytest.mark.gpu_0,
+    pytest.mark.unit,
+]
+
 
 @dataclass
 class _FakeCandidate:
@@ -60,8 +66,8 @@ class TestPrefilterPrefill:
         )
         assert result == candidates
 
-    @patch("dynamo.profiler.utils.aic_prefilter.TaskRunner")
-    @patch("dynamo.profiler.utils.aic_prefilter.TaskConfig")
+    @patch("dynamo.profiler.utils.aic_prefilter.TaskRunner", new_callable=MagicMock)
+    @patch("dynamo.profiler.utils.aic_prefilter.TaskConfig", new_callable=MagicMock)
     def test_selects_top_n_by_ttft(self, mock_tc_cls, mock_runner_cls):
         candidates = _make_candidates(5)
         runner_instance = MagicMock()
@@ -83,11 +89,18 @@ class TestPrefilterPrefill:
         assert result[1] is candidates[3]  # ttft=20
         assert result[2] is candidates[2]  # ttft=30
 
-    @patch(
-        "dynamo.profiler.utils.aic_prefilter.TaskRunner",
-        side_effect=Exception("AIC unavailable"),
-    )
-    def test_fallback_on_aic_error(self, _mock):
+    @patch("dynamo.profiler.utils.aic_prefilter.TaskRunner", None)
+    def test_fallback_when_aic_unavailable(self):
+        candidates = _make_candidates(5)
+        result = prefilter_prefill_candidates(
+            candidates, 3, "model", "sys", "backend", 128, 128
+        )
+        assert len(result) == 5
+
+    @patch("dynamo.profiler.utils.aic_prefilter.TaskRunner", new_callable=MagicMock)
+    @patch("dynamo.profiler.utils.aic_prefilter.TaskConfig", new_callable=MagicMock)
+    def test_fallback_on_aic_runtime_error(self, mock_tc_cls, mock_runner_cls):
+        mock_runner_cls.side_effect = Exception("AIC unavailable")
         candidates = _make_candidates(5)
         result = prefilter_prefill_candidates(
             candidates, 3, "model", "sys", "backend", 128, 128
@@ -96,8 +109,8 @@ class TestPrefilterPrefill:
 
 
 class TestPrefilterDecode:
-    @patch("dynamo.profiler.utils.aic_prefilter.TaskRunner")
-    @patch("dynamo.profiler.utils.aic_prefilter.TaskConfig")
+    @patch("dynamo.profiler.utils.aic_prefilter.TaskRunner", new_callable=MagicMock)
+    @patch("dynamo.profiler.utils.aic_prefilter.TaskConfig", new_callable=MagicMock)
     def test_selects_top_n_by_throughput_descending(self, mock_tc_cls, mock_runner_cls):
         candidates = _make_candidates(5)
         runner_instance = MagicMock()
@@ -119,11 +132,18 @@ class TestPrefilterDecode:
         assert result[1] is candidates[4]  # thpt=400
         assert result[2] is candidates[2]  # thpt=300
 
-    @patch(
-        "dynamo.profiler.utils.aic_prefilter.TaskRunner",
-        side_effect=Exception("AIC unavailable"),
-    )
-    def test_fallback_on_aic_error(self, _mock):
+    @patch("dynamo.profiler.utils.aic_prefilter.TaskRunner", None)
+    def test_fallback_when_aic_unavailable(self):
+        candidates = _make_candidates(5)
+        result = prefilter_decode_candidates(
+            candidates, 3, "model", "sys", "backend", 128, 128
+        )
+        assert len(result) == 5
+
+    @patch("dynamo.profiler.utils.aic_prefilter.TaskRunner", new_callable=MagicMock)
+    @patch("dynamo.profiler.utils.aic_prefilter.TaskConfig", new_callable=MagicMock)
+    def test_fallback_on_aic_runtime_error(self, mock_tc_cls, mock_runner_cls):
+        mock_runner_cls.side_effect = Exception("AIC unavailable")
         candidates = _make_candidates(5)
         result = prefilter_decode_candidates(
             candidates, 3, "model", "sys", "backend", 128, 128
