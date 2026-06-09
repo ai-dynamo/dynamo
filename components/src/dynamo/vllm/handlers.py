@@ -296,9 +296,15 @@ async def _deferred_abort_guard(
         yield guard
     finally:
         if guard is not None:
-            if registry is not None:
-                registry.pop(request_id, None)
-            await guard.close()
+            # Keep the guard registered until close() finishes: close() may
+            # await a deferred abort, and an out-of-band admin abort_request
+            # during that window must still find the guard and route through
+            # the deferred path instead of taking the unsafe direct abort.
+            try:
+                await guard.close()
+            finally:
+                if registry is not None:
+                    registry.pop(request_id, None)
 
 
 class VllmEnginePauseController:
