@@ -239,7 +239,10 @@ async fn call_worker_routes(
         .endpoint(target.endpoint.clone());
 
     let client = endpoint.client().await?;
-    wait_for_client_targets(&client, &[target.instance_id], Duration::from_secs(5)).await;
+    // Bound the readiness wait by the configured request timeout (capped at 5s so a
+    // large request_timeout doesn't block discovery on a single slow-to-register worker).
+    let readiness_timeout = timeout.min(Duration::from_secs(5));
+    wait_for_client_targets(&client, &[target.instance_id], readiness_timeout).await?;
 
     let router = PushRouter::<serde_json::Value, Annotated<serde_json::Value>>::from_client(
         client,
@@ -273,7 +276,11 @@ async fn call_worker_routes(
         .map_err(|_| anyhow::anyhow!("routes request timed out after {}s", timeout.as_secs()))?
 }
 
-async fn wait_for_client_targets(client: &Client, target_ids: &[u64], timeout: Duration) {
+async fn wait_for_client_targets(
+    client: &Client,
+    target_ids: &[u64],
+    timeout: Duration,
+) -> anyhow::Result<()> {
     let wait = async {
         loop {
             let ids = client.instance_ids();
@@ -283,7 +290,12 @@ async fn wait_for_client_targets(client: &Client, target_ids: &[u64], timeout: D
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     };
-    let _ = tokio::time::timeout(timeout, wait).await;
+    tokio::time::timeout(timeout, wait).await.map_err(|_| {
+        anyhow::anyhow!(
+            "timed out after {}s waiting for worker instance(s) to become discoverable",
+            timeout.as_secs()
+        )
+    })
 }
 
 fn parse_worker_routes(value: serde_json::Value) -> anyhow::Result<WorkerRoutes> {

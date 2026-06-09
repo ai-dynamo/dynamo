@@ -401,7 +401,7 @@ impl HttpService {
                 .handle(handle.clone())
                 .serve(router.into_make_service());
 
-            self.spawn_rl_listener_if_configured(&cancel_token);
+            self.spawn_rl_listener_if_configured(&cancel_token).await?;
 
             // Spawn canary after all fallible startup so it won't leak on early errors
             tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
@@ -451,7 +451,7 @@ impl HttpService {
                 }
             };
 
-            self.spawn_rl_listener_if_configured(&cancel_token);
+            self.spawn_rl_listener_if_configured(&cancel_token).await?;
 
             // Spawn canary after all fallible startup so it won't leak on early errors
             tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
@@ -474,37 +474,41 @@ impl HttpService {
         Ok(())
     }
 
-    fn spawn_rl_listener_if_configured(&self, cancel_token: &CancellationToken) {
+    async fn spawn_rl_listener_if_configured(
+        &self,
+        cancel_token: &CancellationToken,
+    ) -> Result<()> {
         let Some(rl_router) = self.rl_router.clone() else {
-            return;
+            return Ok(());
         };
         let rl_addr = format!("{}:{}", self.host, self.rl_port);
+        // Bind eagerly and fail fast: when RL discovery is enabled, a bind failure
+        // should abort service startup rather than silently leave RL discovery
+        // unavailable while the main HTTP service keeps running.
+        let listener = tokio::net::TcpListener::bind(&rl_addr).await.map_err(|e| {
+            tracing::error!(
+                address = %rl_addr,
+                error = %e,
+                "Failed to bind RL worker discovery listener"
+            );
+            anyhow::anyhow!("Failed to bind RL worker discovery listener on {rl_addr}: {e}")
+        })?;
+        tracing::info!(
+            address = %rl_addr,
+            "RL worker discovery listener started"
+        );
         let rl_cancel = cancel_token.child_token();
         tokio::spawn(async move {
-            match tokio::net::TcpListener::bind(&rl_addr).await {
-                Ok(listener) => {
-                    tracing::info!(
-                        address = %rl_addr,
-                        "RL worker discovery listener started"
-                    );
-                    if let Err(e) = axum::serve(listener, rl_router)
-                        .with_graceful_shutdown(async move {
-                            rl_cancel.cancelled_owned().await;
-                        })
-                        .await
-                    {
-                        tracing::error!("RL worker discovery listener error: {e}");
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(
-                        address = %rl_addr,
-                        error = %e,
-                        "Failed to bind RL worker discovery listener"
-                    );
-                }
+            if let Err(e) = axum::serve(listener, rl_router)
+                .with_graceful_shutdown(async move {
+                    rl_cancel.cancelled_owned().await;
+                })
+                .await
+            {
+                tracing::error!("RL worker discovery listener error: {e}");
             }
         });
+        Ok(())
     }
 
     /// Documentation of exposed HTTP endpoints
