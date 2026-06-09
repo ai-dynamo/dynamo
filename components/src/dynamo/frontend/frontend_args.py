@@ -58,6 +58,10 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     http_port: int
     tls_cert_path: Optional[pathlib.Path]
     tls_key_path: Optional[pathlib.Path]
+    frontend_admission_control: str
+    frontend_lag_threshold_ms: int
+    frontend_lag_check_interval_ms: int
+    frontend_lag_cooldown_ms: int
 
     namespace: Optional[str] = None
     namespace_prefix: Optional[str] = None
@@ -87,6 +91,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     trust_remote_code: bool
 
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens"}
+    _VALID_FRONTEND_ADMISSION_CONTROLS = {"none", "tokio-lag"}
 
     def validate(self) -> None:
         if self.load_aware:
@@ -114,6 +119,30 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
                 f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
             )
+        if self.frontend_admission_control not in (
+            self._VALID_FRONTEND_ADMISSION_CONTROLS
+        ):
+            raise ValueError(
+                "--frontend-admission-control: invalid value "
+                f"'{self.frontend_admission_control}' "
+                f"(choose from {sorted(self._VALID_FRONTEND_ADMISSION_CONTROLS)})"
+            )
+        if (
+            self.frontend_admission_control == "tokio-lag"
+            and self.frontend_lag_threshold_ms <= 0
+        ):
+            raise ValueError(
+                "--frontend-lag-threshold-ms must be > 0 when tokio-lag admission is enabled"
+            )
+        if (
+            self.frontend_admission_control == "tokio-lag"
+            and self.frontend_lag_check_interval_ms <= 0
+        ):
+            raise ValueError(
+                "--frontend-lag-check-interval-ms must be > 0 when tokio-lag admission is enabled"
+            )
+        if self.frontend_lag_cooldown_ms < 0:
+            raise ValueError("--frontend-lag-cooldown-ms must be >= 0")
         if self.router_prefill_load_model == "aic":
             if self.router_mode != "kv":
                 raise ValueError(
@@ -211,6 +240,45 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_HTTP_PORT",
             default=8000,
             help="HTTP port for the engine (u16).",
+            arg_type=int,
+        )
+        add_argument(
+            g,
+            flag_name="--frontend-admission-control",
+            env_var="DYN_FRONTEND_ADMISSION_CONTROL",
+            default="none",
+            help=(
+                "Frontend-local admission control mode. 'none' disables frontend "
+                "load-based rejection; 'tokio-lag' rejects inference requests when "
+                "Tokio scheduling lag exceeds the configured threshold."
+            ),
+            choices=["none", "tokio-lag"],
+        )
+        add_argument(
+            g,
+            flag_name="--frontend-lag-threshold-ms",
+            env_var="DYN_FRONTEND_LAG_THRESHOLD_MS",
+            default=50,
+            help="Tokio scheduling lag threshold for frontend admission, in milliseconds.",
+            arg_type=int,
+        )
+        add_argument(
+            g,
+            flag_name="--frontend-lag-check-interval-ms",
+            env_var="DYN_FRONTEND_LAG_CHECK_INTERVAL_MS",
+            default=10,
+            help="Tokio scheduling lag canary check interval, in milliseconds.",
+            arg_type=int,
+        )
+        add_argument(
+            g,
+            flag_name="--frontend-lag-cooldown-ms",
+            env_var="DYN_FRONTEND_LAG_COOLDOWN_MS",
+            default=1000,
+            help=(
+                "Minimum time to keep frontend admission in overloaded state "
+                "after lag exceeds the threshold, in milliseconds."
+            ),
             arg_type=int,
         )
         add_negatable_bool_argument(

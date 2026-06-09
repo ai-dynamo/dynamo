@@ -11,9 +11,14 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::Response;
+use axum::response::IntoResponse;
 
 use super::Metrics;
 use super::RouteDoc;
+use super::admission::{
+    FrontendAdmissionConfig, FrontendAdmissionController, register_frontend_admission_metrics,
+    rejection_response,
+};
 use super::metrics;
 use super::metrics::register_worker_timing_metrics;
 use crate::discovery::ModelManager;
@@ -60,6 +65,7 @@ pub struct State {
     discovery_client: Arc<dyn Discovery>,
     flags: StateFlags,
     cancel_token: CancellationToken,
+    frontend_admission: Option<Arc<FrontendAdmissionController>>,
 }
 
 #[derive(Default, Debug)]
@@ -130,6 +136,7 @@ impl State {
         manager: Arc<ModelManager>,
         discovery_client: Arc<dyn Discovery>,
         cancel_token: CancellationToken,
+        frontend_admission: Option<Arc<FrontendAdmissionController>>,
     ) -> Self {
         Self {
             manager,
@@ -147,6 +154,7 @@ impl State {
                 anthropic_endpoints_enabled: AtomicBool::new(false),
             },
             cancel_token,
+            frontend_admission,
         }
     }
 
@@ -175,6 +183,10 @@ impl State {
     /// Get the cancellation token
     pub fn cancel_token(&self) -> &CancellationToken {
         &self.cancel_token
+    }
+
+    pub fn frontend_admission(&self) -> Option<Arc<FrontendAdmissionController>> {
+        self.frontend_admission.clone()
     }
 
     // TODO
@@ -270,6 +282,9 @@ pub struct HttpServiceConfig {
     /// are registered using discovery.instance_id() and exposed on /metrics.
     #[builder(default = "None")]
     drt_discovery: Option<Arc<dyn Discovery>>,
+
+    #[builder(default)]
+    frontend_admission_config: FrontendAdmissionConfig,
 }
 
 impl HttpService {
@@ -380,6 +395,9 @@ impl HttpService {
 
             // Spawn canary after all fallible startup so it won't leak on early errors
             tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
+            if let Some(admission) = self.state.frontend_admission() {
+                admission.spawn_canary(cancel_token.clone());
+            }
 
             tokio::select! {
                 result = server => {
@@ -428,6 +446,9 @@ impl HttpService {
 
             // Spawn canary after all fallible startup so it won't leak on early errors
             tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
+            if let Some(admission) = self.state.frontend_admission() {
+                admission.spawn_canary(cancel_token.clone());
+            }
 
             axum::serve(listener, router)
                 .with_graceful_shutdown(async move {
@@ -503,7 +524,16 @@ impl HttpServiceConfigBuilder {
                 cancel_token.child_token(),
             )) as Arc<dyn Discovery>
         });
-        let state = Arc::new(State::new(model_manager, discovery_client, cancel_token));
+        let frontend_admission_config = config.frontend_admission_config.clone();
+        let frontend_admission = frontend_admission_config
+            .is_enabled()
+            .then(|| Arc::new(FrontendAdmissionController::new(frontend_admission_config)));
+        let state = Arc::new(State::new(
+            model_manager,
+            discovery_client,
+            cancel_token,
+            frontend_admission,
+        ));
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
@@ -561,6 +591,9 @@ impl HttpServiceConfigBuilder {
         }
         if let Err(e) = ensure_transport_metrics_registered_prometheus(&registry) {
             tracing::warn!("Failed to register transport metrics: {}", e);
+        }
+        if let Err(e) = register_frontend_admission_metrics(&registry) {
+            tracing::warn!("Failed to register frontend admission metrics: {}", e);
         }
 
         let mut all_docs = Vec::new();
@@ -708,12 +741,22 @@ impl HttpServiceConfigBuilder {
                     async move {
                         // Check if the endpoint is enabled
                         let enabled = state.flags.get(&endpoint_type);
-                        if enabled {
-                            Ok(next.run(req).await)
-                        } else {
+                        if !enabled {
                             tracing::debug!("{} endpoints are disabled", endpoint_type.as_str());
-                            Err(axum::http::StatusCode::NOT_FOUND)
+                            return axum::http::StatusCode::NOT_FOUND.into_response();
                         }
+
+                        if let Some(admission) = state.frontend_admission()
+                            && let Err(rejection) = admission.admit()
+                        {
+                            tracing::debug!(
+                                endpoint = endpoint_type.as_str(),
+                                "rejecting request due to frontend admission control"
+                            );
+                            return rejection_response(rejection);
+                        }
+
+                        next.run(req).await
                     }
                 },
             ));
@@ -769,6 +812,59 @@ mod tests {
         assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
 
         // Clean up
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_frontend_admission_rejects_inference_but_not_health() {
+        let cancel_token = CancellationToken::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind ephemeral port");
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder()
+            .port(port)
+            .enable_chat_endpoints(true)
+            .frontend_admission_config(
+                FrontendAdmissionConfig::new("tokio-lag", 50, 10_000, 1_000).unwrap(),
+            )
+            .build()
+            .unwrap();
+
+        service
+            .state()
+            .frontend_admission()
+            .unwrap()
+            .record_tick_for_test(Duration::from_millis(75));
+
+        let service_for_task = service.clone();
+        let server_token = cancel_token.clone();
+        let handle = tokio::spawn(async move {
+            service_for_task
+                .run_with_listener(server_token, listener)
+                .await
+                .unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+        let client = reqwest::Client::new();
+        let rejected = client
+            .post(format!("http://localhost:{}/v1/chat/completions", port))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .expect("chat request failed");
+        assert_eq!(rejected.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+
+        let health = client
+            .get(format!("http://localhost:{}/health", port))
+            .send()
+            .await
+            .expect("health request failed");
+        assert_eq!(health.status(), reqwest::StatusCode::OK);
+
+        cancel_token.cancel();
         handle.abort();
     }
 }

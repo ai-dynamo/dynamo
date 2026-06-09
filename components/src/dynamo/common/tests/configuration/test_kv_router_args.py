@@ -29,6 +29,16 @@ def _clear_admission_control_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name, raising=False)
 
 
+def _clear_frontend_load_admission_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "DYN_FRONTEND_ADMISSION_CONTROL",
+        "DYN_FRONTEND_LAG_THRESHOLD_MS",
+        "DYN_FRONTEND_LAG_CHECK_INTERVAL_MS",
+        "DYN_FRONTEND_LAG_COOLDOWN_MS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 def test_aic_perf_moe_cli_flows_to_binding_kwargs() -> None:
     parser = argparse.ArgumentParser()
     AicPerfArgGroup().add_arguments(parser)
@@ -476,6 +486,82 @@ def test_frontend_admission_control_defaults_to_none(monkeypatch) -> None:
     assert config.active_prefill_tokens_threshold is None
     assert config.active_prefill_tokens_threshold_frac is None
     assert config.router_queue_threshold == 16.0
+
+
+def test_frontend_load_admission_defaults_to_none(monkeypatch) -> None:
+    _clear_frontend_load_admission_env(monkeypatch)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    config.validate()
+
+    assert config.frontend_admission_control == "none"
+    assert config.frontend_lag_threshold_ms == 50
+    assert config.frontend_lag_check_interval_ms == 10
+    assert config.frontend_lag_cooldown_ms == 1000
+
+
+def test_frontend_load_admission_tokio_lag_cli(monkeypatch) -> None:
+    _clear_frontend_load_admission_env(monkeypatch)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(
+        [
+            "--frontend-admission-control",
+            "tokio-lag",
+            "--frontend-lag-threshold-ms",
+            "75",
+            "--frontend-lag-check-interval-ms",
+            "5",
+            "--frontend-lag-cooldown-ms",
+            "250",
+        ]
+    )
+    config = FrontendConfig.from_cli_args(args)
+    config.validate()
+
+    assert config.frontend_admission_control == "tokio-lag"
+    assert config.frontend_lag_threshold_ms == 75
+    assert config.frontend_lag_check_interval_ms == 5
+    assert config.frontend_lag_cooldown_ms == 250
+
+
+def test_frontend_load_admission_env(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_FRONTEND_ADMISSION_CONTROL", "tokio-lag")
+    monkeypatch.setenv("DYN_FRONTEND_LAG_THRESHOLD_MS", "80")
+    monkeypatch.setenv("DYN_FRONTEND_LAG_CHECK_INTERVAL_MS", "20")
+    monkeypatch.setenv("DYN_FRONTEND_LAG_COOLDOWN_MS", "500")
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    config.validate()
+
+    assert config.frontend_admission_control == "tokio-lag"
+    assert config.frontend_lag_threshold_ms == 80
+    assert config.frontend_lag_check_interval_ms == 20
+    assert config.frontend_lag_cooldown_ms == 500
+
+
+def test_frontend_load_admission_rejects_zero_threshold(monkeypatch) -> None:
+    _clear_frontend_load_admission_env(monkeypatch)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(
+        [
+            "--frontend-admission-control",
+            "tokio-lag",
+            "--frontend-lag-threshold-ms",
+            "0",
+        ]
+    )
+    config = FrontendConfig.from_cli_args(args)
+
+    with pytest.raises(ValueError, match="frontend-lag-threshold-ms"):
+        config.validate()
 
 
 def test_admission_control_token_capacity_preserves_busy_thresholds(
