@@ -26,7 +26,7 @@ use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
 use dynamo_runtime::config::env_is_truthy;
-use dynamo_runtime::config::environment_names::llm as env_llm;
+use dynamo_runtime::config::environment_names::llm::{self as env_llm, metrics as env_metrics};
 use dynamo_runtime::discovery::Discovery;
 use dynamo_runtime::logging::{make_inference_request_span, make_system_request_span};
 use dynamo_runtime::metrics::{
@@ -60,6 +60,10 @@ pub struct State {
     discovery_client: Arc<dyn Discovery>,
     flags: StateFlags,
     cancel_token: CancellationToken,
+    enable_anthropic_api: bool,
+    strip_anthropic_preamble: bool,
+    enable_streaming_tool_dispatch: bool,
+    enable_streaming_reasoning_dispatch: bool,
 }
 
 #[derive(Default, Debug)]
@@ -130,10 +134,15 @@ impl State {
         manager: Arc<ModelManager>,
         discovery_client: Arc<dyn Discovery>,
         cancel_token: CancellationToken,
+        metrics_prefix: Option<String>,
+        enable_anthropic_api: bool,
+        strip_anthropic_preamble: bool,
+        enable_streaming_tool_dispatch: bool,
+        enable_streaming_reasoning_dispatch: bool,
     ) -> Self {
         Self {
             manager,
-            metrics: Arc::new(Metrics::default()),
+            metrics: Arc::new(Metrics::new_with_prefix(metrics_prefix)),
             discovery_client,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
@@ -147,6 +156,10 @@ impl State {
                 anthropic_endpoints_enabled: AtomicBool::new(false),
             },
             cancel_token,
+            enable_anthropic_api,
+            strip_anthropic_preamble,
+            enable_streaming_tool_dispatch,
+            enable_streaming_reasoning_dispatch,
         }
     }
 
@@ -182,24 +195,32 @@ impl State {
         None
     }
 
-    /// Returns true if streaming tool call dispatch is enabled via
-    /// [`env_llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH`].
+    /// Returns true if Anthropic billing preamble stripping is enabled.
+    pub fn strip_anthropic_preamble_enabled(&self) -> bool {
+        self.strip_anthropic_preamble
+    }
+
+    /// Returns true if the Anthropic Messages API is enabled by service config.
+    pub fn anthropic_api_enabled(&self) -> bool {
+        self.enable_anthropic_api
+    }
+
+    /// Returns true if streaming tool call dispatch is enabled.
     ///
     /// When enabled, the chat completions streaming path emits `event: tool_call_dispatch`
     /// SSE events for each complete tool call, letting clients start processing tool calls
     /// before `finish_reason="tool_calls"` arrives.
     pub fn streaming_tool_dispatch_enabled(&self) -> bool {
-        env_is_truthy(env_llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH)
+        self.enable_streaming_tool_dispatch
     }
 
-    /// Returns true if streaming reasoning dispatch is enabled via
-    /// [`env_llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH`].
+    /// Returns true if streaming reasoning dispatch is enabled.
     ///
     /// When enabled, the chat completions streaming path accumulates reasoning tokens and
     /// emits a single `event: reasoning_dispatch` SSE event with the complete reasoning
     /// block once thinking ends (DeepSeek-R1, Qwen3, etc.).
     pub fn streaming_reasoning_dispatch_enabled(&self) -> bool {
-        env_is_truthy(env_llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH)
+        self.enable_streaming_reasoning_dispatch
     }
 }
 
@@ -235,6 +256,9 @@ pub struct HttpServiceConfig {
     #[builder(default = "None")]
     tls_key_path: Option<PathBuf>,
 
+    #[builder(default = "std::env::var(env_metrics::DYN_METRICS_PREFIX).ok()")]
+    metrics_prefix: Option<String>,
+
     // #[builder(default)]
     // custom: Vec<axum::Router>
     #[builder(default = "false")]
@@ -249,8 +273,17 @@ pub struct HttpServiceConfig {
     #[builder(default = "true")]
     enable_responses_endpoints: bool,
 
-    #[builder(default = "false")]
+    #[builder(default = "env_is_truthy(env_llm::DYN_ENABLE_ANTHROPIC_API)")]
     enable_anthropic_endpoints: bool,
+
+    #[builder(default = "env_is_truthy(env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE)")]
+    strip_anthropic_preamble: bool,
+
+    #[builder(default = "env_is_truthy(env_llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH)")]
+    enable_streaming_tool_dispatch: bool,
+
+    #[builder(default = "env_is_truthy(env_llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH)")]
+    enable_streaming_reasoning_dispatch: bool,
 
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
@@ -287,6 +320,10 @@ impl HttpService {
 
     pub fn model_manager(&self) -> &ModelManager {
         self.state().manager()
+    }
+
+    pub fn anthropic_api_enabled(&self) -> bool {
+        self.state().anthropic_api_enabled()
     }
 
     pub async fn spawn(&self, cancel_token: CancellationToken) -> JoinHandle<Result<()>> {
@@ -503,7 +540,16 @@ impl HttpServiceConfigBuilder {
                 cancel_token.child_token(),
             )) as Arc<dyn Discovery>
         });
-        let state = Arc::new(State::new(model_manager, discovery_client, cancel_token));
+        let state = Arc::new(State::new(
+            model_manager,
+            discovery_client,
+            cancel_token,
+            config.metrics_prefix,
+            config.enable_anthropic_endpoints,
+            config.strip_anthropic_preamble,
+            config.enable_streaming_tool_dispatch,
+            config.enable_streaming_reasoning_dispatch,
+        ));
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
@@ -583,7 +629,7 @@ impl HttpServiceConfigBuilder {
                 var(HTTP_SVC_METRICS_PATH_ENV).ok(),
                 config.drt_metrics,
             ),
-            if env_is_truthy(env_llm::DYN_ENABLE_ANTHROPIC_API) {
+            if config.enable_anthropic_endpoints {
                 super::anthropic::anthropic_models_router(
                     state.clone(),
                     var(HTTP_SVC_MODELS_PATH_ENV).ok(),
@@ -601,8 +647,11 @@ impl HttpServiceConfigBuilder {
             all_docs.extend(route_docs);
         }
         // Inference routes (completions, chat, embeddings, etc.) — info-level spans
-        let endpoint_routes =
-            HttpServiceConfigBuilder::get_endpoints_router(state.clone(), &config.request_template);
+        let endpoint_routes = HttpServiceConfigBuilder::get_endpoints_router(
+            state.clone(),
+            &config.request_template,
+            config.enable_anthropic_endpoints,
+        );
         let mut inference_router = axum::Router::new();
         for (route_docs, route) in endpoint_routes {
             inference_router = inference_router.merge(route);
@@ -651,6 +700,7 @@ impl HttpServiceConfigBuilder {
     fn get_endpoints_router(
         state: Arc<State>,
         request_template: &Option<RequestTemplate>,
+        enable_anthropic_endpoints: bool,
     ) -> Vec<(Vec<RouteDoc>, axum::Router)> {
         let mut routes = Vec::new();
         // Add chat completions route with conditional middleware
@@ -682,7 +732,7 @@ impl HttpServiceConfigBuilder {
         endpoint_routes.insert(EndpointType::Realtime, (realtime_docs, realtime_route));
         endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
 
-        if env_is_truthy(env_llm::DYN_ENABLE_ANTHROPIC_API) {
+        if enable_anthropic_endpoints {
             tracing::warn!("Anthropic Messages API (/v1/messages) is experimental.");
             let (anthropic_docs, anthropic_route) = super::anthropic::anthropic_messages_router(
                 state.clone(),

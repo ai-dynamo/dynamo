@@ -25,6 +25,7 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let mut grpc_service_builder = kserve::KserveService::builder()
         .port(engine_config.local_model().http_port()) // [WIP] generalize port..
+        .metrics_prefix(engine_config.local_model().metrics_prefix())
         .http_cancel_token(Some(distributed_runtime.primary_token()))
         .with_request_template(engine_config.local_model().request_template());
 
@@ -59,6 +60,7 @@ pub async fn run(
                 namespace_filter,
                 prefill_load_estimator.clone(),
                 local_model_path,
+                model.metrics_prefix(),
             )
             .await?;
             grpc_service
@@ -126,9 +128,10 @@ async fn run_watcher(
     namespace_filter: NamespaceFilter,
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
     local_model_path: Option<PathBuf>,
+    metrics_prefix: Option<String>,
 ) -> anyhow::Result<()> {
     // Create metrics for migration tracking (not exposed via /metrics in gRPC mode)
-    let metrics = Arc::new(Metrics::new());
+    let metrics = Arc::new(Metrics::new_with_prefix(metrics_prefix));
     let mut watch_obj = ModelWatcher::new(
         runtime.clone(),
         model_manager,

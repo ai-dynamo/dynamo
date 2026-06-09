@@ -444,6 +444,11 @@ pub(crate) struct EntrypointArgs {
     http_host: Option<String>,
     http_port: u16,
     http_metrics_port: Option<u16>,
+    metrics_prefix: Option<String>,
+    enable_anthropic_api: bool,
+    strip_anthropic_preamble: bool,
+    enable_streaming_tool_dispatch: bool,
+    enable_streaming_reasoning_dispatch: bool,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     extra_engine_args: Option<PathBuf>,
@@ -463,7 +468,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None, metrics_prefix=None, enable_anthropic_api=false, strip_anthropic_preamble=false, enable_streaming_tool_dispatch=false, enable_streaming_reasoning_dispatch=false))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -490,6 +495,11 @@ impl EntrypointArgs {
         migration_max_seq_len: Option<u32>,
         chat_engine_factory: Option<PyObject>,
         aic_perf_config: Option<AicPerfConfig>,
+        metrics_prefix: Option<String>,
+        enable_anthropic_api: bool,
+        strip_anthropic_preamble: bool,
+        enable_streaming_tool_dispatch: bool,
+        enable_streaming_reasoning_dispatch: bool,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if let Some(runtime_config) = &runtime_config {
@@ -531,6 +541,11 @@ impl EntrypointArgs {
             http_host,
             http_port: http_port.unwrap_or(DEFAULT_HTTP_PORT),
             http_metrics_port,
+            metrics_prefix,
+            enable_anthropic_api,
+            strip_anthropic_preamble,
+            enable_streaming_tool_dispatch,
+            enable_streaming_reasoning_dispatch,
             tls_cert_path,
             tls_key_path,
             extra_engine_args,
@@ -580,6 +595,11 @@ pub fn make_engine<'p>(
         .http_host(args.http_host.clone())
         .http_port(args.http_port)
         .http_metrics_port(args.http_metrics_port)
+        .metrics_prefix(args.metrics_prefix.clone())
+        .enable_anthropic_api(args.enable_anthropic_api)
+        .strip_anthropic_preamble(args.strip_anthropic_preamble)
+        .enable_streaming_tool_dispatch(args.enable_streaming_tool_dispatch)
+        .enable_streaming_reasoning_dispatch(args.enable_streaming_reasoning_dispatch)
         .tls_cert_path(args.tls_cert_path.clone())
         .tls_key_path(args.tls_key_path.clone())
         .is_mocker(matches!(args.engine_type, EngineType::Mocker))

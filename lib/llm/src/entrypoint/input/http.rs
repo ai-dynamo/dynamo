@@ -54,6 +54,12 @@ pub async fn run(
         http_service_builder.cancel_token(Some(distributed_runtime.primary_token()));
     http_service_builder =
         http_service_builder.with_request_template(engine_config.local_model().request_template());
+    http_service_builder = http_service_builder
+        .metrics_prefix(local_model.metrics_prefix())
+        .enable_anthropic_endpoints(local_model.enable_anthropic_api())
+        .strip_anthropic_preamble(local_model.strip_anthropic_preamble())
+        .enable_streaming_tool_dispatch(local_model.enable_streaming_tool_dispatch())
+        .enable_streaming_reasoning_dispatch(local_model.enable_streaming_reasoning_dispatch());
     // Inject the DRT's metrics registry so that component-scoped metrics
     // (e.g. KvIndexerMetrics) are exposed (default port 8000 if not overridden).
     http_service_builder =
@@ -229,13 +235,19 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
     match model_type {
         ModelUpdate::Added(card) => {
             // Handle all supported endpoint types, not just the first one
-            for endpoint_type in card.model_type.as_endpoint_types() {
+            for endpoint_type in card
+                .model_type
+                .as_endpoint_types_with_anthropic(service.anthropic_api_enabled())
+            {
                 service.enable_model_endpoint(endpoint_type, true);
             }
         }
         ModelUpdate::Removed(card) => {
             // Handle all supported endpoint types, not just the first one
-            for endpoint_type in card.model_type.as_endpoint_types() {
+            for endpoint_type in card
+                .model_type
+                .as_endpoint_types_with_anthropic(service.anthropic_api_enabled())
+            {
                 service.enable_model_endpoint(endpoint_type, false);
             }
         }

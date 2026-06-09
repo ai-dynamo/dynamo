@@ -24,7 +24,6 @@ use axum::{
     },
     routing::{get, post},
 };
-use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
 use futures::{StreamExt, stream};
 use tracing::Instrument;
@@ -215,7 +214,7 @@ async fn anthropic_messages(
     }
 
     // Strip Claude Code billing preamble from system prompt if enabled
-    if env_is_truthy(env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE) {
+    if state.strip_anthropic_preamble_enabled() {
         strip_billing_preamble(&mut request.system);
     }
 
@@ -495,10 +494,10 @@ async fn anthropic_messages(
 /// Handler for POST /v1/messages/count_tokens.
 /// Returns an estimated input token count using a len/3 heuristic.
 async fn handler_count_tokens(
-    State((_state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     Json(mut request): Json<AnthropicCountTokensRequest>,
 ) -> Result<Response, Response> {
-    if env_is_truthy(env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE) {
+    if state.strip_anthropic_preamble_enabled() {
         strip_billing_preamble(&mut request.system);
     }
     let tokens = request.estimate_tokens();
