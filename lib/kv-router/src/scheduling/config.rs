@@ -279,6 +279,10 @@ pub struct KvRouterConfig {
     /// Direct G2 transfer tax in block-equivalent units.
     #[validate(range(min = 0.0))]
     pub remote_g2_cost_blocks: f64,
+
+    /// Direct G2 transfer cost per planned block in block-equivalent units.
+    #[validate(range(min = 0.0))]
+    pub remote_g2_cost_per_block: f64,
 }
 
 impl Default for KvRouterConfig {
@@ -309,6 +313,7 @@ impl Default for KvRouterConfig {
             shared_cache_type: SharedCacheType::default(),
             remote_g2_reuse_enabled: false,
             remote_g2_cost_blocks: 0.0,
+            remote_g2_cost_per_block: 0.0,
         }
     }
 }
@@ -388,6 +393,7 @@ impl KvRouterConfig {
                 .and_then(|cfg| cfg.shared_cache_multiplier)
                 .unwrap_or(self.shared_cache_multiplier),
             cost_blocks: self.remote_g2_cost_blocks,
+            cost_per_block: self.remote_g2_cost_per_block,
         }
     }
 
@@ -541,8 +547,13 @@ mod tests {
             remote_g2_cost_blocks: -1.0,
             ..Default::default()
         };
+        let negative_cost_per_block = KvRouterConfig {
+            remote_g2_cost_per_block: -0.1,
+            ..Default::default()
+        };
 
         assert!(negative_cost.validate().is_err());
+        assert!(negative_cost_per_block.validate().is_err());
     }
 
     #[test]

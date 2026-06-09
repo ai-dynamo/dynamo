@@ -98,15 +98,16 @@ pub struct RemoteKvReuseSelectionStats {
 pub struct RemoteG2CostModel {
     pub score_weight: f64,
     pub cost_blocks: f64,
+    pub cost_per_block: f64,
 }
 
 impl RemoteG2CostModel {
-    pub fn estimated_cost_blocks(&self) -> f64 {
-        self.cost_blocks
+    pub fn estimated_cost_blocks(&self, planned_blocks: u32) -> f64 {
+        self.cost_blocks + self.cost_per_block * planned_blocks as f64
     }
 
-    pub fn score_blocks(&self, incremental_blocks: u32) -> f64 {
-        self.score_weight * incremental_blocks as f64 - self.cost_blocks
+    pub fn score_blocks(&self, incremental_blocks: u32, planned_blocks: u32) -> f64 {
+        self.score_weight * incremental_blocks as f64 - self.estimated_cost_blocks(planned_blocks)
     }
 }
 
@@ -161,7 +162,7 @@ fn choose_better_candidate_score(
         input.target_local_prefix_blocks,
     );
     let (cost_blocks, score_blocks) =
-        remote_g2_score_for_candidate(input.cost_model, incremental_blocks);
+        remote_g2_score_for_candidate(input.cost_model, incremental_blocks, planned_blocks);
     let candidate = RemoteG2CandidateScore {
         target: input.target,
         source: worker,
@@ -207,11 +208,12 @@ fn remote_g2_incremental_blocks(start: u32, planned_blocks: u32, target_local_bl
 fn remote_g2_score_for_candidate(
     cost_model: Option<RemoteG2CostModel>,
     incremental_blocks: u32,
+    planned_blocks: u32,
 ) -> (f64, f64) {
     match cost_model {
         Some(model) => (
-            model.estimated_cost_blocks(),
-            model.score_blocks(incremental_blocks),
+            model.estimated_cost_blocks(planned_blocks),
+            model.score_blocks(incremental_blocks, planned_blocks),
         ),
         None => (0.0, incremental_blocks as f64),
     }
@@ -833,6 +835,7 @@ mod tests {
             cost_model: Some(RemoteG2CostModel {
                 score_weight: 0.5,
                 cost_blocks: 1.0,
+                cost_per_block: 0.0,
             }),
             ..selection_input(target, &hashes, &matches)
         };
@@ -851,6 +854,35 @@ mod tests {
     }
 
     #[test]
+    fn select_candidate_charges_per_planned_block_transfer_cost() {
+        let hashes = block_hashes(8);
+        let target = WorkerWithDpRank::new(9, 0);
+        let source = WorkerWithDpRank::new(7, 0);
+        let matches = tiered_matches(&[], &[(source, 8)]);
+        let input = RemoteKvReuseSelectionInput {
+            target_local_prefix_blocks: 3,
+            cost_model: Some(RemoteG2CostModel {
+                score_weight: 0.5,
+                cost_blocks: 1.0,
+                cost_per_block: 0.1,
+            }),
+            ..selection_input(target, &hashes, &matches)
+        };
+
+        let decision = select_remote_g2_candidate(input);
+
+        match decision {
+            RemoteG2CandidateDecision::Candidate { candidate, .. } => {
+                assert_eq!(candidate.planned_blocks, 8);
+                assert_eq!(candidate.incremental_blocks, 5);
+                assert!((candidate.cost_blocks - 1.8).abs() < f64::EPSILON);
+                assert!((candidate.score_blocks - 0.7).abs() < f64::EPSILON);
+            }
+            other => panic!("expected candidate, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn select_candidate_rejects_cost_negative_direct_g2() {
         let hashes = block_hashes(8);
         let target = WorkerWithDpRank::new(9, 0);
@@ -860,6 +892,7 @@ mod tests {
             cost_model: Some(RemoteG2CostModel {
                 score_weight: 0.5,
                 cost_blocks: 16.0,
+                cost_per_block: 0.0,
             }),
             ..selection_input(target, &hashes, &matches)
         };

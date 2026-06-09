@@ -1308,6 +1308,7 @@ class KvRouterConfig:
         shared_cache_type: str = "none",
         remote_g2_reuse_enabled: bool = False,
         remote_g2_cost_blocks: float = 0.0,
+        remote_g2_cost_per_block: float = 0.0,
     ) -> None:
         """
         Create a KV router configuration.
@@ -1353,6 +1354,7 @@ class KvRouterConfig:
             shared_cache_type: Type of external shared KV cache to query: "none" or "hicache" (default: "none").
             remote_g2_reuse_enabled: Enable live source-worker HostPinned KV transfer planning (default: False).
             remote_g2_cost_blocks: Direct G2 transfer tax in block-equivalent units (default: 0.0).
+            remote_g2_cost_per_block: Direct G2 transfer tax per planned block (default: 0.0).
         """
         ...
 

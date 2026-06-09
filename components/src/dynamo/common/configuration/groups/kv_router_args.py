@@ -40,6 +40,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "shared_cache_type",
     "remote_g2_reuse_enabled",
     "remote_g2_cost_blocks",
+    "remote_g2_cost_per_block",
 )
 
 
@@ -68,6 +69,7 @@ class KvRouterConfigBase(ConfigBase):
     shared_cache_type: str = "none"
     remote_g2_reuse_enabled: bool = False
     remote_g2_cost_blocks: float = 0.0
+    remote_g2_cost_per_block: float = 0.0
 
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
@@ -333,6 +335,18 @@ class KvRouterArgGroup(ArgGroup):
                 "[EXPERIMENTAL] KV Router: Direct G2 transfer tax in block-equivalent units. "
                 "The router scores Direct G2 as shared_cache_multiplier * incremental_blocks "
                 "minus this cost."
+            ),
+            arg_type=float,
+        )
+        add_argument(
+            g,
+            flag_name="--remote-g2-cost-per-block",
+            env_var="DYN_REMOTE_G2_COST_PER_BLOCK",
+            default=0.0,
+            help=(
+                "[EXPERIMENTAL] KV Router: Direct G2 transfer tax per planned block. "
+                "The router scores Direct G2 as shared_cache_multiplier * incremental_blocks "
+                "minus remote_g2_cost_blocks minus this value times planned_blocks."
             ),
             arg_type=float,
         )
