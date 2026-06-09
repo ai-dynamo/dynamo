@@ -224,6 +224,35 @@ class Endpoint:
         """
         ...
 
+    async def serve_bidirectional_endpoint(
+        self,
+        handler: Callable[..., AsyncIterator[JsonLike]],
+        graceful_shutdown: bool = True,
+        metrics_labels: Optional[List[Tuple[str, str]]] = None,
+    ) -> None:
+        """
+        Serve a bidirectional (streaming-input, streaming-output) endpoint.
+
+        The handler is an async generator function — `async def
+        generate(request_stream)` or `async def generate(request_stream,
+        context)` — so calling it returns an async iterator of response frames
+        directly (it is not awaited). `request_stream` is a
+        `PyAsyncRequestStream` yielding inbound frames as JSON-like Python
+        objects; the generator yields response frames as JSON-like Python
+        objects.
+
+        Request-stream end (when `__anext__` raises `StopAsyncIteration`)
+        is not a cancellation signal: the caller has merely stopped sending
+        input. The engine must keep yielding response chunks until it
+        chooses to return or observes `context.is_stopped()`.
+
+        Args:
+            handler: The async generator factory described above
+            graceful_shutdown: Whether to wait for inflight requests to complete during shutdown (default: True)
+            metrics_labels: Optional list of metrics labels to add to the metrics
+        """
+        ...
+
     async def client(self, router_mode: Optional[RouterMode] = None) -> Client:
         """
         Create a `Client` capable of calling served instances of this endpoint.
@@ -267,6 +296,21 @@ class Endpoint:
         and should start receiving requests.
         """
         ...
+
+class PyAsyncRequestStream:
+    """
+    Python-visible inbound iterator handed to bidirectional engine
+    handlers as the first positional argument. Yields request frames as
+    JSON-like Python objects.
+
+    Request-stream end is not a cancellation signal: when this iterator
+    raises `StopAsyncIteration`, the caller has merely stopped sending
+    input. The engine should keep yielding response chunks until it
+    chooses to return or observes `context.is_stopped()`.
+    """
+
+    def __aiter__(self) -> "PyAsyncRequestStream": ...
+    async def __anext__(self) -> JsonLike: ...
 
 class Client:
     """
@@ -1837,6 +1881,7 @@ class MockEngineArgs:
         aic_attention_dp_size: Optional[int] = None,
         aic_nextn: Optional[int] = None,
         aic_nextn_accept_rates: Optional[str] = None,
+        aic_mtp_seed: int = 42,
         gpu_memory_utilization: Optional[float] = None,
         mem_fraction_static: Optional[float] = None,
         free_gpu_memory_fraction: Optional[float] = None,
@@ -1991,6 +2036,12 @@ class MockEngineArgs:
     def aic_nextn_accept_rates(self, value: Optional[str]) -> None: ...
 
     @property
+    def aic_mtp_seed(self) -> int: ...
+
+    @aic_mtp_seed.setter
+    def aic_mtp_seed(self, value: int) -> None: ...
+
+    @property
     def gpu_memory_utilization(self) -> Optional[float]: ...
 
     @gpu_memory_utilization.setter
@@ -2035,6 +2086,7 @@ class MockEngineArgs:
         aic_attention_dp_size: Optional[int] = None,
         aic_nextn: Optional[int] = None,
         aic_nextn_accept_rates: Optional[str] = None,
+        aic_mtp_seed: Optional[int] = None,
         gpu_memory_utilization: Optional[float] = None,
         mem_fraction_static: Optional[float] = None,
         free_gpu_memory_fraction: Optional[float] = None,

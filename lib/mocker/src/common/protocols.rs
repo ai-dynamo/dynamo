@@ -259,6 +259,7 @@ pub struct OutputSignal {
 
 /// Preemption policy for evicting decode requests under memory pressure
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
 pub enum PreemptionMode {
     /// Evict the newest request (matches vLLM v1 default)
     #[default]
@@ -271,11 +272,11 @@ impl FromStr for PreemptionMode {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
+        match value.to_ascii_lowercase().as_str() {
             "lifo" => Ok(Self::Lifo),
             "fifo" => Ok(Self::Fifo),
-            other => Err(format!(
-                "Invalid preemption_mode: '{other}'. Must be 'lifo' or 'fifo'."
+            _ => Err(format!(
+                "Invalid preemption_mode: '{value}'. Must be 'lifo' or 'fifo'."
             )),
         }
     }
@@ -283,6 +284,7 @@ impl FromStr for PreemptionMode {
 
 /// Engine type for selecting scheduling and KV cache simulation behavior
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
 pub enum EngineType {
     /// vLLM-style scheduling with hash-based block KV cache
     #[default]
@@ -298,12 +300,12 @@ impl FromStr for EngineType {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
+        match value.to_ascii_lowercase().as_str() {
             "vllm" => Ok(Self::Vllm),
             "sglang" => Ok(Self::Sglang),
             "trtllm" => Ok(Self::Trtllm),
-            other => Err(format!(
-                "Invalid engine_type '{other}'. Must be 'vllm', 'sglang', or 'trtllm'."
+            _ => Err(format!(
+                "Invalid engine_type '{value}'. Must be 'vllm', 'sglang', or 'trtllm'."
             )),
         }
     }
@@ -325,6 +327,7 @@ pub enum SchedulingPolicy {
 
 /// Worker type for disaggregated serving configurations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
 pub enum WorkerType {
     /// Standard aggregated worker handling both prefill and decode
     #[default]
@@ -339,12 +342,12 @@ impl FromStr for WorkerType {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
+        match value.to_ascii_lowercase().as_str() {
             "aggregated" => Ok(Self::Aggregated),
             "prefill" => Ok(Self::Prefill),
             "decode" => Ok(Self::Decode),
-            other => Err(format!(
-                "Invalid worker_type '{other}'. Must be 'aggregated', 'prefill', or 'decode'."
+            _ => Err(format!(
+                "Invalid worker_type '{value}'. Must be 'aggregated', 'prefill', or 'decode'."
             )),
         }
     }
@@ -484,6 +487,7 @@ struct MockEngineArgsSerde {
     aic_attention_dp_size: OptionalConfigValue<usize>,
     aic_nextn: OptionalConfigValue<usize>,
     aic_nextn_accept_rates: OptionalConfigValue<String>,
+    aic_mtp_seed: OptionalConfigValue<u64>,
     gpu_memory_utilization: OptionalConfigValue<f64>,
     mem_fraction_static: OptionalConfigValue<f64>,
     free_gpu_memory_fraction: OptionalConfigValue<f64>,
@@ -644,20 +648,22 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub aic_attention_dp_size: Option<usize>,
 
-    /// MTP/Eagle speculative-decoding draft-token count (1..=5). When set,
-    /// AIC's perf model applies the spec-dec speedup to decode latency.
-    /// Validated here so the mocker/replay JSON path shares the same 1..=5
-    /// contract as `AicPerfConfig` (omit to disable spec dec).
-    #[serde(skip)]
+    /// MTP/Eagle speculative-decoding draft-token count (1..=5).
+    /// The mocker samples accepted drafts while AIC supplies undiscounted
+    /// verification-round latency.
     #[builder(default = "None")]
     #[validate(range(min = 1, max = 5))]
     pub aic_nextn: Option<usize>,
 
-    /// Per-position accept rates for MTP draft tokens, comma-separated
-    /// (e.g. "0.85,0.3,0,0,0"). Padded to length 5 by the Python layer.
-    #[serde(skip)]
+    /// Conditional acceptance rates for draft tokens, comma-separated.
+    /// Entry i is P(draft i accepted | every earlier draft was accepted).
     #[builder(default = "None")]
     pub aic_nextn_accept_rates: Option<String>,
+
+    /// Base RNG seed for MTP burst sampling. Worker rank is added with
+    /// wrapping arithmetic before constructing each worker-local sampler.
+    #[builder(default = "42")]
+    pub aic_mtp_seed: u64,
 
     /// GPU memory fraction for AIC KV capacity estimation with vLLM.
     #[builder(default = "None")]
@@ -826,6 +832,23 @@ fn validate_mock_engine_args(args: &MockEngineArgs) -> Result<(), ValidationErro
         ));
     }
 
+    if args.aic_nextn.is_some() && args.decode_speedup_ratio != 1.0 {
+        return Err(mock_engine_args_validation_error(
+            "mtp_decode_speedup_conflict",
+            format!(
+                "aic_nextn requires decode_speedup_ratio=1.0 because MTP output acceleration is modeled by burst sampling, got {}",
+                args.decode_speedup_ratio
+            ),
+        ));
+    }
+
+    if args.aic_nextn.is_none() && args.aic_nextn_accept_rates.is_some() {
+        return Err(mock_engine_args_validation_error(
+            "mtp_rates_without_nextn",
+            "aic_nextn_accept_rates requires aic_nextn".to_string(),
+        ));
+    }
+
     if let Some(policy) = args
         .trtllm
         .as_ref()
@@ -988,6 +1011,9 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         if let Some(aic_nextn_accept_rates) = compat.aic_nextn_accept_rates.into_nullable() {
             builder = builder.aic_nextn_accept_rates(aic_nextn_accept_rates);
         }
+        if let Some(aic_mtp_seed) = compat.aic_mtp_seed.into_non_null("aic_mtp_seed")? {
+            builder = builder.aic_mtp_seed(aic_mtp_seed);
+        }
         if let Some(gpu_memory_utilization) = compat.gpu_memory_utilization.into_nullable() {
             builder = builder.gpu_memory_utilization(gpu_memory_utilization);
         }
@@ -1141,9 +1167,17 @@ impl MockEngineArgs {
         }
     }
 
-    fn validate_config(&self) -> anyhow::Result<()> {
+    fn validate_config(&mut self) -> anyhow::Result<()> {
         self.validate()
             .map_err(|error| anyhow::anyhow!("Failed to validate MockEngineArgs: {error}"))?;
+        if let Some(nextn) = self.aic_nextn {
+            let rates = crate::common::speculative::normalize_conditional_accept_rates(
+                nextn,
+                self.aic_nextn_accept_rates.as_deref(),
+            )?;
+            self.aic_nextn_accept_rates =
+                Some(crate::common::speculative::format_accept_rates(&rates));
+        }
         Ok(())
     }
 
@@ -1166,6 +1200,10 @@ impl MockEngineArgs {
 
     pub fn needs_kv_publisher(&self) -> bool {
         self.enable_prefix_caching && !self.is_decode()
+    }
+
+    pub fn undiscounted_aic_accept_rates(&self) -> Option<String> {
+        crate::common::speculative::undiscounted_aic_accept_rates(self.aic_nextn)
     }
 
     /// Create MockEngineArgs from a JSON file containing extra engine arguments
@@ -1250,6 +1288,24 @@ mod tests {
         assert_eq!(restored.worker_type, WorkerType::Decode);
         assert_eq!(restored.max_num_seqs, None);
         assert_eq!(restored.max_num_batched_tokens, None);
+    }
+
+    #[test]
+    fn test_mock_engine_args_accepts_legacy_enum_case_and_writes_lowercase() {
+        let args = MockEngineArgs::from_json_str(
+            &json!({
+                "engine_type": "Vllm",
+                "worker_type": "Aggregated",
+                "preemption_mode": "Lifo",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let serialized = serde_json::to_value(args).unwrap();
+        assert_eq!(serialized["engine_type"], "vllm");
+        assert_eq!(serialized["worker_type"], "aggregated");
+        assert_eq!(serialized["preemption_mode"], "lifo");
     }
 
     #[test]
@@ -1391,7 +1447,7 @@ mod tests {
     #[test]
     fn test_normalized_rejects_out_of_range_aic_nextn() {
         // The mocker/replay JSON path must share AicPerfConfig's 1..=5 contract.
-        for bad in [0_usize, 6] {
+        for bad in [0_usize, 6, usize::MAX] {
             let err = MockEngineArgs::builder()
                 .aic_nextn(Some(bad))
                 .build()
@@ -1409,6 +1465,81 @@ mod tests {
             .unwrap()
             .normalized()
             .expect("in-range aic_nextn should validate");
+    }
+
+    #[test]
+    fn test_mtp_defaults_and_json_round_trip() {
+        let args = MockEngineArgs::builder()
+            .aic_nextn(Some(3))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+        assert_eq!(args.aic_nextn_accept_rates.as_deref(), Some("0.85,0.3,0"));
+        assert_eq!(args.aic_mtp_seed, 42);
+        assert_eq!(
+            args.undiscounted_aic_accept_rates().as_deref(),
+            Some("0,0,0")
+        );
+
+        let json = serde_json::to_string(&args).unwrap();
+        let round_trip = MockEngineArgs::from_json_str(&json).unwrap();
+        assert_eq!(round_trip.aic_nextn, Some(3));
+        assert_eq!(
+            round_trip.aic_nextn_accept_rates.as_deref(),
+            Some("0.85,0.3,0")
+        );
+        assert_eq!(round_trip.aic_mtp_seed, 42);
+    }
+
+    #[test]
+    fn test_mtp_rates_are_validated_before_normalization() {
+        for rates in ["nan", "inf", "-0.1", "1.1", "bad"] {
+            let err = MockEngineArgs::builder()
+                .aic_nextn(Some(1))
+                .aic_nextn_accept_rates(Some(rates.to_string()))
+                .build()
+                .unwrap()
+                .normalized()
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("aic_nextn_accept_rates"),
+                "unexpected error for rates={rates:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_mtp_rates_are_padded_and_truncated_to_nextn() {
+        let padded = MockEngineArgs::builder()
+            .aic_nextn(Some(3))
+            .aic_nextn_accept_rates(Some("1,0.5".to_string()))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+        assert_eq!(padded.aic_nextn_accept_rates.as_deref(), Some("1,0.5,0"));
+
+        let truncated = MockEngineArgs::builder()
+            .aic_nextn(Some(2))
+            .aic_nextn_accept_rates(Some("1,0.5,0.25".to_string()))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+        assert_eq!(truncated.aic_nextn_accept_rates.as_deref(), Some("1,0.5"));
+    }
+
+    #[test]
+    fn test_mtp_rejects_decode_speedup_ratio() {
+        let err = MockEngineArgs::builder()
+            .aic_nextn(Some(1))
+            .decode_speedup_ratio(2.0)
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap_err();
+        assert!(err.to_string().contains("decode_speedup_ratio=1.0"));
     }
 
     #[test]
