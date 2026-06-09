@@ -118,14 +118,23 @@ func TestNewRestorePod(t *testing.T) {
 		t.Fatalf("expected %s mount, got %#v", SnapshotControlVolumeName, main.VolumeMounts)
 	}
 	foundEnv := false
+	foundPlaceholderEnv := false
 	for _, e := range main.Env {
 		if e.Name == SnapshotControlDirEnv {
 			foundEnv = true
-			break
+		}
+		if e.Name == RestorePlaceholderModeEnv {
+			foundPlaceholderEnv = true
+			if e.Value != "1" {
+				t.Fatalf("expected %s=1, got %#v", RestorePlaceholderModeEnv, e)
+			}
 		}
 	}
 	if !foundEnv {
 		t.Fatalf("expected %s env, got %#v", SnapshotControlDirEnv, main.Env)
+	}
+	if !foundPlaceholderEnv {
+		t.Fatalf("expected %s env, got %#v", RestorePlaceholderModeEnv, main.Env)
 	}
 }
 
@@ -166,6 +175,18 @@ func TestNewRestorePodShapesMultipleTargets(t *testing.T) {
 			t.Fatalf("expected args to be preserved on %s, got %#v", name, c.Args)
 		}
 		assertRestoreStartupGate(t, c.StartupProbe)
+		foundPlaceholderEnv := false
+		for _, e := range c.Env {
+			if e.Name == RestorePlaceholderModeEnv {
+				foundPlaceholderEnv = true
+				if e.Value != "1" {
+					t.Fatalf("expected %s=1 on %s, got %#v", RestorePlaceholderModeEnv, name, e)
+				}
+			}
+		}
+		if !foundPlaceholderEnv {
+			t.Fatalf("expected %s env on %s, got %#v", RestorePlaceholderModeEnv, name, c.Env)
+		}
 		found := false
 		for _, m := range c.VolumeMounts {
 			if m.Name == SnapshotControlVolumeName {
@@ -190,8 +211,8 @@ func TestNewRestorePodShapesMultipleTargets(t *testing.T) {
 		}
 	}
 	for _, e := range sidecar.Env {
-		if e.Name == SnapshotControlDirEnv {
-			t.Fatalf("sidecar must not get a control env: %#v", sidecar.Env)
+		if e.Name == SnapshotControlDirEnv || e.Name == RestorePlaceholderModeEnv {
+			t.Fatalf("sidecar must not get a restore env: %#v", sidecar.Env)
 		}
 	}
 }
@@ -291,13 +312,23 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 		t.Fatalf("expected single %s mount after repeated calls, got %#v", SnapshotControlVolumeName, container.VolumeMounts)
 	}
 	envCount := 0
+	placeholderEnvCount := 0
 	for _, e := range container.Env {
 		if e.Name == SnapshotControlDirEnv {
 			envCount++
 		}
+		if e.Name == RestorePlaceholderModeEnv {
+			placeholderEnvCount++
+			if e.Value != "1" {
+				t.Fatalf("expected %s=1, got %#v", RestorePlaceholderModeEnv, e)
+			}
+		}
 	}
 	if envCount != 1 {
 		t.Fatalf("expected single %s env after repeated calls, got %#v", SnapshotControlDirEnv, container.Env)
+	}
+	if placeholderEnvCount != 1 {
+		t.Fatalf("expected single %s env after repeated calls, got %#v", RestorePlaceholderModeEnv, container.Env)
 	}
 	if got, want := container.Command, []string{"python3", "-m", "dynamo.vllm"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("expected command %#v, got %#v", want, got)

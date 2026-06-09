@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Any, Mapping
 
-from .constants import (
+from dynamo.common.snapshot.constants import (
     KUBERNETES_OPTIONAL_ENV_NAMES,
     KUBERNETES_REQUIRED_ENV_NAMES,
     RESTORE_RUNTIME_ENV_NAMES,

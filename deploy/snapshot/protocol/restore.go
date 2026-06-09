@@ -31,6 +31,14 @@ type PodOptions struct {
 	SeccompProfile  string
 }
 
+const (
+	// RestorePlaceholderModeEnv asks Dynamo backend entrypoints to capture
+	// restore context and sleep instead of cold-starting the workload. Generic
+	// images that do not honor this env must still provide their own inert
+	// restore command.
+	RestorePlaceholderModeEnv = "DYN_SNAPSHOT_RESTORE_PLACEHOLDER"
+)
+
 // NewRestorePod shapes every annotated target container for restore.
 func NewRestorePod(pod *corev1.Pod, opts PodOptions) (*corev1.Pod, error) {
 	pod = pod.DeepCopy()
@@ -50,8 +58,10 @@ func NewRestorePod(pod *corev1.Pod, opts PodOptions) (*corev1.Pod, error) {
 }
 
 // PrepareRestorePodSpec applies restore shaping to annotated target containers.
-// It does not change container command/args; callers that need an inert
-// pre-restore process should set that entrypoint before calling this function.
+// It does not change container command/args. Once the checkpoint is ready, it
+// sets DYN_SNAPSHOT_RESTORE_PLACEHOLDER=1 so Dynamo placeholder entrypoints
+// sleep before CRIU restore; generic images that do not honor the env must
+// still provide their own inert restore command.
 func PrepareRestorePodSpec(
 	podSpec *corev1.PodSpec,
 	annotations map[string]string,
@@ -86,6 +96,24 @@ func PrepareRestorePodSpec(
 		}
 		EnsureControlVolume(podSpec, container)
 		if isCheckpointReady {
+			// Dynamo placeholder entrypoints honor this env by writing restore
+			// context and sleeping. Keep command/args intact so generic images
+			// can provide their own inert restore entrypoint when needed.
+			foundRestorePlaceholderModeEnv := false
+			for i := range container.Env {
+				if container.Env[i].Name == RestorePlaceholderModeEnv {
+					container.Env[i].Value = "1"
+					container.Env[i].ValueFrom = nil
+					foundRestorePlaceholderModeEnv = true
+					break
+				}
+			}
+			if !foundRestorePlaceholderModeEnv {
+				container.Env = append(container.Env, corev1.EnvVar{
+					Name:  RestorePlaceholderModeEnv,
+					Value: "1",
+				})
+			}
 			ensureRestoreStartupProbe(container)
 		}
 	}

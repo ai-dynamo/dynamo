@@ -63,7 +63,7 @@ func assertRestorePlaceholderMode(
 
 	found := false
 	for _, env := range container.Env {
-		if env.Name == restorePlaceholderModeEnv {
+		if env.Name == snapshotprotocol.RestorePlaceholderModeEnv {
 			found = true
 			assert.Equal(t, "1", env.Value)
 		}

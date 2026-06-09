@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generic, TypeVar
 
-from .constants import (
+from dynamo.common.snapshot.constants import (
     READY_FOR_SNAPSHOT_FILE,
     RESTORE_COMPLETE_FILE,
     SNAPSHOT_COMPLETE_FILE,

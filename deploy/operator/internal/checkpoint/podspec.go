@@ -30,8 +30,6 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-const restorePlaceholderModeEnv = "DYN_SNAPSHOT_RESTORE_PLACEHOLDER"
-
 func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]string, checkpointInfo *CheckpointInfo) {
 	_ = ApplyRestorePodMetadataWithStorageConfig(
 		labels,
@@ -270,21 +268,6 @@ func injectCheckpointIntoPodSpec(
 		}
 		if container == nil {
 			return fmt.Errorf("checkpoint restore target %q does not exist in pod spec", name)
-		}
-		foundRestorePlaceholderModeEnv := false
-		for i := range container.Env {
-			if container.Env[i].Name == restorePlaceholderModeEnv {
-				container.Env[i].Value = "1"
-				container.Env[i].ValueFrom = nil
-				foundRestorePlaceholderModeEnv = true
-				break
-			}
-		}
-		if !foundRestorePlaceholderModeEnv {
-			container.Env = append(container.Env, corev1.EnvVar{
-				Name:  restorePlaceholderModeEnv,
-				Value: "1",
-			})
 		}
 		targetContainers = append(targetContainers, container)
 	}
