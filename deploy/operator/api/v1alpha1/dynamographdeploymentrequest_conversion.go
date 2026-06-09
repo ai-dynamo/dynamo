@@ -432,6 +432,9 @@ func restoreDGDRHubOnlySpec(restored *v1beta1.DynamoGraphDeploymentRequestSpec, 
 	if restored.SearchStrategy != "" {
 		dst.SearchStrategy = restored.SearchStrategy
 	}
+	if restored.Thorough != nil {
+		dst.Thorough = restored.Thorough.DeepCopy()
+	}
 }
 
 // projectSLAAndWorkloadFromProfilingConfigBlob extracts SLA and Workload fields from the v1alpha1 JSON blob.
@@ -726,6 +729,9 @@ func saveDGDRHubOnlySpec(src *v1beta1.DynamoGraphDeploymentRequestSpec, save *v1
 		save.Features = &v1beta1.FeaturesSpec{Mocker: &v1beta1.MockerSpec{Enabled: false}}
 	}
 	save.SearchStrategy = src.SearchStrategy
+	if src.Thorough != nil {
+		save.Thorough = src.Thorough.DeepCopy()
+	}
 }
 
 func stripDGDRTypedProfilingConfig(blob dgdrProfilingConfigBlob) dgdrProfilingConfigBlob {

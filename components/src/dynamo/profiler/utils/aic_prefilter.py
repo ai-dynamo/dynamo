@@ -53,7 +53,7 @@ def _candidate_label(candidate) -> str:
     )
 
 
-def _run_aic_simulation(
+def run_aic_simulation(
     model: str,
     system: str,
     backend: str,
@@ -66,7 +66,13 @@ def _run_aic_simulation(
     The TaskConfig does not take per-candidate parallelism params — AIC
     explores those internally and returns a pareto_df with predicted metrics
     for each config it considers viable.
+
+    Returns an empty DataFrame on failure.
     """
+    if TaskRunner is None or TaskConfig is None:
+        logger.warning("aiconfigurator not available; returning empty pareto_df.")
+        return pd.DataFrame()
+
     task = TaskConfig(
         serving_mode="disagg",
         model_path=model,
@@ -87,31 +93,21 @@ def _run_aic_simulation(
 def prefilter_prefill_candidates(
     candidates: Sequence,
     top_n: int,
-    model: str,
-    system: str,
-    backend: str,
-    total_gpus: int,
-    isl: int,
-    osl: int,
+    pareto_df: pd.DataFrame,
 ) -> list:
     """Keep the top-N prefill candidates ranked by predicted TTFT (ascending).
 
-    Runs AIC simulation once, matches the predicted ``parallel`` labels to
-    enumerated candidates, and sorts by predicted TTFT ascending.
+    Matches the ``parallel`` labels in *pareto_df* (from a prior
+    ``run_aic_simulation`` call) to enumerated candidates and sorts by
+    predicted TTFT ascending. Candidates with no AIC prediction sort last.
 
-    Returns the original list unchanged on any AIC error (best-effort).
+    Returns the original list unchanged when *pareto_df* lacks the needed
+    columns.
     """
     if top_n is None or top_n <= 0 or len(candidates) <= top_n:
         return list(candidates)
 
-    if TaskRunner is None or TaskConfig is None:
-        logger.warning("aiconfigurator not available; skipping prefill pre-filter.")
-        return list(candidates)
-
     try:
-        pareto_df = _run_aic_simulation(
-            model, system, backend, total_gpus, isl, osl,
-        )
         if pareto_df.empty or "ttft" not in pareto_df.columns:
             logger.warning("AIC returned no prefill predictions; skipping pre-filter.")
             return list(candidates)
@@ -153,31 +149,22 @@ def prefilter_prefill_candidates(
 def prefilter_decode_candidates(
     candidates: Sequence,
     top_n: int,
-    model: str,
-    system: str,
-    backend: str,
-    total_gpus: int,
-    isl: int,
-    osl: int,
+    pareto_df: pd.DataFrame,
 ) -> list:
     """Keep the top-N decode candidates ranked by predicted tokens/s/gpu (descending).
 
-    Runs AIC simulation once, matches the predicted ``parallel`` labels to
-    enumerated candidates, and sorts by predicted tokens/s/gpu descending.
+    Matches the ``parallel`` labels in *pareto_df* (from a prior
+    ``run_aic_simulation`` call) to enumerated candidates and sorts by
+    predicted throughput descending. Candidates with no AIC prediction sort
+    last.
 
-    Returns the original list unchanged on any AIC error (best-effort).
+    Returns the original list unchanged when *pareto_df* lacks the needed
+    columns.
     """
     if top_n is None or top_n <= 0 or len(candidates) <= top_n:
         return list(candidates)
 
-    if TaskRunner is None or TaskConfig is None:
-        logger.warning("aiconfigurator not available; skipping decode pre-filter.")
-        return list(candidates)
-
     try:
-        pareto_df = _run_aic_simulation(
-            model, system, backend, total_gpus, isl, osl,
-        )
         if pareto_df.empty:
             logger.warning("AIC returned no decode predictions; skipping pre-filter.")
             return list(candidates)

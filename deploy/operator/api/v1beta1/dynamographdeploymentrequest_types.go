@@ -429,8 +429,6 @@ type HardwareSpec struct {
 	RDMA *bool `json:"rdma,omitempty"`
 }
 
-// DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
-// Only the Model field is required; all other fields are optional and have sensible defaults.
 // ThoroughSpec configures options for the THOROUGH search strategy.
 type ThoroughSpec struct {
 	// PrefilterTopN, when set, uses AIC to score enumerated candidates offline
@@ -441,6 +439,8 @@ type ThoroughSpec struct {
 	PrefilterTopN *int32 `json:"prefilterTopN,omitempty"`
 }
 
+// DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
+// Only the Model field is required; all other fields are optional and have sensible defaults.
 type DynamoGraphDeploymentRequestSpec struct {
 	// Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").
 	// Can be a HuggingFace ID or a private model name.

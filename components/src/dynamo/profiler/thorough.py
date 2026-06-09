@@ -41,6 +41,7 @@ from dynamo.profiler.utils.config_modifiers.protocol import apply_dgd_overrides
 from dynamo.profiler.utils.aic_prefilter import (
     prefilter_decode_candidates,
     prefilter_prefill_candidates,
+    run_aic_simulation,
 )
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     DynamoGraphDeploymentRequestSpec,
@@ -440,15 +441,27 @@ async def run_thorough(
         else None
     )
     if prefilter_top_n is not None and prefilter_top_n > 0:
+        try:
+            pareto_df = run_aic_simulation(
+                model=local_or_hf_model,
+                system=system,
+                backend=backend,
+                total_gpus=total_gpus,
+                isl=isl,
+                osl=osl,
+            )
+        except Exception:
+            logger.warning(
+                "AIC simulation failed; skipping pre-filter.",
+                exc_info=True,
+            )
+            pareto_df = pd.DataFrame()
+
         prefill_candidates = prefilter_prefill_candidates(
-            prefill_candidates, prefilter_top_n,
-            model=local_or_hf_model, system=system, backend=backend,
-            total_gpus=total_gpus, isl=isl, osl=osl,
+            prefill_candidates, prefilter_top_n, pareto_df,
         )
         decode_candidates = prefilter_decode_candidates(
-            decode_candidates, prefilter_top_n,
-            model=local_or_hf_model, system=system, backend=backend,
-            total_gpus=total_gpus, isl=isl, osl=osl,
+            decode_candidates, prefilter_top_n, pareto_df,
         )
         logger.info(
             "After AIC prefilter: %d prefill candidates, %d decode candidates",
