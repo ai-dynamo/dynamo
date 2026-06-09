@@ -119,6 +119,29 @@ class TestPrefilterPrefill:
         result = prefilter_prefill_candidates(candidates, 3, pareto_df)
         assert len(result) == 5
 
+    def test_fallback_on_missing_parallel_column(self):
+        candidates = _make_candidates([(1, 1, 1, 1, 1)] * 5)
+        pareto_df = pd.DataFrame([{"ttft": 10.0}])
+        result = prefilter_prefill_candidates(candidates, 3, pareto_df)
+        assert len(result) == 5
+
+    def test_nan_ttft_treated_as_infinity(self):
+        candidates = _make_candidates([
+            (1, 1, 1, 1, 1),  # tp1
+            (2, 1, 1, 1, 1),  # tp2
+        ])
+        pareto_df = pd.DataFrame([
+            {"parallel": "tp1", "ttft": float("nan")},
+            {"parallel": "tp2", "ttft": 10.0},
+        ])
+        result = prefilter_prefill_candidates(candidates, 1, pareto_df)
+        assert len(result) == 1
+        assert result[0].tp == 2  # NaN treated as inf, so tp2 (10.0) wins
+
+    def test_empty_candidates(self):
+        result = prefilter_prefill_candidates([], 3, pd.DataFrame())
+        assert result == []
+
 
 # ---------------------------------------------------------------------------
 # Decode pre-filter
@@ -163,6 +186,25 @@ class TestPrefilterDecode:
         candidates = _make_candidates([(1, 1, 1, 1, 1)] * 5)
         result = prefilter_decode_candidates(candidates, 0, pd.DataFrame())
         assert result == candidates
+
+    def test_fallback_on_missing_parallel_column(self):
+        candidates = _make_candidates([(1, 1, 1, 1, 1)] * 5)
+        pareto_df = pd.DataFrame([{"seq/s/gpu": 100.0}])
+        result = prefilter_decode_candidates(candidates, 3, pareto_df)
+        assert len(result) == 5
+
+    def test_nan_throughput_treated_as_zero(self):
+        candidates = _make_candidates([
+            (1, 1, 1, 1, 1),  # tp1
+            (2, 1, 1, 1, 1),  # tp2
+        ])
+        pareto_df = pd.DataFrame([
+            {"parallel": "tp1", "seq/s/gpu": float("nan")},
+            {"parallel": "tp2", "seq/s/gpu": 100.0},
+        ])
+        result = prefilter_decode_candidates(candidates, 1, pareto_df)
+        assert len(result) == 1
+        assert result[0].tp == 2  # NaN treated as 0, so tp2 (100.0) wins
 
     def test_prefers_tokens_per_s_gpu_over_seq_s_gpu(self):
         """When both throughput columns exist, prefer tokens/s/gpu."""

@@ -25,6 +25,7 @@ Best-effort: any AIC failure returns the original candidates unchanged.
 from __future__ import annotations
 
 import logging
+import math
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -84,8 +85,10 @@ def run_aic_simulation(
     )
     runner = TaskRunner()
     result = runner.run(task)
-    pareto_df = result.get("pareto_df", pd.DataFrame())
-    if pareto_df is None:
+    if not isinstance(result, dict):
+        return pd.DataFrame()
+    pareto_df = result.get("pareto_df")
+    if pareto_df is None or not isinstance(pareto_df, pd.DataFrame):
         return pd.DataFrame()
     return pareto_df
 
@@ -113,12 +116,16 @@ def prefilter_prefill_candidates(
             return list(candidates)
 
         label_to_ttft: dict[str, float] = {}
-        if "parallel" in pareto_df.columns:
-            for _, row in pareto_df.iterrows():
-                label = str(row["parallel"])
-                ttft = float(row.get("ttft", float("inf")))
-                if label not in label_to_ttft or ttft < label_to_ttft[label]:
-                    label_to_ttft[label] = ttft
+        if "parallel" not in pareto_df.columns:
+            logger.warning("AIC pareto_df has no 'parallel' column; skipping pre-filter.")
+            return list(candidates)
+        for _, row in pareto_df.iterrows():
+            label = str(row["parallel"])
+            ttft = float(row.get("ttft", float("inf")))
+            if not math.isfinite(ttft):
+                ttft = float("inf")
+            if label not in label_to_ttft or ttft < label_to_ttft[label]:
+                label_to_ttft[label] = ttft
 
         scored = []
         for candidate in candidates:
@@ -182,12 +189,16 @@ def prefilter_decode_candidates(
             return list(candidates)
 
         label_to_thpt: dict[str, float] = {}
-        if "parallel" in pareto_df.columns:
-            for _, row in pareto_df.iterrows():
-                label = str(row["parallel"])
-                thpt = float(row.get(thpt_col, 0.0))
-                if label not in label_to_thpt or thpt > label_to_thpt[label]:
-                    label_to_thpt[label] = thpt
+        if "parallel" not in pareto_df.columns:
+            logger.warning("AIC pareto_df has no 'parallel' column; skipping pre-filter.")
+            return list(candidates)
+        for _, row in pareto_df.iterrows():
+            label = str(row["parallel"])
+            thpt = float(row.get(thpt_col, 0.0))
+            if not math.isfinite(thpt):
+                thpt = 0.0
+            if label not in label_to_thpt or thpt > label_to_thpt[label]:
+                label_to_thpt[label] = thpt
 
         scored = []
         for candidate in candidates:
