@@ -32,17 +32,17 @@ from dynamo.profiler.utils.aic_dataframe import (
     build_prefill_row,
     make_parallel_label,
 )
+from dynamo.profiler.utils.aic_prefilter import (
+    prefilter_decode_candidates,
+    prefilter_prefill_candidates,
+    run_aic_simulation,
+)
 from dynamo.profiler.utils.aiperf import (
     get_decode_itl_and_thpt_per_gpu,
     get_prefill_ttft,
 )
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.config_modifiers.protocol import apply_dgd_overrides
-from dynamo.profiler.utils.aic_prefilter import (
-    prefilter_decode_candidates,
-    prefilter_prefill_candidates,
-    run_aic_simulation,
-)
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     DynamoGraphDeploymentRequestSpec,
     ModelCacheSpec,
@@ -435,11 +435,7 @@ async def run_thorough(
     config_modifier = CONFIG_MODIFIERS[backend]
 
     # --- Stage 1b: Optional AIC pre-filter ---
-    prefilter_top_n = (
-        dgdr.thorough.prefilterTopN
-        if dgdr.thorough is not None
-        else None
-    )
+    prefilter_top_n = dgdr.thorough.prefilterTopN if dgdr.thorough is not None else None
     if prefilter_top_n is not None and prefilter_top_n > 0:
         try:
             pareto_df = run_aic_simulation(
@@ -458,10 +454,14 @@ async def run_thorough(
             pareto_df = pd.DataFrame()
 
         prefill_candidates = prefilter_prefill_candidates(
-            prefill_candidates, prefilter_top_n, pareto_df,
+            prefill_candidates,
+            prefilter_top_n,
+            pareto_df,
         )
         decode_candidates = prefilter_decode_candidates(
-            decode_candidates, prefilter_top_n, pareto_df,
+            decode_candidates,
+            prefilter_top_n,
+            pareto_df,
         )
         logger.info(
             "After AIC prefilter: %d prefill candidates, %d decode candidates",
