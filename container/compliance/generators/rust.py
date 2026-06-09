@@ -19,7 +19,13 @@ import logging
 from pathlib import Path
 
 from .. import overrides as license_overrides
-from .common import UNKNOWN, Component, dedupe_by_name_version, spdx_license_text
+from .common import (
+    UNKNOWN,
+    Component,
+    dedupe_by_name_version,
+    read_harvested_license,
+    spdx_license_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +69,9 @@ def _normalize_license(licenses_field: list[dict] | None) -> str:
     return " AND ".join(f"({p})" if " " in p else p for p in parts)
 
 
-def _component_from_sbom_entry(entry: dict) -> Component | None:
+def _component_from_sbom_entry(
+    entry: dict, licenses_dir: Path | None = None
+) -> Component | None:
     """Convert one CycloneDX components[] entry to a Component."""
     name = entry.get("name")
     version = entry.get("version")
@@ -91,17 +99,24 @@ def _component_from_sbom_entry(entry: dict) -> Component | None:
             purl_clean = purl
         source_url = purl_clean
 
+    # Prefer the crate's real LICENSE files harvested from the cargo registry
+    # in wheel_builder (keyed "<name>-<version>"); the runtime image only has
+    # the compiled wheel, so when no harvest is available fall back to the
+    # canonical SPDX text for the identifier.
+    license_text = read_harvested_license(licenses_dir, f"{name}-{version}")
+    is_canonical = False
+    if license_text is None:
+        license_text = spdx_license_text(spdx)
+        is_canonical = license_text is not None
+
     return Component(
         ecosystem=ECOSYSTEM,
         name=name,
         version=str(version),
         spdx=spdx,
         source_url=source_url,
-        # cargo-cyclonedx records only the SPDX expression, and the crate
-        # sources aren't present in the licenses stage — fall back to the
-        # canonical SPDX text for the identifier so NOTICES carries full text.
-        license_text=spdx_license_text(spdx),
-        license_text_is_canonical=True,
+        license_text=license_text,
+        license_text_is_canonical=is_canonical,
     )
 
 
@@ -128,7 +143,9 @@ def _find_wheel_sboms(search_paths: list[Path]) -> list[Path]:
     return sorted(sboms)
 
 
-def collect_components(search_paths: list[Path]) -> list[Component]:
+def collect_components(
+    search_paths: list[Path], licenses_dir: Path | None = None
+) -> list[Component]:
     """Read every wheel SBOM under each search path and return deduped Components.
 
     SBOMs that are not Rust-flavored (e.g. NIXL's auditwheel.cdx.json which
@@ -153,7 +170,7 @@ def collect_components(search_paths: list[Path]) -> list[Component]:
             purl = entry.get("purl") or ""
             if not purl.startswith("pkg:cargo/"):
                 continue
-            comp = _component_from_sbom_entry(entry)
+            comp = _component_from_sbom_entry(entry, licenses_dir)
             if comp is None:
                 continue
             components.append(comp)
@@ -179,15 +196,18 @@ def generate(
     search_paths: list[Path],
     output_dir: Path,
     subtract: set[tuple[str, str]] | None = None,
+    licenses_dir: Path | None = None,
 ) -> list[Component]:
     """Read SBOMs from each search path, write NOTICES-Rust.txt + rust-deps.csv.
 
     When `subtract` is provided, components matching (name, version) are
     filtered before writing — used to drop baseline-owned components.
+    When `licenses_dir` is provided, each crate's real LICENSE text is read
+    from it in preference to the canonical SPDX text.
     """
     from . import common
 
-    components = collect_components(search_paths)
+    components = collect_components(search_paths, licenses_dir)
     if subtract:
         components = common.subtract_baseline(components, subtract)
     common.write_notices(ECOSYSTEM, components, output_dir)

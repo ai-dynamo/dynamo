@@ -87,6 +87,21 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
     git -c user.email=build@dynamo -c user.name=build commit -q -m sbom && \
     cyclonedx-gomod app -licenses -json -main ./cmd/agent -output /sbom-go.cdx.json .
 
+# Compliance: harvest each Go module's real LICENSE files from the module cache
+# so the go NOTICES generator inlines upstream license text instead of canonical
+# SPDX fallback. Preserve the cache's escaped "<module-path>@<version>/" layout —
+# generators/go.py escapes module names the same way to look up. Non-fatal.
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
+    mkdir -p /sbom-go-licenses && cd /go/pkg/mod && \
+    find . -path ./cache -prune -o -type f \
+        \( -iname 'LICENSE*' -o -iname 'LICENCE*' -o -iname 'COPYING*' \
+           -o -iname 'NOTICE*' -o -iname 'UNLICENSE*' \) -print | \
+    while IFS= read -r lf; do \
+        rel="${lf#./}"; dest="/sbom-go-licenses/$(dirname "$rel")"; \
+        mkdir -p "$dest" && cp "$lf" "$dest/" 2>/dev/null || true; \
+    done; \
+    echo "go license harvest: $(find /sbom-go-licenses -type f 2>/dev/null | wc -l) files"; true
+
 # Compliance source archival: vendor third-party Go modules. Same pattern
 # as operator's builder. First-party (github.com/ai-dynamo/) pruned later
 # in collect_sources.py.
@@ -233,6 +248,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 python3
 COPY --from=compliance . /opt/compliance
 ENV PYTHONPATH=/opt
 COPY --from=builder /sbom-go.cdx.json /tmp/sbom-go.cdx.json
+COPY --from=builder /sbom-go-licenses /tmp/go-licenses
 
 # go + dpkg cover the runtime image's apt + Go module set. native
 # enumerates from-source components (CRIU, cuda-checkpoint,
@@ -246,6 +262,7 @@ ARG BASELINE_SBOM_FILE=""
 RUN python3 -m compliance.generators \
     --ecosystem go,dpkg,native \
     --go-sbom /tmp/sbom-go.cdx.json \
+    --go-licenses-dir /tmp/go-licenses \
     --native-yaml /opt/compliance/native_packages.yaml \
     --native-image snapshot-agent \
     --output-dir /legal \

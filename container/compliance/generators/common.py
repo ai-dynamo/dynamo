@@ -43,6 +43,34 @@ def _spdx_ids(spdx_expr: str) -> list[str]:
     return ids
 
 
+def read_harvested_license(base_dir: Path | None, key: str) -> str | None:
+    """Read + concatenate the upstream LICENSE files harvested for `key`.
+
+    The builder stages (wheel_builder for rust, the go-builders for go) copy
+    each dependency's real LICENSE/COPYING/NOTICE files into `base_dir/<key>/`,
+    mirroring the source-cache layout (rust: "<name>-<version>"; go: the
+    escaped module path "<path>@<version>"). Returns None when base_dir is
+    unset or no readable license files exist for the key, so callers fall back
+    to canonical SPDX text.
+    """
+    if base_dir is None:
+        return None
+    pkg_dir = base_dir / key
+    if not pkg_dir.is_dir():
+        return None
+    texts: list[str] = []
+    for f in sorted(pkg_dir.iterdir()):
+        if not f.is_file():
+            continue
+        try:
+            body = f.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if body:
+            texts.append(f"--- {f.name} ---\n\n{body}")
+    return "\n\n".join(texts) if texts else None
+
+
 def spdx_license_text(spdx_expr: str) -> str | None:
     """Return the canonical SPDX license text(s) for an SPDX expression, or None.
 

@@ -24,13 +24,28 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 
-from .common import UNKNOWN, Component, dedupe_by_name_version, spdx_license_text
+from .common import (
+    UNKNOWN,
+    Component,
+    dedupe_by_name_version,
+    read_harvested_license,
+    spdx_license_text,
+)
 
 logger = logging.getLogger(__name__)
 
 ECOSYSTEM = "go"
+
+
+def _escape_go_module_path(path: str) -> str:
+    """Mirror the Go module cache's case-escaping: each uppercase letter X
+    becomes "!x" (e.g. github.com/Azure -> github.com/!azure), so a module
+    name from the SBOM maps to its on-disk harvest directory.
+    """
+    return re.sub(r"[A-Z]", lambda m: "!" + m.group(0).lower(), path)
 
 
 def _normalize_license(licenses_field: list[dict] | None) -> str:
@@ -64,7 +79,9 @@ def _normalize_license(licenses_field: list[dict] | None) -> str:
     return " AND ".join(f"({p})" if " " in p else p for p in parts)
 
 
-def _component_from_sbom_entry(entry: dict) -> Component | None:
+def _component_from_sbom_entry(
+    entry: dict, licenses_dir: Path | None = None
+) -> Component | None:
     name = entry.get("name")
     version = entry.get("version")
     if not name or not version:
@@ -88,21 +105,31 @@ def _component_from_sbom_entry(entry: dict) -> Component | None:
         # full purl is the actual fetch URL via go module proxy.
         source_url = purl.split("?", 1)[0]
 
+    # Prefer the module's real LICENSE files harvested from the go module
+    # cache in the go-builder (keyed by the escaped module path "@version");
+    # the runtime image only has the compiled binary, so when no harvest is
+    # available fall back to the canonical SPDX text for the identifier.
+    key = f"{_escape_go_module_path(str(name))}@{version}"
+    license_text = read_harvested_license(licenses_dir, key)
+    is_canonical = False
+    if license_text is None:
+        license_text = spdx_license_text(spdx)
+        is_canonical = license_text is not None
+
     return Component(
         ecosystem=ECOSYSTEM,
         name=name,
         version=str(version),
         spdx=spdx,
         source_url=source_url,
-        # cyclonedx-gomod records only the SPDX expression, and the module
-        # sources aren't present in the licenses stage — fall back to the
-        # canonical SPDX text for the identifier so NOTICES carries full text.
-        license_text=spdx_license_text(spdx),
-        license_text_is_canonical=True,
+        license_text=license_text,
+        license_text_is_canonical=is_canonical,
     )
 
 
-def collect_components(sbom_paths: list[Path]) -> list[Component]:
+def collect_components(
+    sbom_paths: list[Path], licenses_dir: Path | None = None
+) -> list[Component]:
     """Read one or more Go SBOMs, return deduped Components.
 
     cyclonedx-gomod produces one SBOM per Go binary. Multi-SBOM inputs arise
@@ -128,7 +155,7 @@ def collect_components(sbom_paths: list[Path]) -> list[Component]:
             purl = entry.get("purl") or ""
             if not purl.startswith("pkg:golang/"):
                 continue
-            comp = _component_from_sbom_entry(entry)
+            comp = _component_from_sbom_entry(entry, licenses_dir)
             if comp is None:
                 continue
             components.append(comp)
@@ -154,15 +181,18 @@ def generate(
     sbom_paths: list[Path],
     output_dir: Path,
     subtract: set[tuple[str, str]] | None = None,
+    licenses_dir: Path | None = None,
 ) -> list[Component]:
     """Read one or more Go SBOMs, write NOTICES-Go.txt + go-deps.csv.
 
     When `subtract` is provided, components matching (name, version) are
     filtered before writing — used to drop baseline-owned components.
+    When `licenses_dir` is provided, each module's real LICENSE text is read
+    from it in preference to the canonical SPDX text.
     """
     from . import common
 
-    components = collect_components(sbom_paths)
+    components = collect_components(sbom_paths, licenses_dir)
     if subtract:
         components = common.subtract_baseline(components, subtract)
     common.write_notices(ECOSYSTEM, components, output_dir)

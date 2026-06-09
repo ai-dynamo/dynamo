@@ -12,8 +12,11 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
+from compliance.generators import go as go_gen
+from compliance.generators import rust as rust_gen
 from compliance.generators.common import (
     Component,
+    read_harvested_license,
     render_notices,
     spdx_license_text,
 )
@@ -80,3 +83,47 @@ def test_bundled_text_has_no_disclaimer():
     out = render_notices("python", [actual])
     assert "No license file was distributed" not in out
     assert "Real Author" in out
+
+
+def test_go_module_path_escaping():
+    assert go_gen._escape_go_module_path("github.com/Azure/Foo") == "github.com/!azure/!foo"
+    assert go_gen._escape_go_module_path("golang.org/x/sys") == "golang.org/x/sys"
+
+
+def test_rust_prefers_harvested_over_canonical(tmp_path):
+    crate = tmp_path / "serde-1.0.0"
+    crate.mkdir()
+    (crate / "LICENSE-MIT").write_text("MIT License\n\nCopyright (c) 2014 Serde Authors")
+    comp = rust_gen._component_from_sbom_entry(
+        {"name": "serde", "version": "1.0.0",
+         "licenses": [{"license": {"id": "MIT"}}], "purl": "pkg:cargo/serde@1.0.0"},
+        licenses_dir=tmp_path,
+    )
+    assert "Serde Authors" in comp.license_text
+    assert comp.license_text_is_canonical is False
+    # un-harvested crate falls back to canonical
+    comp2 = rust_gen._component_from_sbom_entry(
+        {"name": "tokio", "version": "1.0.0",
+         "licenses": [{"license": {"id": "MIT"}}], "purl": "pkg:cargo/tokio@1.0.0"},
+        licenses_dir=tmp_path,
+    )
+    assert comp2.license_text and comp2.license_text_is_canonical is True
+
+
+def test_go_prefers_harvested_via_escaped_path(tmp_path):
+    mod_dir = tmp_path / "github.com" / "!azure" / "foo@v1.0.0"
+    mod_dir.mkdir(parents=True)
+    (mod_dir / "LICENSE").write_text("Apache License 2.0\n\nCopyright Azure")
+    comp = go_gen._component_from_sbom_entry(
+        {"name": "github.com/Azure/foo", "version": "v1.0.0",
+         "licenses": [{"license": {"id": "Apache-2.0"}}],
+         "purl": "pkg:golang/github.com/Azure/foo@v1.0.0"},
+        licenses_dir=tmp_path,
+    )
+    assert "Copyright Azure" in comp.license_text
+    assert comp.license_text_is_canonical is False
+
+
+def test_read_harvested_license_none_when_absent(tmp_path):
+    assert read_harvested_license(None, "x-1.0") is None
+    assert read_harvested_license(tmp_path, "missing-9.9") is None

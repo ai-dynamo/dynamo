@@ -73,6 +73,21 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
     git -c user.email=build@dynamo -c user.name=build commit -q -m sbom && \
     cyclonedx-gomod app -licenses -json -main ./cmd -output /sbom-go.cdx.json .
 
+# Compliance: harvest each Go module's real LICENSE files from the module cache
+# so the go NOTICES generator inlines upstream license text instead of canonical
+# SPDX fallback. Preserve the cache's escaped "<module-path>@<version>/" layout —
+# generators/go.py escapes module names the same way to look up. Non-fatal.
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
+    mkdir -p /sbom-go-licenses && cd /go/pkg/mod && \
+    find . -path ./cache -prune -o -type f \
+        \( -iname 'LICENSE*' -o -iname 'LICENCE*' -o -iname 'COPYING*' \
+           -o -iname 'NOTICE*' -o -iname 'UNLICENSE*' \) -print | \
+    while IFS= read -r lf; do \
+        rel="${lf#./}"; dest="/sbom-go-licenses/$(dirname "$rel")"; \
+        mkdir -p "$dest" && cp "$lf" "$dest/" 2>/dev/null || true; \
+    done; \
+    echo "go license harvest: $(find /sbom-go-licenses -type f 2>/dev/null | wc -l) files"; true
+
 # Compliance source archival: vendor third-party Go modules into /tmp/go-vendor
 # for the sources_collect stage. Gated on ENABLE_SOURCE_ARCHIVAL so PR builds
 # skip the ~50-150 MB vendor pull. First-party modules (github.com/ai-dynamo/)
@@ -107,6 +122,7 @@ RUN mkdir -p /legal /sboms
 COPY --from=compliance . /opt/compliance
 ENV PYTHONPATH=/opt
 COPY --from=builder /sbom-go.cdx.json /tmp/sbom-go.cdx.json
+COPY --from=builder /sbom-go-licenses /tmp/go-licenses
 
 # Only `go` is invoked — the operator runtime is distroless (no dpkg metadata
 # survives), ships no Python or Rust at runtime, and has no native sources of
@@ -119,6 +135,7 @@ ARG BASELINE_SBOM_FILE=""
 RUN python3 -m compliance.generators \
     --ecosystem go \
     --go-sbom /tmp/sbom-go.cdx.json \
+    --go-licenses-dir /tmp/go-licenses \
     --output-dir /legal \
     ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}} \
     -v

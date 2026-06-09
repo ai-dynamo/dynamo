@@ -120,6 +120,27 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--rust-licenses-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory of real crate LICENSE files harvested from the cargo "
+            "registry in wheel_builder (subdir per '<name>-<version>'). When "
+            "present, the rust generator prefers these over canonical SPDX text."
+        ),
+    )
+    parser.add_argument(
+        "--go-licenses-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory of real module LICENSE files harvested from the go "
+            "module cache in the go-builder (mirrors the escaped module path "
+            "'<path>@<version>'). When present, the go generator prefers these "
+            "over canonical SPDX text."
+        ),
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
     args = parser.parse_args(argv)
@@ -155,7 +176,12 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 from . import rust as gen
 
-                gen.generate(search_paths, eco_out, subtract=subtract)
+                gen.generate(
+                    search_paths,
+                    eco_out,
+                    subtract=subtract,
+                    licenses_dir=args.rust_licenses_dir,
+                )
             elif eco == "python":
                 if not search_paths:
                     failures.append(
@@ -175,7 +201,12 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 from . import go as gen  # type: ignore[no-redef]
 
-                gen.generate(args.go_sbom, eco_out, subtract=subtract)
+                gen.generate(
+                    args.go_sbom,
+                    eco_out,
+                    subtract=subtract,
+                    licenses_dir=args.go_licenses_dir,
+                )
             elif eco == "native":
                 if args.native_yaml is None or args.native_image is None:
                     failures.append(

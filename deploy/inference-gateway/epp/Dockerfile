@@ -170,6 +170,23 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
         -output /sbom-go.cdx.json \
         .
 
+# Compliance: harvest each Go module's real LICENSE files from the module cache
+# (which go mod download populated) so the frontend's go NOTICES generator can
+# inline upstream license text instead of canonical SPDX fallback. Preserve the
+# cache's escaped "<module-path>@<version>/" layout — generators/go.py escapes
+# the module name the same way to look up. Best-effort + non-fatal.
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
+    mkdir -p /sbom-go-licenses && cd /go/pkg/mod && \
+    find . -path ./cache -prune -o -type f \
+        \( -iname 'LICENSE*' -o -iname 'LICENCE*' -o -iname 'COPYING*' \
+           -o -iname 'NOTICE*' -o -iname 'UNLICENSE*' \) -print | \
+    while IFS= read -r lf; do \
+        rel="${lf#./}"; dest="/sbom-go-licenses/$(dirname "$rel")"; \
+        mkdir -p "$dest" && cp "$lf" "$dest/" 2>/dev/null || true; \
+    done; \
+    echo "go license harvest: $(find /sbom-go-licenses -type f 2>/dev/null | wc -l) files"; \
+    true
+
 # =============================================================================
 # Stage 3: Runtime
 # =============================================================================
@@ -185,8 +202,10 @@ WORKDIR /
 COPY --from=go-builder /workspace/epp .
 
 # EPP is not shipped to customers, but the frontend image's licenses stage
-# consumes this CycloneDX SBOM via COPY --from=epp /sbom-go.cdx.json.
+# consumes this CycloneDX SBOM via COPY --from=epp /sbom-go.cdx.json, plus the
+# harvested module LICENSE files for full-text NOTICES.
 COPY --from=go-builder /sbom-go.cdx.json /sbom-go.cdx.json
+COPY --from=go-builder /sbom-go-licenses /sbom-go-licenses
 
 # Note: EPP config is mounted via Kubernetes ConfigMap at runtime
 # See helm/dynamo-gaie/templates/epp-configmap.yaml

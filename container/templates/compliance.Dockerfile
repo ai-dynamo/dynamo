@@ -58,6 +58,12 @@ USER root
 RUN mkdir -p /legal /sboms
 COPY --chown=root:0 container/compliance /opt/compliance
 ENV PYTHONPATH=/opt
+
+# Real crate LICENSE files harvested from the cargo registry in wheel_builder
+# (empty when none were harvested -- the rust generator then falls back to
+# canonical SPDX text). Keyed "<name>-<version>". wheel_builder_base always
+# creates the dir, so this COPY never fails even for wheel-less targets.
+COPY --from=wheel_builder /opt/dynamo/rust-licenses /tmp/rust-licenses
 {% if target == "frontend" %}
 # Approach A: EPP self-describes. frontend.Dockerfile pulls a dedicated
 # amd64-pinned EPP stage `epp_sbom` whose only purpose is to expose the
@@ -66,6 +72,9 @@ ENV PYTHONPATH=/opt
 # from the amd64-pinned stage regardless of TARGETPLATFORM. The SBOM
 # itself is architecture-independent JSON, so this is safe.
 COPY --from=epp_sbom /sbom-go.cdx.json /tmp/sbom-go-epp.cdx.json
+# Real Go module LICENSE files harvested from EPP's go module cache, so the go
+# generator inlines upstream license text instead of canonical SPDX fallback.
+COPY --from=epp_sbom /sbom-go-licenses /tmp/go-licenses
 {% endif %}
 
 # BASELINE_SBOM_FILE: the slim CycloneDX SBOM under
@@ -80,7 +89,9 @@ RUN python3 -m compliance.generators \
 {% if framework == "sglang" %}    --site-packages "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
 {% else %}    --venv ${VIRTUAL_ENV} \
 {% endif %}{% if target == "frontend" %}    --go-sbom /tmp/sbom-go-epp.cdx.json \
-{% endif %}    --output-dir /legal \
+    --go-licenses-dir /tmp/go-licenses \
+{% endif %}    --rust-licenses-dir /tmp/rust-licenses \
+    --output-dir /legal \
 {% if make_efa %}    --native-yaml /opt/compliance/native_packages.yaml \
     --native-image {{ framework }}-runtime-efa \
 {% endif %}    ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}} \
