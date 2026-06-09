@@ -6,7 +6,13 @@ import json
 
 import pytest
 
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
+from dynamo.llm import (
+    ModelInput,
+    ModelRuntimeConfig,
+    ModelType,
+    WorkerType,
+    register_model,
+)
 from dynamo.runtime import DistributedRuntime
 
 pytestmark = [
@@ -42,6 +48,7 @@ async def _register_leader(
         endpoint,
         "tensor",
         runtime_config=runtime_config,
+        worker_type=WorkerType.Aggregated,
     )
     return endpoint.connection_id()
 
@@ -231,3 +238,59 @@ async def test_wait_for_instance_by_runtime_data_links_two_late_subscribers(
         leader_b.shutdown()
         nonleader_a.shutdown()
         nonleader_b.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Cross-version compat: prefill registers the legacy ModelType.Prefill
+# marker bit (dual-emit). register_model must accept it while still rejecting a
+# genuine OpenAI surface on a prefill worker. These cases all raise during the
+# synchronous validation prologue — before any model-card load — so the test is
+# fully offline (no HF download).
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_prefill_dual_emit_model_type_validation(temp_file_store):
+    rt = _runtime()
+    try:
+        ep = rt.endpoint("test.prefill.generate")
+        await ep.register_endpoint_instance()
+
+        prefill = dict(worker_type=WorkerType.Prefill, needs=[[WorkerType.Decode]])
+
+        # REJECT: a prefill worker must not expose an OpenAI surface.
+        with pytest.raises(ValueError, match="surface"):
+            await register_model(ModelInput.Tokens, ModelType.Chat, ep, "m", **prefill)
+
+        # REJECT: prefill receives pre-tokenized requests.
+        with pytest.raises(ValueError, match="ModelInput"):
+            await register_model(ModelInput.Text, ModelType.Prefill, ep, "m", **prefill)
+
+        # REJECT: worker_type is required.
+        with pytest.raises(ValueError, match="worker_type"):
+            await register_model(ModelInput.Tokens, ModelType.Empty, ep, "m")
+
+        # ACCEPT (dual-emit): worker_type=Prefill + ModelType.Prefill passes the
+        # surface gate. Prove it WITHOUT loading a model card by tripping the
+        # *later* non-empty-needs check: if the surface gate had rejected the
+        # Prefill marker bit, the error would mention "surface", not "needs".
+        with pytest.raises(ValueError, match="needs"):
+            await register_model(
+                ModelInput.Tokens,
+                ModelType.Prefill,
+                ep,
+                "m",
+                worker_type=WorkerType.Prefill,
+                needs=[],
+            )
+
+        # ACCEPT: the surface-less Empty form is still allowed for prefill too.
+        with pytest.raises(ValueError, match="needs"):
+            await register_model(
+                ModelInput.Tokens,
+                ModelType.Empty,
+                ep,
+                "m",
+                worker_type=WorkerType.Prefill,
+                needs=[],
+            )
+    finally:
+        rt.shutdown()

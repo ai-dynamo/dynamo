@@ -37,10 +37,15 @@ from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend import telemetry
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
+    DYN_ENABLE_TEST_LOGITS_PROCESSOR,
     EngineConfig,
     GenerateChunk,
     GenerateRequest,
     LLMEngine,
+    LogitsProcessorSpec,
+    is_generation_stage,
+    logits_processors_for_request,
+    resolve_test_logits_processor_spec,
 )
 from dynamo.common.backend.health_check import (
     bos_token_id_or,
@@ -66,6 +71,7 @@ from dynamo.sglang.capacity import (
     local_dp_rank_bounds,
     runtime_capacity,
 )
+from dynamo.sglang.logits_processing import activate_logits_processors
 from dynamo.sglang.pause import SGLangEnginePauseController
 from dynamo.sglang.publisher import format_zmq_endpoint
 
@@ -104,6 +110,10 @@ def _local_dp_rank_range(server_args) -> tuple[int, int]:
 
 
 class SglangLLMEngine(LLMEngine):
+    # Class-level default so ``__new__``-built instances (tests skipping
+    # ``__init__``) still expose what ``generate()`` reads; ``start()`` sets it.
+    _logits_processor_spec: "LogitsProcessorSpec | None" = None
+
     def __init__(self, server_args, dynamo_args, serving_mode: DisaggregationMode):
         self.server_args = server_args
         self.dynamo_args = dynamo_args
@@ -131,6 +141,7 @@ class SglangLLMEngine(LLMEngine):
         # `dp_rank` against this node's range before forwarding to SGLang.
         self._dp_start: int = 0
         self._dp_size: int = 1
+        self._logits_processor_spec: LogitsProcessorSpec | None = None
         self._pause_controller: SGLangEnginePauseController | None = None
         self._pause_lock = asyncio.Lock()
 
@@ -141,6 +152,15 @@ class SglangLLMEngine(LLMEngine):
         config = await parse_args(argv if argv is not None else sys.argv[1:])
         server_args = config.server_args
         dynamo_args = config.dynamo_args
+
+        # Enable SGLang's custom-processor path and force tokenizer init (to
+        # resolve the forced token IDs at startup). After parse_args so a user
+        # skip_tokenizer_init can't starve the hook.
+        if os.getenv(DYN_ENABLE_TEST_LOGITS_PROCESSOR) == "1" and is_generation_stage(
+            config.serving_mode
+        ):
+            server_args.enable_custom_logit_processor = True
+            server_args.skip_tokenizer_init = False
 
         model_input = (
             ModelInput.Text if dynamo_args.use_sglang_tokenizer else ModelInput.Tokens
@@ -168,6 +188,9 @@ class SglangLLMEngine(LLMEngine):
             else None
         )
         self._input_param_manager = InputParamManager(tokenizer)
+
+        # Resolve once the tokenizer is available (see logits_processor_spec()).
+        self._logits_processor_spec = await self.logits_processor_spec()
 
         logger.info(
             "Trace header forwarding: %s",
@@ -215,6 +238,32 @@ class SglangLLMEngine(LLMEngine):
             bootstrap_port=self._bootstrap_port,
             runtime_data=_get_runtime_data(self.server_args),
         )
+
+    def _logits_tokenizer(self) -> Any:
+        """Tokenizer the smoke hook tokenizes ``"Hello world!"`` with.
+
+        Accessed lazily (only when the env hook is on, inside the resolver),
+        so the skip_tokenizer_init / hook-off path never touches it. from_args
+        forces skip_tokenizer_init=False for the hook, so the tokenizer exists
+        here.
+        """
+        if self.engine is None:
+            raise RuntimeError("Engine not initialized")
+        tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
+        tokenizer = getattr(tokenizer_manager, "tokenizer", None)
+        if tokenizer is None:
+            raise RuntimeError(
+                "SGLang engine exposes no tokenizer; "
+                f"{DYN_ENABLE_TEST_LOGITS_PROCESSOR} requires tokenizer init"
+            )
+        return tokenizer
+
+    async def logits_processor_spec(self) -> LogitsProcessorSpec | None:
+        # Only generation roles ever attach (PREFILL gates out per request),
+        # so skip spec resolution — and the tokenizer it needs — otherwise.
+        if not is_generation_stage(self.serving_mode):
+            return None
+        return resolve_test_logits_processor_spec(self._logits_tokenizer)
 
     def _kv_routing_enabled(self) -> bool:
         # Matches legacy `DynamoSglangPublisher.init_kv_event_publish` —
@@ -298,6 +347,20 @@ class SglangLLMEngine(LLMEngine):
             (request.get("output_options") or {}).get("return_tokens_as_token_ids")
         )
 
+        # No-op for PREFILL / hook-off (gating returns []). Resolve the uid
+        # only when there's something to activate.
+        logits_entries = logits_processors_for_request(
+            self._logits_processor_spec,
+            disaggregation_mode=self.serving_mode,
+        )
+        logits_kwargs = (
+            activate_logits_processors(
+                sampling_params, logits_entries, request_uid=context.id()
+            )
+            if logits_entries
+            else {}
+        )
+
         # SGLang disagg keys NIXL transport on a (host, port, room) triple
         # exchanged between prefill and decode peers.
         bootstrap_kwargs: dict[str, Any] = {}
@@ -327,6 +390,7 @@ class SglangLLMEngine(LLMEngine):
                 enabled=self.enable_trace,
             ),
             **bootstrap_kwargs,
+            **logits_kwargs,
             **logprob_kwargs,
         )
 

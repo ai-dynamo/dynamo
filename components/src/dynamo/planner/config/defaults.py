@@ -89,7 +89,6 @@ class SLAPlannerDefaults(BasePlannerDefaults):
         16  # must be a perfect square; total buckets across input axes
     )
     load_scaling_down_sensitivity = 80  # 0-100
-    load_metric_samples = 10  # number of samples per interval
     load_min_observations = 5  # cold start threshold
     prefill_scale_up_queue_tokens = None
     prefill_scale_down_queue_tokens = None

@@ -165,7 +165,7 @@ When using KV routing, the router needs to know what each worker has cached. The
 | Topology | Workers | How It Works |
 |----------|---------|--------------|
 | **Aggregated** | Single pool (prefill + decode in one process) | All workers handle the full request lifecycle |
-| **Disaggregated** | Separate prefill and decode pools | Frontend routes to a prefill worker first, then to a decode worker; requires workers registered with `ModelType.Prefill` |
+| **Disaggregated** | Separate prefill and decode pools | Frontend routes to a prefill worker first, then to a decode worker; requires workers registered with `WorkerType.Prefill` |
 
 Disaggregated mode is activated automatically when prefill workers register alongside decode workers. See [Disaggregated Serving](router-disaggregated-serving.md) for details.
 

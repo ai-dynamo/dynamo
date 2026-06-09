@@ -5,8 +5,6 @@ title: Reference Guide
 subtitle: Configuration, arguments, and operational details for the vLLM backend
 ---
 
-# Reference Guide
-
 ## Overview
 
 The vLLM backend in Dynamo integrates [vLLM](https://github.com/vllm-project/vllm) engines into Dynamo's distributed runtime, enabling disaggregated serving, KV-aware routing, and request cancellation. Dynamo leverages vLLM's native KV cache events, NIXL-based transfer mechanisms, and metric reporting.

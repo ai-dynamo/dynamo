@@ -612,7 +612,6 @@ class PlannerConfig(BaseModel):
             "optimization_target='load'. Accepts 0-100."
         ),
     )
-    load_metric_samples: int = SLAPlannerDefaults.load_metric_samples
     load_min_observations: int = SLAPlannerDefaults.load_min_observations
 
     # Advisory mode: compute and log decisions without executing scaling

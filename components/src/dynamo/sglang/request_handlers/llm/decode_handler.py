@@ -19,6 +19,16 @@ from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
+_SAMPLING_OPTION_FIELDS = (
+    "presence_penalty",
+    "frequency_penalty",
+    "repetition_penalty",
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+)
+
 
 def _extract_media_urls(mm_data: Dict[str, Any], media_key: str) -> list[str] | None:
     """Normalize multimodal URL items from the frontend wire format."""
@@ -49,6 +59,14 @@ def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
     if not isinstance(extra_fields, list):
         return False
     return field in extra_fields
+
+
+def _sampling_option_params(values: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract sampling options that SGLang accepts as sampling params."""
+    params = {field: values.get(field) for field in _SAMPLING_OPTION_FIELDS}
+    if values.get("seed") is not None:
+        params["sampling_seed"] = values.get("seed")
+    return params
 
 
 def _user_stop_token_ids(request: Dict[str, Any]) -> set[int]:
@@ -261,13 +279,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             stop_token_ids = _merged if _merged else None
 
             param_mapping = {
-                "temperature": sampling_opts.get("temperature"),
-                "top_p": sampling_opts.get("top_p"),
-                "top_k": sampling_opts.get("top_k"),
                 "n": sampling_opts.get("n"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
                 "ignore_eos": stop_conditions.get("ignore_eos"),
                 "stop_token_ids": stop_token_ids,
+                **_sampling_option_params(sampling_opts),
                 **self._get_guided_decoding_params(
                     sampling_opts.get("guided_decoding")
                 ),
@@ -275,11 +291,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         else:
             # OpenAI request format
             param_mapping = {
-                "temperature": request.get("temperature"),
-                "top_p": request.get("top_p"),
-                "top_k": request.get("top_k"),
                 "n": request.get("n"),
                 "max_new_tokens": request.get("max_tokens"),
+                **_sampling_option_params(request),
                 **_openai_stop_sampling_params(request),
                 **self._get_guided_decoding_params(request.get("guided_decoding")),
             }
