@@ -1630,20 +1630,13 @@ mod tests {
     }
 
     #[test]
-    fn test_mcf_overflow_uses_slot_aware_bounded_pin() {
+    fn test_mcf_overflow_bounded_pin_keeps_loras_routable() {
         // MCF genuine overflow: more cold-start LoRAs than slots. The MCF solver places what fits
-        // and OMITS the rest from its assignment. An omitted (unplaced) LoRA must be re-placed via
-        // the SLOT-AWARE allocator (compute_replica_set_with_slots), in parity with the HRW
-        // dropped_active path — NOT the slot-blind compute_replica_set the previous MCF fallback
-        // used. With a single full worker, the slot-aware pin bounds the LoRA to that one worker
-        // (REQ 7 keep-one-home; backend enforces max_*_lora_count), never scattering it across all
-        // workers. The key property: each unplaced LoRA gets a single bounded replica, not the full
-        // worker set.
+        // and OMITS the rest. Each omitted LoRA must stay routable via a single bounded pin (REQ 7
+        // keep-one-home; backend enforces max_*_lora_count), NOT be scattered across all workers.
         let (mut controller, st, _le, rt) = setup_mcf_controller();
         let w1 = make_worker(1);
         let w2 = make_worker(2);
-        // Two workers, each cap 1 (budget 2). Three cold-start (inactive) adapters loaded across
-        // them, so at least one overflows the MCF solve and hits the slot-aware fallback.
         st.handle_mdc_addition(w1, &make_lora_info("lora-a", 1));
         st.handle_mdc_addition(w2, &make_lora_info("lora-b", 1));
         st.handle_mdc_addition(w1, &make_lora_info("lora-c", 1));
@@ -1666,5 +1659,83 @@ mod tests {
             let w = cfg.replica_set[0];
             assert!(w == w1 || w == w2, "LoRA {name} must pin to a live worker");
         }
+    }
+
+    #[test]
+    fn test_mcf_overflow_fallback_is_slot_aware_not_slot_blind() {
+        // Discriminating test (N-1): proves the MCF unplaced fallback uses the SLOT-AWARE
+        // `compute_replica_set_with_slots` rather than the old slot-blind `compute_replica_set`.
+        //
+        // Construct an overflow that leaves a FREE worker so the two behaviors diverge: with
+        // `candidate_m = 1` the MCF solve only considers each LoRA's single top-HRW worker. Two
+        // LoRAs that both rank w1 as their top contend for w1 (cap 1) — one is placed, the other
+        // overflows — while w2 is never a candidate and stays free. The overflowed LoRA's top-HRW
+        // worker is the (now-full) w1, so:
+        //   * slot-blind compute_replica_set would re-pin it onto the FULL w1 (cold load on a
+        //     worker with no slot — the bug), landing BOTH LoRAs on w1.
+        //   * slot-aware compute_replica_set_with_slots skips full w1 and pins it to the FREE w2.
+        // Asserting the two LoRAs land on DIFFERENT workers therefore fails for slot-blind and
+        // passes only for slot-aware — and also exercises projected-usage charging (w1 is marked
+        // full by the committed MCF placement, which is what makes the fallback avoid it).
+        let w1 = make_worker(1);
+        let w2 = make_worker(2);
+
+        // Find two adapter names that both rank w1 as their top HRW worker over {w1, w2}.
+        let mut colliding: Vec<String> = Vec::new();
+        for i in 0..10_000 {
+            let name = format!("lora-{i}");
+            let ranked = crate::lora::routing::RendezvousHasher::rank_workers(&name, &[w1, w2]);
+            if ranked[0].0 == w1 {
+                colliding.push(name);
+                if colliding.len() == 2 {
+                    break;
+                }
+            }
+        }
+        assert_eq!(
+            colliding.len(),
+            2,
+            "need two adapters that both top-rank w1"
+        );
+
+        let config = LoraAllocationConfig {
+            algorithm: AllocationAlgorithmType::MinCostFlow,
+            mcf: crate::lora::config::McfConfig {
+                candidate_m: 1,
+                ..crate::lora::config::McfConfig::default()
+            },
+            ..LoraAllocationConfig::default()
+        };
+        let rt = LoraRoutingTable::new();
+        let st = LoraStateTracker::new();
+        let le = Arc::new(LoadEstimator::new());
+        let mut controller = LoraController::new(config, rt.clone(), st.clone(), le.clone());
+
+        // Both colliding adapters cold-loaded on w1 (cap 1); w2 is a free capacity-only worker.
+        st.handle_mdc_addition(w1, &make_lora_info(&colliding[0], 1));
+        st.handle_mdc_addition(w1, &make_lora_info(&colliding[1], 1));
+        st.set_worker_capacity(w2, 1);
+        assert_eq!(st.total_lora_slots(), 2);
+
+        controller.recompute_now();
+
+        let c0 = rt
+            .get_config(&colliding[0])
+            .expect("first colliding LoRA must stay routable");
+        let c1 = rt
+            .get_config(&colliding[1])
+            .expect("second colliding LoRA must stay routable");
+        assert_eq!(c0.replica_set.len(), 1);
+        assert_eq!(c1.replica_set.len(), 1);
+        let placed: std::collections::HashSet<u64> =
+            [c0.replica_set[0].worker_id, c1.replica_set[0].worker_id]
+                .into_iter()
+                .collect();
+        assert_eq!(
+            placed,
+            [w1.worker_id, w2.worker_id].into_iter().collect(),
+            "slot-aware fallback must move the overflowed LoRA off the full w1 onto the free w2 \
+             (slot-blind would pin both onto w1)"
+        );
     }
 }

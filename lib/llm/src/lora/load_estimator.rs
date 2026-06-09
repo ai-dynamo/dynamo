@@ -110,12 +110,20 @@ impl BucketedRateCounter {
         let global_bucket = (elapsed.as_nanos() / self.bucket_duration.as_nanos()) as u64;
         let index = (global_bucket as usize) % self.num_buckets;
 
-        // Record the latest-arrival bucket for the rotation-safe recent-arrival check. A rare stale
-        // record (an out-of-order older `now`) may store a slightly smaller value, but it is still
-        // within ~1 bucket of the true latest and far inside the window, so retain_known's decision
-        // is unaffected.
-        self.last_arrival_bucket
-            .store(global_bucket, Ordering::Relaxed);
+        // Advance the latest-arrival bucket monotonically for the rotation-safe recent-arrival
+        // check. Use a max-update (treating the u64::MAX "empty" sentinel as lower than any real
+        // bucket) so a rare stale/out-of-order recorder with an older `now` can never REGRESS the
+        // marker below a newer concurrent record — which would otherwise make has_recent_arrival
+        // read stale and drop a genuinely recent signal.
+        let _ =
+            self.last_arrival_bucket
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                    Some(if cur == u64::MAX {
+                        global_bucket
+                    } else {
+                        cur.max(global_bucket)
+                    })
+                });
 
         loop {
             let current_epoch = self.epochs[index].load(Ordering::Acquire);
@@ -968,6 +976,32 @@ mod tests {
             load.get("lora-test"),
             Some(&3),
             "EMA with alpha=1.0 should match raw count"
+        );
+    }
+
+    #[test]
+    fn has_recent_arrival_marker_never_regresses_from_stale_writer() {
+        // L-1: the last-arrival marker must advance monotonically. A stale/out-of-order recorder
+        // with an older `now` must NOT regress the marker below a newer concurrent record, or
+        // has_recent_arrival would read stale and wrongly drop a genuinely recent signal.
+        let base = Instant::now();
+        let bd = Duration::from_secs(1);
+        let counter = BucketedRateCounter::new(3, bd, base); // window = 3 buckets
+
+        // Newer record at bucket 10, then a STALE record at bucket 2 (out of order).
+        counter.record_count(1, base + Duration::from_secs(10));
+        counter.record_count(1, base + Duration::from_secs(2));
+
+        // Queried at bucket 10: only the newer (bucket 10) arrival is inside the 3-bucket window.
+        // If the stale write had regressed the marker to bucket 2, this would read false.
+        assert!(
+            counter.has_recent_arrival(base + Duration::from_secs(10)),
+            "marker must reflect the newest arrival (bucket 10), not the stale older write"
+        );
+        // Far past the window: no recent arrival.
+        assert!(
+            !counter.has_recent_arrival(base + Duration::from_secs(20)),
+            "once the window slides past the newest arrival, has_recent_arrival is false"
         );
     }
 
