@@ -7,7 +7,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Mapping, NoReturn
+from typing import Any, Mapping
 
 from dynamo.common.utils.namespace import get_worker_namespace
 
@@ -228,14 +228,11 @@ def _apply_restore_env(
     return restored_env
 
 
-def is_restore_placeholder_mode() -> bool:
-    """Return whether this process should act as a restore placeholder."""
+def maybe_run_restore_placeholder_mode() -> None:
+    """Capture restore env and sleep when restore-placeholder mode is enabled."""
 
-    return os.environ.get(SNAPSHOT_RESTORE_PLACEHOLDER_ENV) == "1"
-
-
-def run_restore_placeholder() -> NoReturn:
-    """Capture restore env, then hold the container for snapshot-agent."""
+    if os.environ.get(SNAPSHOT_RESTORE_PLACEHOLDER_ENV) != "1":
+        return
 
     write_snapshot_restore_context()
     os.execvp("sleep", ["sleep", "infinity"])

@@ -12,8 +12,7 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.common.utils.snapshot.restore_context import (
     apply_snapshot_restore_config,
-    is_restore_placeholder_mode,
-    run_restore_placeholder,
+    maybe_run_restore_placeholder_mode,
 )
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import parse_args
@@ -37,8 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 async def worker():
-    if is_restore_placeholder_mode():
-        run_restore_placeholder()
+    maybe_run_restore_placeholder_mode()
 
     config = await parse_args(sys.argv[1:])
     dump_config(config.dynamo_args.dump_config_to, config)

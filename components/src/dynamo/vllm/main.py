@@ -30,8 +30,7 @@ from dynamo.common.utils.prometheus import (
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.common.utils.snapshot.restore_context import (
     apply_snapshot_restore_config,
-    is_restore_placeholder_mode,
-    run_restore_placeholder,
+    maybe_run_restore_placeholder_mode,
 )
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
@@ -118,8 +117,7 @@ def run_dynamo_headless(config: Config) -> None:
 
 
 async def worker() -> None:
-    if is_restore_placeholder_mode():
-        run_restore_placeholder()
+    maybe_run_restore_placeholder_mode()
 
     config = parse_args()
 

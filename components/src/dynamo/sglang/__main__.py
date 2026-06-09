@@ -7,14 +7,12 @@ if "PYTHONHASHSEED" not in os.environ:
     os.environ["PYTHONHASHSEED"] = "0"
 
 from dynamo.common.utils.snapshot.restore_context import (
-    is_restore_placeholder_mode,
-    run_restore_placeholder,
+    maybe_run_restore_placeholder_mode,
 )
 
 # Check before importing dynamo.sglang.main: the restore placeholder must
 # capture env and hold without importing SGLang or constructing backend state.
-if is_restore_placeholder_mode():
-    run_restore_placeholder()
+maybe_run_restore_placeholder_mode()
 
 from dynamo.sglang.main import main
 
