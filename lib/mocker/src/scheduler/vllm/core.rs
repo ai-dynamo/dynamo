@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::common::protocols::G1;
 use crate::common::protocols::{
     DirectRequest, KvEventPublishers, MockEngineArgs, MoveBlock, OutputSignal, PreemptionMode,
-    WorkerType,
+    PrefillCost, WorkerType,
 };
 use crate::common::sequence::ActiveSequence;
 use crate::common::speculative::{SpeculativeDecodeSampler, normalize_conditional_accept_rates};
@@ -27,7 +27,7 @@ use crate::kv_manager::KvManager;
 #[cfg(feature = "kvbm-offload")]
 use crate::kv_manager::kvbm_backend::SwapInRegistrationBlock;
 use crate::replay::TraceCollector;
-use crate::scheduler::trtllm;
+use crate::scheduler::vllm::policy::{self, AdmissionDecision};
 use crate::scheduler::{
     AdmissionEvent, CapturedRouterEventBuffer, EnginePassResult, ForwardPassSnapshot,
     MockerMetrics, RouterEventVisibility, build_fpm_snapshot, capture_router_event_sink,
@@ -452,26 +452,22 @@ impl VllmCore {
     pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
         let mut max_output_tokens = request.max_output_tokens;
-        if trtllm::is_no_evict(self.args.scheduling_policy()) {
-            // TRT-LLM enqueue normalization: clamp the output so prompt + output
-            // fits the KV pool (keeps the request valid and admittable).
-            if let Some(clamped) = trtllm::normalize_max_output_tokens(
-                request.tokens.len(),
-                max_output_tokens,
-                self.args.num_gpu_blocks,
-                self.args.block_size,
-            ) {
-                if clamped != max_output_tokens {
-                    tracing::warn!(%uuid, requested = max_output_tokens, clamped,
-                        "clamped TRT-LLM max_output_tokens to KV-pool capacity");
-                }
-                max_output_tokens = clamped;
+        if let Some(clamped) = policy::normalize_max_output_tokens(
+            self.args.scheduling_policy(),
+            request.tokens.len(),
+            max_output_tokens,
+            self.args.num_gpu_blocks,
+            self.args.block_size,
+        ) {
+            if clamped != max_output_tokens {
+                tracing::warn!(%uuid, requested = max_output_tokens, clamped,
+                    "clamped TRT-LLM max_output_tokens to KV-pool capacity");
             }
-            // The `None` case (prompt alone exceeds the pool) is left unchanged
-            // here on purpose: terminal rejection is decided at the admission gate,
-            // the only place that can emit the terminal rejection signal and where
-            // the no-evict footprint check lives (see `execute_pass_internal`).
+            max_output_tokens = clamped;
         }
+        // The `None` case (a TRT-LLM prompt alone leaves no decode room) is
+        // unchanged here. The waiting-admission policy owns terminal rejection
+        // because that path can emit the lifecycle signal.
         let sequence = ActiveSequence::new(
             request.tokens,
             max_output_tokens,
@@ -503,8 +499,8 @@ impl VllmCore {
         self.state.requests.len()
     }
 
-    /// Read-only view of the scheduler state, for tests in sibling modules
-    /// (e.g. `crate::scheduler::trtllm`) that assert on queue membership.
+    /// Read-only view of the scheduler state for policy tests that assert on
+    /// queue membership.
     #[cfg(test)]
     pub(crate) fn state(&self) -> &SchedulerState {
         &self.state
@@ -652,7 +648,12 @@ impl VllmCore {
     /// By passing only the uncached-suffix PLHs to the engine, we avoid
     /// redundantly re-onboarding the G1-cached prefix.
     #[cfg(feature = "kvbm-offload")]
-    fn try_park_for_swap_in(&mut self, uuid: Uuid, now_ms: f64) -> SwapInAdmissionAttempt {
+    fn try_park_for_swap_in(
+        &mut self,
+        uuid: Uuid,
+        now_ms: f64,
+        prefill_cost: &PrefillCost,
+    ) -> SwapInAdmissionAttempt {
         use crate::kv_manager::kvbm_backend::BatchSwapInOutcome;
         if !self.kv_manager.has_offload_engine() {
             return SwapInAdmissionAttempt::NoHit;
@@ -665,14 +666,13 @@ impl VllmCore {
         if !matches!(request.status, RequestStatus::Waiting) {
             return SwapInAdmissionAttempt::NoHit;
         }
-        let cost = self.kv_manager.get_prefill_cost(&request.sequence);
         let block_size = request.sequence.block_size();
-        let skip_blocks = cost.cached_tokens / block_size;
+        let skip_blocks = prefill_cost.cached_tokens / block_size;
         let plhs = request.sequence.positional_lineage_hashes();
         tracing::trace!(
             %uuid,
             now_ms,
-            cached_tokens = cost.cached_tokens,
+            cached_tokens = prefill_cost.cached_tokens,
             skip_blocks,
             plhs_len = plhs.len(),
             "kvbm-offload: swap-in admission probe"
@@ -783,6 +783,7 @@ impl VllmCore {
             match self.schedule_request(
                 uuid,
                 false,
+                None,
                 &mut token_budget,
                 &mut scheduled,
                 &mut batch_count,
@@ -812,77 +813,53 @@ impl VllmCore {
         }
 
         let max_num_running = self.args.max_num_seqs.unwrap_or(usize::MAX);
-        let trtllm_no_evict = trtllm::is_no_evict(self.args.scheduling_policy());
+        let scheduling_policy = self.args.scheduling_policy();
         let mut rejected_uuids: Vec<Uuid> = Vec::new();
         while !preempted_any && self.state.running.len() < max_num_running {
             let Some(uuid) = self.state.next_waiting_uuid() else {
                 break;
             };
-            // TRT-LLM GUARANTEED_NO_EVICT capacity gate: only admit a waiting
-            // request if its prompt + max_output footprint fits after the
-            // to-completion reservations of all running requests. Halt at the
-            // first non-fitting candidate (no skip-ahead) to preserve FIFO
-            // fairness, matching TRT-LLM's `capacityScheduler.cpp`.
-            if trtllm_no_evict {
-                // "Can it ever fit?" uses the UNDISCOUNTED footprint: a reused
-                // prefix block stays physically resident while the request runs, so
-                // a request whose full footprint exceeds the whole pool can never be
-                // admitted even when reusing an active prefix. Terminally reject it —
-                // leaving it at the FIFO head would block every follower and hang
-                // offline (`in_flight`) / live (`waiter`) replay. The terminal signal
-                // is emitted after `emit_ready_tokens`.
-                let footprint = self
+            let decision = {
+                let request = self
                     .state
                     .requests
                     .get(&uuid)
-                    .map(|request| request.sequence.to_completion_blocks())
-                    .unwrap_or(0);
-                if footprint > self.args.num_gpu_blocks {
-                    tracing::warn!(
-                        %uuid,
-                        footprint,
-                        num_gpu_blocks = self.args.num_gpu_blocks,
-                        "rejecting TRT-LLM request whose footprint exceeds the entire KV pool"
-                    );
-                    rejected_uuids.push(uuid);
-                    self.drop_request(uuid);
-                    continue;
-                }
-                // "Can it be admitted now?" uses the prefix-discounted `needed`
-                // against the reservation-aware free pool.
-                let needed = self
-                    .state
-                    .requests
-                    .get(&uuid)
-                    .map(|request| {
-                        trtllm::blocks_needed_to_finish(
-                            &request.sequence,
-                            self.args.block_size,
-                            &self.kv_manager,
-                        )
-                    })
-                    .unwrap_or(0);
+                    .expect("waiting request missing from state");
                 let running_seqs = self
                     .state
                     .running
                     .iter()
                     .filter_map(|running_uuid| self.state.requests.get(running_uuid))
                     .map(|request| &request.sequence);
-                if needed
-                    > trtllm::available_blocks(
-                        running_seqs,
-                        self.args.num_gpu_blocks,
-                        self.args.block_size,
-                        &self.kv_manager,
-                    )
-                {
-                    // Fits the pool but not right now (running reservations);
-                    // halt here (FIFO, no skip-ahead) and retry next pass.
+                policy::decide_waiting_admission(
+                    scheduling_policy,
+                    &request.sequence,
+                    request.status == RequestStatus::Waiting,
+                    running_seqs,
+                    self.args.num_gpu_blocks,
+                    self.args.block_size,
+                    &self.kv_manager,
+                )
+            };
+            let prefill_cost = match decision {
+                AdmissionDecision::Admit { prefill_cost } => prefill_cost,
+                AdmissionDecision::Wait => {
                     break;
                 }
-            }
+                AdmissionDecision::Reject => {
+                    tracing::warn!(
+                        %uuid,
+                        ?scheduling_policy,
+                        num_gpu_blocks = self.args.num_gpu_blocks,
+                        "rejecting request whose admission footprint exceeds the entire KV pool"
+                    );
+                    rejected_uuids.push(uuid);
+                    self.drop_request(uuid);
+                    continue;
+                }
+            };
             #[cfg(feature = "kvbm-offload")]
-            match self.try_park_for_swap_in(uuid, now_ms) {
+            match self.try_park_for_swap_in(uuid, now_ms, &prefill_cost) {
                 SwapInAdmissionAttempt::Parked => continue,
                 SwapInAdmissionAttempt::BlockedOnG1Offload => break,
                 SwapInAdmissionAttempt::NoHit => {}
@@ -890,6 +867,7 @@ impl VllmCore {
             match self.schedule_request(
                 uuid,
                 true,
+                Some(&prefill_cost),
                 &mut token_budget,
                 &mut scheduled,
                 &mut batch_count,
@@ -987,11 +965,10 @@ impl VllmCore {
     /// Under vLLM semantics this evicts a running request on KV pressure. Under
     /// TRT-LLM `GUARANTEED_NO_EVICT` preemption must never happen — the capacity
     /// gate reserves blocks for every admitted request up front — so reaching
-    /// this path is reported as a hard error (see
-    /// [`trtllm::report_no_evict_violation`]) and nothing is evicted.
+    /// this path is reported as a hard error and nothing is evicted.
     pub(super) fn policy_preempt(&mut self) -> Option<PreemptedRequest> {
-        if trtllm::is_no_evict(self.args.scheduling_policy()) {
-            trtllm::report_no_evict_violation();
+        if !policy::allows_preemption(self.args.scheduling_policy()) {
+            policy::report_no_preemption_violation();
             return None;
         }
         self.state.preempt(self.args.preemption_mode)
@@ -1050,6 +1027,7 @@ impl VllmCore {
         &mut self,
         uuid: Uuid,
         from_waiting: bool,
+        prefill_cost: Option<&PrefillCost>,
         token_budget: &mut usize,
         scheduled: &mut FxHashMap<Uuid, ScheduledWork>,
         batch_count: &mut usize,
@@ -1064,9 +1042,13 @@ impl VllmCore {
             .unwrap_or_else(|| panic!("schedule_request: {uuid} missing from state.requests"));
         request.debug_assert_invariants(uuid);
         let cached_prefix_tokens = if request.num_computed_tokens == 0 {
-            self.kv_manager
-                .get_prefill_cost(&request.sequence)
-                .cached_tokens
+            prefill_cost
+                .map(|cost| cost.cached_tokens)
+                .unwrap_or_else(|| {
+                    self.kv_manager
+                        .get_prefill_cost(&request.sequence)
+                        .cached_tokens
+                })
         } else {
             0
         };

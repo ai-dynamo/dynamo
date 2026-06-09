@@ -50,6 +50,7 @@ use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
 
 // Re-use helpers from the openai module (sibling under service/)
+use super::error::SanitizedError;
 use super::metadata::extract_metadata_from_http;
 use super::openai::{get_body_limit, get_or_create_request_id};
 
@@ -178,10 +179,9 @@ async fn handler_anthropic_messages(
         tokio::spawn(anthropic_messages(state, template, request, stream_handle).in_current_span())
             .await
             .map_err(|e| {
-                anthropic_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "api_error",
-                    &format!("Failed to await messages task: {:?}", e),
+                anthropic_sanitized_error_with_details(
+                    SanitizedError::Internal,
+                    format!("Failed to await Anthropic messages task: {e:?}"),
                 )
             })?;
 
@@ -333,17 +333,15 @@ async fn anthropic_messages(
         // Check for cancelled request (client disconnected before response was sent)
         if super::metrics::request_was_cancelled(e.as_ref()) {
             inflight_guard.mark_error(super::metrics::ErrorType::Cancelled);
-            return anthropic_error(
-                StatusCode::from_u16(499).unwrap(),
-                "request_cancelled",
-                &format!("Request cancelled: {}", e),
+            return anthropic_sanitized_error_with_details(
+                SanitizedError::Cancelled,
+                format!("{e:#}"),
             );
         }
         inflight_guard.mark_error(super::metrics::ErrorType::Internal);
-        anthropic_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "api_error",
-            &format!("Failed to generate completions: {}", e),
+        anthropic_sanitized_error_with_details(
+            SanitizedError::Internal,
+            format!("Failed to generate Anthropic completions: {e}"),
         )
     })?;
 
@@ -446,13 +444,30 @@ async fn anthropic_messages(
         // Check first event for backend errors using the openai helper
         let stream_with_check = super::openai::check_for_backend_error(engine_stream)
             .await
-            .map_err(|(status, json_err)| {
-                tracing::error!(request_id, %status, ?json_err, "Backend error detected");
-                anthropic_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "api_error",
-                    "Backend error during generation",
-                )
+            .map_err(|(status, _json_err)| {
+                // check_for_backend_error has already sanitized the body and
+                // logged the backend detail; preserve its status when
+                // re-wrapping in Anthropic format. Status classification is
+                // delegated to SanitizedError::for_backend_status so the
+                // openai and anthropic surfaces stay aligned.
+                let details = format!("backend error event (status {})", status.as_u16());
+                match SanitizedError::for_backend_status(status) {
+                    Some(variant) => anthropic_sanitized_error_with_details(variant, details),
+                    // 4xx (non-499): preserve the client-error status; the
+                    // message is the canonical reason so we don't smuggle
+                    // backend text through. The "invalid_request_error"
+                    // argument is a fallback — anthropic_error remaps
+                    // 401/403/404/429 to their spec-correct types from the
+                    // status code itself.
+                    None => {
+                        tracing::error!(%status, "Anthropic backend error event");
+                        anthropic_error(
+                            status,
+                            "invalid_request_error",
+                            status.canonical_reason().unwrap_or("Client error"),
+                        )
+                    }
+                }
             })?;
 
         let mut http_queue_guard = Some(http_queue_guard);
@@ -468,11 +483,9 @@ async fn anthropic_messages(
             NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
                 .await
                 .map_err(|e| {
-                    tracing::error!(request_id, "Failed to fold messages stream: {:?}", e);
-                    anthropic_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "api_error",
-                        &format!("Failed to fold messages stream: {}", e),
+                    anthropic_sanitized_error_with_details(
+                        SanitizedError::Internal,
+                        format!("Failed to fold messages stream: {e:?}"),
                     )
                 })?;
 
@@ -518,7 +531,7 @@ fn build_model_context_map(state: &service_v2::State) -> std::collections::HashM
         .manager()
         .get_model_cards()
         .iter()
-        .map(|c| (c.display_name.clone(), c.context_length))
+        .map(|c| (c.display_name.clone(), c.effective_context_length()))
         .collect()
 }
 
@@ -732,6 +745,33 @@ fn estimate_input_tokens(req: &AnthropicCreateMessageRequest) -> u32 {
         tools: req.tools.clone(),
     };
     count_req.estimate_tokens()
+}
+
+/// Build an Anthropic-formatted error response from a canonical
+/// [`SanitizedError`] variant. The status, public message, and Anthropic
+/// `error_type` all come from the variant; `details` are logged
+/// server-side but never reach the client.
+fn anthropic_sanitized_error_with_details(
+    err: SanitizedError,
+    details: impl std::fmt::Display,
+) -> Response {
+    let status = err.status();
+    if err.log_as_error() {
+        tracing::error!(status = %status, "Anthropic {err}: {details}");
+    } else {
+        tracing::debug!(status = %status, "Anthropic {err}: {details}");
+    }
+    (
+        status,
+        Json(AnthropicErrorResponse {
+            object_type: "error".to_string(),
+            error: AnthropicErrorBody {
+                error_type: err.anthropic_type().to_string(),
+                message: err.to_string(),
+            },
+        }),
+    )
+        .into_response()
 }
 
 /// Build an Anthropic-formatted error response.

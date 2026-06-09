@@ -2177,6 +2177,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             }
 
                             runtime_config = ModelRuntimeConfig()
+                            runtime_config.context_length = self.model_max_len
                             runtime_config.tool_call_parser = (
                                 self.config.dyn_tool_call_parser
                             )
