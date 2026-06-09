@@ -60,8 +60,16 @@ fn commentary_header_cleanup_regex() -> &'static Regex {
 
 fn analysis_block_cleanup_regex() -> &'static Regex {
     ANALYSIS_BLOCK_CLEANUP_REGEX.get_or_init(|| {
-        Regex::new(r"(?s)(?:<\|start\|>assistant)?<\|channel\|>analysis<\|message\|>(?P<body>.*?)(?:<\|end\|>|\z)")
-            .expect("analysis block cleanup regex")
+        // Accepts both the spec-compliant reasoning form
+        //   `<|channel|>analysis<|message|>...<|end|>`
+        // and the gpt-oss model-bug directed-tool-call form (recovered by PR #10366)
+        //   `<|channel|>analysis to=functions.X[ <|constrain|>json]<|message|>{args}<|call|>`
+        // The `name` capture distinguishes the two in the strip log so analysis
+        // stays semantically "thinking" while the bug-shape is logged as a tool call.
+        Regex::new(
+            r"(?s)(?:<\|start\|>assistant)?<\|channel\|>analysis(?:\s+to=functions\.(?P<name>[\w.\-]+))?.*?<\|message\|>(?P<body>.*?)(?:<\|call\|>|<\|end\|>|\z)",
+        )
+        .expect("analysis block cleanup regex")
     })
 }
 
@@ -127,7 +135,11 @@ fn strip_harmony_protocol_from_normal_text(text: &str, reason: &'static str) -> 
     let cleaned = analysis_block_cleanup_regex()
         .replace_all(&cleaned, |caps: &Captures<'_>| {
             record_special_tokens(&caps[0], &mut stripped);
-            push_unique(&mut stripped, "analysis_envelope".to_string());
+            let item = match caps.name("name").map(|m| m.as_str()) {
+                Some(name) => format!("analysis_tool_call:functions.{name}"),
+                None => "analysis_envelope".to_string(),
+            };
+            push_unique(&mut stripped, item);
             ""
         })
         .into_owned();
@@ -393,8 +405,8 @@ pub async fn parse_tool_calls_harmony_complete(
 
             let Some(fname) = message
                 .recipient
-                .as_deref()
-                .and_then(|r| r.strip_prefix("functions."))
+                .as_ref()
+                .and_then(|r| r.split('.').nth(1))
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string())
             else {
