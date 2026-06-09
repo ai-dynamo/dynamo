@@ -157,13 +157,12 @@ where
         return;
     }
 
-    if let Some(data) = response.data.as_mut() {
-        if let Some(chat_response) =
+    if let Some(data) = response.data.as_mut()
+        && let Some(chat_response) =
             (data as &mut dyn Any).downcast_mut::<NvCreateChatCompletionStreamResponse>()
-        {
-            chat_response.llm_metrics = Some(metrics);
-            return;
-        }
+    {
+        chat_response.llm_metrics = Some(metrics);
+        return;
     }
 
     attach_metrics_annotation(response, &metrics);
