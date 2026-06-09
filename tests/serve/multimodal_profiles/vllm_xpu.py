@@ -3,6 +3,7 @@
 
 import pytest
 
+from tests.serve.common import WORKSPACE_DIR
 from tests.utils.multimodal import (
     MmCase,
     MultimodalModelProfile,
@@ -95,7 +96,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 delayed_start=60,
                 profiled_vram_gib=8.2,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
-                tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
+                tests=[MmCase(payload=make_video_payload(["red", "static", "still"]), env={"DYN_MM_LOCAL_PATH": WORKSPACE_DIR})],
             ),
             # Pre_merge gater for the lightseek MM-routing path. Fine-grained
             # assertions live in tests/mm_router/test_router_rust_mm_router_e2e.py
