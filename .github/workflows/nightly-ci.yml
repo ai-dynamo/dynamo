@@ -524,17 +524,22 @@ jobs:
         mkdir -p dd-junit
         cargo install cargo2junit --locked --quiet || true
         [ -f rust-test-results.json ] && cargo2junit < rust-test-results.json > dd-junit/rust-test-results.junit.xml || true
+    - name: Install datadog-ci
+      if: always()
+      continue-on-error: true
+      uses: DataDog/install-datadog-ci-github-action@501e9d922bf506902d2ecc2c830b0f4471760396  # v1.0.6
+      with:
+        version: v5.18.0
     - name: Upload Rust test results to Datadog
       if: always()
       continue-on-error: true
-      uses: datadog/junit-upload-github-action@7eb5fe4f8eca717d66542cd89a2f8538ac02082c  # v3.4.0
-      with:
-        api_key: ${{ secrets.DD_API_KEY }}
-        service: dynamo-rust
-        site: us3.datadoghq.com
-        env: ci
-        files: ${{ matrix.dir }}/dd-junit
-        tags: language:rust,suite:nightly-coverage
+      env:
+        DD_API_KEY: ${{ secrets.DD_API_KEY }}
+        DD_SITE: us3.datadoghq.com
+        DD_SERVICE: dynamo-rust
+        DD_ENV: ci
+        DD_TAGS: language:rust,suite:nightly-coverage
+      run: datadog-ci junit upload ${{ matrix.dir }}/dd-junit
     - name: Upload Rust Coverage Data
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       if: always()

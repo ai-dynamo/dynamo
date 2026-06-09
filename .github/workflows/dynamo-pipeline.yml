@@ -165,17 +165,22 @@ jobs:
             [ -f "$f" ] || continue
             cargo2junit < "$f" > "dd-junit/${f%.json}.junit.xml" || true
           done
+      - name: Install datadog-ci
+        if: always()
+        continue-on-error: true
+        uses: DataDog/install-datadog-ci-github-action@501e9d922bf506902d2ecc2c830b0f4471760396  # v1.0.6
+        with:
+          version: v5.18.0
       - name: Upload Rust test results to Datadog
         if: always()
         continue-on-error: true
-        uses: datadog/junit-upload-github-action@7eb5fe4f8eca717d66542cd89a2f8538ac02082c  # v3.4.0
-        with:
-          api_key: ${{ secrets.DD_API_KEY }}
-          service: dynamo-rust
-          site: us3.datadoghq.com
-          env: ci
-          files: lib/llm/dd-junit
-          tags: language:rust,suite:rust-gpu
+        env:
+          DD_API_KEY: ${{ secrets.DD_API_KEY }}
+          DD_SITE: us3.datadoghq.com
+          DD_SERVICE: dynamo-rust
+          DD_ENV: ci
+          DD_TAGS: language:rust,suite:rust-gpu
+        run: datadog-ci junit upload lib/llm/dd-junit
 
   mypy:
     needs: image
