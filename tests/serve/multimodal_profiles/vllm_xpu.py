@@ -57,6 +57,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
     MultimodalModelProfile(
         name="Qwen/Qwen3-VL-2B-Instruct",
         short_name="qwen3-vl-2b",
+        gpu_marker="xpu_1",
         topologies={
             "agg": TopologyConfig(
                 marks=[pytest.mark.post_merge, pytest.mark.xpu_1],
@@ -117,7 +118,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 timeout_s=400,
                 profiled_vram_gib=18.7,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
-                env={"NUM_WORKERS": 2},
+                env={"NUM_WORKERS": "2"},
                 tests=[MmCase(payload=make_image_payload_cached_tokens(["green"]))],
             ),
             # The chat-processor variant of the MM-aware router: same routing
@@ -134,7 +135,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 timeout_s=400,
                 profiled_vram_gib=18.7,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
-                env={"NUM_WORKERS": 2},
+                env={"NUM_WORKERS": "2"},
                 tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
             # Frontend-decode variant: same `agg_multimodal_router.sh` as
@@ -152,7 +153,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 profiled_vram_gib=18.7,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
                 env={
-                    "NUM_WORKERS": 2,
+                    "NUM_WORKERS": "2",
                     "VLLM_EXTRA_ARGS": "--frontend-decoding",
                 },
                 tests=[MmCase(payload=make_image_payload(["green"]))],
@@ -178,7 +179,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 gpu_marker="xpu_2",
                 profiled_vram_gib=19.0,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
-                env={"NUM_WORKERS": 2},
+                env={"NUM_WORKERS": "2"},
                 tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
         },
@@ -193,7 +194,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 gpu_marker="xpu_2",
                 profiled_vram_gib=16.0,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
-                env={"NUM_WORKERS": 2},
+                env={"NUM_WORKERS": "2"},
                 tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
         },
@@ -213,7 +214,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 gpu_marker="xpu_2",
                 profiled_vram_gib=22.0,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
-                env={"NUM_WORKERS": 2},
+                env={"NUM_WORKERS": "2"},
                 # cached_tokens-asserting payload proves MM-aware routing
                 # engaged (2nd identical request hits the warm worker's KV
                 # cache); a silent regression to text-prefix-only routing
