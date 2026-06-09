@@ -1,0 +1,110 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Dynamo aggregated serving with frontend-decoding ON, embedding cache OFF.
+# The Rust frontend decodes base64 images and sends post-ViT embeddings to
+# the worker, offloading ViT encoder work from the GPU decode path.
+#
+# Per-config flag diff vs vllm-serve:
+#   --enable-multimodal        : MM request handling
+#   --frontend-decoding        : frontend decodes images, worker receives embeddings
+#   --mm-processor-cache-gb 60 : same across all configs (fair comparison)
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen35-122b-dynamo-fd
+  labels:
+    app.kubernetes.io/name: qwen3.5-122b-a10b
+    app.kubernetes.io/component: dynamo-fd
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  pvcs:
+    - create: false
+      name: shared-model-cache
+  services:
+    Frontend:
+      componentType: frontend
+      envs:
+        - name: HF_HOME
+          value: /home/dynamo/.cache/huggingface
+        - name: DYN_REQUEST_PLANE
+          value: tcp
+        - name: DYN_HTTP_BODY_LIMIT_MB
+          value: "200"
+      extraPodSpec:
+        nodeSelector: ${HW_NODE_SELECTOR}
+        tolerations: ${HW_TOLERATIONS}
+        mainContainer:
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+      replicas: 1
+      resources:
+        requests:
+          cpu: "4"
+          memory: 16Gi
+        limits:
+          cpu: "8"
+          memory: 32Gi
+      subComponentType: null
+
+    VllmWorker:
+      componentType: worker
+      extraPodSpec:
+        nodeSelector: ${HW_NODE_SELECTOR}
+        tolerations: ${HW_TOLERATIONS}
+        mainContainer:
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              ulimit -l unlimited
+              python3 -m dynamo.vllm \
+                --model "${MODEL_NAME}" \
+                --enable-multimodal \
+                --frontend-decoding \
+                --tensor-parallel-size 2 \
+                --quantization fp8 \
+                --gpu-memory-utilization 0.9 \
+                --max-model-len 65537 \
+                --max-num-batched-tokens 32768 \
+                --max-num-seqs 50 \
+                --mm-processor-cache-gb 60 \
+                --mm-encoder-tp-mode data \
+                --enable-prefix-caching \
+                --enable-expert-parallel \
+                --dyn-tool-call-parser qwen3_coder \
+                --dyn-reasoning-parser qwen3 \
+                --limit-mm-per-prompt '{"image": 5, "video": 0}' \
+                --no-enable-log-requests
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MODEL_NAME
+              value: "Qwen/Qwen3.5-122B-A10B"
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: DYN_REQUEST_PLANE
+              value: tcp
+            - name: DYN_MM_ALLOW_INTERNAL
+              value: "1"
+          workingDir: /workspace
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_RESOURCE
+      replicas: 1
+      resources:
+        limits:
+          gpu: "2"
+        requests:
+          gpu: "2"
+      subComponentType: null
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /home/dynamo/.cache/huggingface
