@@ -50,6 +50,11 @@ pub struct BucketedRateCounter {
     epoch_start: Instant,
     bucket_duration: Duration,
     num_buckets: usize,
+    /// Absolute bucket index of the most recent recorded arrival, or `u64::MAX` if none recorded
+    /// since creation/clear. Read by [`Self::has_recent_arrival`] for a rotation-safe "any arrival
+    /// in the window" check — unlike [`Self::count`], it never transiently reads 0 while a bucket
+    /// is mid-rotation, so it cannot drop a just-recorded short-lived arrival.
+    last_arrival_bucket: AtomicU64,
 }
 
 // All fields (Vec<AtomicU64>, Instant, Duration, usize) are Sync, so Sync is
@@ -79,6 +84,7 @@ impl BucketedRateCounter {
             epoch_start: now,
             bucket_duration,
             num_buckets,
+            last_arrival_bucket: AtomicU64::new(u64::MAX),
         }
     }
 
@@ -103,6 +109,13 @@ impl BucketedRateCounter {
         let elapsed = now.duration_since(self.epoch_start);
         let global_bucket = (elapsed.as_nanos() / self.bucket_duration.as_nanos()) as u64;
         let index = (global_bucket as usize) % self.num_buckets;
+
+        // Record the latest-arrival bucket for the rotation-safe recent-arrival check. A rare stale
+        // record (an out-of-order older `now`) may store a slightly smaller value, but it is still
+        // within ~1 bucket of the true latest and far inside the window, so retain_known's decision
+        // is unaffected.
+        self.last_arrival_bucket
+            .store(global_bucket, Ordering::Relaxed);
 
         loop {
             let current_epoch = self.epochs[index].load(Ordering::Acquire);
@@ -162,11 +175,31 @@ impl BucketedRateCounter {
         total
     }
 
+    /// Whether any arrival was recorded within the sliding window ending at `now`.
+    ///
+    /// Rotation-safe single-atomic read (no per-bucket scan): checks the most-recent-arrival
+    /// bucket against the window, so unlike [`Self::count`] it cannot transiently miss an arrival
+    /// while a bucket is mid-rotation. Used by `retain_known` to avoid pruning a short-lived
+    /// new-adapter's load signal during the bucket-rotation window.
+    pub fn has_recent_arrival(&self, now: Instant) -> bool {
+        let last = self.last_arrival_bucket.load(Ordering::Relaxed);
+        if last == u64::MAX {
+            return false; // nothing recorded since creation/clear
+        }
+        let elapsed = now.duration_since(self.epoch_start);
+        let global_bucket = (elapsed.as_nanos() / self.bucket_duration.as_nanos()) as u64;
+        // saturating_sub handles a last bucket slightly ahead of `global_bucket` (treated as just
+        // now → recent); a last bucket older than the window yields a difference >= num_buckets.
+        global_bucket.saturating_sub(last) < self.num_buckets as u64
+    }
+
     pub fn clear(&self) {
         for i in 0..self.num_buckets {
             self.buckets[i].store(0, Ordering::Release);
             self.epochs[i].store(0, Ordering::Release);
         }
+        // No arrivals remain in the window after a clear.
+        self.last_arrival_bucket.store(u64::MAX, Ordering::Release);
     }
 }
 
@@ -333,14 +366,17 @@ impl LoadEstimator {
         // additionally protects a SHORT request for a newly seen adapter that already completed
         // (active_count back to 0) before discovery reported the adapter: its arrival history must
         // survive at least one rate window so the controller still sees the load signal and can
-        // allocate for it, instead of pruning the demand the instant the request finishes. Once
-        // the window slides past with no further arrivals (count == 0) and the name is still
-        // unknown, it is pruned, so memory stays bounded against unknown/typo request names.
+        // allocate for it, instead of pruning the demand the instant the request finishes. The
+        // recent-arrival check uses the rotation-safe `has_recent_arrival` (a single-atomic
+        // last-arrival-bucket read), NOT `count`, so a bucket mid-rotation cannot transiently read
+        // zero and drop the very signal this protects. Once the window slides past with no further
+        // arrivals and the name is still unknown, it is pruned, so memory stays bounded against
+        // unknown/typo request names.
         let now = Instant::now();
         self.data.retain(|name, data| {
             known.contains(name.as_str())
                 || data.active_count.load(Ordering::Relaxed) > 0
-                || data.rate_counter.count(now) > 0
+                || data.rate_counter.has_recent_arrival(now)
         });
         self.predictors
             .lock()
