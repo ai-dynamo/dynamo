@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Generic, TypeVar
 
 from .constants import (
-    READY_FOR_CHECKPOINT_FILE,
+    READY_FOR_SNAPSHOT_FILE,
     RESTORE_COMPLETE_FILE,
     SNAPSHOT_COMPLETE_FILE,
     SNAPSHOT_CONTROL_DIR_ENV,
@@ -30,7 +30,7 @@ class CheckpointConfig:
 
     def __init__(self, control_dir: str):
         self.control_dir = control_dir
-        self.ready_file = os.path.join(control_dir, READY_FOR_CHECKPOINT_FILE)
+        self.ready_file = os.path.join(control_dir, READY_FOR_SNAPSHOT_FILE)
 
     @classmethod
     def from_env(cls) -> "CheckpointConfig | None":
@@ -85,7 +85,7 @@ class CheckpointConfig:
 
     def _cleanup_ready_and_sentinels(self) -> None:
         for name in (
-            READY_FOR_CHECKPOINT_FILE,
+            READY_FOR_SNAPSHOT_FILE,
             SNAPSHOT_COMPLETE_FILE,
             RESTORE_COMPLETE_FILE,
         ):

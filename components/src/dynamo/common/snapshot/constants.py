@@ -4,24 +4,22 @@
 """Constants shared by Dynamo snapshot helpers."""
 
 KUBERNETES_REQUIRED_ENV_NAMES = {
-    "DYN_NAMESPACE": "dyn_namespace",
-    "DYN_COMPONENT": "dyn_component",
-    "DYN_PARENT_DGD_K8S_NAME": "dyn_parent_dgd_k8s_name",
-    "DYN_PARENT_DGD_K8S_NAMESPACE": "dyn_parent_dgd_k8s_namespace",
+    "DYN_NAMESPACE",
+    "DYN_COMPONENT",
+    "DYN_PARENT_DGD_K8S_NAME",
+    "DYN_PARENT_DGD_K8S_NAMESPACE",
 }
-KUBERNETES_OPTIONAL_ENV_NAMES = {
-    "DYN_NAMESPACE_WORKER_SUFFIX": "dyn_namespace_worker_suffix",
-}
+KUBERNETES_OPTIONAL_ENV_NAMES = {"DYN_NAMESPACE_WORKER_SUFFIX"}
 SNAPSHOT_CONTROL_DIR_ENV = "DYN_SNAPSHOT_CONTROL_DIR"
 SNAPSHOT_CONTROL_DIR = "/snapshot-control"
 SNAPSHOT_RESTORE_CONTEXT_FILE = "restore-context.json"
 SNAPSHOT_RESTORE_PLACEHOLDER_ENV = "DYN_SNAPSHOT_RESTORE_PLACEHOLDER"
 
 # Must match snapshotprotocol.{SnapshotCompleteFile,RestoreCompleteFile,
-# ReadyForCheckpointFile}.
+# ReadyForSnapshotFile}.
 SNAPSHOT_COMPLETE_FILE = "snapshot-complete"
 RESTORE_COMPLETE_FILE = "restore-complete"
-READY_FOR_CHECKPOINT_FILE = "ready-for-checkpoint"
+READY_FOR_SNAPSHOT_FILE = "ready-for-snapshot"
 
 RESTORE_RUNTIME_ENV_NAMES = {
     # Parsed Python runtime config that must also refresh the in-memory config
