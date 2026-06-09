@@ -9,7 +9,6 @@ use std::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use validator::{Validate, ValidationError};
 
-use crate::protocols::tensor;
 use dynamo_kv_router::protocols::KvTransferEnforcement;
 
 /// Re-export from parsers crate so that `ModelRuntimeConfig` can use it
@@ -59,28 +58,14 @@ pub struct DisaggregatedEndpoint {
 /// Runtime-resolved metadata published by a worker after its engine starts.
 ///
 /// NOTE: This type is intended for facts that can only be known authoritatively at
-/// runtime, such as effective engine limits, capacity, data-parallel placement, and
-/// resolved service endpoints. Declarative model, frontend, routing, and deployment
-/// policy should live in dedicated metadata instead of accumulating here.
-///
-/// TODO(metadata ownership): Refine this boundary without changing behavior until the
-/// corresponding producers and consumers can migrate together.
-///
-/// - Move `ModelDeploymentCard::context_length` here as the effective engine serving
-///   limit. Preserve any static architectural maximum separately in model metadata.
-/// - Move and rename `ModelDeploymentCard::kv_cache_block_size` to
-///   `kv_event_block_size`. This is the router/KV-event hashing granularity, not
-///   necessarily the engine's physical KV block size; preserve the current fallback
-///   value of 16 during the migration.
-/// - Move frontend policy out: tool/reasoning parsers, structural-tag settings, and
-///   tool filtering behavior.
-/// - Move worker identity and placement metadata out: local-indexer availability,
-///   taints, stable routing identity, topology domains, and KV-transfer policy.
-/// - Move tensor model configuration to model metadata and speculative-decoding
-///   capability to engine metadata.
-/// - Audit `runtime_data` and retain only extensions that are genuinely resolved at
-///   runtime.
+/// runtime, such as the effective engine context limit, capacity, data-parallel
+/// placement, and resolved service endpoints. Some legacy fields do not yet follow
+/// this ownership boundary; avoid adding declarative model metadata here.
 pub struct ModelRuntimeConfig {
+    /// Effective context limit enforced by the running engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u32>,
+
     pub total_kv_blocks: Option<u64>,
 
     pub max_num_seqs: Option<u64>,
@@ -122,16 +107,6 @@ pub struct ModelRuntimeConfig {
     /// Mapping of engine-specific runtime configs
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub runtime_data: HashMap<String, serde_json::Value>,
-
-    // Provide tensor model config in the case where the model type is Tensor.
-    // Currently use JSON object for convinence, the programmatic way is to
-    // define the model config struct as part of the tensor protocol and
-    // import it here.
-    // [gluo TODO] switch to ModelConfig if desired and workout a way to
-    // prepare it in a convinent way, the protobuf library used by tonic
-    // doesn't provide JSON parsing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tensor_model_config: Option<tensor::TensorModelConfig>,
 
     /// Bootstrap endpoint for disaggregated serving (prefill workers publish this)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -204,6 +179,7 @@ const fn default_eagle() -> bool {
 impl Default for ModelRuntimeConfig {
     fn default() -> Self {
         Self {
+            context_length: None,
             total_kv_blocks: None,
             max_num_seqs: None,
             max_num_batched_tokens: None,
@@ -217,7 +193,6 @@ impl Default for ModelRuntimeConfig {
             data_parallel_size: default_data_parallel_size(),
             enable_local_indexer: true,
             runtime_data: HashMap::new(),
-            tensor_model_config: None,
             disaggregated_endpoint: None,
             enable_eagle: false,
             taints: HashSet::new(),
@@ -501,6 +476,7 @@ mod tests {
         let cfg = ModelRuntimeConfig::default();
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(!json.contains("stable_routing_id"));
+        assert!(!json.contains("context_length"));
     }
 
     #[test]

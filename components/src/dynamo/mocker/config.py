@@ -347,6 +347,8 @@ def build_runtime_config(
     engine_args: MockEngineArgs,
 ) -> tuple[int, ModelRuntimeConfig]:
     rc = ModelRuntimeConfig()
+    # Mocker does not enforce a model context limit.
+    rc.context_length = 0
     rc.total_kv_blocks = engine_args.num_gpu_blocks
     rc.max_num_seqs = engine_args.max_num_seqs
     if rc.max_num_seqs is None:

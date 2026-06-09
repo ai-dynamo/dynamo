@@ -2280,7 +2280,7 @@ async fn list_models_openai(
     let cards = state.manager().get_model_cards();
     let card_map: HashMap<String, u32> = cards
         .iter()
-        .map(|c| (c.display_name.clone(), c.context_length))
+        .map(|c| (c.display_name.clone(), c.effective_context_length()))
         .collect();
 
     // Env var overrides (take precedence over MDC values)
@@ -2439,7 +2439,7 @@ async fn get_model_openai(
     let context_length = cards
         .iter()
         .find(|c| c.display_name == model_id)
-        .map(|c| c.context_length as u64);
+        .map(|c| c.effective_context_length() as u64);
     let context_window: Option<u64> = std::env::var("DYN_CONTEXT_WINDOW")
         .ok()
         .and_then(|v| v.parse().ok())

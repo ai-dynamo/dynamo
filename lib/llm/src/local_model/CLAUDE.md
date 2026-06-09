@@ -1,8 +1,10 @@
 # Local Model Metadata
 
 `ModelRuntimeConfig` is intended for facts resolved authoritatively after an
-engine starts, such as effective limits, capacity, data-parallel placement, and
-resolved service endpoints.
+engine starts. `context_length` is the effective limit enforced by the running
+engine; the static model maximum belongs in
+`ModelDeploymentCard::architectural_max_context_length`. Tensor model
+configuration is model metadata and belongs at the top level of the card.
 
 Some existing fields do not yet follow this ownership boundary. In particular,
 declarative model, frontend, routing, worker-placement, and deployment policy

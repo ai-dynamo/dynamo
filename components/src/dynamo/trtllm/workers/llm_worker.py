@@ -520,6 +520,7 @@ async def init_llm_worker(
         # So for now, we just set the parsers from the config
         # TODO: fix this once we have a better way to get total_kv_blocks
         runtime_config = ModelRuntimeConfig()
+        runtime_config.context_length = config.max_seq_len
 
         # Set values from config that are available immediately
         # Note: We populate max_num_seqs and max_num_batched_tokens from config
@@ -703,7 +704,6 @@ async def init_llm_worker(
             endpoint,
             config.model,
             config.served_model_name,
-            context_length=config.max_seq_len,
             kv_cache_block_size=config.kv_block_size,
             runtime_config=runtime_config,
             custom_template_path=config.custom_jinja_template,
