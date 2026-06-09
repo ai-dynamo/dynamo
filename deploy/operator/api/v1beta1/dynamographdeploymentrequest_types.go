@@ -431,6 +431,16 @@ type HardwareSpec struct {
 
 // DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
 // Only the Model field is required; all other fields are optional and have sensible defaults.
+// ThoroughSpec configures options for the THOROUGH search strategy.
+type ThoroughSpec struct {
+	// PrefilterTopN, when set, uses AIC to score enumerated candidates offline
+	// and benchmarks only the top-N per side (prefill and decode).
+	// Omit or set to null to benchmark every candidate (unchanged behavior).
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	PrefilterTopN *int32 `json:"prefilterTopN,omitempty"`
+}
+
 type DynamoGraphDeploymentRequestSpec struct {
 	// Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").
 	// Can be a HuggingFace ID or a private model name.
@@ -482,6 +492,11 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// +kubebuilder:default=rapid
 	// +kubebuilder:validation:Enum=rapid;thorough
 	SearchStrategy SearchStrategy `json:"searchStrategy,omitempty"`
+
+	// Thorough configures options for the THOROUGH search strategy.
+	// Only applies when SearchStrategy is "thorough".
+	// +optional
+	Thorough *ThoroughSpec `json:"thorough,omitempty"`
 
 	// AutoApply indicates whether to automatically create a DynamoGraphDeployment
 	// after profiling completes. If false, the generated spec is stored in status

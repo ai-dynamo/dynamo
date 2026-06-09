@@ -443,12 +443,12 @@ async def run_thorough(
         prefill_candidates = prefilter_prefill_candidates(
             prefill_candidates, prefilter_top_n,
             model=local_or_hf_model, system=system, backend=backend,
-            isl=isl, osl=osl,
+            total_gpus=total_gpus, isl=isl, osl=osl,
         )
         decode_candidates = prefilter_decode_candidates(
             decode_candidates, prefilter_top_n,
             model=local_or_hf_model, system=system, backend=backend,
-            isl=isl, osl=osl,
+            total_gpus=total_gpus, isl=isl, osl=osl,
         )
         logger.info(
             "After AIC prefilter: %d prefill candidates, %d decode candidates",
