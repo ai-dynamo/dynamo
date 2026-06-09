@@ -172,7 +172,8 @@ COMMON_ENV=(
 
 # ZE_AFFINITY is expected to be provided by the caller. For multi-worker
 # launches, pass a comma-separated list (for example: 0,1).
-IFS=',' read -r -a ZE_AFFINITY_LIST <<< "${ZE_AFFINITY}"
+# Default to empty so the single-worker path doesn't error under set -euo pipefail.
+IFS=',' read -r -a ZE_AFFINITY_LIST <<< "${ZE_AFFINITY:-}"
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-18083}
 # Phase 1: launch all workers in parallel.
 # Under SINGLE_GPU=true, requires the KV-bytes cap (CI sets it via the

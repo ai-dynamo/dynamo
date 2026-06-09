@@ -133,7 +133,8 @@ GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 
 # ZE_AFFINITY is expected to be provided by the caller. For multi-worker
 # launches, pass a comma-separated list (for example: 0,1).
-IFS=',' read -r -a ZE_AFFINITY_LIST <<< "${ZE_AFFINITY}"
+# Default to empty so the single-worker path doesn't error under set -euo pipefail.
+IFS=',' read -r -a ZE_AFFINITY_LIST <<< "${ZE_AFFINITY:-}"
 # DYN_SYSTEM_PORT is expected to be provided by the caller. For multi-worker
 # launches, use numbered vars (for example: DYN_SYSTEM_PORT1=18081,
 # DYN_SYSTEM_PORT2=18083).
