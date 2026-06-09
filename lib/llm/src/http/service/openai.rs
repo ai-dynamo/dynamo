@@ -2384,7 +2384,7 @@ pub fn list_models_router(
     // segment, so it can't be its own axum route). Advertised for discovery.
     let doc_for_readiness = RouteDoc::new(
         axum::http::Method::GET,
-        format!("{}/{{model_id}}/readiness", openai_path),
+        format!("{}/{{model_id}}/ready", openai_path),
     );
 
     let router = Router::new()
@@ -2413,11 +2413,11 @@ async fn get_model_openai(
     let models: HashSet<String> = state.manager().model_display_names();
 
     // The retrieve route (`/v1/models/{*model_id}`) is a catch-all, so model
-    // IDs can contain '/' — and may even end in '/readiness'. We therefore
+    // IDs can contain '/' — and may even end in '/ready'. We therefore
     // dispatch by precedence: an *exact* model match always wins, and only when
-    // there is no such model do we treat a trailing `/readiness` as the
+    // there is no such model do we treat a trailing `/ready` as the
     // per-model readiness sub-resource (Mechanism 4). This means a model
-    // literally named `foo/readiness` is still retrievable and never shadowed.
+    // literally named `foo/ready` is still retrievable and never shadowed.
     if models.contains(model_id) {
         return get_model_retrieve(&state, model_id);
     }
@@ -2426,7 +2426,7 @@ async fn get_model_openai(
     // `get_model` — NOT `model_display_names()`, which filters to displayable
     // (ready) models. The whole point of this endpoint is to diagnose models
     // that are registered but not yet ready, so it must find them too.
-    if let Some(base) = model_id.strip_suffix("/readiness")
+    if let Some(base) = model_id.strip_suffix("/ready")
         && state.manager().get_model(base).is_some()
     {
         return get_model_readiness(&state, base);
@@ -2472,7 +2472,7 @@ fn get_model_retrieve(
     .into_response())
 }
 
-/// `GET /v1/models/{model}/readiness` — structured per-namespace topology
+/// `GET /v1/models/{model}/ready` — structured per-namespace topology
 /// readiness detail (Mechanism 4). Deliberately *not* topology-gated: it exists
 /// to diagnose models that are not yet ready, so it returns 200 with the full
 /// breakdown regardless of whether the model would be served.

@@ -69,7 +69,7 @@ pub struct NamespaceReadiness {
 }
 
 /// Structured topology readiness for a model across all its namespaces — the
-/// response body of `GET /v1/models/{model}/readiness`.
+/// response body of `GET /v1/models/{model}/ready`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelReadiness {
     pub model: String,
@@ -351,7 +351,7 @@ impl Model {
     }
 
     /// Structured per-namespace topology readiness for this model — the data
-    /// behind the `GET /v1/models/{model}/readiness` observability endpoint.
+    /// behind the `GET /v1/models/{model}/ready` observability endpoint.
     ///
     /// Reuses [`Self::is_workers_ready`] for each namespace's `ready` flag so
     /// the endpoint can never disagree with the gate, and decomposes the same
@@ -1392,7 +1392,7 @@ mod tests {
         );
     }
 
-    // -- namespace_topology() (GET /v1/models/{model}/readiness) --
+    // -- namespace_topology() (GET /v1/models/{model}/ready) --
 
     #[test]
     fn topology_pd_pair_ready() {

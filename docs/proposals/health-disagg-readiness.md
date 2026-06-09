@@ -12,7 +12,7 @@ This causes decode-only workers to receive aggregated requests and crash when th
 
 ## Proposed Solution: Worker-Declared Dependencies
 
-Each worker declares its **`worker_type`** and **dependencies** at registration time, derived from existing CLI flags (no new flags needed). The frontend builds a per-model dependency view and checks readiness. Readiness is surfaced through four mechanisms: `/v1/models` filtering (Mechanism 1) and per-model request gating with HTTP 503 + diagnostic body (Mechanism 2) — both in initial scope; per-namespace dispatch gating (Mechanism 3) and a `GET /v1/models/{model}/readiness` detail endpoint (Mechanism 4) — both deferred to follow-up PRs after Phase 4.
+Each worker declares its **`worker_type`** and **dependencies** at registration time, derived from existing CLI flags (no new flags needed). The frontend builds a per-model dependency view and checks readiness. Readiness is surfaced through four mechanisms: `/v1/models` filtering (Mechanism 1) and per-model request gating with HTTP 503 + diagnostic body (Mechanism 2) — both in initial scope; per-namespace dispatch gating (Mechanism 3) and a `GET /v1/models/{model}/ready` detail endpoint (Mechanism 4) — both deferred to follow-up PRs after Phase 4.
 
 ### Terminology
 
@@ -183,10 +183,10 @@ No protocol changes. No MDC schema changes. No CLI flag changes.
 
 ### Mechanism 4: Readiness detail endpoint (deferred to follow-up)
 
-A `GET /v1/models/{model}/readiness` endpoint exposes per-namespace topology detail for debugging, monitoring, and operator tooling. It supplements the 503 error body from Mechanism 2 (which is concise by design) with structured, queryable detail across all namespaces — including ones that are *not* the namespace dispatch would have admitted.
+A `GET /v1/models/{model}/ready` endpoint exposes per-namespace topology detail for debugging, monitoring, and operator tooling. It supplements the 503 error body from Mechanism 2 (which is concise by design) with structured, queryable detail across all namespaces — including ones that are *not* the namespace dispatch would have admitted.
 
 ```json
-GET /v1/models/llama-3.1-70b/readiness
+GET /v1/models/llama-3.1-70b/ready
 
 {
   "model": "llama-3.1-70b",
@@ -304,7 +304,7 @@ This section describes **end-state changes** — the state of the codebase after
 **Frontend request gating & readiness:**
 - `lib/llm/src/http/service/openai.rs` — Add a new `check_topology_ready(&State, &ModelName) -> Result<(), ErrorResponse>` that calls `Model::has_ready_workers()`. On failure, the 503 error body identifies the model and the missing-role condition (`ErrorMessage::service_unavailable_with_body`). Call it in every inference handler (chat, completions, embeddings, images, audio, videos, responses, Anthropic, per-model GET) immediately after the existing `check_ready()` guard (which [PR #8590](https://github.com/ai-dynamo/dynamo/pull/8590) activates for process readiness). Also extend `list_models_openai` to filter by readiness (unconditional).
 - **Dependency:** this work assumes [PR #8590](https://github.com/ai-dynamo/dynamo/pull/8590) has landed; `check_topology_ready()` **composes with** its `check_ready()`, does not replace it.
-- **Not in initial scope:** the `/v1/models/{model}/readiness` detail route (Mechanism 4) and per-namespace dispatch filtering (Mechanism 3) — both deferred to follow-up PRs.
+- **Not in initial scope:** the `/v1/models/{model}/ready` detail route (Mechanism 4) and per-namespace dispatch filtering (Mechanism 3) — both deferred to follow-up PRs.
 
 ## Implementation Phases
 
@@ -355,7 +355,7 @@ Sub-changes (1)–(3) share infrastructure and ship together. Splitting them wou
 
 Why this is the right shape: the pool replaces a per-request O(candidates) filter pass with a per-event O(candidates) recomputation. At production QPS with churn every few minutes, this is millions of redundant filter operations per second avoided. The unification with Mechanisms 1+2 means no parallel readiness state to drift.
 
-#### Step 3 — `/v1/models/{model}/readiness` endpoint (Mechanism 4)
+#### Step 3 — `/v1/models/{model}/ready` endpoint (Mechanism 4)
 
 Sits on top of Step 2. The endpoint reads the same per-namespace pool view Step 2 established, plus the underlying cards for the `missing_worker_types` diagnostic. Operator-facing structured topology detail for dashboards, cross-namespace visibility, and CI assertions. Scope is one new route, one accessor on `Model`, and no protocol changes.
 
@@ -496,7 +496,7 @@ again rejected loudly rather than silently treated as Aggregated.
 Both deferred to a separate execution track after PR 4. Scoped in [Addressing the cross-namespace dispatch gap](#addressing-the-cross-namespace-dispatch-gap-mechanism-3--4).
 
 - **Step 2 — Pool + dispatch + rewire** (production-blocking for any deployment with rolling updates / blue-green / multi-WorkerSet capacity expansion). Closes Mechanism 3 and unifies Mechanisms 1+2 onto the same pool.
-- **Step 3 — `/v1/models/{model}/readiness` endpoint** (Mechanism 4 — operator observability; sits on top of Step 2's pool view).
+- **Step 3 — `/v1/models/{model}/ready` endpoint** (Mechanism 4 — operator observability; sits on top of Step 2's pool view).
 
 ### PR dependencies
 
@@ -521,7 +521,7 @@ All Phase 1–4 PRs should land in Release X. **PR 5 (compat-layer removal) land
 6. **Bitflag `WorkerType` with `Aggregated = Prefill | Decode` alias** — Initial design. Lets readiness math be a single bitwise AND (`required & present == required`) and lets an E-PD deployment satisfy `Encode.needs = Prefill | Decode` "for free." Rejected in favor of an enum + DNF `needs` design because the bitflag alias conflates two distinct meanings (a worker's role vs a set of capabilities) and forces nonsensical encodings for "needs (P AND D) OR Aggregated." DNF expresses the disjunction explicitly and keeps `WorkerType` as a tagged role, not an arithmetic bag.
 7. **OR-valued `needs` via a sentinel `AnyOf(Prefill, Decode, Aggregated)`** — Would let Encode express "I need any consumer" more precisely than a flat list. Rejected as a special-case construct once DNF made the disjunction first-class.
 8. **Delaying `ModelType::Prefill` removal to a follow-up DEP** — Considered. Folded into Phase 3 (final removal in PR 4) to avoid a vestigial-code intermediate state where the Rust consumers have migrated but the enum variant still exists.
-9. **Dedicated `GET /v1/models/{model}/readiness` detail endpoint, in initial scope** — Considered. Moved to Mechanism 4 (deferred follow-up) to keep the initial DEP scope bounded. The 503 error body from Mechanism 2 carries enough diagnostic detail (missing-role names per affected namespace) for the common "why is my request failing?" question; dashboards, cross-namespace visibility, and CI assertion targets motivate the dedicated endpoint and justify a separate observability PR.
+9. **Dedicated `GET /v1/models/{model}/ready` detail endpoint, in initial scope** — Considered. Moved to Mechanism 4 (deferred follow-up) to keep the initial DEP scope bounded. The 503 error body from Mechanism 2 carries enough diagnostic detail (missing-role names per affected namespace) for the common "why is my request failing?" question; dashboards, cross-namespace visibility, and CI assertion targets motivate the dedicated endpoint and justify a separate observability PR.
 
 ## Open Questions
 
