@@ -493,13 +493,27 @@ impl Model {
     where
         F: Fn(&WorkerSet) -> Option<T>,
     {
+        // Precompute the set of topology-ready namespaces BEFORE iterating
+        // `worker_sets` below. `is_workers_ready` itself iterates `worker_sets`,
+        // so calling it from inside a `worker_sets.iter()` entry would re-enter
+        // the DashMap while holding a shard guard and can deadlock against a
+        // concurrent add/remove on the same shard. Computing membership up front
+        // (each `is_workers_ready` call runs after `distinct_namespaces_sorted`
+        // has released its guards) keeps the selection loop free of nested
+        // DashMap access.
+        let ready_namespaces: std::collections::HashSet<String> = self
+            .distinct_namespaces_sorted()
+            .into_iter()
+            .filter(|ns| self.is_workers_ready(ns))
+            .collect();
+
         // Fast path: single set (same zero-worker filtering as the multi-set path below)
         if self.worker_sets.len() == 1 {
             return self.worker_sets.iter().next().and_then(|entry| {
                 let ws = entry.value();
                 if ws.worker_count() == 0
                     || !ws.can_serve_requests()
-                    || !self.is_workers_ready(ws.namespace())
+                    || !ready_namespaces.contains(ws.namespace())
                 {
                     return None;
                 }
@@ -518,7 +532,9 @@ impl Model {
             .filter_map(|entry| {
                 let ws = entry.value();
                 let count = ws.worker_count();
-                if count == 0 || !ws.can_serve_requests() || !self.is_workers_ready(ws.namespace())
+                if count == 0
+                    || !ws.can_serve_requests()
+                    || !ready_namespaces.contains(ws.namespace())
                 {
                     return None;
                 }
