@@ -118,13 +118,6 @@ jobs:
           # include_bytes!; without lfs:true the checkout has 132-byte pointer files and
           # the image-decoder tests panic with "image format could not be determined".
           lfs: true
-      - name: Configure Datadog Test Visibility
-        continue-on-error: true
-        uses: datadog/test-visibility-github-action@4e7afb05b464fd349275e41e65a7f4de83e7f46b  # v2.10.0
-        with:
-          languages: rust
-          api_key: ${{ secrets.DD_API_KEY }}
-          site: us3.datadoghq.com
       - name: Select cargo target dir (prefer NVMe scratch)
         shell: bash
         run: |
@@ -147,16 +140,42 @@ jobs:
           SCCACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
           SCCACHE_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
         shell: bash
+        # set -o pipefail (default for GHA bash) keeps cargo's exit code as the gate
+        # even though stdout is piped to tee. RUSTC_BOOTSTRAP=1 unlocks libtest's
+        # unstable --format json on the stable toolchain. --lib --bins --tests excludes
+        # the lib/llm benches (harness = false) whose runners reject --format json.
         run: |
           /workspace/container/use-sccache.sh install
           eval $(/workspace/container/use-sccache.sh setup-env)
           rustup component add rustfmt clippy
           cargo fmt -- --check
           cargo clippy --features block-manager,media-ffmpeg,testing-nixl,integration --no-deps --all-targets -- -D warnings
-          cargo nextest run --locked --features=block-manager,media-ffmpeg,testing-nixl,integration
+          RUSTC_BOOTSTRAP=1 cargo test --locked --lib --bins --tests --features=block-manager,media-ffmpeg,testing-nixl,integration -- -Z unstable-options --format json --report-time | tee rust-test-main.json
           cargo clippy -p kvbm-physical --no-deps --all-targets -- -D warnings
-          cargo nextest run --locked -p kvbm-physical --features testing-kvbm -j 4
+          RUSTC_BOOTSTRAP=1 cargo test --locked -p kvbm-physical --features testing-kvbm -- -Z unstable-options --format json --report-time --test-threads=4 | tee rust-test-kvbm.json
           /workspace/container/use-sccache.sh show-stats "Rust Checks"
+      - name: Convert Rust test results to JUnit
+        if: always()
+        continue-on-error: true
+        working-directory: lib/llm
+        run: |
+          mkdir -p dd-junit
+          cargo install cargo2junit --locked --quiet || true
+          for f in rust-test-main.json rust-test-kvbm.json; do
+            [ -f "$f" ] || continue
+            cargo2junit < "$f" > "dd-junit/${f%.json}.junit.xml" || true
+          done
+      - name: Upload Rust test results to Datadog
+        if: always()
+        continue-on-error: true
+        uses: datadog/junit-upload-github-action@7eb5fe4f8eca717d66542cd89a2f8538ac02082c  # v3.4.0
+        with:
+          api_key: ${{ secrets.DD_API_KEY }}
+          service: dynamo-rust
+          site: us3.datadoghq.com
+          env: ci
+          files: lib/llm/dd-junit
+          tags: language:rust,suite:rust-gpu
 
   mypy:
     needs: image

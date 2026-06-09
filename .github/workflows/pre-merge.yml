@@ -165,13 +165,6 @@ jobs:
         restore-keys: ${{ runner.os }}-cargo-
     - name: Set up Rust Toolchain Components
       run: rustup component add rustfmt
-    - name: Configure Datadog Test Visibility
-      continue-on-error: true
-      uses: datadog/test-visibility-github-action@4e7afb05b464fd349275e41e65a7f4de83e7f46b  # v2.10.0
-      with:
-        languages: rust
-        api_key: ${{ secrets.DD_API_KEY }}
-        site: us3.datadoghq.com
     - name: Verify Code Formatting
       working-directory: ${{ matrix.dir }}
       run: cargo fmt -- --check
@@ -189,12 +182,42 @@ jobs:
       run: cargo doc --no-deps && cargo test --locked --doc
     - name: Run Unit Tests
       working-directory: ${{ matrix.dir }}
-      # NOTE: cargo nextest does not run doc tests; those are covered by the step above.
-      run: cargo nextest run --locked
+      # --lib --bins --tests runs every libtest unit/integration test (doc tests run
+      # above). Benches/examples are intentionally excluded: their custom (harness = false)
+      # runners reject libtest's --format json. RUSTC_BOOTSTRAP=1 unlocks the unstable
+      # libtest JSON output on the stable toolchain; pipefail keeps cargo's exit code as
+      # the gate while tee streams the JSON to a file for JUnit conversion.
+      run: |
+        set -o pipefail
+        RUSTC_BOOTSTRAP=1 cargo test --locked --lib --bins --tests -- -Z unstable-options --format json --report-time | tee rust-test-results.json
     - name: Run KVBM offload Mooncake trace test
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
-      run: cargo nextest run --locked -p dynamo-bench --test mooncake_trace --features mocker-kvbm-offload
+      run: |
+        set -o pipefail
+        RUSTC_BOOTSTRAP=1 cargo test --locked -p dynamo-bench --test mooncake_trace --features mocker-kvbm-offload -- -Z unstable-options --format json --report-time | tee rust-test-mooncake.json
+    - name: Convert Rust test results to JUnit
+      if: always()
+      continue-on-error: true
+      working-directory: ${{ matrix.dir }}
+      run: |
+        mkdir -p dd-junit
+        cargo install cargo2junit --locked --quiet || true
+        for f in rust-test-results.json rust-test-mooncake.json; do
+          [ -f "$f" ] || continue
+          cargo2junit < "$f" > "dd-junit/${f%.json}.junit.xml" || true
+        done
+    - name: Upload Rust test results to Datadog
+      if: always()
+      continue-on-error: true
+      uses: datadog/junit-upload-github-action@7eb5fe4f8eca717d66542cd89a2f8538ac02082c  # v3.4.0
+      with:
+        api_key: ${{ secrets.DD_API_KEY }}
+        service: dynamo-rust
+        site: us3.datadoghq.com
+        env: ci
+        files: ${{ matrix.dir }}/dd-junit
+        tags: language:rust,suite:pre-merge
 
   rust-clippy:
     needs: changed-files
