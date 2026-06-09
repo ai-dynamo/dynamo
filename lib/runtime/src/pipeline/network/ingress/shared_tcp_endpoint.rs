@@ -58,15 +58,14 @@ const DEFAULT_DYNAMO_REQUEST_QUEUE_LIMIT: usize = 16;
 
 /// Resolved worker-pool / overflow-queue sizing for the TCP ingress.
 ///
-/// Single admission flow: `read_loop` front-acquires a worker-pool permit and
-/// dispatches directly when a worker is free, falls back to the bounded overflow
-/// queue, and returns an early 503 ("Server overloaded") when both are full —
-/// rather than parking in `reserve().await`. The knobs only change the *sizes*:
+/// `read_loop` front-acquires a worker-pool permit and dispatches directly when
+/// a worker is free, falls back to the bounded overflow queue, and returns 503
+/// ("Server overloaded") when both are full. The knobs set the *sizes*:
 ///
 /// * `DYN_ENGINE_REQUEST_LIMIT` set → pool = engine limit (N), queue = Q
-///   (default 16). Hard cap N+Q; rejection engages.
-/// * unset → large defaults (10000 / 40000): rejection effectively off at
-///   normal load, but a pinned worker still sheds fast (503) instead of hanging.
+///   (default 16). Hard cap N+Q.
+/// * unset → large defaults (10000 / 40000), so rejection only triggers under
+///   extreme saturation.
 struct SizingConfig {
     pool_size: usize,
     queue_size: usize,
@@ -106,7 +105,6 @@ impl ActiveTaskGuard {
     fn new() -> Self {
         WORK_HANDLER_POOL_ACTIVE_TASKS.inc();
         // `dynamo_engine_request`: requests currently in the engine.
-        // Driven from the same site as the back-compat active-tasks gauge.
         ENGINE_REQUEST_GAUGE.inc();
         Self
     }
