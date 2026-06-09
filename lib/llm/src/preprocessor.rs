@@ -427,12 +427,12 @@ impl OpenAIPreprocessor {
             }
         };
 
+        let context_length = mdc.effective_context_length();
+
         let media_loader = match mdc.media_decoder {
             Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
             None => None,
         };
-
-        let context_length = mdc.context_length;
 
         #[cfg(feature = "mm-routing")]
         let (image_token_counter, routing_image_token_id, bos_token_string) =

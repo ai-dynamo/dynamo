@@ -79,11 +79,12 @@ def _card(worker_type: str = "decode", **runtime_config_overrides) -> dict:
         "model_type": 2,  # Completions
         "worker_type": worker_type,
         "kv_cache_block_size": 16,
-        "context_length": 8192,
+        "architectural_max_context_length": 32768,
         "runtime_config": {
             "total_kv_blocks": 1024,
             "max_num_seqs": 256,
             "max_num_batched_tokens": 8192,
+            "context_length": 8192,
             **runtime_config_overrides,
         },
     }
@@ -173,7 +174,7 @@ class TestWorkerInfoFromMdc:
         assert info.total_kv_blocks is None
         # Non-runtime_config fields still populate
         assert info.kv_cache_block_size == 16
-        assert info.context_length == 8192
+        assert info.context_length == 32768
 
     def test_non_dict_runtime_config_treated_as_missing(self):
         card = _card()
@@ -183,13 +184,17 @@ class TestWorkerInfoFromMdc:
         assert info.max_num_batched_tokens is None
         assert info.total_kv_blocks is None
         assert info.max_num_seqs is None
+        assert info.context_length == 32768
+
+    def test_runtime_context_zero_does_not_fall_back(self):
+        entry = MdcEntry(card_json=_card(context_length=0))
+        info = worker_info_from_mdc(entry, SubComponentType.DECODE, backend="vllm")
+        assert info.context_length == 0
 
     def test_empty_card_json(self):
         entry = MdcEntry(card_json={})
         info = worker_info_from_mdc(entry, SubComponentType.DECODE, backend="vllm")
-        # Component/endpoint/k8s_name from defaults
         assert info.component_name == "backend"
-        # Runtime fields all None
         assert info.max_num_batched_tokens is None
         assert info.model_name is None
 

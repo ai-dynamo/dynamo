@@ -518,7 +518,7 @@ fn build_model_context_map(state: &service_v2::State) -> std::collections::HashM
         .manager()
         .get_model_cards()
         .iter()
-        .map(|c| (c.display_name.clone(), c.context_length))
+        .map(|c| (c.display_name.clone(), c.effective_context_length()))
         .collect()
 }
 

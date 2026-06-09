@@ -674,6 +674,7 @@ async def register_vllm_model(
             (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
+    runtime_config.context_length = vllm_config.model_config.max_model_len
 
     # Get runtime configuration from vLLM engine
     logging.info(
@@ -753,7 +754,6 @@ async def register_vllm_model(
         generate_endpoint,
         config.model,
         config.served_model_name,
-        context_length=vllm_config.model_config.max_model_len,
         kv_cache_block_size=runtime_values["kv_event_block_size"],
         runtime_config=runtime_config,
         custom_template_path=config.custom_jinja_template,
