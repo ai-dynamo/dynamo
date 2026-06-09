@@ -19,6 +19,7 @@ use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::entrypoint::{ChatEngineFactoryCallback, PrefillRoutedEngine};
+use dynamo_llm::frontend_config::{FrontendApiConfig, MetricsConfig};
 use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::make_mocker_engine;
@@ -444,11 +445,8 @@ pub(crate) struct EntrypointArgs {
     http_host: Option<String>,
     http_port: u16,
     http_metrics_port: Option<u16>,
-    metrics_prefix: Option<String>,
-    enable_anthropic_api: bool,
-    strip_anthropic_preamble: bool,
-    enable_streaming_tool_dispatch: bool,
-    enable_streaming_reasoning_dispatch: bool,
+    metrics_config: MetricsConfig,
+    frontend_api_config: FrontendApiConfig,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     extra_engine_args: Option<PathBuf>,
@@ -541,11 +539,13 @@ impl EntrypointArgs {
             http_host,
             http_port: http_port.unwrap_or(DEFAULT_HTTP_PORT),
             http_metrics_port,
-            metrics_prefix,
-            enable_anthropic_api,
-            strip_anthropic_preamble,
-            enable_streaming_tool_dispatch,
-            enable_streaming_reasoning_dispatch,
+            metrics_config: MetricsConfig::new(metrics_prefix),
+            frontend_api_config: FrontendApiConfig::from_flags(
+                enable_anthropic_api,
+                strip_anthropic_preamble,
+                enable_streaming_tool_dispatch,
+                enable_streaming_reasoning_dispatch,
+            ),
             tls_cert_path,
             tls_key_path,
             extra_engine_args,
@@ -595,11 +595,8 @@ pub fn make_engine<'p>(
         .http_host(args.http_host.clone())
         .http_port(args.http_port)
         .http_metrics_port(args.http_metrics_port)
-        .metrics_prefix(args.metrics_prefix.clone())
-        .enable_anthropic_api(args.enable_anthropic_api)
-        .strip_anthropic_preamble(args.strip_anthropic_preamble)
-        .enable_streaming_tool_dispatch(args.enable_streaming_tool_dispatch)
-        .enable_streaming_reasoning_dispatch(args.enable_streaming_reasoning_dispatch)
+        .metrics_config(args.metrics_config.clone())
+        .frontend_api_config(args.frontend_api_config.clone())
         .tls_cert_path(args.tls_cert_path.clone())
         .tls_key_path(args.tls_key_path.clone())
         .is_mocker(matches!(args.engine_type, EngineType::Mocker))

@@ -7,10 +7,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use dynamo_runtime::component::Endpoint;
-use dynamo_runtime::config::{
-    env_is_truthy,
-    environment_names::llm::{self as env_llm, metrics as env_metrics},
-};
 use dynamo_runtime::discovery::DiscoveryInstance;
 use dynamo_runtime::discovery::DiscoverySpec;
 use dynamo_runtime::protocols::EndpointId;
@@ -20,6 +16,7 @@ use modelexpress_common::providers::{HuggingFaceProvider, ModelProviderTrait as 
 
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
+use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
 use crate::model_card::{ModelDeploymentCard, is_weight_file};
 use crate::model_type::{ModelInput, ModelType};
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
@@ -53,10 +50,6 @@ fn env_self_host_metadata_default() -> bool {
     }
 }
 
-fn env_metrics_prefix_default() -> Option<String> {
-    std::env::var(env_metrics::DYN_METRICS_PREFIX).ok()
-}
-
 pub struct LocalModelBuilder {
     model_path: Option<PathBuf>,
     source_path: Option<PathBuf>,
@@ -69,11 +62,8 @@ pub struct LocalModelBuilder {
     http_host: Option<String>,
     http_port: u16,
     http_metrics_port: Option<u16>,
-    metrics_prefix: Option<String>,
-    enable_anthropic_api: bool,
-    strip_anthropic_preamble: bool,
-    enable_streaming_tool_dispatch: bool,
-    enable_streaming_reasoning_dispatch: bool,
+    metrics_config: MetricsConfig,
+    frontend_api_config: FrontendApiConfig,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     migration_limit: u32,
@@ -97,15 +87,8 @@ impl Default for LocalModelBuilder {
             http_host: Default::default(),
             http_port: DEFAULT_HTTP_PORT,
             http_metrics_port: None,
-            metrics_prefix: env_metrics_prefix_default(),
-            enable_anthropic_api: env_is_truthy(env_llm::DYN_ENABLE_ANTHROPIC_API),
-            strip_anthropic_preamble: env_is_truthy(env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE),
-            enable_streaming_tool_dispatch: env_is_truthy(
-                env_llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
-            ),
-            enable_streaming_reasoning_dispatch: env_is_truthy(
-                env_llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
-            ),
+            metrics_config: Default::default(),
+            frontend_api_config: Default::default(),
             tls_cert_path: Default::default(),
             tls_key_path: Default::default(),
             model_path: Default::default(),
@@ -183,27 +166,45 @@ impl LocalModelBuilder {
     }
 
     pub fn metrics_prefix(&mut self, prefix: Option<String>) -> &mut Self {
-        self.metrics_prefix = prefix;
+        self.metrics_config.set_prefix(prefix);
+        self
+    }
+
+    pub fn metrics_config(&mut self, metrics_config: MetricsConfig) -> &mut Self {
+        self.metrics_config = metrics_config;
+        self
+    }
+
+    pub fn frontend_api_config(&mut self, frontend_api_config: FrontendApiConfig) -> &mut Self {
+        self.frontend_api_config = frontend_api_config;
         self
     }
 
     pub fn enable_anthropic_api(&mut self, enabled: bool) -> &mut Self {
-        self.enable_anthropic_api = enabled;
+        self.frontend_api_config
+            .anthropic_mut()
+            .set_enabled(enabled);
         self
     }
 
     pub fn strip_anthropic_preamble(&mut self, enabled: bool) -> &mut Self {
-        self.strip_anthropic_preamble = enabled;
+        self.frontend_api_config
+            .anthropic_mut()
+            .set_strip_preamble(enabled);
         self
     }
 
     pub fn enable_streaming_tool_dispatch(&mut self, enabled: bool) -> &mut Self {
-        self.enable_streaming_tool_dispatch = enabled;
+        self.frontend_api_config
+            .streaming_dispatch_mut()
+            .set_tool_dispatch(enabled);
         self
     }
 
     pub fn enable_streaming_reasoning_dispatch(&mut self, enabled: bool) -> &mut Self {
-        self.enable_streaming_reasoning_dispatch = enabled;
+        self.frontend_api_config
+            .streaming_dispatch_mut()
+            .set_reasoning_dispatch(enabled);
         self
     }
 
@@ -342,11 +343,8 @@ impl LocalModelBuilder {
                 http_host: self.http_host.take(),
                 http_port: self.http_port,
                 http_metrics_port: self.http_metrics_port,
-                metrics_prefix: self.metrics_prefix.take(),
-                enable_anthropic_api: self.enable_anthropic_api,
-                strip_anthropic_preamble: self.strip_anthropic_preamble,
-                enable_streaming_tool_dispatch: self.enable_streaming_tool_dispatch,
-                enable_streaming_reasoning_dispatch: self.enable_streaming_reasoning_dispatch,
+                metrics_config: self.metrics_config.clone(),
+                frontend_api_config: self.frontend_api_config.clone(),
                 tls_cert_path: self.tls_cert_path.take(),
                 tls_key_path: self.tls_key_path.take(),
                 router_config: self.router_config.take().unwrap_or_default(),
@@ -404,11 +402,8 @@ impl LocalModelBuilder {
             http_host: self.http_host.take(),
             http_port: self.http_port,
             http_metrics_port: self.http_metrics_port,
-            metrics_prefix: self.metrics_prefix.take(),
-            enable_anthropic_api: self.enable_anthropic_api,
-            strip_anthropic_preamble: self.strip_anthropic_preamble,
-            enable_streaming_tool_dispatch: self.enable_streaming_tool_dispatch,
-            enable_streaming_reasoning_dispatch: self.enable_streaming_reasoning_dispatch,
+            metrics_config: self.metrics_config.clone(),
+            frontend_api_config: self.frontend_api_config.clone(),
             tls_cert_path: self.tls_cert_path.take(),
             tls_key_path: self.tls_key_path.take(),
             router_config: self.router_config.take().unwrap_or_default(),
@@ -432,11 +427,8 @@ pub struct LocalModel {
     http_host: Option<String>,
     http_port: u16,
     http_metrics_port: Option<u16>,
-    metrics_prefix: Option<String>,
-    enable_anthropic_api: bool,
-    strip_anthropic_preamble: bool,
-    enable_streaming_tool_dispatch: bool,
-    enable_streaming_reasoning_dispatch: bool,
+    metrics_config: MetricsConfig,
+    frontend_api_config: FrontendApiConfig,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     router_config: RouterConfig,
@@ -497,23 +489,35 @@ impl LocalModel {
     }
 
     pub fn metrics_prefix(&self) -> Option<String> {
-        self.metrics_prefix.clone()
+        self.metrics_config.prefix()
+    }
+
+    pub fn metrics_config(&self) -> &MetricsConfig {
+        &self.metrics_config
+    }
+
+    pub fn frontend_api_config(&self) -> &FrontendApiConfig {
+        &self.frontend_api_config
     }
 
     pub fn enable_anthropic_api(&self) -> bool {
-        self.enable_anthropic_api
+        self.frontend_api_config.anthropic().enabled()
     }
 
     pub fn strip_anthropic_preamble(&self) -> bool {
-        self.strip_anthropic_preamble
+        self.frontend_api_config.anthropic().strip_preamble()
     }
 
     pub fn enable_streaming_tool_dispatch(&self) -> bool {
-        self.enable_streaming_tool_dispatch
+        self.frontend_api_config
+            .streaming_dispatch()
+            .tool_dispatch()
     }
 
     pub fn enable_streaming_reasoning_dispatch(&self) -> bool {
-        self.enable_streaming_reasoning_dispatch
+        self.frontend_api_config
+            .streaming_dispatch()
+            .reasoning_dispatch()
     }
 
     pub fn tls_cert_path(&self) -> Option<&Path> {

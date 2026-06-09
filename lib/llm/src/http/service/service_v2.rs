@@ -25,8 +25,7 @@ use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
-use dynamo_runtime::config::env_is_truthy;
-use dynamo_runtime::config::environment_names::llm::{self as env_llm, metrics as env_metrics};
+use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::discovery::Discovery;
 use dynamo_runtime::logging::{make_inference_request_span, make_system_request_span};
 use dynamo_runtime::metrics::{
@@ -39,6 +38,8 @@ use std::net::SocketAddr;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
+
+use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
 
 /// Middleware that echoes `x-request-id` from request to response headers.
 async fn echo_request_id_header(
@@ -60,18 +61,17 @@ pub struct State {
     discovery_client: Arc<dyn Discovery>,
     flags: StateFlags,
     cancel_token: CancellationToken,
-    enable_anthropic_api: bool,
-    strip_anthropic_preamble: bool,
-    enable_streaming_tool_dispatch: bool,
-    enable_streaming_reasoning_dispatch: bool,
+    // Frontend API behavior read by request handlers after the service is built.
+    frontend_api_config: FrontendApiConfig,
 }
 
+/// Typed config needed only to construct HTTP shared state.
+///
+/// `MetricsConfig` initializes the per-service metrics object, while
+/// `FrontendApiConfig` is retained in `State` for route and handler decisions.
 struct StateConfig {
-    metrics_prefix: Option<String>,
-    enable_anthropic_api: bool,
-    strip_anthropic_preamble: bool,
-    enable_streaming_tool_dispatch: bool,
-    enable_streaming_reasoning_dispatch: bool,
+    metrics_config: MetricsConfig,
+    frontend_api_config: FrontendApiConfig,
 }
 
 #[derive(Default, Debug)]
@@ -146,7 +146,7 @@ impl State {
     ) -> Self {
         Self {
             manager,
-            metrics: Arc::new(Metrics::new_with_prefix(config.metrics_prefix)),
+            metrics: Arc::new(Metrics::new_with_prefix(config.metrics_config.prefix())),
             discovery_client,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
@@ -160,10 +160,7 @@ impl State {
                 anthropic_endpoints_enabled: AtomicBool::new(false),
             },
             cancel_token,
-            enable_anthropic_api: config.enable_anthropic_api,
-            strip_anthropic_preamble: config.strip_anthropic_preamble,
-            enable_streaming_tool_dispatch: config.enable_streaming_tool_dispatch,
-            enable_streaming_reasoning_dispatch: config.enable_streaming_reasoning_dispatch,
+            frontend_api_config: config.frontend_api_config,
         }
     }
 
@@ -201,12 +198,12 @@ impl State {
 
     /// Returns true if Anthropic billing preamble stripping is enabled.
     pub fn strip_anthropic_preamble_enabled(&self) -> bool {
-        self.strip_anthropic_preamble
+        self.frontend_api_config.anthropic().strip_preamble()
     }
 
     /// Returns true if the Anthropic Messages API is enabled by service config.
     pub fn anthropic_api_enabled(&self) -> bool {
-        self.enable_anthropic_api
+        self.frontend_api_config.anthropic().enabled()
     }
 
     /// Returns true if streaming tool call dispatch is enabled.
@@ -215,7 +212,9 @@ impl State {
     /// SSE events for each complete tool call, letting clients start processing tool calls
     /// before `finish_reason="tool_calls"` arrives.
     pub fn streaming_tool_dispatch_enabled(&self) -> bool {
-        self.enable_streaming_tool_dispatch
+        self.frontend_api_config
+            .streaming_dispatch()
+            .tool_dispatch()
     }
 
     /// Returns true if streaming reasoning dispatch is enabled.
@@ -224,7 +223,9 @@ impl State {
     /// emits a single `event: reasoning_dispatch` SSE event with the complete reasoning
     /// block once thinking ends (DeepSeek-R1, Qwen3, etc.).
     pub fn streaming_reasoning_dispatch_enabled(&self) -> bool {
-        self.enable_streaming_reasoning_dispatch
+        self.frontend_api_config
+            .streaming_dispatch()
+            .reasoning_dispatch()
     }
 }
 
@@ -260,8 +261,9 @@ pub struct HttpServiceConfig {
     #[builder(default = "None")]
     tls_key_path: Option<PathBuf>,
 
-    #[builder(default = "std::env::var(env_metrics::DYN_METRICS_PREFIX).ok()")]
-    metrics_prefix: Option<String>,
+    /// Metrics naming config used when initializing the HTTP service metrics registry.
+    #[builder(default)]
+    metrics_config: MetricsConfig,
 
     // #[builder(default)]
     // custom: Vec<axum::Router>
@@ -277,17 +279,9 @@ pub struct HttpServiceConfig {
     #[builder(default = "true")]
     enable_responses_endpoints: bool,
 
-    #[builder(default = "env_is_truthy(env_llm::DYN_ENABLE_ANTHROPIC_API)")]
-    enable_anthropic_endpoints: bool,
-
-    #[builder(default = "env_is_truthy(env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE)")]
-    strip_anthropic_preamble: bool,
-
-    #[builder(default = "env_is_truthy(env_llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH)")]
-    enable_streaming_tool_dispatch: bool,
-
-    #[builder(default = "env_is_truthy(env_llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH)")]
-    enable_streaming_reasoning_dispatch: bool,
+    /// API behavior config retained in HTTP state for route and streaming decisions.
+    #[builder(default)]
+    frontend_api_config: FrontendApiConfig,
 
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
@@ -532,6 +526,9 @@ static HTTP_SVC_ANTHROPIC_PATH_ENV: &str = "DYN_HTTP_SVC_ANTHROPIC_PATH";
 impl HttpServiceConfigBuilder {
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
         let config: HttpServiceConfig = self.build_internal()?;
+        let metrics_config = config.metrics_config.clone();
+        let frontend_api_config = config.frontend_api_config.clone();
+        let anthropic_endpoints_enabled = frontend_api_config.anthropic().enabled();
 
         let model_manager = Arc::new(ModelManager::new());
         let cancel_token = config.cancel_token.unwrap_or_default();
@@ -549,11 +546,8 @@ impl HttpServiceConfigBuilder {
             discovery_client,
             cancel_token,
             StateConfig {
-                metrics_prefix: config.metrics_prefix,
-                enable_anthropic_api: config.enable_anthropic_endpoints,
-                strip_anthropic_preamble: config.strip_anthropic_preamble,
-                enable_streaming_tool_dispatch: config.enable_streaming_tool_dispatch,
-                enable_streaming_reasoning_dispatch: config.enable_streaming_reasoning_dispatch,
+                metrics_config,
+                frontend_api_config,
             },
         ));
         state
@@ -570,7 +564,7 @@ impl HttpServiceConfigBuilder {
             .set(&EndpointType::Responses, config.enable_responses_endpoints);
         state.flags.set(
             &EndpointType::AnthropicMessages,
-            config.enable_anthropic_endpoints,
+            anthropic_endpoints_enabled,
         );
 
         // enable prometheus metrics
@@ -635,7 +629,7 @@ impl HttpServiceConfigBuilder {
                 var(HTTP_SVC_METRICS_PATH_ENV).ok(),
                 config.drt_metrics,
             ),
-            if config.enable_anthropic_endpoints {
+            if anthropic_endpoints_enabled {
                 super::anthropic::anthropic_models_router(
                     state.clone(),
                     var(HTTP_SVC_MODELS_PATH_ENV).ok(),
@@ -656,7 +650,7 @@ impl HttpServiceConfigBuilder {
         let endpoint_routes = HttpServiceConfigBuilder::get_endpoints_router(
             state.clone(),
             &config.request_template,
-            config.enable_anthropic_endpoints,
+            anthropic_endpoints_enabled,
         );
         let mut inference_router = axum::Router::new();
         for (route_docs, route) in endpoint_routes {
@@ -700,6 +694,43 @@ impl HttpServiceConfigBuilder {
 
     pub fn with_request_template(mut self, request_template: Option<RequestTemplate>) -> Self {
         self.request_template = Some(request_template);
+        self
+    }
+
+    pub fn metrics_prefix(mut self, prefix: Option<String>) -> Self {
+        self.metrics_config = Some(MetricsConfig::new(prefix));
+        self
+    }
+
+    pub fn enable_anthropic_endpoints(mut self, enabled: bool) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .anthropic_mut()
+            .set_enabled(enabled);
+        self
+    }
+
+    pub fn strip_anthropic_preamble(mut self, enabled: bool) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .anthropic_mut()
+            .set_strip_preamble(enabled);
+        self
+    }
+
+    pub fn enable_streaming_tool_dispatch(mut self, enabled: bool) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .streaming_dispatch_mut()
+            .set_tool_dispatch(enabled);
+        self
+    }
+
+    pub fn enable_streaming_reasoning_dispatch(mut self, enabled: bool) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .streaming_dispatch_mut()
+            .set_reasoning_dispatch(enabled);
         self
     }
 

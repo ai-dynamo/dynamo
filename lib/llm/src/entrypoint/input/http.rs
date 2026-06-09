@@ -55,11 +55,8 @@ pub async fn run(
     http_service_builder =
         http_service_builder.with_request_template(engine_config.local_model().request_template());
     http_service_builder = http_service_builder
-        .metrics_prefix(local_model.metrics_prefix())
-        .enable_anthropic_endpoints(local_model.enable_anthropic_api())
-        .strip_anthropic_preamble(local_model.strip_anthropic_preamble())
-        .enable_streaming_tool_dispatch(local_model.enable_streaming_tool_dispatch())
-        .enable_streaming_reasoning_dispatch(local_model.enable_streaming_reasoning_dispatch());
+        .metrics_config(local_model.metrics_config().clone())
+        .frontend_api_config(local_model.frontend_api_config().clone());
     // Inject the DRT's metrics registry so that component-scoped metrics
     // (e.g. KvIndexerMetrics) are exposed (default port 8000 if not overridden).
     http_service_builder =
