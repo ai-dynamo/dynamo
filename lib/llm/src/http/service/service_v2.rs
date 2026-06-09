@@ -66,6 +66,14 @@ pub struct State {
     enable_streaming_reasoning_dispatch: bool,
 }
 
+struct StateConfig {
+    metrics_prefix: Option<String>,
+    enable_anthropic_api: bool,
+    strip_anthropic_preamble: bool,
+    enable_streaming_tool_dispatch: bool,
+    enable_streaming_reasoning_dispatch: bool,
+}
+
 #[derive(Default, Debug)]
 struct StateFlags {
     chat_endpoints_enabled: AtomicBool,
@@ -130,19 +138,15 @@ impl StateFlags {
 }
 
 impl State {
-    pub fn new(
+    fn new(
         manager: Arc<ModelManager>,
         discovery_client: Arc<dyn Discovery>,
         cancel_token: CancellationToken,
-        metrics_prefix: Option<String>,
-        enable_anthropic_api: bool,
-        strip_anthropic_preamble: bool,
-        enable_streaming_tool_dispatch: bool,
-        enable_streaming_reasoning_dispatch: bool,
+        config: StateConfig,
     ) -> Self {
         Self {
             manager,
-            metrics: Arc::new(Metrics::new_with_prefix(metrics_prefix)),
+            metrics: Arc::new(Metrics::new_with_prefix(config.metrics_prefix)),
             discovery_client,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
@@ -156,10 +160,10 @@ impl State {
                 anthropic_endpoints_enabled: AtomicBool::new(false),
             },
             cancel_token,
-            enable_anthropic_api,
-            strip_anthropic_preamble,
-            enable_streaming_tool_dispatch,
-            enable_streaming_reasoning_dispatch,
+            enable_anthropic_api: config.enable_anthropic_api,
+            strip_anthropic_preamble: config.strip_anthropic_preamble,
+            enable_streaming_tool_dispatch: config.enable_streaming_tool_dispatch,
+            enable_streaming_reasoning_dispatch: config.enable_streaming_reasoning_dispatch,
         }
     }
 
@@ -544,11 +548,13 @@ impl HttpServiceConfigBuilder {
             model_manager,
             discovery_client,
             cancel_token,
-            config.metrics_prefix,
-            config.enable_anthropic_endpoints,
-            config.strip_anthropic_preamble,
-            config.enable_streaming_tool_dispatch,
-            config.enable_streaming_reasoning_dispatch,
+            StateConfig {
+                metrics_prefix: config.metrics_prefix,
+                enable_anthropic_api: config.enable_anthropic_endpoints,
+                strip_anthropic_preamble: config.strip_anthropic_preamble,
+                enable_streaming_tool_dispatch: config.enable_streaming_tool_dispatch,
+                enable_streaming_reasoning_dispatch: config.enable_streaming_reasoning_dispatch,
+            },
         ));
         state
             .flags
