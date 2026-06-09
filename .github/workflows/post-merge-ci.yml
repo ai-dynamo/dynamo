@@ -513,11 +513,87 @@ jobs:
   # IMAGE COMPLIANCE JOBS
   # ============================================================================
   #
-  # Compliance is now an inline step inside each <framework>-build job
-  # (see .github/actions/compliance-extract/action.yml, called from
-  # shared-build-image.yml's "Compliance extract + verify" step).
-  # The separate <framework>-compliance jobs that previously called
-  # shared-compliance.yml have been removed.
+  # Compliance extract + verify runs via shared-build-image.yml in
+  # compliance_only mode: a sibling <framework>-compliance job that
+  # needs:[<framework>-build] (warm registry cache) and runs in PARALLEL with
+  # the test jobs rather than serially in the build job. archive_sources is
+  # threaded through so release branches still emit the /sources.zip artifact
+  # from the compliance job.
+
+  vllm-compliance:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [vllm-build]
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: vllm
+      target: runtime
+      cuda_version: '["13.0"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-vllm-compliance
+      compliance_only: true
+      build_timeout_minutes: 60
+      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
+    secrets: inherit
+
+  sglang-compliance:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [sglang-build]
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: sglang
+      target: runtime
+      cuda_version: '["13.0"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-sglang-compliance
+      compliance_only: true
+      build_timeout_minutes: 60
+      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
+    secrets: inherit
+
+  trtllm-compliance:
+    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
+    needs: [trtllm-build]
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: trtllm
+      target: runtime
+      cuda_version: '["13.1"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-trtllm-compliance
+      compliance_only: true
+      build_timeout_minutes: 60
+      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
+    secrets: inherit
+
+  planner-compliance:
+    name: planner # This name overlaps with other planner jobs to group them in the UI
+    needs: [planner-build]
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: dynamo
+      target: planner
+      cuda_version: '[""]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-planner-compliance
+      compliance_only: true
+      build_timeout_minutes: 60
+      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
+    secrets: inherit
+
+  frontend-compliance:
+    name: frontend # This name overlaps with other frontend jobs to group them in the UI
+    needs: [frontend-build]
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: dynamo
+      target: frontend
+      cuda_version: '[""]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}-frontend-compliance
+      compliance_only: true
+      build_timeout_minutes: 60
+      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
+    secrets: inherit
 
   # ============================================================================
   # IMAGE COPY JOBS

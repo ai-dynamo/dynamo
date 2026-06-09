@@ -62,23 +62,28 @@ jobs:
       - vllm-dev-build
       - vllm-test
       - vllm-multi-gpu-test
+      - vllm-compliance
       - vllm-copy-to-acr
       - sglang-build
       - sglang-dev-build
       - sglang-test
       - sglang-multi-gpu-test
+      - sglang-compliance
       - sglang-copy-to-acr
       - trtllm-build
       - trtllm-dev-build
       - trtllm-test
       - trtllm-multi-gpu-test
+      - trtllm-compliance
       - trtllm-copy-to-acr
       - vllm-efa-build
       - sglang-efa-build
       - trtllm-efa-build
       - planner-build
       - planner-test
+      - planner-compliance
       - frontend-build
+      - frontend-compliance
       - frontend-copy-to-acr
     if: always()
     steps:
@@ -534,18 +539,93 @@ jobs:
   # IMAGE COMPLIANCE PIPELINES
   # ============================================================================
   #
-  # Compliance is now an inline step inside each <framework>-build job
-  # (see .github/actions/compliance-extract/action.yml, called from
-  # shared-build-image.yml's "Compliance extract + verify" step).
-  #
-  # Running inline reuses the warm BuildKit cache from the image build,
-  # so /legal/ + /sboms/ extraction is microseconds instead of pulling
-  # base images cold in a separate job. License-policy enforcement
-  # already happens IN the licenses Dockerfile stage during build —
-  # the build itself fails on policy violations.
-  #
-  # The separate <framework>-compliance jobs that previously called
-  # shared-compliance.yml have been removed.
+  # Compliance extract + verify runs via shared-build-image.yml in
+  # compliance_only mode: a sibling <framework>-compliance job that
+  # needs:[<framework>-build] (so the registry build cache is warm) and runs in
+  # PARALLEL with <framework>-test. The extract is ~10 min; keeping it OUT of
+  # the build job lets tests start at image push instead of waiting for it.
+  # License-policy enforcement happens IN the licenses Dockerfile stage, and the
+  # compliance job fails on policy/SBOM-diff violations. NOTE: these jobs do not
+  # yet preempt in-flight tests on failure (tracked follow-up).
+
+  vllm-compliance:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [changed-files, vllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: vllm
+      target: runtime
+      cuda_version: '["13.0"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      compliance_only: true
+      build_timeout_minutes: 45
+    secrets: inherit
+
+  sglang-compliance:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [changed-files, sglang-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: sglang
+      target: runtime
+      cuda_version: '["13.0"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      compliance_only: true
+      build_timeout_minutes: 45
+    secrets: inherit
+
+  trtllm-compliance:
+    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
+    needs: [changed-files, trtllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: trtllm
+      target: runtime
+      cuda_version: '["13.1"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      compliance_only: true
+      build_timeout_minutes: 45
+    secrets: inherit
+
+  planner-compliance:
+    name: planner # This name overlaps with other planner jobs to group them in the UI
+    needs: [changed-files, planner-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: dynamo
+      target: planner
+      cuda_version: '[""]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      compliance_only: true
+      build_timeout_minutes: 45
+    secrets: inherit
+
+  frontend-compliance:
+    name: frontend # This name overlaps with other frontend jobs to group them in the UI
+    needs: [changed-files, frontend-build]
+    if: |
+      needs.changed-files.outputs.frontend == 'true' ||
+      needs.changed-files.outputs.operator == 'true' ||
+      needs.changed-files.outputs.snapshot == 'true' ||
+      needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: dynamo
+      target: frontend
+      cuda_version: '[""]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      compliance_only: true
+      build_timeout_minutes: 45
+    secrets: inherit
 
   # ============================================================================
   # IMAGE COPY PIPELINES

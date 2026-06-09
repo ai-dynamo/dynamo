@@ -109,6 +109,16 @@ on:
         required: false
         type: string
         default: ''
+      compliance_only:
+        description: |
+          Run ONLY the compliance extract + verify (and artifact upload),
+          skipping the image build/push. Used to run compliance as a sibling
+          job in parallel with tests instead of serially in the build job —
+          the caller invokes this with needs:[<framework>-build] so the
+          registry build cache is already warm. Default false (build mode).
+        required: false
+        type: boolean
+        default: false
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -383,6 +393,7 @@ jobs:
         run: python3 .github/scripts/apply_dev_version.py "${{ inputs.dev_version_suffix }}" .
       - name: Build and Push Image
         id: build-image
+        if: ${{ !inputs.compliance_only }}
         uses: ./.github/actions/docker-remote-build
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.image_uri }}
@@ -403,12 +414,15 @@ jobs:
             EPP_IMAGE=${{ steps.build-epp-image.outputs.epp_image_uri || '' }}
             ENABLE_SOURCE_ARCHIVAL=${{ inputs.archive_sources }}
             ${{ inputs.extra_build_args }}
-      # Inline-compliance extraction: runs in the same job as the build, reusing
-      # the warm BuildKit cache. Both --target legal and --target sboms are
-      # FROM scratch so the export is microseconds. Skipped for dev / local-dev
+      # Compliance extract + verify. Runs ONLY in compliance_only mode — i.e. a
+      # sibling <framework>-compliance job that needs:[<framework>-build] and
+      # therefore runs in PARALLEL with the test jobs rather than serially in
+      # the build job (the extract takes ~10 min; keeping it off the build job
+      # lets tests start at image push). The needs: edge guarantees the
+      # registry build cache is already warm. Skipped for dev / local-dev
       # targets (those don't ship and don't go through OSRB).
       - name: Compliance extract + verify
-        if: ${{ inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.push_image == true }}
+        if: ${{ inputs.compliance_only && inputs.target != 'dev' && inputs.target != 'local-dev' }}
         uses: ./.github/actions/compliance-extract
         with:
           framework: ${{ inputs.framework }}
@@ -431,7 +445,7 @@ jobs:
           arch: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
       - name: Build and Push Test Image
-        if: ${{ inputs.target != 'dev' && inputs.target != 'frontend' }}
+        if: ${{ !inputs.compliance_only && inputs.target != 'dev' && inputs.target != 'frontend' }}
         shell: bash
         run: |
           PUSH_ARGS=""
