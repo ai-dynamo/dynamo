@@ -509,8 +509,12 @@ impl AggRuntime {
         _completed_requests: usize,
         output_signals: Vec<OutputSignal>,
         kv_events: Vec<RouterEvent>,
+        accept_length_output_tokens: usize,
+        accept_length_decode_forwards: usize,
     ) -> anyhow::Result<()> {
         self.apply_router_events(kv_events)?;
+        self.traffic
+            .on_accept_length_sample(accept_length_output_tokens, accept_length_decode_forwards);
         for signal in output_signals {
             self.process_output_signal(signal)?;
         }
@@ -528,6 +532,8 @@ impl AggRuntime {
                 payload.completed_requests,
                 payload.output_signals,
                 payload.kv_events,
+                payload.accept_length_output_tokens,
+                payload.accept_length_decode_forwards,
             )?;
             changed = true;
         }
@@ -585,6 +591,8 @@ impl AggRuntime {
                 payload.completed_requests,
                 payload.output_signals,
                 payload.kv_events,
+                payload.accept_length_output_tokens,
+                payload.accept_length_decode_forwards,
             )?;
         }
         for ScheduledWorkerCompletion { at_ms, payload } in effects.scheduled_completions {
@@ -655,6 +663,9 @@ impl AggRuntime {
             };
 
             if next_timestamp_ms > until_ms {
+                if until_ms > self.now_ms {
+                    self.now_ms = until_ms;
+                }
                 break;
             }
 
@@ -2156,6 +2167,34 @@ mod tests {
         rt.advance_to(expected_ready_ms).unwrap();
         assert_eq!(rt.active_worker_count(), 2); // now active
         assert_eq!(rt.total_worker_count(), 2);
+    }
+
+    #[test]
+    fn test_advance_to_moves_clock_across_idle_gap() {
+        let args = fast_router_args();
+        let requests = VecDeque::from([DirectRequest {
+            tokens: vec![1; 64],
+            max_output_tokens: 2,
+            uuid: Some(Uuid::from_u128(1)),
+            dp_rank: 0,
+            arrival_timestamp_ms: Some(1000.0),
+        }]);
+        let mut rt = AggRuntime::new(
+            &args,
+            None,
+            None,
+            requests,
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        rt.advance_to(500.0).unwrap();
+
+        assert_eq!(rt.now_ms(), 500.0);
+        let stats = rt.drain_traffic();
+        assert!((stats.duration_s - 0.5).abs() < 1e-9);
     }
 
     #[test]

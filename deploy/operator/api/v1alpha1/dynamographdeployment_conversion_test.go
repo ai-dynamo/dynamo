@@ -622,6 +622,7 @@ func TestDGD_RoundTrip_Experimental(t *testing.T) {
 							NumShadows: 1,
 						},
 						Checkpoint: &v1beta1.ComponentCheckpointConfig{
+							Enabled:             true,
 							Mode:                v1beta1.CheckpointModeAuto,
 							StartupPolicy:       v1beta1.CheckpointStartupPolicyWaitForCheckpoint,
 							DeletionPolicy:      v1beta1.CheckpointDeletionPolicyRetain,
@@ -823,9 +824,9 @@ func TestDGD_FromV1alpha1_PVCsPreserved(t *testing.T) {
 	}
 }
 
-// TestDGD_FromV1alpha1_DisabledExperimental verifies that v1alpha1
-// GMS/Failover/Checkpoint with Enabled=false and payloads survive the
-// round-trip via sparse spec preservation.
+// TestDGD_FromV1alpha1_DisabledExperimental verifies that v1alpha1 disabled
+// GMS/Failover payloads survive via sparse spec preservation, and disabled
+// Checkpoint survives via v1beta1 checkpoint.enabled=false.
 func TestDGD_FromV1alpha1_DisabledExperimental(t *testing.T) {
 	src := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "disabled", Namespace: "ns"},
@@ -1194,7 +1195,7 @@ func TestDGD_FromV1alpha1_ScalingAdapterDisabled(t *testing.T) {
 }
 
 // TestDGD_FromV1alpha1_CheckpointDisabled checks that Checkpoint{Enabled:false}
-// with a non-trivial payload survives via sparse spec preservation.
+// with a non-trivial payload round-trips via v1beta1 checkpoint.enabled=false.
 func TestDGD_FromV1alpha1_CheckpointDisabled(t *testing.T) {
 	ref := "my-ckpt"
 	src := &DynamoGraphDeployment{
@@ -1628,9 +1629,9 @@ func TestDGD_FromV1alpha1_FailoverEnabledFalseEmptyPayload(t *testing.T) {
 	}
 }
 
-// TestDGD_FromV1alpha1_CheckpointEnabledFalseEmptyPayload covers the same
-// "Enabled=false with zero-valued payload -> sparse save" branch for the
-// Checkpoint sibling in convertExperimentalTo.
+// TestDGD_FromV1alpha1_CheckpointEnabledFalseEmptyPayload verifies that
+// disabled checkpoint configs round-trip through v1beta1's explicit enabled
+// field.
 func TestDGD_FromV1alpha1_CheckpointEnabledFalseEmptyPayload(t *testing.T) {
 	src := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "ckpt-empty", Namespace: "ns"},
@@ -1648,9 +1649,9 @@ func TestDGD_FromV1alpha1_CheckpointEnabledFalseEmptyPayload(t *testing.T) {
 		t.Fatalf("ConvertTo: %v", err)
 	}
 	assertOnlyKnownDGDAnnotations(t, b.Annotations)
-	saved := mustRestoreDGDSpokeServiceSave(t, b, "worker")
-	if saved.Checkpoint == nil || saved.Checkpoint.Enabled {
-		t.Fatalf("expected disabled Checkpoint in sparse save, got %#v", saved.Checkpoint)
+	hub := b.GetComponentByName("worker")
+	if hub == nil || hub.Experimental == nil || hub.Experimental.Checkpoint == nil || hub.Experimental.Checkpoint.Enabled {
+		t.Fatalf("expected disabled Checkpoint in hub spec, got %#v", hub)
 	}
 
 	got := roundTripFromV1alpha1(t, src)

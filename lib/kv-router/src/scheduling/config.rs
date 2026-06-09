@@ -86,6 +86,89 @@ pub fn apply_deprecated_overlap_score_weight_override(
     }
 }
 
+/// Build a [`KvRouterConfig`] from defaults and standard Dynamo environment variables.
+pub fn kv_router_config_from_dynamo_env() -> KvRouterConfig {
+    let config = kv_router_config_from_lookup(|key| env::var(key).ok());
+    tracing::info!(
+        overlap_score_credit = config.overlap_score_credit,
+        prefill_load_scale = config.prefill_load_scale,
+        router_temperature = config.router_temperature,
+        use_kv_events = config.use_kv_events,
+        router_replica_sync = config.router_replica_sync,
+        router_track_active_blocks = config.router_track_active_blocks,
+        router_track_output_blocks = config.router_track_output_blocks,
+        router_track_prefill_tokens = config.router_track_prefill_tokens,
+        router_queue_threshold = ?config.router_queue_threshold,
+        router_predicted_ttl_secs = ?config.router_predicted_ttl_secs,
+        queue_depth_tiers_unbounded = config.router_queue_by_incoming_missing_isl.is_unbounded(),
+        "KvRouterConfig initialized (DYN_* env overrides applied)"
+    );
+    config
+}
+
+fn kv_router_config_from_lookup(get_env: impl Fn(&str) -> Option<String>) -> KvRouterConfig {
+    fn parse_f64(get_env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<f64> {
+        get_env(key).and_then(|value| value.parse().ok())
+    }
+
+    fn parse_bool(get_env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<bool> {
+        get_env(key).and_then(|value| match value.to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => Some(true),
+            "false" | "0" | "no" | "off" => Some(false),
+            _ => None,
+        })
+    }
+
+    let mut config = KvRouterConfig::default();
+
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT") {
+        config.overlap_score_credit = value;
+    }
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_PREFILL_LOAD_SCALE") {
+        config.prefill_load_scale = value;
+    }
+    for key in [
+        "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
+        "DYN_OVERLAP_SCORE_WEIGHT",
+    ] {
+        if let Some(value) = parse_f64(&get_env, key) {
+            tracing::warn!("{key} is deprecated; use DYN_ROUTER_PREFILL_LOAD_SCALE");
+            apply_deprecated_overlap_score_weight_override(
+                value,
+                &mut config.overlap_score_credit,
+                &mut config.prefill_load_scale,
+            );
+            break;
+        }
+    }
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_TEMPERATURE") {
+        config.router_temperature = value;
+    }
+    if let Some(value) = parse_bool(&get_env, "DYN_USE_KV_EVENTS") {
+        config.use_kv_events = value;
+    }
+    if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_REPLICA_SYNC") {
+        config.router_replica_sync = value;
+    }
+    if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_TRACK_ACTIVE_BLOCKS") {
+        config.router_track_active_blocks = value;
+    }
+    if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_TRACK_OUTPUT_BLOCKS") {
+        config.router_track_output_blocks = value;
+    }
+    if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_TRACK_PREFILL_TOKENS") {
+        config.router_track_prefill_tokens = value;
+    }
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_QUEUE_THRESHOLD") {
+        config.router_queue_threshold = Some(value);
+    }
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_PREDICTED_TTL_SECS") {
+        config.router_predicted_ttl_secs = Some(value);
+    }
+
+    config
+}
+
 fn apply_deprecated_overlap_score_weight_override_option(
     value: f64,
     overlap_score_credit: &mut Option<f64>,
@@ -841,6 +924,92 @@ impl KvRouterConfig {
 mod tests {
     use super::*;
     use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo};
+    use std::collections::HashMap;
+
+    fn config_from_values(values: &[(&str, &str)]) -> KvRouterConfig {
+        let values: HashMap<&str, &str> = values.iter().copied().collect();
+        kv_router_config_from_lookup(|key| values.get(key).map(|value| (*value).to_string()))
+    }
+
+    #[test]
+    fn dynamo_env_config_uses_defaults_when_unset() {
+        let config = config_from_values(&[]);
+        let default = KvRouterConfig::default();
+
+        assert_eq!(config.overlap_score_credit, default.overlap_score_credit);
+        assert_eq!(config.prefill_load_scale, default.prefill_load_scale);
+        assert_eq!(config.use_kv_events, default.use_kv_events);
+        assert_eq!(
+            config.router_predicted_ttl_secs,
+            default.router_predicted_ttl_secs
+        );
+    }
+
+    #[test]
+    fn dynamo_env_config_parses_canonical_settings() {
+        let config = config_from_values(&[
+            ("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "0.25"),
+            ("DYN_ROUTER_PREFILL_LOAD_SCALE", "2.5"),
+            ("DYN_ROUTER_TEMPERATURE", "0.7"),
+            ("DYN_USE_KV_EVENTS", "false"),
+            ("DYN_ROUTER_REPLICA_SYNC", "yes"),
+            ("DYN_ROUTER_TRACK_ACTIVE_BLOCKS", "0"),
+            ("DYN_ROUTER_TRACK_OUTPUT_BLOCKS", "on"),
+            ("DYN_ROUTER_TRACK_PREFILL_TOKENS", "false"),
+            ("DYN_ROUTER_QUEUE_THRESHOLD", "4.5"),
+        ]);
+
+        assert_eq!(config.overlap_score_credit, 0.25);
+        assert_eq!(config.prefill_load_scale, 2.5);
+        assert_eq!(config.router_temperature, 0.7);
+        assert!(!config.use_kv_events);
+        assert!(config.router_replica_sync);
+        assert!(!config.router_track_active_blocks);
+        assert!(config.router_track_output_blocks);
+        assert!(!config.router_track_prefill_tokens);
+        assert_eq!(config.router_queue_threshold, Some(4.5));
+
+        let predicted = config_from_values(&[("DYN_ROUTER_PREDICTED_TTL_SECS", "60")]);
+        assert_eq!(predicted.router_predicted_ttl_secs, Some(60.0));
+        assert!(predicted.validate_config().is_ok());
+    }
+
+    #[test]
+    fn dynamo_env_config_preserves_deprecated_alias_precedence() {
+        let config = config_from_values(&[
+            ("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "0.25"),
+            ("DYN_ROUTER_PREFILL_LOAD_SCALE", "2"),
+            ("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "3"),
+            ("DYN_OVERLAP_SCORE_WEIGHT", "4"),
+        ]);
+
+        assert_eq!(config.overlap_score_credit, 0.25);
+        assert_eq!(config.prefill_load_scale, 3.0);
+
+        let disabled = config_from_values(&[
+            ("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "0.75"),
+            ("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "0"),
+        ]);
+        assert_eq!(disabled.overlap_score_credit, 0.0);
+        assert_eq!(disabled.prefill_load_scale, 0.0);
+    }
+
+    #[test]
+    fn dynamo_env_config_ignores_unparseable_values_and_validates_ranges() {
+        let unparseable = config_from_values(&[
+            ("DYN_ROUTER_TEMPERATURE", "warm"),
+            ("DYN_ROUTER_TRACK_ACTIVE_BLOCKS", "sometimes"),
+        ]);
+        let default = KvRouterConfig::default();
+        assert_eq!(unparseable.router_temperature, default.router_temperature);
+        assert_eq!(
+            unparseable.router_track_active_blocks,
+            default.router_track_active_blocks
+        );
+
+        let out_of_range = config_from_values(&[("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "1.5")]);
+        assert!(out_of_range.validate_config().is_err());
+    }
 
     #[test]
     fn compute_seq_hashes_for_tracking_uses_mm_hashes() {

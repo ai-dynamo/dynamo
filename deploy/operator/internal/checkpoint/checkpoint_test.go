@@ -776,22 +776,20 @@ func TestResolveCheckpointForService(t *testing.T) {
 		}
 	})
 
-	t.Run("Manual mode without checkpointRef or identity errors", func(t *testing.T) {
-		c := fake.NewClientBuilder().WithScheme(s).Build()
-		_, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
-			Enabled: true,
-			Mode:    nvidiacomv1alpha1.CheckpointModeManual,
-		})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "Manual mode requires checkpointRef or identity")
-	})
-
-	t.Run("Auto mode without identity resolves enabled without error", func(t *testing.T) {
+	t.Run("deprecated Manual value without checkpointRef is ignored", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).Build()
 		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
 			Enabled: true,
-			Mode:    nvidiacomv1alpha1.CheckpointModeAuto,
+			Mode:    nvidiacomv1alpha1.CheckpointModeManual,
 		})
+		require.NoError(t, err)
+		assert.True(t, info.Enabled)
+		assert.False(t, info.Exists)
+	})
+
+	t.Run("config without ref or identity resolves enabled without error", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(s).Build()
+		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true})
 		require.NoError(t, err)
 		assert.True(t, info.Enabled)
 		assert.False(t, info.Exists)

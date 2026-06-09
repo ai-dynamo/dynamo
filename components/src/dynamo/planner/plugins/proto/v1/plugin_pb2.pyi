@@ -168,18 +168,20 @@ class ObservationData(_message.Message):
     def __init__(self, traffic: _Optional[_Union[TrafficMetrics, _Mapping]] = ..., fpm: _Optional[_Union[FpmData, _Mapping]] = ..., workers: _Optional[_Union[WorkerState, _Mapping]] = ...) -> None: ...
 
 class TrafficMetrics(_message.Message):
-    __slots__ = ("duration_s", "num_req", "isl", "osl", "kv_hit_rate")
+    __slots__ = ("duration_s", "num_req", "isl", "osl", "kv_hit_rate", "accept_length")
     DURATION_S_FIELD_NUMBER: _ClassVar[int]
     NUM_REQ_FIELD_NUMBER: _ClassVar[int]
     ISL_FIELD_NUMBER: _ClassVar[int]
     OSL_FIELD_NUMBER: _ClassVar[int]
     KV_HIT_RATE_FIELD_NUMBER: _ClassVar[int]
+    ACCEPT_LENGTH_FIELD_NUMBER: _ClassVar[int]
     duration_s: float
     num_req: float
     isl: float
     osl: float
     kv_hit_rate: float
-    def __init__(self, duration_s: _Optional[float] = ..., num_req: _Optional[float] = ..., isl: _Optional[float] = ..., osl: _Optional[float] = ..., kv_hit_rate: _Optional[float] = ...) -> None: ...
+    accept_length: float
+    def __init__(self, duration_s: _Optional[float] = ..., num_req: _Optional[float] = ..., isl: _Optional[float] = ..., osl: _Optional[float] = ..., kv_hit_rate: _Optional[float] = ..., accept_length: _Optional[float] = ...) -> None: ...
 
 class FpmData(_message.Message):
     __slots__ = ("prefill_engines", "decode_engines")
