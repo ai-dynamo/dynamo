@@ -154,6 +154,7 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
         args.bootstrap_ports_list
         or args.zmq_kv_events_ports_list
         or args.zmq_replay_ports_list
+        or base_engine_args.aic_nextn is not None
     )
 
     for worker_id in range(args.num_workers):
@@ -184,6 +185,11 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
                 zmq_replay_port=(
                     args.zmq_replay_ports_list[worker_id]
                     if args.zmq_replay_ports_list
+                    else None
+                ),
+                aic_mtp_seed=(
+                    (base_engine_args.aic_mtp_seed + worker_id) % (1 << 64)
+                    if base_engine_args.aic_nextn is not None
                     else None
                 ),
             )

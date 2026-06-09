@@ -4,8 +4,6 @@
 title: AKS Spot VMs
 ---
 
-# Running Dynamo on AKS Spot VMs
-
 [Azure Spot VMs](https://azure.microsoft.com/en-us/products/virtual-machines/spot) offer significant cost savings for GPU workloads but can be evicted by Azure at any time. This guide covers the configuration required to schedule Dynamo on Spot VM node pools.
 
 ## How AKS Taints Spot Nodes
