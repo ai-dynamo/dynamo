@@ -687,15 +687,15 @@ def test_lazy_traffic_pull_matches_dot_path_sub_paths_of_observations_traffic():
         "p_sibling", ["observations.traffic_legacy"]
     )
     sched = adapter._compute_next_scheduled_tick()
-    assert sched.need_traffic_metrics is False, (
-        "prefix match must not over-fire on sibling field 'observations.traffic_legacy'"
-    )
+    assert (
+        sched.need_traffic_metrics is False
+    ), "prefix match must not over-fire on sibling field 'observations.traffic_legacy'"
 
     # --- Case 4: completely unrelated needs must NOT match ---
     adapter._orchestrator._registry._plugins["p_other"] = _make_traffic_plugin(
         "p_other", ["observations.fpm", "predictions"]
     )
     sched = adapter._compute_next_scheduled_tick()
-    assert sched.need_traffic_metrics is False, (
-        "unrelated needs must not trigger the traffic pull"
-    )
+    assert (
+        sched.need_traffic_metrics is False
+    ), "unrelated needs must not trigger the traffic pull"

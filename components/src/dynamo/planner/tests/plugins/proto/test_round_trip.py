@@ -46,9 +46,9 @@ def test_class_coverage_pydantic_side():
     }
     registered = set(_PYD_TO_PROTO.keys())
     missing = pyd_classes - registered
-    assert not missing, (
-        f"Pydantic classes missing proto registration: {sorted(c.__name__ for c in missing)}"
-    )
+    assert (
+        not missing
+    ), f"Pydantic classes missing proto registration: {sorted(c.__name__ for c in missing)}"
 
 
 def test_class_coverage_proto_side():
@@ -245,9 +245,9 @@ def test_prediction_data_optional_unset_vs_zero():
     # Explicit 0.0 (rare but valid)
     p2 = pyd.PredictionData(predicted_num_req=0.0)
     pb2 = pydantic_to_proto(p2)
-    assert pb2.HasField("predicted_num_req"), (
-        "predicted_num_req=0.0 must round-trip as set"
-    )
+    assert pb2.HasField(
+        "predicted_num_req"
+    ), "predicted_num_req=0.0 must round-trip as set"
     assert pb2.predicted_num_req == 0.0
     assert not pb2.HasField("predicted_isl")  # still unset
 
