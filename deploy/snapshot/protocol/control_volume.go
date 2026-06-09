@@ -27,6 +27,22 @@ const (
 	// mount path to the workload.
 	SnapshotControlDirEnv = "DYN_SNAPSHOT_CONTROL_DIR"
 
+	// TorchC10dRendezvousFileEnv points PyTorch at the post-restore c10d
+	// rendezvous file in the snapshot-control volume.
+	TorchC10dRendezvousFileEnv = "TORCH_C10D_RENDEZVOUS_FILE"
+
+	// CudaCheckpointJobFileEnv points CUDA at the per-container job file
+	// used to coordinate multi-process CUDA IPC checkpoint metadata.
+	CudaCheckpointJobFileEnv = "CUDA_CHECKPOINT_JOB_FILE"
+
+	// TorchC10dRendezvousFile is written before restore-complete so restored
+	// processes can recreate TCPStore/Gloo state with fresh pod addresses.
+	TorchC10dRendezvousFile = "rendezvous.json"
+
+	// CudaCheckpointJobFile is created before CUDA initialization in the
+	// checkpoint source process and inherited by worker processes.
+	CudaCheckpointJobFile = "cuda-checkpoint-job-file"
+
 	// SnapshotCompleteFile is written by the snapshot agent inside the
 	// control volume when a checkpoint has completed successfully.
 	SnapshotCompleteFile = "snapshot-complete"
@@ -92,17 +108,36 @@ func EnsureControlVolume(podSpec *corev1.PodSpec, container *corev1.Container) {
 		})
 	}
 
-	hasEnv := false
+	hasControlEnv := false
+	hasRendezvousEnv := false
+	hasCudaJobFileEnv := false
 	for _, e := range container.Env {
 		if e.Name == SnapshotControlDirEnv {
-			hasEnv = true
-			break
+			hasControlEnv = true
+		}
+		if e.Name == TorchC10dRendezvousFileEnv {
+			hasRendezvousEnv = true
+		}
+		if e.Name == CudaCheckpointJobFileEnv {
+			hasCudaJobFileEnv = true
 		}
 	}
-	if !hasEnv {
+	if !hasControlEnv {
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  SnapshotControlDirEnv,
 			Value: SnapshotControlMountPath,
+		})
+	}
+	if !hasRendezvousEnv {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  TorchC10dRendezvousFileEnv,
+			Value: SnapshotControlMountPath + "/" + TorchC10dRendezvousFile,
+		})
+	}
+	if !hasCudaJobFileEnv {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  CudaCheckpointJobFileEnv,
+			Value: SnapshotControlMountPath + "/" + CudaCheckpointJobFile,
 		})
 	}
 }

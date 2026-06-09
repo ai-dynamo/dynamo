@@ -19,6 +19,8 @@ func main() {
 	checkpointPath := flag.String("checkpoint-path", "", "Path to checkpoint directory")
 	cudaDeviceMap := flag.String("cuda-device-map", "", "CUDA device map for cuda-checkpoint-helper restore")
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
+	restorePodUID := flag.String("restore-pod-uid", "", "Restore target pod UID for Kubernetes mount remapping")
+	restoreContainerName := flag.String("restore-container-name", "", "Restore target container name for Kubernetes mount remapping")
 	flag.Parse()
 
 	if *checkpointPath == "" {
@@ -26,9 +28,11 @@ func main() {
 	}
 
 	opts := executor.RestoreOptions{
-		CheckpointPath: *checkpointPath,
-		CUDADeviceMap:  *cudaDeviceMap,
-		CgroupRoot:     *cgroupRoot,
+		CheckpointPath:       *checkpointPath,
+		CUDADeviceMap:        *cudaDeviceMap,
+		CgroupRoot:           *cgroupRoot,
+		RestorePodUID:        *restorePodUID,
+		RestoreContainerName: *restoreContainerName,
 	}
 
 	result, err := executor.RestoreInNamespace(context.Background(), opts, log)

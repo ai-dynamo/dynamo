@@ -282,11 +282,9 @@ class InstrumentedScheduler(AsyncScheduler):
 
         base_port = int(os.environ.get(ENV_FPM_PORT, str(DEFAULT_FPM_PORT)))
         port = base_port + dp_rank
-        self._publisher = _FpmPublisherThread(
-            f"tcp://*:{port}",
-            worker_id=self._fpm_worker_id,
-            dp_rank=dp_rank,
-        )
+        self._fpm_endpoint = f"tcp://*:{port}"
+        self._publisher: _FpmPublisherThread | None = None
+        self._start_publisher()
 
         logger.info(
             "InstrumentedScheduler: ZMQ PUB bound on tcp://*:%d "
@@ -297,6 +295,28 @@ class InstrumentedScheduler(AsyncScheduler):
         )
 
         self._bench_init(vllm_config)
+
+    def _start_publisher(self) -> None:
+        if self._publisher is not None:
+            return
+        self._publisher = _FpmPublisherThread(
+            self._fpm_endpoint,
+            worker_id=self._fpm_worker_id,
+            dp_rank=self._fpm_dp_rank,
+        )
+
+    def snapshot_checkpoint_prepare(self) -> None:
+        publisher = self._publisher
+        if publisher is None:
+            return
+        logger.info("InstrumentedScheduler: closing ZMQ PUB for snapshot")
+        publisher.shutdown()
+        self._publisher = None
+
+    def snapshot_checkpoint_restore(self) -> None:
+        if self._publisher is None:
+            logger.info("InstrumentedScheduler: reopening ZMQ PUB after snapshot")
+            self._start_publisher()
 
     @staticmethod
     def _resolve_dp_rank(parallel_config) -> int:
@@ -389,7 +409,10 @@ class InstrumentedScheduler(AsyncScheduler):
                 len(self._bench_active_req_ids),
             )
             self._bench_cleanup_requests()
-        self._publisher.shutdown()
+        publisher = self._publisher
+        if publisher is not None:
+            publisher.shutdown()
+            self._publisher = None
         super().shutdown()
 
     def update_from_output(
@@ -414,7 +437,8 @@ class InstrumentedScheduler(AsyncScheduler):
             metrics = self._extract_metrics(
                 scheduler_output, self._compute_queued(), wall_time
             )
-            self._publisher.publish(metrics)
+            if self._publisher is not None:
+                self._publisher.publish(metrics)
 
             if self._bench_active:
                 self._bench_current_fpms.append(

@@ -47,7 +47,6 @@ func runCheckpoint(args []string) error {
 	kubeContext := flags.String("kube-context", "", "Kubernetes context override")
 	checkpointID := flags.String("checkpoint-id", "", "Explicit checkpoint ID; defaults to a generated value")
 	container := flags.String("container", "", "Required. Name of the workload container inside the manifest to checkpoint. May be omitted if the manifest already sets the nvidia.com/snapshot-target-containers annotation")
-	disableCudaCheckpointJobFile := flags.Bool("disable-cuda-checkpoint-job-file", false, "Preserve the manifest command instead of wrapping it with cuda-checkpoint --launch-job")
 	timeout := flags.Duration("timeout", 45*time.Minute, "Maximum time to wait for checkpoint completion")
 
 	if err := flags.Parse(args); err != nil {
@@ -62,13 +61,12 @@ func runCheckpoint(args []string) error {
 
 	snapshotctlLog.Info("Running checkpoint", "manifest", *manifest, "namespace", *namespace)
 	result, err := runCheckpointFlow(context.Background(), checkpointOptions{
-		ManifestPath:                 *manifest,
-		Namespace:                    *namespace,
-		KubeContext:                  *kubeContext,
-		CheckpointID:                 *checkpointID,
-		Container:                    *container,
-		DisableCudaCheckpointJobFile: *disableCudaCheckpointJobFile,
-		Timeout:                      *timeout,
+		ManifestPath: *manifest,
+		Namespace:    *namespace,
+		KubeContext:  *kubeContext,
+		CheckpointID: *checkpointID,
+		Container:    *container,
+		Timeout:      *timeout,
 	})
 	if err != nil {
 		return err

@@ -4,7 +4,7 @@
 //! IP resolution utilities for getting local IP addresses with fallback support
 
 use crate::pipeline::network::tcp::server::{DefaultIpResolver, IpResolver};
-use local_ip_address::Error;
+use local_ip_address::{Error, list_afinet_netifas};
 use std::net::IpAddr;
 
 fn resolve_local_ip_with_resolver<R: IpResolver>(resolver: R) -> IpAddr {
@@ -27,6 +27,81 @@ fn format_ip_for_url(addr: IpAddr) -> String {
         IpAddr::V6(_) => format!("[{}]", addr),
         IpAddr::V4(_) => addr.to_string(),
     }
+}
+
+fn parse_env_host_ip(host: &str) -> Option<IpAddr> {
+    let host = host.trim();
+    if host.is_empty() {
+        return None;
+    }
+    let host = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+    host.parse().ok()
+}
+
+fn current_interface_ips() -> Option<Vec<IpAddr>> {
+    match list_afinet_netifas() {
+        Ok(interfaces) => Some(interfaces.into_iter().map(|(_, ip)| ip).collect()),
+        Err(err) => {
+            tracing::warn!(
+                %err,
+                "Could not list local interfaces while validating RPC host env var"
+            );
+            None
+        }
+    }
+}
+
+fn select_rpc_host_from_value<F>(
+    env_var: &str,
+    configured_host: String,
+    local_ips: Option<&[IpAddr]>,
+    fallback: F,
+) -> String
+where
+    F: FnOnce() -> String,
+{
+    if configured_host.trim().is_empty() {
+        let resolved_host = fallback();
+        tracing::warn!(
+            env_var = %env_var,
+            resolved_host = %resolved_host,
+            "Ignoring empty RPC host env var"
+        );
+        return resolved_host;
+    }
+
+    let Some(configured_ip) = parse_env_host_ip(&configured_host) else {
+        return configured_host;
+    };
+
+    if let Some(local_ips) = local_ips {
+        if !local_ips.contains(&configured_ip) {
+            let resolved_host = fallback();
+            tracing::warn!(
+                env_var = %env_var,
+                configured_host = %configured_host,
+                resolved_host = %resolved_host,
+                "Ignoring RPC host env var because it is not assigned to this network namespace"
+            );
+            return resolved_host;
+        }
+    }
+
+    configured_host
+}
+
+fn get_rpc_host_from_env<F>(env_var: &str, fallback: F) -> String
+where
+    F: FnOnce() -> String,
+{
+    let Ok(configured_host) = std::env::var(env_var) else {
+        return fallback();
+    };
+    let local_ips = current_interface_ips();
+    select_rpc_host_from_value(env_var, configured_host, local_ips.as_deref(), fallback)
 }
 
 /// Get the local IP address for advertising endpoints, using IpResolver with fallback to 127.0.0.1
@@ -74,7 +149,7 @@ pub fn get_http_rpc_host() -> String {
 /// # Returns
 /// A string representation of the HTTP RPC host address
 pub fn get_http_rpc_host_from_env() -> String {
-    std::env::var("DYN_HTTP_RPC_HOST").unwrap_or_else(|_| get_http_rpc_host())
+    get_rpc_host_from_env("DYN_HTTP_RPC_HOST", get_http_rpc_host)
 }
 
 /// Get the TCP RPC host from environment variable or resolve local IP as fallback
@@ -85,7 +160,7 @@ pub fn get_http_rpc_host_from_env() -> String {
 /// # Returns
 /// A string representation of the TCP RPC host address
 pub fn get_tcp_rpc_host_from_env() -> String {
-    std::env::var("DYN_TCP_RPC_HOST").unwrap_or_else(|_| get_http_rpc_host())
+    get_rpc_host_from_env("DYN_TCP_RPC_HOST", get_http_rpc_host)
 }
 
 #[cfg(test)]
@@ -155,11 +230,11 @@ mod tests {
     fn test_get_http_rpc_host_from_env_with_env_var() {
         // Set environment variable
         unsafe {
-            std::env::set_var("DYN_HTTP_RPC_HOST", "10.0.0.1");
+            std::env::set_var("DYN_HTTP_RPC_HOST", "127.0.0.1");
         }
 
         let result = get_http_rpc_host_from_env();
-        assert_eq!(result, "10.0.0.1");
+        assert_eq!(result, "127.0.0.1");
 
         // Clean up
         unsafe {
@@ -206,5 +281,49 @@ mod tests {
         // IPv4 should NOT be bracketed
         assert!(!result.contains('['), "IPv4 should not contain '['");
         assert_eq!(result, "10.0.0.1");
+    }
+
+    #[test]
+    fn test_stale_rpc_host_env_ip_falls_back_to_resolved_ip() {
+        let result = select_rpc_host_from_value(
+            "DYN_TCP_RPC_HOST",
+            "10.0.0.1".to_string(),
+            Some(&[IpAddr::from([10, 0, 0, 2])]),
+            || "10.0.0.2".to_string(),
+        );
+        assert_eq!(result, "10.0.0.2");
+    }
+
+    #[test]
+    fn test_current_rpc_host_env_ip_is_used() {
+        let result = select_rpc_host_from_value(
+            "DYN_TCP_RPC_HOST",
+            "10.0.0.2".to_string(),
+            Some(&[IpAddr::from([10, 0, 0, 2])]),
+            || "10.0.0.3".to_string(),
+        );
+        assert_eq!(result, "10.0.0.2");
+    }
+
+    #[test]
+    fn test_rpc_host_env_hostname_is_used() {
+        let result = select_rpc_host_from_value(
+            "DYN_TCP_RPC_HOST",
+            "rank-0.default.svc.cluster.local".to_string(),
+            Some(&[IpAddr::from([10, 0, 0, 2])]),
+            || "10.0.0.2".to_string(),
+        );
+        assert_eq!(result, "rank-0.default.svc.cluster.local");
+    }
+
+    #[test]
+    fn test_stale_bracketed_ipv6_rpc_host_env_ip_falls_back_to_resolved_ip() {
+        let result = select_rpc_host_from_value(
+            "DYN_TCP_RPC_HOST",
+            "[fd00::1]".to_string(),
+            Some(&[IpAddr::from([0xfd00, 0, 0, 0, 0, 0, 0, 2])]),
+            || "[fd00::2]".to_string(),
+        );
+        assert_eq!(result, "[fd00::2]");
     }
 }

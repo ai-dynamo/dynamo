@@ -129,6 +129,49 @@ func TestNewRestorePod(t *testing.T) {
 	}
 }
 
+func TestNewRestorePodPreservesRendezvousMetadata(t *testing.T) {
+	restorePod, err := NewRestorePod(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "worker",
+			Annotations: map[string]string{
+				TargetContainersAnnotation: "main",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:    "main",
+				Command: []string{"python3", "-m", "dynamo.vllm"},
+				Args: []string{
+					"--model",
+					"Qwen",
+					"--master-addr=$(LWS_LEADER_ADDRESS)",
+					"--master-port",
+					"29517",
+				},
+			}},
+		},
+	}, PodOptions{
+		Namespace:       "test-ns",
+		CheckpointID:    "hash",
+		ArtifactVersion: "2",
+		SeccompProfile:  DefaultSeccompLocalhostProfile,
+	})
+	if err != nil {
+		t.Fatalf("NewRestorePod returned error: %v", err)
+	}
+
+	if restorePod.Annotations[RendezvousHostAnnotation] != "$(LWS_LEADER_ADDRESS)" {
+		t.Fatalf("expected rendezvous host annotation, got %#v", restorePod.Annotations)
+	}
+	if restorePod.Annotations[RendezvousPortAnnotation] != "29517" {
+		t.Fatalf("expected rendezvous port annotation, got %#v", restorePod.Annotations)
+	}
+	main := restorePod.Spec.Containers[0]
+	if len(main.Command) != 2 || main.Command[0] != "sleep" || main.Command[1] != "infinity" {
+		t.Fatalf("expected placeholder command, got %#v", main.Command)
+	}
+}
+
 func TestNewRestorePodShapesMultipleTargets(t *testing.T) {
 	restorePod, err := NewRestorePod(&corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{

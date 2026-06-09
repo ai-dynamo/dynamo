@@ -23,11 +23,12 @@ async def prepare_snapshot_engine(
         return None
 
     if config.headless:
-        raise ValueError(
-            "--headless is incompatible with checkpoint mode "
-            "(DYN_CHECKPOINT_SIGNAL_FILE is set). "
-            "Remove --headless or unset DYN_CHECKPOINT_SIGNAL_FILE."
+        logger.info(
+            "Checkpoint mode enabled for headless vLLM; worker ranks will "
+            "quiesce through the leader scheduler broadcast"
         )
+        config.engine_args.enable_sleep_mode = True
+        return None
 
     logger.info("Checkpoint mode enabled (watcher-driven signals)")
     config.engine_args.enable_sleep_mode = True
@@ -38,7 +39,6 @@ async def prepare_snapshot_engine(
         engine=engine,
         quiesce_controller=VllmEngineQuiesceController(engine[0]),
         checkpoint_config=checkpoint_config,
-        quiesce_args=(None,),
     )
     if not await snapshot_controller.wait_for_restore():
         raise SystemExit(0)

@@ -17,9 +17,11 @@ import (
 
 // RestoreOptions holds configuration for an in-namespace restore.
 type RestoreOptions struct {
-	CheckpointPath string
-	CUDADeviceMap  string
-	CgroupRoot     string
+	CheckpointPath       string
+	CUDADeviceMap        string
+	CgroupRoot           string
+	RestorePodUID        string
+	RestoreContainerName string
 }
 
 type RestoreInNamespaceResult struct {
@@ -53,7 +55,10 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 
 	// Phase 1: Configure — build CRIU opts from manifest
 	configureStart := time.Now()
-	criuOpts, err := criu.BuildRestoreOpts(m, opts.CheckpointPath, opts.CgroupRoot, log)
+	criuOpts, err := criu.BuildRestoreOpts(m, opts.CheckpointPath, opts.CgroupRoot, criu.RestoreMountContext{
+		PodUID:        opts.RestorePodUID,
+		ContainerName: opts.RestoreContainerName,
+	}, log)
 	if err != nil {
 		return nil, err
 	}
@@ -98,6 +103,13 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 
 	if err := snapshotruntime.ApplyDeletedFiles(opts.CheckpointPath, "/", log); err != nil {
 		log.Error(err, "Failed to apply deleted files")
+	}
+
+	if err := criu.PrepareRestoreMountpoints(m, criu.RestoreMountContext{
+		PodUID:        opts.RestorePodUID,
+		ContainerName: opts.RestoreContainerName,
+	}, log); err != nil {
+		return nil, 0, fmt.Errorf("failed to prepare restore mountpoints: %w", err)
 	}
 
 	// Unmount placeholder's /dev/shm so CRIU can recreate tmpfs with checkpointed content

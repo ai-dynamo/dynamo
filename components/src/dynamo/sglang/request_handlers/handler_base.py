@@ -89,11 +89,16 @@ class SGLangEngineQuiesceController:
         from sglang.srt.managers.io_struct import (
             PauseGenerationReqInput,
             ReleaseMemoryOccupationReqInput,
+            SnapshotCheckpointPrepareReqInput,
         )
 
         await self._engine.tokenizer_manager.pause_generation(PauseGenerationReqInput())
         await self._engine.tokenizer_manager.release_memory_occupation(
             ReleaseMemoryOccupationReqInput(tags=tags),
+            None,
+        )
+        await self._engine.tokenizer_manager.snapshot_checkpoint_prepare(
+            SnapshotCheckpointPrepareReqInput(),
             None,
         )
         self._is_quiesced = True
@@ -106,8 +111,13 @@ class SGLangEngineQuiesceController:
         from sglang.srt.managers.io_struct import (
             ContinueGenerationReqInput,
             ResumeMemoryOccupationReqInput,
+            SnapshotCheckpointRestoreReqInput,
         )
 
+        await self._engine.tokenizer_manager.snapshot_checkpoint_restore(
+            SnapshotCheckpointRestoreReqInput(),
+            None,
+        )
         await self._engine.tokenizer_manager.resume_memory_occupation(
             ResumeMemoryOccupationReqInput(tags=tags),
             None,

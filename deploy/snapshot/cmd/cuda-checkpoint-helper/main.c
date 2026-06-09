@@ -1,9 +1,28 @@
 #include <ctype.h>
 #include <cuda.h>
+#include <dlfcn.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+static const CUuuid cuda_checkpoint_export_table_id = {{
+    (char)0x69, (char)0xa2, (char)0x8e, (char)0x9f,
+    (char)0x24, (char)0x49,
+    (char)0x8b, (char)0x47,
+    (char)0xb0, (char)0x30, (char)0xc5, (char)0xda,
+    (char)0x33, (char)0x0e, (char)0xa4, (char)0xe9,
+}};
+
+typedef struct CudaCheckpointExportTable_st
+{
+  size_t struct_size;
+  void* reserved[29];
+  CUresult(CUDAAPI* CreateJobFile)(const char* job_file_path);
+  CUresult(CUDAAPI* SetJobFile)(const char* job_file_path);
+} CudaCheckpointExportTable;
+
+typedef CUresult(CUDAAPI* CuGetExportTableFn)(const void** table, const CUuuid* id);
 
 static int
 print_usage(FILE* stream)
@@ -11,6 +30,7 @@ print_usage(FILE* stream)
   return fprintf(
              stream,
              "Usage:\n"
+             "  cuda-checkpoint-helper --create-job-file <path>\n"
              "  cuda-checkpoint-helper --get-state --pid <pid>\n"
              "  cuda-checkpoint-helper --get-restore-tid --pid <pid>\n"
              "  cuda-checkpoint-helper --action lock|checkpoint|restore|unlock --pid <pid> [--timeout <ms>] "
@@ -36,6 +56,54 @@ print_cuda_error(CUresult status)
   }
 
   fprintf(stderr, "%s: %s\n", name, msg);
+}
+
+static CUresult
+get_checkpoint_export_table(const CudaCheckpointExportTable** table_out)
+{
+  void* handle;
+  void* symbol;
+  const CudaCheckpointExportTable* table = NULL;
+  CUresult status;
+
+  *table_out = NULL;
+
+  handle = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
+  if (handle == NULL) {
+    handle = RTLD_DEFAULT;
+  }
+  symbol = dlsym(handle, "cuGetExportTable");
+  if (symbol == NULL) {
+    return CUDA_ERROR_UNKNOWN;
+  }
+
+  status = ((CuGetExportTableFn)symbol)((const void**)&table, &cuda_checkpoint_export_table_id);
+  if (status != CUDA_SUCCESS) {
+    return status;
+  }
+  if (table == NULL || table->struct_size < sizeof(*table) || table->CreateJobFile == NULL) {
+    return CUDA_ERROR_INVALID_VALUE;
+  }
+
+  *table_out = table;
+  return CUDA_SUCCESS;
+}
+
+static CUresult
+do_create_job_file(const char* job_file_path)
+{
+  const CudaCheckpointExportTable* table = NULL;
+  CUresult status;
+
+  if (job_file_path == NULL || job_file_path[0] == '\0') {
+    return CUDA_ERROR_INVALID_VALUE;
+  }
+
+  status = get_checkpoint_export_table(&table);
+  if (status != CUDA_SUCCESS) {
+    return status;
+  }
+  return table->CreateJobFile(job_file_path);
 }
 
 static int
@@ -269,8 +337,10 @@ main(int argc, char** argv)
 {
   const char* action = NULL;
   const char* device_map = "";
+  const char* job_file_path = NULL;
   int pid = 0;
   int have_pid = 0;
+  int do_create_job_file_flag = 0;
   int do_get_state_flag = 0;
   int do_get_restore_tid_flag = 0;
   unsigned int timeout_ms = 0;
@@ -288,6 +358,14 @@ main(int argc, char** argv)
     }
     if (strcmp(argv[i], "--get-restore-tid") == 0) {
       do_get_restore_tid_flag = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--create-job-file") == 0) {
+      if (++i >= argc) {
+        return print_usage(stderr);
+      }
+      do_create_job_file_flag = 1;
+      job_file_path = argv[i];
       continue;
     }
     if (strcmp(argv[i], "--action") == 0) {
@@ -323,9 +401,22 @@ main(int argc, char** argv)
     return print_usage(stderr);
   }
 
-  if ((do_get_state_flag + do_get_restore_tid_flag + (action != NULL ? 1 : 0)) != 1) {
+  if ((do_create_job_file_flag + do_get_state_flag + do_get_restore_tid_flag + (action != NULL ? 1 : 0)) != 1) {
     return print_usage(stderr);
   }
+
+  if (do_create_job_file_flag) {
+    if (have_pid || timeout_ms != 0 || device_map[0] != '\0') {
+      return print_usage(stderr);
+    }
+    status = do_create_job_file(job_file_path);
+    if (status != CUDA_SUCCESS) {
+      print_cuda_error(status);
+      return 1;
+    }
+    return 0;
+  }
+
   if (!have_pid) {
     return print_usage(stderr);
   }

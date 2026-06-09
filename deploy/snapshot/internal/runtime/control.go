@@ -4,6 +4,7 @@
 package runtime
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,15 +33,48 @@ func WriteControlSentinel(hostPID int, name string) error {
 	return writeSentinelInDir(dir, name)
 }
 
+type RendezvousConfig struct {
+	RestoreID string          `json:"restore_id,omitempty"`
+	Store     RendezvousStore `json:"store"`
+}
+
+type RendezvousStore struct {
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	MasterRank int    `json:"master_rank"`
+}
+
+func WriteRendezvousFile(hostPID int, config RendezvousConfig) error {
+	if hostPID <= 0 {
+		return fmt.Errorf("invalid host PID %d for rendezvous file", hostPID)
+	}
+	if config.Store.Host == "" {
+		return fmt.Errorf("rendezvous store host is empty")
+	}
+	if config.Store.Port <= 0 {
+		return fmt.Errorf("invalid rendezvous store port %d", config.Store.Port)
+	}
+	dir := filepath.Join(HostProcPath, strconv.Itoa(hostPID), "root", snapshotprotocol.SnapshotControlMountPath)
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal rendezvous file: %w", err)
+	}
+	return writeFileInDir(dir, snapshotprotocol.TorchC10dRendezvousFile, append(data, '\n'))
+}
+
 func writeSentinelInDir(dir, name string) error {
+	return writeFileInDir(dir, name, []byte("done\n"))
+}
+
+func writeFileInDir(dir, name string, data []byte) error {
 	tmpPath := filepath.Join(dir, "."+name+".tmp")
 	finalPath := filepath.Join(dir, name)
-	if err := os.WriteFile(tmpPath, []byte("done\n"), 0o644); err != nil {
-		return fmt.Errorf("write temp sentinel %s: %w", tmpPath, err)
+	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
+		return fmt.Errorf("write temp file %s: %w", tmpPath, err)
 	}
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		_ = os.Remove(tmpPath)
-		return fmt.Errorf("rename sentinel %s -> %s: %w", tmpPath, finalPath, err)
+		return fmt.Errorf("rename file %s -> %s: %w", tmpPath, finalPath, err)
 	}
 	return nil
 }

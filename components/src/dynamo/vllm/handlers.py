@@ -221,6 +221,31 @@ class VllmEngineQuiesceController:
     def __init__(self, engine_client: Any):
         self._engine_client = engine_client
         self._is_quiesced = False
+        self._slept = False
+        self._checkpoint_prepared = False
+
+    def _refresh_rpc_host_env_for_restore(self) -> None:
+        from vllm.utils.network_utils import get_current_ip
+
+        current_ip = get_current_ip()
+        if not current_ip or current_ip == "0.0.0.0":
+            logger.warning(
+                "Snapshot checkpoint restore: could not refresh Dynamo RPC "
+                "host env vars; resolved current_ip=%s",
+                current_ip,
+            )
+            return
+
+        for env_var in ("DYN_TCP_RPC_HOST", "DYN_HTTP_RPC_HOST"):
+            old_host = os.environ.get(env_var)
+            os.environ[env_var] = current_ip
+            logger.info(
+                "Snapshot checkpoint restore: refreshed Dynamo RPC host env "
+                "var %s from %s to %s",
+                env_var,
+                old_host,
+                current_ip,
+            )
 
     @property
     def is_quiesced(self) -> bool:
@@ -230,12 +255,31 @@ class VllmEngineQuiesceController:
         if self._is_quiesced:
             return False
 
-        level = args[0] if args else None
+        control_dir = (
+            str(args[0]) if args and isinstance(args[0], (str, os.PathLike)) else None
+        )
+        level = args[1] if control_dir is not None and len(args) > 1 else None
+        if control_dir is None and args:
+            level = args[0]
         await self._engine_client.pause_generation()
-        if level is None:
+        if control_dir is not None and level is None:
+            logger.info(
+                "Snapshot checkpoint quiesce: paused generation without vLLM memory sleep"
+            )
+        elif level is None:
             await self._engine_client.sleep()
+            self._slept = True
         else:
+            if control_dir is not None:
+                logger.info(
+                    "Snapshot checkpoint quiesce: using explicit vLLM sleep level %s",
+                    level,
+                )
             await self._engine_client.sleep(level)
+            self._slept = True
+        if control_dir is not None:
+            await self._engine_client.snapshot_checkpoint_prepare(control_dir)
+            self._checkpoint_prepared = True
         self._is_quiesced = True
         return True
 
@@ -243,15 +287,22 @@ class VllmEngineQuiesceController:
         if not self._is_quiesced:
             return False
 
-        if tags is None:
-            await self._engine_client.wake_up()
-        else:
-            await self._engine_client.wake_up(tags)
+        if self._checkpoint_prepared:
+            await self._engine_client.snapshot_checkpoint_restore()
+            self._refresh_rpc_host_env_for_restore()
+            self._checkpoint_prepared = False
+        if self._slept:
+            if tags is None:
+                await self._engine_client.wake_up()
+            else:
+                await self._engine_client.wake_up(tags)
         await self._engine_client.resume_generation()
         return True
 
     def mark_resumed(self) -> None:
         self._is_quiesced = False
+        self._slept = False
+        self._checkpoint_prepared = False
 
 
 @dataclass(frozen=True)

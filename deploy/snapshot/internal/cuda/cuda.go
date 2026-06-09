@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +21,8 @@ import (
 const (
 	nvidiaGPUResource  = "nvidia.com/gpu"
 	nvidiaGPUDRADriver = "gpu.nvidia.com"
+
+	cudaStateProbeTimeout = 10 * time.Second
 )
 
 var podResourcesSocketPath = "/var/lib/kubelet/pod-resources/kubelet.sock"
@@ -145,22 +148,29 @@ func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podNa
 
 // FilterProcesses returns the subset of candidate PIDs that hold actual CUDA contexts.
 // Uses --get-restore-tid (the same technique as the CRIU CUDA plugin) instead of
-// --get-state, because --get-state incorrectly matches coordinator processes like
-// cuda-checkpoint --launch-job that share a /proc namespace with CUDA processes but
-// don't hold CUDA contexts themselves.
+// --get-state, because --get-state incorrectly matches coordinator processes
+// that share a /proc namespace with CUDA processes but don't hold CUDA
+// contexts themselves.
 func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) []int {
 	cudaPIDs := make([]int, 0, len(allPIDs))
 	for _, pid := range allPIDs {
 		if pid <= 0 {
 			continue
 		}
-		cmd := exec.CommandContext(ctx, cudaCheckpointHelperBinary, "--get-restore-tid", "--pid", strconv.Itoa(pid))
+		probeCtx, cancel := context.WithTimeout(ctx, cudaStateProbeTimeout)
+		cmd := exec.CommandContext(probeCtx, cudaCheckpointHelperBinary, "--get-restore-tid", "--pid", strconv.Itoa(pid))
 		output, err := cmd.CombinedOutput()
+		cancel()
 		if err != nil {
 			if ctx.Err() != nil {
 				break
 			}
-			log.V(1).Info("CUDA restore-tid probe negative", "pid", pid)
+			if state, ok := getCheckpointState(ctx, pid, log); ok && (state == "checkpointed" || state == "locked") {
+				log.V(1).Info("CUDA restore-tid probe negative but process is checkpoint-managed", "pid", pid, "state", state)
+				cudaPIDs = append(cudaPIDs, pid)
+				continue
+			}
+			log.V(1).Info("CUDA restore-tid probe negative", "pid", pid, "error", err, "output", strings.TrimSpace(string(output)))
 			continue
 		}
 		tid := strings.TrimSpace(string(output))
@@ -168,6 +178,20 @@ func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) []int 
 		cudaPIDs = append(cudaPIDs, pid)
 	}
 	return cudaPIDs
+}
+
+func getCheckpointState(ctx context.Context, pid int, log logr.Logger) (string, bool) {
+	probeCtx, cancel := context.WithTimeout(ctx, cudaStateProbeTimeout)
+	defer cancel()
+
+	state, err := getState(probeCtx, pid)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.V(1).Info("CUDA state probe failed", "pid", pid, "error", err)
+		}
+		return "", false
+	}
+	return state, true
 }
 
 // BuildDeviceMap creates a cuda-checkpoint-helper --device-map value from source and target GPU UUID lists.
@@ -226,14 +250,33 @@ func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.
 	var timings CheckpointPhaseTimings
 
 	start := time.Now()
-	for _, pid := range cudaPIDs {
-		if err := lock(ctx, pid, log); err != nil {
+	checkpointPIDs := append([]int(nil), cudaPIDs...)
+	slices.Reverse(checkpointPIDs)
+	log.V(1).Info("Locking CUDA process tree", "pids", checkpointPIDs)
+	for _, pid := range checkpointPIDs {
+		if state, ok := getCheckpointState(ctx, pid, log); ok {
+			if state == "checkpointed" {
+				log.V(1).Info("CUDA process already checkpointed", "pid", pid)
+				continue
+			}
+			if state == "locked" {
+				log.V(1).Info("CUDA process already locked", "pid", pid)
+			} else if err := lock(ctx, pid, log); err != nil {
+				timings.TotalDuration = time.Since(start)
+				return timings, err
+			}
+		} else if err := lock(ctx, pid, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
 	}
 
-	for _, pid := range cudaPIDs {
+	log.V(1).Info("Checkpointing locked CUDA process tree", "pids", checkpointPIDs)
+	for _, pid := range checkpointPIDs {
+		if state, ok := getCheckpointState(ctx, pid, log); ok && state == "checkpointed" {
+			log.V(1).Info("CUDA process already checkpointed", "pid", pid)
+			continue
+		}
 		if err := checkpoint(ctx, pid, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err

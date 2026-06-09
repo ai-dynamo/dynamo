@@ -36,6 +36,8 @@ const (
 
 	CheckpointStorageTypeAnnotation     = "nvidia.com/snapshot-storage-type"
 	CheckpointStorageBasePathAnnotation = "nvidia.com/snapshot-storage-base-path"
+	RendezvousHostAnnotation            = "nvidia.com/snapshot-rendezvous-host"
+	RendezvousPortAnnotation            = "nvidia.com/snapshot-rendezvous-port"
 	CheckpointVolumeName                = "checkpoint-storage"
 	DefaultCheckpointArtifactVersion    = "1"
 	DefaultCheckpointJobTTLSeconds      = int32(300)
@@ -189,6 +191,8 @@ func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string
 	delete(labels, CheckpointIDLabel)
 	delete(annotations, CheckpointArtifactVersionAnnotation)
 	delete(annotations, CheckpointStatusAnnotation)
+	delete(annotations, RendezvousHostAnnotation)
+	delete(annotations, RendezvousPortAnnotation)
 	clearRestoreStatusKeys(annotations)
 
 	if !enabled {

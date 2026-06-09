@@ -29,6 +29,8 @@ def _make_handler() -> _TestWorkerHandler:
         sleep=AsyncMock(),
         wake_up=AsyncMock(),
         resume_generation=AsyncMock(),
+        snapshot_checkpoint_prepare=AsyncMock(),
+        snapshot_checkpoint_restore=AsyncMock(),
     )
     handler.generate_endpoint = SimpleNamespace(
         unregister_endpoint_instance=AsyncMock(),
@@ -67,8 +69,10 @@ async def test_sleep_and_wake_are_idempotent():
 
     handler.engine_client.pause_generation.assert_awaited_once()
     handler.engine_client.sleep.assert_awaited_once_with(2)
+    handler.engine_client.snapshot_checkpoint_prepare.assert_not_awaited()
     handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
 
+    handler.engine_client.snapshot_checkpoint_restore.assert_not_awaited()
     handler.engine_client.wake_up.assert_awaited_once_with()
     handler.engine_client.resume_generation.assert_awaited_once()
     handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
@@ -81,6 +85,8 @@ async def test_quiesce_without_level_uses_vllm_default_sleep():
         sleep=AsyncMock(),
         wake_up=AsyncMock(),
         resume_generation=AsyncMock(),
+        snapshot_checkpoint_prepare=AsyncMock(),
+        snapshot_checkpoint_restore=AsyncMock(),
     )
     controller = VllmEngineQuiesceController(engine_client)
 
@@ -89,6 +95,61 @@ async def test_quiesce_without_level_uses_vllm_default_sleep():
     assert changed is True
     engine_client.pause_generation.assert_awaited_once()
     engine_client.sleep.assert_awaited_once_with()
+    engine_client.snapshot_checkpoint_prepare.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_quiesce_prepares_and_restores_checkpoint():
+    engine_client = SimpleNamespace(
+        pause_generation=AsyncMock(),
+        sleep=AsyncMock(),
+        wake_up=AsyncMock(),
+        resume_generation=AsyncMock(),
+        snapshot_checkpoint_prepare=AsyncMock(),
+        snapshot_checkpoint_restore=AsyncMock(),
+    )
+    controller = VllmEngineQuiesceController(engine_client)
+
+    changed = await controller.quiesce("/snapshot-control", 2)
+    resumed = await controller.resume()
+
+    assert changed is True
+    assert resumed is True
+    engine_client.pause_generation.assert_awaited_once()
+    engine_client.sleep.assert_awaited_once_with(2)
+    engine_client.snapshot_checkpoint_prepare.assert_awaited_once_with(
+        "/snapshot-control"
+    )
+    engine_client.snapshot_checkpoint_restore.assert_awaited_once()
+    engine_client.wake_up.assert_awaited_once_with()
+    engine_client.resume_generation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_quiesce_without_level_skips_memory_sleep():
+    engine_client = SimpleNamespace(
+        pause_generation=AsyncMock(),
+        sleep=AsyncMock(),
+        wake_up=AsyncMock(),
+        resume_generation=AsyncMock(),
+        snapshot_checkpoint_prepare=AsyncMock(),
+        snapshot_checkpoint_restore=AsyncMock(),
+    )
+    controller = VllmEngineQuiesceController(engine_client)
+
+    changed = await controller.quiesce("/snapshot-control")
+    resumed = await controller.resume()
+
+    assert changed is True
+    assert resumed is True
+    engine_client.pause_generation.assert_awaited_once()
+    engine_client.sleep.assert_not_awaited()
+    engine_client.snapshot_checkpoint_prepare.assert_awaited_once_with(
+        "/snapshot-control"
+    )
+    engine_client.snapshot_checkpoint_restore.assert_awaited_once()
+    engine_client.wake_up.assert_not_awaited()
+    engine_client.resume_generation.assert_awaited_once()
 
 
 @pytest.mark.asyncio

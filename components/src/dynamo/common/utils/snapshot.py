@@ -48,7 +48,6 @@ class CheckpointConfig:
         if not control_dir:
             return None
 
-        configure_checkpoint_transport_env()
         return cls(control_dir=control_dir)
 
     async def run_lifecycle(
@@ -57,8 +56,9 @@ class CheckpointConfig:
         *quiesce_args: object,
     ) -> bool:
         logger.info("Quiescing model")
-        await quiesce_controller.quiesce(*quiesce_args)
+        await quiesce_controller.quiesce(self.control_dir, *quiesce_args)
 
+        event = None
         try:
             with open(self.ready_file, "w", encoding="utf-8") as ready_file:
                 ready_file.write("ready")
@@ -71,13 +71,15 @@ class CheckpointConfig:
 
             event = await self._wait_for_sentinel()
         finally:
-            self._cleanup_ready_and_sentinels()
+            if event != "restore":
+                self._cleanup_ready_and_sentinels()
 
         if event == "restore":
             logger.info("Restore sentinel detected")
             logger.info("Resuming model after restore")
             await quiesce_controller.resume()
             quiesce_controller.mark_resumed()
+            self._cleanup_ready_and_sentinels()
             return True
 
         logger.info("Snapshot completion sentinel detected")
@@ -106,81 +108,6 @@ class CheckpointConfig:
                 pass
             except OSError:
                 logger.exception("Failed to clean up %s at %s", name, path)
-
-
-def configure_checkpoint_transport_env() -> None:
-    gloo_ifname = os.environ.get("GLOO_SOCKET_IFNAME")
-    if gloo_ifname and gloo_ifname != "lo":
-        logger.warning(
-            "Overriding GLOO_SOCKET_IFNAME=%r with 'lo' for checkpoint mode "
-            "because CRIU cannot restore sockets bound to non-loopback addresses",
-            gloo_ifname,
-        )
-    os.environ["GLOO_SOCKET_IFNAME"] = "lo"
-
-    nccl_ifname = os.environ.get("NCCL_SOCKET_IFNAME")
-    if nccl_ifname and nccl_ifname != "lo":
-        logger.warning(
-            "Overriding NCCL_SOCKET_IFNAME=%r with 'lo' for checkpoint mode "
-            "because CRIU cannot restore sockets bound to non-loopback addresses",
-            nccl_ifname,
-        )
-    os.environ["NCCL_SOCKET_IFNAME"] = "lo"
-
-    nccl_cumem_enable = os.environ.get("NCCL_CUMEM_ENABLE")
-    if nccl_cumem_enable and nccl_cumem_enable != "0":
-        logger.warning(
-            "Overriding NCCL_CUMEM_ENABLE=%r with '0' for checkpoint mode "
-            "because cuda-checkpoint does not support cuMem-backed NCCL allocations",
-            nccl_cumem_enable,
-        )
-    os.environ["NCCL_CUMEM_ENABLE"] = "0"
-
-    nccl_p2p_disable = os.environ.get("NCCL_P2P_DISABLE")
-    if nccl_p2p_disable and nccl_p2p_disable != "0":
-        logger.warning(
-            "Overriding NCCL_P2P_DISABLE=%r with '0' for checkpoint mode "
-            "to keep NCCL on GPU P2P transport when topology allows it",
-            nccl_p2p_disable,
-        )
-    os.environ["NCCL_P2P_DISABLE"] = "0"
-
-    nccl_nvls_enable = os.environ.get("NCCL_NVLS_ENABLE")
-    if nccl_nvls_enable and nccl_nvls_enable != "0":
-        logger.warning(
-            "Overriding NCCL_NVLS_ENABLE=%r with '0' for checkpoint mode "
-            "to avoid NVLS and keep NCCL on the legacy P2P path",
-            nccl_nvls_enable,
-        )
-    os.environ["NCCL_NVLS_ENABLE"] = "0"
-
-    nccl_ib_disable = os.environ.get("NCCL_IB_DISABLE")
-    if nccl_ib_disable and nccl_ib_disable != "1":
-        logger.warning(
-            "Overriding NCCL_IB_DISABLE=%r with '1' for checkpoint mode "
-            "because CRIU and cuda-checkpoint cannot restore InfiniBand state",
-            nccl_ib_disable,
-        )
-    os.environ["NCCL_IB_DISABLE"] = "1"
-
-    nccl_ras_enable = os.environ.get("NCCL_RAS_ENABLE")
-    if nccl_ras_enable and nccl_ras_enable != "0":
-        logger.warning(
-            "Overriding NCCL_RAS_ENABLE=%r with '0' for checkpoint mode "
-            "because NCCL RAS background state is not part of the checkpoint contract",
-            nccl_ras_enable,
-        )
-    os.environ["NCCL_RAS_ENABLE"] = "0"
-
-    torch_nccl_monitoring = os.environ.get("TORCH_NCCL_ENABLE_MONITORING")
-    if torch_nccl_monitoring and torch_nccl_monitoring != "0":
-        logger.warning(
-            "Overriding TORCH_NCCL_ENABLE_MONITORING=%r with '0' for checkpoint mode "
-            "because ProcessGroupNCCL monitoring can terminate restored processes",
-            torch_nccl_monitoring,
-        )
-    os.environ["TORCH_NCCL_ENABLE_MONITORING"] = "0"
-    os.environ.setdefault("TORCH_NCCL_DUMP_ON_TIMEOUT", "0")
 
 
 @dataclass

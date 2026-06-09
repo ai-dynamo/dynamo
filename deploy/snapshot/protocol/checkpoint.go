@@ -21,7 +21,6 @@ type CheckpointJobOptions struct {
 	Name                  string
 	ActiveDeadlineSeconds *int64
 	TTLSecondsAfterFinish *int32
-	WrapLaunchJob         bool
 }
 
 type CheckpointObservationPhase string
@@ -97,16 +96,6 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 	}
 	targetContainer.LivenessProbe = nil
 	targetContainer.StartupProbe = nil
-
-	if opts.WrapLaunchJob {
-		if len(targetContainer.Command) == 0 {
-			return nil, fmt.Errorf("checkpoint job requires container.command when cuda-checkpoint launch-job wrapping is enabled")
-		}
-		targetContainer.Command, targetContainer.Args = wrapWithCudaCheckpointLaunchJob(
-			targetContainer.Command,
-			targetContainer.Args,
-		)
-	}
 
 	return &batchv1.Job{
 		TypeMeta: metav1.TypeMeta{APIVersion: "batch/v1", Kind: "Job"},
@@ -201,18 +190,4 @@ func EnsureLocalhostSeccompProfile(podSpec *corev1.PodSpec, profile string) {
 		Type:             corev1.SeccompProfileTypeLocalhost,
 		LocalhostProfile: &profile,
 	}
-}
-
-// wrapWithCudaCheckpointLaunchJob rewrites the container's entrypoint so the
-// workload is launched under `cuda-checkpoint --launch-job`, required for
-// multi-GPU checkpoints. The original command and args are preserved as-is
-// (including shell-form entrypoints): workload-to-agent signaling now uses
-// file sentinels in the snapshot-control volume, so an intervening shell at
-// PID 1 is no longer an issue.
-func wrapWithCudaCheckpointLaunchJob(command []string, args []string) ([]string, []string) {
-	wrappedArgs := make([]string, 0, len(command)+len(args)+1)
-	wrappedArgs = append(wrappedArgs, "--launch-job")
-	wrappedArgs = append(wrappedArgs, command...)
-	wrappedArgs = append(wrappedArgs, args...)
-	return []string{"cuda-checkpoint"}, wrappedArgs
 }

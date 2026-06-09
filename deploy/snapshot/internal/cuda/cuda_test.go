@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -76,6 +77,68 @@ func TestBuildDeviceMap(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestLockAndCheckpointProcessTreeLocksAllPIDsBeforeCheckpointing(t *testing.T) {
+	dir := t.TempDir()
+	actionsPath := filepath.Join(dir, "actions")
+	helperPath := filepath.Join(dir, "cuda-checkpoint-helper")
+	script := `#!/bin/sh
+if [ "$1" = "--get-state" ]; then
+  echo running
+  exit 0
+fi
+
+action=""
+pid=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --action)
+      action="$2"
+      shift 2
+      ;;
+    --pid)
+      pid="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+printf '%s:%s\n' "$action" "$pid" >> "$HELPER_ACTIONS_PATH"
+`
+	if err := os.WriteFile(helperPath, []byte(script), 0700); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+	t.Setenv("HELPER_ACTIONS_PATH", actionsPath)
+
+	previousHelper := cudaCheckpointHelperBinary
+	cudaCheckpointHelperBinary = helperPath
+	t.Cleanup(func() {
+		cudaCheckpointHelperBinary = previousHelper
+	})
+
+	if _, err := LockAndCheckpointProcessTree(context.Background(), []int{101, 102, 103}, logr.Discard()); err != nil {
+		t.Fatalf("LockAndCheckpointProcessTree: %v", err)
+	}
+
+	data, err := os.ReadFile(actionsPath)
+	if err != nil {
+		t.Fatalf("read helper actions: %v", err)
+	}
+	got := strings.Split(strings.TrimSpace(string(data)), "\n")
+	want := []string{
+		"lock:103",
+		"lock:102",
+		"lock:101",
+		"checkpoint:103",
+		"checkpoint:102",
+		"checkpoint:101",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("helper actions = %q, want %q", got, want)
 	}
 }
 

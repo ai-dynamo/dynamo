@@ -5,6 +5,7 @@ package executor
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,6 +89,7 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	// Phase 3: Capture — CRIU dump, rootfs diff
 	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, log)
 	if err != nil {
+		preserveFailedCheckpointArtifacts(tmpDir, finalDir, log)
 		return err
 	}
 	phaseTimings.CUDADuration = captureTimings.CUDADuration
@@ -260,6 +262,7 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 		}
 		timings.CUDADuration = cudaTimings.TotalDuration
 	}
+	writeNVIDIAOpenFDDiagnostic(state, checkpointDir, log)
 
 	criuDumpDuration, err := criu.ExecuteDump(criuOpts, checkpointDir, criuSettings, log)
 	if err != nil {
@@ -282,4 +285,55 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	}
 
 	return timings, nil
+}
+
+func preserveFailedCheckpointArtifacts(tmpDir, finalDir string, log logr.Logger) {
+	failureDir := filepath.Join(filepath.Dir(finalDir), "failed", filepath.Base(tmpDir))
+	preserved := 0
+	err := filepath.WalkDir(tmpDir, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+
+		name := entry.Name()
+		if name != criu.DumpLogFilename &&
+			name != "criu.conf" &&
+			!strings.HasSuffix(name, ".log") &&
+			!strings.HasPrefix(name, "cuda-nvidia-fd.") {
+			return nil
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(tmpDir, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(failureDir, rel)
+		if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(target, content, info.Mode().Perm()); err != nil {
+			return err
+		}
+		preserved++
+		return nil
+	})
+	if err != nil {
+		log.Error(err, "Failed to preserve checkpoint failure artifacts", "source_dir", tmpDir, "failure_dir", failureDir)
+		return
+	}
+	log.Info("Preserved checkpoint failure artifacts", "source_dir", tmpDir, "failure_dir", failureDir, "count", preserved)
 }

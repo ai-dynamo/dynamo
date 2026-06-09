@@ -259,7 +259,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.Equal(t, int32(0), *job.Spec.BackoffLimit)
 	assert.Equal(t, int32(300), *job.Spec.TTLSecondsAfterFinished)
 
-	// Multi-GPU: wrapping decision uses identity.TensorParallelSize, not container GPU limits.
+	// Multi-GPU: the checkpoint job still preserves the workload command.
 	ckpt.Spec.Identity.TensorParallelSize = 2
 	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Resources = corev1.ResourceRequirements{
 		Limits: corev1.ResourceList{
@@ -268,11 +268,10 @@ func TestBuildCheckpointJob(t *testing.T) {
 	}
 	job, err = buildCheckpointJob(context.Background(), nil, r.Config, ckpt, defaultCheckpointJobName)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"cuda-checkpoint"}, job.Spec.Template.Spec.Containers[0].Command)
-	assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, job.Spec.Template.Spec.Containers[0].Args)
+	assert.Equal(t, []string{"python3", "-m", "dynamo.vllm"}, job.Spec.Template.Spec.Containers[0].Command)
 }
 
-func TestBuildCheckpointJobWrapsWithCudaCheckpointForMultiGPU(t *testing.T) {
+func TestBuildCheckpointJobPreservesCommandForMultiGPU(t *testing.T) {
 	s := checkpointTestScheme()
 	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
 	ckpt.Spec.Identity.TensorParallelSize = 2
@@ -301,8 +300,8 @@ func TestBuildCheckpointJobWrapsWithCudaCheckpointForMultiGPU(t *testing.T) {
 	require.NoError(t, err)
 
 	main := &job.Spec.Template.Spec.Containers[0]
-	assert.Equal(t, []string{"cuda-checkpoint"}, main.Command)
-	assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, main.Args)
+	assert.Equal(t, []string{"python3", "-m", "dynamo.vllm"}, main.Command)
+	assert.Nil(t, main.Args)
 	require.NotNil(t, main.ReadinessProbe)
 	assert.Equal(t, []string{"cat", "/snapshot-control/ready-for-checkpoint"}, main.ReadinessProbe.Exec.Command)
 	assert.Nil(t, main.LivenessProbe)

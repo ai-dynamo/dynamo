@@ -140,8 +140,7 @@ impl NetworkConfig {
         Self {
             // HTTP server configuration
             // If DYN_HTTP_RPC_PORT is set, use that port; otherwise None means OS will assign a free port
-            http_host: std::env::var("DYN_HTTP_RPC_HOST")
-                .unwrap_or_else(|_| crate::utils::get_http_rpc_host_from_env()),
+            http_host: crate::utils::get_http_rpc_host_from_env(),
             http_port: std::env::var("DYN_HTTP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok()),
@@ -150,8 +149,7 @@ impl NetworkConfig {
 
             // TCP server configuration
             // If DYN_TCP_RPC_PORT is set, use that port; otherwise None means OS will assign a free port
-            tcp_host: std::env::var("DYN_TCP_RPC_HOST")
-                .unwrap_or_else(|_| crate::utils::get_tcp_rpc_host_from_env()),
+            tcp_host: crate::utils::get_tcp_rpc_host_from_env(),
             tcp_port: std::env::var("DYN_TCP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok()),

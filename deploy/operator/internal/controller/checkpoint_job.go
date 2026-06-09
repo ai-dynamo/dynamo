@@ -145,19 +145,6 @@ func buildCheckpointJob(
 		activeDeadlineSeconds = &defaultDeadline
 	}
 
-	// Wrap with cuda-checkpoint --launch-job for multi-GPU jobs (TP*PP > 1).
-	// Use checkpoint identity (not container limits) because DRA may have
-	// already removed nvidia.com/gpu from the template.
-	tp := ckpt.Spec.Identity.TensorParallelSize
-	pp := ckpt.Spec.Identity.PipelineParallelSize
-	if tp == 0 {
-		tp = 1
-	}
-	if pp == 0 {
-		pp = 1
-	}
-	wrapLaunchJob := tp*pp > 1
-
 	ttlSecondsAfterFinish := snapshotprotocol.DefaultCheckpointJobTTLSeconds
 
 	return snapshotprotocol.NewCheckpointJob(podTemplate, snapshotprotocol.CheckpointJobOptions{
@@ -168,6 +155,5 @@ func buildCheckpointJob(
 		Name:                  jobName,
 		ActiveDeadlineSeconds: activeDeadlineSeconds,
 		TTLSecondsAfterFinish: &ttlSecondsAfterFinish,
-		WrapLaunchJob:         wrapLaunchJob,
 	})
 }

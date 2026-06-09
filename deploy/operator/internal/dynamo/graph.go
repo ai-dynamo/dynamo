@@ -36,6 +36,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/imdario/mergo"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -1830,8 +1831,38 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", p.r.Name, err)
 	}
 
+	labels, err := generateLabels(p.component, p.dynamoDeployment, p.componentName, p.discoveryContext)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate labels: %w", err)
+	}
+	annotations, err := generateAnnotations(p.component, p.dynamoDeployment, p.componentName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate annotations: %w", err)
+	}
+	if p.isInterPodFailover && p.r.Role != RoleGMS {
+		labels[commonconsts.KubeLabelDynamoFailoverEngineGroupMember] = commonconsts.KubeLabelValueTrue
+	}
+	if p.r.Role == RoleGMS {
+		delete(labels, commonconsts.KubeLabelDynamoDiscoveryBackend)
+		delete(labels, commonconsts.KubeLabelDynamoDiscoveryEnabled)
+	}
+	if p.r.Role != RoleGMS {
+		if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(labels, annotations, p.checkpointInfo, p.operatorConfig.Checkpoint.Storage); err != nil {
+			return nil, fmt.Errorf("failed to apply checkpoint metadata for role %s: %w", p.r.Name, err)
+		}
+	}
+
 	// GMS weight servers load weights fresh from disk and are not CRIU targets.
 	if p.operatorConfig.Checkpoint.Enabled && p.r.Role != RoleGMS {
+		if p.checkpointInfo != nil && p.checkpointInfo.Enabled && p.checkpointInfo.Ready {
+			targets := p.checkpointInfo.RestoreTargetContainers
+			if len(targets) == 0 {
+				targets = []string{commonconsts.MainContainerName}
+			}
+			if err := snapshotprotocol.ApplyRendezvousMetadataFromPodSpec(annotations, podSpec, targets); err != nil {
+				return nil, fmt.Errorf("failed to apply checkpoint rendezvous metadata for role %s: %w", p.r.Name, err)
+			}
+		}
 		if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
 			p.ctx, p.kubeClient, p.dynamoDeployment.Namespace, podSpec, p.checkpointInfo,
 			p.operatorConfig.Checkpoint.Storage,
@@ -1884,39 +1915,12 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		},
 	}
 
+	clique.Labels = labels
+
 	if !p.usesPCSG {
 		clique.TopologyConstraint = toGroveTopologyConstraint(p.component.TopologyConstraint)
 	}
 
-	labels, err := generateLabels(p.component, p.dynamoDeployment, p.componentName, p.discoveryContext)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate labels: %w", err)
-	}
-	clique.Labels = labels
-	if p.isInterPodFailover && p.r.Role != RoleGMS {
-		clique.Labels[commonconsts.KubeLabelDynamoFailoverEngineGroupMember] = commonconsts.KubeLabelValueTrue
-	}
-	// Strip discovery labels from RoleGMS pods. generateLabels applies them
-	// unconditionally to every role for container-mode Pod reflector filtering
-	// (see #8067), but GMS weight-server pods run gpu_memory_service.cli.server
-	// — not the dynamo runtime — and never register a DynamoWorkerMetadata CR.
-	// Leaving the labels on them would make the Rust discovery daemon include
-	// them in its reflector store for no purpose and wake its debounce loop on
-	// every GMS restart/fast-kill event.
-	if p.r.Role == RoleGMS {
-		delete(clique.Labels, commonconsts.KubeLabelDynamoDiscoveryBackend)
-		delete(clique.Labels, commonconsts.KubeLabelDynamoDiscoveryEnabled)
-	}
-
-	annotations, err := generateAnnotations(p.component, p.dynamoDeployment, p.componentName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate annotations: %w", err)
-	}
-	if p.r.Role != RoleGMS {
-		if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(labels, annotations, p.checkpointInfo, p.operatorConfig.Checkpoint.Storage); err != nil {
-			return nil, fmt.Errorf("failed to apply checkpoint metadata for role %s: %w", p.r.Name, err)
-		}
-	}
 	annotations = applyRestartAnnotation(annotations, p.componentName, p.restartState, p.existingRestartAnnotations)
 	clique.Annotations = annotations
 

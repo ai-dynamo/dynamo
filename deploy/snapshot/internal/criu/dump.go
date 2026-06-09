@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	dumpLogFilename  = "dump.log"
+	DumpLogFilename  = "dump.log"
 	criuConfFilename = "criu.conf"
 )
 
@@ -44,9 +44,17 @@ func BuildDumpOptions(
 	criuOpts := &criurpc.CriuOpts{
 		Pid:     proto.Int32(int32(state.PID)),
 		Root:    proto.String(state.RootFS),
-		LogFile: proto.String(dumpLogFilename),
+		LogFile: proto.String(DumpLogFilename),
 		// Always externalize network namespace
 		External: []string{fmt.Sprintf("net[%d]:extNetNs", state.NetNSInode)},
+	}
+	nvidiaExternal, err := dumpNVIDIAExternalDevices(state.RootFS)
+	if err != nil {
+		return nil, err
+	}
+	criuOpts.External = append(criuOpts.External, nvidiaExternal...)
+	if len(nvidiaExternal) > 0 {
+		log.Info("Externalized NVIDIA device files for CRIU dump", "external", nvidiaExternal)
 	}
 	criuOpts.ExtMnt = toExtMountMaps(externalized)
 	criuOpts.SkipMnt = skipped
@@ -113,7 +121,7 @@ func ExecuteDump(
 		log.Error(err, "CRIU dump failed",
 			"duration", dumpDuration,
 			"checkpoint_dir", checkpointDir,
-			"dump_log_path", fmt.Sprintf("%s/%s", checkpointDir, dumpLogFilename),
+			"dump_log_path", fmt.Sprintf("%s/%s", checkpointDir, DumpLogFilename),
 		)
 		return 0, fmt.Errorf("CRIU dump failed: %w", err)
 	}

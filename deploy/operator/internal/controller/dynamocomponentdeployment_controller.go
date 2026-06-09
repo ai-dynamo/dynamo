@@ -42,6 +42,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -979,7 +980,19 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate base pod spec")
 	}
+	if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(podLabels, podAnnotations, checkpointInfo, r.Config.Checkpoint.Storage); err != nil {
+		return nil, errors.Wrap(err, "failed to apply checkpoint metadata")
+	}
 	if r.Config.Checkpoint.Enabled {
+		if checkpointInfo != nil && checkpointInfo.Enabled && checkpointInfo.Ready {
+			targets := checkpointInfo.RestoreTargetContainers
+			if len(targets) == 0 {
+				targets = []string{commonconsts.MainContainerName}
+			}
+			if err := snapshotprotocol.ApplyRendezvousMetadataFromPodSpec(podAnnotations, podSpec, targets); err != nil {
+				return nil, errors.Wrap(err, "failed to apply checkpoint rendezvous metadata")
+			}
+		}
 		if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
 			ctx,
 			r.Client,
@@ -1004,12 +1017,6 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	if commonController.IsK8sDiscoveryEnabled(r.Config.Discovery.Backend, podAnnotations) {
 		podLabels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
 		podLabels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
-	}
-
-	// Restore labels are operator-controlled state. Clear stale values after
-	// metadata merge and only reapply them when checkpoint material is ready.
-	if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(podLabels, podAnnotations, checkpointInfo, r.Config.Checkpoint.Storage); err != nil {
-		return nil, errors.Wrap(err, "failed to apply checkpoint metadata")
 	}
 
 	if podSpec.ServiceAccountName == "" {
