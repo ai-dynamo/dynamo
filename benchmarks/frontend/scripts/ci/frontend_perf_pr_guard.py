@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import shutil
 import socket
@@ -113,6 +114,11 @@ def to_float(value: object) -> float:
     if value in (None, ""):
         return 0.0
     return float(value)
+
+
+def is_positive_finite(value: object) -> bool:
+    metric = to_float(value)
+    return math.isfinite(metric) and metric > 0
 
 
 def normalize_row(row: dict[str, object]) -> dict[str, object]:
@@ -226,8 +232,10 @@ def evaluate(
             "itl_p50_ms",
             "itl_p99_ms",
         ):
-            if to_float(row.get(metric)) <= 0:
-                issues.append(f"{key}: {metric} is missing or non-positive")
+            if not is_positive_finite(row.get(metric)):
+                issues.append(
+                    f"{key}: {metric} is missing, non-finite, or non-positive"
+                )
 
     baseline: dict[str, dict[str, object]] = {}
     if baseline_path is not None:
