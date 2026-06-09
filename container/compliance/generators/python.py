@@ -31,7 +31,7 @@ import re
 from pathlib import Path
 
 from .. import overrides as license_overrides
-from .common import UNKNOWN, Component, dedupe_by_name_version
+from .common import UNKNOWN, Component, dedupe_by_name_version, spdx_license_text
 
 logger = logging.getLogger(__name__)
 
@@ -427,6 +427,14 @@ def collect_components(search_paths: list[Path]) -> list[Component]:
                 continue
 
             spdx = _resolve_spdx(name, version, license_expr, license_free, classifiers)
+            # Prefer the wheel's own bundled LICENSE (PEP 639 / dist-info);
+            # when the wheel ships none, fall back to the canonical SPDX text
+            # for the identifier (render_notices adds the no-license-file note).
+            license_text = _read_license_text(dist_info)
+            is_canonical = False
+            if license_text is None:
+                license_text = spdx_license_text(spdx)
+                is_canonical = license_text is not None
             components.append(
                 Component(
                     ecosystem=ECOSYSTEM,
@@ -434,7 +442,8 @@ def collect_components(search_paths: list[Path]) -> list[Component]:
                     version=version,
                     spdx=spdx,
                     source_url=f"https://pypi.org/project/{name}/{version}/",
-                    license_text=_read_license_text(dist_info),
+                    license_text=license_text,
+                    license_text_is_canonical=is_canonical,
                 )
             )
 

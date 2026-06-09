@@ -19,7 +19,7 @@ import logging
 from pathlib import Path
 
 from .. import overrides as license_overrides
-from .common import UNKNOWN, Component, dedupe_by_name_version
+from .common import UNKNOWN, Component, dedupe_by_name_version, spdx_license_text
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +97,11 @@ def _component_from_sbom_entry(entry: dict) -> Component | None:
         version=str(version),
         spdx=spdx,
         source_url=source_url,
+        # cargo-cyclonedx records only the SPDX expression, and the crate
+        # sources aren't present in the licenses stage — fall back to the
+        # canonical SPDX text for the identifier so NOTICES carries full text.
+        license_text=spdx_license_text(spdx),
+        license_text_is_canonical=True,
     )
 
 

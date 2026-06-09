@@ -37,7 +37,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from .common import UNKNOWN, Component
+from .common import UNKNOWN, Component, spdx_license_text
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,9 @@ def collect_components(
             if image_filter not in images:
                 continue
 
+        spdx_value = pkg.get("license") or UNKNOWN
         license_text: str | None = None
+        is_canonical = False
         text_path_str = pkg.get("license_text_path")
         if text_path_str:
             text_path = Path(text_path_str)
@@ -95,19 +97,26 @@ def collect_components(
                 logger.warning(
                     "native package %s declares license_text_path=%s but the "
                     "file is not present in this stage's filesystem; falling "
-                    "back to SPDX-only attribution",
+                    "back to canonical SPDX text",
                     name,
                     text_path,
                 )
+
+        if license_text is None:
+            # No bundled license file for this component — use the canonical
+            # SPDX text (render_notices adds the no-license-file disclaimer).
+            license_text = spdx_license_text(spdx_value)
+            is_canonical = license_text is not None
 
         out.append(
             Component(
                 ecosystem=ECOSYSTEM,
                 name=name,
                 version=str(version),
-                spdx=pkg.get("license") or UNKNOWN,
+                spdx=spdx_value,
                 source_url=pkg.get("source"),
                 license_text=license_text,
+                license_text_is_canonical=is_canonical,
             )
         )
 
