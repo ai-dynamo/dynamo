@@ -30,7 +30,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/rest"
 	k8sptr "k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -42,6 +45,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		trueVal          = true
 		falseVal         = false
 	)
+
+	scheme := runtime.NewScheme()
+	if err := grovev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add Grove scheme: %v", err)
+	}
 
 	tests := []struct {
 		name         string
@@ -2162,7 +2170,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator := NewDynamoGraphDeploymentValidator(tt.deployment, nil, tt.groveEnabled)
+			client := fake.NewClientBuilder().WithScheme(scheme).Build()
+			validator := NewDynamoGraphDeploymentValidator(tt.deployment, &fakeManager{client: client, config: &rest.Config{}}, true)
 			_, err := validator.Validate(context.Background())
 
 			if (err != nil) != tt.wantErr {
@@ -2188,6 +2197,15 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		})
 	}
 }
+
+type fakeManager struct {
+	ctrl.Manager // satisfies the rest of the interface; panics if unexpected methods are used
+	client       client.Client
+	config       *rest.Config
+}
+
+func (m fakeManager) GetClient() client.Client { return m.client }
+func (m fakeManager) GetConfig() *rest.Config  { return m.config }
 
 func TestDynamoGraphDeploymentValidator_KvTransferPolicyClusterTopology(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -2255,7 +2273,7 @@ func TestDynamoGraphDeploymentValidator_KvTransferPolicyClusterTopology(t *testi
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tt.objects...).Build()
-			validator := NewDynamoGraphDeploymentValidator(tt.deployment, client, true)
+			validator := NewDynamoGraphDeploymentValidator(tt.deployment, &fakeManager{client: client, config: &rest.Config{}}, true)
 			_, err := validator.Validate(context.Background())
 			if tt.wantErr == "" {
 				if err != nil {
@@ -2271,6 +2289,11 @@ func TestDynamoGraphDeploymentValidator_KvTransferPolicyClusterTopology(t *testi
 }
 
 func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := grovev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add Grove scheme: %v", err)
+	}
+
 	kvTransferUpdateDeployment := func(kvt *nvidiacomv1alpha1.KvTransferPolicy) *nvidiacomv1alpha1.DynamoGraphDeployment {
 		dgd := &nvidiacomv1alpha1.DynamoGraphDeployment{
 			Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
@@ -3157,7 +3180,8 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator := NewDynamoGraphDeploymentValidator(tt.newDeployment, nil, true)
+			client := fake.NewClientBuilder().WithScheme(scheme).Build()
+			validator := NewDynamoGraphDeploymentValidator(tt.newDeployment, &fakeManager{client: client, config: &rest.Config{}}, true)
 			// Pass nil userInfo and empty operatorPrincipal - these tests don't modify replicas, so it's safe
 			warnings, err := validator.ValidateUpdate(tt.oldDeployment, nil, "")
 

@@ -35,7 +35,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
-	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
@@ -53,44 +52,18 @@ const (
 // This validator can be used by both webhooks and controllers for consistent validation.
 type DynamoGraphDeploymentValidator struct {
 	deployment   *nvidiacomv1alpha1.DynamoGraphDeployment
-	mgr          ctrl.Manager      // Optional: for API group detection via discovery client
-	client       ctrlclient.Client // Optional: for ClusterTopology lookups
+	mgr          ctrl.Manager
 	groveEnabled bool
 }
 
 // NewDynamoGraphDeploymentValidator creates a new validator for DynamoGraphDeployment.
 // groveEnabled should reflect the operator's runtime Grove configuration.
-func NewDynamoGraphDeploymentValidator(deployment *nvidiacomv1alpha1.DynamoGraphDeployment, client ctrlclient.Client, groveEnabled bool) *DynamoGraphDeploymentValidator {
-	return &DynamoGraphDeploymentValidator{
-		deployment:   deployment,
-		client:       client,
-		groveEnabled: groveEnabled,
-	}
-}
-
-// NewDynamoGraphDeploymentValidatorWithManager creates a validator with a manager for API group detection.
-func NewDynamoGraphDeploymentValidatorWithManager(deployment *nvidiacomv1alpha1.DynamoGraphDeployment, mgr ctrl.Manager, groveEnabled bool) *DynamoGraphDeploymentValidator {
-	var client ctrlclient.Client
-	if mgr != nil {
-		client = mgr.GetClient()
-	}
-
+func NewDynamoGraphDeploymentValidator(deployment *nvidiacomv1alpha1.DynamoGraphDeployment, mgr ctrl.Manager, groveEnabled bool) *DynamoGraphDeploymentValidator {
 	return &DynamoGraphDeploymentValidator{
 		deployment:   deployment,
 		mgr:          mgr,
-		client:       client,
 		groveEnabled: groveEnabled,
 	}
-}
-
-func (v *DynamoGraphDeploymentValidator) validationClient() ctrlclient.Client {
-	if v.client != nil {
-		return v.client
-	}
-	if v.mgr != nil {
-		return v.mgr.GetClient()
-	}
-	return nil
 }
 
 // Validate performs validation on the DynamoGraphDeployment.
@@ -732,18 +705,12 @@ func (v *DynamoGraphDeploymentValidator) shouldValidateGroveClusterTopology(errs
 	return len(errs) == 0 &&
 		hasClusterTopologyRef &&
 		v.deployment.Generation <= 1 &&
-		v.validationClient() != nil &&
 		v.isGrovePathway()
 }
 
 func (v *DynamoGraphDeploymentValidator) readGroveClusterTopology(ctx context.Context, name string) (*clusterTopologyInfo, error) {
-	cl := v.validationClient()
-	if cl == nil {
-		return nil, nil
-	}
-
 	ct := &grovev1alpha1.ClusterTopology{}
-	if err := cl.Get(ctx, types.NamespacedName{Name: name}, ct); err != nil {
+	if err := v.mgr.GetClient().Get(ctx, types.NamespacedName{Name: name}, ct); err != nil {
 		return nil, err
 	}
 
