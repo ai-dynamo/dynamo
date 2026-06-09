@@ -8,7 +8,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::kv_router::protocols::WorkerWithDpRank;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
+use crate::lora::routing::RendezvousHasher;
 use crate::lora::routing::table::LoraRoutingTable;
 use crate::lora::state_tracker::LoraStateTracker;
 
@@ -27,6 +29,52 @@ impl LoraFilter {
             routing_table,
             state_tracker,
         }
+    }
+
+    /// Bounded fallback for an existing routing-table entry whose own replica workers are all
+    /// unavailable (worker removal / controller lag). Instead of widening to EVERY available worker
+    /// — which scatters adapter traffic across the cluster and forces cold loads on workers the
+    /// controller never picked, bypassing its placement/capacity decisions — narrow to:
+    ///   1. workers that already have this adapter loaded (no new load), else
+    ///   2. a single deterministic HRW-pinned available worker (a bounded cold load that every
+    ///      router instance agrees on, coordination-free), else
+    ///   3. nothing (only when `available` is empty).
+    ///
+    /// The HRW pin ranks by worker id (dp_rank collapsed to 0, since the filter operates on worker
+    /// ids): it need not match the controller's exact pin — that worker is unavailable here — only
+    /// be deterministic given the same available set.
+    fn bounded_fallback(&self, lora_name: &str, available: &[u64]) -> Vec<u64> {
+        let loaded = self.state_tracker.get_loaded_workers(lora_name);
+        if !loaded.is_empty() {
+            let loaded_ids: HashSet<u64> = loaded.iter().map(|w| w.worker_id).collect();
+            let live_loaded: Vec<u64> = available
+                .iter()
+                .copied()
+                .filter(|id| loaded_ids.contains(id))
+                .collect();
+            if !live_loaded.is_empty() {
+                tracing::debug!(
+                    lora = lora_name,
+                    count = live_loaded.len(),
+                    "Replica workers unavailable; narrowed to known-loaded live workers"
+                );
+                return live_loaded;
+            }
+        }
+        // Deterministic single HRW pin among available workers (highest score, ties broken by id).
+        if let Some(pin) = available.iter().copied().max_by(|&a, &b| {
+            let sa = RendezvousHasher::compute_score(lora_name, WorkerWithDpRank::new(a, 0));
+            let sb = RendezvousHasher::compute_score(lora_name, WorkerWithDpRank::new(b, 0));
+            sa.cmp(&sb).then(a.cmp(&b))
+        }) {
+            tracing::debug!(
+                lora = lora_name,
+                worker_id = pin,
+                "Replica workers unavailable and adapter not loaded; bounded HRW pin (no scatter)"
+            );
+            return vec![pin];
+        }
+        Vec::new()
     }
 
     /// Filter available worker IDs for a LoRA request.
@@ -115,9 +163,9 @@ impl LoraFilter {
 
             tracing::warn!(
                 lora = lora_name,
-                "Replica set workers not available, falling back to all workers"
+                "Replica set workers all unavailable; using bounded fallback (no scatter)"
             );
-            available.to_vec()
+            self.bounded_fallback(lora_name, available)
         } else {
             // Inactive: cold-start pin
             if let Some(pin_id) = config.replica_set.first().map(|w| w.worker_id)
@@ -132,9 +180,9 @@ impl LoraFilter {
             }
             tracing::warn!(
                 lora = lora_name,
-                "Cold-start pin worker not available, falling back to all workers"
+                "Cold-start pin worker unavailable; using bounded fallback (no scatter)"
             );
-            available.to_vec()
+            self.bounded_fallback(lora_name, available)
         }
     }
 
@@ -316,7 +364,9 @@ mod tests {
     }
 
     #[test]
-    fn test_inactive_pin_worker_unavailable_falls_back() {
+    fn test_inactive_pin_worker_unavailable_uses_bounded_pin() {
+        // Inactive cold-start pin worker is gone and the adapter is loaded nowhere: the fallback
+        // must bound to a SINGLE deterministic HRW-pinned available worker, not scatter to all.
         let rt = LoraRoutingTable::new();
         let st = LoraStateTracker::new();
 
@@ -335,6 +385,76 @@ mod tests {
         let workers = make_workers_map(&[1, 2, 3]);
 
         let result = filter.filter_workers_for_lora(Some("lora-b"), &workers);
-        assert_eq!(result.len(), 3);
+        assert_eq!(
+            result.len(),
+            1,
+            "must bound to one worker, not scatter to all three"
+        );
+        // Deterministic: the same inputs always resolve to the same single pin.
+        let again = filter.filter_workers_for_lora(Some("lora-b"), &workers);
+        assert_eq!(
+            result.keys().collect::<Vec<_>>(),
+            again.keys().collect::<Vec<_>>(),
+            "bounded HRW pin must be deterministic"
+        );
+    }
+
+    #[test]
+    fn test_active_all_replicas_unavailable_prefers_known_loaded() {
+        // Active entry whose entire replica set is unavailable, but the adapter is still loaded on
+        // a live worker OUTSIDE the replica set: route there (no new load), never scatter.
+        let rt = LoraRoutingTable::new();
+        let st = LoraStateTracker::new();
+        rt.update_allocation(
+            "lora-a".to_string(),
+            LoraReplicaConfig {
+                lora_name: "lora-a".to_string(),
+                replica_factor: 2,
+                replica_set: vec![make_worker(8), make_worker(9)], // both gone
+                updated_at: Instant::now(),
+                is_active: true,
+            },
+        );
+        // Adapter is actually loaded on live worker 2 (not in the replica set).
+        st.handle_mdc_addition(make_worker(2), &make_lora_info("lora-a"));
+
+        let filter = LoraFilter::new(rt, st);
+        let workers = make_workers_map(&[1, 2, 3]);
+
+        let result = filter.filter_workers_for_lora(Some("lora-a"), &workers);
+        assert_eq!(
+            result.len(),
+            1,
+            "must narrow to the known-loaded worker, not scatter"
+        );
+        assert!(result.contains_key(&2));
+    }
+
+    #[test]
+    fn test_active_all_replicas_unavailable_not_loaded_uses_bounded_pin() {
+        // Active entry, entire replica set unavailable, adapter loaded nowhere: bound to a single
+        // deterministic HRW pin rather than scattering cold loads across every worker.
+        let rt = LoraRoutingTable::new();
+        let st = LoraStateTracker::new();
+        rt.update_allocation(
+            "lora-a".to_string(),
+            LoraReplicaConfig {
+                lora_name: "lora-a".to_string(),
+                replica_factor: 2,
+                replica_set: vec![make_worker(8), make_worker(9)],
+                updated_at: Instant::now(),
+                is_active: true,
+            },
+        );
+
+        let filter = LoraFilter::new(rt, st);
+        let workers = make_workers_map(&[1, 2, 3]);
+
+        let result = filter.filter_workers_for_lora(Some("lora-a"), &workers);
+        assert_eq!(
+            result.len(),
+            1,
+            "must bound to one worker, not scatter to all three"
+        );
     }
 }
