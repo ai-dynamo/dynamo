@@ -20,8 +20,6 @@ use crate::{
     traits::DistributedRuntimeProvider,
 };
 use async_trait::async_trait;
-use blake2::Blake2bVar;
-use blake2::digest::{Update, VariableOutput};
 use futures::Stream;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -193,11 +191,7 @@ impl RouterMode {
 }
 
 fn multimodal_cache_key_from_url(url: &str) -> Option<String> {
-    let mut hasher = Blake2bVar::new(32).ok()?;
-    hasher.update(url.as_bytes());
-    let mut out = [0u8; 32];
-    hasher.finalize_variable(&mut out).ok()?;
-    Some(out.iter().map(|b| format!("{:02x}", b)).collect())
+    Some(blake3::hash(url.as_bytes()).to_hex().to_string())
 }
 
 fn extract_multimodal_cache_keys_from_request<T: Data + Serialize>(

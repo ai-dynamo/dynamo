@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import hashlib
 import json
 import logging
 from contextlib import suppress
 from typing import Any, AsyncIterator, Dict, Optional
 
 import torch
+from blake3 import blake3
 
 # MMEncoder chain imports compiled CUDA ops; may fail in CPU-only environments.
 try:
@@ -174,8 +174,8 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
 
     @staticmethod
     def _url_hash(url: str) -> str:
-        """Stable blake2b hash of an image URL, used as embedding cache key."""
-        return hashlib.blake2b(url.encode(), digest_size=32).hexdigest()
+        """Stable blake3 hash of an image URL, used as embedding cache key."""
+        return blake3(url.encode()).hexdigest()
 
     def _resolve_mm_token_id(
         self, token_str: Optional[str], preferred_token: Optional[str] = None
