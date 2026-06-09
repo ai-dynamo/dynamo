@@ -242,6 +242,7 @@ These crates use repository `https://github.com/ai-dynamo/dynamo.git`. The table
 | `v1.2.0` | Jun 2, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0) | [Docs](https://docs.dynamo.nvidia.com/dynamo) | |
 | `v1.2.0-deepseek-v4-dev.3` | May 9, 2026 | [Tag](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0-deepseek-v4-dev.3) | — | Experimental (DeepSeek-V4-Flash / V4-Pro Blackwell preview; vLLM + SGLang containers only) |
 | `v1.2.0-deepseek-v4-dev.2` | May 1, 2026 | [Tag](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0-deepseek-v4-dev.2) | — | Experimental (DeepSeek-V4-Flash / V4-Pro Blackwell preview; vLLM + SGLang containers only) |
+| `v1.2.0-sglang-deepseek-v4-dev.1` | Apr 25, 2026 | [Tag](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0-sglang-deepseek-v4-dev.1) | — | Experimental (SGLang container only; DeepSeek-V4 Blackwell preview) |
 | `v1.1.1` | May 5, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.1) | [Docs](https://docs.dynamo.nvidia.com/dynamo) | |
 | `v1.1.0` | May 1, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0) | [Docs](https://docs.dynamo.nvidia.com/dynamo) | |
 | `v1.1.0-dev.3` | Apr 18, 2026 | [Tag](https://github.com/ai-dynamo/dynamo/releases/tag/v1.1.0-dev.3) | — | Pre-Release (TRT-LLM Runtime Image + Wheels; see Pre-Release Artifacts) |
@@ -753,6 +754,31 @@ A GitHub or container tag `v1.1.0-dev.N` maps to a wheel version `1.1.0.devN` (f
 | `vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3` | vLLM `v0.20.1` | `v13.0` | AMD64/ARM64 |
 | `sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.3` | SGLang upstream DSv4 preview | `v12.9` | AMD64 |
 | `sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.3` | SGLang upstream DSv4 preview | `v13.0` | ARM64 |
+
+#### Python Wheels
+
+Not published for this dev release. Use the `v1.1.1` wheels or `v1.1.0-dev.3` from [pypi.nvidia.com](https://pypi.nvidia.com/).
+
+#### Helm Charts
+
+Not published for this dev release. Use `v1.1.1` charts for platform install.
+
+#### Rust Crates
+
+Not shipped for pre-release versions.
+
+### v1.2.0-sglang-deepseek-v4-dev.1
+
+- **Branch:** [release/1.2.0-sglang-deepseek-v4-dev.1](https://github.com/ai-dynamo/dynamo/tree/release/1.2.0-sglang-deepseek-v4-dev.1)
+- **GitHub Tag:** [v1.2.0-sglang-deepseek-v4-dev.1](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0-sglang-deepseek-v4-dev.1)
+- **Backends:** SGLang upstream `lmsysorg/sglang:deepseek-v4-blackwell` preview
+- **Coverage:** Partial -- DeepSeek-V4-Flash and V4-Pro only. SGLang container only, published for Blackwell (B200). No vLLM or TensorRT-LLM containers, no other component containers, no Helm charts, no wheels. Earliest DSv4 preview snapshot; superseded by dev.2/dev.3; not QA-gated.
+
+#### Container Images
+
+| Image:Tag | Backend | CUDA | Arch |
+|-----------|---------|------|------|
+| `sglang-runtime:1.2.0-sglang-deepseek-v4-b200-dev.1` | SGLang (DSv4 Blackwell preview) | `v12.9` | AMD64 |
 
 #### Python Wheels
 

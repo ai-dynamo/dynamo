@@ -781,6 +781,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		CheckpointID:                checkpointID,
 		CheckpointLocation:          checkpointLocation.HostPath,
 		ContainerCheckpointLocation: checkpointLocation.ContainerPath,
+		ContainerID:                 containerID,
 		StartedAt:                   startedAt,
 		NSRestorePath:               w.config.Restore.NSRestorePath,
 		PodName:                     pod.Name,
@@ -796,7 +797,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 			return statusErr
 		}
 		// Re-resolve: executor.Restore may have failed before resolving the placeholder.
-		placeholderHostPID, _, pidErr := w.runtime.ResolveContainerByPod(ctx, pod.Name, pod.Namespace, containerName)
+		placeholderHostPID, _, pidErr := w.runtime.ResolveContainer(ctx, containerID)
 		if pidErr != nil {
 			return fmt.Errorf("restore failed and placeholder PID could not be resolved: %w", pidErr)
 		}

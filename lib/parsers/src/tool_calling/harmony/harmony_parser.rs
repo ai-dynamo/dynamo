@@ -432,6 +432,14 @@ pub fn detect_tool_call_start_harmony(
         return false;
     }
 
+    let has_complete_end_token = config
+        .tool_call_end_tokens
+        .iter()
+        .any(|token| !token.is_empty() && trimmed.contains(token));
+    if has_complete_end_token {
+        return true;
+    }
+
     if strict {
         // Check for complete start tokens first
         let has_complete_token = config
@@ -917,6 +925,24 @@ mod detect_parser_tests {
         };
         let result = detect_tool_call_start_harmony(text, &config, false);
         assert!(result);
+    }
+
+    #[tokio::test]
+    async fn test_parse_harmony_orphan_call_marker_does_not_leak() {
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<|start|>assistant<|channel|>commentary".to_string()],
+            tool_call_end_tokens: vec!["<|call|>".to_string()],
+            ..Default::default()
+        };
+
+        assert!(detect_tool_call_start_harmony("<|call|>", &config, false));
+        assert!(detect_tool_call_start_harmony("<|call|>", &config, true));
+
+        let (tool_calls, normal) = parse_tool_calls_harmony_complete("<|call|>", &config, None)
+            .await
+            .unwrap();
+        assert!(tool_calls.is_empty());
+        assert_eq!(normal, Some("".to_string()));
     }
 
     #[test] // helper, TOOLCALLING.stream.3

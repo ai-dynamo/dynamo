@@ -52,7 +52,9 @@ use crate::protocols::common::preprocessor::{
 use crate::protocols::common::timing::RequestTracker;
 use crate::tokenizers::Encoding;
 
-use dynamo_parsers::{ReasoningParser, ReasoningParserType};
+use dynamo_parsers::{
+    ReasoningParser, ReasoningParserType, tool_calling::parsers::get_tool_parser_map,
+};
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
 use dynamo_runtime::pipeline::{
     AsyncEngineContext, Error, ManyOut, Operator, SingleIn, async_trait,
@@ -60,6 +62,7 @@ use dynamo_runtime::pipeline::{
 use dynamo_runtime::protocols::annotated::{Annotated, AnnotationsProvider};
 
 use crate::protocols::{
+    TokenIdType,
     common::{OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
     openai::{
         DeltaGeneratorExt,
@@ -226,100 +229,6 @@ struct PreprocessRequestOptions {
     preserve_omitted_max_tokens: bool,
 }
 
-/// Backend-specific MM-routing wire shape. Resolved once from
-/// `runtime_config.backend_framework`; unknown values disable MM
-/// routing (text-prefix fallback).
-///
-/// TODO(mm-routing): collapse the 16-vs-64-char split. Blocked on
-/// kv-router's `parse_mm_hash_from_extra_key` using 64-char length as
-/// the MM-hash type tag in vLLM `BlockStored` extra_keys.
-#[cfg(feature = "mm-routing")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MmRoutingProtocol {
-    /// SGLang: image positions filled with `pad_value(mm_hash)`; no
-    /// `block_mm_infos` emitted (matches sglang's `BlockStored` event bytes).
-    Sglang,
-    /// vLLM: image positions filled with `image_token_id`; per-image
-    /// 64-char-hex mm_hashes forwarded via `multi_modal_uuids` in
-    /// `extra_args` (matches vLLM's mm_uuid event format).
-    Vllm,
-}
-
-/// Mirror of sglang's `MultimodalItem._compute_pad_value` constants from
-/// `python/sglang/srt/managers/multimodal_processor.py`. The pad_value
-/// shoved into routing-side block hashes for each image must match what
-/// sglang publishes via its `BlockStored` KV events — if either constant
-/// drifts from upstream, our pad_value diverges and routing silently
-/// degrades to text-prefix.
-///
-/// Pinned by `mm_pad_value_matches_sglang_protocol` in `mod tests`.
-#[cfg(feature = "mm-routing")]
-const MM_PAD_SHIFT_VALUE: u64 = 1_000_000;
-#[cfg(feature = "mm-routing")]
-const MM_PAD_HASH_MASK: u64 = (1 << 30) - 1;
-
-/// Compute the sglang per-image pad_value from a routing-side mm_hash.
-/// Wrapping the formula in a function (not just an inline closure) lets
-/// the test in `mod tests` pin both the constants and the formula
-/// directly.
-#[cfg(feature = "mm-routing")]
-fn pad_value_for_sglang(mm_hash: u64) -> crate::protocols::TokenIdType {
-    (MM_PAD_SHIFT_VALUE + (mm_hash & MM_PAD_HASH_MASK)) as crate::protocols::TokenIdType
-}
-
-#[cfg(feature = "mm-routing")]
-impl MmRoutingProtocol {
-    /// Resolve from `runtime_config.backend_framework`. Returns `None` for
-    /// missing or unrecognized values so MM-aware routing disables itself
-    /// (text-prefix fallback) instead of silently picking a wire shape.
-    fn from_backend_framework(value: Option<&str>) -> Option<Self> {
-        match value {
-            Some(s) if s.eq_ignore_ascii_case("sglang") => Some(Self::Sglang),
-            Some(s) if s.eq_ignore_ascii_case("vllm") => Some(Self::Vllm),
-            other => {
-                tracing::warn!(
-                    target: "mm_routing",
-                    backend_framework = ?other,
-                    "backend_framework missing or unrecognized; \
-                     MM-aware routing disabled (text-prefix fallback)."
-                );
-                None
-            }
-        }
-    }
-
-    /// Hex-encode `mm_hash` for `extra_args["mm_hashes"]`. Length is
-    /// load-bearing: sglang reads `int(hex, 16)` for pad_value, vLLM's
-    /// `BlockStored` parser uses 64-char as the MM-hash type tag.
-    fn format_mm_hash_hex(&self, mm_hash: u64) -> String {
-        const HEX_PAD: &str = "000000000000000000000000000000000000000000000000";
-        match self {
-            Self::Sglang => format!("{mm_hash:016x}"),
-            Self::Vllm => format!("{mm_hash:016x}{HEX_PAD}"),
-        }
-    }
-
-    /// Fill token at image positions in the routing-side `token_ids`.
-    /// sglang: `pad_value(mm_hash)` to match RadixAttention cache key.
-    /// vLLM: `find_token_id` (what the HF processor emits).
-    fn image_fill_token(
-        &self,
-        mm_hash: u64,
-        find_token_id: crate::protocols::TokenIdType,
-    ) -> crate::protocols::TokenIdType {
-        match self {
-            Self::Sglang => pad_value_for_sglang(mm_hash),
-            Self::Vllm => find_token_id,
-        }
-    }
-
-    /// Emit per-block MM-info? vLLM consumes it; sglang's pad_value
-    /// already encodes `mm_hash` in the bytes the router hashes.
-    fn emits_block_mm_infos(&self) -> bool {
-        matches!(self, Self::Vllm)
-    }
-}
-
 pub struct OpenAIPreprocessor {
     mdcsum: String,
     formatter: Arc<dyn OAIPromptFormatter>,
@@ -334,11 +243,6 @@ pub struct OpenAIPreprocessor {
     media_loader: Option<MediaLoader>,
     /// Max context length (in tokens) this model can handle, from ModelDeploymentCard
     context_length: u32,
-    /// Backend protocol the MM-routing fill path matches against. `None`
-    /// when `runtime_config.backend_framework` is missing or unrecognized
-    /// — MM-aware routing then falls back to text-prefix routing.
-    #[cfg(feature = "mm-routing")]
-    mm_routing_protocol: Option<MmRoutingProtocol>,
     /// Per-image token-count engine. `None` when the feature is disabled, the
     /// model isn't covered by the registry, or `preprocessor_config.json` is
     /// unreadable.
@@ -491,13 +395,6 @@ impl OpenAIPreprocessor {
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
         let kv_cache_block_size = mdc.kv_cache_block_size as usize;
-
-        // Resolve the backend label once at startup; used by the MM-routing
-        // hot path to pick between sglang pad_value substitution and vLLM
-        // mm_hashes forwarding without re-checking per request.
-        #[cfg(feature = "mm-routing")]
-        let mm_routing_protocol =
-            MmRoutingProtocol::from_backend_framework(runtime_config.backend_framework.as_deref());
 
         // Capture MM-routing inputs before mdc is partially moved into MediaLoader.
         // model_type comes from config.json (e.g. "qwen3_vl") and lets the
@@ -680,8 +577,6 @@ impl OpenAIPreprocessor {
             media_loader,
             context_length,
             #[cfg(feature = "mm-routing")]
-            mm_routing_protocol,
-            #[cfg(feature = "mm-routing")]
             image_token_counter,
             #[cfg(feature = "mm-routing")]
             routing_image_token_id,
@@ -829,38 +724,44 @@ impl OpenAIPreprocessor {
         builder.model(request.model());
 
         let mut stop_conditions = request.extract_stop_conditions()?;
-        // Harmony's `<|call|>` is BOTH the tool-call terminator the parser needs in the
-        // decoded text AND a gpt-oss EOS token. Hiding it like other EOS tokens strips the
-        // terminator before the harmony parser sees it, so tool calls are silently dropped
-        // (vLLM >=0.22 correctly stops on `<|call|>`, which is when this surfaces). Keep it
-        // visible — out of the hidden stop set — when the harmony tool-call parser is active.
-        // Generation still stops on it via the worker's own EOS; we only avoid *hiding* it.
-        let visible_eos: Vec<u32> = if matches!(self.tool_call_parser.as_deref(), Some("harmony")) {
-            dynamo_parsers::harmony_terminator_token_ids()
-        } else {
-            Vec::new()
-        };
+        let eos_token_ids = self.model_info.eos_token_ids();
+        let hidden_eos_token_ids = eos_token_ids.clone();
         if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
-            for eos_token in self.model_info.eos_token_ids() {
-                if !visible_eos.contains(&eos_token) && !stop_tokens.contains(&eos_token) {
-                    stop_tokens.push(eos_token);
+            for eos_token_id in hidden_eos_token_ids {
+                if !stop_tokens.contains(&eos_token_id) {
+                    stop_tokens.push(eos_token_id);
                 }
             }
         } else {
-            stop_conditions.stop_token_ids_hidden = Some(
-                self.model_info
-                    .eos_token_ids()
-                    .into_iter()
-                    .filter(|t| !visible_eos.contains(t))
-                    .collect(),
-            );
+            stop_conditions.stop_token_ids_hidden = Some(hidden_eos_token_ids);
+        }
+        // Some tool-call parsers terminate on a token that is also a model
+        // EOS (e.g. Harmony's `<|call|>` for gpt-oss). Left in the hidden
+        // set, the engine stops AND strips it, so the parser sees a
+        // truncated envelope and drops the call. Move such tokens to the
+        // visible set so the engine still stops on them but the token
+        // survives into output for the parser to consume. See PR #9778.
+        let mut visible_tool_parser_end_token_ids = Vec::new();
+        if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
+            visible_tool_parser_end_token_ids =
+                self.remove_tool_parser_end_tokens_from_hidden_stops(request, stop_tokens)?;
+        }
+        if !visible_tool_parser_end_token_ids.is_empty() {
+            let visible_stops = stop_conditions
+                .stop_token_ids_visible
+                .get_or_insert_with(Vec::new);
+            for token_id in visible_tool_parser_end_token_ids {
+                if !visible_stops.contains(&token_id) {
+                    visible_stops.push(token_id);
+                }
+            }
         }
 
         // apply ignore eos if not already set
         stop_conditions.apply_ignore_eos();
 
         if !stop_conditions.ignore_eos.unwrap_or(false) {
-            builder.eos_token_ids(self.model_info.eos_token_ids());
+            builder.eos_token_ids(eos_token_ids);
         }
 
         builder.stop_conditions(stop_conditions);
@@ -947,6 +848,81 @@ impl OpenAIPreprocessor {
         builder.mm_processor_kwargs(request.mm_processor_kwargs().cloned());
 
         Ok(builder)
+    }
+
+    fn remove_tool_parser_end_tokens_from_hidden_stops<R: OAIChatLikeRequest>(
+        &self,
+        request: &R,
+        hidden_stop_token_ids: &mut Vec<TokenIdType>,
+    ) -> Result<Vec<TokenIdType>> {
+        let has_tools = request
+            .tools()
+            .as_ref()
+            .and_then(|tools| tools.len())
+            .is_some_and(|len| len > 0);
+        let tool_choice_none = request
+            .tool_choice()
+            .as_ref()
+            .and_then(|tool_choice| tool_choice.as_str())
+            == Some("none");
+
+        if !Self::should_keep_tool_parser_end_tokens_visible(has_tools, tool_choice_none) {
+            return Ok(Vec::new());
+        }
+
+        let Some(tool_call_parser) = self.tool_call_parser.as_deref().filter(|p| !p.is_empty())
+        else {
+            return Ok(Vec::new());
+        };
+        let Some(tool_call_config) = get_tool_parser_map().get(tool_call_parser) else {
+            return Ok(Vec::new());
+        };
+
+        let mut visible_stop_token_ids = Vec::new();
+        for end_token in tool_call_config.parser_config.tool_call_end_tokens() {
+            if end_token.is_empty() {
+                continue;
+            }
+            let encoded = self.tokenizer.encode(&end_token).with_context(|| {
+                format!(
+                    "Failed to encode tool-call end token {end_token:?} for parser {tool_call_parser:?}"
+                )
+            })?;
+            let was_hidden_eos =
+                Self::remove_single_token_marker(hidden_stop_token_ids, encoded.token_ids());
+            if !was_hidden_eos {
+                tracing::debug!(
+                    token_ids = ?encoded.token_ids(),
+                    end_token,
+                    parser = tool_call_parser,
+                    "Tool-call end token was not a single hidden EOS token"
+                );
+                continue;
+            }
+            if let [token_id] = encoded.token_ids()
+                && !visible_stop_token_ids.contains(token_id)
+            {
+                visible_stop_token_ids.push(*token_id);
+            }
+        }
+
+        Ok(visible_stop_token_ids)
+    }
+
+    fn should_keep_tool_parser_end_tokens_visible(has_tools: bool, tool_choice_none: bool) -> bool {
+        has_tools && !tool_choice_none
+    }
+
+    fn remove_single_token_marker(
+        hidden_eos_token_ids: &mut Vec<TokenIdType>,
+        marker_token_ids: &[TokenIdType],
+    ) -> bool {
+        let [marker_token_id] = marker_token_ids else {
+            return false;
+        };
+        let before = hidden_eos_token_ids.len();
+        hidden_eos_token_ids.retain(|token_id| token_id != marker_token_id);
+        hidden_eos_token_ids.len() != before
     }
 
     pub fn apply_template<
@@ -1263,24 +1239,25 @@ impl OpenAIPreprocessor {
 
             // Forward routing-side mm_hashes in `extra_args["mm_hashes"]` so the
             // backend's KV events publish under the same key the router computes.
-            // Each backend's hex format is owned by `MmRoutingProtocol::format_mm_hash_hex`
-            // (sglang 16-char, vLLM 64-char — both are protocol-load-bearing).
+            // Always the canonical 16-char hex (u64); each backend adapts it:
+            // sglang reads `int(hex, 16)` as-is, vLLM pads to its 64-char
+            // BlockStored form. No information is lost — both carry the same u64.
             //
             // Skip forwarding entirely if any image failed dim resolution —
             // a shorter `mm_hashes` list would misalign with the image
             // positions the backend derives from `multi_modal_data`, and
             // the wrong UUIDs would get injected onto the wrong images.
             #[cfg(feature = "mm-routing")]
-            if let Some(protocol) = self.mm_routing_protocol
+            if self.routing_image_token_id.is_some()
                 && !mm_image_entries.is_empty()
                 && mm_image_entries.len() == total_image_count
             {
                 let hexes: Vec<serde_json::Value> = mm_image_entries
                     .iter()
-                    .map(|e| serde_json::Value::String(protocol.format_mm_hash_hex(e.mm_hash)))
+                    .map(|e| serde_json::Value::String(format!("{:016x}", e.mm_hash)))
                     .collect();
                 extra_args["mm_hashes"] = serde_json::Value::Array(hexes);
-            } else if !mm_image_entries.is_empty() && self.mm_routing_protocol.is_some() {
+            } else if !mm_image_entries.is_empty() && self.routing_image_token_id.is_some() {
                 tracing::warn!(
                     target: "mm_routing",
                     resolved = mm_image_entries.len(),
@@ -1313,18 +1290,10 @@ impl OpenAIPreprocessor {
         formatted_prompt: Option<&str>,
     ) -> Result<()> {
         use crate::protocols::common::preprocessor::MmRoutingInfo;
-        use dynamo_kv_router::protocols::{RequestExtraInfo, RequestMmObjectInfo};
 
         if mm_image_entries.is_empty() {
             return Ok(());
         }
-        let Some(protocol) = self.mm_routing_protocol else {
-            tracing::debug!(
-                target: "mm_routing",
-                "mm_routing_protocol unset; skipping MM routing info"
-            );
-            return Ok(());
-        };
         let Some(find_token_id) = self.routing_image_token_id else {
             tracing::debug!(
                 target: "mm_routing",
@@ -1400,8 +1369,11 @@ impl OpenAIPreprocessor {
             .collect();
         let n_total: usize = n_tokens.iter().sum();
 
-        // Per-protocol image-position fill (see `MmRoutingProtocol::image_fill_token`).
-        // sglang's pad_value formula is pinned by `mm_pad_value_matches_sglang_protocol`.
+        // Canonical pad_value fill at image positions for ALL backends. sglang
+        // consumes pad_value natively; vLLM events are normalized to pad_value
+        // in the kv-router (see `create_stored_blocks`), so the frontend stays
+        // backend-agnostic. pad_value formula pinned by
+        // `pad_value_matches_sglang_protocol` in dynamo_kv_router.
         //
         // BOS ownership: when the Phi-3 splice helper produced
         // `normalized_token_ids` (Cow::Owned), it has already emitted the
@@ -1416,15 +1388,12 @@ impl OpenAIPreprocessor {
         if !splice_owns_bos && let Some(bos) = self.routing_prepend_bos {
             expanded.push(bos);
         }
-        let mut img_ranges: Vec<(usize, usize)> = Vec::with_capacity(mm_image_entries.len());
         let mut i = 0usize;
         for &t in normalized_token_ids.iter() {
             if t == find_token_id && i < mm_image_entries.len() {
-                let start = expanded.len();
                 let fill_token =
-                    protocol.image_fill_token(mm_image_entries[i].mm_hash, find_token_id);
+                    dynamo_kv_router::protocols::pad_value_for_mm_hash(mm_image_entries[i].mm_hash);
                 expanded.extend(std::iter::repeat_n(fill_token, n_tokens[i]));
-                img_ranges.push((start, start + n_tokens[i]));
                 i += 1;
             } else {
                 expanded.push(t);
@@ -1442,35 +1411,21 @@ impl OpenAIPreprocessor {
             expanded.resize(total_tokens, 0);
         }
 
-        // Build request-level MM info, then derive per-block info. In sglang
-        // mode skip block_mm_infos: pad_value already encodes mm_hash in the
-        // bytes the router hashes; sglang's events carry no extra_keys.
-        let block_mm_infos = if !protocol.emits_block_mm_infos() {
-            Vec::new()
-        } else {
-            let mm_objects: Vec<RequestMmObjectInfo> = mm_image_entries
-                .iter()
-                .zip(img_ranges.iter())
-                .map(|(entry, &(s, e))| RequestMmObjectInfo {
-                    mm_hash: entry.mm_hash,
-                    offsets: vec![(s, e)],
-                })
-                .collect();
-            RequestExtraInfo { mm_objects }.to_block_level(block_size, total_tokens)
-        };
-
+        // pad_value already encodes mm_hash in the routing tokens the router
+        // hashes, so block_mm_infos is always empty (the canonical scheme for
+        // both backends). The mm identity rides in the token stream, not a
+        // side channel.
         tracing::debug!(
             target: "mm_routing",
             n_images = mm_image_entries.len(),
             block_size,
             total_tokens,
-            n_blocks = block_mm_infos.len(),
-            "MmRoutingInfo built (exact)"
+            "MmRoutingInfo built (exact, pad_value)"
         );
 
         builder.mm_routing_info(Some(MmRoutingInfo {
             routing_token_ids: expanded,
-            block_mm_infos,
+            block_mm_infos: Vec::new(),
         }));
         Ok(())
     }
@@ -3003,7 +2958,7 @@ impl
         )?;
 
         tracing::trace!(request = ?common_request, prompt_injected_reasoning, "Pre-processed request");
-        let trace_state = crate::agents::trace::build_agent_trace_request_end_state(
+        let trace_state = crate::request_trace::build_request_end_trace_state(
             &common_request,
             &tracker,
             &context,
@@ -3011,7 +2966,7 @@ impl
         );
         let trace_tokens_enabled = trace_state.is_some();
         let trace_finish_reason_metadata =
-            crate::agents::trace::finish_reason_metadata_handle(&trace_state);
+            crate::request_trace::finish_reason_metadata_handle(&trace_state);
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
@@ -3088,7 +3043,7 @@ impl
             &self.tokenizer,
         );
 
-        let final_stream = crate::agents::trace::wrap_agent_trace_chat_request_end_stream(
+        let final_stream = crate::request_trace::wrap_chat_request_end_stream(
             final_stream,
             trace_state,
             request_id,
@@ -3165,7 +3120,7 @@ impl
 
         let mut common_request = builder.build()?;
 
-        let trace_state = crate::agents::trace::build_agent_trace_request_end_state(
+        let trace_state = crate::request_trace::build_request_end_trace_state(
             &common_request,
             &tracker,
             &context,
@@ -3173,7 +3128,7 @@ impl
         );
         let trace_tokens_enabled = trace_state.is_some();
         let trace_finish_reason_metadata =
-            crate::agents::trace::finish_reason_metadata_handle(&trace_state);
+            crate::request_trace::finish_reason_metadata_handle(&trace_state);
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
@@ -3212,7 +3167,7 @@ impl
             trace_finish_reason_metadata,
         );
 
-        let stream = crate::agents::trace::wrap_agent_trace_completion_request_end_stream(
+        let stream = crate::request_trace::wrap_completion_request_end_stream(
             Box::pin(stream),
             trace_state,
             request_id,
@@ -3848,40 +3803,6 @@ mod tests {
         assert_ne!(
             s3a, s3b,
             "s3:// query params identify objects and must not collide"
-        );
-    }
-
-    /// Pin the sglang pad_value protocol constants and formula against
-    /// upstream `MultimodalItem._compute_pad_value`. If sglang bumps
-    /// either constant in a new release, this test fails — without it
-    /// the routing-side pad_value would silently diverge from sglang's
-    /// `BlockStored` event bytes and MM-routing would degrade to text-
-    /// prefix without any error.
-    #[cfg(feature = "mm-routing")]
-    #[test]
-    fn mm_pad_value_matches_sglang_protocol() {
-        // Constant pins (upstream:
-        // python/sglang/srt/managers/multimodal_processor.py).
-        assert_eq!(MM_PAD_SHIFT_VALUE, 1_000_000);
-        assert_eq!(MM_PAD_HASH_MASK, (1u64 << 30) - 1);
-
-        // Formula pins. Three cases: zero, a value that exactly fits the
-        // 30-bit mask, and a value that overflows it (verifies the mask
-        // is actually applied, not just additively combined).
-        assert_eq!(
-            pad_value_for_sglang(0),
-            MM_PAD_SHIFT_VALUE as crate::protocols::TokenIdType
-        );
-        let fits = (1u64 << 30) - 1;
-        assert_eq!(
-            pad_value_for_sglang(fits),
-            (MM_PAD_SHIFT_VALUE + fits) as crate::protocols::TokenIdType
-        );
-        let overflow = (1u64 << 30) | 0xCAFE;
-        assert_eq!(
-            pad_value_for_sglang(overflow),
-            (MM_PAD_SHIFT_VALUE + 0xCAFE) as crate::protocols::TokenIdType,
-            "high bits above the 30-bit mask must be discarded"
         );
     }
 }

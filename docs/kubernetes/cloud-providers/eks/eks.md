@@ -4,9 +4,16 @@
 title: Amazon Elastic Kubernetes Service (EKS)
 ---
 
-# Steps to create an EKS cluster
-
 This guide demonstrates the Dynamo platform on Amazon Elastic Kubernetes Service (EKS).
+
+## Clone the repository and set working directory
+
+Manifest and template paths in this guide are relative to `examples/deployments/EKS/` in the Dynamo repository.
+
+```bash
+git clone https://github.com/ai-dynamo/dynamo.git
+cd dynamo/examples/deployments/EKS
+```
 
 ## Setup environment variables
 

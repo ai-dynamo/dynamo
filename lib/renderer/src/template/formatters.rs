@@ -87,6 +87,133 @@ fn remove_known_non_jinja2_tags(template: &str) -> String {
         .replace("{% endgeneration %}", "")
 }
 
+/// Normalize common Python/Jinja dict method calls that are ambiguous in minijinja.
+///
+/// JSON schemas commonly use an `items` key for array item definitions. In
+/// minijinja, `foo.items()` can resolve `items` as a map entry before the
+/// pycompat method callback sees it, causing "object is not callable" for
+/// templates that iterate OpenAI tool schemas. The `items` filter gives the same
+/// map iteration behavior without colliding with schema keys.
+fn normalize_dict_method_calls(template: &str) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut i = 0;
+
+    while i < template.len() {
+        if template[i..].starts_with("{#") {
+            let Some(end) = find_tag_end(template, i + 2, "#}") else {
+                out.push_str(&template[i..]);
+                break;
+            };
+            out.push_str(&template[i..end]);
+            i = end;
+        } else if template[i..].starts_with("{{") {
+            let Some(end) = find_tag_end(template, i + 2, "}}") else {
+                out.push_str(&template[i..]);
+                break;
+            };
+            out.push_str("{{");
+            out.push_str(&normalize_jinja_code_segment(&template[i + 2..end - 2]));
+            out.push_str("}}");
+            i = end;
+        } else if template[i..].starts_with("{%") {
+            let Some(end) = find_tag_end(template, i + 2, "%}") else {
+                out.push_str(&template[i..]);
+                break;
+            };
+            let inner = &template[i + 2..end - 2];
+            if is_jinja_block_name(inner, "raw") {
+                if let Some(raw_end) = find_raw_block_end(template, end) {
+                    out.push_str(&template[i..raw_end]);
+                    i = raw_end;
+                } else {
+                    out.push_str(&template[i..]);
+                    break;
+                }
+            } else {
+                out.push_str("{%");
+                out.push_str(&normalize_jinja_code_segment(inner));
+                out.push_str("%}");
+                i = end;
+            }
+        } else {
+            let ch = template[i..].chars().next().expect("valid char boundary");
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+
+    out
+}
+
+fn find_tag_end(template: &str, start: usize, close: &str) -> Option<usize> {
+    template[start..]
+        .find(close)
+        .map(|relative| start + relative + close.len())
+}
+
+fn find_raw_block_end(template: &str, start: usize) -> Option<usize> {
+    let mut i = start;
+    while let Some(relative_open) = template[i..].find("{%") {
+        let open = i + relative_open;
+        let end = find_tag_end(template, open + 2, "%}")?;
+        if is_jinja_block_name(&template[open + 2..end - 2], "endraw") {
+            return Some(end);
+        }
+        i = end;
+    }
+    None
+}
+
+fn is_jinja_block_name(inner: &str, name: &str) -> bool {
+    let trimmed = inner.trim_start();
+    let trimmed = trimmed
+        .strip_prefix('-')
+        .or_else(|| trimmed.strip_prefix('+'))
+        .unwrap_or(trimmed)
+        .trim_start();
+    let Some(rest) = trimmed.strip_prefix(name) else {
+        return false;
+    };
+    rest.chars()
+        .next()
+        .is_none_or(|ch| ch.is_whitespace() || ch == '-' || ch == '+')
+}
+
+fn normalize_jinja_code_segment(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    let mut i = 0;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    while i < segment.len() {
+        let ch = segment[i..].chars().next().expect("valid char boundary");
+
+        if let Some(q) = quote {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == q {
+                quote = None;
+            }
+            i += ch.len_utf8();
+        } else if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+            out.push(ch);
+            i += ch.len_utf8();
+        } else if segment[i..].starts_with(".items()") {
+            out.push_str("|items");
+            i += ".items()".len();
+        } else {
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+
+    out
+}
+
 impl JinjaEnvironment {
     fn env(self) -> Environment<'static> {
         self.env
@@ -152,7 +279,8 @@ impl HfTokenizerConfigJsonFormatter {
                     supports_add_generation_prompt = Some(true);
                 }
                 // Remove known non-standard tags before validation (they don't affect output)
-                let template_cleaned = remove_known_non_jinja2_tags(x);
+                let template_cleaned =
+                    normalize_dict_method_calls(&remove_known_non_jinja2_tags(x));
                 env.add_template_owned("default", template_cleaned.clone())?;
                 env.add_template_owned("tool_use", template_cleaned)?;
             }
@@ -177,7 +305,8 @@ impl HfTokenizerConfigJsonFormatter {
                             supports_add_generation_prompt = Some(false);
                         }
                         // Remove known non-standard tags before validation (they don't affect output)
-                        let template_cleaned = remove_known_non_jinja2_tags(v);
+                        let template_cleaned =
+                            normalize_dict_method_calls(&remove_known_non_jinja2_tags(v));
                         env.add_template_owned(k.to_string(), template_cleaned)?;
                     }
                 }
@@ -277,6 +406,71 @@ mod tests {
         let template = "Start {% generation %}Part 1{% endgeneration %} middle {% generation %}Part 2{% endgeneration %}";
         let result = remove_known_non_jinja2_tags(template);
         assert_eq!(result, "Start Part 1 middle Part 2");
+    }
+
+    #[test]
+    fn test_normalize_dict_method_calls_rewrites_items_method() {
+        let template = "{% for k, v in tool.parameters.properties.items() %}{{ k }}{% endfor %}";
+        let result = normalize_dict_method_calls(template);
+        assert_eq!(
+            result,
+            "{% for k, v in tool.parameters.properties|items %}{{ k }}{% endfor %}"
+        );
+    }
+
+    #[test]
+    fn test_normalize_dict_method_calls_rewrites_expression_items_method() {
+        let template = "{{ tool.parameters.properties.items() }}";
+        let result = normalize_dict_method_calls(template);
+        assert_eq!(result, "{{ tool.parameters.properties|items }}");
+    }
+
+    #[test]
+    fn test_normalize_dict_method_calls_preserves_literal_text() {
+        let template = "Do not rewrite literal .items() text.";
+        let result = normalize_dict_method_calls(template);
+        assert_eq!(result, template);
+    }
+
+    #[test]
+    fn test_normalize_dict_method_calls_preserves_comments_raw_and_strings() {
+        let template = concat!(
+            "{# comment .items() #}",
+            "{% raw %}{{ tool.parameters.properties.items() }}{% endraw %}",
+            "{{ '.items()' }}",
+            "{{ \".items()\" }}",
+        );
+        let result = normalize_dict_method_calls(template);
+        assert_eq!(result, template);
+    }
+
+    #[test]
+    fn test_normalize_dict_method_calls_avoids_schema_items_collision() {
+        let template = normalize_dict_method_calls(
+            "{% for param_name, param_spec in tool.parameters.properties.items() %}{{ param_name }}={{ param_spec.type }};{% endfor %}",
+        );
+
+        let mut env = Environment::new();
+        env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
+        env.add_template("t", &template).unwrap();
+
+        let tool = json!({
+            "parameters": {
+                "properties": {
+                    "items": {"type": "array", "items": {"type": "object"}},
+                    "message": {"type": "string"}
+                }
+            }
+        });
+
+        let out = env
+            .get_template("t")
+            .unwrap()
+            .render(context! { tool => tool })
+            .unwrap();
+
+        assert!(out.contains("items=array;"));
+        assert!(out.contains("message=string;"));
     }
 
     #[test]
