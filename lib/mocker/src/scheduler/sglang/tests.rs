@@ -530,6 +530,80 @@ mod core_behavior {
     }
 
     #[test]
+    fn test_mtp_batch_applies_request_bursts_in_stable_order() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .num_gpu_blocks(32)
+            .block_size(4)
+            .speedup_ratio(0.0)
+            .aic_nextn(Some(2))
+            .aic_nextn_accept_rates(Some("1,1".to_string()))
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(16),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap();
+        let mut core = SglangCore::new(args);
+        let short = Uuid::from_u128(101);
+        let long = Uuid::from_u128(102);
+        let longer = Uuid::from_u128(103);
+        for (uuid, tokens, max_output_tokens) in [
+            (short, vec![1, 2, 3, 4], 5),
+            (long, vec![5, 6, 7, 8], 8),
+            (longer, vec![9, 10, 11, 12], 8),
+        ] {
+            core.receive(DirectRequest {
+                tokens,
+                max_output_tokens,
+                uuid: Some(uuid),
+                dp_rank: 0,
+                arrival_timestamp_ms: None,
+            });
+        }
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let first = core.execute_pass(&mut collector, 0.0);
+        assert_eq!(first.output_signals.len(), 9);
+        let second = core.execute_pass(&mut collector, first.end_ms);
+        let ordered = second
+            .output_signals
+            .iter()
+            .map(|signal| (signal.uuid, signal.completed))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered,
+            vec![
+                (short, false),
+                (short, true),
+                (long, false),
+                (long, false),
+                (long, false),
+                (longer, false),
+                (longer, false),
+                (longer, false),
+            ]
+        );
+        assert_eq!(core.running.len(), 2);
+        assert_eq!(core.running[0].uuid, long);
+        assert_eq!(core.running[0].output_len(), 6);
+        assert_eq!(core.running[1].uuid, longer);
+        assert_eq!(core.running[1].output_len(), 6);
+        assert_eq!(second.fpm.unwrap().num_decode_requests, 3);
+
+        let third = core.execute_pass(&mut collector, second.end_ms);
+        assert_eq!(
+            third
+                .output_signals
+                .iter()
+                .map(|signal| signal.uuid)
+                .collect::<Vec<_>>(),
+            vec![long, long, longer, longer],
+        );
+    }
+
+    #[test]
     fn test_sglang_pass_visibility_is_pass_end() {
         let mut core = SglangCore::new_with_kv_capture(test_args(32, 4, 4), ROUTER_TEST_WORKER_ID);
         core.receive(direct_request(vec![1, 2, 3, 4], 1));
@@ -830,6 +904,70 @@ mod router_events {
             }
         }
 
+        assert!(saw_remove);
+        harness.assert_no_event_errors();
+        harness.assert_no_event_warnings();
+        harness.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_mtp_lifecycle_drains_with_clean_router_events() {
+        let harness = RouterIndexerHarness::new(4, ROUTER_TEST_WORKER_ID);
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .num_gpu_blocks(5)
+            .block_size(4)
+            .max_num_batched_tokens(Some(8))
+            .max_num_seqs(Some(4))
+            .speedup_ratio(0.0)
+            .aic_nextn(Some(2))
+            .aic_nextn_accept_rates(Some("0,1".to_string()))
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(4),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap();
+        let mut core = SglangCore::new_with_kv_capture(args, ROUTER_TEST_WORKER_ID);
+        let requests = [
+            direct_request(vec![1, 2, 3, 4, 5, 6], 7),
+            direct_request(vec![9, 10, 11, 12], 5),
+        ];
+        let expected_tokens = requests
+            .iter()
+            .map(|request| request.max_output_tokens)
+            .sum::<usize>();
+        for request in requests {
+            core.receive(request);
+        }
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let mut now_ms = 0.0;
+        let mut output_tokens = 0;
+        let mut saw_remove = false;
+        for _ in 0..100 {
+            if core.is_empty() {
+                break;
+            }
+            let pass = core.execute_pass(&mut collector, now_ms);
+            now_ms = pass.end_ms.max(now_ms + 1.0);
+            output_tokens += pass.output_signals.len();
+            saw_remove |= removed_event_count(&pass.kv_events) > 0;
+            harness.apply_events(pass.kv_events).await;
+        }
+
+        assert!(
+            core.is_empty(),
+            "scheduler did not drain: waiting={}, running={}, outputs={output_tokens}, available={}, evictable={}",
+            core.waiting.len(),
+            core.running.len(),
+            core.kv_manager.cache().available_tokens(),
+            core.kv_manager.cache().evictable_size,
+        );
+        assert_eq!(output_tokens, expected_tokens);
+        assert!(core.waiting.is_empty());
+        assert!(core.running.is_empty());
         assert!(saw_remove);
         harness.assert_no_event_errors();
         harness.assert_no_event_warnings();

@@ -12,6 +12,7 @@ import pytest
 
 from dynamo.llm import EngineType, EntrypointArgs
 from dynamo.mocker import MockEngineArgs
+from dynamo.mocker.args import parse_args
 
 MODULE_PATH = Path(__file__).resolve().parents[2] / "config.py"
 SPEC = importlib.util.spec_from_file_location("dynamo_mocker_config", MODULE_PATH)
@@ -61,6 +62,9 @@ def make_args(**overrides):
         "aic_moe_tp_size": None,
         "aic_moe_ep_size": None,
         "aic_attention_dp_size": None,
+        "aic_nextn": None,
+        "aic_nextn_accept_rates": None,
+        "aic_mtp_seed": 42,
         "gpu_memory_utilization": None,
         "mem_fraction_static": None,
         "free_gpu_memory_fraction": None,
@@ -339,6 +343,51 @@ def test_aic_backend_override_decouples_from_engine_type():
     engine_args = CONFIG.build_mocker_engine_args(args)
 
     assert engine_args.aic_backend == "trtllm"
+
+
+def test_build_mocker_engine_args_propagates_mtp_configuration():
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(
+            aic_perf_model=True,
+            aic_system="h200_sxm",
+            model_path="/models/mock",
+            num_gpu_blocks=128,
+            aic_nextn=3,
+            aic_nextn_accept_rates="1,0.5",
+            aic_mtp_seed=99,
+        )
+    )
+
+    assert engine_args.aic_nextn == 3
+    assert engine_args.aic_nextn_accept_rates == "1,0.5,0"
+    assert engine_args.aic_mtp_seed == 99
+
+
+def test_worker_override_offsets_mtp_seed():
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(aic_nextn=1, aic_mtp_seed=2**64 - 1)
+    )
+
+    worker_args = CONFIG.apply_worker_engine_args_overrides(engine_args, aic_mtp_seed=0)
+
+    assert worker_args.aic_mtp_seed == 0
+
+
+def test_mocker_cli_accepts_mtp_configuration():
+    args = parse_args(
+        [
+            "--aic-nextn",
+            "3",
+            "--aic-nextn-accept-rates",
+            "1,0.5",
+            "--aic-mtp-seed",
+            "99",
+        ]
+    )
+
+    assert args.aic_nextn == 3
+    assert args.aic_nextn_accept_rates == "1,0.5"
+    assert args.aic_mtp_seed == 99
 
 
 def test_replay_engine_args_compute_kv_bytes_for_g3_before_validation(monkeypatch):

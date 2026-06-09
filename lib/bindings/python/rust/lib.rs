@@ -85,6 +85,9 @@ mod prometheus_metrics;
 type JsonServerStreamingIngress =
     Ingress<SingleIn<serde_json::Value>, ManyOut<RsAnnotated<serde_json::Value>>>;
 
+type JsonBidirectionalIngress =
+    Ingress<rs::pipeline::ManyIn<serde_json::Value>, ManyOut<RsAnnotated<serde_json::Value>>>;
+
 static INIT: OnceCell<()> = OnceCell::new();
 
 const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
@@ -178,6 +181,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ModelCardInstanceId>()?;
     m.add_class::<Client>()?;
     m.add_class::<AsyncResponseStream>()?;
+    m.add_class::<PyAsyncRequestStream>()?;
     m.add_class::<llm::entrypoint::EntrypointArgs>()?;
     m.add_class::<llm::entrypoint::EngineConfig>()?;
     m.add_class::<llm::entrypoint::EngineType>()?;
@@ -408,6 +412,7 @@ fn register_model<'p>(
     let is_tensor_based = model_type.inner.supports_tensor();
     let is_images = model_type.inner.supports_images();
     let is_videos = model_type.inner.supports_videos();
+    let is_realtime = model_type.inner.supports_realtime();
 
     let model_type_obj = model_type.inner;
 
@@ -492,9 +497,11 @@ fn register_model<'p>(
     }
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        // For TensorBased, Images, and Videos models, skip HuggingFace downloads and register directly
-        // These model types handle model loading internally, no tokenizer extraction needed
-        if is_tensor_based || is_images || is_videos {
+        // For TensorBased, Images, Videos, and Realtime models, skip
+        // HuggingFace downloads and register directly. These model types
+        // handle model loading internally; no tokenizer extraction is
+        // needed and the source path is not required to be a HF repo.
+        if is_tensor_based || is_images || is_videos || is_realtime {
             let model_name = model_name.unwrap_or_else(|| source_path.clone());
             let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
             card.model_type = model_type_obj;
@@ -1147,6 +1154,78 @@ impl Endpoint {
         })
     }
 
+    /// Serve a bidirectional (streaming-input, streaming-output) endpoint.
+    ///
+    /// The handler is a Python `async def generate(request_stream)` or
+    /// `async def generate(request_stream, context)` coroutine that
+    /// returns an async generator. `request_stream` is a
+    /// [`PyAsyncRequestStream`] yielding inbound frames as plain Python
+    /// objects (dicts/lists/etc., the depythonization of
+    /// `serde_json::Value`). The generator yields response frames as
+    /// plain Python objects that are then pythonized back to JSON values
+    /// on the wire.
+    ///
+    /// Request-stream end (when `__anext__` raises `StopAsyncIteration`)
+    /// is *not* a cancellation signal: the caller has merely stopped
+    /// sending input. The engine must keep yielding response chunks until
+    /// it chooses to return or observes `context.is_stopped()`.
+    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None))]
+    fn serve_bidirectional_endpoint<'p>(
+        &self,
+        py: Python<'p>,
+        generator: PyObject,
+        graceful_shutdown: Option<bool>,
+        metrics_labels: Option<Vec<(String, String)>>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let engine = Arc::new(engine::PythonBidirectionalEngine::new(
+            generator,
+            self.event_loop.clone(),
+        )?);
+        let ingress: Arc<JsonBidirectionalIngress> =
+            Ingress::for_engine(engine).map_err(to_pyerr)?;
+
+        let builder = self
+            .inner
+            .endpoint_builder()
+            .metrics_labels(metrics_labels)
+            .handler(ingress);
+
+        // [gluo FIXME] skipping health check for now:
+        // both `health_check_payload` and local in-process engine registration
+        // are needed and that requires proper implementation of the bidirectional
+        // engine type which is too much for this PR.
+        //
+        // Enabling them for bidirectional engines would require:
+        //   1. A `ManyIn`-typed local-registry slot (e.g. a
+        //      `LocalBidirectionalEngine` alias plus a
+        //      `register_local_bidirectional_engine` builder method).
+        //   2. A canary path that wraps the payload as a single-frame input
+        //      stream and reads the first response (the current canary builds
+        //      `SingleIn::new(payload)`).
+        //   3. A `health_check_payload` that can be handled by the model
+        //      (e.g. a realtime `session.update`); otherwise the engine yields
+        //      an `error` frame and the probe is marked unhealthy.
+        //      This needs extra caring because the bidirectional engine is likely
+        //      to be stateful.
+
+        // if let Some(payload) = health_payload_json {
+        //     builder = builder.health_check_payload(payload);
+        // }
+
+        // // Register the engine in the local endpoint registry for in-process calls
+        // builder = builder.register_local_engine(engine).map_err(to_pyerr)?;
+
+        let graceful_shutdown = graceful_shutdown.unwrap_or(true);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            builder
+                .graceful_shutdown(graceful_shutdown)
+                .start()
+                .await
+                .map_err(to_pyerr)?;
+            Ok(())
+        })
+    }
+
     #[pyo3(signature = (router_mode = None))]
     fn client<'p>(
         &self,
@@ -1563,6 +1642,54 @@ impl AsyncResponseStream {
                     }
                     None => return Err(PyStopAsyncIteration::new_err("Stream exhausted")),
                 }
+            }
+        })
+    }
+}
+
+/// Python-visible inbound iterator for bidirectional engines. Wraps an
+/// mpsc receiver of pre-pythonized request frames; `__anext__` is a thin
+/// `.recv()` that returns the next `PyObject` directly, with no per-frame
+/// GIL acquisition on the consumer side. The producer (the forwarder
+/// spawned by `PythonBidirectionalEngine::generate`) acquires the GIL
+/// once per frame and pushes the converted `PyObject` onto the channel.
+///
+/// Termination follows the same shape as `AsyncResponseStream`: when the
+/// channel returns `None`, `__anext__` raises `PyStopAsyncIteration` and
+/// the iterator is exhausted. Note that input-stream end is *not* a
+/// cancellation signal — engines must keep yielding response chunks until
+/// they decide to return or observe `context.is_stopped()`.
+#[pyclass]
+pub(crate) struct PyAsyncRequestStream {
+    rx: Arc<Mutex<tokio::sync::mpsc::Receiver<PyObject>>>,
+}
+
+impl PyAsyncRequestStream {
+    pub(crate) fn new(rx: tokio::sync::mpsc::Receiver<PyObject>) -> Self {
+        Self {
+            rx: Arc::new(Mutex::new(rx)),
+        }
+    }
+}
+
+#[pymethods]
+impl PyAsyncRequestStream {
+    /// Required by the `AsyncIterator` protocol.
+    #[pyo3(name = "__aiter__")]
+    fn aiter(slf: PyRef<Self>, py: Python) -> PyResult<Py<PyAny>> {
+        slf.into_py_any(py)
+    }
+
+    /// Required by the `AsyncIterator` protocol. Returns an awaitable
+    /// resolving to the next pre-pythonized frame, or raises
+    /// `StopAsyncIteration` when the inbound channel is closed.
+    #[pyo3(name = "__anext__")]
+    fn next<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let rx = self.rx.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            match rx.lock().await.recv().await {
+                Some(pyobj) => Ok(pyobj),
+                None => Err(PyStopAsyncIteration::new_err("Request stream exhausted")),
             }
         })
     }

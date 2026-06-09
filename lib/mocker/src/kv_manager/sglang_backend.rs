@@ -5,6 +5,7 @@
 //! operations and KV event publishing.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -40,6 +41,22 @@ pub struct SglangKvManager {
     /// block hash so router events reflect logical block visibility, not
     /// transient slot ownership.
     block_hash_refcounts: HashMap<ExternalSequenceBlockHash, usize>,
+}
+
+pub struct DecodeTokenReservation {
+    indices: VecDeque<usize>,
+}
+
+impl DecodeTokenReservation {
+    pub fn take(&mut self) -> usize {
+        self.indices
+            .pop_front()
+            .expect("reserved decode token allocation must be infallible")
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.indices.len()
+    }
 }
 
 impl SglangKvManager {
@@ -176,10 +193,32 @@ impl SglangKvManager {
     pub fn allocate_decode_token(&mut self, last_idx: Option<usize>) -> Option<usize> {
         let indices = self.cache.token_pool.allocate(1)?;
         let idx = indices[0];
+        self.publish_decode_token(idx, last_idx);
+        Some(idx)
+    }
+
+    pub fn reserve_decode_tokens(&mut self, count: usize) -> Option<DecodeTokenReservation> {
+        self.cache
+            .token_pool
+            .allocate(count)
+            .map(|indices| DecodeTokenReservation {
+                indices: indices.into(),
+            })
+    }
+
+    pub fn publish_decode_token(&mut self, idx: usize, last_idx: Option<usize>) {
         let parent_hash = last_idx.and_then(|i| self.idx_to_block_hash.get(&i).copied());
         self.publish_stored_event(&[], &[idx], parent_hash);
         self.log_trace("allocation", 1);
-        Some(idx)
+    }
+
+    pub fn release_decode_reservation(&mut self, reservation: DecodeTokenReservation) {
+        let indices = reservation.indices.into_iter().collect::<Vec<_>>();
+        if indices.is_empty() {
+            return;
+        }
+        self.cache.token_pool.free(&indices);
+        self.log_trace("release_unpublished", indices.len());
     }
 
     /// Free a request without caching (e.g., aborted request).
