@@ -11,7 +11,7 @@ subtitle: Hardware, software, and build compatibility for Dynamo
 
 **Latest stable release:** [v1.2.0](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0) -- SGLang `0.5.11` (NIXL `1.0.1`) | TensorRT-LLM `1.3.0rc14` (NIXL `0.10.1`) | vLLM `0.20.1` (NIXL `0.10.1`)
 
-**Experimental release:** [v1.3.0-dev.1](https://github.com/ai-dynamo/dynamo/releases/tag/v1.3.0-dev.1) *(full-platform preview of v1.3.0 -- all runtime + component containers, wheels, crates, Helm)* -- SGLang `0.5.12.post1` | TensorRT-LLM `1.3.0rc17` | vLLM `0.22.0` | NIXL `1.1.0` (vLLM); `1.0.1` (SGLang); `0.10.1` (TRT-LLM)
+**Experimental release:** [v1.3.0-dev.1](https://github.com/ai-dynamo/dynamo/tree/release/1.3.0-dev.1) *(full-platform preview of v1.3.0 -- all runtime + component containers, wheels, crates, Helm)* -- SGLang `0.5.12.post1` | TensorRT-LLM `1.3.0rc17` | vLLM `0.22.0` | NIXL `1.1.0` (vLLM); `1.0.1` (SGLang); `0.10.1` (TRT-LLM)
 
 | Requirement | Supported |
 | :--- | :--- |

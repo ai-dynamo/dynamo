@@ -202,7 +202,7 @@ For backend version pins, see the version-pins table above and the [GitHub Relea
 
 **Pre-Release and Experimental Git Tags**
 
-- **v1.3.0-dev.1**: **Images:** full runtime matrix -- `vllm-runtime` (cuda12/cuda13/efa), `tensorrtllm-runtime` (cuda13/efa), `sglang-runtime` (cuda12/cuda13/efa), plus `dynamo-frontend`, `dynamo-planner`, `kubernetes-operator`, `snapshot-agent`. **Wheels:** `ai-dynamo`, `ai-dynamo-runtime`, `kvbm` on [pypi.nvidia.com](https://pypi.nvidia.com/). **Crates:** on [crates.io](https://crates.io/) at `1.3.0-dev.1`. **Helm:** `dynamo-platform` at `1.3.0-dev.1` (see [below](#v130-dev1)).
+- **v1.3.0-dev.1**: **Images:** full runtime matrix -- `vllm-runtime` (cuda12/cuda13/efa), `tensorrtllm-runtime` (cuda13/efa), `sglang-runtime` (cuda12/cuda13/efa), plus `dynamo-frontend`, `dynamo-planner`, `kubernetes-operator`, `snapshot-agent`. **Wheels:** `ai-dynamo`, `ai-dynamo-runtime`, `kvbm` on [pypi.nvidia.com](https://pypi.nvidia.com/). **Crates:** on [crates.io](https://crates.io/) at `1.3.0-dev.1`. **Helm:** `dynamo-platform`, `snapshot` at `1.3.0-dev.1` (see [below](#v130-dev1)).
 - **v1.2.0-deepseek-v4-dev.3**: **Images:** `vllm-runtime:*-deepseek-v4-cuda13-dev.3`, `sglang-runtime:*-deepseek-v4-cuda12-dev.3`, `sglang-runtime:*-deepseek-v4-cuda13-dev.3`. **Helm / PyPI:** Not published for this tag (see [Pre-Release Artifacts](#v120-deepseek-v4-dev3)).
 - **v1.1.0-dev.3**: **Images:** `tensorrtllm-runtime:1.1.0-dev.3`. **Wheels:** `ai-dynamo`, `ai-dynamo-runtime` on [pypi.nvidia.com](https://pypi.nvidia.com/) (see [below](#v110-dev3)).
 - **v1.1.0-dev.2**: **Images:** `sglang-runtime:1.1.0-dev.2`, `tensorrtllm-runtime:1.1.0-dev.2`. **Wheels:** `ai-dynamo`, `ai-dynamo-runtime` on [pypi.nvidia.com](https://pypi.nvidia.com/) (see [below](#v110-dev2)).
@@ -744,9 +744,9 @@ A GitHub or container tag `v1.1.0-dev.N` maps to a wheel version `1.1.0.devN` (f
 ### v1.3.0-dev.1
 
 - **Branch:** [release/1.3.0-dev.1](https://github.com/ai-dynamo/dynamo/tree/release/1.3.0-dev.1)
-- **GitHub Tag:** [v1.3.0-dev.1](https://github.com/ai-dynamo/dynamo/releases/tag/v1.3.0-dev.1)
+- **GitHub Tag:** `v1.3.0-dev.1` *(tag publication pending)*
 - **Backends:** SGLang `0.5.12.post1` | TensorRT-LLM `1.3.0rc17` | vLLM `0.22.0` | NIXL `1.1.0` (vLLM); `1.0.1` (SGLang); `0.10.1` (TRT-LLM)
-- **Coverage:** Full-platform preview of v1.3.0 -- all runtime containers (vLLM and SGLang on CUDA 12 + 13 + EFA, TensorRT-LLM on CUDA 13 + EFA) and component containers, plus `ai-dynamo` / `ai-dynamo-runtime` / `kvbm` wheels, Rust crates, and the `dynamo-platform` Helm chart. Cut from `main` after the TensorRT-LLM `v1.3.0rc17` upgrade; experimental snapshot, not QA-gated.
+- **Coverage:** Full-platform preview of v1.3.0 -- all runtime containers (vLLM and SGLang on CUDA 12 + 13 + EFA, TensorRT-LLM on CUDA 13 + EFA) and component containers, plus `ai-dynamo` / `ai-dynamo-runtime` / `kvbm` wheels, Rust crates, and the `dynamo-platform` and `snapshot` Helm charts. Cut from `main` after the TensorRT-LLM `v1.3.0rc17` upgrade; experimental snapshot, not QA-gated.
 
 #### Container Images
 
@@ -775,7 +775,7 @@ pip install --pre --extra-index-url https://pypi.nvidia.com ai-dynamo==1.3.0.dev
 
 #### Helm Charts
 
-`dynamo-platform` at `1.3.0-dev.1`.
+`dynamo-platform` and `snapshot` at `1.3.0-dev.1`.
 
 #### Rust Crates
 
