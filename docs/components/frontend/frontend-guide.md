@@ -60,11 +60,10 @@ Similar to HTTP frontend, the registered backend will be auto-discovered and add
 * `ModelType::Completions` and `ModelInput::Text`: Combination for LLM backend that uses custom preprocessor
 * `ModelType::Completions` and `ModelInput::Tokens`: Combination for LLM backend that uses Dynamo preprocessor (i.e. Dynamo SGLang / TRTLLM / vLLM backend)
 * `ModelType::TensorBased` and `ModelInput::Tensor`: Combination for backend that is used for generic tensor-based inference
-* `ModelType::Realtime` and `ModelInput::Text`: Combination for OpenAI Realtime WebSocket backends that use `endpoint.serve_bidirectional_endpoint()`
 
 The completions combinations are backed by the OpenAI Completions API; see [OpenAI Completions](#openai-completions) for more detail. The tensor-based combination is most aligned with KServe API, and users can replace an existing deployment with Dynamo once their backend implements an adapter for `NvCreateTensorRequest/NvCreateTensorResponse`; see [Tensor](#tensor) for more detail.
 
-For streaming-input, streaming-output Realtime workers, see [Realtime Bidirectional Python Workers](../../development/realtime-bidirectional-workers.md).
+The OpenAI Realtime path is served by the HTTP frontend WebSocket route, not by the KServe gRPC service. For streaming-input, streaming-output Realtime workers, see [Realtime Bidirectional Python Workers](../../development/realtime-bidirectional-workers.md).
 
 ### OpenAI Completions
 
