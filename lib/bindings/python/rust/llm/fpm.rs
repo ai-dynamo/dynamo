@@ -436,6 +436,11 @@ pub(crate) struct FpmEventSubscriber {
     // construct WorkerInfo from the same MDC stream the liveness watch
     // uses, without the subscriber having to interpret card fields itself.
     worker_model_cards: Arc<DashMap<String, String>>,
+    // DIS-2172 receive-side throughput/loss counter (env-gated DYN_BENCH_COUNT).
+    // Counts FPM events actually consumed by the tracking task + per-publisher
+    // transport-level sequence gaps. Exposed to Python via get_throughput_stats()
+    // so the standalone recv_forward_pass_metrics receiver can print it per window.
+    recv_counter: Arc<dynamo_runtime::transports::event_plane::RecvCounter>,
 }
 
 #[pymethods]
@@ -459,6 +464,9 @@ impl FpmEventSubscriber {
             latest_stats: Arc::new(DashMap::new()),
             known_workers: Arc::new(DashSet::new()),
             worker_model_cards: Arc::new(DashMap::new()),
+            recv_counter: Arc::new(dynamo_runtime::transports::event_plane::RecvCounter::new(
+                "fpm",
+            )),
         })
     }
 
@@ -581,10 +589,12 @@ impl FpmEventSubscriber {
         // per-shard locking keeps contention low but does not eliminate it
         // entirely -- a concurrent reader hitting the same shard will briefly
         // wait for the insert to complete.
+        let recv_counter = self.recv_counter.clone();
         rt.spawn({
             let cancel = cancel.clone();
             let component = component.clone();
             let stats = stats.clone();
+            let recv_counter = recv_counter.clone();
             async move {
                 let mut subscriber =
                     match EventSubscriber::for_component(&component, FPM_TOPIC).await {
@@ -607,6 +617,10 @@ impl FpmEventSubscriber {
                         event = subscriber.next() => {
                             match event {
                                 Some(Ok(envelope)) => {
+                                    // DIS-2172: count this consumed FPM event
+                                    // (received + per-publisher seq-gap loss).
+                                    recv_counter
+                                        .record(envelope.publisher_id, envelope.sequence);
                                     let payload = envelope.payload.to_vec();
                                     if let Some(key) = extract_fpm_key(&payload) {
                                         stats.insert(key, payload);
@@ -779,8 +793,24 @@ impl FpmEventSubscriber {
         Ok(snapshot)
     }
 
+    /// DIS-2172 receive-side throughput/loss counter snapshot.
+    ///
+    /// Returns the cumulative `(received, gaps, n_publishers)` for FPM events
+    /// consumed by the tracking task:
+    ///   - `received`: total FPM envelopes delivered to this subscriber.
+    ///   - `gaps`: sum of per-publisher transport-level sequence gaps (silent drops).
+    ///   - `n_publishers`: distinct publisher_ids seen.
+    ///
+    /// Counting is only active when the `DYN_BENCH_COUNT` env var is set;
+    /// otherwise this returns `(0, 0, 0)`. Used by the standalone
+    /// `recv_forward_pass_metrics` receiver to print throughput per window.
+    fn get_throughput_stats(&self) -> PyResult<(u64, u64, u64)> {
+        Ok(self.recv_counter.snapshot())
+    }
+
     /// Shut down the subscriber (all background tasks).
     fn shutdown(&self) {
+        self.recv_counter.emit_final();
         self.cancel.cancel();
     }
 }

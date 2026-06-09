@@ -87,12 +87,21 @@ impl SequencePublisher for RuntimeSequencePublisher {
 /// Concrete [`SequenceSubscriber`] backed by NATS typed event stream.
 pub struct RuntimeSequenceSubscriber {
     inner: dynamo_runtime::transports::event_plane::TypedEventSubscriber<ActiveSequenceEvent>,
+    /// DIS-2172 receive-side throughput/loss counter for active-sequence
+    /// replica-sync events (env-gated via DYN_BENCH_COUNT). Counting happens
+    /// here, at the transport boundary, BEFORE the `router_id` self-filter in
+    /// `apply_replica_event`, so it reflects raw event-plane delivery + loss.
+    recv_counter: dynamo_runtime::transports::event_plane::RecvCounter,
 }
 
 impl SequenceSubscriber for RuntimeSequenceSubscriber {
     async fn next_event(&mut self) -> Option<anyhow::Result<ActiveSequenceEvent>> {
         match self.inner.next().await? {
-            Ok((_envelope, event)) => Some(Ok(event)),
+            Ok((envelope, event)) => {
+                self.recv_counter
+                    .record(envelope.publisher_id, envelope.sequence);
+                Some(Ok(event))
+            }
             Err(e) => Some(Err(e)),
         }
     }
@@ -102,7 +111,11 @@ impl SequenceSubscriber for RuntimeSequenceSubscriber {
         cx: &mut Context<'_>,
     ) -> Poll<Option<anyhow::Result<ActiveSequenceEvent>>> {
         match self.inner.poll_next(cx) {
-            Poll::Ready(Some(Ok((_envelope, event)))) => Poll::Ready(Some(Ok(event))),
+            Poll::Ready(Some(Ok((envelope, event)))) => {
+                self.recv_counter
+                    .record(envelope.publisher_id, envelope.sequence);
+                Poll::Ready(Some(Ok(event)))
+            }
             Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
@@ -158,7 +171,12 @@ pub async fn create_multi_worker_sequences(
         let subscriber = EventSubscriber::for_component(&component, ACTIVE_SEQUENCES_SUBJECT)
             .await?
             .typed::<ActiveSequenceEvent>();
-        let subscriber = RuntimeSequenceSubscriber { inner: subscriber };
+        let subscriber = RuntimeSequenceSubscriber {
+            inner: subscriber,
+            recv_counter: dynamo_runtime::transports::event_plane::RecvCounter::new(
+                "active_sequences",
+            ),
+        };
         let cancel_token = component.drt().runtime().child_token();
         arc.start_replica_sync(subscriber, cancel_token);
     }

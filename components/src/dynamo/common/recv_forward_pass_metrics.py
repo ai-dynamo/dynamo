@@ -111,10 +111,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--mode",
-        choices=["recv", "tracking"],
+        choices=["recv", "tracking", "throughput"],
         default="recv",
         help="Consumption mode: 'recv' for individual messages, "
-        "'tracking' for latest-snapshot polling (default: recv)",
+        "'tracking' for latest-snapshot polling, "
+        "'throughput' for DIS-2172 receive-side throughput/loss counting "
+        "(requires DYN_BENCH_COUNT=1) (default: recv)",
     )
     parser.add_argument(
         "--poll-interval",
@@ -153,12 +155,83 @@ async def run(args: argparse.Namespace) -> None:
     try:
         if args.mode == "tracking":
             await _run_tracking(subscriber, args)
+        elif args.mode == "throughput":
+            await _run_throughput(subscriber, args)
         else:
             await _run_recv(subscriber, args)
     except KeyboardInterrupt:
         logger.info("Stopped.")
     finally:
         subscriber.shutdown()
+
+
+async def _run_throughput(subscriber, args: argparse.Namespace) -> None:
+    """DIS-2172 receive-side throughput/loss for FPM.
+
+    Drives the instrumented tracking consume loop (start_tracking) and prints a
+    per-window ``dis2172_recv`` JSON line (matching the Rust counters' stderr
+    shape) so the bench harness can scrape it uniformly across all three event
+    types. Requires DYN_BENCH_COUNT=1 for the Rust counter to be active.
+    """
+    subscriber.start_tracking()
+    window_secs = float(os.environ.get("DYN_BENCH_WINDOW_SECS", "10"))
+    logger.info(
+        "Throughput mode started (window=%.1fs, DYN_BENCH_COUNT=%s)",
+        window_secs,
+        os.environ.get("DYN_BENCH_COUNT", "<unset>"),
+    )
+
+    prev_received = 0
+    prev_gaps = 0
+    window_idx = 0
+    # Anchor to the first window in which we actually receive an event.
+    anchored = False
+    while True:
+        await asyncio.sleep(window_secs)
+        received, gaps, n_publishers = subscriber.get_throughput_stats()
+        if received == 0 and not anchored:
+            # No traffic yet; don't start emitting windows (matches the
+            # first-event-anchored behavior of the Rust counters).
+            continue
+        if not anchored:
+            anchored = True
+            print(
+                json.dumps(
+                    {
+                        "dis2172_recv": "window_start",
+                        "site": "fpm",
+                        "window_secs": window_secs,
+                    }
+                ),
+                flush=True,
+            )
+        window_idx += 1
+        w_received = received - prev_received
+        w_gaps = gaps - prev_gaps
+        prev_received, prev_gaps = received, gaps
+        sent_est = w_received + w_gaps
+        drop_rate = (w_gaps / sent_est) if sent_est > 0 else 0.0
+        print(
+            json.dumps(
+                {
+                    "dis2172_recv": "window",
+                    "site": "fpm",
+                    "window_idx": window_idx,
+                    "window_secs": window_secs,
+                    "received": w_received,
+                    "gaps": w_gaps,
+                    "sent_est": sent_est,
+                    "events_per_sec": (w_received / window_secs)
+                    if window_secs > 0
+                    else 0.0,
+                    "drop_rate": drop_rate,
+                    "n_publishers": n_publishers,
+                    "total_received": received,
+                    "total_gaps": gaps,
+                }
+            ),
+            flush=True,
+        )
 
 
 async def _run_recv(subscriber, args: argparse.Namespace) -> None:

@@ -68,6 +68,11 @@ async fn start_kv_router_background_event_plane(
         }
     }
 
+    // DIS-2172 receive-side throughput/loss counter (env-gated via DYN_BENCH_COUNT).
+    // Counts kv-events actually consumed by the KV Router indexer + per-publisher
+    // transport-level sequence gaps. No-op when DYN_BENCH_COUNT is unset.
+    let recv_counter = dynamo_runtime::transports::event_plane::RecvCounter::new("kv-events");
+
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -75,6 +80,7 @@ async fn start_kv_router_background_event_plane(
 
                 _ = cancellation_token.cancelled() => {
                     tracing::debug!("KV Router event plane background task received cancellation signal");
+                    recv_counter.emit_final();
                     break;
                 }
 
@@ -87,6 +93,9 @@ async fn start_kv_router_background_event_plane(
                             continue;
                         }
                     };
+
+                    // DIS-2172: count this consumed event (received + seq-gap loss).
+                    recv_counter.record(envelope.publisher_id, envelope.sequence);
 
                     tracing::trace!(
                         "Received event from publisher {} (seq {})",
