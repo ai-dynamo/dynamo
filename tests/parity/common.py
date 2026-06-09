@@ -191,7 +191,7 @@ def parity_cell_class(marker: str) -> str:
         return "na"
     if marker in {"D", "·"}:
         return "donly"
-    if "!" in marker:
+    if "!" in marker or "✗" in marker:
         return "err"
     if "↯" in marker:
         return "leak"
