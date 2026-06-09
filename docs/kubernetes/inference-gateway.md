@@ -184,6 +184,7 @@ resolution and router configuration:
 | `DYN_NAMESPACE` | `vllm-agg` | Dynamo discovery namespace (fallback) |
 | `DYN_COMPONENT_NAME` | `backend` | Dynamo component name |
 | `DYN_ENFORCE_DISAGG` | `false` | Enforce disaggregated prefill/decode routing |
+| `DYN_KUBE_DISCOVERY_MODE` | `pod` | Kubernetes discovery identity mode; Rust EPP currently rejects `container` |
 | `RUST_LOG` | `info` | Tracing log level filter |
 
 The gRPC port is hardcoded to `9002` (matching the operator's `EPPGRPCPort` constant).
@@ -192,14 +193,23 @@ Namespace resolution follows the same logic as the Go EPP plugin:
 `DYN_NAMESPACE_PREFIX` > `DYN_NAMESPACE` > `"vllm-agg"` (default).
 
 The Rust EPP also respects the standard Dynamo router environment variables
-(`DYN_OVERLAP_SCORE_WEIGHT`, `DYN_ROUTER_TEMPERATURE`, `DYN_USE_KV_EVENTS`, etc.)
-documented in the Configuration section below.
+(`DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT`, `DYN_ROUTER_PREFILL_LOAD_SCALE`,
+`DYN_ROUTER_TEMPERATURE`, `DYN_USE_KV_EVENTS`, etc.) documented in the
+Configuration section below. The deprecated overlap-weight aliases remain
+supported with the same precedence as the Go EPP.
 
 > [!NOTE]
 > The Rust EPP is experimental. It uses Dynamo's native discovery system
 > (`DistributedRuntime`) instead of the GAIE Kubernetes controllers, so it
 > does not require `InferencePool` or `InferenceModel` CRDs for endpoint
 > discovery. It discovers workers through Dynamo's own registration mechanism.
+
+> [!WARNING]
+> The Rust EPP currently supports only pod-level Kubernetes discovery. Deploy
+> one Rust EPP replica per pool because request selection and booking are not
+> yet atomic across concurrent EPP replicas. After a worker-generation rolling
+> update, restart the Rust EPP so it binds to the new generation namespace.
+> Exact streamed output-block updates are also not yet wired into the Rust EPP.
 
 #### `InferencePool` and the data plane (Istio, kGateway, Agentgateway)
 
@@ -365,6 +375,7 @@ To disable the EPP from listening for KV events (e.g., when prefix caching is of
 - `DYN_ROUTER_REPLICA_SYNC` — Enable replica synchronization (default: false)
 - `DYN_ROUTER_TRACK_ACTIVE_BLOCKS` — Track active blocks (default: true)
 - `DYN_ROUTER_TRACK_OUTPUT_BLOCKS` — Track output blocks during generation (default: false)
+- `DYN_ROUTER_PREDICTED_TTL_SECS` — Enable predict-on-route entries with this TTL in seconds
 - See the [KV cache routing design](../design-docs/router-design.md) for details.
 
 

@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
-use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
+use dynamo_kv_router::config::{RouterConfigOverride, kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
@@ -27,6 +27,34 @@ use dynamo_runtime::{DistributedRuntime, Runtime};
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
+const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
+
+fn validate_kube_discovery_mode() -> Result<()> {
+    match std::env::var(DYN_KUBE_DISCOVERY_MODE) {
+        Ok(mode) => validate_kube_discovery_mode_value(Some(&mode)),
+        Err(std::env::VarError::NotPresent) => validate_kube_discovery_mode_value(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{DYN_KUBE_DISCOVERY_MODE} must be valid Unicode")
+        }
+    }
+}
+
+fn validate_kube_discovery_mode_value(mode: Option<&str>) -> Result<()> {
+    match mode {
+        None | Some("pod") => Ok(()),
+        Some("container") => {
+            // TODO(epp-container-discovery): Resolve container-level discovery IDs to pod
+            // endpoints, including non-main worker containers, then remove this restriction.
+            anyhow::bail!(
+                "Rust EPP does not support {DYN_KUBE_DISCOVERY_MODE}=container because it resolves \
+                 worker endpoints by pod identity; use {DYN_KUBE_DISCOVERY_MODE}=pod"
+            )
+        }
+        Some(mode) => anyhow::bail!(
+            "Invalid {DYN_KUBE_DISCOVERY_MODE} value {mode:?}; valid values are 'pod' and 'container'"
+        ),
+    }
+}
 
 fn decode_router_config_override(is_disaggregated: bool) -> Option<RouterConfigOverride> {
     is_disaggregated.then_some(RouterConfigOverride {
@@ -69,6 +97,8 @@ impl Router {
         component: &str,
         enforce_disagg: bool,
     ) -> Result<Self> {
+        validate_kube_discovery_mode()?;
+
         let runtime = Runtime::from_settings()?;
         let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
 
@@ -81,7 +111,11 @@ impl Router {
         let enable_eagle = bootstrap.card.runtime_config.enable_eagle;
         let actual_namespace = &bootstrap.actual_namespace;
 
-        let mut kv_router_config = kv_router_config_from_env();
+        // TODO(epp-rolling-namespace): Rebind both routers when the active
+        // generation-suffixed worker namespace changes during a rolling update.
+        let mut kv_router_config = kv_router_config_from_dynamo_env();
+        // TODO(epp-multi-replica): Provide authoritative admission across EPP
+        // replicas; replica-sync alone does not close the selection-to-booking race.
         kv_router_config.skip_initial_worker_wait = true;
 
         let component_handle = drt.namespace(actual_namespace)?.component(component)?;
@@ -170,6 +204,9 @@ impl Router {
     /// `lib/llm/src/preprocessor.rs` so this gateway path produces the same
     /// queue ordering as a non-GAIE deployment.
     pub fn tokenize(&self, request_json: &str) -> Result<(Vec<u32>, f64)> {
+        // TODO(epp-request-routing): Reuse shared preprocessing so expected output
+        // length, LoRA, pins, sessions, topology constraints, additional protocols,
+        // and multimodal routing hashes are preserved.
         let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
             serde_json::from_str(request_json)?;
 
@@ -266,6 +303,8 @@ impl Router {
             self.prefill_router.register_workers(ids);
         }
 
+        // TODO(epp-prefill-booking): Atomically reserve the selected prefill worker
+        // and release it on first output, cancellation, or routing failure.
         let outcome = self
             .prefill_router
             .query_prefill_worker(
@@ -758,57 +797,6 @@ fn spawn_prefill_discovery_watcher(
     });
 }
 
-fn kv_router_config_from_env() -> KvRouterConfig {
-    let mut cfg = KvRouterConfig::default();
-
-    fn env_f64(key: &str) -> Option<f64> {
-        std::env::var(key).ok().and_then(|v| v.parse().ok())
-    }
-    fn env_bool(key: &str) -> Option<bool> {
-        std::env::var(key)
-            .ok()
-            .and_then(|v| match v.to_lowercase().as_str() {
-                "true" | "1" | "yes" | "on" => Some(true),
-                "false" | "0" | "no" | "off" => Some(false),
-                _ => None,
-            })
-    }
-
-    if let Some(v) = env_f64("DYN_OVERLAP_SCORE_WEIGHT") {
-        cfg.overlap_score_credit = v;
-    }
-    if let Some(v) = env_f64("DYN_ROUTER_TEMPERATURE") {
-        cfg.router_temperature = v;
-    }
-    if let Some(v) = env_bool("DYN_USE_KV_EVENTS") {
-        cfg.use_kv_events = v;
-    }
-    if let Some(v) = env_bool("DYN_ROUTER_REPLICA_SYNC") {
-        cfg.router_replica_sync = v;
-    }
-    if let Some(v) = env_bool("DYN_ROUTER_TRACK_ACTIVE_BLOCKS") {
-        cfg.router_track_active_blocks = v;
-    }
-    if let Some(v) = env_bool("DYN_ROUTER_TRACK_OUTPUT_BLOCKS") {
-        cfg.router_track_output_blocks = v;
-    }
-    if let Some(v) = env_bool("DYN_ROUTER_TRACK_PREFILL_TOKENS") {
-        cfg.router_track_prefill_tokens = v;
-    }
-    if let Some(v) = env_f64("DYN_ROUTER_QUEUE_THRESHOLD") {
-        cfg.router_queue_threshold = Some(v);
-    }
-
-    tracing::info!(
-        overlap_score_weight = cfg.overlap_score_credit,
-        router_temperature = cfg.router_temperature,
-        use_kv_events = cfg.use_kv_events,
-        "KvRouterConfig initialized"
-    );
-
-    cfg
-}
-
 // ---------------------------------------------------------------------------
 // EndpointPicker trait implementation (mirrors Go LW-EPP from GAIE #2834)
 // ---------------------------------------------------------------------------
@@ -955,11 +943,17 @@ impl EndpointPicker for Router {
             }
         };
 
+        // TODO(epp-atomic-admission): Replace query-only selection plus add_request
+        // with one tracked operation. Propagate booking failures, use an internal
+        // booking ID independent of x-request-id, handle cancellation races, roll
+        // back endpoint-resolution failures, and never forward to an unbooked fallback.
         let (decode_worker, _overlap) = self
             .route_decode(&tokens, is_disaggregated, priority_jump, allowed_worker_ids)
             .await
             .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
 
+        // TODO(epp-endpoint-reconciliation): Reconcile Dynamo discovery with the
+        // pod reflector and retry selection when the chosen worker has no endpoint.
         let endpoint = if worker_map.is_empty() {
             self.resolve_worker_endpoint(decode_worker.worker_id)
                 .ok_or_else(|| {
@@ -1091,6 +1085,22 @@ mod tests {
     #[test]
     fn aggregated_decode_uses_configured_bookkeeping() {
         assert!(decode_router_config_override(false).is_none());
+    }
+
+    #[test]
+    fn pod_discovery_mode_is_supported() {
+        validate_kube_discovery_mode_value(None).unwrap();
+        validate_kube_discovery_mode_value(Some("pod")).unwrap();
+    }
+
+    #[test]
+    fn container_discovery_mode_is_rejected() {
+        let error = validate_kube_discovery_mode_value(Some("container")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not support DYN_KUBE_DISCOVERY_MODE=container")
+        );
     }
 
     #[test]

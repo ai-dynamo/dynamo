@@ -489,6 +489,8 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                 picker.on_prefill_complete(&ctx.request_id).await;
                             }
 
+                            // TODO(epp-output-tracking): Parse generated-token progress and
+                            // update router output blocks instead of tracking only phase changes.
                             if ctx.model_server_streaming {
                                 ExtProcServer::<P>::handle_response_body(&mut ctx, body);
                             } else {
@@ -543,8 +545,10 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                 let _ = tx.send(Err(e)).await;
             }
 
-            // Notify the picker that this request is complete so it can
-            // free router bookkeeping state (mirrors Go EPP PostResponse).
+            // TODO(epp-disconnect-semantics): Define how Envoy retries and backend
+            // work continuing after an ext_proc disconnect affect booking ownership.
+            // Notify the picker that this request is complete so it can free router
+            // bookkeeping state (mirrors Go EPP PostResponse).
             if !ctx.request_id.is_empty() {
                 picker.on_request_complete(&ctx.request_id).await;
             }
