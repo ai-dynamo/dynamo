@@ -153,7 +153,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<service_v2::State>) {
             tracing::error!(%err, "/v1/realtime engine.generate() failed");
             *close_reason.lock() = Some(close_message(
                 close_code::ERROR,
-                &format!("engine error: {err}"),
+                &SanitizedError::Internal.to_string(),
             ));
             return;
         }

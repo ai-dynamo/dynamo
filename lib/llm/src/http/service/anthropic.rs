@@ -446,19 +446,28 @@ async fn anthropic_messages(
             .await
             .map_err(|(status, _json_err)| {
                 // check_for_backend_error has already sanitized the body and
-                // logged the backend detail; we just preserve its status when
-                // re-wrapping in Anthropic format.
-                let err = if status.as_u16() == 499 {
-                    SanitizedError::Cancelled
-                } else if status.is_server_error() {
-                    SanitizedError::PreserveServerError(status)
-                } else {
-                    SanitizedError::Internal
-                };
-                anthropic_sanitized_error_with_details(
-                    err,
-                    format!("backend error event (status {})", status.as_u16()),
-                )
+                // logged the backend detail; preserve its status when
+                // re-wrapping in Anthropic format. Status classification is
+                // delegated to SanitizedError::for_backend_status so the
+                // openai and anthropic surfaces stay aligned.
+                let details = format!("backend error event (status {})", status.as_u16());
+                match SanitizedError::for_backend_status(status) {
+                    Some(variant) => anthropic_sanitized_error_with_details(variant, details),
+                    // 4xx (non-499): preserve the client-error status; the
+                    // message is the canonical reason so we don't smuggle
+                    // backend text through. The "invalid_request_error"
+                    // argument is a fallback — anthropic_error remaps
+                    // 401/403/404/429 to their spec-correct types from the
+                    // status code itself.
+                    None => {
+                        tracing::error!(%status, "Anthropic backend error event");
+                        anthropic_error(
+                            status,
+                            "invalid_request_error",
+                            status.canonical_reason().unwrap_or("Client error"),
+                        )
+                    }
+                }
             })?;
 
         let mut http_queue_guard = Some(http_queue_guard);

@@ -1278,6 +1278,14 @@ fn is_annotation_frame<T>(e: &Annotated<T>) -> bool {
         && matches!(e.event.as_deref(), Some(tag) if tag != "error")
 }
 
+/// Cap on how many leading annotation frames `check_for_backend_error`
+/// will buffer before giving up the inspection. A pathological backend
+/// (or attacker who can influence the engine output) that emits only
+/// annotation frames must not be able to pin unbounded memory per
+/// request. The handful of real annotations a frontend prepends
+/// (currently just `request_id`) fits well under this cap.
+const MAX_LEADING_ANNOTATIONS: usize = 16;
+
 /// Inspect the first non-annotation event in the stream for a backend error.
 /// Returns Err(ErrorResponse) if error detected, Ok(stream) otherwise — the
 /// returned stream replays any buffered annotation frames in their original
@@ -1295,43 +1303,23 @@ pub(super) async fn check_for_backend_error(
 
     let mut buffered: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = Vec::new();
     while let Some(event) = stream.next().await {
-        if is_annotation_frame(&event) {
+        if is_annotation_frame(&event) && buffered.len() < MAX_LEADING_ANNOTATIONS {
             buffered.push(event);
             continue;
         }
         if let Some((error_msg, status_code)) = extract_backend_error_if_present(&event) {
-            // 499 is part of is_client_error() but its text can carry
-            // context IDs / cancellation internals — sanitize separately.
-            if status_code.as_u16() == 499 {
-                return Err(ErrorMessage::sanitized_with_details(
-                    SanitizedError::Cancelled,
-                    error_msg,
-                ));
-            }
-            // 4xx is the protocol contract — forward backend message as-is.
-            if status_code.is_client_error() {
-                return Err((
+            return Err(match SanitizedError::for_backend_status(status_code) {
+                Some(variant) => ErrorMessage::sanitized_with_details(variant, error_msg),
+                // 4xx (non-499): protocol contract — forward backend message as-is.
+                None => (
                     status_code,
                     Json(ErrorMessage {
                         message: error_msg,
                         error_type: map_error_code_to_error_type(status_code),
                         code: status_code.as_u16(),
                     }),
-                ));
-            }
-            // 5xx — preserve the status (clients distinguish 503 retry from 500)
-            // but replace the body with a sanitized message.
-            if status_code.is_server_error() {
-                return Err(ErrorMessage::sanitized_with_details(
-                    SanitizedError::PreserveServerError(status_code),
-                    error_msg,
-                ));
-            }
-            // 1xx/2xx/3xx asserted by the backend payload — coerce to 500.
-            return Err(ErrorMessage::sanitized_with_details(
-                SanitizedError::Internal,
-                error_msg,
-            ));
+                ),
+            });
         }
 
         // First non-annotation, non-error event — push it back and stop;
