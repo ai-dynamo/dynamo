@@ -768,13 +768,6 @@ pub enum SchedulingPolicy {
     Unlimited,
     /// Semaphore-based concurrency limiting
     Semaphore(usize),
-    /// Token bucket rate limiting with burst capacity.
-    ///
-    /// Allows `rate` tasks per second in steady state while permitting short
-    /// bursts of up to `burst` tasks. Implemented by [`TokenBucketScheduler`].
-    ///
-    /// Example: `TokenBucket { rate: 10.0, burst: 5 }` = 10 tasks/sec, burst up to 5.
-    TokenBucket { rate: f64, burst: usize },
     // TODO: Future scheduling policies to implement
     //
     // /// Weighted fair scheduling across multiple priority classes
@@ -3159,7 +3152,8 @@ impl TokenBucketScheduler {
             Ok(())
         } else {
             let missing = 1.0 - state.tokens;
-            Err(Duration::from_secs_f64(missing / self.rate))
+            let wait = Duration::try_from_secs_f64(missing / self.rate).unwrap_or(Duration::MAX);
+            Err(wait)
         }
     }
 }
@@ -3179,6 +3173,11 @@ impl TaskScheduler for TokenBucketScheduler {
         }
 
         loop {
+            if cancel_token.is_cancelled() {
+                debug!("Task cancelled before acquiring token");
+                return SchedulingResult::Cancelled;
+            }
+
             match self.try_acquire_token() {
                 Ok(()) => {
                     debug!("Acquired token bucket slot");
