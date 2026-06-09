@@ -6,6 +6,10 @@
 from importlib import import_module
 from types import ModuleType
 
+# Keep this package lazy: restore-placeholder entrypoints import
+# dynamo.common.utils.snapshot.restore_context before loading heavy backend/runtime
+# modules, and eager utility imports can pull those dependencies in too early.
+
 __all__ = [
     "endpoint_types",
     "engine_response",
