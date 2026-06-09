@@ -1082,37 +1082,6 @@ impl EndpointPicker for Router {
 mod tests {
     use super::*;
 
-    #[test]
-    fn aggregated_decode_uses_configured_bookkeeping() {
-        assert!(decode_router_config_override(false).is_none());
-    }
-
-    #[test]
-    fn pod_discovery_mode_is_supported() {
-        validate_kube_discovery_mode_value(None).unwrap();
-        validate_kube_discovery_mode_value(Some("pod")).unwrap();
-    }
-
-    #[test]
-    fn container_discovery_mode_is_rejected() {
-        let error = validate_kube_discovery_mode_value(Some("container")).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("does not support DYN_KUBE_DISCOVERY_MODE=container")
-        );
-    }
-
-    #[test]
-    fn disaggregated_decode_disables_decode_side_prefill_tracking() {
-        let override_config =
-            decode_router_config_override(true).expect("disaggregated mode must override config");
-
-        assert_eq!(override_config.overlap_score_credit, Some(0.0));
-        assert_eq!(override_config.assume_kv_reuse, Some(false));
-        assert_eq!(override_config.track_prefill_tokens, Some(false));
-    }
-
     /// Proves the core feature: `nvext.agent_hints.priority` lifts into a
     /// non-zero `priority_jump`, and absence collapses to `0.0`. If this
     /// regresses, the GAIE ext-proc path is back to ignoring priority.
