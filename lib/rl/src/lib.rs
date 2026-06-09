@@ -174,6 +174,12 @@ impl RlDiscoveryState {
     /// Drop cached clients for endpoints no longer present, so the cache can't grow
     /// without bound under endpoint/component churn. Stable components (the common
     /// case) are always in `live`, so this is a no-op for them.
+    ///
+    /// Note: dropping a `Client` frees its cache slot but does not stop the
+    /// runtime-lived instance-monitor task it spawned — the `dynamo-runtime` `Client`
+    /// has no per-client cancellation/`Drop`. For RL discovery the live endpoint set is
+    /// small and stable, so this is bounded in practice; fully reclaiming the monitor
+    /// task on drop is a runtime `Client` lifecycle change tracked outside this crate.
     async fn retain_endpoints(&self, live: &HashSet<EndpointKey>) {
         let mut guard = self.clients.lock().await;
         guard.retain(|key, _| live.contains(key));
@@ -297,25 +303,18 @@ async fn describe_worker(
     model: Option<String>,
     timeout: Duration,
 ) -> RlWorkerInfo {
-    // Bound global probe concurrency (N1): acquire a permit before doing any work.
-    // The wait is intentionally outside the per-worker timeout below, so time spent
-    // queued for a permit does not consume the probe's own deadline.
-    let _permit = match state.probe_semaphore.acquire().await {
-        Ok(permit) => permit,
-        Err(_) => {
-            return worker_info(
-                endpoint,
-                model,
-                Vec::new(),
-                None,
-                Some("rl discovery is shutting down".to_string()),
-            );
-        }
+    // Bound the whole per-worker probe — INCLUDING the wait for a global concurrency
+    // permit (N1) — by request_timeout, so neither a slow worker nor a saturated
+    // semaphore can make per-worker latency unbounded (true end-to-end deadline, F2).
+    let probe = async {
+        let _permit = state
+            .probe_semaphore
+            .acquire()
+            .await
+            .map_err(|_| anyhow::anyhow!("rl discovery is shutting down"))?;
+        call_worker_routes(state, &endpoint, timeout).await
     };
-    // Single end-to-end deadline for the whole per-worker probe (client lookup +
-    // readiness wait + routes RPC), so total discovery latency stays bounded by
-    // request_timeout instead of summing several independent timeouts.
-    match tokio::time::timeout(timeout, call_worker_routes(state, &endpoint, timeout)).await {
+    match tokio::time::timeout(timeout, probe).await {
         Ok(Ok(routes)) => worker_info(endpoint, model, routes.routes, routes.system_url, None),
         Ok(Err(err)) => worker_info(endpoint, model, Vec::new(), None, Some(err.to_string())),
         Err(_) => worker_info(
