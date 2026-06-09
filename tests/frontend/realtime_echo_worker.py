@@ -17,7 +17,7 @@ import uuid
 
 import uvloop
 
-from dynamo.llm import ModelInput, ModelType, register_model
+from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 from tests.frontend.test_realtime_python_bridge import ENDPOINT_PATH, MODEL_NAME
 
@@ -127,6 +127,7 @@ async def main() -> None:
         endpoint,
         MODEL_NAME,
         model_name=MODEL_NAME,
+        worker_type=WorkerType.Aggregated,
     )
     await endpoint.serve_bidirectional_endpoint(_python_realtime_echo)
 
