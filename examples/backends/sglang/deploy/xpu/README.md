@@ -12,6 +12,7 @@ Hardware-specific deployment templates for Intel XPU GPUs using Kubernetes Dynam
 | File | Pattern | Description |
 |------|---------|-------------|
 | `agg_xpu_dra.yaml` | Aggregated | Single worker with XPU target |
+| `agg_router_xpu_dra.yaml` | Aggregated + KV Router | 2 workers behind KV-aware router |
 | `disagg_xpu_dra.yaml` | Disaggregated | Prefill/decode separation with NixlConnector |
 | `disagg_planner_xpu_dra.yaml` | Disaggregated + Planner | Global Planner for throughput scaling |
 | `disagg_xpu.yaml` | Disaggregated (Device Plugin) | Traditional device plugin (gpu.intel.com/xe) |
