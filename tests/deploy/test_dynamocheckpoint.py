@@ -107,11 +107,10 @@ def _new_vllm_checkpoint_spec(
         VLLM_MAX_MODEL_LEN,
         "--gpu-memory-utilization",
         VLLM_GPU_MEMORY_UTILIZATION,
-        "--enforce-eager",
     ]
 
     decode.setdefault("experimental", {})["checkpoint"] = {
-        "mode": "Auto",
+        "enabled": True,
         "targetContainerName": TARGET_CONTAINER,
     }
     return deployment_spec
