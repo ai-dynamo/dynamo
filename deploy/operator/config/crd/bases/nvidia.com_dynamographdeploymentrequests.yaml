@@ -9199,6 +9199,20 @@ spec:
                       description: TTFT is the Time To First Token target in milliseconds.
                       type: number
                   type: object
+                thorough:
+                  description: |-
+                    Thorough configures options for the THOROUGH search strategy.
+                    Only applies when SearchStrategy is "thorough".
+                  properties:
+                    prefilterTopN:
+                      description: |-
+                        PrefilterTopN, when set, uses AIC to score enumerated candidates offline
+                        and benchmarks only the top-N per side (prefill and decode).
+                        Omit or set to null to benchmark every candidate (unchanged behavior).
+                      format: int32
+                      minimum: 1
+                      type: integer
+                  type: object
                 workload:
                   description: Workload defines the expected workload characteristics for SLA-based profiling.
                   properties:

@@ -2041,6 +2041,7 @@ _Appears in:_
 | `overrides` _[OverridesSpec](#overridesspec)_ | Overrides allows customizing the profiling job and the generated DynamoGraphDeployment. |  | Optional: \{\} <br /> |
 | `features` _[FeaturesSpec](#featuresspec)_ | Features controls optional Dynamo platform features in the generated deployment. |  | Optional: \{\} <br /> |
 | `searchStrategy` _[SearchStrategy](#searchstrategy)_ | SearchStrategy controls the profiling search depth.<br />"rapid" performs a fast sweep; "thorough" explores more configurations. | rapid | Enum: [rapid thorough] <br />Optional: \{\} <br /> |
+| `thorough` _[ThoroughSpec](#thoroughspec)_ | Thorough configures options for the THOROUGH search strategy.<br />Only applies when SearchStrategy is "thorough". |  | Optional: \{\} <br /> |
 | `autoApply` _boolean_ | AutoApply indicates whether to automatically create a DynamoGraphDeployment<br />after profiling completes. If false, the generated spec is stored in status<br />for manual review and application. | true | Optional: \{\} <br /> |
 
 
@@ -2784,6 +2785,22 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `clusterTopologyName` _string_ | clusterTopologyName is the name of the ClusterTopology resource that<br />defines the topology hierarchy for this deployment. |  | MinLength: 1 <br /> |
 | `packDomain` _[TopologyDomain](#topologydomain)_ | packDomain is the default topology domain to pack pods within.<br />Optional; omit when only components carry constraints. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
+
+
+#### ThoroughSpec
+
+
+
+ThoroughSpec configures options for the THOROUGH search strategy.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `prefilterTopN` _integer_ | PrefilterTopN, when set, uses AIC to score enumerated candidates offline<br />and benchmarks only the top-N per side (prefill and decode).<br />Omit or set to null to benchmark every candidate (unchanged behavior). |  | Minimum: 1 <br />Optional: \{\} <br /> |
 
 
 #### TopologyConstraint
