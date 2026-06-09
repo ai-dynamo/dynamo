@@ -51,7 +51,9 @@ def apply_snapshot_restore_config(config: Any) -> None:
     try:
         restore_context = json.loads(context_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"invalid snapshot restore context from {source}: {exc}") from exc
+        raise RuntimeError(
+            f"invalid snapshot restore context from {source}: {exc}"
+        ) from exc
 
     if not isinstance(restore_context, dict):
         raise RuntimeError("snapshot restore context requires an object payload")
