@@ -73,11 +73,6 @@ impl RoutingOccupancyState {
     /// Tie-break policy matches [`select_exact_min_and_increment`] so peek and
     /// select observe the same selection distribution, modulo concurrent races.
     pub(crate) fn peek_min(&self, instance_ids: &[u64]) -> Option<u64> {
-        let deterministic_ties = std::env::var("DYN_ROUTER_LL_DETERMINISTIC_TIES")
-            .ok()
-            .as_deref()
-            == Some("1");
-
         let mut min_load = u64::MAX;
         let mut selected = None;
         let mut tie_count = 0usize;
@@ -93,7 +88,8 @@ impl RoutingOccupancyState {
 
             if load == min_load {
                 tie_count += 1;
-                if !deterministic_ties && rng.random_range(0..tie_count) == 0 {
+                // Reservoir sampling keeps tied minima uniform; matches select_exact_min_and_increment.
+                if rng.random_range(0..tie_count) == 0 {
                     selected = Some(id);
                 }
             }
