@@ -119,8 +119,10 @@ func setTokenizedPrompt(req *schedtypes.InferenceRequest, tokens []int64, logger
 		tokenIDs[i] = uint32(t)
 	}
 
-	req.TokenizedPrompt = &schedtypes.TokenizedPrompt{
-		TokenIDs: tokenIDs,
+	if req.Body != nil {
+		req.Body.TokenizedPrompt = &schedtypes.TokenizedPrompt{
+			TokenIDs: tokenIDs,
+		}
 	}
 
 	// Inject into the PayloadMap so the body includes nvext.token_data.
