@@ -479,6 +479,16 @@ impl Model {
     ///
     /// The `extract` closure should return `Some(value)` if the WorkerSet has the
     /// desired engine, or `None` if it doesn't.
+    ///
+    /// Selection is also confined to namespaces whose worker set is
+    /// topologically complete (`is_workers_ready`). Without this, a model with
+    /// two deployments — one ready, one missing a role (e.g. a decode-only
+    /// namespace with no prefill peer) — could route a request to the
+    /// incomplete deployment, which would accept it and then fail. The
+    /// model-level gate (`has_ready_workers`) only guarantees *some* namespace
+    /// is ready; this filter ensures we actually pick from a ready one.
+    /// Legacy (pre-`worker_type`) cards are treated as ready when live by
+    /// `is_workers_ready`, so cross-version behavior is preserved.
     fn select_worker_set_with<T, F>(&self, extract: F) -> Option<T>
     where
         F: Fn(&WorkerSet) -> Option<T>,
@@ -487,15 +497,19 @@ impl Model {
         if self.worker_sets.len() == 1 {
             return self.worker_sets.iter().next().and_then(|entry| {
                 let ws = entry.value();
-                if ws.worker_count() == 0 || !ws.can_serve_requests() {
+                if ws.worker_count() == 0
+                    || !ws.can_serve_requests()
+                    || !self.is_workers_ready(ws.namespace())
+                {
                     return None;
                 }
                 extract(ws)
             });
         }
 
-        // Collect eligible sets with their worker counts, skipping sets with no workers
-        // or sets whose prefill router has died under enforce_disagg.
+        // Collect eligible sets with their worker counts, skipping sets with no workers,
+        // sets whose prefill router has died under enforce_disagg, or sets in a namespace
+        // whose topology is incomplete.
         // In-process models (no discovery watcher) return count=1, so they always participate.
         // Discovery models with count=0 have no available workers and are skipped.
         let eligible: Vec<(T, usize)> = self
@@ -504,7 +518,8 @@ impl Model {
             .filter_map(|entry| {
                 let ws = entry.value();
                 let count = ws.worker_count();
-                if count == 0 || !ws.can_serve_requests() {
+                if count == 0 || !ws.can_serve_requests() || !self.is_workers_ready(ws.namespace())
+                {
                     return None;
                 }
                 extract(ws).map(|val| (val, count))
@@ -1316,5 +1331,106 @@ mod tests {
         Arc::new(crate::engines::StreamingEngineAdapter::new(
             crate::engines::make_echo_engine(),
         ))
+    }
+
+    /// Build a WorkerSet with an explicit worker_type / needs, a live worker
+    /// count, AND a chat engine attached (i.e. it can be selected to serve a
+    /// chat request).
+    fn ws_serving_role(
+        namespace: &str,
+        mdcsum: &str,
+        worker_type: WorkerType,
+        needs: Vec<Vec<WorkerType>>,
+        worker_ids: Vec<u64>,
+    ) -> (Arc<WorkerSet>, watch::Sender<Vec<u64>>) {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(worker_type);
+        card.needs = needs;
+        let (tx, rx) = watch::channel(worker_ids);
+        let mut ws = WorkerSet::new(namespace.to_string(), mdcsum.to_string(), card);
+        ws.set_instance_watcher(rx);
+        ws.chat_engine = Some(make_test_chat_engine());
+        (Arc::new(ws), tx)
+    }
+
+    /// A single deployment that is topologically incomplete (decode-only, no
+    /// prefill peer) must not be selected for serving, even though it has a
+    /// live worker and a chat engine attached. Confirms the fast-path
+    /// readiness filter in `select_worker_set_with`.
+    #[test]
+    fn select_skips_unready_namespace_single_set() {
+        let model = Model::new("llama".to_string());
+        let (decode, _tx) = ws_serving_role(
+            "bad",
+            "mdc-d",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![1],
+        );
+        model.add_worker_set("bad".to_string(), decode);
+
+        assert!(!model.is_workers_ready("bad"));
+        assert!(
+            model.get_chat_engine().is_err(),
+            "decode-only namespace (missing prefill) must not be selectable"
+        );
+    }
+
+    /// With two deployments of one model — a ready P/D pair and an unready
+    /// decode-only namespace — selection must only ever land on the ready one.
+    /// The decode WorkerSets in BOTH namespaces carry a chat engine and a live
+    /// worker, so before the readiness filter the unready namespace could be
+    /// picked. Removing the ready namespace leaves only the unready one, which
+    /// must then be unservable rather than silently accepting (and failing) the
+    /// request.
+    #[test]
+    fn select_skips_unready_namespace_multi_set() {
+        let model = Model::new("llama".to_string());
+
+        // Ready deployment: live prefill + live decode (decode is the front door).
+        let (good_prefill, _tx_gp) = ws_with_role(
+            "good",
+            "mdc-gp",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![1],
+        );
+        let (good_decode, _tx_gd) = ws_serving_role(
+            "good",
+            "mdc-gd",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![2],
+        );
+        model.add_worker_set("good:prefill".to_string(), good_prefill);
+        model.add_worker_set("good".to_string(), good_decode);
+
+        // Unready deployment: live decode only, no prefill peer.
+        let (bad_decode, _tx_bd) = ws_serving_role(
+            "bad",
+            "mdc-bd",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![3],
+        );
+        model.add_worker_set("bad".to_string(), bad_decode);
+
+        assert!(model.is_workers_ready("good"));
+        assert!(!model.is_workers_ready("bad"));
+
+        // The ready namespace keeps the model servable.
+        assert!(
+            model.get_chat_engine().is_ok(),
+            "a ready namespace must keep the model servable"
+        );
+
+        // Drop the ready namespace; only the unready decode-only namespace is
+        // left. It must NOT be selectable despite having a live worker + engine.
+        model.remove_worker_set("good:prefill");
+        model.remove_worker_set("good");
+        assert!(
+            model.get_chat_engine().is_err(),
+            "unready namespace must never be selected for serving"
+        );
     }
 }
