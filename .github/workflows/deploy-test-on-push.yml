@@ -11,6 +11,7 @@ on:
   push:
     branches:
       - main
+      - deploy_test_static_ns
   workflow_dispatch:
     inputs:
       operator_tag:
