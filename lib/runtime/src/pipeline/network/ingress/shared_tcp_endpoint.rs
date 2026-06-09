@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tokio_util::bytes::BytesMut;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -95,6 +95,12 @@ pub struct SharedTcpServer {
     cancellation_token: CancellationToken,
     /// Channel for sending work to the worker pool
     work_tx: tokio::sync::mpsc::Sender<WorkItem>,
+    /// Worker-pool semaphore bounding concurrent in-engine requests. Shared with
+    /// `read_loop` so it can front-acquire a permit and dispatch directly.
+    engine_sem: Arc<Semaphore>,
+    /// Overflow-queue capacity; `read_loop` compares against it to tell whether
+    /// the queue is empty for the FIFO direct-dispatch rule.
+    queue_capacity: usize,
 }
 
 struct EndpointHandler {
@@ -132,8 +138,11 @@ impl SharedTcpServer {
         // Create bounded channel for work items
         let (work_tx, work_rx) = tokio::sync::mpsc::channel(work_queue_size);
 
-        // Start worker pool
-        Self::start_worker_pool(worker_pool_size, work_rx, cancellation_token.clone());
+        // Shared with read_loop, which front-acquires permits for direct dispatch.
+        let engine_sem = Arc::new(Semaphore::new(worker_pool_size));
+
+        // Dispatcher drains the overflow queue.
+        Self::start_worker_pool(engine_sem.clone(), work_rx, cancellation_token.clone());
 
         Arc::new(Self {
             handlers: Arc::new(DashMap::new()),
@@ -143,6 +152,8 @@ impl SharedTcpServer {
             actual_addr: RwLock::new(None),
             cancellation_token,
             work_tx,
+            engine_sem,
+            queue_capacity: work_queue_size,
         })
     }
 
@@ -151,11 +162,11 @@ impl SharedTcpServer {
     /// Uses a single receiver with a semaphore to bound concurrent execution,
     /// avoiding mutex contention that would serialize all workers.
     fn start_worker_pool(
-        pool_size: usize,
+        semaphore: Arc<Semaphore>,
         mut work_rx: tokio::sync::mpsc::Receiver<WorkItem>,
         cancellation_token: CancellationToken,
     ) {
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(pool_size));
+        let pool_size = semaphore.available_permits();
 
         tokio::spawn(async move {
             tracing::trace!(
@@ -196,17 +207,7 @@ impl SharedTcpServer {
                         WORK_HANDLER_PERMIT_WAIT_SECONDS
                             .observe(permit_wait_start.elapsed().as_secs_f64());
 
-                        // Construct the guard before spawn (inc runs synchronously
-                        // here, so the gauge is never observed negative even if
-                        // the future completes on another worker first), then
-                        // move ownership into the future — Drop handles dec on
-                        // every exit path.
-                        let active_guard = ActiveTaskGuard::new();
-                        tokio::spawn(async move {
-                            let _active_guard = active_guard;
-                            Self::handle_work_item(work_item).await;
-                            drop(permit);
-                        });
+                        Self::spawn_handle(work_item, permit);
                     }
                 }
             }
@@ -218,6 +219,19 @@ impl SharedTcpServer {
             "Started TCP worker dispatcher with concurrency limit {}",
             pool_size
         );
+    }
+
+    /// Spawn the worker task for an item that already holds a permit (the
+    /// direct path in `read_loop` and the queued path in the dispatcher). The
+    /// `ActiveTaskGuard` is built synchronously so the gauge increments before
+    /// the task is polled; the permit drops on completion.
+    fn spawn_handle(work_item: WorkItem, permit: OwnedSemaphorePermit) {
+        let active_guard = ActiveTaskGuard::new();
+        tokio::spawn(async move {
+            let _active_guard = active_guard;
+            Self::handle_work_item(work_item).await;
+            drop(permit);
+        });
     }
 
     /// Handle a single work item
@@ -325,8 +339,10 @@ impl SharedTcpServer {
 
                             let handlers = self.handlers.clone();
                             let work_tx = self.work_tx.clone();
+                            let engine_sem = self.engine_sem.clone();
+                            let queue_capacity = self.queue_capacity;
                             tokio::spawn(async move {
-                                if let Err(e) = Self::handle_connection(stream, handlers, work_tx).await {
+                                if let Err(e) = Self::handle_connection(stream, handlers, work_tx, engine_sem, queue_capacity).await {
                                     tracing::error!("TCP connection error: {e}");
                                 }
                             });
@@ -427,6 +443,8 @@ impl SharedTcpServer {
         stream: TcpStream,
         handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
         work_tx: tokio::sync::mpsc::Sender<WorkItem>,
+        engine_sem: Arc<Semaphore>,
+        queue_capacity: usize,
     ) -> Result<()> {
         use crate::pipeline::network::codec::{TcpRequestMessage, TcpResponseMessage};
 
@@ -440,7 +458,15 @@ impl SharedTcpServer {
         let write_task = tokio::spawn(Self::write_loop(write_half, response_rx));
 
         // Run read task in current context
-        let read_result = Self::read_loop(read_half, handlers, response_tx, work_tx).await;
+        let read_result = Self::read_loop(
+            read_half,
+            handlers,
+            response_tx,
+            work_tx,
+            engine_sem,
+            queue_capacity,
+        )
+        .await;
 
         // Write task will end when response_tx is dropped
         write_task.await??;
@@ -448,11 +474,14 @@ impl SharedTcpServer {
         read_result
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn read_loop(
         mut read_half: tokio::io::ReadHalf<TcpStream>,
         handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
         response_tx: tokio::sync::mpsc::UnboundedSender<Bytes>,
         work_tx: tokio::sync::mpsc::Sender<WorkItem>,
+        engine_sem: Arc<Semaphore>,
+        queue_capacity: usize,
     ) -> Result<()> {
         use crate::pipeline::network::codec::{TcpResponseMessage, ZeroCopyTcpDecoder};
 
@@ -541,12 +570,38 @@ impl SharedTcpServer {
                 endpoint_name: handler.endpoint_name.clone(),
             };
 
-            // Admission control: try_reserve is non-blocking. If the work
-            // queue is at DYN_TCP_WORK_QUEUE_SIZE capacity, reject the
-            // request immediately (Full) rather than waiting for capacity —
-            // the FE sees a fast "Server overloaded" response and can fail
-            // the client request with a 503 instead of a TCP read timeout.
-            // See DIS-2105.
+            // Engine permit free and nothing queued ahead → dispatch directly.
+            // Take the direct path only when the queue is empty so a new request
+            // can't jump ahead of queued ones (FIFO). This keeps a request from
+            // ever being rejected while an engine worker is free.
+            let queue_empty = work_tx.capacity() == queue_capacity;
+            let direct_permit = if queue_empty {
+                engine_sem.clone().try_acquire_owned().ok()
+            } else {
+                None
+            };
+
+            if let Some(permit) = direct_permit {
+                // Bypass the queue — routing through work_tx would make it a throat.
+                Self::spawn_handle(work_item, permit);
+
+                // Send acknowledgment after dispatch.
+                let ack_response = TcpResponseMessage::empty();
+                if let Ok(encoded_ack) = ack_response.encode()
+                    && response_tx.send(encoded_ack).is_err()
+                {
+                    tracing::debug!("Write task closed, ending read loop");
+                    break;
+                }
+                continue;
+            }
+
+            // Admission control: all engine slots are busy (or items are already
+            // queued ahead). try_reserve is non-blocking. If the work queue is at
+            // DYN_TCP_WORK_QUEUE_SIZE capacity, reject the request immediately
+            // (Full) rather than waiting for capacity — the FE sees a fast
+            // "Server overloaded" response and can fail the client request with a
+            // 503 instead of a TCP read timeout. See DIS-2105.
             //
             // Reserving the slot BEFORE incrementing the queue-depth gauge
             // means the gauge cannot exceed `queue_capacity` under
@@ -989,7 +1044,11 @@ mod tests {
         let cancellation_token = CancellationToken::new();
 
         // Start worker pool with small concurrency limit
-        SharedTcpServer::start_worker_pool(pool_size, work_rx, cancellation_token.clone());
+        SharedTcpServer::start_worker_pool(
+            Arc::new(Semaphore::new(pool_size)),
+            work_rx,
+            cancellation_token.clone(),
+        );
 
         // Create tracking handler
         let handler = Arc::new(ConcurrencyTrackingHandler::new(Duration::from_millis(50)));
@@ -1069,7 +1128,11 @@ mod tests {
         let total_requests = 4;
         let (work_tx, work_rx) = tokio::sync::mpsc::channel::<WorkItem>(total_requests);
         let cancellation_token = CancellationToken::new();
-        SharedTcpServer::start_worker_pool(pool_size, work_rx, cancellation_token.clone());
+        SharedTcpServer::start_worker_pool(
+            Arc::new(Semaphore::new(pool_size)),
+            work_rx,
+            cancellation_token.clone(),
+        );
 
         let handler = Arc::new(ConcurrencyTrackingHandler::new(Duration::from_millis(25)));
         let inflight = Arc::new(AtomicU64::new(0));
