@@ -793,12 +793,12 @@ class EngineFactory:
         tokenizer = input_processor.get_tokenizer()
 
         # vLLM's renderer skips its AutoProcessor fallback when tools are present,
-        # so tool calls crash unless the tokenizer has an inline template.
+        # so tool calls crash unless tokenizer.chat_template is set; load from disk.
         if tokenizer.chat_template is None:
             tokenizer.chat_template = resolve_chat_template(source_path)
 
-        # --chat-template overrides; load_chat_template accepts a path or an
-        # inline Jinja literal.
+        # --chat-template overrides; load_chat_template accepts either a file path
+        # or an inline Jinja template string.
         chat_template_flag = getattr(self.flags, "chat_template", None)
         if chat_template_flag:
             tokenizer.chat_template = load_chat_template(chat_template_flag)
