@@ -613,6 +613,10 @@ fn join_endpoints(primary: &str, fallbacks: &[String]) -> String {
     s
 }
 
+// `Status` is the tonic-mandated error type; boxing it would rewrite the
+// return path and it's validated once per stream, so the large-Err variant is
+// not a hot-path concern.
+#[allow(clippy::result_large_err)]
 fn validate_protocol_config(
     pc: &crate::proto::envoy::service::ext_proc::v3::ProtocolConfiguration,
 ) -> Result<(), Status> {

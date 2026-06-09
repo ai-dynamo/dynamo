@@ -38,12 +38,12 @@ mod zmq_listener;
 use batching::BatchingState;
 #[cfg(test)]
 use dedup::EventDedupFilter;
+pub(crate) use dedup::PerWorkerDedup;
 #[cfg(test)]
 use event_processor::run_event_processor_loop;
 use event_processor::{start_event_processor, start_event_processor_jetstream};
 use sinks::EventPlanePublisher;
 pub use worker_metrics::WorkerMetricsPublisher;
-pub(crate) use dedup::PerWorkerDedup;
 pub(crate) use zmq_listener::start_zmq_listener;
 
 const MAX_BATCHING_TIMEOUT_MS: u64 = 15_000;
