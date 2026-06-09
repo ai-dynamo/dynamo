@@ -563,7 +563,7 @@ mod tests {
         // Should have exactly 2 chunks: tool call + trailing content
         assert_eq!(
             results.len(),
-            2,
+            3,
             "Should have tool call and trailing content"
         );
 
@@ -658,7 +658,7 @@ mod tests {
         // Should have exactly 3 chunks: content + tool call + content
         assert_eq!(
             results.len(),
-            3,
+            4,
             "Should have content, tool call, and trailing content"
         );
 
@@ -703,7 +703,7 @@ mod tests {
         // Should have exactly 3 chunks: content + tool call + content
         assert_eq!(
             results.len(),
-            3,
+            4,
             "Should have content, tool call, and trailing content"
         );
 
@@ -744,7 +744,7 @@ mod tests {
         // Should have exactly 3 chunks: content + tool call + content
         assert_eq!(
             results.len(),
-            3,
+            4,
             "Should have content, tool call, and trailing content"
         );
 
@@ -792,7 +792,7 @@ mod tests {
         // Should have exactly 3 chunks: content + tool call + content
         assert_eq!(
             results.len(),
-            3,
+            4,
             "Should have content, tool call, and trailing content"
         );
 
@@ -838,7 +838,7 @@ mod tests {
         // Should have exactly 3 chunks: content + tool call + content
         assert_eq!(
             results.len(),
-            3,
+            4,
             "Should have content, tool call, and trailing content"
         );
 
@@ -968,7 +968,7 @@ mod tests {
 
         assert_eq!(
             results.len(),
-            2,
+            3,
             "Should emit prefix content + recovered tool call"
         );
 
@@ -1050,7 +1050,7 @@ mod tests {
         // === Verify chunk count ===
         assert_eq!(
             results.len(),
-            5,
+            6,
             "Should emit exactly 5 chunks as documented above"
         );
 
@@ -1159,7 +1159,7 @@ mod tests {
         // Expected output: [Content(), ToolCall(), Content()]
         assert_eq!(
             results.len(),
-            3,
+            4,
             "Should consolidate fragments into 3 chunks"
         );
 
@@ -1433,7 +1433,7 @@ mod tests {
         // === Verify chunk count ===
         assert_eq!(
             results.len(),
-            3,
+            4,
             "Should emit exactly 3 chunks as documented above"
         );
 
@@ -1475,7 +1475,7 @@ mod tests {
         // Should have exactly 3 chunks: content + tool call + trailing
         assert_eq!(
             results.len(),
-            3,
+            4,
             "Should have content, tool call, and trailing content"
         );
 
@@ -1848,7 +1848,7 @@ mod tests {
         // === Verify chunk count ===
         assert_eq!(
             results.len(),
-            2,
+            3,
             "Should emit exactly 2 chunks: [0] 'text' content, [1] tool call"
         );
 
@@ -2177,7 +2177,7 @@ mod tests {
 
         assert_eq!(
             results.len(),
-            3,
+            4,
             "Should have content, tool call, and trailing content"
         );
 
@@ -2230,7 +2230,7 @@ mod tests {
 
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        assert_eq!(results.len(), 3, "Should have 3 chunks");
+        assert_eq!(results.len(), 4, "Should have 3 chunks");
 
         test_utils::assert_content(&results[0], "Let me search for that. ");
         test_utils::assert_tool_call(
@@ -2272,7 +2272,7 @@ mod tests {
 
         assert_eq!(
             results.len(),
-            3,
+            4,
             "Should have content, tool call, and trailing content"
         );
 
@@ -4240,6 +4240,218 @@ fahrenheit
         assert!(
             !emitted_text.contains("search"),
             "wrong-tool JSON leaked to content: {emitted_text:?}"
+        );
+    }
+}
+
+/// Regression tests: a tool call parsed from marker-based jailing must always
+/// surface `finish_reason: "tool_calls"` somewhere in the output stream.
+///
+/// Mirrors the stream shape produced by a qwen3_coder-parser deployment with
+/// speculative decoding (observed on arcee-ai/trinity-large-thinking): the
+/// engine emits the tool-call XML, then a content-less chunk carrying
+/// `finish_reason: stop`, then a usage-only chunk. Strict OpenAI clients hang
+/// if no chunk ever carries a non-null finish_reason.
+mod tool_call_terminal_finish_reason_tests {
+    use super::tests::test_utils;
+    use super::*;
+    use futures::StreamExt;
+    use futures::stream;
+
+    fn trinity_tool_call_chunks() -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+        [
+            "<tool_call>",
+            "<function=write_file>",
+            "<parameter=path>\nok.txt\n</parameter>",
+            "<parameter=content>\nDONE\n</parameter>",
+            "</function>",
+            "</tool_call>",
+        ]
+        .iter()
+        .map(|s| test_utils::create_mock_response_chunk(s.to_string(), 0))
+        .collect()
+    }
+
+    fn content_chunk_with_finish(
+        text: &str,
+        finish: Option<FinishReason>,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut chunk = test_utils::create_mock_response_chunk(text.to_string(), 0);
+        if let Some(ref mut data) = chunk.data {
+            data.inner.choices[0].finish_reason = finish;
+        }
+        chunk
+    }
+
+    fn usage_only_chunk() -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut chunk = test_utils::create_mock_response_chunk(String::new(), 0);
+        if let Some(ref mut data) = chunk.data {
+            data.inner.choices.clear();
+            data.inner.usage = Some(CompletionUsage {
+                prompt_tokens: 270,
+                completion_tokens: 99,
+                total_tokens: 369,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            });
+        }
+        chunk
+    }
+
+    async fn run_qwen3_coder_jail(
+        chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>>,
+    ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+        let jail = JailedStream::builder()
+            .tool_call_parser("qwen3_coder")
+            .build();
+        jail.apply_with_finish_reason(stream::iter(chunks))
+            .collect()
+            .await
+    }
+
+    fn collected_finish_reasons(
+        results: &[Annotated<NvCreateChatCompletionStreamResponse>],
+    ) -> Vec<FinishReason> {
+        results
+            .iter()
+            .flat_map(|r| r.data.iter())
+            .flat_map(|d| d.inner.choices.iter())
+            .filter_map(|c| c.finish_reason)
+            .collect()
+    }
+
+    fn emitted_tool_call_names(
+        results: &[Annotated<NvCreateChatCompletionStreamResponse>],
+    ) -> Vec<String> {
+        results
+            .iter()
+            .flat_map(|r| r.data.iter())
+            .flat_map(|d| d.inner.choices.iter())
+            .flat_map(|c| c.delta.tool_calls.iter().flatten())
+            .filter_map(|tc| tc.function.as_ref().and_then(|f| f.name.clone()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn finish_only_chunk_after_tool_call_yields_tool_calls_finish() {
+        let mut chunks = trinity_tool_call_chunks();
+        chunks.push(test_utils::create_final_response_chunk(0));
+        chunks.push(usage_only_chunk());
+
+        let results = run_qwen3_coder_jail(chunks).await;
+
+        assert_eq!(
+            emitted_tool_call_names(&results),
+            vec!["write_file".to_string()],
+            "tool call must be parsed and emitted"
+        );
+        assert_eq!(
+            collected_finish_reasons(&results),
+            vec![FinishReason::ToolCalls],
+            "stream must carry exactly one finish_reason and it must be tool_calls"
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_only_chunk_after_tool_call_and_trailing_newline() {
+        let mut chunks = trinity_tool_call_chunks();
+        chunks.push(test_utils::create_mock_response_chunk("\n".to_string(), 0));
+        chunks.push(test_utils::create_final_response_chunk(0));
+        chunks.push(usage_only_chunk());
+
+        let results = run_qwen3_coder_jail(chunks).await;
+
+        assert_eq!(
+            emitted_tool_call_names(&results),
+            vec!["write_file".to_string()],
+            "tool call must be parsed and emitted"
+        );
+        assert_eq!(
+            collected_finish_reasons(&results),
+            vec![FinishReason::ToolCalls],
+            "stream must carry exactly one finish_reason and it must be tool_calls"
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_on_last_tool_call_content_chunk_yields_tool_calls_finish() {
+        // Speculative decoding can attach finish_reason to the chunk that also
+        // carries the last piece of tool-call text.
+        let mut chunks = trinity_tool_call_chunks();
+        let last = chunks.len() - 1;
+        chunks[last] = content_chunk_with_finish("</tool_call>", Some(FinishReason::Stop));
+        chunks.push(usage_only_chunk());
+
+        let results = run_qwen3_coder_jail(chunks).await;
+
+        assert_eq!(
+            emitted_tool_call_names(&results),
+            vec!["write_file".to_string()],
+            "tool call must be parsed and emitted"
+        );
+        assert_eq!(
+            collected_finish_reasons(&results),
+            vec![FinishReason::ToolCalls],
+            "stream must carry exactly one finish_reason and it must be tool_calls"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_ending_without_any_finish_chunk_still_yields_tool_calls_finish() {
+        // Engine drops the terminal chunk entirely (worst case).
+        let mut chunks = trinity_tool_call_chunks();
+        chunks.push(usage_only_chunk());
+
+        let results = run_qwen3_coder_jail(chunks).await;
+
+        assert_eq!(
+            emitted_tool_call_names(&results),
+            vec!["write_file".to_string()],
+            "tool call must be parsed and emitted"
+        );
+        assert_eq!(
+            collected_finish_reasons(&results),
+            vec![FinishReason::ToolCalls],
+            "stream must carry exactly one finish_reason and it must be tool_calls"
+        );
+
+        // OpenAI ordering: the terminal finish_reason chunk must precede the
+        // usage-only chunk.
+        let finish_pos = results.iter().position(|r| {
+            r.data.as_ref().is_some_and(|d| {
+                d.inner
+                    .choices
+                    .iter()
+                    .any(|c| c.finish_reason == Some(FinishReason::ToolCalls))
+            })
+        });
+        let usage_pos = results.iter().position(|r| {
+            r.data
+                .as_ref()
+                .is_some_and(|d| d.inner.choices.is_empty() && d.inner.usage.is_some())
+        });
+        assert!(
+            finish_pos.unwrap() < usage_pos.unwrap(),
+            "finish_reason chunk must precede the usage chunk"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_ending_without_finish_or_usage_still_yields_tool_calls_finish() {
+        // No finish chunk and no usage chunk: synthesize at stream end.
+        let chunks = trinity_tool_call_chunks();
+
+        let results = run_qwen3_coder_jail(chunks).await;
+
+        assert_eq!(
+            emitted_tool_call_names(&results),
+            vec!["write_file".to_string()],
+            "tool call must be parsed and emitted"
+        );
+        assert_eq!(
+            collected_finish_reasons(&results),
+            vec![FinishReason::ToolCalls],
+            "stream must carry exactly one finish_reason and it must be tool_calls"
         );
     }
 }

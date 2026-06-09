@@ -17,7 +17,7 @@ use dynamo_parsers::tool_calling::{
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::utils::{MarkerMatcher, MatchResult};
@@ -1416,10 +1416,23 @@ impl JailedStream {
         stream! {
             tokio::pin!(input_stream);
             let mut has_tool_calls_per_choice: HashMap<u32, bool> = HashMap::new();
+            // Choices that carried a non-null finish_reason at some point. Used to
+            // synthesize the OpenAI-required terminal `finish_reason: "tool_calls"`
+            // chunk when the engine never emits a finish_reason for a choice that
+            // produced tool calls (observed with speculative decoding, where the
+            // stream ends with a usage-only chunk and no terminal finish chunk).
+            let mut finish_reason_seen: HashSet<u32> = HashSet::new();
+            // Stream metadata so synthesized terminal chunks carry real values
+            let mut last_id = String::new();
+            let mut last_model = String::new();
+            let mut last_created: u32 = 0;
 
             while let Some(mut response) = input_stream.next().await {
                 // Track if any choice emitted tool calls
                 if let Some(ref data) = response.data {
+                    last_id.clone_from(&data.inner.id);
+                    last_model.clone_from(&data.inner.model);
+                    last_created = data.inner.created;
                     for choice in &data.inner.choices {
                         if choice.delta.tool_calls.is_some() {
                             has_tool_calls_per_choice.insert(choice.index, true);
@@ -1431,6 +1444,7 @@ impl JailedStream {
                 if let Some(ref mut data) = response.data {
                     for choice in &mut data.inner.choices {
                         if let Some(finish) = choice.finish_reason {
+                            finish_reason_seen.insert(choice.index);
                             // Only modify Stop finish reason, preserve Length/ContentFilter
                             if finish == FinishReason::Stop {
                                 let has_tool_calls = has_tool_calls_per_choice.get(&choice.index).copied().unwrap_or(false);
@@ -1458,9 +1472,104 @@ impl JailedStream {
                     }
                 }
 
+                // A usage-only chunk (empty choices, usage set) is the engine's
+                // terminal chunk. If a tool-call choice still has no finish_reason
+                // by now, the engine dropped it: synthesize the terminal chunk
+                // first so clients see finish_reason before usage, matching
+                // OpenAI stream ordering.
+                let is_terminal_usage_chunk = response.data.as_ref().is_some_and(|d| {
+                    d.inner.choices.is_empty() && d.inner.usage.is_some()
+                });
+                if is_terminal_usage_chunk {
+                    for chunk in Self::synthesize_missing_tool_calls_finish(
+                        &has_tool_calls_per_choice,
+                        &mut finish_reason_seen,
+                        &last_id,
+                        &last_model,
+                        last_created,
+                    ) {
+                        yield chunk;
+                    }
+                }
+
                 yield response;
             }
+
+            // Stream ended without a usage chunk: synthesize for any tool-call
+            // choice that never got a finish_reason.
+            for chunk in Self::synthesize_missing_tool_calls_finish(
+                &has_tool_calls_per_choice,
+                &mut finish_reason_seen,
+                &last_id,
+                &last_model,
+                last_created,
+            ) {
+                yield chunk;
+            }
         }
+    }
+
+    /// Build synthetic `finish_reason: "tool_calls"` chunks for every choice that
+    /// emitted tool calls but never carried a non-null finish_reason. Marks the
+    /// indices as seen so callers can invoke this more than once without
+    /// duplicating chunks.
+    fn synthesize_missing_tool_calls_finish(
+        has_tool_calls_per_choice: &HashMap<u32, bool>,
+        finish_reason_seen: &mut HashSet<u32>,
+        id: &str,
+        model: &str,
+        created: u32,
+    ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+        let mut missing: Vec<u32> = has_tool_calls_per_choice
+            .iter()
+            .filter(|(idx, has)| **has && !finish_reason_seen.contains(idx))
+            .map(|(idx, _)| *idx)
+            .collect();
+        missing.sort_unstable();
+
+        missing
+            .into_iter()
+            .map(|index| {
+                finish_reason_seen.insert(index);
+                tracing::debug!(
+                    choice_index = index,
+                    "Synthesizing missing finish_reason=tool_calls chunk for tool-call choice"
+                );
+                #[allow(deprecated)]
+                let choice = ChatChoiceStream {
+                    index,
+                    delta: ChatCompletionStreamResponseDelta {
+                        role: None,
+                        content: None,
+                        tool_calls: None,
+                        function_call: None,
+                        refusal: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: Some(FinishReason::ToolCalls),
+                    logprobs: None,
+                };
+                Annotated {
+                    data: Some(NvCreateChatCompletionStreamResponse {
+                        inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                            id: id.to_string(),
+                            object: "chat.completion.chunk".to_string(),
+                            created,
+                            model: model.to_string(),
+                            choices: vec![choice],
+                            usage: None,
+                            service_tier: None,
+                            system_fingerprint: None,
+                        },
+                        nvext: None,
+                    }),
+                    id: None,
+                    event: None,
+                    comment: None,
+                    error: None,
+                }
+            })
+            .collect()
     }
 }
 
