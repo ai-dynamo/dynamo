@@ -326,13 +326,21 @@ impl LoadEstimator {
     /// Prune tracking data (and predictors) for any LoRA not in `known`. Bounds memory
     /// against unloaded adapters and unknown/typo request names that never get allocated.
     pub fn retain_known(&self, known: &std::collections::HashSet<&str>) {
-        // Keep an entry if it is known OR still has in-flight requests. Pruning a LoRA with a
-        // nonzero active_count (e.g. one whose arrival raced this controller tick, before its MDC
-        // reached the state tracker) would drop live tracking and make the matching LoadGuard /
-        // Free-event decrement a silent no-op, losing that arrival. Unknown/typo names with no
-        // in-flight requests are still pruned, so memory stays bounded.
+        // Keep an entry if it is known, OR still has in-flight requests, OR has nonzero arrivals
+        // within the current rate window. The in-flight check protects a LoRA whose arrival raced
+        // this controller tick before its MDC reached the state tracker (dropping it would make
+        // the matching LoadGuard / Free-event decrement a silent no-op). The recent-arrival check
+        // additionally protects a SHORT request for a newly seen adapter that already completed
+        // (active_count back to 0) before discovery reported the adapter: its arrival history must
+        // survive at least one rate window so the controller still sees the load signal and can
+        // allocate for it, instead of pruning the demand the instant the request finishes. Once
+        // the window slides past with no further arrivals (count == 0) and the name is still
+        // unknown, it is pruned, so memory stays bounded against unknown/typo request names.
+        let now = Instant::now();
         self.data.retain(|name, data| {
-            known.contains(name.as_str()) || data.active_count.load(Ordering::Relaxed) > 0
+            known.contains(name.as_str())
+                || data.active_count.load(Ordering::Relaxed) > 0
+                || data.rate_counter.count(now) > 0
         });
         self.predictors
             .lock()
@@ -924,6 +932,65 @@ mod tests {
             load.get("lora-test"),
             Some(&3),
             "EMA with alpha=1.0 should match raw count"
+        );
+    }
+
+    #[test]
+    fn retain_known_keeps_recent_arrival_after_short_request() {
+        // A short request for a newly seen adapter can arrive and complete (active_count back to 0)
+        // before the adapter appears in discovery. retain_known must keep its recent-arrival
+        // history so the controller still sees the load signal for at least one rate window,
+        // instead of pruning the demand the instant the request finishes.
+        let est = LoadEstimator::new();
+        est.increment_load("new-adapter"); // request arrives
+        est.decrement_load("new-adapter"); // request completes immediately
+        assert!(
+            est.get_inflight_counts().get("new-adapter").is_none(),
+            "no in-flight requests remain after the short request completes"
+        );
+
+        // Discovery has not reported it yet, so it is not "known".
+        let known: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        est.retain_known(&known);
+
+        assert!(
+            est.data.contains_key("new-adapter"),
+            "a recent arrival must survive retain_known for at least one rate window"
+        );
+        assert!(
+            est.get_raw_arrival_counts()
+                .get("new-adapter")
+                .copied()
+                .unwrap_or(0)
+                > 0,
+            "the load signal (recent arrival) must be preserved"
+        );
+    }
+
+    #[test]
+    fn retain_known_prunes_unknown_with_no_recent_arrivals() {
+        // Once the rate window has slid past the arrival (no recent arrivals) and the name is still
+        // unknown, retain_known must prune it so memory stays bounded against typo/unknown names.
+        let est = LoadEstimator::new();
+        est.increment_load("typo-adapter");
+        est.decrement_load("typo-adapter");
+        // Simulate the rate window fully sliding past the arrival without sleeping.
+        est.clear_rate_counter("typo-adapter");
+        assert_eq!(
+            est.get_raw_arrival_counts()
+                .get("typo-adapter")
+                .copied()
+                .unwrap_or(0),
+            0,
+            "precondition: no recent arrivals remain"
+        );
+
+        let known: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        est.retain_known(&known);
+
+        assert!(
+            !est.data.contains_key("typo-adapter"),
+            "an unknown name with no in-flight requests and no recent arrivals must be pruned"
         );
     }
 }
