@@ -29,6 +29,7 @@ from dynamo.vllm.multimodal_utils.protocol import (
 
 pytestmark = [
     pytest.mark.pre_merge,
+    pytest.mark.unit,
     pytest.mark.vllm,
     pytest.mark.gpu_0,
     pytest.mark.multimodal,
