@@ -150,9 +150,9 @@ jobs:
           curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C "${CARGO_HOME:-/usr/local/cargo}/bin"
           cargo fmt -- --check
           cargo clippy --features block-manager,media-ffmpeg,testing-nixl,integration --no-deps --all-targets -- -D warnings
-          cargo nextest run --locked --profile ci --config-file ${{ github.workspace }}/.config/nextest.toml --features=block-manager,media-ffmpeg,testing-nixl,integration
+          cargo nextest run --locked --profile ci --config-file ${{ github.workspace }}/.config/nextest.toml --no-tests=pass --features=block-manager,media-ffmpeg,testing-nixl,integration
           cargo clippy -p kvbm-physical --no-deps --all-targets -- -D warnings
-          cargo nextest run --locked --profile ci-aux --config-file ${{ github.workspace }}/.config/nextest.toml -p kvbm-physical --features testing-kvbm --test-threads=4
+          cargo nextest run --locked --profile ci-aux --config-file ${{ github.workspace }}/.config/nextest.toml --no-tests=pass -p kvbm-physical --features testing-kvbm --test-threads=4
           /workspace/container/use-sccache.sh show-stats "Rust Checks"
       - name: Install datadog-ci
         if: always()

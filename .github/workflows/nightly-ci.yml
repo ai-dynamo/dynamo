@@ -512,7 +512,7 @@ jobs:
       env:
         NEXTEST_PROFILE: ci
       run: |
-        cargo llvm-cov --no-report --locked nextest --config-file ${{ github.workspace }}/.config/nextest.toml
+        cargo llvm-cov --no-report --locked nextest --no-tests=pass --config-file ${{ github.workspace }}/.config/nextest.toml
         cargo llvm-cov report --output-path coverage-rust.txt
         cargo llvm-cov report --lcov --output-path coverage-rust.lcov
         echo "Coverage summary:"

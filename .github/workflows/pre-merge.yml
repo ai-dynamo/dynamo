@@ -190,13 +190,15 @@ jobs:
       # (doc tests run above; nextest doesn't cover them). --profile ci writes a
       # JUnit report to <target>/nextest/ci/junit.xml for the Datadog upload.
       # --config-file points the sub-workspaces at the repo-root nextest config.
-      run: cargo nextest run --locked --profile ci --config-file ${{ github.workspace }}/.config/nextest.toml
+      # --no-tests=pass: some matrix dirs (e.g. lib/runtime/examples) have no Rust
+      # tests in this config; nextest otherwise exits non-zero on zero tests.
+      run: cargo nextest run --locked --profile ci --config-file ${{ github.workspace }}/.config/nextest.toml --no-tests=pass
     - name: Run KVBM offload Mooncake trace test
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
       # --profile ci-aux so this second run's JUnit doesn't overwrite the unit-test
       # report (nextest writes one report per profile, no append).
-      run: cargo nextest run --locked --profile ci-aux --config-file ${{ github.workspace }}/.config/nextest.toml -p dynamo-bench --test mooncake_trace --features mocker-kvbm-offload
+      run: cargo nextest run --locked --profile ci-aux --config-file ${{ github.workspace }}/.config/nextest.toml --no-tests=pass -p dynamo-bench --test mooncake_trace --features mocker-kvbm-offload
     - name: Install datadog-ci
       if: always()
       continue-on-error: true
