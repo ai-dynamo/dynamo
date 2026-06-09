@@ -133,7 +133,17 @@ impl PrefillRouter {
         let block_size = decode_router.block_size() as usize;
         let prompt_tokens = routing_token_ids.len();
 
-        let input = ConditionalPrefillDecisionInput::new(prompt_tokens, block_size, overlap_blocks);
+        let mut input =
+            ConditionalPrefillDecisionInput::new(prompt_tokens, block_size, overlap_blocks);
+        if self.conditional_prefill_policy.needs_prefill_worker_busy() {
+            let busy = self.peek_prefill_chosen_worker_busy(req).await;
+            tracing::debug!(
+                request_id,
+                prefill_chosen_worker_busy = ?busy,
+                "Conditional prefill load gate peeked best prefill worker"
+            );
+            input = input.with_prefill_chosen_worker_busy(busy);
+        }
         let net_new_tokens = input.net_new_tokens();
         let overlap_tokens = (overlap_blocks as usize) * block_size;
 
@@ -546,6 +556,65 @@ impl PrefillRouter {
         if let Some(InnerPrefillRouter::KvRouter(r)) = self.prefill_router.get() {
             r.chooser.register_workers(worker_ids);
         }
+    }
+
+    /// v1.5: peek the prefill router for the worker it would pick for this
+    /// request, then ask the prefill scheduler whether that worker is over
+    /// the configured busy line. `None` when the signal is unavailable
+    /// (no busy threshold resolved, peek failed, router is not the KV variant).
+    async fn peek_prefill_chosen_worker_busy(&self, req: &PreprocessedRequest) -> Option<bool> {
+        let threshold = self.conditional_prefill_busy_threshold?;
+        let prefill_router = self.prefill_router.get()?;
+        let r = match prefill_router {
+            InnerPrefillRouter::KvRouter(r) => r,
+            // SimpleRouter has no scheduler with a busy line; signal unavailable.
+            InnerPrefillRouter::SimpleRouter(_) => return None,
+        };
+
+        let lora_name = req.routing.as_ref().and_then(|r| r.lora_name.clone());
+        let priority_jump = req
+            .routing
+            .as_ref()
+            .and_then(|r| r.priority_jump)
+            .unwrap_or(0.0);
+        let allowed_worker_ids = req
+            .routing
+            .as_ref()
+            .and_then(|r| r.allowed_worker_ids.clone());
+        let routing_constraints = req
+            .routing
+            .as_ref()
+            .and_then(|r| r.routing_constraints.clone())
+            .unwrap_or_default();
+        let (routing_token_ids, block_mm_infos) = req.block_mm_routing_info();
+
+        let outcome = r
+            .chooser
+            .find_best_match_details(
+                None,
+                routing_token_ids,
+                block_mm_infos,
+                None,
+                false,
+                false,
+                lora_name,
+                priority_jump,
+                None,
+                None,
+                allowed_worker_ids,
+                routing_constraints,
+            )
+            .await
+            .ok()?;
+
+        let worker = match outcome {
+            crate::kv_router::FindBestMatchOutcome::Routed { worker, .. } => worker,
+            // Scheduler queue saturated: treat as busy.
+            crate::kv_router::FindBestMatchOutcome::Backpressure { .. } => return Some(true),
+        };
+
+        r.chooser
+            .worker_is_prefill_busy(worker, tokio::time::Instant::now(), threshold)
     }
 
     /// Check if disaggregated mode is currently active (prefill router activated).

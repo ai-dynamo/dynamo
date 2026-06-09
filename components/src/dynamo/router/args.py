@@ -13,8 +13,10 @@ from dynamo.common.configuration.groups.aic_perf_args import (
 )
 from dynamo.common.configuration.groups.kv_router_args import (
     CONDITIONAL_PREFILL_POLICY_CHOICES,
+    LOAD_AWARE_CONDITIONAL_PREFILL_POLICIES,
     KvRouterArgGroup,
     KvRouterConfigBase,
+    _warn_conditional_prefill_busy_threshold_resolution,
 )
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 from dynamo.llm import AicPerfConfig, KvRouterConfig
@@ -60,6 +62,16 @@ class DynamoRouterConfig(KvRouterConfigBase, AicPerfConfigBase):
         if not 0.0 <= self.conditional_prefill_eff_isl_ratio_threshold <= 1.0:
             raise ValueError(
                 "--router-conditional-prefill-eff-isl-ratio-threshold must be in [0.0, 1.0]"
+            )
+        if (
+            self.conditional_prefill_enabled
+            and self.conditional_prefill_policy
+            in LOAD_AWARE_CONDITIONAL_PREFILL_POLICIES
+        ):
+            _warn_conditional_prefill_busy_threshold_resolution(
+                policy=self.conditional_prefill_policy,
+                busy_threshold=self.conditional_prefill_busy_threshold,
+                queue_threshold=self.router_queue_threshold,
             )
         if self.router_prefill_load_model == "aic":
             missing = [

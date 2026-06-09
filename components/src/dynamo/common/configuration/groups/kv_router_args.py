@@ -11,6 +11,7 @@ unpacked directly into ``KvRouterConfig(**config.kv_router_kwargs())``.
 """
 
 import argparse
+import logging
 import os
 import warnings
 from typing import Optional
@@ -52,12 +53,66 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "conditional_prefill_policy",
     "conditional_prefill_eff_isl_threshold",
     "conditional_prefill_eff_isl_ratio_threshold",
+    "conditional_prefill_busy_threshold",
     "router_predicted_ttl_secs",
 )
 
 # Accepted values for `--router-conditional-prefill-policy`. Kept in lock-step
 # with the Rust enum at `lib/kv-router/src/scheduling/config.rs::ConditionalPrefillPolicyKind`.
-CONDITIONAL_PREFILL_POLICY_CHOICES: tuple[str, ...] = ("isl_bounding",)
+CONDITIONAL_PREFILL_POLICY_CHOICES: tuple[str, ...] = (
+    "isl_bounding",
+    "prefill_load",
+    "isl_or_load",
+)
+
+# Policies that consume the per-worker prefill-busy signal. The signal is
+# computed from `--router-queue-threshold * max_num_batched_tokens`, so it is
+# unavailable when `--router-queue-threshold` is unset and the load gate
+# silently degrades to v1 behavior. Validators warn when this combination is
+# requested explicitly.
+LOAD_AWARE_CONDITIONAL_PREFILL_POLICIES: frozenset[str] = frozenset(
+    {"prefill_load", "isl_or_load"}
+)
+
+
+def _warn_conditional_prefill_busy_threshold_resolution(
+    *,
+    policy: str,
+    busy_threshold: Optional[float],
+    queue_threshold: Optional[float],
+) -> None:
+    """Surface which busy-threshold value the v1.5 load gate is using.
+
+    Called from the frontend / standalone-router validators after they confirm
+    the policy is one of the load-aware variants. Mirrors the same diagnostic
+    that `validate_kv_router_config` emits on the Rust side via tracing.
+    """
+    if busy_threshold is not None:
+        # Explicit dedicated knob in use. Informational only; not noisy.
+        logging.getLogger(__name__).info(
+            "conditional_prefill load gate using "
+            "--router-conditional-prefill-busy-threshold=%s",
+            busy_threshold,
+        )
+    elif queue_threshold is not None:
+        # Fallback path; surface the inherited value so operators understand
+        # which knob is actually in effect.
+        logging.getLogger(__name__).info(
+            "conditional_prefill load gate inheriting "
+            "--router-queue-threshold=%s "
+            "(--router-conditional-prefill-busy-threshold not set)",
+            queue_threshold,
+        )
+    else:
+        warnings.warn(
+            f"--router-conditional-prefill-policy={policy!r} consumes the "
+            "prefill-worker busy signal, but neither "
+            "--router-conditional-prefill-busy-threshold nor "
+            "--router-queue-threshold is set; the load gate will be a no-op. "
+            "Set one of these flags to enable it.",
+            stacklevel=3,
+        )
+
 
 _DEPRECATED_OVERLAP_WEIGHT_MESSAGE = (
     "router KV overlap score weight is deprecated; use "
@@ -140,6 +195,7 @@ class KvRouterConfigBase(ConfigBase):
     conditional_prefill_policy: str = "isl_bounding"
     conditional_prefill_eff_isl_threshold: int = 2048
     conditional_prefill_eff_isl_ratio_threshold: float = 0.7
+    conditional_prefill_busy_threshold: Optional[float] = None
     router_predicted_ttl_secs: Optional[float] = None
     load_aware: bool = False
 
@@ -412,10 +468,15 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_CONDITIONAL_PREFILL_POLICY",
             default="isl_bounding",
             help=(
-                "KV Router: Which conditional-prefill bypass policy to use. v1 ships "
+                "KV Router: Which conditional-prefill bypass policy to use. "
                 "'isl_bounding' (default): bypass when net-new prompt tokens are below "
                 "--router-conditional-prefill-eff-isl-threshold AND the eff_isl/prompt ratio "
-                "is below --router-conditional-prefill-eff-isl-ratio-threshold."
+                "is below --router-conditional-prefill-eff-isl-ratio-threshold. "
+                "'prefill_load' (v1.5): bypass when the best prefill worker for the request "
+                "is over the existing prefill-busy line (reuses --router-queue-threshold as "
+                "the trigger). "
+                "'isl_or_load' (v1.5): bypass when EITHER 'isl_bounding' OR 'prefill_load' "
+                "would bypass."
             ),
             arg_type=str,
             choices=list(CONDITIONAL_PREFILL_POLICY_CHOICES),
@@ -446,6 +507,22 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=float,
             dest="conditional_prefill_eff_isl_ratio_threshold",
+        )
+        add_argument(
+            g,
+            flag_name="--router-conditional-prefill-busy-threshold",
+            env_var="DYN_ROUTER_CONDITIONAL_PREFILL_BUSY_THRESHOLD",
+            default=None,
+            help=(
+                "KV Router: Dedicated busy-line fraction for the 'prefill_load' / "
+                "'isl_or_load' policies. A prefill worker W is considered busy when "
+                "`active_tokens(W) > this * max_num_batched_tokens(W)`. If unset, "
+                "the load gate falls back to --router-queue-threshold so a single "
+                "knob covers both queueing and bypass; set this explicitly to "
+                "decouple the load gate from the queueing trigger."
+            ),
+            arg_type=float,
+            dest="conditional_prefill_busy_threshold",
         )
         add_negatable_bool_argument(
             g,

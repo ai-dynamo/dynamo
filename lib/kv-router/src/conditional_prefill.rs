@@ -42,6 +42,14 @@ pub struct ConditionalPrefillDecisionInput {
 
     /// Device-prefix overlap on the cache-hot decode worker, in blocks.
     pub decode_chosen_overlap_blocks: u32,
+
+    /// Whether the prefill worker the router would pick for this request is
+    /// over the existing prefill-busy line (i.e.
+    /// `active_tokens > router_queue_threshold * max_num_batched_tokens`).
+    /// `None` when the signal isn't available (queueing disabled, no prefill
+    /// workers, or the peek-selection failed); in that case the load-aware
+    /// policies treat the worker as calm.
+    pub prefill_chosen_worker_busy: Option<bool>,
 }
 
 impl ConditionalPrefillDecisionInput {
@@ -50,7 +58,15 @@ impl ConditionalPrefillDecisionInput {
             prompt_tokens,
             block_size,
             decode_chosen_overlap_blocks,
+            prefill_chosen_worker_busy: None,
         }
+    }
+
+    /// Set the chosen-worker busy signal. Chained from `new` at call sites
+    /// that have the signal (e.g. `PrefillRouter` after a peek).
+    pub fn with_prefill_chosen_worker_busy(mut self, busy: Option<bool>) -> Self {
+        self.prefill_chosen_worker_busy = busy;
+        self
     }
 
     /// Effective net-new prefill in tokens after the decode-side device
@@ -76,6 +92,15 @@ pub trait ConditionalPrefillPolicy: Send + Sync {
     /// future policy's slow path can consult an external service. v1's
     /// `IslBoundingPolicy` is fully synchronous — the `.await` is a no-op.
     async fn should_bypass_remote_prefill(&self, input: ConditionalPrefillDecisionInput) -> bool;
+
+    /// True iff this policy consumes
+    /// [`ConditionalPrefillDecisionInput::prefill_chosen_worker_busy`]. The
+    /// `PrefillRouter` uses this to skip the extra prefill-worker peek for
+    /// policies that don't need the signal (back-compat fast path for
+    /// `IslBounding`).
+    fn needs_prefill_worker_busy(&self) -> bool {
+        false
+    }
 }
 
 /// Build the configured conditional-prefill policy. Returns a disabled
@@ -91,7 +116,26 @@ pub fn make_conditional_prefill_policy(
         ConditionalPrefillPolicyKind::IslBounding => {
             Box::new(IslBoundingPolicy::from_config(config))
         }
+        ConditionalPrefillPolicyKind::PrefillLoad => {
+            Box::new(PrefillLoadPolicy::from_config(config))
+        }
+        ConditionalPrefillPolicyKind::IslOrLoad => Box::new(IslOrLoadPolicy::from_config(config)),
     }
+}
+
+/// True iff the policy needs the `prefill_chosen_worker_busy` signal
+/// populated on `ConditionalPrefillDecisionInput`. Used by `PrefillRouter`
+/// to skip the prefill-worker peek for policies that don't consume the
+/// signal (back-compat fast path for `IslBounding` / `Disabled`).
+pub fn policy_needs_prefill_worker_busy(config: Option<&KvRouterConfig>) -> bool {
+    let Some(config) = config else { return false };
+    if !config.conditional_prefill_enabled {
+        return false;
+    }
+    matches!(
+        config.conditional_prefill_policy,
+        ConditionalPrefillPolicyKind::PrefillLoad | ConditionalPrefillPolicyKind::IslOrLoad,
+    )
 }
 
 /// v1 conditional-prefill policy. Bypasses to AGG when the request is both
@@ -162,6 +206,123 @@ impl ConditionalPrefillPolicy for IslBoundingPolicy {
         let denom = input.prompt_tokens.max(1) as f64;
         let ratio = eff_isl as f64 / denom;
         ratio < self.eff_isl_ratio_threshold
+    }
+}
+
+/// v1.5 conditional-prefill policy. Bypasses to AGG when the prefill worker
+/// the router would pick for this request is already over the existing
+/// prefill-busy line — same predicate the scheduler uses to decide whether
+/// to park a new request in the pending queue:
+///
+/// ```text
+/// busy(worker) = active_tokens > router_queue_threshold * max_num_batched_tokens
+/// ```
+///
+/// Semantic interpretation: if the chosen prefill worker would queue this
+/// request anyway, just bypass to decode instead — avoiding queue overhead
+/// and exploiting decode-side cache locality. No new operator knob; the
+/// trigger is the existing `router_queue_threshold`.
+///
+/// The signal is `input.prefill_chosen_worker_busy`, populated by
+/// `PrefillRouter` after peek-selecting the best prefill worker for this
+/// request. When the signal is `None` (queueing disabled, no prefill
+/// workers, or peek failure), the policy treats the worker as calm and does
+/// not bypass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefillLoadPolicy {
+    enabled: bool,
+}
+
+impl PrefillLoadPolicy {
+    pub fn new(enabled: bool) -> Self {
+        Self { enabled }
+    }
+
+    pub fn from_config(config: &KvRouterConfig) -> Self {
+        Self {
+            enabled: config.conditional_prefill_enabled,
+        }
+    }
+
+    pub fn disabled() -> Self {
+        Self { enabled: false }
+    }
+}
+
+impl Default for PrefillLoadPolicy {
+    fn default() -> Self {
+        Self::disabled()
+    }
+}
+
+#[async_trait]
+impl ConditionalPrefillPolicy for PrefillLoadPolicy {
+    fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    async fn should_bypass_remote_prefill(&self, input: ConditionalPrefillDecisionInput) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        // None ⇒ signal unavailable ⇒ treat as calm (don't bypass).
+        input.prefill_chosen_worker_busy.unwrap_or(false)
+    }
+
+    fn needs_prefill_worker_busy(&self) -> bool {
+        self.enabled
+    }
+}
+
+/// v1.5 composition policy: bypass when EITHER `IslBoundingPolicy` says so
+/// OR `PrefillLoadPolicy` says so. Pure glue — the two inner policies are
+/// independently testable, and the OR captures the "each gate has an
+/// independent rationale for keeping local" framing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IslOrLoadPolicy {
+    isl: IslBoundingPolicy,
+    load: PrefillLoadPolicy,
+}
+
+impl IslOrLoadPolicy {
+    pub fn new(isl: IslBoundingPolicy, load: PrefillLoadPolicy) -> Self {
+        Self { isl, load }
+    }
+
+    pub fn from_config(config: &KvRouterConfig) -> Self {
+        Self {
+            isl: IslBoundingPolicy::from_config(config),
+            load: PrefillLoadPolicy::from_config(config),
+        }
+    }
+
+    pub fn disabled() -> Self {
+        Self {
+            isl: IslBoundingPolicy::disabled(),
+            load: PrefillLoadPolicy::disabled(),
+        }
+    }
+}
+
+impl Default for IslOrLoadPolicy {
+    fn default() -> Self {
+        Self::disabled()
+    }
+}
+
+#[async_trait]
+impl ConditionalPrefillPolicy for IslOrLoadPolicy {
+    fn is_enabled(&self) -> bool {
+        self.isl.is_enabled() || self.load.is_enabled()
+    }
+
+    async fn should_bypass_remote_prefill(&self, input: ConditionalPrefillDecisionInput) -> bool {
+        self.isl.should_bypass_remote_prefill(input).await
+            || self.load.should_bypass_remote_prefill(input).await
+    }
+
+    fn needs_prefill_worker_busy(&self) -> bool {
+        self.isl.needs_prefill_worker_busy() || self.load.needs_prefill_worker_busy()
     }
 }
 
@@ -299,5 +460,168 @@ mod tests {
         for _ in 0..50 {
             assert!(policy.should_bypass_remote_prefill(input(100, 0, 64)).await);
         }
+    }
+
+    // ===== PrefillLoadPolicy tests ==========================================
+
+    fn input_with_busy(
+        prompt_tokens: usize,
+        overlap_blocks: u32,
+        block_size: usize,
+        busy: Option<bool>,
+    ) -> ConditionalPrefillDecisionInput {
+        ConditionalPrefillDecisionInput::new(prompt_tokens, block_size, overlap_blocks)
+            .with_prefill_chosen_worker_busy(busy)
+    }
+
+    #[tokio::test]
+    async fn prefill_load_disabled_never_bypasses() {
+        let policy = PrefillLoadPolicy::new(false);
+        // Even when worker is reported busy, disabled policy never bypasses.
+        assert!(
+            !policy
+                .should_bypass_remote_prefill(input_with_busy(1000, 0, 64, Some(true)))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn prefill_load_signal_none_does_not_bypass() {
+        let policy = PrefillLoadPolicy::new(true);
+        // No signal ⇒ treat as calm.
+        assert!(
+            !policy
+                .should_bypass_remote_prefill(input_with_busy(1000, 0, 64, None))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn prefill_load_worker_calm_does_not_bypass() {
+        let policy = PrefillLoadPolicy::new(true);
+        assert!(
+            !policy
+                .should_bypass_remote_prefill(input_with_busy(1000, 0, 64, Some(false)))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn prefill_load_worker_busy_bypasses() {
+        let policy = PrefillLoadPolicy::new(true);
+        assert!(
+            policy
+                .should_bypass_remote_prefill(input_with_busy(1000, 0, 64, Some(true)))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn prefill_load_independent_of_isl_fields() {
+        // PrefillLoadPolicy ignores prompt_tokens / overlap / block_size — it
+        // only consults `prefill_chosen_worker_busy`. Verify a "large" request
+        // bypasses purely on the busy signal.
+        let policy = PrefillLoadPolicy::new(true);
+        assert!(
+            policy
+                .should_bypass_remote_prefill(input_with_busy(100_000, 0, 64, Some(true)))
+                .await
+        );
+        assert!(
+            !policy
+                .should_bypass_remote_prefill(input_with_busy(100_000, 0, 64, Some(false)))
+                .await
+        );
+    }
+
+    // ===== IslOrLoadPolicy tests ============================================
+    //
+    // Four-quadrant truth table: (isl_says_bypass, worker_busy).
+    // Helper: "small + cached" trips IslBounding; "large" doesn't.
+
+    fn small_input(busy: Option<bool>) -> ConditionalPrefillDecisionInput {
+        // 1000 prompt, 14 blocks * 64 = 896 cached → eff_isl = 104 < 2048, ratio = 0.104 < 0.7
+        input_with_busy(1000, 14, 64, busy)
+    }
+
+    fn large_input(busy: Option<bool>) -> ConditionalPrefillDecisionInput {
+        // 100k prompt, 0 overlap → eff_isl = 100k > 2048
+        input_with_busy(100_000, 0, 64, busy)
+    }
+
+    fn enabled_or_policy() -> IslOrLoadPolicy {
+        IslOrLoadPolicy::new(
+            IslBoundingPolicy::new(true, 2048, 0.7),
+            PrefillLoadPolicy::new(true),
+        )
+    }
+
+    #[tokio::test]
+    async fn isl_or_load_small_and_calm_bypasses_via_isl() {
+        assert!(
+            enabled_or_policy()
+                .should_bypass_remote_prefill(small_input(Some(false)))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn isl_or_load_small_and_busy_bypasses() {
+        // Both gates fire — still one bypass.
+        assert!(
+            enabled_or_policy()
+                .should_bypass_remote_prefill(small_input(Some(true)))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn isl_or_load_large_and_calm_does_not_bypass() {
+        assert!(
+            !enabled_or_policy()
+                .should_bypass_remote_prefill(large_input(Some(false)))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn isl_or_load_large_and_busy_bypasses_via_load() {
+        assert!(
+            enabled_or_policy()
+                .should_bypass_remote_prefill(large_input(Some(true)))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn isl_or_load_disabled_never_bypasses() {
+        // Both inner disabled — even small+busy must not bypass.
+        let policy = IslOrLoadPolicy::disabled();
+        assert!(
+            !policy
+                .should_bypass_remote_prefill(small_input(Some(true)))
+                .await
+        );
+        assert!(
+            !policy
+                .should_bypass_remote_prefill(large_input(Some(true)))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn isl_or_load_signal_none_falls_back_to_isl_only() {
+        // No busy signal ⇒ Load gate is a no-op ⇒ behavior matches IslBounding alone.
+        let policy = enabled_or_policy();
+        assert!(policy.should_bypass_remote_prefill(small_input(None)).await);
+        assert!(!policy.should_bypass_remote_prefill(large_input(None)).await);
+    }
+
+    #[tokio::test]
+    async fn decision_input_new_defaults_busy_to_none() {
+        // Back-compat: existing call sites that build via `new` should default
+        // the new field to `None`.
+        let input = ConditionalPrefillDecisionInput::new(1000, 64, 0);
+        assert_eq!(input.prefill_chosen_worker_busy, None);
     }
 }

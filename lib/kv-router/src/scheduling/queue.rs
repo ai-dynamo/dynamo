@@ -362,6 +362,38 @@ impl<
         self.pending_isl_tokens.load(AtomicOrdering::Relaxed)
     }
 
+    /// Per-worker prefill-busy check. Mirrors the per-worker predicate inside
+    /// `all_workers_prefill_busy` (`queue.rs:699-744`) but exposes it for a
+    /// single worker and lets the caller pass the threshold explicitly, so
+    /// conditional-prefill v1.5 can use a busy-line knob that is independent
+    /// of `--router-queue-threshold`.
+    ///
+    /// Returns:
+    /// - `Some(true)` when `active_tokens > threshold * max_num_batched_tokens`.
+    /// - `Some(false)` when active tokens are at or below the busy line.
+    /// - `None` when the worker has no registered config — i.e. the signal
+    ///   can't be computed.
+    ///
+    /// Used by conditional-prefill v1.5 (`PrefillLoadPolicy`) to gate bypass
+    /// decisions on the load of the prefill worker that would actually be
+    /// picked for the request. Pure read of `slots.active_tokens()` +
+    /// worker config; no mutation, no booking.
+    pub fn worker_is_prefill_busy(
+        &self,
+        worker: WorkerWithDpRank,
+        decay_now: Instant,
+        threshold: f64,
+    ) -> Option<bool> {
+        let configs = self.workers_with_configs.borrow();
+        let config = configs.get(&worker.worker_id)?;
+        let max_batched = config
+            .max_num_batched_tokens()
+            .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
+        let active_tokens = self.slots.active_tokens(decay_now);
+        let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
+        Some((tokens as f64) > threshold * (max_batched as f64))
+    }
+
     pub fn supports_overlap_refresh(&self) -> bool {
         self.supports_overlap_refresh
     }
@@ -1930,6 +1962,180 @@ mod tests {
         let _ = slots.free(&"req-1".to_string(), decay_now());
         let _ = slots.mark_prefill_completed(&"req-2".to_string(), decay_now());
         let _ = slots.free(&"req-2".to_string(), decay_now());
+    }
+
+    // --- v1.5: tests for `SchedulerQueue::worker_is_prefill_busy` ---------
+    //
+    // The helper takes the busy threshold as an explicit argument so v1.5's
+    // load gate can run with a threshold independent of `--router-queue-threshold`.
+    // The threshold itself is computed and resolved by the caller (typically
+    // `PrefillRouter` at construction time, falling back to `router_queue_threshold`
+    // when no dedicated knob is configured).
+    //
+    // Contract under test:
+    //   - None for an unknown worker
+    //   - Some(false) when active_tokens <= threshold * max_batched
+    //   - Some(true)  when active_tokens >  threshold * max_batched (strict >)
+    //   - Per-worker normalization against each worker's own
+    //     `max_num_batched_tokens`.
+    //   - The queue's own `threshold_frac` (queueing knob) is irrelevant to
+    //     this helper — the threshold is the caller's responsibility.
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn worker_is_prefill_busy_returns_none_for_unknown_worker() {
+        // No matter what threshold the caller passes, an unknown worker yields None.
+        let (queue, _slots) = make_queue(1, 16, 256, Some(0.5));
+        let busy = queue.worker_is_prefill_busy(WorkerWithDpRank::new(99, 0), decay_now(), 0.5);
+        assert_eq!(busy, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn worker_is_prefill_busy_works_when_queueing_disabled() {
+        // The helper is independent of the queueing threshold; with queueing
+        // disabled (threshold_frac=None), it still returns a valid signal
+        // based on the caller-supplied threshold.
+        let (queue, _slots) = make_queue(1, 16, 256, None);
+        let busy = queue.worker_is_prefill_busy(WorkerWithDpRank::new(0, 0), decay_now(), 0.5);
+        assert_eq!(busy, Some(false));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn worker_is_prefill_busy_false_at_zero_active_tokens() {
+        let (queue, _slots) = make_queue(1, 16, 256, Some(0.5));
+        let busy = queue.worker_is_prefill_busy(WorkerWithDpRank::new(0, 0), decay_now(), 0.5);
+        assert_eq!(busy, Some(false));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn worker_is_prefill_busy_strict_gt_boundary() {
+        // threshold = 0.5, max_batched = 256, so the busy line is 128.
+        // Enqueue a single request of 128 prefill tokens: active_tokens == 128.
+        // The busy predicate is strict `>`, so this must report `false`.
+        let (queue, slots) = make_queue(1, 16, 256, Some(0.5));
+        let (req, rx) = make_request("req-boundary", 128);
+        queue.enqueue(req).await;
+        let _resp = rx.await.unwrap().unwrap();
+
+        assert_eq!(
+            slots
+                .active_tokens(decay_now())
+                .get(&WorkerWithDpRank::new(0, 0))
+                .copied(),
+            Some(128)
+        );
+        let busy = queue.worker_is_prefill_busy(WorkerWithDpRank::new(0, 0), decay_now(), 0.5);
+        assert_eq!(busy, Some(false));
+
+        let _ = slots.mark_prefill_completed(&"req-boundary".to_string(), decay_now());
+        let _ = slots.free(&"req-boundary".to_string(), decay_now());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn worker_is_prefill_busy_true_above_boundary() {
+        // threshold = 0.5, max_batched = 256, busy line = 128.
+        // 130 tokens > 128 → busy.
+        let (queue, slots) = make_queue(1, 16, 256, Some(0.5));
+        let (req, rx) = make_request("req-busy", 130);
+        queue.enqueue(req).await;
+        let _resp = rx.await.unwrap().unwrap();
+
+        let busy = queue.worker_is_prefill_busy(WorkerWithDpRank::new(0, 0), decay_now(), 0.5);
+        assert_eq!(busy, Some(true));
+
+        let _ = slots.mark_prefill_completed(&"req-busy".to_string(), decay_now());
+        let _ = slots.free(&"req-busy".to_string(), decay_now());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn worker_is_prefill_busy_threshold_is_caller_supplied() {
+        // Same active_tokens, two threshold choices. With 130 active tokens
+        // against max_batched=256: threshold 0.5 → busy line 128 → busy;
+        // threshold 1.0 → busy line 256 → not busy. Demonstrates that the
+        // caller's threshold drives the decision (this is the v1.5 hook that
+        // lets the load gate diverge from the queueing knob).
+        let (queue, slots) = make_queue(1, 16, 256, Some(0.5));
+        let (req, rx) = make_request("req-thresh", 130);
+        queue.enqueue(req).await;
+        let _resp = rx.await.unwrap().unwrap();
+
+        assert_eq!(
+            queue.worker_is_prefill_busy(WorkerWithDpRank::new(0, 0), decay_now(), 0.5),
+            Some(true)
+        );
+        assert_eq!(
+            queue.worker_is_prefill_busy(WorkerWithDpRank::new(0, 0), decay_now(), 1.0),
+            Some(false)
+        );
+
+        let _ = slots.mark_prefill_completed(&"req-thresh".to_string(), decay_now());
+        let _ = slots.free(&"req-thresh".to_string(), decay_now());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn worker_is_prefill_busy_per_worker_normalization() {
+        // Two workers with different max_num_batched_tokens. The same number
+        // of active tokens on worker 0 must cross worker 0's busy line but
+        // not worker 1's. We use DefaultWorkerSelector + pinned_worker to
+        // route the test request to worker 0 deterministically.
+        let block_size = 16u32;
+        let dp_range: HashMap<u64, (u32, u32)> = HashMap::from([(0, (0, 1)), (1, (0, 1))]);
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            block_size as usize,
+            dp_range,
+            false,
+            0,
+            "test",
+        ));
+        // Worker 0: max_batched = 100 → busy line = 50.
+        // Worker 1: max_batched = 1000 → busy line = 500.
+        let configs: HashMap<u64, SimpleWorkerConfig> = HashMap::from([
+            (
+                0,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(100),
+                    ..Default::default()
+                },
+            ),
+            (
+                1,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(1000),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let (_cfg_tx, cfg_rx) = watch::channel(configs);
+
+        let queue = Arc::new(SchedulerQueue::new(
+            Arc::clone(&slots),
+            cfg_rx,
+            Some(0.5),
+            RouterQueueDepthTiers::unbounded_cap(),
+            block_size,
+            DefaultWorkerSelector::new(None, "test"),
+            FcfsPolicy,
+            None,
+        ));
+
+        // Pin to worker 0 so the request lands there and bumps active_tokens.
+        let (mut req, rx) = make_request("req-mix", 64);
+        req.pinned_worker = Some(WorkerWithDpRank::new(0, 0));
+        queue.enqueue(req).await;
+        let _resp = rx.await.unwrap().unwrap();
+
+        assert_eq!(
+            queue.worker_is_prefill_busy(WorkerWithDpRank::new(0, 0), decay_now(), 0.5),
+            Some(true)
+        );
+        assert_eq!(
+            queue.worker_is_prefill_busy(WorkerWithDpRank::new(1, 0), decay_now(), 0.5),
+            Some(false),
+            "worker 1 has a much higher max_batched; worker 0's load shouldn't mark it busy"
+        );
+
+        let _ = slots.mark_prefill_completed(&"req-mix".to_string(), decay_now());
+        let _ = slots.free(&"req-mix".to_string(), decay_now());
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]

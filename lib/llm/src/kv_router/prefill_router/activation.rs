@@ -41,6 +41,7 @@ impl PrefillRouter {
             router_mode,
             enforce_disagg,
             conditional_prefill_policy: make_conditional_prefill_policy(None),
+            conditional_prefill_busy_threshold: None,
             prefill_load_estimator: None,
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
@@ -67,6 +68,13 @@ impl PrefillRouter {
         let prefill_router = std::sync::OnceLock::new();
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let conditional_prefill_policy = make_conditional_prefill_policy(kv_router_config.as_ref());
+        // v1.5: dedicated busy threshold falls back to router_queue_threshold
+        // when unset. The startup INFO/WARN that surfaces which knob is in
+        // effect lives in `validate_kv_router_config`.
+        let conditional_prefill_busy_threshold = kv_router_config.as_ref().and_then(|c| {
+            c.conditional_prefill_busy_threshold
+                .or(c.router_queue_threshold)
+        });
 
         let router = Arc::new(Self {
             prefill_router,
@@ -77,6 +85,7 @@ impl PrefillRouter {
             router_mode,
             enforce_disagg,
             conditional_prefill_policy,
+            conditional_prefill_busy_threshold,
             prefill_load_estimator,
             model_name,
             namespace,

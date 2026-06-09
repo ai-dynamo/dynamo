@@ -664,6 +664,21 @@ where
         self.scheduler.pending_count()
     }
 
+    /// Per-worker prefill-busy peek for conditional-prefill v1.5 load gate.
+    /// Forwards `SchedulerQueue::worker_is_prefill_busy`; `None` means the
+    /// worker is unknown or has no config. Caller provides the busy threshold
+    /// (resolved from `conditional_prefill_busy_threshold` with fallback to
+    /// `router_queue_threshold`).
+    pub fn worker_is_prefill_busy(
+        &self,
+        worker: dynamo_kv_router::protocols::WorkerWithDpRank,
+        decay_now: tokio::time::Instant,
+        threshold: f64,
+    ) -> Option<bool> {
+        self.scheduler
+            .worker_is_prefill_busy(worker, decay_now, threshold)
+    }
+
     fn prefill_load_hint_for(
         &self,
         isl_tokens: usize,

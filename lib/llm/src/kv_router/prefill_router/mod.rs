@@ -64,6 +64,11 @@ pub struct PrefillRouter {
     /// Conditional-prefill bypass policy. Immutable after construction.
     /// `disabled()` initializes to a no-op `IslBoundingPolicy::disabled()`.
     conditional_prefill_policy: Box<dyn ConditionalPrefillPolicy>,
+    /// v1.5 load-gate busy threshold. Resolved once at construction:
+    /// `KvRouterConfig::conditional_prefill_busy_threshold` if set, else
+    /// `KvRouterConfig::router_queue_threshold`. `None` ⇒ load gate is a
+    /// no-op (matches startup warning in `validate_kv_router_config`).
+    conditional_prefill_busy_threshold: Option<f64>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     /// Model name used to look up the worker monitor for prefill client registration
     model_name: String,
@@ -160,8 +165,7 @@ impl
                         BYPASS_REMOTE_PREFILL_ANNOTATION,
                         &true,
                     )?;
-                    let merged =
-                        stream::once(async move { annotation }).chain(response_stream);
+                    let merged = stream::once(async move { annotation }).chain(response_stream);
                     return Ok(ResponseStream::new(Box::pin(merged), ctx));
                 }
                 Ok(None) => {}

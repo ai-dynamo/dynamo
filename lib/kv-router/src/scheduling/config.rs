@@ -338,12 +338,23 @@ pub enum ConditionalPrefillPolicyKind {
     /// `lib/kv-router/src/conditional_prefill.rs::IslBoundingPolicy`.
     #[default]
     IslBounding,
+    /// v1.5 policy: bypass to AGG when the predicted-best prefill worker for
+    /// this request is over the existing prefill-busy line
+    /// (`active_tokens > router_queue_threshold * max_num_batched_tokens`).
+    /// Reuses the same trigger that drives admission-vs-queueing today.
+    PrefillLoad,
+    /// v1.5 composition policy: bypass when EITHER the ISL gate fires OR the
+    /// chosen prefill worker is busy. The bypass conditions are independent;
+    /// either is sufficient.
+    IslOrLoad,
 }
 
 impl fmt::Display for ConditionalPrefillPolicyKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::IslBounding => f.write_str("isl_bounding"),
+            Self::PrefillLoad => f.write_str("prefill_load"),
+            Self::IslOrLoad => f.write_str("isl_or_load"),
         }
     }
 }
@@ -354,8 +365,11 @@ impl FromStr for ConditionalPrefillPolicyKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "isl_bounding" => Ok(Self::IslBounding),
+            "prefill_load" => Ok(Self::PrefillLoad),
+            "isl_or_load" => Ok(Self::IslOrLoad),
             _ => Err(format!(
-                "unknown conditional_prefill_policy: {s:?}, expected 'isl_bounding'"
+                "unknown conditional_prefill_policy: {s:?}, \
+                 expected 'isl_bounding', 'prefill_load', or 'isl_or_load'"
             )),
         }
     }
@@ -480,6 +494,8 @@ struct KvRouterConfigSerde {
     conditional_prefill_policy: ConditionalPrefillPolicyKind,
     conditional_prefill_eff_isl_threshold: usize,
     conditional_prefill_eff_isl_ratio_threshold: f64,
+    #[serde(default)]
+    conditional_prefill_busy_threshold: Option<f64>,
 }
 
 impl Default for KvRouterConfigSerde {
@@ -518,6 +534,7 @@ impl Default for KvRouterConfigSerde {
             conditional_prefill_eff_isl_threshold: config.conditional_prefill_eff_isl_threshold,
             conditional_prefill_eff_isl_ratio_threshold: config
                 .conditional_prefill_eff_isl_ratio_threshold,
+            conditional_prefill_busy_threshold: config.conditional_prefill_busy_threshold,
         }
     }
 }
@@ -689,6 +706,17 @@ pub struct KvRouterConfig {
     #[serde(default = "default_conditional_prefill_eff_isl_ratio_threshold")]
     #[validate(range(min = 0.0, max = 1.0))]
     pub conditional_prefill_eff_isl_ratio_threshold: f64,
+
+    /// v1.5 `PrefillLoadPolicy` / `IslOrLoadPolicy` knob: dedicated busy-line
+    /// fraction for the load gate. When `Some(frac)`, the load gate uses
+    /// `frac * max_num_batched_tokens(W)` as the busy line for worker W. When
+    /// `None`, the load gate falls back to `router_queue_threshold` (so
+    /// operators who want one knob get inheritance for free, and operators
+    /// who want the load gate active while queueing is off can set this
+    /// independently).
+    #[serde(default)]
+    #[validate(range(min = 0.0))]
+    pub conditional_prefill_busy_threshold: Option<f64>,
 }
 
 fn default_conditional_prefill_eff_isl_threshold() -> usize {
@@ -733,6 +761,7 @@ impl Default for KvRouterConfig {
             conditional_prefill_eff_isl_threshold: default_conditional_prefill_eff_isl_threshold(),
             conditional_prefill_eff_isl_ratio_threshold:
                 default_conditional_prefill_eff_isl_ratio_threshold(),
+            conditional_prefill_busy_threshold: None,
         }
     }
 }
@@ -784,6 +813,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             conditional_prefill_eff_isl_threshold: compat.conditional_prefill_eff_isl_threshold,
             conditional_prefill_eff_isl_ratio_threshold: compat
                 .conditional_prefill_eff_isl_ratio_threshold,
+            conditional_prefill_busy_threshold: compat.conditional_prefill_busy_threshold,
         })
     }
 }
@@ -831,6 +861,42 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
         return Err(ValidationError::new(
             "router_predicted_ttl_secs requires use_kv_events=true",
         ));
+    }
+
+    // v1.5 conditional-prefill load gate: surface threshold resolution so
+    // operators see exactly which knob is in effect.
+    if config.conditional_prefill_enabled
+        && matches!(
+            config.conditional_prefill_policy,
+            ConditionalPrefillPolicyKind::PrefillLoad | ConditionalPrefillPolicyKind::IslOrLoad,
+        )
+    {
+        match (
+            config.conditional_prefill_busy_threshold,
+            config.router_queue_threshold,
+        ) {
+            (Some(busy), _) => {
+                tracing::info!(
+                    busy_threshold = busy,
+                    "conditional_prefill load gate using --router-conditional-prefill-busy-threshold"
+                );
+            }
+            (None, Some(queue)) => {
+                tracing::info!(
+                    inherited_threshold = queue,
+                    "conditional_prefill load gate inheriting --router-queue-threshold \
+                     (--router-conditional-prefill-busy-threshold not set)"
+                );
+            }
+            (None, None) => {
+                tracing::warn!(
+                    policy = ?config.conditional_prefill_policy,
+                    "conditional_prefill load gate is a no-op: neither \
+                     --router-conditional-prefill-busy-threshold nor --router-queue-threshold \
+                     is set; the load gate will never fire"
+                );
+            }
+        }
     }
     // Validation for router_queue_by_incoming_missing_isl is handled by RouterQueueDepthTiers::try_from
     Ok(())
