@@ -122,9 +122,9 @@ spec:
           - { name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090" }
           # --- UCX backend over RoCE (NIXL default; no DYN_KVBM_NIXL_BACKEND_* needed) ---
           # NOTE: don't set UCX_TLS — an explicit transport allowlist can omit the
-          # internal transports UCX needs for wireup. Restrict the NIC set with
-          # UCX_NET_DEVICES instead (pins KV transfer to the 4 RoCE NICs).
-          - { name: UCX_NET_DEVICES,    value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1" }
+          # internal transports UCX needs for wireup. UCX_NET_DEVICES is left unset too:
+          # on A4X, UCX auto-probe binds the 4 RoCE NICs (rc_mlx5 over mlx5_0..3) on its
+          # own, so no explicit NIC pin is needed.
           - { name: NCCL_SOCKET_IFNAME, value: "eth0" }
           - { name: NCCL_CROSS_NIC,     value: "0" }
           # --- GKE NCCL/GIB plugin + driver libs (mounted from host) ---
@@ -256,8 +256,7 @@ spec:
           - { name: NIXL_TELEMETRY_ENABLE,          value: "y" }
           - { name: NIXL_TELEMETRY_EXPORTER,        value: "prometheus" }
           - { name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090" }
-          # NOTE: no UCX_TLS — see prefill block; let UCX auto-probe.
-          - { name: UCX_NET_DEVICES,    value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1" }
+          # NOTE: no UCX_TLS and no UCX_NET_DEVICES — see prefill block; let UCX auto-probe.
           - { name: NCCL_SOCKET_IFNAME, value: "eth0" }
           - { name: NCCL_CROSS_NIC,     value: "0" }
           # /opt/nvidia/nvda_nixl/lib64 must come FIRST so NIXL_TELEMETRY_ENABLE=y can
