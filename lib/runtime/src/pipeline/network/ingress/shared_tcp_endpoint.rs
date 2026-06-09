@@ -664,7 +664,7 @@ impl SharedTcpServer {
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                     // Engine and queue both full → shed; keep the connection open.
                     REJECTION_REQUEST_TOTAL.inc();
-                    tracing::info!(
+                    tracing::warn!(
                         endpoint = handler.endpoint_name.as_str(),
                         instance_id = handler.instance_id,
                         "Worker at capacity (engine + queue full), rejecting request"

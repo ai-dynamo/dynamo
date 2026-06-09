@@ -230,7 +230,7 @@ impl PrefillRouter {
                 // source so the chain stays downcastable to 503; boxing the raw
                 // anyhow error instead would hide that identity.
                 if match_error_chain(e.as_ref(), &[ErrorType::ResourceExhausted], &[]) {
-                    tracing::info!(
+                    tracing::warn!(
                         worker_error = %e,
                         "Request rejected by prefill worker (at capacity) — returning HTTP 503"
                     );

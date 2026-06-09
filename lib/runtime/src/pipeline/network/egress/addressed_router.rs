@@ -525,7 +525,7 @@ impl AddressedPushRouter {
         // response-plane connection the worker will never open; returning early
         // drops `recv_registered` and `inflight_guard` (their Drop cleans up).
         if let Some(err) = detect_worker_overload_response(&request_plane_response) {
-            tracing::info!(
+            tracing::warn!(
                 request_id = context.id(),
                 worker_response = %err.to_string(),
                 "Request rejected by worker (at capacity) — returning HTTP 503"
