@@ -23,6 +23,7 @@ pub mod metadata;
 mod openai;
 
 pub mod busy_threshold;
+pub mod clear_kv_blocks;
 pub mod disconnect;
 pub mod error;
 pub mod health;
