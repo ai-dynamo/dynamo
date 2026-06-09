@@ -1,0 +1,90 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Runs deploy tests on push without requiring a PR. Uses pre-built images from
+# ACR (main-operator, main-vllm-runtime, etc.) so no build step is needed.
+# Also triggerable manually via workflow_dispatch to test any image tag.
+
+name: Deploy Test on Push
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      operator_tag:
+        description: 'Operator image tag (default: main-operator)'
+        required: false
+        default: 'main-operator'
+
+jobs:
+  deploy-operator:
+    runs-on: prod-deploy-tester-v1
+    outputs:
+      namespace: ${{ steps.setup.outputs.namespace }}
+      vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
+      operator_tag: ${{ steps.setup.outputs.operator_tag }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Setup vCluster and operator
+        id: setup
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ inputs.operator_tag || 'main-operator' }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+
+  deploy-test-vllm:
+    name: vllm Deploy Test
+    needs: [deploy-operator]
+    uses: ./.github/workflows/shared-deploy-test.yml
+    with:
+      framework: vllm
+      profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
+      image_suffix: vllm-runtime
+      namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+    secrets: inherit
+
+  deploy-test-sglang:
+    name: sglang Deploy Test
+    needs: [deploy-operator]
+    uses: ./.github/workflows/shared-deploy-test.yml
+    with:
+      framework: sglang
+      profiles: '["agg", "agg_router"]'
+      image_suffix: sglang-runtime
+      namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+    secrets: inherit
+
+  deploy-test-trtllm:
+    name: trtllm Deploy Test
+    needs: [deploy-operator]
+    uses: ./.github/workflows/shared-deploy-test.yml
+    with:
+      framework: trtllm
+      profiles: '["agg", "agg_router"]'
+      image_suffix: trtllm-runtime
+      namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+    secrets: inherit
+
+  deploy-cleanup:
+    if: always()
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
+    runs-on: prod-deploy-tester-v1
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Teardown vCluster
+        if: needs.deploy-operator.outputs.namespace != '' && needs.deploy-operator.outputs.vcluster_name != ''
+        uses: ./.github/actions/teardown-dynamo-operator
+        with:
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}

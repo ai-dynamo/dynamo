@@ -57,8 +57,6 @@ runs:
       shell: bash
       env:
         INPUT_VCLUSTER_NAME: ${{ inputs.vcluster_name }}
-        INPUT_NAMESPACE: ${{ inputs.vcluster_namespace }}
-        BRANCH: ${{ github.ref_name }}
       run: |
         if [ -n "${INPUT_VCLUSTER_NAME}" ]; then
           echo "vcluster_name=${INPUT_VCLUSTER_NAME}" >> "$GITHUB_OUTPUT"
@@ -66,16 +64,7 @@ runs:
           echo "vcluster_name=ci-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
         fi
 
-        if [ -n "${INPUT_NAMESPACE}" ]; then
-          echo "namespace=${INPUT_NAMESPACE}" >> "$GITHUB_OUTPUT"
-        else
-          BRANCH_SANITIZED="${BRANCH//\//-}"
-          BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
-          BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
-          BRANCH_SANITIZED="${BRANCH_SANITIZED:0:10}"
-          echo "namespace=gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt" >> "$GITHUB_OUTPUT"
-        fi
-
+        echo "namespace=dynamo-deploy-test" >> "$GITHUB_OUTPUT"
         echo "operator_tag=${{ inputs.operator_tag }}" >> "$GITHUB_OUTPUT"
 
     - name: Setup host kubeconfig
@@ -98,8 +87,6 @@ runs:
         set -x
         kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
         kubectl label namespaces ${NAMESPACE} \
-          nscleanup/enabled=true \
-          nscleanup/ttl=7200 \
           ngc-api=enabled \
           nvcr-imagepull=enabled \
           --overwrite
