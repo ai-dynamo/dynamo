@@ -496,34 +496,29 @@ jobs:
       run: rustup component add llvm-tools-preview
     - name: Install cargo-llvm-cov
       run: cargo-llvm-cov --version 2>/dev/null || cargo install cargo-llvm-cov --locked
+    - name: Install cargo-nextest
+      run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
     # Have an explicit step to build tests first to separate time spent on build vs execution.
     - name: Compile Tests
       working-directory: ${{ matrix.dir }}
       run: cargo test --locked --no-run
     - name: Run Unit Tests with Coverage
       working-directory: ${{ matrix.dir }}
-      # --no-report defers output so we can emit multiple formats without re-running.
-      # --lib --bins --tests covers all libtest tests (doc tests are not measured here);
-      # benches/examples are excluded so their harness = false runners don't reject
-      # --format json. RUSTC_BOOTSTRAP=1 unlocks the unstable libtest JSON on stable, and
-      # tee captures it (pipefail keeps the cargo exit code as the gate) for JUnit upload.
+      # Run the suite through nextest under llvm-cov: coverage is collected as before,
+      # and nextest writes a JUnit report to <target>/nextest/ci/junit.xml for Datadog.
+      # NEXTEST_PROFILE selects the profile (cargo-llvm-cov's own --profile is the build
+      # profile, so a --profile flag would be ambiguous). --no-report defers coverage
+      # output so we can emit multiple formats without re-running.
+      env:
+        NEXTEST_PROFILE: ci
       run: |
-        set -o pipefail
-        RUSTC_BOOTSTRAP=1 cargo llvm-cov --locked --lib --bins --tests --no-report -- -Z unstable-options --format json --report-time | tee rust-test-results.json
+        cargo llvm-cov --no-report --locked nextest --config-file ${{ github.workspace }}/.config/nextest.toml
         cargo llvm-cov report --output-path coverage-rust.txt
         cargo llvm-cov report --lcov --output-path coverage-rust.lcov
         echo "Coverage summary:"
         grep "^TOTAL" coverage-rust.txt || tail -3 coverage-rust.txt
         SAFE_DIR=$(echo "${{ matrix.dir }}" | sed 's|^\.$|root|' | tr '/' '-')
         echo "RUST_COV_ARTIFACT_NAME=coverage-rust-${SAFE_DIR}-${{ github.run_id }}" >> $GITHUB_ENV
-    - name: Convert Rust test results to JUnit
-      if: always()
-      continue-on-error: true
-      working-directory: ${{ matrix.dir }}
-      run: |
-        mkdir -p dd-junit
-        cargo install cargo2junit --locked --quiet || true
-        [ -f rust-test-results.json ] && cargo2junit < rust-test-results.json > dd-junit/rust-test-results.junit.xml || true
     - name: Install datadog-ci
       if: always()
       continue-on-error: true
@@ -539,7 +534,7 @@ jobs:
         DD_SERVICE: dynamo-rust
         DD_ENV: ci
         DD_TAGS: language:rust,suite:nightly-coverage
-      run: datadog-ci junit upload ${{ matrix.dir }}/dd-junit
+      run: datadog-ci junit upload --auto-discovery ${{ matrix.dir }}/target/nextest
     - name: Upload Rust Coverage Data
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       if: always()

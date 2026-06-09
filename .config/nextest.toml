@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# cargo-nextest configuration.
+# Docs: https://nexte.st/docs/configuration/
+
+# CI profile: emit a JUnit report so CI can upload Rust test results to Datadog
+# Test Optimization. nextest writes it to <target-dir>/nextest/ci/junit.xml.
+[profile.ci.junit]
+path = "junit.xml"
+
+# Secondary profile for jobs that run nextest twice (e.g. a follow-up suite in the
+# same job). nextest writes one report per profile with no append, so a second run
+# under "ci" would clobber the first; "ci-aux" keeps it at
+# <target-dir>/nextest/ci-aux/junit.xml instead.
+[profile.ci-aux.junit]
+path = "junit.xml"
