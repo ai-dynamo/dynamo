@@ -648,7 +648,12 @@ impl OpenAIPreprocessor {
         TOKENIZE_SECONDS.observe(tokenize_start.elapsed().as_secs_f64());
 
         let _mm_image_entries = self
-            .gather_multi_modal_data(request, &mut builder, formatted_prompt.as_deref())
+            .gather_multi_modal_data(
+                request,
+                &mut builder,
+                formatted_prompt.as_deref(),
+                &token_ids,
+            )
             .await
             .with_context(|| "Failed to gather multimodal data")?;
 
@@ -976,6 +981,10 @@ impl OpenAIPreprocessor {
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
         formatted_prompt: Option<&str>,
+        // Worker-bound token ids; used (mm-routing only) to gate `mm_hashes`
+        // forwarding on the same placeholder-count precondition as
+        // `gather_mm_exact_routing_info`, so the two never diverge.
+        token_ids: &[crate::protocols::TokenIdType],
     ) -> Result<Vec<MmImageEntry>> {
         let mut media_map: MultimodalDataMap = HashMap::new();
         let mut fetch_tasks: Vec<(String, &ChatCompletionRequestUserMessageContentPart)> =
@@ -1230,10 +1239,21 @@ impl OpenAIPreprocessor {
             // a shorter `mm_hashes` list would misalign with the image
             // positions the backend derives from `multi_modal_data`, and
             // the wrong UUIDs would get injected onto the wrong images.
+            //
+            // Also gate on the single-token placeholder count matching the
+            // image count — the same precondition `gather_mm_exact_routing_info`
+            // uses to build routing info. Forwarding `mm_hashes` makes the
+            // worker pad_value-key its KV blocks; if the router then falls back
+            // to plain `token_ids` (e.g. numbered-placeholder models like Phi-3,
+            // where the count won't match), the keys diverge and overlap is
+            // lost. Keeping both gated together leaves that fallback as clean
+            // text-prefix routing.
             #[cfg(feature = "mm-routing")]
-            if self.routing_image_token_id.is_some()
+            if let Some(find_token_id) = self.routing_image_token_id
                 && !mm_image_entries.is_empty()
                 && mm_image_entries.len() == total_image_count
+                && token_ids.iter().filter(|&&t| t == find_token_id).count()
+                    == mm_image_entries.len()
             {
                 let hexes: Vec<serde_json::Value> = mm_image_entries
                     .iter()
@@ -1245,7 +1265,7 @@ impl OpenAIPreprocessor {
                     target: "mm_routing",
                     resolved = mm_image_entries.len(),
                     expected = total_image_count,
-                    "mm-routing: not all images resolved an MM-routing entry; skipping mm_hashes forwarding"
+                    "mm-routing: exact MM routing info not built (dim resolution or placeholder-count mismatch); skipping mm_hashes forwarding"
                 );
             }
 
@@ -2981,7 +3001,7 @@ impl
         // Returned MM entries are unused on the embeddings path; routing info is
         // not built here.
         let _ = self
-            .gather_multi_modal_data(&request, &mut builder, None)
+            .gather_multi_modal_data(&request, &mut builder, None, &[])
             .await?;
 
         let mut common_request = builder.build()?;
