@@ -102,16 +102,54 @@ pub struct RlWorkersResponse {
     pub workers: Vec<RlWorkerInfo>,
 }
 
+type EndpointKey = (String, String, String);
+
 #[derive(Clone)]
 pub struct RlDiscoveryState {
     config: Arc<RlDiscoveryConfig>,
+    /// Cache of request-plane clients keyed by (namespace, component, endpoint).
+    /// A `Client` spawns a runtime-lived instance-monitor task and has no per-client
+    /// Drop cleanup, so building one per request would leak a task per (request*worker).
+    /// Cache and reuse one client per endpoint instead.
+    clients: Arc<tokio::sync::Mutex<HashMap<EndpointKey, Client>>>,
 }
 
 impl RlDiscoveryState {
     pub fn new(config: RlDiscoveryConfig) -> Self {
         Self {
             config: Arc::new(config),
+            clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Get (or lazily create and cache) the request-plane client for an endpoint.
+    /// The lock is held across creation so concurrent fan-out for the same endpoint
+    /// creates exactly one client (cloning a `Client` shares its monitor task).
+    async fn client_for(
+        &self,
+        namespace: &str,
+        component: &str,
+        endpoint: &str,
+    ) -> anyhow::Result<Client> {
+        let key = (
+            namespace.to_string(),
+            component.to_string(),
+            endpoint.to_string(),
+        );
+        let mut guard = self.clients.lock().await;
+        if let Some(client) = guard.get(&key) {
+            return Ok(client.clone());
+        }
+        let client = self
+            .config
+            .runtime
+            .namespace(namespace)?
+            .component(component)?
+            .endpoint(endpoint.to_string())
+            .client()
+            .await?;
+        guard.insert(key, client.clone());
+        Ok(client)
     }
 }
 
@@ -122,7 +160,7 @@ pub fn rl_router(state: RlDiscoveryState) -> Router {
 }
 
 async fn workers_handler(State(state): State<RlDiscoveryState>) -> impl IntoResponse {
-    match list_workers(&state.config).await {
+    match list_workers(&state).await {
         Ok(workers) => Json(RlWorkersResponse {
             namespace: state.config.namespace.clone(),
             workers,
@@ -142,7 +180,8 @@ async fn workers_handler(State(state): State<RlDiscoveryState>) -> impl IntoResp
     }
 }
 
-async fn list_workers(config: &RlDiscoveryConfig) -> anyhow::Result<Vec<RlWorkerInfo>> {
+async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerInfo>> {
+    let config = &state.config;
     let endpoint_instances = config
         .runtime
         .discovery()
@@ -178,7 +217,7 @@ async fn list_workers(config: &RlDiscoveryConfig) -> anyhow::Result<Vec<RlWorker
         .collect::<Vec<_>>();
 
     let mut workers = join_all(rl_endpoints.into_iter().map(|endpoint| {
-        let runtime = config.runtime.clone();
+        let state = state.clone();
         let timeout = config.request_timeout;
         let model = models
             .get(&(
@@ -187,7 +226,7 @@ async fn list_workers(config: &RlDiscoveryConfig) -> anyhow::Result<Vec<RlWorker
                 endpoint.instance_id,
             ))
             .cloned();
-        async move { describe_worker(runtime, endpoint, model, timeout).await }
+        async move { describe_worker(&state, endpoint, model, timeout).await }
     }))
     .await;
 
@@ -211,14 +250,27 @@ async fn list_workers(config: &RlDiscoveryConfig) -> anyhow::Result<Vec<RlWorker
 }
 
 async fn describe_worker(
-    runtime: Arc<DistributedRuntime>,
+    state: &RlDiscoveryState,
     endpoint: Instance,
     model: Option<String>,
     timeout: Duration,
 ) -> RlWorkerInfo {
-    match call_worker_routes(&runtime, &endpoint, timeout).await {
-        Ok(routes) => worker_info(endpoint, model, routes.routes, routes.system_url, None),
-        Err(err) => worker_info(endpoint, model, Vec::new(), None, Some(err.to_string())),
+    // Single end-to-end deadline for the whole per-worker probe (client lookup +
+    // readiness wait + routes RPC), so total discovery latency stays bounded by
+    // request_timeout instead of summing several independent timeouts.
+    match tokio::time::timeout(timeout, call_worker_routes(state, &endpoint, timeout)).await {
+        Ok(Ok(routes)) => worker_info(endpoint, model, routes.routes, routes.system_url, None),
+        Ok(Err(err)) => worker_info(endpoint, model, Vec::new(), None, Some(err.to_string())),
+        Err(_) => worker_info(
+            endpoint,
+            model,
+            Vec::new(),
+            None,
+            Some(format!(
+                "worker discovery timed out after {}s",
+                timeout.as_secs()
+            )),
+        ),
     }
 }
 
@@ -229,18 +281,19 @@ struct WorkerRoutes {
 }
 
 async fn call_worker_routes(
-    runtime: &Arc<DistributedRuntime>,
+    state: &RlDiscoveryState,
     target: &Instance,
     timeout: Duration,
 ) -> anyhow::Result<WorkerRoutes> {
-    let endpoint = runtime
-        .namespace(&target.namespace)?
-        .component(&target.component)?
-        .endpoint(target.endpoint.clone());
+    // Reuse a cached client per endpoint instead of constructing one per worker/request
+    // (a fresh client leaks a runtime-lived monitor task — see RlDiscoveryState::client_for).
+    let client = state
+        .client_for(&target.namespace, &target.component, &target.endpoint)
+        .await?;
 
-    let client = endpoint.client().await?;
-    // Bound the readiness wait by the configured request timeout (capped at 5s so a
-    // large request_timeout doesn't block discovery on a single slow-to-register worker).
+    // Bound the readiness wait by the configured request timeout (capped at 5s so a large
+    // request_timeout doesn't block discovery on a single slow-to-register worker). The
+    // caller (describe_worker) also enforces the overall request_timeout deadline.
     let readiness_timeout = timeout.min(Duration::from_secs(5));
     wait_for_client_targets(&client, &[target.instance_id], readiness_timeout).await?;
 
@@ -255,25 +308,19 @@ async fn call_worker_routes(
     });
     let instance_id = target.instance_id;
 
-    let dispatch = async {
-        let request = SingleIn::new(request_value);
-        let mut stream = router.direct(request, instance_id).await?;
+    let request = SingleIn::new(request_value);
+    let mut stream = router.direct(request, instance_id).await?;
 
-        while let Some(chunk) = stream.next().await {
-            if let Some(data) = chunk.data {
-                return parse_worker_routes(data);
-            }
-            if let Some(err) = chunk.error {
-                anyhow::bail!(err.to_string());
-            }
+    while let Some(chunk) = stream.next().await {
+        if let Some(data) = chunk.data {
+            return parse_worker_routes(data);
         }
+        if let Some(err) = chunk.error {
+            anyhow::bail!(err.to_string());
+        }
+    }
 
-        anyhow::bail!("empty routes response from worker");
-    };
-
-    tokio::time::timeout(timeout, dispatch)
-        .await
-        .map_err(|_| anyhow::anyhow!("routes request timed out after {}s", timeout.as_secs()))?
+    anyhow::bail!("empty routes response from worker")
 }
 
 async fn wait_for_client_targets(
@@ -313,13 +360,22 @@ fn parse_worker_routes(value: serde_json::Value) -> anyhow::Result<WorkerRoutes>
         );
     }
 
-    let routes = value
+    let routes_array = value
         .get("routes")
         .and_then(|routes| routes.as_array())
-        .ok_or_else(|| anyhow::anyhow!("worker routes response missing 'routes' array"))?
-        .iter()
-        .filter_map(|route| route.as_str().map(ToString::to_string))
-        .collect::<Vec<_>>();
+        .ok_or_else(|| anyhow::anyhow!("worker routes response missing 'routes' array"))?;
+    let mut routes = Vec::with_capacity(routes_array.len());
+    for route in routes_array {
+        // Surface a protocol error for malformed entries instead of silently dropping
+        // them (which would report a truncated capability list as success).
+        let name = route.as_str().ok_or_else(|| {
+            anyhow::anyhow!("worker routes response contains a non-string route entry")
+        })?;
+        if name.is_empty() {
+            anyhow::bail!("worker routes response contains an empty route entry");
+        }
+        routes.push(name.to_string());
+    }
 
     let system_url = value
         .get("system_url")
@@ -363,24 +419,168 @@ fn request_plane_url(endpoint: &Instance) -> String {
 }
 
 fn model_map(instances: Vec<DiscoveryInstance>) -> HashMap<ModelKey, String> {
-    instances
+    // A worker registers its model under its serving endpoint (e.g. "generate"), not the
+    // "rl" endpoint, so association is by (namespace, component, instance_id) and intentionally
+    // ignores the model's own endpoint. If one instance advertises multiple distinct base
+    // models we cannot pick one safely, so omit it rather than report an arbitrary/wrong model.
+    let mut by_key: HashMap<ModelKey, std::collections::BTreeSet<String>> = HashMap::new();
+    for instance in instances {
+        if let DiscoveryInstance::Model {
+            namespace,
+            component,
+            endpoint: _,
+            instance_id,
+            card_json,
+            model_suffix,
+        } = instance
+            && model_suffix.as_ref().is_none_or(|suffix| suffix.is_empty())
+            && let Some(name) = card_json
+                .get("display_name")
+                .and_then(|value| value.as_str())
+        {
+            by_key
+                .entry((namespace, component, instance_id))
+                .or_default()
+                .insert(name.to_string());
+        }
+    }
+    by_key
         .into_iter()
-        .filter_map(|instance| match instance {
-            DiscoveryInstance::Model {
-                namespace,
-                component,
-                endpoint: _,
-                instance_id,
-                card_json,
-                model_suffix,
-            } if model_suffix.as_ref().is_none_or(|suffix| suffix.is_empty()) => {
-                let model = card_json
-                    .get("display_name")
-                    .and_then(|value| value.as_str())
-                    .map(ToString::to_string);
-                model.map(|name| ((namespace, component, instance_id), name))
-            }
+        .filter_map(|(key, names)| match names.len() {
+            1 => names.into_iter().next().map(|name| (key, name)),
             _ => None,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn model_instance(
+        namespace: &str,
+        component: &str,
+        endpoint: &str,
+        instance_id: u64,
+        display_name: &str,
+        model_suffix: Option<&str>,
+    ) -> DiscoveryInstance {
+        DiscoveryInstance::Model {
+            namespace: namespace.to_string(),
+            component: component.to_string(),
+            endpoint: endpoint.to_string(),
+            instance_id,
+            card_json: json!({ "display_name": display_name }),
+            model_suffix: model_suffix.map(ToString::to_string),
+        }
+    }
+
+    #[test]
+    fn parse_worker_routes_accepts_valid_payload() {
+        let parsed = parse_worker_routes(json!({
+            "routes": ["pause_generation", "resume_generation"],
+            "system_url": "  http://worker:8080  ",
+        }))
+        .expect("valid payload");
+        let routes: Vec<&str> = parsed.routes.iter().map(String::as_str).collect();
+        assert_eq!(routes, ["pause_generation", "resume_generation"]);
+        // system_url is trimmed.
+        assert_eq!(parsed.system_url.as_deref(), Some("http://worker:8080"));
+    }
+
+    #[test]
+    fn parse_worker_routes_blank_system_url_is_none() {
+        let parsed = parse_worker_routes(json!({ "routes": [], "system_url": "   " }))
+            .expect("valid payload");
+        assert!(parsed.routes.is_empty());
+        assert!(parsed.system_url.is_none());
+    }
+
+    #[test]
+    fn parse_worker_routes_requires_routes_array() {
+        let err = parse_worker_routes(json!({ "system_url": "http://x" })).unwrap_err();
+        assert!(err.to_string().contains("missing 'routes' array"));
+    }
+
+    #[test]
+    fn parse_worker_routes_rejects_non_string_entry() {
+        // Must surface a protocol error, not silently drop the bad entry (finding F4).
+        let err = parse_worker_routes(json!({ "routes": ["pause", 7] })).unwrap_err();
+        assert!(err.to_string().contains("non-string route entry"));
+    }
+
+    #[test]
+    fn parse_worker_routes_rejects_empty_entry() {
+        let err = parse_worker_routes(json!({ "routes": ["pause", ""] })).unwrap_err();
+        assert!(err.to_string().contains("empty route entry"));
+    }
+
+    #[test]
+    fn parse_worker_routes_propagates_worker_error_status() {
+        let err = parse_worker_routes(json!({ "status": "error", "message": "engine is dead" }))
+            .unwrap_err();
+        assert!(err.to_string().contains("engine is dead"));
+    }
+
+    #[test]
+    fn model_map_associates_single_model_ignoring_endpoint() {
+        let map = model_map(vec![model_instance(
+            "dynamo",
+            "backend",
+            "generate",
+            1,
+            "Qwen/Qwen3-0.6B",
+            None,
+        )]);
+        assert_eq!(
+            map.get(&("dynamo".to_string(), "backend".to_string(), 1u64))
+                .map(String::as_str),
+            Some("Qwen/Qwen3-0.6B")
+        );
+    }
+
+    #[test]
+    fn model_map_omits_instance_with_conflicting_models() {
+        // One instance advertising two distinct base models must be omitted, not
+        // arbitrarily resolved to one of them (finding F5).
+        let map = model_map(vec![
+            model_instance("dynamo", "backend", "generate", 1, "Qwen/Qwen3-0.6B", None),
+            model_instance(
+                "dynamo",
+                "backend",
+                "embed",
+                1,
+                "Qwen/Qwen3-Embedding-4B",
+                None,
+            ),
+        ]);
+        assert!(!map.contains_key(&("dynamo".to_string(), "backend".to_string(), 1u64)));
+    }
+
+    #[test]
+    fn model_map_dedupes_identical_model_across_endpoints() {
+        let map = model_map(vec![
+            model_instance("dynamo", "backend", "generate", 1, "Qwen/Qwen3-0.6B", None),
+            model_instance("dynamo", "backend", "rl", 1, "Qwen/Qwen3-0.6B", None),
+        ]);
+        assert_eq!(
+            map.get(&("dynamo".to_string(), "backend".to_string(), 1u64))
+                .map(String::as_str),
+            Some("Qwen/Qwen3-0.6B")
+        );
+    }
+
+    #[test]
+    fn model_map_skips_lora_suffix_entries() {
+        let map = model_map(vec![model_instance(
+            "dynamo",
+            "backend",
+            "generate",
+            1,
+            "adapter",
+            Some("lora-1"),
+        )]);
+        assert!(map.is_empty());
+    }
 }
