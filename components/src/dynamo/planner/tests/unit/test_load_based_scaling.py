@@ -773,12 +773,10 @@ class TestRefreshWorkerInfoFromConnector:
         # Bypass Prometheus registration (Gauge+Enum double-register across
         # tests). KubernetesConnector.__init__ loads ~/.kube/config and reads
         # DYN_PARENT_DGD_K8S_NAME; stub both so this runs in plain pytest envs.
-        with patch(
-            "dynamo.planner.core.base.PlannerPrometheusMetrics"
-        ) as mock_metrics, patch(
-            "dynamo.planner.connectors.kubernetes.KubernetesAPI"
-        ), patch.dict(
-            os.environ, {"DYN_PARENT_DGD_K8S_NAME": "test-graph"}
+        with (
+            patch("dynamo.planner.core.base.PlannerPrometheusMetrics") as mock_metrics,
+            patch("dynamo.planner.connectors.kubernetes.KubernetesAPI"),
+            patch.dict(os.environ, {"DYN_PARENT_DGD_K8S_NAME": "test-graph"}),
         ):
             mock_metrics.return_value = Mock()
             config = PlannerConfig.model_construct(

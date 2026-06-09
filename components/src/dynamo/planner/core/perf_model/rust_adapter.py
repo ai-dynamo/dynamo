@@ -597,17 +597,19 @@ class PlannerEnginePerfModel:
         if self._worker_type != "prefill" and osl <= 0:
             return None
         accept_length = max(1.0, float(accept_length))
+        request_kwargs: dict[str, Any] = {
+            "isl": int(math.ceil(isl)),
+            "osl": max(1, int(math.ceil(osl))),
+            "ttft_sla_ms": ttft_sla_ms,
+            "itl_sla_ms": itl_sla_ms,
+            "e2e_latency_sla_ms": e2e_latency_sla_ms,
+            "kv_hit_rate": kv_hit_rate,
+            "optimization_target": OptimizationTarget.Throughput,
+        }
+        if self._worker_type != "prefill":
+            request_kwargs["accept_length"] = accept_length
         try:
-            request = EngineCapacityRequest(
-                isl=int(math.ceil(isl)),
-                osl=max(1, int(math.ceil(osl))),
-                ttft_sla_ms=ttft_sla_ms,
-                itl_sla_ms=itl_sla_ms,
-                e2e_latency_sla_ms=e2e_latency_sla_ms,
-                kv_hit_rate=kv_hit_rate,
-                optimization_target=OptimizationTarget.Throughput,
-                accept_length=accept_length,
-            )
+            request = EngineCapacityRequest(**request_kwargs)
             result = self._rust_model.find_engine_capacity_rps(request)
         except _RUST_SHIM_FALLBACK_EXCEPTIONS as e:
             logger.warning("Rust capacity query failed: %s", e)

@@ -738,8 +738,8 @@ class NativePlannerBase:
         queries to keep the per-load-tick scrape cheap.
 
         The observation is still returned when metrics are unavailable so the
-        state machine can reset speculative-decode discounting to the
-        no-discount fallback.
+        state machine can retain last-value runtime metadata without skipping
+        the load tick.
         """
         assert self.model_name is not None
         if duration_s <= 0:

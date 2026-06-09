@@ -139,10 +139,12 @@ features:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `load_predictor` | string | `arima` | Prediction method: `constant`, `arima`, `kalman`, or `prophet`. |
-| `load_predictor_log1p` | bool | `false` | Apply log1p transform to load data before prediction. |
+| `load_predictor` | string | `arima` | Prediction method for request count, ISL, and OSL: `constant`, `arima`, `kalman`, or `prophet`. Runtime metadata such as KV hit rate and speculative decode accept length uses the latest valid observation instead. |
+| `load_predictor_log1p` | bool | `false` | Apply log1p transform to predicted request count, ISL, and OSL data. |
 | `prophet_window_size` | int | `50` | Window size (seconds) for Prophet predictor. |
 | `load_predictor_warmup_trace` | string | `null` | Path to a warmup trace file for bootstrapping predictions. |
+
+KV hit rate and speculative decode accept length are runtime engine/router signals, not traffic shape. The planner stores the latest valid observation for each signal and reuses it until a newer valid value arrives. On cold start, missing KV hit rate means no prefix-cache discount, and missing accept length means `1.0`.
 
 ### Kalman Filter Settings
 

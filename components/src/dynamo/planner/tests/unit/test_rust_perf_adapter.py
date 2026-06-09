@@ -391,6 +391,36 @@ def test_capacity_request_passes_kv_hit_rate(monkeypatch):
     assert fake.capacity_requests[0].kwargs["kv_hit_rate"] == 0.4
 
 
+def test_prefill_capacity_does_not_pass_accept_length(monkeypatch):
+    fake = _FakeRustModel(
+        diagnostics={
+            "source": "aic",
+            "readiness": "ready",
+            "retained_observations": 0,
+            "correction_ready_buckets": 0,
+            "last_warning": None,
+        },
+        capacity=_FakeCapacity(rps=10.0, ttft_ms=100.0),
+    )
+    _install_fake_rust(monkeypatch, fake)
+    model = PlannerEnginePerfModel(
+        worker_type="prefill",
+        config=_config(min_observations=1),
+        capabilities=_caps(),
+    )
+
+    capacity = model.find_engine_capacity_rps(
+        isl=1000,
+        osl=100,
+        ttft_sla_ms=500.0,
+        accept_length=2.0,
+    )
+
+    assert "accept_length" not in fake.capacity_requests[0].kwargs
+    assert capacity is not None
+    assert capacity.rps == 10.0
+
+
 def test_decode_capacity_passes_accept_length_to_rust(monkeypatch):
     fake = _FakeRustModel(
         diagnostics={

@@ -107,7 +107,8 @@ class TickDiagnostics:
     estimated_ttft_ms: Optional[float] = None
     estimated_itl_ms: Optional[float] = None
 
-    # Throughput-scaling: predicted next-interval traffic
+    # Throughput-scaling: predicted next-interval traffic and last-value
+    # runtime metadata used by throughput decisions.
     predicted_num_req: Optional[float] = None
     predicted_isl: Optional[float] = None
     predicted_osl: Optional[float] = None
