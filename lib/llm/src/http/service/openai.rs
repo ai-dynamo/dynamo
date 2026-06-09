@@ -2110,12 +2110,12 @@ async fn responses(
                     &mut http_queue_guard,
                 );
 
-                // Check for backend error before extracting data.
-                // Error events have data: None and event: Some("error").
+                if extract_backend_error_if_present(&annotated_chunk).is_some() {
+                    saw_error = true;
+                    continue;
+                }
+
                 let Some(stream_resp) = annotated_chunk.data else {
-                    if annotated_chunk.event.as_deref() == Some("error") {
-                        saw_error = true;
-                    }
                     continue;
                 };
 
