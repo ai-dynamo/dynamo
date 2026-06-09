@@ -50,6 +50,15 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	if err := grovev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add Grove scheme: %v", err)
 	}
+	clusterTopology := &grovev1alpha1.ClusterTopology{
+		ObjectMeta: metav1.ObjectMeta{Name: "grove-topology"},
+		Spec: grovev1alpha1.ClusterTopologySpec{
+			Levels: []grovev1alpha1.TopologyLevel{
+				{Domain: grovev1alpha1.TopologyDomainZone, Key: "topology.kubernetes.io/zone"},
+				{Domain: grovev1alpha1.TopologyDomainRack, Key: "nvidia.com/rack"},
+			},
+		},
+	}
 
 	tests := []struct {
 		name         string
@@ -2170,8 +2179,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client := fake.NewClientBuilder().WithScheme(scheme).Build()
-			validator := NewDynamoGraphDeploymentValidator(tt.deployment, &fakeManager{client: client, config: &rest.Config{}}, true)
+			client := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(clusterTopology).Build()
+			validator := NewDynamoGraphDeploymentValidator(tt.deployment, &fakeManager{client: client, config: &rest.Config{}}, tt.groveEnabled)
 			_, err := validator.Validate(context.Background())
 
 			if (err != nil) != tt.wantErr {
