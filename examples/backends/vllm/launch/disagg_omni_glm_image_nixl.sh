@@ -6,8 +6,8 @@
 # Uses NIXL/UCX over InfiniBand for inter-stage tensor transfer.
 #
 # Usage - run on BOTH nodes with ROLE set:
-#   AR node:   ROLE=ar  bash disagg_omni_glm_image_xpu_cuda.sh
-#   DiT node:  ROLE=dit bash disagg_omni_glm_image_xpu_cuda.sh
+#   AR node:   ROLE=ar  bash disagg_omni_glm_image_nixl.sh
+#   DiT node:  ROLE=dit bash disagg_omni_glm_image_nixl.sh
 #
 # Environment variables:
 #   AR_TP          - Tensor parallel size for AR stage (default: 1)
@@ -28,7 +28,7 @@ set -e
 trap 'kill 0 2>/dev/null; exit' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../../common/launch_utils.sh"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 trap dynamo_exit_trap EXIT
 
 # Default device types for cross-device disaggregation (CUDA AR + XPU DiT)
@@ -42,7 +42,7 @@ NATS_SERVER="${NATS_SERVER:-nats://127.0.0.1:4222}"
 ETCD_ENDPOINTS="${ETCD_ENDPOINTS:-http://127.0.0.1:2379}"
 
 if [ -z "${STAGE_CONFIG:-}" ]; then
-    STAGE_CONFIG="$(readlink -f "$SCRIPT_DIR/../stage_configs/glm_image_nixl.yaml")"
+    STAGE_CONFIG="$(readlink -f "$SCRIPT_DIR/stage_configs/glm_image_nixl.yaml")"
 fi
 
 # Namespace must match on both nodes for discovery
