@@ -116,22 +116,20 @@ const (
 	EnvTopologyEnabled   = "DYN_TOPOLOGY_ENABLED"
 	EnvTopologyMountPath = "DYN_TOPOLOGY_MOUNT_PATH"
 
-	// Topology source annotations are set on worker pods when
-	// spec.experimental.kvTransferPolicy is configured. The topology label
-	// controller consumes them after scheduling and copies node topology labels
-	// onto pod labels projected through the Downward API.
+	// Topology source annotations are set on worker pods when spec.experimental.kvTransferPolicy is
+	// configured. The topology label controller watches for pods being scheduled with these annotations
+	// and uses the annotation value to determine the node label(s) to copy onto the pod. The copied labels
+	// are projected through a Downward API volume for the runtime to consume (i.e. zone="us-east-1a")
 	//
-	// KubeAnnotationTopologyLabelKey selects a single node label key to copy
+	// KubeAnnotationTopologyLabelKey defines a single node label key (i.e. "topology.kubernetes.io/zone") to copy
 	// onto the pod under the same label key.
 	KubeAnnotationTopologyLabelKey = "nvidia.com/topology-label-key"
 
-	// KubeAnnotationTopologyClusterTopologyName selects a Grove ClusterTopology resource.
-	// Each level key is copied onto a Dynamo-owned topology label.
+	// KubeAnnotationTopologyClusterTopologyName specifies the Grove ClusterTopology resource that defines domains to node labels mappings
+	// (i.e. zone -> "nvidia.com/topology.zone"). The topology label controller copies each domain's node label(s) onto the pod under
+	// KubeLabelDynamoTopologyPrefix + domain (i.e. nvidia.com/dynamo-topology.zone)
 	KubeAnnotationTopologyClusterTopologyName = "nvidia.com/topology-cluster-topology-name"
-
-	// KubeLabelDynamoTopologyPrefix prefixes Dynamo-owned pod labels that mirror
-	// ClusterTopology levels for Downward API projection.
-	KubeLabelDynamoTopologyPrefix = "nvidia.com/dynamo-topology."
+	KubeLabelDynamoTopologyPrefix             = "nvidia.com/dynamo-topology."
 
 	DynamoDeploymentConfigEnvVar      = "DYN_DEPLOYMENT_CONFIG"
 	DynamoNamespaceEnvVar             = "DYN_NAMESPACE"
