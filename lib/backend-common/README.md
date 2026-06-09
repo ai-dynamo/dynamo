@@ -177,7 +177,7 @@ Roles and `Worker` behavior:
 | Mode | Role | Worker effects |
 | --- | --- | --- |
 | `Aggregated` | Self-contained inference (default) | Standard registration; KV indexer enabled |
-| `Prefill`    | Run prompt → emit 1 token + KV handoff | Registers as `ModelType::Prefill`; advertises `bootstrap_host`/`port` if set in `EngineConfig` |
+| `Prefill`    | Run prompt → emit 1 token + KV handoff | Registers with `ModelType::empty()` + `WorkerType::Prefill`; advertises `bootstrap_host`/`port` if set in `EngineConfig` |
 | `Decode`     | Resume from a prefill peer's KV | Disables the local indexer (KV is owned by the prefill peer) |
 
 The crate re-exports `PrefillResult` and `BootstrapInfo` from

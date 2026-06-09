@@ -25,9 +25,6 @@ from dynamo.planner.monitoring.worker_info import (
 
 logger = logging.getLogger(__name__)
 
-# ModelType::Prefill bit in ModelDeploymentCard::model_type (bitflags: 1 << 4).
-_MODEL_TYPE_PREFILL_BIT = 0x10
-
 
 @dataclass
 class MdcEntry:
@@ -64,19 +61,13 @@ def is_model_card(wrapper: dict) -> bool:
 def is_prefill_card(card_json: dict) -> bool:
     """Whether a card_json belongs to a prefill worker.
 
-    ``model_type`` can be serialized three ways depending on the producer:
-    an integer bitflag, a serde-bitflags dict with a ``bits`` key, or a
-    human-readable string (e.g. ``"Prefill"`` / ``"Chat|Completions"``).
+    The prefill role is carried on the card's ``worker_type`` field
+    (serialized as the lowercase string ``"prefill"``).
     """
-    model_type: Any = card_json.get("model_type", 0)
-    if isinstance(model_type, str):
-        return "prefill" in model_type.lower()
-    if isinstance(model_type, dict):
-        model_type = model_type.get("bits", 0)
-    try:
-        return bool(int(model_type) & _MODEL_TYPE_PREFILL_BIT)
-    except (TypeError, ValueError):
-        return False
+    worker_type: Any = card_json.get("worker_type")
+    if isinstance(worker_type, str):
+        return worker_type.lower() == "prefill"
+    return False
 
 
 def select_entry(

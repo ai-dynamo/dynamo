@@ -56,7 +56,14 @@ fn setup_kv_publishers(
         let (source_config, on_ready) = match source {
             KvEventSource::Zmq {
                 endpoint, topic, ..
-            } => (Some(KvEventSourceConfig::Zmq { endpoint, topic }), None),
+            } => (
+                Some(KvEventSourceConfig::Zmq {
+                    endpoint,
+                    topic,
+                    image_token_id: None,
+                }),
+                None,
+            ),
             KvEventSource::Push { on_ready, .. } => (None, Some(on_ready)),
         };
         let publisher = KvEventPublisher::new_with_local_indexer(

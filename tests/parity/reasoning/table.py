@@ -465,10 +465,16 @@ def _reasoning_markup_re(family: str | None) -> re.Pattern[str]:
 
 
 def _is_gpt_oss_tool_handoff(family: str | None, field: str, value: str) -> bool:
+    # Both `commentary to=functions.X` and `analysis to=functions.X` are
+    # tool-call handoffs after PR #10366: the recipient is the signal, not
+    # the channel label. Either lands in normal_text as the jail's input.
     return (
         family == "gpt_oss"
         and field == "normal_text"
-        and "<|channel|>commentary to=functions." in value
+        and (
+            "<|channel|>commentary to=functions." in value
+            or "<|channel|>analysis to=functions." in value
+        )
         and "<|call|>" in value
     )
 

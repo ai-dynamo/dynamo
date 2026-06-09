@@ -123,7 +123,6 @@ features:
 | `max_num_fpm_samples` | int | `64` | Maximum retained FPM observations for online tuning or regression. |
 | `fpm_sample_bucket_size` | int | `16` | Number of buckets for observation retirement (must be a perfect square). |
 | `load_scaling_down_sensitivity` | int | `80` | Scale-down sensitivity 0–100 (0=never, 100=aggressive). |
-| `load_metric_samples` | int | `10` | Number of metric samples to collect per decision. |
 | `load_min_observations` | int | `5` | Minimum observations before making scaling decisions. |
 
 ### General Settings
