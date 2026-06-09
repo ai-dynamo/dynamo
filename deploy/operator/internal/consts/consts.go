@@ -125,8 +125,8 @@ const (
 	// onto the pod under the same label key.
 	KubeAnnotationTopologyLabelKey = "nvidia.com/topology-label-key"
 
-	// KubeAnnotationTopologyClusterTopologyName selects a Grove ClusterTopology;
-	// each level key is copied onto a Dynamo-owned topology label.
+	// KubeAnnotationTopologyClusterTopologyName selects a Grove ClusterTopology resource.
+	// Each level key is copied onto a Dynamo-owned topology label.
 	KubeAnnotationTopologyClusterTopologyName = "nvidia.com/topology-cluster-topology-name"
 
 	// KubeLabelDynamoTopologyPrefix prefixes Dynamo-owned pod labels that mirror

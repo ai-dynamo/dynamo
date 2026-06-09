@@ -237,7 +237,6 @@ spec:
                             ClusterTopologyName references a Grove ClusterTopology CR. The operator
                             reads the CR's topology levels and projects them through Dynamo-owned pod
                             labels for worker topology metadata.
-                          maxLength: 253
                           minLength: 1
                           type: string
                         domain:
@@ -20885,7 +20884,6 @@ spec:
                             clusterTopologyName references a Grove ClusterTopology CR. The operator
                             reads the CR's topology levels and projects them through Dynamo-owned pod
                             labels for worker topology metadata.
-                          maxLength: 253
                           minLength: 1
                           type: string
                         domain:

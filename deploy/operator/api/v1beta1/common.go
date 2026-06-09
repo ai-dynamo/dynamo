@@ -501,7 +501,6 @@ type KvTransferPolicy struct {
 	// labels for worker topology metadata.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=253
 	ClusterTopologyName string `json:"clusterTopologyName,omitempty"`
 
 	// labelKey is a Kubernetes node label key (e.g.
