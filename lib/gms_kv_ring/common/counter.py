@@ -137,10 +137,43 @@ class EngineCounterArray:
         with self._lock:
             slot = self._slot_seq % self.num_counters
             self._slot_seq += 1
-            # Consume two values: N (success) and N+1 (failure).
-            success_target = self._slot_target[slot] + 1
-            self._slot_target[slot] += 2
-            return slot, success_target
+            return self._reserve_slot_locked(slot)
+
+    def try_reserve_completed_slot(self) -> Optional[tuple[int, int]]:
+        """Reserve a counter slot only if its prior op completed.
+
+        Returns ``None`` when every slot still has an in-flight target.
+        This prevents wrapping the fixed counter array under high
+        concurrency and reusing a slot whose previous daemon write has
+        not become visible yet.
+        """
+        with self._lock:
+            for _ in range(self.num_counters):
+                slot = self._slot_seq % self.num_counters
+                self._slot_seq += 1
+                previous_success_target = self._slot_target[slot] - 1
+                if previous_success_target > 0:
+                    if self.read_slot(slot) < previous_success_target:
+                        continue
+                return self._reserve_slot_locked(slot)
+            return None
+
+    def _reserve_slot_locked(self, slot: int) -> tuple[int, int]:
+        # Consume two values: N (success) and N+1 (failure).
+        success_target = self._slot_target[slot] + 1
+        self._slot_target[slot] += 2
+        return slot, success_target
+
+    def mark_slot_failed(self, slot: int, target: int) -> None:
+        """Host-side failure mark for a reserved slot with no daemon op.
+
+        Used when the producer reserved a slot but could not enqueue the
+        ring record. It makes the slot reusable and wakes any accidental
+        GEQ wait as a failure.
+        """
+        if not 0 <= slot < self.num_counters:
+            raise ValueError(f"slot {slot} out of range")
+        struct.pack_into("<I", self.buf, slot * 4, int(target) + 1)
 
     def read_slot(self, slot: int) -> int:
         """Host-side read of counter[slot]. Used post-sync by the
