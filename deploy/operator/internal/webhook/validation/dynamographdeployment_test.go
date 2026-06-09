@@ -2271,6 +2271,35 @@ func TestDynamoGraphDeploymentValidator_KvTransferPolicyClusterTopology(t *testi
 }
 
 func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
+	kvTransferUpdateDeployment := func(kvt *nvidiacomv1alpha1.KvTransferPolicy) *nvidiacomv1alpha1.DynamoGraphDeployment {
+		dgd := &nvidiacomv1alpha1.DynamoGraphDeployment{
+			Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+				BackendFramework: "sglang",
+				Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					"worker": {},
+				},
+			},
+		}
+		if kvt != nil {
+			dgd.Spec.Experimental = &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
+				KvTransferPolicy: kvt,
+			}
+		}
+		return dgd
+	}
+	clusterTopologyKvTransferPolicy := func() *nvidiacomv1alpha1.KvTransferPolicy {
+		return &nvidiacomv1alpha1.KvTransferPolicy{
+			ClusterTopologyName: "grove-topology",
+			Domain:              "zone",
+		}
+	}
+	labelKeyKvTransferPolicy := func() *nvidiacomv1alpha1.KvTransferPolicy {
+		return &nvidiacomv1alpha1.KvTransferPolicy{
+			LabelKey: "topology.kubernetes.io/zone",
+			Domain:   "zone",
+		}
+	}
+
 	tests := []struct {
 		name            string
 		oldDeployment   *nvidiacomv1alpha1.DynamoGraphDeployment
@@ -2293,6 +2322,96 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 				},
 			},
 			wantErr: false,
+		},
+		{
+			name: "unchanged kvTransferPolicy is allowed",
+			oldDeployment: kvTransferUpdateDeployment(&nvidiacomv1alpha1.KvTransferPolicy{
+				ClusterTopologyName: "grove-topology",
+				Domain:              "zone",
+			}),
+			newDeployment: kvTransferUpdateDeployment(&nvidiacomv1alpha1.KvTransferPolicy{
+				ClusterTopologyName: "grove-topology",
+				Domain:              "zone",
+				Enforcement:         nvidiacomv1alpha1.KvTransferEnforcementRequired,
+			}),
+			wantErr: false,
+		},
+		{
+			name:          "adding kvTransferPolicy is immutable",
+			oldDeployment: kvTransferUpdateDeployment(nil),
+			newDeployment: kvTransferUpdateDeployment(clusterTopologyKvTransferPolicy()),
+			wantErr:       true,
+			errMsg:        "spec.experimental.kvTransferPolicy is immutable and cannot be added, removed, or changed after creation",
+		},
+		{
+			name:          "removing kvTransferPolicy is immutable",
+			oldDeployment: kvTransferUpdateDeployment(clusterTopologyKvTransferPolicy()),
+			newDeployment: kvTransferUpdateDeployment(nil),
+			wantErr:       true,
+			errMsg:        "spec.experimental.kvTransferPolicy is immutable and cannot be added, removed, or changed after creation",
+		},
+		{
+			name:          "changing kvTransferPolicy clusterTopologyName is immutable",
+			oldDeployment: kvTransferUpdateDeployment(clusterTopologyKvTransferPolicy()),
+			newDeployment: kvTransferUpdateDeployment(&nvidiacomv1alpha1.KvTransferPolicy{
+				ClusterTopologyName: "other-topology",
+				Domain:              "zone",
+			}),
+			wantErr: true,
+			errMsg:  "spec.experimental.kvTransferPolicy is immutable and cannot be added, removed, or changed after creation",
+		},
+		{
+			name:          "changing kvTransferPolicy labelKey is immutable",
+			oldDeployment: kvTransferUpdateDeployment(labelKeyKvTransferPolicy()),
+			newDeployment: kvTransferUpdateDeployment(&nvidiacomv1alpha1.KvTransferPolicy{
+				LabelKey: "topology.kubernetes.io/rack",
+				Domain:   "zone",
+			}),
+			wantErr: true,
+			errMsg:  "spec.experimental.kvTransferPolicy is immutable and cannot be added, removed, or changed after creation",
+		},
+		{
+			name:          "changing kvTransferPolicy domain is immutable",
+			oldDeployment: kvTransferUpdateDeployment(clusterTopologyKvTransferPolicy()),
+			newDeployment: kvTransferUpdateDeployment(&nvidiacomv1alpha1.KvTransferPolicy{
+				ClusterTopologyName: "grove-topology",
+				Domain:              "rack",
+			}),
+			wantErr: true,
+			errMsg:  "spec.experimental.kvTransferPolicy is immutable and cannot be added, removed, or changed after creation",
+		},
+		{
+			name: "changing kvTransferPolicy enforcement is immutable",
+			oldDeployment: kvTransferUpdateDeployment(&nvidiacomv1alpha1.KvTransferPolicy{
+				LabelKey:    "topology.kubernetes.io/zone",
+				Domain:      "zone",
+				Enforcement: nvidiacomv1alpha1.KvTransferEnforcementRequired,
+			}),
+			newDeployment: kvTransferUpdateDeployment(&nvidiacomv1alpha1.KvTransferPolicy{
+				LabelKey:        "topology.kubernetes.io/zone",
+				Domain:          "zone",
+				Enforcement:     nvidiacomv1alpha1.KvTransferEnforcementPreferred,
+				PreferredWeight: k8sptr.To[float32](0.85),
+			}),
+			wantErr: true,
+			errMsg:  "spec.experimental.kvTransferPolicy is immutable and cannot be added, removed, or changed after creation",
+		},
+		{
+			name: "changing kvTransferPolicy preferredWeight is immutable",
+			oldDeployment: kvTransferUpdateDeployment(&nvidiacomv1alpha1.KvTransferPolicy{
+				LabelKey:        "topology.kubernetes.io/zone",
+				Domain:          "zone",
+				Enforcement:     nvidiacomv1alpha1.KvTransferEnforcementPreferred,
+				PreferredWeight: k8sptr.To[float32](0.5),
+			}),
+			newDeployment: kvTransferUpdateDeployment(&nvidiacomv1alpha1.KvTransferPolicy{
+				LabelKey:        "topology.kubernetes.io/zone",
+				Domain:          "zone",
+				Enforcement:     nvidiacomv1alpha1.KvTransferEnforcementPreferred,
+				PreferredWeight: k8sptr.To[float32](0.85),
+			}),
+			wantErr: true,
+			errMsg:  "spec.experimental.kvTransferPolicy is immutable and cannot be added, removed, or changed after creation",
 		},
 		{
 			name: "changing backend framework",

@@ -254,6 +254,10 @@ func (v *DynamoGraphDeploymentValidator) validateImmutableFields(old *nvidiacomv
 		errs = append(errs, err)
 	}
 
+	if err := v.validateKvTransferPolicyImmutability(old); err != nil {
+		errs = append(errs, err)
+	}
+
 	return errors.Join(errs...)
 
 }
@@ -913,6 +917,52 @@ func topologyConstraintsEqual(a, b *nvidiacomv1alpha1.TopologyConstraint) bool {
 		return false
 	}
 	return a.PackDomain == b.PackDomain
+}
+
+func (v *DynamoGraphDeploymentValidator) validateKvTransferPolicyImmutability(old *nvidiacomv1alpha1.DynamoGraphDeployment) error {
+	if kvTransferPoliciesEqual(kvTransferPolicyFor(old), kvTransferPolicyFor(v.deployment)) {
+		return nil
+	}
+	return fmt.Errorf("spec.experimental.kvTransferPolicy is immutable and cannot be added, removed, or changed after creation; " +
+		"delete and recreate the DynamoGraphDeployment to change the KV transfer policy")
+}
+
+func kvTransferPolicyFor(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) *nvidiacomv1alpha1.KvTransferPolicy {
+	if dgd == nil || dgd.Spec.Experimental == nil {
+		return nil
+	}
+	return dgd.Spec.Experimental.KvTransferPolicy
+}
+
+func kvTransferPoliciesEqual(a, b *nvidiacomv1alpha1.KvTransferPolicy) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return a.ClusterTopologyName == b.ClusterTopologyName &&
+		a.LabelKey == b.LabelKey &&
+		a.Domain == b.Domain &&
+		effectiveKvTransferEnforcement(a) == effectiveKvTransferEnforcement(b) &&
+		kvTransferPreferredWeightsEqual(a.PreferredWeight, b.PreferredWeight)
+}
+
+func effectiveKvTransferEnforcement(kvt *nvidiacomv1alpha1.KvTransferPolicy) nvidiacomv1alpha1.KvTransferEnforcement {
+	if kvt == nil || kvt.Enforcement == "" {
+		return nvidiacomv1alpha1.KvTransferEnforcementRequired
+	}
+	return kvt.Enforcement
+}
+
+func kvTransferPreferredWeightsEqual(a, b *float32) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
 }
 
 func getUnique[T comparable](slice []T) []T {
