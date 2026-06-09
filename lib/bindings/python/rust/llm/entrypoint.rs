@@ -20,6 +20,7 @@ use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::entrypoint::{ChatEngineFactoryCallback, PrefillRoutedEngine};
 use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
+use dynamo_llm::local_model::runtime_config::TokenizerBackend;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::make_mocker_engine;
 use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
@@ -449,6 +450,7 @@ pub(crate) struct EntrypointArgs {
     strip_anthropic_preamble: bool,
     enable_streaming_tool_dispatch: bool,
     enable_streaming_reasoning_dispatch: bool,
+    tokenizer_backend: Option<TokenizerBackend>,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     extra_engine_args: Option<PathBuf>,
@@ -468,7 +470,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None, metrics_prefix=None, enable_anthropic_api=false, strip_anthropic_preamble=false, enable_streaming_tool_dispatch=false, enable_streaming_reasoning_dispatch=false))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None, metrics_prefix=None, enable_anthropic_api=false, strip_anthropic_preamble=false, enable_streaming_tool_dispatch=false, enable_streaming_reasoning_dispatch=false, tokenizer_backend=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -500,6 +502,7 @@ impl EntrypointArgs {
         strip_anthropic_preamble: bool,
         enable_streaming_tool_dispatch: bool,
         enable_streaming_reasoning_dispatch: bool,
+        tokenizer_backend: Option<String>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if let Some(runtime_config) = &runtime_config {
@@ -529,6 +532,14 @@ impl EntrypointArgs {
             })
             .transpose()?;
 
+        let tokenizer_backend = tokenizer_backend
+            .map(|backend| {
+                backend
+                    .parse::<TokenizerBackend>()
+                    .map_err(PyValueError::new_err)
+            })
+            .transpose()?;
+
         Ok(EntrypointArgs {
             engine_type,
             model_path,
@@ -546,6 +557,7 @@ impl EntrypointArgs {
             strip_anthropic_preamble,
             enable_streaming_tool_dispatch,
             enable_streaming_reasoning_dispatch,
+            tokenizer_backend,
             tls_cert_path,
             tls_key_path,
             extra_engine_args,
@@ -605,6 +617,7 @@ pub fn make_engine<'p>(
         .is_mocker(matches!(args.engine_type, EngineType::Mocker))
         .extra_engine_args(args.extra_engine_args.clone())
         .runtime_config(args.runtime_config.clone().unwrap_or_default().inner)
+        .tokenizer_backend(args.tokenizer_backend)
         .namespace(args.namespace.clone())
         .namespace_prefix(args.namespace_prefix.clone());
     pyo3_async_runtimes::tokio::future_into_py(py, async move {

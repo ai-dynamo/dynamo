@@ -678,6 +678,7 @@ class ModelRuntimeConfig:
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
     reasoning_parser: str | None
+    tokenizer_backend: str | None
     exclude_tools_when_tool_choice_none: bool
     data_parallel_start_rank: int
     data_parallel_size: int
@@ -2743,8 +2744,15 @@ class EntrypointArgs:
         is_prefill: bool = False,
         is_decode: bool = False,
         migration_limit: int = 0,
+        migration_max_seq_len: Optional[int] = None,
         chat_engine_factory: Optional[Callable] = None,
         aic_perf_config: Optional[AicPerfConfig] = None,
+        metrics_prefix: Optional[str] = None,
+        enable_anthropic_api: bool = False,
+        strip_anthropic_preamble: bool = False,
+        enable_streaming_tool_dispatch: bool = False,
+        enable_streaming_reasoning_dispatch: bool = False,
+        tokenizer_backend: Optional[str] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -2771,8 +2779,15 @@ class EntrypointArgs:
             is_prefill: Whether this is a prefill worker
             is_decode: Whether this is a decode worker (disaggregated); pairs with a prefill peer for readiness
             migration_limit: Maximum number of request migrations (0=disabled)
+            migration_max_seq_len: Maximum sequence length eligible for migration
             chat_engine_factory: Optional Python chat completions engine factory callback
             aic_perf_config: Optional AIC perf-model configuration for default KV routing
+            metrics_prefix: Optional frontend metrics prefix
+            enable_anthropic_api: Whether to expose Anthropic-compatible routes
+            strip_anthropic_preamble: Whether to strip the Anthropic thinking preamble
+            enable_streaming_tool_dispatch: Whether to dispatch streaming tool calls incrementally
+            enable_streaming_reasoning_dispatch: Whether to dispatch streaming reasoning incrementally
+            tokenizer_backend: Optional tokenizer backend override ("default" or "fastokens")
         """
         ...
 

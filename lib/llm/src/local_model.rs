@@ -27,7 +27,7 @@ use crate::request_template::RequestTemplate;
 
 pub mod runtime_config;
 
-use runtime_config::ModelRuntimeConfig;
+use runtime_config::{ModelRuntimeConfig, TokenizerBackend};
 
 /// What we call a model if the user didn't provide a name. Usually this means the name
 /// is invisible, for example in a text chat.
@@ -271,6 +271,13 @@ impl LocalModelBuilder {
 
     pub fn runtime_config(&mut self, runtime_config: ModelRuntimeConfig) -> &mut Self {
         self.runtime_config = runtime_config;
+        self
+    }
+
+    pub fn tokenizer_backend(&mut self, tokenizer_backend: Option<TokenizerBackend>) -> &mut Self {
+        if let Some(tokenizer_backend) = tokenizer_backend {
+            self.runtime_config.tokenizer_backend = Some(tokenizer_backend);
+        }
         self
     }
 
