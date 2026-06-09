@@ -2409,8 +2409,7 @@ name = "dynamo-data-gen"
 version = "1.3.0"
 dependencies = [
  "anyhow",
- "bytemuck",
- "dynamo-tokens",
+ "dynamo-kv-hashing",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
