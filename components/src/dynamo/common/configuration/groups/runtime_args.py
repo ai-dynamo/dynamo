@@ -43,6 +43,11 @@ class DynamoRuntimeConfig(ConfigBase):
     # Honored only by the unified backend's `Worker`, where it overrides the engine's
     # default `health_check_payload()` for the runtime canary.
     health_check_payload: Optional[str] = None
+    # DGH-897 worker-side request admission/rejection knobs. Disabled (None) by
+    # default; when set, these surface env vars that the Rust runtime reads
+    # directly (see lib/runtime/src/pipeline/network/ingress/shared_tcp_endpoint.rs).
+    engine_request_limit: Optional[int] = None
+    dynamo_request_queue_limit: Optional[int] = None
 
     def validate(self) -> None:
         self.namespace = get_worker_namespace(self.namespace)
@@ -262,4 +267,29 @@ class DynamoRuntimeArgGroup(ArgGroup):
             'object (e.g. \'{"token_ids": [1], "stop_conditions": {"max_tokens": 1}}\') '
             "or '@/path/to/payload.json'. Takes precedence over the engine's "
             "default health_check_payload(). Unified backend only.",
+        )
+
+        # DGH-897 worker-side request admission/rejection. Both default to None
+        # (disabled); when unset the worker behaves exactly as before. These only
+        # surface env vars — the Rust runtime reads DYN_ENGINE_REQUEST_LIMIT /
+        # DYN_DYNAMO_REQUEST_QUEUE_LIMIT directly.
+        add_argument(
+            g,
+            flag_name="--engine-request-limit",
+            env_var="DYN_ENGINE_REQUEST_LIMIT",
+            default=None,
+            arg_type=int,
+            help="Max requests handled concurrently by the engine (worker-pool "
+            "semaphore size). Enables worker-side request rejection when set. "
+            "Disabled by default.",
+        )
+        add_argument(
+            g,
+            flag_name="--dynamo-request-queue-limit",
+            env_var="DYN_DYNAMO_REQUEST_QUEUE_LIMIT",
+            default=None,
+            arg_type=int,
+            help="Max requests waiting in Dynamo (not yet in the engine) before "
+            "rejection — the overflow queue size. Only takes effect when "
+            "--engine-request-limit is set; defaults to 16 in that case.",
         )

@@ -24,6 +24,11 @@ pub enum PrefillError {
     /// Disaggregated params not found in prefill response
     #[error("No disaggregated params in prefill response: {0}")]
     NoDisaggregatedParams(String),
+
+    /// Prefill worker shed the request. Holds the `DynamoError` as `#[source]`
+    /// so the chain stays downcastable to `ResourceExhausted` for the 503 mapping.
+    #[error("Prefill worker overloaded: {0}")]
+    WorkerOverloaded(#[source] dynamo_runtime::error::DynamoError),
 }
 
 /// Result of the prefill phase in `generate()`.

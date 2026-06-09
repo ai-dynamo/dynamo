@@ -9,7 +9,11 @@ use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 
 use dynamo_kv_router::protocols::{BlockExtraInfo, RoutingConstraints, WorkerId};
-use dynamo_runtime::{pipeline::SingleIn, protocols::maybe_error::MaybeError};
+use dynamo_runtime::{
+    error::{DynamoError, ErrorType, match_error_chain},
+    pipeline::SingleIn,
+    protocols::maybe_error::MaybeError,
+};
 
 use super::{
     InnerPrefillRouter, PrefillError, PrefillQueryOutcome, PrefillResolveDecision, PrefillRouter,
@@ -222,6 +226,21 @@ impl PrefillRouter {
             .generate_to_worker(request, target_worker)
             .await
             .map_err(|e| {
+                // A shed prefill worker returns ResourceExhausted; the generic
+                // PrefillError wrapper erases its downcast identity, so emit the
+                // dedicated WorkerOverloaded variant to keep the chain mappable to 503.
+                if match_error_chain(e.as_ref(), &[ErrorType::ResourceExhausted], &[]) {
+                    tracing::info!(
+                        worker_error = %e,
+                        "Request rejected by prefill worker (at capacity) — returning HTTP 503"
+                    );
+                    return PrefillError::WorkerOverloaded(
+                        DynamoError::builder()
+                            .error_type(ErrorType::ResourceExhausted)
+                            .message(e.to_string())
+                            .build(),
+                    );
+                }
                 PrefillError::PrefillError(
                     "failed to route to prefill worker".to_string(),
                     Some(e.into()),
