@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -391,27 +392,29 @@ OPTIONAL_IMPORT_NAMES = {"kvbm": "kvbm"}
 
 def install_core(
     wheelhouse: Path, python_spec: str, also: tuple[str, ...] = ()
-) -> Path:
+) -> None:
     ai_dynamo = require_one_wheel(wheelhouse, "ai-dynamo")
     runtime = require_one_wheel(wheelhouse, "ai-dynamo-runtime")
     also_wheels = {dist: require_one_wheel(wheelhouse, dist) for dist in also}
 
     venv_python = create_venv(python_spec)
-    requirements = [
-        str(runtime),
-        str(ai_dynamo),
-        *(str(w) for w in also_wheels.values()),
-    ]
-    pip_install(venv_python, wheelhouse, requirements)
-    pip_check(venv_python)
-    assert_dynamo_local_install(venv_python, wheelhouse, ai_dynamo, runtime)
-    run_core_import_smoke(venv_python)
+    try:
+        requirements = [
+            str(runtime),
+            str(ai_dynamo),
+            *(str(w) for w in also_wheels.values()),
+        ]
+        pip_install(venv_python, wheelhouse, requirements)
+        pip_check(venv_python)
+        assert_dynamo_local_install(venv_python, wheelhouse, ai_dynamo, runtime)
+        run_core_import_smoke(venv_python)
 
-    for dist, wheel in also_wheels.items():
-        assert_local_direct_url(venv_python, dist, wheel, wheelhouse)
-        import_name = OPTIONAL_IMPORT_NAMES.get(dist, dist)
-        run([str(venv_python), "-c", f"import {import_name}; assert {import_name}"])
-    return venv_python
+        for dist, wheel in also_wheels.items():
+            assert_local_direct_url(venv_python, dist, wheel, wheelhouse)
+            import_name = OPTIONAL_IMPORT_NAMES.get(dist, dist)
+            run([str(venv_python), "-c", f"import {import_name}; assert {import_name}"])
+    finally:
+        shutil.rmtree(venv_python.parent.parent, ignore_errors=True)
 
 
 def _requires_dist_for_extra(requires: list[str], dist: str, extra: str) -> bool:
