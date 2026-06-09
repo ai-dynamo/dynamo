@@ -56,6 +56,30 @@ pub struct DisaggregatedEndpoint {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Validate)]
 #[validate(schema(function = "validate_model_runtime_config"))]
+/// Runtime-resolved metadata published by a worker after its engine starts.
+///
+/// NOTE: This type is intended for facts that can only be known authoritatively at
+/// runtime, such as effective engine limits, capacity, data-parallel placement, and
+/// resolved service endpoints. Declarative model, frontend, routing, and deployment
+/// policy should live in dedicated metadata instead of accumulating here.
+///
+/// TODO(metadata ownership): Refine this boundary without changing behavior until the
+/// corresponding producers and consumers can migrate together.
+///
+/// - Move `ModelDeploymentCard::context_length` here as the effective engine serving
+///   limit. Preserve any static architectural maximum separately in model metadata.
+/// - Move and rename `ModelDeploymentCard::kv_cache_block_size` to
+///   `kv_event_block_size`. This is the router/KV-event hashing granularity, not
+///   necessarily the engine's physical KV block size; preserve the current fallback
+///   value of 16 during the migration.
+/// - Move frontend policy out: tool/reasoning parsers, structural-tag settings, and
+///   tool filtering behavior.
+/// - Move worker identity and placement metadata out: local-indexer availability,
+///   taints, stable routing identity, topology domains, and KV-transfer policy.
+/// - Move tensor model configuration to model metadata and speculative-decoding
+///   capability to engine metadata.
+/// - Audit `runtime_data` and retain only extensions that are genuinely resolved at
+///   runtime.
 pub struct ModelRuntimeConfig {
     pub total_kv_blocks: Option<u64>,
 
