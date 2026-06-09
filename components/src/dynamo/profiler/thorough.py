@@ -38,6 +38,10 @@ from dynamo.profiler.utils.aiperf import (
 )
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.config_modifiers.protocol import apply_dgd_overrides
+from dynamo.profiler.utils.aic_prefilter import (
+    prefilter_decode_candidates,
+    prefilter_prefill_candidates,
+)
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     DynamoGraphDeploymentRequestSpec,
     ModelCacheSpec,
@@ -428,6 +432,29 @@ async def run_thorough(
         )
 
     config_modifier = CONFIG_MODIFIERS[backend]
+
+    # --- Stage 1b: Optional AIC pre-filter ---
+    prefilter_top_n = (
+        dgdr.thorough.prefilterTopN
+        if dgdr.thorough is not None
+        else None
+    )
+    if prefilter_top_n is not None and prefilter_top_n > 0:
+        prefill_candidates = prefilter_prefill_candidates(
+            prefill_candidates, prefilter_top_n,
+            model=local_or_hf_model, system=system, backend=backend,
+            isl=isl, osl=osl,
+        )
+        decode_candidates = prefilter_decode_candidates(
+            decode_candidates, prefilter_top_n,
+            model=local_or_hf_model, system=system, backend=backend,
+            isl=isl, osl=osl,
+        )
+        logger.info(
+            "After AIC prefilter: %d prefill candidates, %d decode candidates",
+            len(prefill_candidates),
+            len(decode_candidates),
+        )
 
     # --- Stage 2: Benchmarking ---
     ops.current_phase = ProfilingPhase.SweepingPrefill

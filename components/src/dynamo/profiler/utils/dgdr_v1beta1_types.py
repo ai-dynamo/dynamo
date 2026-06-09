@@ -242,6 +242,16 @@ class HardwareSpec(BaseModel):
     )
 
 
+class ThoroughSpec(BaseModel):
+    """ThoroughSpec configures options for the THOROUGH search strategy."""
+
+    prefilterTopN: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="When set, use AIC to score enumerated candidates offline and benchmark only the top-N per side (prefill and decode). Omit or set to null to benchmark every candidate (unchanged behavior).",
+    )
+
+
 class DynamoGraphDeploymentRequestSpec(BaseModel):
     """DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest. Only the Model field is required; all other fields are optional and have sensible defaults."""
 
@@ -283,6 +293,10 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
     searchStrategy: SearchStrategy = Field(
         default="rapid",
         description='SearchStrategy controls the profiling search depth. "rapid" performs a fast sweep; "thorough" explores more configurations.',
+    )
+    thorough: Optional[ThoroughSpec] = Field(
+        default=None,
+        description="Thorough-mode options. Only applies when searchStrategy is 'thorough'.",
     )
     autoApply: Optional[bool] = Field(
         default=True,
