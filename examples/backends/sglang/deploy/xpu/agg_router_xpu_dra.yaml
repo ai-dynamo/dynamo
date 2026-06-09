@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated serving with KV-aware router for Intel XPU.
+# 2 workers behind a KV router, each on a separate GPU.
+# Workers publish KV events via ZMQ for routing optimization.
+#
+# Prerequisites:
+# - Intel XPU GPU with DRA driver installed
+# - 2+ GPU devices available
+# - hf-token-secret created in target namespace
+
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: gpu-template
+spec:
+  spec:
+    devices:
+      requests:
+        - name: gpu
+          exactly:
+            deviceClassName: gpu.intel.com
+            count: 1
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-agg-router-xpu-dra
+spec:
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: docker.io/library/dynamo-sglang-xpu:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DYN_ROUTER_MODE
+              value: kv
+    decode:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 2
+      resources:
+        requests:
+          custom:
+            ephemeral-storage: "2Gi"
+      extraPodSpec:
+        resourceClaims:
+          - name: gpu
+            resourceClaimTemplateName: gpu-template
+        # Uncomment if needed for your environment
+        # securityContext:
+        #   runAsUser: 1000
+        #   runAsGroup: 1000
+        #   supplementalGroups:
+        #     - 44    # video group
+        #     - 991   # render group
+        mainContainer:
+          image: docker.io/library/dynamo-sglang-xpu:latest
+          imagePullPolicy: IfNotPresent
+          resources:
+            claims:
+              - name: gpu
+          workingDir: /workspace/examples/backends/sglang
+          command:
+            - python3
+            - -m
+            - dynamo.sglang
+          args:
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --page-size
+            - "16"
+            - --tp
+            - "1"
+            - --trust-remote-code
+            - --skip-tokenizer-init
+            - --device
+            - xpu
+            - --disable-cuda-graph
+            - --grammar-backend
+            - none
+            - --enable-metrics
+            # KV events for router - endpoint differs per worker instance
+            # Dynamo will auto-assign unique ports for each replica
+            - --kv-events-config
+            - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
