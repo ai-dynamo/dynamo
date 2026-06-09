@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Test-only dependencies — installed in test and dev containers, NOT in runtime.
+
 # For deploy/utils async file IO used by deploy tests and profiler deployment helpers
 aiofiles<=25.1.0
 # For Allure test reporting in CI
 allure-pytest==2.15.3
-# Test-only dependencies — installed in test and dev containers, NOT in runtime.
-
 # For wheel smoke tests: manylinux policy + glibc-floor ELF symbol checks
 auditwheel==6.7.0
 # For MinIO/S3 operations in LoRA tests (replaces AWS CLI dependency)
