@@ -224,7 +224,7 @@ The contribution process depends on the size and scope of your change. Even when
 
 4. **Address Code Rabbit Review** — Respond to automated Code Rabbit suggestions, including nitpicks.
 
-5. **Trigger CI Tests** — For external contributors, a maintainer must comment `/ok to test COMMIT-ID` to run the full CI suite, where `COMMIT-ID` is the short SHA of your latest commit. Fix any failing tests before requesting human review.
+5. **Trigger CI Tests** — For external contributors, a maintainer must comment `/ok to test COMMIT-ID` to run the full CI suite, where `COMMIT-ID` is the short SHA of your latest commit. If CI fails for the current PR head and the failure appears flaky, comment `/retest` to rerun only failed jobs for that unchanged commit. Fix deterministic failures before requesting human review.
 
 6. **Request Review** — Add the person who approved your issue as a reviewer. Check [CODEOWNERS](https://github.com/ai-dynamo/dynamo/blob/main/CODEOWNERS) for required approvers based on files modified.
 

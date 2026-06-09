@@ -1,0 +1,167 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Retest Failed CI Jobs
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  actions: write
+  issues: write
+  pull-requests: read
+
+jobs:
+  retest:
+    if: ${{ github.event.issue.pull_request && github.event.comment.body == '/retest' }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: retest-failed-ci-${{ github.repository }}-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    steps:
+      - name: Rerun failed jobs for the current PR head
+        uses: actions/github-script@v7
+        env:
+          MAX_RUN_ATTEMPTS: "3"
+          MAX_RUNS_TO_RETEST: "8"
+          RETEST_WORKFLOW_PATH: ".github/workflows/command-retest.yml"
+        with:
+          script: |
+            // A /retest request is API-only: identify the current PR head, find existing CI runs for it,
+            // and ask GitHub to rerun failed jobs without checking out or executing PR-controlled code.
+            const { owner, repo } = context.repo;
+            const issueNumber = context.payload.issue.number;
+
+            // Keep the command bounded: do not retry the same run forever, and do not fan out endlessly.
+            const maxRunAttempts = Number(process.env.MAX_RUN_ATTEMPTS || '3');
+            const maxRunsToRetest = Number(process.env.MAX_RUNS_TO_RETEST || '8');
+            const retestWorkflowPath = process.env.RETEST_WORKFLOW_PATH;
+            const activeStatuses = new Set(['queued', 'in_progress', 'requested', 'waiting', 'pending']);
+
+            // Every outcome is reported on the PR so external contributors can see why a request did or did not run.
+            const comment = async (body) => {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: issueNumber,
+                body,
+              });
+            };
+
+            // Link workflow runs in responses so maintainers can inspect exactly what was touched.
+            const formatRun = (run) => {
+              const attempt = run.run_attempt || 1;
+              return `- [${run.name} #${run.run_number}](${run.html_url}) (attempt ${attempt})`;
+            };
+
+            // The PR API is the source of truth for the only SHA this command is allowed to affect.
+            const pr = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: issueNumber,
+            });
+            const headSha = pr.data.head.sha;
+            const shortSha = headSha.slice(0, 12);
+            const mirroredPrBranch = `pull-request/${issueNumber}`;
+            const runs = [];
+
+            // List runs by head_sha first; the later filters narrow this to runs that belong to this PR.
+            for (let page = 1; page <= 10; page += 1) {
+              const response = await github.rest.actions.listWorkflowRunsForRepo({
+                owner,
+                repo,
+                head_sha: headSha,
+                per_page: 100,
+                page,
+              });
+              runs.push(...response.data.workflow_runs);
+              if (response.data.workflow_runs.length < 100) {
+                break;
+              }
+            }
+
+            // Keep only runs for this unchanged PR head and never consider this command workflow itself.
+            const candidateRuns = runs.filter((run) => {
+              if (run.head_sha !== headSha) {
+                return false;
+              }
+              if (
+                !run.pull_requests?.some((pullRequest) => pullRequest.number === issueNumber) &&
+                !(run.event === 'push' && run.head_branch === mirroredPrBranch)
+              ) {
+                return false;
+              }
+              if (run.id === context.runId || run.name === context.workflow) {
+                return false;
+              }
+              if (run.path === retestWorkflowPath || run.path?.startsWith(`${retestWorkflowPath}@`)) {
+                return false;
+              }
+              return true;
+            });
+
+            // If matching CI is already active, another /retest would only duplicate load and confuse results.
+            const activeRuns = candidateRuns.filter((run) => activeStatuses.has(run.status));
+            if (activeRuns.length > 0) {
+              await comment(
+                `Cannot retest ${shortSha}: CI is already queued or running for the current PR HEAD.\n\n` +
+                activeRuns.slice(0, 8).map(formatRun).join('\n')
+              );
+              return;
+            }
+
+            // Only completed failures are actionable; success, skipped, cancelled, and neutral runs are left alone.
+            const failedRuns = candidateRuns
+              .filter((run) => run.status === 'completed' && run.conclusion === 'failure')
+              .sort((left, right) => new Date(right.created_at) - new Date(left.created_at));
+            if (failedRuns.length === 0) {
+              await comment(
+                `No failed workflow run exists for the current PR HEAD ${shortSha}. ` +
+                'Only completed failed runs tied to this PR and whose head_sha exactly matches the PR head can be retested.'
+              );
+              return;
+            }
+
+            // Refuse after a small number of attempts so a flaky command cannot become an unbounded retry loop.
+            const eligibleRuns = failedRuns.filter((run) => (run.run_attempt || 1) < maxRunAttempts);
+            if (eligibleRuns.length === 0) {
+              await comment(
+                `Cannot retest ${shortSha}: all failed workflow runs for this SHA have reached ` +
+                `the attempt limit of ${maxRunAttempts}.`
+              );
+              return;
+            }
+
+            // GitHub's endpoint reruns failed jobs only, preserving successful jobs from the original run.
+            const selectedRuns = eligibleRuns.slice(0, maxRunsToRetest);
+            for (const run of selectedRuns) {
+              await github.rest.actions.reRunWorkflowFailedJobs({
+                owner,
+                repo,
+                run_id: run.id,
+              });
+            }
+
+            // Finish with the exact run list so the comment thread records the command's effect.
+            const skippedCount = eligibleRuns.length - selectedRuns.length;
+            const skippedText = skippedCount > 0
+              ? `\n\nSkipped ${skippedCount} additional failed run(s) due to the per-comment limit of ${maxRunsToRetest}.`
+              : '';
+            await comment(
+              `Retesting failed jobs for current PR HEAD ${shortSha}.\n\n` +
+              selectedRuns.map(formatRun).join('\n') +
+              skippedText
+            );

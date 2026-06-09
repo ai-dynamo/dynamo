@@ -110,7 +110,7 @@ spec:
 
 ## Testing
 
-Once you have an MR up and standard checks pass trigger the integration tests by adding the comment “/ok to test <COMMIT-ID> “
+Once you have an MR up and standard checks pass, trigger the integration tests by adding the comment `/ok to test <COMMIT-ID>`. If CI fails for the current PR head and the failure appears flaky, comment `/retest` to rerun only failed jobs for that unchanged commit.
 
 
 ### Unit Tests

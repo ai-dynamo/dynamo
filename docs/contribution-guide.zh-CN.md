@@ -225,7 +225,7 @@ pre-commit install
 
 4. **处理 Code Rabbit Review** — 回复自动化 Code Rabbit 建议，包括 nitpick。
 
-5. **触发 CI 测试** — 对于外部贡献者，维护者必须评论 `/ok to test COMMIT-ID` 才能运行完整 CI 套件，其中 `COMMIT-ID` 是你最新提交的短 SHA。请求人工审阅前，请修复所有失败的测试。
+5. **触发 CI 测试** — 对于外部贡献者，维护者必须评论 `/ok to test COMMIT-ID` 才能运行完整 CI 套件，其中 `COMMIT-ID` 是你最新提交的短 SHA。如果当前 PR head 的 CI 失败且看起来是 flaky 失败，可以评论 `/retest`，仅重新运行该未变更提交上的失败 job。请求人工审阅前，请修复确定性失败。
 
 6. **请求审阅** — 将批准你 issue 的人员添加为 reviewer。根据修改的文件，查看 [CODEOWNERS](https://github.com/ai-dynamo/dynamo/blob/main/CODEOWNERS) 了解必需 approver。
 
