@@ -57,6 +57,7 @@ pub enum RemoteKvReuseNoPlanReason {
     IncompatibleBlockSize,
     PlanExpired,
     NoSourceBootstrapEndpoint,
+    LocalOverlapGapTooLarge,
     SerializationFailed,
 }
 
@@ -71,6 +72,7 @@ impl RemoteKvReuseNoPlanReason {
             Self::IncompatibleBlockSize => "incompatible_block_size",
             Self::PlanExpired => "plan_expired",
             Self::NoSourceBootstrapEndpoint => "no_source_bootstrap_endpoint",
+            Self::LocalOverlapGapTooLarge => "local_overlap_gap_too_large",
             Self::SerializationFailed => "serialization_failed",
         }
     }
@@ -81,6 +83,7 @@ pub struct RemoteKvReuseSelectionInput<'a> {
     pub request_id: &'a str,
     pub target: WorkerWithDpRank,
     pub target_local_prefix_blocks: u32,
+    pub best_local_prefix_blocks: u32,
     pub block_hashes: &'a [LocalBlockHash],
     pub block_size_tokens: u32,
     pub tiered_matches: &'a TieredMatchDetails,
@@ -99,15 +102,33 @@ pub struct RemoteG2CostModel {
     pub score_weight: f64,
     pub cost_blocks: f64,
     pub cost_per_block: f64,
+    pub max_planned_blocks: Option<u32>,
+    pub max_local_overlap_gap_blocks: Option<u32>,
 }
 
 impl RemoteG2CostModel {
+    pub fn capped_planned_blocks(&self, planned_blocks: u32) -> u32 {
+        self.max_planned_blocks
+            .map(|max_blocks| planned_blocks.min(max_blocks))
+            .unwrap_or(planned_blocks)
+    }
+
     pub fn estimated_cost_blocks(&self, planned_blocks: u32) -> f64 {
         self.cost_blocks + self.cost_per_block * planned_blocks as f64
     }
 
     pub fn score_blocks(&self, incremental_blocks: u32, planned_blocks: u32) -> f64 {
         self.score_weight * incremental_blocks as f64 - self.estimated_cost_blocks(planned_blocks)
+    }
+
+    pub fn allows_local_overlap_gap(
+        &self,
+        target_local_blocks: u32,
+        best_local_blocks: u32,
+    ) -> bool {
+        self.max_local_overlap_gap_blocks
+            .map(|max_gap| target_local_blocks >= best_local_blocks.saturating_sub(max_gap))
+            .unwrap_or(true)
     }
 }
 
@@ -155,7 +176,13 @@ fn choose_better_candidate_score(
     input: RemoteKvReuseSelectionInput<'_>,
 ) {
     let start_block_index = start as u32;
-    let planned_blocks = hits as u32;
+    let planned_blocks = input
+        .cost_model
+        .map(|model| model.capped_planned_blocks(hits as u32))
+        .unwrap_or(hits as u32);
+    if planned_blocks == 0 {
+        return;
+    }
     let incremental_blocks = remote_g2_incremental_blocks(
         start_block_index,
         planned_blocks,
@@ -223,6 +250,18 @@ pub fn select_remote_g2_candidate(
     input: RemoteKvReuseSelectionInput<'_>,
 ) -> RemoteG2CandidateDecision {
     let stats = remote_g2_selection_stats(input.tiered_matches);
+
+    if input.cost_model.is_some_and(|model| {
+        !model.allows_local_overlap_gap(
+            input.target_local_prefix_blocks,
+            input.best_local_prefix_blocks,
+        )
+    }) {
+        return RemoteG2CandidateDecision::NoCandidate {
+            reason: RemoteKvReuseNoPlanReason::LocalOverlapGapTooLarge,
+            stats,
+        };
+    }
 
     let Some(host_pinned_matches) = input
         .tiered_matches
@@ -451,6 +490,7 @@ mod tests {
             request_id: "request-1",
             target,
             target_local_prefix_blocks: 0,
+            best_local_prefix_blocks: 0,
             block_hashes,
             block_size_tokens: 16,
             tiered_matches,
@@ -643,6 +683,7 @@ mod tests {
             request_id: "req-meta",
             target,
             target_local_prefix_blocks: 0,
+            best_local_prefix_blocks: 0,
             block_hashes: &hashes,
             block_size_tokens: 32,
             tiered_matches: &matches,
@@ -836,6 +877,8 @@ mod tests {
                 score_weight: 0.5,
                 cost_blocks: 1.0,
                 cost_per_block: 0.0,
+                max_planned_blocks: None,
+                max_local_overlap_gap_blocks: None,
             }),
             ..selection_input(target, &hashes, &matches)
         };
@@ -865,6 +908,8 @@ mod tests {
                 score_weight: 0.5,
                 cost_blocks: 1.0,
                 cost_per_block: 0.1,
+                max_planned_blocks: None,
+                max_local_overlap_gap_blocks: None,
             }),
             ..selection_input(target, &hashes, &matches)
         };
@@ -883,6 +928,64 @@ mod tests {
     }
 
     #[test]
+    fn select_candidate_caps_planned_blocks_before_scoring_and_materializing() {
+        let hashes = block_hashes(12);
+        let target = WorkerWithDpRank::new(9, 0);
+        let source = WorkerWithDpRank::new(7, 0);
+        let matches = tiered_matches(&[], &[(source, 12)]);
+        let input = RemoteKvReuseSelectionInput {
+            cost_model: Some(RemoteG2CostModel {
+                score_weight: 1.0,
+                cost_blocks: 1.0,
+                cost_per_block: 0.0,
+                max_planned_blocks: Some(5),
+                max_local_overlap_gap_blocks: None,
+            }),
+            ..selection_input(target, &hashes, &matches)
+        };
+
+        let decision = select_remote_g2_reuse_plan(input);
+
+        match decision {
+            RemoteKvReuseDecision::Plan { plan, .. } => {
+                assert_eq!(plan.start_block_index, 0);
+                assert_eq!(plan.planned_prefix_blocks, 5);
+                assert_eq!(plan.router_block_hashes, hashes[..5]);
+            }
+            other => panic!("expected capped plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_candidate_rejects_target_outside_local_overlap_gap() {
+        let hashes = block_hashes(12);
+        let target = WorkerWithDpRank::new(9, 0);
+        let source = WorkerWithDpRank::new(7, 0);
+        let matches = tiered_matches(&[], &[(source, 12)]);
+        let input = RemoteKvReuseSelectionInput {
+            target_local_prefix_blocks: 2,
+            best_local_prefix_blocks: 8,
+            cost_model: Some(RemoteG2CostModel {
+                score_weight: 1.0,
+                cost_blocks: 1.0,
+                cost_per_block: 0.0,
+                max_planned_blocks: None,
+                max_local_overlap_gap_blocks: Some(4),
+            }),
+            ..selection_input(target, &hashes, &matches)
+        };
+
+        let decision = select_remote_g2_candidate(input);
+
+        match decision {
+            RemoteG2CandidateDecision::NoCandidate { reason, .. } => {
+                assert_eq!(reason, RemoteKvReuseNoPlanReason::LocalOverlapGapTooLarge);
+            }
+            other => panic!("expected local-overlap rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn select_candidate_rejects_cost_negative_direct_g2() {
         let hashes = block_hashes(8);
         let target = WorkerWithDpRank::new(9, 0);
@@ -893,6 +996,8 @@ mod tests {
                 score_weight: 0.5,
                 cost_blocks: 16.0,
                 cost_per_block: 0.0,
+                max_planned_blocks: None,
+                max_local_overlap_gap_blocks: None,
             }),
             ..selection_input(target, &hashes, &matches)
         };

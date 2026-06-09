@@ -41,6 +41,8 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "remote_g2_reuse_enabled",
     "remote_g2_cost_blocks",
     "remote_g2_cost_per_block",
+    "remote_g2_max_planned_blocks",
+    "remote_g2_max_local_overlap_gap_blocks",
 )
 
 
@@ -70,6 +72,8 @@ class KvRouterConfigBase(ConfigBase):
     remote_g2_reuse_enabled: bool = False
     remote_g2_cost_blocks: float = 0.0
     remote_g2_cost_per_block: float = 0.0
+    remote_g2_max_planned_blocks: Optional[int] = None
+    remote_g2_max_local_overlap_gap_blocks: Optional[int] = None
 
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
@@ -349,4 +353,27 @@ class KvRouterArgGroup(ArgGroup):
                 "minus remote_g2_cost_blocks minus this value times planned_blocks."
             ),
             arg_type=float,
+        )
+        add_argument(
+            g,
+            flag_name="--remote-g2-max-planned-blocks",
+            env_var="DYN_REMOTE_G2_MAX_PLANNED_BLOCKS",
+            default=None,
+            help=(
+                "[EXPERIMENTAL] KV Router: Optional cap on Direct G2 planned transfer "
+                "length in KV blocks before scoring and plan materialization."
+            ),
+            arg_type=int,
+        )
+        add_argument(
+            g,
+            flag_name="--remote-g2-max-local-overlap-gap-blocks",
+            env_var="DYN_REMOTE_G2_MAX_LOCAL_OVERLAP_GAP_BLOCKS",
+            default=None,
+            help=(
+                "[EXPERIMENTAL] KV Router: Optional maximum local-overlap deficit "
+                "in KV blocks for Direct G2 to influence worker selection. Use 0 "
+                "to only credit Direct G2 on workers tied for best local overlap."
+            ),
+            arg_type=int,
         )

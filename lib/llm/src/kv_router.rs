@@ -240,6 +240,31 @@ fn remote_g2_target_local_prefix_blocks(
     effective_blocks.max(host_pinned_blocks)
 }
 
+fn remote_g2_best_local_prefix_blocks(
+    workers: &HashMap<WorkerId, ModelRuntimeConfig>,
+    allowed_worker_ids: Option<&HashSet<WorkerId>>,
+    tier_overlap_blocks: &TierOverlapBlocks,
+    cache_hit_estimates: &CacheHitEstimates,
+) -> u32 {
+    workers
+        .iter()
+        .filter(|(worker_id, _)| {
+            allowed_worker_ids
+                .map(|allowed| allowed.contains(*worker_id))
+                .unwrap_or(true)
+        })
+        .flat_map(|(worker_id, config)| {
+            let start = config.data_parallel_start_rank();
+            let end = start + config.data_parallel_size();
+            (start..end).map(move |dp_rank| WorkerWithDpRank::new(*worker_id, dp_rank))
+        })
+        .map(|target| {
+            remote_g2_target_local_prefix_blocks(target, tier_overlap_blocks, cache_hit_estimates)
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn remote_g2_candidates_from_tiered_matches(
     kv_router_config: &KvRouterConfig,
@@ -250,6 +275,8 @@ fn remote_g2_candidates_from_tiered_matches(
     tiered_matches: &indexer::TieredMatchDetails,
     tier_overlap_blocks: &TierOverlapBlocks,
     cache_hit_estimates: &CacheHitEstimates,
+    allowed_worker_ids: Option<&HashSet<WorkerId>>,
+    best_local_prefix_blocks: u32,
     request_id: &str,
     created_at_ms: u64,
     expires_at_ms: u64,
@@ -259,7 +286,11 @@ fn remote_g2_candidates_from_tiered_matches(
     }
     let cost_model = kv_router_config.remote_g2_cost_model(router_config_override);
     let mut candidates = HashMap::new();
-    for (worker_id, config) in workers {
+    for (worker_id, config) in workers.iter().filter(|(worker_id, _)| {
+        allowed_worker_ids
+            .map(|allowed| allowed.contains(*worker_id))
+            .unwrap_or(true)
+    }) {
         let data_parallel_size = config.data_parallel_size();
         let data_parallel_start_rank = config.data_parallel_start_rank();
         for dp_rank in data_parallel_start_rank..(data_parallel_start_rank + data_parallel_size) {
@@ -273,6 +304,7 @@ fn remote_g2_candidates_from_tiered_matches(
                 request_id,
                 target,
                 target_local_prefix_blocks,
+                best_local_prefix_blocks,
                 block_hashes,
                 block_size_tokens: block_size,
                 tiered_matches,
@@ -714,6 +746,15 @@ where
         let find_matches_elapsed = start.elapsed();
         let created_at_ms = unix_epoch_ms();
         let expires_at_ms = created_at_ms.saturating_add(REMOTE_KV_REUSE_PLAN_TTL_MS);
+        let best_local_prefix_blocks = {
+            let workers = self.workers_with_configs.borrow();
+            remote_g2_best_local_prefix_blocks(
+                &workers,
+                allowed_worker_ids.as_ref(),
+                &tier_overlap_blocks,
+                &cache_hit_estimates,
+            )
+        };
         let remote_g2_candidates = {
             let workers = self.workers_with_configs.borrow();
             remote_g2_candidates_from_tiered_matches(
@@ -725,6 +766,8 @@ where
                 &tiered_matches,
                 &tier_overlap_blocks,
                 &cache_hit_estimates,
+                allowed_worker_ids.as_ref(),
+                best_local_prefix_blocks,
                 context_id.unwrap_or_default(),
                 created_at_ms,
                 expires_at_ms,
@@ -767,6 +810,7 @@ where
             request_id: context_id.unwrap_or_default(),
             target: response.best_worker,
             target_local_prefix_blocks: selected_target_local_prefix_blocks,
+            best_local_prefix_blocks,
             block_hashes: &block_hashes,
             block_size_tokens: self.block_size,
             tiered_matches: &tiered_matches,

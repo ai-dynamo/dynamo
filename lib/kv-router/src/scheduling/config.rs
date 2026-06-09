@@ -283,6 +283,15 @@ pub struct KvRouterConfig {
     /// Direct G2 transfer cost per planned block in block-equivalent units.
     #[validate(range(min = 0.0))]
     pub remote_g2_cost_per_block: f64,
+
+    /// Optional cap on Direct G2 planned transfer length in KV blocks.
+    #[validate(range(min = 1))]
+    pub remote_g2_max_planned_blocks: Option<u32>,
+
+    /// Optional max local-overlap deficit, in KV blocks, for letting Direct G2
+    /// influence worker selection. Set to 0 to only credit Direct G2 on workers
+    /// tied for the best local overlap.
+    pub remote_g2_max_local_overlap_gap_blocks: Option<u32>,
 }
 
 impl Default for KvRouterConfig {
@@ -314,6 +323,8 @@ impl Default for KvRouterConfig {
             remote_g2_reuse_enabled: false,
             remote_g2_cost_blocks: 0.0,
             remote_g2_cost_per_block: 0.0,
+            remote_g2_max_planned_blocks: None,
+            remote_g2_max_local_overlap_gap_blocks: None,
         }
     }
 }
@@ -394,6 +405,8 @@ impl KvRouterConfig {
                 .unwrap_or(self.shared_cache_multiplier),
             cost_blocks: self.remote_g2_cost_blocks,
             cost_per_block: self.remote_g2_cost_per_block,
+            max_planned_blocks: self.remote_g2_max_planned_blocks,
+            max_local_overlap_gap_blocks: self.remote_g2_max_local_overlap_gap_blocks,
         }
     }
 
@@ -551,9 +564,14 @@ mod tests {
             remote_g2_cost_per_block: -0.1,
             ..Default::default()
         };
+        let zero_max_planned_blocks = KvRouterConfig {
+            remote_g2_max_planned_blocks: Some(0),
+            ..Default::default()
+        };
 
         assert!(negative_cost.validate().is_err());
         assert!(negative_cost_per_block.validate().is_err());
+        assert!(zero_max_planned_blocks.validate().is_err());
     }
 
     #[test]
