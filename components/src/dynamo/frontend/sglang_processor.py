@@ -628,7 +628,7 @@ class SglangEngineFactory:
         # blake3-verified copies; this path duplicates the download.
         source_path = mdc.source_path()
         if not os.path.exists(source_path):
-            await fetch_model(source_path, ignore_weights=True)
+            source_path = await fetch_model(source_path, ignore_weights=True)
 
         logger.info("Loading SGLang tokenizer from %s", source_path)
         tokenizer = _load_tokenizer(source_path, self.trust_remote_code)

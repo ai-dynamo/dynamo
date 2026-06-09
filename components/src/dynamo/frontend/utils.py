@@ -21,13 +21,16 @@ def resolve_chat_template(source_path: str) -> str | None:
     """
     jinja_path = os.path.join(source_path, "chat_template.jinja")
     if os.path.exists(jinja_path):
-        with open(jinja_path) as f:
+        with open(jinja_path, encoding="utf-8") as f:
             return f.read()
 
     json_path = os.path.join(source_path, "chat_template.json")
     if os.path.exists(json_path):
-        with open(json_path) as f:
-            return json.load(f).get("chat_template")
+        with open(json_path, encoding="utf-8") as f:
+            try:
+                return json.load(f).get("chat_template")
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Malformed JSON in {json_path}: {e}") from e
 
     return None
 
