@@ -604,7 +604,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--planner-config",
-        help="path to planner config YAML/JSON or inline JSON; enables planner-in-the-loop replay (offline agg only)",
+        help="path to planner config YAML/JSON or inline JSON; enables planner-in-the-loop replay (offline agg/disagg)",
     )
     parser.add_argument(
         "--benchmark-granularity",
