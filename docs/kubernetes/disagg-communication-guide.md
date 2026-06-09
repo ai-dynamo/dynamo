@@ -10,7 +10,7 @@ This guide explains how prefill and decode workers communicate in Dynamo's disag
 
 ## Summary
 
-- **NVLink cannot be used between Kubernetes pods** due to process isolation and GPU partitioning
+- **NVLink cannot be used between Kubernetes pods on standard nodes** due to process isolation and GPU partitioning (exception: **MNNVL** on GB200/GB300 NVL72 — see table note below)
 - **RDMA (InfiniBand, RoCE, or AWS EFA) is required** for production disaggregated deployments
 - **Without RDMA, expect 200-500x performance degradation** in Time To First Token (TTFT) — observed ~98s TTFT with TCP vs ~200-500ms with RDMA
 - **UCX or libfabric** are the communication layers that NIXL uses to transfer KV cache between workers
@@ -85,10 +85,12 @@ VLLMDecodeWorker:
 
 | Transport | Bandwidth | Latency | Same-Node | Cross-Node | GPU Direct |
 |-----------|-----------|---------|-----------|------------|------------|
-| **NVLink** | 450-900 GB/s | ~µs | ✅ (intra-pod only) | ❌ | ✅ |
+| **NVLink** | 450-900 GB/s | ~µs | ✅ (intra-pod only) | ✅ (via MNNVL) | ✅ |
 | **InfiniBand RDMA** | 20-50 GB/s | ~1 µs | ✅ | ✅ | ✅ (with GPUDirect) |
 | **RoCE RDMA** | 10-25 GB/s | ~2 µs | ✅ | ✅ | ✅ (with GPUDirect) |
 | **TCP** | 1-3 GB/s | ~50 µs | ✅ | ✅ | ❌ (host staging) |
+
+> **MNNVL = Multi-Node NVLink.** On rack-scale NVLink systems (NVIDIA GB200/GB300 NVL72), the NVLink fabric spans nodes, so cross-node KV transfer can use NVLink. On standard nodes (e.g. 8×H100/H200), NVLink stays intra-node and cross-node KV transfer falls back to RDMA.
 
 ### Same-Node Communication
 
