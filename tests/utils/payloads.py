@@ -481,28 +481,16 @@ class CachedTokensChatPayload(ChatPayload):
             f"cached_tokens={cached_tokens}, prompt_tokens_details={prompt_tokens_details}"
         )
 
-        # For requests after the first one, we expect cached tokens > 0
-        # (since identical prompts should hit the prefix cache).
-        #
-        # Fail closed on absent usage evidence: a response with no usage
-        # block, no prompt_tokens, or no cached_tokens key cannot prove a
-        # cache hit OR a cache miss. Defaulting those to zero (the old
-        # behavior) silently turned "no evidence" into "cache miss", letting
-        # a backend that doesn't report usage pass the gate by luck. Require
-        # the fields to be present before drawing any conclusion.
+        # On repeats we expect a cache hit. Require usage with prompt_tokens > 0
+        # so a backend that reports no usage fails instead of passing by default.
+        # An absent cached_tokens field is a legit miss (vLLM/SGLang omit it when
+        # cached==0), so treat it as a soft miss below, not a hard error.
         if self._request_count > 1 and self.min_cached_tokens > 0:
             if usage is None or prompt_tokens is None or prompt_tokens <= 0:
                 raise AssertionError(
                     f"Request {self._request_count}: response carried no usage "
                     f"evidence (usage={usage!r}); cannot validate cached tokens. "
-                    f"Expected usage.prompt_tokens > 0 and "
-                    f"usage.prompt_tokens_details.cached_tokens to be present."
-                )
-            if "cached_tokens" not in prompt_tokens_details:
-                raise AssertionError(
-                    f"Request {self._request_count}: usage.prompt_tokens_details "
-                    f"has no 'cached_tokens' field ({prompt_tokens_details!r}); "
-                    f"cannot validate prefix-cache reuse."
+                    f"Expected a usage block with prompt_tokens > 0."
                 )
             if cached_tokens >= self.min_cached_tokens:
                 self._cached_tokens_found = True
@@ -555,19 +543,23 @@ class CachedTokensChatPayload(ChatPayload):
         )
 
     def final_validation(self) -> None:
-        """Assert cached_tokens >= min_cached_tokens on at least one repeat,
-        and (if set) router_kv_hit_rate post-R1 mean >= min_avg_kv_hit_rate.
+        """Assert cached_tokens >= min_cached_tokens on at least one repeat
+        (only when min_cached_tokens > 0), and (if set) router_kv_hit_rate
+        post-R1 mean >= min_avg_kv_hit_rate.
         """
-        if self.repeat_count > 1 and not self._cached_tokens_found:
-            raise AssertionError(
-                f"Expected cached_tokens >= {self.min_cached_tokens} in "
-                f"prompt_tokens_details for at least one repeated request, "
-                f"but none found after {self._request_count} requests. "
-                f"Verify that prefix caching is enabled and working correctly."
+        # Only assert cached tokens when a positive threshold is set; a caller
+        # validating purely via the router metric passes min_cached_tokens=0.
+        if self.min_cached_tokens > 0:
+            if self.repeat_count > 1 and not self._cached_tokens_found:
+                raise AssertionError(
+                    f"Expected cached_tokens >= {self.min_cached_tokens} in "
+                    f"prompt_tokens_details for at least one repeated request, "
+                    f"but none found after {self._request_count} requests. "
+                    f"Verify that prefix caching is enabled and working correctly."
+                )
+            logger.info(
+                "✓ Final validation PASSED: cached_tokens found in repeated requests"
             )
-        logger.info(
-            "✓ Final validation PASSED: cached_tokens found in repeated requests"
-        )
 
         if self.min_avg_kv_hit_rate <= 0:
             return

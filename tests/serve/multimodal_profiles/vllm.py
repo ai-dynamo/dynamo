@@ -193,9 +193,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
     # Rust-frontend VLM coverage on `agg_router` (
     # MM-aware routing path). Each profile below adds the same smoke test
     # as Qwen3-VL-2B's agg_router (pre_merge), but on post_merge with the
-    # corresponding family — Qwen2.5-VL, Qwen2-VL — so the
-    # full MM-routing model list (FAMILIES in lightseek_mm.rs) is exercised
-    # end-to-end. SINGLE_GPU=true packs both workers onto GPU 0 to match
+    # corresponding family (Qwen2.5-VL, Qwen2-VL). The LLaVA-1.5/NeXT profiles
+    # below are skip-marked, so this is Qwen-family coverage, not the full
+    # FAMILIES list. SINGLE_GPU=true packs both workers onto GPU 0 to match
     # the gpu_1 single-GPU box. Initial VRAM profiles are estimates; the
     # first post_merge run will surface real peaks and we'll tighten.
     MultimodalModelProfile(
