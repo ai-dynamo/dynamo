@@ -883,28 +883,44 @@ impl LoraController {
         current_replicas: usize,
     ) -> usize {
         if desired_replicas < current_replicas {
-            if let Some(hyst) = self.hysteresis.get(lora_name) {
-                let ticks_since = self.tick.saturating_sub(hyst.last_scale_down_tick);
-                if ticks_since < self.config.scale_down_cooldown_ticks as u64 {
-                    tracing::debug!(
-                        lora = lora_name,
-                        desired = desired_replicas,
-                        current = current_replicas,
-                        cooldown_remaining =
-                            self.config.scale_down_cooldown_ticks as u64 - ticks_since,
-                        "Scale-down deferred by hysteresis"
-                    );
-                    return current_replicas;
+            // Copy the timestamp so the immutable borrow ends before the mutable re-arm below.
+            match self
+                .hysteresis
+                .get(lora_name)
+                .map(|h| h.last_scale_down_tick)
+            {
+                Some(last_scale_down_tick) => {
+                    let ticks_since = self.tick.saturating_sub(last_scale_down_tick);
+                    if ticks_since < self.config.scale_down_cooldown_ticks as u64 {
+                        tracing::debug!(
+                            lora = lora_name,
+                            desired = desired_replicas,
+                            current = current_replicas,
+                            cooldown_remaining =
+                                self.config.scale_down_cooldown_ticks as u64 - ticks_since,
+                            "Scale-down deferred by hysteresis"
+                        );
+                        return current_replicas;
+                    }
+                    // Cooldown elapsed: apply this scale-down AND re-arm the cooldown to THIS tick
+                    // so the next scale-down is rate-limited too. Without this refresh the timestamp
+                    // stays at the first-deferral tick, which would let a continuing decline shrink
+                    // replicas on every subsequent tick (the cooldown would only delay the first
+                    // scale-down, not space out successive ones).
+                    if let Some(h) = self.hysteresis.get_mut(lora_name) {
+                        h.last_scale_down_tick = self.tick;
+                    }
+                    desired_replicas
                 }
-                desired_replicas
-            } else {
-                self.hysteresis.insert(
-                    lora_name.to_string(),
-                    HysteresisState {
-                        last_scale_down_tick: self.tick,
-                    },
-                );
-                current_replicas
+                None => {
+                    self.hysteresis.insert(
+                        lora_name.to_string(),
+                        HysteresisState {
+                            last_scale_down_tick: self.tick,
+                        },
+                    );
+                    current_replicas
+                }
             }
         } else {
             self.hysteresis.remove(lora_name);
@@ -1626,6 +1642,85 @@ mod tests {
             LoraController::compute_changed_workers(&workers, &workers, &prev_caps, &prev_caps)
                 .is_empty(),
             "no id/capacity change must yield no changed workers"
+        );
+    }
+
+    #[test]
+    fn test_hysteresis_rate_limits_successive_scale_downs() {
+        // Hysteresis must space out SUCCESSIVE scale-downs by the cooldown, not just delay the
+        // first one. Regression: previously last_scale_down_tick was set only on the first
+        // deferral and never refreshed, so once the cooldown elapsed a continuing decline shrank
+        // replicas on every tick.
+        let (mut controller, _st, _le, _rt) = setup_controller();
+        assert_eq!(
+            controller.config.scale_down_cooldown_ticks, 3,
+            "test assumes the default 3-tick cooldown"
+        );
+
+        // First desire to scale down 5->3 is deferred for the cooldown window.
+        controller.tick = 1;
+        assert_eq!(
+            controller.apply_hysteresis("l", 3, 5),
+            5,
+            "first scale-down is deferred"
+        );
+        controller.tick = 2;
+        assert_eq!(
+            controller.apply_hysteresis("l", 3, 5),
+            5,
+            "still within cooldown"
+        );
+        controller.tick = 3;
+        assert_eq!(
+            controller.apply_hysteresis("l", 3, 5),
+            5,
+            "still within cooldown"
+        );
+
+        // Cooldown elapsed (1 -> 4): scale-down 5->3 applied AND cooldown re-armed at tick 4.
+        controller.tick = 4;
+        assert_eq!(
+            controller.apply_hysteresis("l", 3, 5),
+            3,
+            "scale-down applied after the cooldown"
+        );
+
+        // A further decline 3->1 on the very next tick MUST be deferred (this is the bug fix:
+        // previously it returned 1 immediately because the timestamp was stale).
+        controller.tick = 5;
+        assert_eq!(
+            controller.apply_hysteresis("l", 1, 3),
+            3,
+            "a successive scale-down must wait a fresh cooldown, not apply next tick"
+        );
+        controller.tick = 6;
+        assert_eq!(
+            controller.apply_hysteresis("l", 1, 3),
+            3,
+            "still within the re-armed cooldown"
+        );
+
+        // Re-armed cooldown elapsed (4 -> 7): now 3->1 applies.
+        controller.tick = 7;
+        assert_eq!(
+            controller.apply_hysteresis("l", 1, 3),
+            1,
+            "scale-down applied after the re-armed cooldown"
+        );
+
+        // Scale-up applies immediately and clears the hysteresis entry, so a later decline
+        // re-arms the cooldown from scratch (first decline deferred again).
+        controller.tick = 8;
+        assert_eq!(
+            controller.apply_hysteresis("l", 4, 1),
+            4,
+            "scale-up applies immediately"
+        );
+        controller.tick = 9;
+        assert_eq!(
+            controller.apply_hysteresis("l", 2, 4),
+            4,
+            "after a scale-up, the next decline is deferred again (cooldown re-armed from scratch)"
         );
     }
 
