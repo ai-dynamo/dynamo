@@ -522,6 +522,112 @@ mod tests {
     use dynamo_protocols::types::CreateChatCompletionRequest as NvCreateChatCompletionRequest;
     use minijinja::{Environment, context};
 
+    /// Dev utility (ignored by default): dump the prompt Dynamo's renderer
+    /// produces for a tool-calling chat request, so it can be diffed against
+    /// vLLM's `openai_harmony` rendering — to see whether the gpt-oss Jinja
+    /// `chat_template` actually emits the harmony "tool calls go to the
+    /// commentary channel" guidance + `functions` namespace.
+    ///
+    /// Point GPTOSS_CHAT_TEMPLATE at the model's tokenizer_config.json (its
+    /// `chat_template` field is extracted) OR a raw chat_template.jinja file:
+    ///   GPTOSS_CHAT_TEMPLATE=/path/openai-gpt-oss-120b/tokenizer_config.json \
+    ///     cargo test -p dynamo-renderer dump_gptoss_tool_prompt -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn dump_gptoss_tool_prompt() {
+        use super::tokcfg::ChatTemplate;
+        use super::{ContextMixins, HfTokenizerConfigJsonFormatter};
+
+        let path = std::env::var("GPTOSS_CHAT_TEMPLATE").expect(
+            "set GPTOSS_CHAT_TEMPLATE to the tokenizer_config.json, chat_template.jinja, or model dir path",
+        );
+        let input_path = std::path::Path::new(&path);
+        let file_path = if input_path.is_dir() {
+            // Prefer tokenizer_config.json from model dir if provided
+            input_path.join("tokenizer_config.json")
+        } else {
+            input_path.to_path_buf()
+        };
+        let raw = std::fs::read_to_string(&file_path).expect("read chat template file");
+        // Resolve the actual Jinja template. gpt-oss ships its chat template in a
+        // separate `chat_template.jinja` file, NOT inside tokenizer_config.json,
+        // so:
+        //   * if the file is JSON with a `chat_template` field, use it;
+        //   * otherwise, if a sibling `chat_template.jinja` exists, read that;
+        //   * otherwise treat the file itself as the template.
+        let template_string: String = match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(v) if v.get("chat_template").is_some() => v["chat_template"]
+                .as_str()
+                .expect("chat_template field must be a string")
+                .to_string(),
+            _ => {
+                let sibling = std::path::Path::new(&path)
+                    .parent()
+                    .map(|d| d.join("chat_template.jinja"));
+                match sibling {
+                    Some(p) if p.exists() => {
+                        eprintln!(
+                            "[info] {path} had no chat_template field; using {}",
+                            p.display()
+                        );
+                        std::fs::read_to_string(&p).expect("read sibling chat_template.jinja")
+                    }
+                    _ => raw,
+                }
+            }
+        };
+
+        // Guard against silently echoing a non-template (e.g. a tokenizer_config.json
+        // with no chat_template and no sibling .jinja).
+        assert!(
+            template_string.contains("{%") || template_string.contains("{{"),
+            "resolved template has no Jinja tags — GPTOSS_CHAT_TEMPLATE ({path}) is probably \
+             tokenizer_config.json with no chat_template field and no sibling chat_template.jinja. \
+             Point it at the chat_template.jinja file."
+        );
+
+        let chat_template: ChatTemplate =
+            serde_json::from_value(serde_json::json!({ "chat_template": template_string }))
+                .unwrap();
+
+        let formatter =
+            HfTokenizerConfigJsonFormatter::new(chat_template, ContextMixins::new(&[])).unwrap();
+
+        // Declare tools — the tool-channel guidance only renders when tools are present.
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(
+            r#"{
+              "model": "openai/gpt-oss-120b",
+              "messages": [{"role":"user","content":"Search the repo for the string \"countHook\"."}],
+              "tools": [
+                {"type":"function","function":{"name":"grep","description":"search files","parameters":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]}}},
+                {"type":"function","function":{"name":"read","description":"read a file","parameters":{"type":"object","properties":{"filePath":{"type":"string"}},"required":["filePath"]}}}
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let rendered = formatter.render(&request).unwrap();
+        eprintln!("================ RENDERED gpt-oss PROMPT (tools declared) ================");
+        eprintln!("{rendered}");
+        eprintln!("================ END RENDERED PROMPT ================");
+        eprintln!("[diagnostics] does the rendered prompt contain…");
+        for needle in [
+            "commentary",
+            "Calls to these tools",
+            "functions",
+            "# Tools",
+            "<|channel|>",
+            "constrain",
+            "analysis",
+        ] {
+            eprintln!(
+                "  {:>22}: {}",
+                format!("{needle:?}"),
+                rendered.contains(needle)
+            );
+        }
+    }
+
     /// Tests that media URL content parts are converted to empty placeholders.
     #[test]
     fn test_convert_media_url_to_placeholder_single_type() {
