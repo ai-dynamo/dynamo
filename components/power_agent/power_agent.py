@@ -465,8 +465,21 @@ class PowerAgent:
             k8s_config.load_kube_config()
         self._core_v1 = k8s_client.CoreV1Api()
 
-    def _list_pods_on_node(self) -> list:
-        """List all pods scheduled on this node."""
+    def _list_pods_on_node(self) -> Optional[list]:
+        """List all pods scheduled on this node.
+
+        Returns the pod list on success (an empty list is a *valid* success
+        result, meaning this node genuinely hosts no pods), or ``None`` to
+        signal that the listing FAILED (API error).
+
+        The ``None`` sentinel is deliberate and load-bearing: callers MUST
+        distinguish "the API call failed" from "this node has zero pods".
+        Returning ``[]`` for both would let a transient apiserver error look
+        identical to an empty node, silently re-deriving every GPU's cap from
+        a zero-pod view. ``reconcile_once`` keys its fail-safe (skip the cycle,
+        freeze each GPU at its last-known-good cap) off this ``None`` — so do
+        NOT collapse the failure path back to ``[]``.
+        """
         try:
             field_selector = (
                 f"spec.nodeName={self.node_name}" if self.node_name else None
@@ -482,8 +495,10 @@ class PowerAgent:
                 )
             return result.items
         except Exception as e:
-            logger.warning("Failed to list pods: %s", e)
-            return []
+            # Explicit failure result — see the contract in the docstring.
+            # Returning None (not []) is what keeps the reconcile fail-safe.
+            logger.warning("Failed to list pods on node: %s", e)
+            return None
 
     def _build_uid_to_annotation(self, pods: list) -> dict[str, Optional[str]]:
         """Map pod UID → power-limit annotation value (or None if absent/malformed)."""
@@ -497,6 +512,20 @@ class PowerAgent:
     def reconcile_once(self) -> None:
         """Run one reconcile cycle: list pods, map PIDs→UIDs, apply caps."""
         pods = self._list_pods_on_node()
+        if pods is None:
+            # Fail-safe: the pod listing failed (API error), so we have no
+            # trustworthy view of which pods own which GPUs this cycle. We
+            # deliberately SKIP the reconcile rather than proceed with an
+            # empty view — skipping freezes each GPU at its last-known-good
+            # cap until the next successful cycle, which is strictly safer
+            # than un-capping or re-deriving caps from a zero-pod snapshot.
+            # The cap state lives on the GPU (NVML) and the agent's managed
+            # set, so a skipped cycle loses nothing.
+            logger.warning(
+                "Pod listing unavailable this cycle; skipping reconcile to "
+                "preserve last-known-good caps."
+            )
+            return
         uid_to_annotation = self._build_uid_to_annotation(pods)
 
         for gpu_idx in range(self.device_count):
