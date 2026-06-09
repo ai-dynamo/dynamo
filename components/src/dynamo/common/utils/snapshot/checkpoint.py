@@ -6,8 +6,9 @@
 import asyncio
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 from .constants import (
     READY_FOR_CHECKPOINT_FILE,
@@ -17,6 +18,7 @@ from .constants import (
 )
 
 logger = logging.getLogger(__name__)
+EngineT = TypeVar("EngineT")
 
 # Poll interval for the snapshot-control directory. Checkpoint and restore
 # latencies are seconds, so 100ms is negligible overhead.
@@ -170,3 +172,17 @@ def configure_checkpoint_transport_env() -> None:
         )
     os.environ["TORCH_NCCL_ENABLE_MONITORING"] = "0"
     os.environ.setdefault("TORCH_NCCL_DUMP_ON_TIMEOUT", "0")
+
+
+@dataclass
+class EngineSnapshotController(Generic[EngineT]):
+    engine: EngineT
+    pause_controller: Any
+    checkpoint_config: CheckpointConfig
+    pause_args: tuple[object, ...] = ()
+
+    async def wait_for_restore(self) -> bool:
+        return await self.checkpoint_config.run_lifecycle(
+            self.pause_controller,
+            *self.pause_args,
+        )

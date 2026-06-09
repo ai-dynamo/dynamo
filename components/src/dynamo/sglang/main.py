@@ -11,6 +11,7 @@ from dynamo.common.config_dump import dump_config
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.common.utils.snapshot.restore_context import (
+    apply_snapshot_restore_config,
     is_restore_placeholder_mode,
     run_restore_placeholder,
 )
@@ -54,13 +55,7 @@ async def worker():
     snapshot_engine = None
     if snapshot_controller is not None:
         snapshot_engine = snapshot_controller.engine
-        restore_config = snapshot_controller.reload_restore_config(
-            namespace=dynamo_args.namespace,
-            discovery_backend=dynamo_args.discovery_backend,
-            request_plane=dynamo_args.request_plane,
-            event_plane=dynamo_args.event_plane,
-        )
-        restore_config.apply_to(dynamo_args)
+        apply_snapshot_restore_config(dynamo_args)
 
     shutdown_event = asyncio.Event()
     shutdown_endpoints: list = []

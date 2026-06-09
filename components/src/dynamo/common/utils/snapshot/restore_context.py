@@ -6,7 +6,6 @@
 import json
 import logging
 import os
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, NoReturn
 
@@ -26,70 +25,8 @@ from .constants import (
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class RestoreRuntimeConfig:
-    """Env-backed runtime fields refreshed from the restored environment.
-
-    CRIU restores checkpoint-time Python objects as well as checkpoint-time
-    process environment. After applying restore-time environment, callers use
-    this object to refresh only fields that were already parsed from env before
-    checkpoint and are consumed after restore.
-
-    Attributes:
-        namespace: Dynamo worker namespace after applying any worker suffix.
-        discovery_backend: Restore-time discovery backend.
-        request_plane: Restore-time request plane, when explicitly configured.
-        event_plane: Restore-time event plane, when explicitly configured.
-    """
-
-    namespace: str
-    discovery_backend: str
-    request_plane: str | None = None
-    event_plane: str | None = None
-
-    def apply_to(self, config: Any) -> None:
-        """Apply refreshed runtime fields to a backend config object."""
-
-        config.namespace = self.namespace
-        config.discovery_backend = self.discovery_backend
-        if self.request_plane is not None:
-            config.request_plane = self.request_plane
-        config.event_plane = self.event_plane
-
-
-@dataclass(frozen=True)
-class SnapshotRestoreContext:
-    """Restore-time environment captured by the restore placeholder.
-
-    Attributes:
-        env: Non-secret env values from the restore target container.
-        source: Human-readable source path or description.
-        env_applied: Whether env has already been applied to ``os.environ``.
-    """
-
-    env: dict[str, str | None]
-    source: str
-    env_applied: bool = False
-
-
-def reload_snapshot_restore_identity(
-    namespace: str,
-    discovery_backend: str,
-) -> tuple[str, str]:
-    restored = reload_snapshot_restore_config(
-        namespace=namespace,
-        discovery_backend=discovery_backend,
-    )
-    return restored.namespace, restored.discovery_backend
-
-
-def reload_snapshot_restore_config(
-    namespace: str,
-    discovery_backend: str,
-    request_plane: str | None = None,
-    event_plane: str | None = None,
-) -> RestoreRuntimeConfig:
-    """Apply restore-time env and return refreshed env-backed runtime fields.
+def apply_snapshot_restore_config(config: Any) -> None:
+    """Apply restore-time env to ``os.environ`` and a backend config object.
 
     CRIU restores the checkpoint-time process environment. The restore
     placeholder captures the restore pod's non-secret environment into the
@@ -99,54 +36,46 @@ def reload_snapshot_restore_config(
     or a missing ``DYN_SYSTEM_PORT``.
     """
 
-    restore_context = _load_snapshot_restore_context()
-    restore_env = restore_context.env
+    restore_env, source, env_applied = _load_snapshot_restore_env()
 
     refreshed_discovery_backend = _restore_env_value(
         restore_env,
         env_name="DYN_DISCOVERY_BACKEND",
-        fallback=discovery_backend,
+        fallback=config.discovery_backend,
     )
     if refreshed_discovery_backend != "kubernetes":
         logger.info(
             "Snapshot restore reusing configured discovery backend",
             extra={
-                "dynamo_namespace": namespace,
+                "dynamo_namespace": config.namespace,
                 "discovery_backend": refreshed_discovery_backend,
             },
         )
-        return RestoreRuntimeConfig(
-            namespace=namespace,
-            discovery_backend=refreshed_discovery_backend,
-            request_plane=_restore_env_value(
-                restore_env,
-                env_name="DYN_REQUEST_PLANE",
-                fallback=request_plane,
-            ),
-            event_plane=_restore_env_value(
-                restore_env,
-                env_name="DYN_EVENT_PLANE",
-                fallback=event_plane,
-            ),
-        )
+        config.discovery_backend = refreshed_discovery_backend
+        _apply_restore_planes(config, restore_env)
+        return
 
     os.environ["DYN_DISCOVERY_BACKEND"] = "kubernetes"
-    if not restore_context.env_applied:
-        _apply_restore_env(restore_env, source=restore_context.source)
+    if not env_applied:
+        _apply_restore_env(restore_env, source=source)
     _validate_kubernetes_restore_env()
-    return RestoreRuntimeConfig(
-        namespace=get_worker_namespace(),
-        discovery_backend="kubernetes",
-        request_plane=_restore_env_value(
-            restore_env,
-            env_name="DYN_REQUEST_PLANE",
-            fallback=request_plane,
-        ),
-        event_plane=_restore_env_value(
-            restore_env,
-            env_name="DYN_EVENT_PLANE",
-            fallback=event_plane,
-        ),
+    config.namespace = get_worker_namespace()
+    config.discovery_backend = "kubernetes"
+    _apply_restore_planes(config, restore_env)
+
+
+def _apply_restore_planes(config: Any, restore_env: dict[str, str | None]) -> None:
+    request_plane = _restore_env_value(
+        restore_env,
+        env_name="DYN_REQUEST_PLANE",
+        fallback=config.request_plane,
+    )
+    if request_plane is not None:
+        config.request_plane = request_plane
+    config.event_plane = _restore_env_value(
+        restore_env,
+        env_name="DYN_EVENT_PLANE",
+        fallback=config.event_plane,
     )
 
 
@@ -205,23 +134,19 @@ def _write_text_atomic(path: Path, contents: str) -> None:
     tmp_path.replace(path)
 
 
-def _load_snapshot_restore_context() -> SnapshotRestoreContext:
+def _load_snapshot_restore_env() -> tuple[dict[str, str | None], str, bool]:
     for context_path in _snapshot_restore_context_paths():
         if not context_path.is_file():
             continue
         payload = context_path.read_text(encoding="utf-8").strip()
         if not payload:
             continue
-        return _parse_and_apply_snapshot_restore_context_payload(
+        return _parse_and_apply_snapshot_restore_env(
             payload,
             source=str(context_path),
         )
 
-    return SnapshotRestoreContext(
-        env=_read_legacy_kubernetes_podinfo(),
-        source=PODINFO_ROOT,
-        env_applied=False,
-    )
+    return _read_legacy_kubernetes_podinfo(), PODINFO_ROOT, False
 
 
 def _snapshot_restore_context_paths() -> list[Path]:
@@ -229,10 +154,10 @@ def _snapshot_restore_context_paths() -> list[Path]:
     return [Path(control_dir) / SNAPSHOT_RESTORE_CONTEXT_FILE]
 
 
-def _parse_and_apply_snapshot_restore_context_payload(
+def _parse_and_apply_snapshot_restore_env(
     payload: str,
     source: str,
-) -> SnapshotRestoreContext:
+) -> tuple[dict[str, str | None], str, bool]:
     try:
         restore_context = json.loads(payload)
     except json.JSONDecodeError as exc:
@@ -250,11 +175,7 @@ def _parse_and_apply_snapshot_restore_context_payload(
     if not isinstance(env_config, dict):
         raise RuntimeError("snapshot restore context requires an object env field")
 
-    return SnapshotRestoreContext(
-        env=_apply_restore_env(env_config, source=source),
-        source=source,
-        env_applied=True,
-    )
+    return _apply_restore_env(env_config, source=source), source, True
 
 
 def _apply_restore_env(

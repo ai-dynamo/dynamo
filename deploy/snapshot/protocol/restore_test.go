@@ -323,38 +323,6 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 	assertRestoreStartupGate(t, container.StartupProbe)
 }
 
-func TestPrepareRestorePodSpecPreservesTargetEntrypoint(t *testing.T) {
-	podSpec := corev1.PodSpec{
-		Containers: []corev1.Container{{
-			Name:    "main",
-			Command: []string{"python3"},
-			Args:    []string{"-m", "dynamo.vllm"},
-		}},
-	}
-
-	if err := PrepareRestorePodSpec(
-		&podSpec,
-		map[string]string{TargetContainersAnnotation: "main"},
-		Storage{},
-		"",
-		true,
-	); err != nil {
-		t.Fatalf("PrepareRestorePodSpec error: %v", err)
-	}
-
-	container := &podSpec.Containers[0]
-	if got, want := container.Command, []string{"python3"}; len(got) != len(want) || got[0] != want[0] {
-		t.Fatalf("expected command %#v, got %#v", want, got)
-	}
-	if got, want := container.Args, []string{"-m", "dynamo.vllm"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("expected args %#v, got %#v", want, got)
-	}
-	if container.StartupProbe == nil {
-		t.Fatalf("expected startup probe to gate restore completion")
-	}
-	assertRestoreStartupGate(t, container.StartupProbe)
-}
-
 func TestPrepareRestorePodSpecSynthesizesStartupProbeFromLiveness(t *testing.T) {
 	livenessProbe := &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{

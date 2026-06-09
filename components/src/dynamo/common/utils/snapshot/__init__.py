@@ -3,8 +3,7 @@
 
 """Shared Dynamo snapshot helpers for checkpoint lifecycle."""
 
-from .checkpoint import CheckpointConfig
-from .controller import EngineSnapshotController
+from .checkpoint import CheckpointConfig, EngineSnapshotController
 
 __all__ = [
     "CheckpointConfig",
