@@ -1204,7 +1204,10 @@ mod tests {
 
     /// End-to-end render through the Nemotron-Parse pass-through chat template:
     /// a text+image chat request must produce exactly the control-token prompt,
-    /// with the image dropped from the rendered text.
+    /// with the image dropped from the rendered text. The renderer is agnostic
+    /// to the control tokens themselves (they are just the text part, passed
+    /// through verbatim), so both `predict_no_text_in_pic` and
+    /// `predict_text_in_pic` prompts round-trip identically.
     #[test]
     fn test_render_nemotron_parse_passthrough() {
         use super::super::tokcfg::ChatTemplate;
@@ -1217,24 +1220,29 @@ mod tests {
         let formatter =
             HfTokenizerConfigJsonFormatter::new(chat_template, ContextMixins::new(&[])).unwrap();
 
-        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
-            "model": "nvidia/NVIDIA-Nemotron-Parse-v1.2",
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "</s><s><predict_bbox><predict_classes><output_markdown><predict_no_text_in_pic>"},
-                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
-                ]
-            }]
-        }))
-        .unwrap();
-
-        let rendered = formatter.render(&request).unwrap();
-        assert_eq!(
-            rendered,
+        for prompt in [
             "</s><s><predict_bbox><predict_classes><output_markdown><predict_no_text_in_pic>",
-            "rendered prompt must be the control tokens only, with no JSON-serialized image array"
-        );
+            "</s><s><predict_bbox><predict_classes><output_markdown><predict_text_in_pic>",
+        ] {
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "nvidia/NVIDIA-Nemotron-Parse-v1.2",
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+                        ]
+                    }]
+                }))
+                .unwrap();
+
+            let rendered = formatter.render(&request).unwrap();
+            assert_eq!(
+                rendered, prompt,
+                "rendered prompt must be the control tokens only, with no JSON-serialized image array"
+            );
+        }
     }
 
     /// Tests that content arrays containing only non-text types remain as arrays,
