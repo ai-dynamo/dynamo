@@ -504,6 +504,11 @@ async def init_llm_worker(
         # The callback uses this to poll active request count during shutdown.
         if engine_holder is not None:
             engine_holder.append(engine)
+
+        snapshot_before_endpoint = getattr(runtime, "snapshot_before_endpoint", None)
+        if snapshot_before_endpoint is not None:
+            await snapshot_before_endpoint(engine, config)
+
         engine.start_health_monitor(runtime=runtime, shutdown_event=shutdown_event)
 
         endpoint = runtime.endpoint(

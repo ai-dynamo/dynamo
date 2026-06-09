@@ -4,12 +4,14 @@
 import asyncio
 import gc
 import logging
-from typing import Callable, Coroutine
+import os
+from typing import Any, Callable, Coroutine
 
 import uvloop
 
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.runtime import create_runtime
+from dynamo.common.utils.snapshot import CheckpointConfig, EngineSnapshotController
 from dynamo.runtime.logging import configure_dynamo_logging, get_bool_env_var
 from dynamo.trtllm.args import parse_args
 from dynamo.trtllm.constants import DisaggregationMode
@@ -21,6 +23,98 @@ shutdown_endpoints: list = []
 # Maximum time (seconds) to wait for in-flight requests to drain during shutdown.
 _DRAIN_TIMEOUT_S = 30.0
 _DRAIN_POLL_INTERVAL_S = 0.5
+
+
+class _NoOpSnapshotPauseController:
+    """Pause controller for pre-runtime TRT-LLM engine snapshots.
+
+    The snapshot hook runs after the TRT-LLM engine has loaded and before the
+    Dynamo runtime endpoint is created. There is no endpoint to drain or
+    unregister at this point, so keep the TRT-LLM/CUDA allocations resident and
+    only run Python GC before CRIU/cuda-checkpoint capture.
+    """
+
+    async def pause(self, *_args: object) -> bool:
+        gc.collect()
+        return True
+
+    async def resume(self) -> bool:
+        return True
+
+    def mark_resumed(self) -> None:
+        return None
+
+
+class _SnapshotRuntimeProxy:
+    """Delay Dynamo runtime creation until after TRT-LLM snapshot restore.
+
+    TRT-LLM initializes CUDA/OpenMPI state while creating the engine. For
+    snapshot mode we want that state captured, but we do not want the Dynamo
+    runtime endpoint and its network sockets in the checkpoint. This proxy is
+    passed through the normal worker initialization path and materializes the
+    real runtime only after restore.
+    """
+
+    def __init__(self, checkpoint_config: CheckpointConfig) -> None:
+        self._checkpoint_config = checkpoint_config
+        self._runtime: Any | None = None
+
+    async def snapshot_before_endpoint(self, engine: Any, config: Any) -> None:
+        if self._runtime is not None:
+            return
+
+        logging.info(
+            "Checkpoint mode enabled: TRT-LLM engine is initialized before "
+            "Dynamo runtime creation"
+        )
+        pause_controller = _NoOpSnapshotPauseController()
+        snapshot_controller = EngineSnapshotController(
+            engine=engine,
+            pause_controller=pause_controller,
+            checkpoint_config=self._checkpoint_config,
+        )
+
+        restored = await snapshot_controller.wait_for_restore()
+        if not restored:
+            logging.info(
+                "Initial TRT-LLM snapshot captured successfully; exiting "
+                "without destroying the engine"
+            )
+            os._exit(0)
+
+        config.namespace, config.discovery_backend = (
+            snapshot_controller.reload_restore_identity(
+                config.namespace,
+                config.discovery_backend,
+            )
+        )
+        self._runtime, _ = create_runtime(
+            discovery_backend=config.discovery_backend,
+            request_plane=config.request_plane,
+            event_plane=config.event_plane,
+        )
+        logging.info("Dynamo runtime created after TRT-LLM snapshot restore")
+
+    def _require_runtime(self) -> Any:
+        if self._runtime is None:
+            raise RuntimeError(
+                "Dynamo runtime is not available until the TRT-LLM snapshot "
+                "hook has restored and created it"
+            )
+        return self._runtime
+
+    def endpoint(self, *args: Any, **kwargs: Any) -> Any:
+        return self._require_runtime().endpoint(*args, **kwargs)
+
+    def register_engine_route(self, *args: Any, **kwargs: Any) -> Any:
+        return self._require_runtime().register_engine_route(*args, **kwargs)
+
+    def shutdown(self) -> None:
+        if self._runtime is not None:
+            self._runtime.shutdown()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._require_runtime(), name)
 
 
 def _make_drain_callback(
@@ -91,11 +185,17 @@ async def worker():
         )
 
     shutdown_event = asyncio.Event()
-    runtime, loop = create_runtime(
-        discovery_backend=config.discovery_backend,
-        request_plane=config.request_plane,
-        event_plane=config.event_plane,
-    )
+    checkpoint_config = CheckpointConfig.from_env()
+    runtime: Any
+    if checkpoint_config is None:
+        runtime, loop = create_runtime(
+            discovery_backend=config.discovery_backend,
+            request_plane=config.request_plane,
+            event_plane=config.event_plane,
+        )
+    else:
+        runtime = _SnapshotRuntimeProxy(checkpoint_config)
+        loop = asyncio.get_running_loop()
 
     # Only prefill workers need a drain callback.  When a prefill worker shuts
     # down, decode workers may still be reading its GPU memory via NIXL RDMA.
