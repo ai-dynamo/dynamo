@@ -65,6 +65,23 @@ where
             .collect()
     }
 
+    fn reconcile_worker_configs(
+        slots: &ActiveSequencesMultiWorker<P>,
+        current_workers: HashMap<WorkerId, C>,
+        last_workers: &mut Option<HashMap<WorkerId, C>>,
+    ) {
+        if last_workers.as_ref() == Some(&current_workers) {
+            return;
+        }
+
+        let dp_ranges = Self::worker_dp_ranges(&current_workers);
+        if let Err(error) = slots.reconcile_workers(dp_ranges) {
+            tracing::error!(%error, "Invalid worker topology update");
+            return;
+        }
+        *last_workers = Some(current_workers);
+    }
+
     /// Construct a scheduler with dequeue-time overlap refresh.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_overlap_refresh(
@@ -87,10 +104,15 @@ where
         if monitor_worker_configs {
             let slots_monitor = Arc::clone(&slots);
             let mut monitor_rx = workers_with_configs.clone();
-            let mut last_workers = monitor_rx.borrow().clone();
             let monitor_cancel_token = cancellation_token.clone();
             tokio::spawn(async move {
                 tracing::trace!("LocalScheduler workers monitoring task started");
+                let mut last_workers = None;
+                Self::reconcile_worker_configs(
+                    &slots_monitor,
+                    monitor_rx.borrow_and_update().clone(),
+                    &mut last_workers,
+                );
 
                 loop {
                     tokio::select! {
@@ -107,16 +129,11 @@ where
                     }
 
                     let current_workers = monitor_rx.borrow_and_update().clone();
-                    if current_workers == last_workers {
-                        continue;
-                    }
-
-                    let dp_ranges = Self::worker_dp_ranges(&current_workers);
-                    if let Err(error) = slots_monitor.reconcile_workers(dp_ranges) {
-                        tracing::error!(%error, "Invalid worker topology update");
-                        continue;
-                    }
-                    last_workers = current_workers;
+                    Self::reconcile_worker_configs(
+                        &slots_monitor,
+                        current_workers,
+                        &mut last_workers,
+                    );
                 }
             });
         }
@@ -1263,6 +1280,144 @@ mod tests {
         })
         .await
         .unwrap();
+
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_worker_watch_reconciles_current_snapshot_on_start() {
+        let mut initial_workers = HashMap::new();
+        initial_workers.insert(0, SimpleWorkerConfig::default());
+        let dp_range = initial_workers
+            .iter()
+            .map(|(&id, cfg)| (id, (cfg.data_parallel_start_rank, cfg.data_parallel_size)))
+            .collect();
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            64,
+            dp_range,
+            false,
+            0,
+            "test",
+        ));
+        let (cfg_tx, cfg_rx) = watch::channel(initial_workers);
+
+        let mut updated_workers = HashMap::new();
+        updated_workers.insert(0, SimpleWorkerConfig::default());
+        updated_workers.insert(1, SimpleWorkerConfig::default());
+        cfg_tx.send(updated_workers).unwrap();
+
+        let cancel_token = CancellationToken::new();
+        let scheduler = LocalScheduler::new_without_overlap_refresh(
+            Arc::clone(&slots),
+            cfg_rx,
+            None,
+            crate::scheduling::config::RouterQueueDepthTiers::unbounded_cap(),
+            64,
+            DefaultWorkerSelector::new(None, "test"),
+            FcfsPolicy,
+            None,
+            Duration::from_secs(60),
+            true,
+            cancel_token.clone(),
+            "test",
+            true,
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if scheduler
+                    .get_potential_loads(None, 64, HashMap::new(), true)
+                    .iter()
+                    .any(|load| load.worker_id == 1)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_worker_watch_reconciles_empty_snapshot_on_start() {
+        let mut initial_workers = HashMap::new();
+        initial_workers.insert(0, SimpleWorkerConfig::default());
+        let dp_range = initial_workers
+            .iter()
+            .map(|(&id, cfg)| (id, (cfg.data_parallel_start_rank, cfg.data_parallel_size)))
+            .collect();
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            64,
+            dp_range,
+            false,
+            0,
+            "test",
+        ));
+        let (cfg_tx, cfg_rx) = watch::channel(initial_workers);
+        cfg_tx.send(HashMap::new()).unwrap();
+
+        let cancel_token = CancellationToken::new();
+        let scheduler = LocalScheduler::new_without_overlap_refresh(
+            Arc::clone(&slots),
+            cfg_rx,
+            None,
+            crate::scheduling::config::RouterQueueDepthTiers::unbounded_cap(),
+            64,
+            DefaultWorkerSelector::new(None, "test"),
+            FcfsPolicy,
+            None,
+            Duration::from_secs(60),
+            true,
+            cancel_token.clone(),
+            "test",
+            true,
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if scheduler
+                    .get_potential_loads(None, 64, HashMap::new(), true)
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_worker_watch_disabled_freezes_slot_ranges() {
+        let mut workers = HashMap::new();
+        workers.insert(0, SimpleWorkerConfig::default());
+        let (scheduler, _slots, cfg_tx, cancel_token) = make_scheduler(workers, None, false, None);
+
+        assert_eq!(
+            scheduler
+                .get_potential_loads(None, 64, HashMap::new(), true)
+                .len(),
+            1
+        );
+
+        let mut updated_workers = HashMap::new();
+        updated_workers.insert(0, SimpleWorkerConfig::default());
+        updated_workers.insert(1, SimpleWorkerConfig::default());
+        cfg_tx.send(updated_workers).unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let loads = scheduler.get_potential_loads(None, 64, HashMap::new(), true);
+        assert_eq!(loads.len(), 1);
+        assert_eq!(loads[0].worker_id, 0);
 
         cancel_token.cancel();
     }

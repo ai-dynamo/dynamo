@@ -10,4 +10,5 @@ pub mod perf_model;
 pub mod protocols;
 pub mod running_mean;
 pub mod sequence;
+pub(crate) mod speculative;
 pub mod utils;

@@ -69,7 +69,9 @@ ARG SCCACHE_REGION=""
 
 # NIXL configuration
 ARG NIXL_UCX_REF={{ context.dynamo.nixl_ucx_ref }}
-{% if "nixl_ref" in context[framework] -%}
+{% if "nixl_ref" in context[framework].get(device_key, {}) -%}
+ARG NIXL_REF={{ context[framework][device_key].nixl_ref }}
+{% elif "nixl_ref" in context[framework] -%}
 ARG NIXL_REF={{ context[framework].nixl_ref }}
 {% endif -%}
 {% if device == "cuda" %}
@@ -114,6 +116,14 @@ ARG MODELEXPRESS_REF={{ context.vllm.modelexpress_ref }}
 # aws-sdk-cpp tag for the NIXL OBJ / S3 backend (built in wheel_builder).
 ARG AWS_SDK_CPP_VERSION={{ context.vllm.aws_sdk_cpp_version }}
 {% endif %}
+{%- endif -%}
+
+{% if framework == "sglang" and device == "xpu" -%}
+# SGLang XPU build: clone and build from source (no pre-built runtime image)
+ARG SGLANG_GIT_URL={{ context.sglang.xpu.sglang_git_url }}
+ARG SGLANG_REF={{ context.sglang.xpu.sglang_ref }}
+ARG SGLANG_KERNEL_GIT_URL={{ context.sglang.xpu.sglang_kernel_git_url }}
+ARG SGLANG_KERNEL_REF={{ context.sglang.xpu.sglang_kernel_ref }}
 {%- endif -%}
 
 {% if make_efa == true %}

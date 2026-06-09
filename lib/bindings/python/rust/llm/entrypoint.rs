@@ -750,7 +750,7 @@ async fn select_engine(
                 let moe_ep_size = mocker_args.aic_moe_ep_size;
                 let attention_dp_size = mocker_args.aic_attention_dp_size;
                 let nextn = mocker_args.aic_nextn;
-                let nextn_accept_rates = mocker_args.aic_nextn_accept_rates.as_deref();
+                let undiscounted_accept_rates = mocker_args.undiscounted_aic_accept_rates();
                 match Python::with_gil(|py| {
                     create_aic_callback(
                         py,
@@ -763,7 +763,7 @@ async fn select_engine(
                         moe_ep_size,
                         attention_dp_size,
                         nextn,
-                        nextn_accept_rates,
+                        undiscounted_accept_rates.as_deref(),
                     )
                 }) {
                     Ok(callback) => {

@@ -8,9 +8,6 @@ Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 # Python Libraries
 *.py @ai-dynamo/python-codeowners @ai-dynamo/Devops
 
-# Docs utility scripts (diagram generators, conversion tools — not production code)
-/docs/**/*.py
-
 # Container/Environments
 /container/ @ai-dynamo/Devops @ai-dynamo/dynamo-rust-codeowners @ai-dynamo/python-codeowners @ai-dynamo/dynamo-deploy-codeowners
 
@@ -59,3 +56,12 @@ CODEOWNERS @ai-dynamo/Devops
 /lib/bindings/python/tests/test_parsers.py @ai-dynamo/dynamo-parser-codeowners
 /lib/llm/tests/test_reasoning_parser.rs @ai-dynamo/dynamo-parser-codeowners
 /lib/llm/tests/test_streaming_tool_parsers.rs @ai-dynamo/dynamo-parser-codeowners
+
+# Docs — the docs group owns documentation surfaces: the docs site (docs/, fern/)
+# and the Markdown inside examples/ and recipes/. Code teams above still own all
+# non-Markdown (code, deploy configs) in examples/ and recipes/; only the prose
+# routes to the docs group. Placed last so these rules win (last match wins).
+/docs/ @ai-dynamo/dynamo-docs
+/fern/ @ai-dynamo/dynamo-docs
+/examples/**/*.md @ai-dynamo/dynamo-docs
+/recipes/**/*.md @ai-dynamo/dynamo-docs
