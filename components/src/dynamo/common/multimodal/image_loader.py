@@ -13,9 +13,7 @@ from urllib.parse import urlparse
 
 from PIL import Image
 
-import dynamo.nixl_connect as nixl_connect
 from dynamo.common.utils import nvtx_utils as _nvtx
-from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
 from dynamo.common.utils.runtime import run_async
 
 from ..http import HttpError, HttpStatusError, HttpTimeoutError, fetch_bytes
@@ -26,6 +24,31 @@ logger = logging.getLogger(__name__)
 # Constants for multimodal data variants
 URL_VARIANT_KEY: Final = "Url"
 DECODED_VARIANT_KEY: Final = "Decoded"
+
+
+def _create_nixl_connector() -> Any:
+    try:
+        import dynamo.nixl_connect as nixl_connect
+    except ImportError as exc:
+        raise RuntimeError(
+            "NIXL is required for frontend image decoding; install "
+            "dynamo.nixl_connect to enable decoded image transfers."
+        ) from exc
+
+    return nixl_connect.Connector()
+
+
+async def read_decoded_media_via_nixl(*args: Any, **kwargs: Any) -> Any:
+    try:
+        from dynamo.common.utils.media_nixl import (
+            read_decoded_media_via_nixl as _read_decoded_media_via_nixl,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "NIXL media utilities are required for frontend image decoding."
+        ) from exc
+
+    return await _read_decoded_media_via_nixl(*args, **kwargs)
 
 
 class ImageLoader:
@@ -61,7 +84,7 @@ class ImageLoader:
         # Lazy-init NIXL connector only when frontend decoding is enabled
         self._nixl_connector = None
         if self._enable_frontend_decoding:
-            self._nixl_connector = nixl_connect.Connector()
+            self._nixl_connector = _create_nixl_connector()
             run_async(
                 self._nixl_connector.initialize
             )  # Synchronously wait for async init
@@ -117,6 +140,15 @@ class ImageLoader:
         except HttpError as e:
             logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")
             raise
+        except Image.UnidentifiedImageError as e:
+            logger.error(f"Unsupported image format loading: '{image_url}'")
+            raise HttpStatusError(415, "Unsupported Media Type", image_url) from e
+        except ValueError as e:
+            if "Unsupported image format" in str(e):
+                logger.error(f"Unsupported image format loading: '{image_url}'")
+                raise HttpStatusError(415, "Unsupported Media Type", image_url) from e
+            logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")
+            raise ValueError(f"Failed to load image: '{image_url}': {e}") from e
         except Exception as e:
             logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")
             raise ValueError(f"Failed to load image: '{image_url}': {e}") from e
@@ -185,7 +217,15 @@ class ImageLoader:
                         raise ValueError(f"Invalid base64 encoding: {e}") from e
                     image_data = BytesIO(image_bytes)
                 return await self._open_image(image_data)
+            except Image.UnidentifiedImageError as e:
+                logger.error(f"Unsupported image format decoding: '{image_url}'")
+                raise HttpStatusError(415, "Unsupported Media Type", image_url) from e
             except Exception as e:
+                if "Unsupported image format" in str(e):
+                    logger.error(f"Unsupported image format decoding: '{image_url}'")
+                    raise HttpStatusError(
+                        415, "Unsupported Media Type", image_url
+                    ) from e
                 logger.error(f"{type(e).__name__} decoding image: '{image_url}': {e}")
                 raise ValueError(f"Failed to decoding image: '{image_url}': {e}") from e
 
@@ -210,7 +250,10 @@ class ImageLoader:
             List of loaded image data
 
         Raises:
-            Exception: If any image fails to load
+            HttpStatusError: If any image fails with an HTTP status error
+                (e.g. 415 Unsupported Media Type); the status is preserved so the
+                frontend returns the correct client-error code instead of 500.
+            Exception: If any image fails to load for any other reason
             ValueError: If enable_frontend_decoding=True but nixl_connector is None
         """
         image_futures = []
@@ -238,6 +281,7 @@ class ImageLoader:
         results = await asyncio.gather(*image_futures, return_exceptions=True)
         loaded_images = []
         collective_exceptions = ""
+        status_error: HttpStatusError | None = None
         for media_item, result in zip(image_mm_items, results):
             if isinstance(result, Exception):
                 source = media_item.get(URL_VARIANT_KEY, "decoded")
@@ -245,8 +289,17 @@ class ImageLoader:
                 collective_exceptions += (
                     f"Failed to load image from {source[:80]}...: {result}\n"
                 )
+                # Preserve HTTP status semantics (e.g. 415 Unsupported Media Type).
+                # Folding an HttpStatusError into a generic Exception below would
+                # strip the status and force the frontend back to a 500. Surface
+                # the first one so single-item batches keep their client-error code.
+                if status_error is None and isinstance(result, HttpStatusError):
+                    status_error = result
                 continue
             loaded_images.append(result)
+
+        if status_error is not None:
+            raise status_error
 
         if collective_exceptions:
             raise Exception(collective_exceptions)

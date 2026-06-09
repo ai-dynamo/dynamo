@@ -106,6 +106,22 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.txt
 
+# Vendored sglang patches for v${SGLANG_VER} — currently carries
+# sgl-project/sglang#25300 (mm_hashes interop). Drop on upstream bump.
+RUN --mount=type=bind,source=./container/deps/sglang/patches,target=/tmp/deps/sglang/patches \
+    SGLANG_VER=$(python3 -c 'import sglang; print(sglang.__version__)') && \
+    PATCH_DIR="/tmp/deps/sglang/patches/v${SGLANG_VER}" && \
+    if [ -d "$PATCH_DIR" ] && ls "$PATCH_DIR"/*.patch >/dev/null 2>&1; then \
+        echo "=== Applying vendored sglang patches from $PATCH_DIR ===" && \
+        for p in "$PATCH_DIR"/*.patch; do \
+            echo "--- $(basename "$p") ---"; \
+            patch -p2 --batch -d /sgl-workspace/sglang/python < "$p" || exit $?; \
+        done && \
+        echo "✓ sglang patches applied"; \
+    else \
+        echo "No vendored sglang patches for v${SGLANG_VER} (fine if upstream already includes them)"; \
+    fi
+
 # Copy tests, deploy and components for CI with correct ownership
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples

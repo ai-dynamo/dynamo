@@ -5,17 +5,16 @@ inference, metrics + Prometheus bridging, KV event publishing,
 KV-aware (DP-rank) routing, health-check canaries, OpenTelemetry
 tracing, and request-side guided decoding / structural tag.
 
-> **Work in progress.** Logprob response wire, multimodal, diffusion
-> (image/video/DLLM), LoRA, engine routes (sleep/wake, profiling,
-> weight updates), text-in-text-out, and snapshot/CRIU are still on
-> the non-unified path. See [Feature Gaps](#feature-gaps) for the
-> per-engine matrix.
+> **Work in progress.** Multimodal, diffusion (image/video/DLLM), LoRA,
+> engine routes (pause/resume, profiling, weight updates),
+> text-in-text-out, and snapshot/CRIU are still on the non-unified
+> path. See [Feature Gaps](#feature-gaps) for the per-engine matrix.
 
 > **Looking for a walkthrough?** Start with the
-> [Writing a Python Unified Backend](../../../../../docs/development/python-backend-guide.md)
-> guide. This README is the in-tree reference: file layout, per-engine
-> cancellation cookbook, disaggregation contract, error-handling table,
-> and the feature-gap matrix.
+> [Writing Unified Backends](../../../../../docs/development/unified-backends.md)
+> guide and choose the Python tab. This README is the in-tree reference:
+> file layout, per-engine cancellation cookbook, disaggregation contract,
+> error-handling table, and the feature-gap matrix.
 
 A two-class abstraction that separates **runtime integration** (common across
 all backends) from **engine logic** (vLLM, SGLang, TensorRT-LLM, etc.).
@@ -232,10 +231,10 @@ from dynamo.llm.exceptions import (
 The unified path supports the canonical PD-disagg roles via a single
 `--disaggregation-mode` flag. The mode flows from CLI → `WorkerConfig` →
 the Rust `Worker`, which uses it to decide model registration
-(`ModelType::Prefill` for prefill workers, the parsed `endpoint_types`
-for everyone else) and to disable the local KV indexer on decode
-workers. Engines read the same field on their runtime config to switch
-per-mode behavior in `generate()`.
+(`ModelType::empty()` + `WorkerType::Prefill` for prefill workers, the
+parsed `endpoint_types` for everyone else) and to disable the local KV
+indexer on decode workers. Engines read the same field on their runtime
+config to switch per-mode behavior in `generate()`.
 
 ```text
 +-----------+   --disaggregation-mode prefill    +------------------+
@@ -243,7 +242,7 @@ per-mode behavior in `generate()`.
 +-----------+                                    +------------------+
                                                           |
                                                           v
-                                          ModelType::Prefill registration
+                                          WorkerType::Prefill registration
                                           (Rust Worker)
 
                                                           |
@@ -402,6 +401,9 @@ common/backend/
     worker.py            # Worker + WorkerConfig (incl. disaggregation_mode)
     disagg.py            # Disagg request helpers (prefill clamp,
                          #   prefill_result extraction)
+    logprobs.py          # Shared logprob helpers
+                         #   (vLLM/TRT-LLM extractor, SGLang variant,
+                         #   option parsing, SGLang gate)
     metrics.py           # Prometheus helpers (gather_with_labels,
                          #   ensure_prometheus_multiproc_dir, registration)
     publisher.py         # ComponentSnapshot dataclass (push payload)
@@ -409,7 +411,7 @@ common/backend/
     sample_engine.py     # SampleLLMEngine (reference impl)
     sample_main.py       # Entry point for sample engine
     tests/               # test_backend_bindings, test_disagg_helpers,
-                         #   test_sample_engine
+                         #   test_logprobs, test_sample_engine
     CLAUDE.md            # Design notes (rationale, invariants)
 
 vllm/llm_engine.py       # VllmLLMEngine (agg + disagg)
@@ -437,10 +439,17 @@ Lifecycle and runtime:
 - `drain()` hook for pre-cleanup work
 - `DynamoException` error chain wrapping
 - Finish reason normalization handled by the Rust layer
+- Engine control plumbing, with per-backend profiling, pause/resume, and supported weight-update controls
 - **Disaggregated serving** (`agg`/`prefill`/`decode`) — KV transfer
   uses NIXL across all three engines; SGLang exchanges a Dynamo-level
   bootstrap address, vLLM and TRT-LLM use an engine-internal handshake.
   See [Disaggregated Serving](#disaggregated-serving) below.
+- **Logprobs** — selected-token + top-k logprob extraction and
+  streaming, sourced from `dynamo.common.backend.logprobs` and used by
+  both unified engines and the legacy handlers (which now delegate
+  here). vLLM/TRT-LLM share an extractor; SGLang has a cumulative-array
+  variant. The sample engine and Rust mocker emit synthetic logprobs
+  when `output_options.logprobs` is set.
 
 Observability:
 - **Health-check canary** — `health_check_payload()` + operator
@@ -486,19 +495,17 @@ Request handling:
 
 | Feature | Description |
 |---------|-------------|
-| Logprob response wire | Legacy handlers extract logprobs onto response chunks (`vllm/handlers.py:_extract_logprobs`, `sglang/.../decode_handler.py:_extract_logprobs`, `trtllm/.../handler_base.py:_extract_logprobs`); the unified `generate()` loops do not populate `log_probs` / `top_logprobs` / `cum_log_probs` on `GenerateChunk`. vLLM's `build_sampling_params` still passes `output_options.logprobs` to the engine on the unified path, so the engine computes them, but the values are dropped before reaching the chunk. SGLang and TRT-LLM unified `generate()` do not read `output_options.logprobs` at all. |
 | Text-in-text-out mode | OpenAI-compatible chat/completion with engine-side tokenization. Unified hardcodes `ModelInput.Tokens`. |
 | Multimodal | Images / video / embeddings, NIXL embedding transfer, encode workers. `worker.py:_to_rust_disaggregation_mode` rejects the `ENCODE` role. |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path. |
 | LoRA adapters | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization locks, per-request adapter threading on prefill. |
-| Engine routes | Profile start/stop, sleep / wake / quiesce, weight updates (disk / tensor / distributed / IPC), KV block clearing, prefix cache reset. |
 | Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload. |
 
 ### vLLM-specific gaps
 
 | Feature | Description |
 |---------|-------------|
-| Sleep/wake/quiesce | 3-level engine lifecycle control (`VllmEngineQuiesceController`) with shutdown-delay tags |
+| Sleep/wake | 3-level vLLM engine lifecycle control (`VllmEnginePauseController`) with shutdown-delay tags |
 | Elastic EP scaling | `scale_elastic_ep` endpoint with Ray node management |
 | GMS shadow mode | GPU Memory Service integration with failover lock (`--gms-shadow-mode`, `configure_gms_lock_mode`) |
 | ModelExpress P2P | Distributed model loading via P2P (`--model-express-url`, `register_modelexpress_loaders`, `mx-source` / `mx-target` load formats) |
@@ -523,7 +530,7 @@ Request handling:
 | Multimodal encode worker | Front-facing `MMEncoder`, embedding LRU cache, NIXL transfer (`MultimodalEncodeWorkerHandler`) |
 | Multimodal worker | Aggregated and disaggregated-prefill multimodal inference with `EmbeddingsProcessor` |
 | Deferred signal handling | `install_graceful_shutdown` captures SGLang's internal `loop.add_signal_handler` registrations for coordinated teardown |
-| Snapshot quiesce | Legacy `prepare_snapshot_engine` wires `SGLangEngineQuiesceController` to the shared `EngineSnapshotController` (CRIU + identity reload); unified path doesn't invoke it |
+| Snapshot pause | Legacy `prepare_snapshot_engine` wires `SGLangEnginePauseController` to the shared `EngineSnapshotController` (CRIU + identity reload); unified path doesn't invoke it |
 | Image/video health-check payloads | `ImageDiffusionHealthCheckPayload`, `VideoGenerationHealthCheckPayload` |
 | `register_model_with_readiness_gate` + image/video fast paths | `register.py` skips HF `config.json` download for `ModelType.Images` / `ModelType.Videos` |
 | Output modalities override | Required for diffusion workers (default `["text"]` -> `["image"]` / `["video"]`) |
@@ -536,7 +543,6 @@ Request handling:
 
 | Feature | Description |
 |---------|-------------|
-| Custom logits processors | `TrtllmDynamoLogitsAdapter` with CUDA stream support; legacy wraps user processors via `create_trtllm_adapters` |
 | Multimodal processing | `MultimodalRequestProcessor` with image URL fetching (`load_tensor_from_path_or_url`, httpx) and embedding injection |
 | Image / video diffusion | `DiffusionEngine`, auto-detect pipeline from `model_index.json`, MP4 encoding, `MediaOutput`, full `DiffusionConfig` flag family |
 | Encode helper (EPD) | Remote encode via `encode_client`, NIXL tensor reading; full `_encode_and_pack_disaggregated_params` flow |
@@ -555,21 +561,14 @@ Request handling:
 
 For users picking what to land next on the unified path:
 
-1. **Logprob response wire** — smallest lift. Wire
-   `output_options.{logprobs, prompt_logprobs}` through to each
-   engine's sampling params, and emit the engine's per-token
-   logprobs onto `GenerateChunk.{log_probs, top_logprobs,
-   cum_log_probs}` in each `generate()`. vLLM already has the
-   request-side passthrough (`build_sampling_params`); SGLang and
-   TRT-LLM unified `generate()` need it added.
-2. **Text-in-text-out** (`ModelInput.Text`) — common ask; needs
+1. **Text-in-text-out** (`ModelInput.Text`) — common ask; needs
    engine-side tokenization + chat templating path.
-3. **LoRA dynamic load/unload + MDC publishing** — production-visible
+2. **LoRA dynamic load/unload + MDC publishing** — production-visible
    feature with concrete API surface (three endpoints on vLLM
    `handlers.py`).
-4. **Engine routes / lifecycle endpoints** — sleep/wake, profile
+3. **Engine routes / lifecycle endpoints** — sleep/wake, profile
    start/stop, weight updates, KV block clearing, prefix cache
    reset. Visible in operator workflows.
-5. **Snapshot / CRIU** — production checkpoint support.
-6. **Multimodal / diffusion / video / DLLM** — biggest functional
+4. **Snapshot / CRIU** — production checkpoint support.
+5. **Multimodal / diffusion / video / DLLM** — biggest functional
    gap, but largest scope. Best parallelized across modality leads.
