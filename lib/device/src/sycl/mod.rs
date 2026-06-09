@@ -277,21 +277,40 @@ impl DeviceContextOps for SyclDeviceContext {
                             return Ok(addr);
                         }
                         Ok(None) => {} // NUMA node unknown, fall through
-                        Err(e) => return Err(anyhow::anyhow!(
-                            "NUMA-aware pinned allocation failed: {}", e
-                        )),
+                        Err(e) => {
+                            tracing::warn!(
+                                size,
+                                pci = %pci,
+                                error = %e,
+                                "NUMA-aware SYCL pinned allocation failed; falling back to process-wide SYCL allocation"
+                            );
+                        }
                     }
                 }
             }
         }
 
         // Fallback: non-NUMA SYCL host allocation.
-        let ptr = self
-            .shared_context
-            .malloc_host(size)
-            .map_err(|e| anyhow::anyhow!(
-                "SYCL host allocation failed ({} bytes): {}", size, e
-            ))?;
+        // If host USM is too constrained for a large G2 tier, fall back to
+        // shared USM, which remains host-visible and device-accessible.
+        let ptr = match self.shared_context.malloc_host(size) {
+            Ok(ptr) => ptr,
+            Err(host_err) => {
+                tracing::warn!(
+                    size,
+                    error = %host_err,
+                    "SYCL malloc_host failed; falling back to malloc_shared for pinned allocation"
+                );
+                self.shared_context
+                    .malloc_shared(&self.device, size)
+                    .map_err(|shared_err| anyhow::anyhow!(
+                        "SYCL host allocation failed ({} bytes): {}; fallback malloc_shared also failed: {}",
+                        size,
+                        host_err,
+                        shared_err
+                    ))?
+            }
+        };
         let addr = ptr as u64;
         track_alloc(&HOST_ALLOCS, addr);
         Ok(addr)

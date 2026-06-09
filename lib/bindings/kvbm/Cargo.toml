@@ -33,9 +33,13 @@ v2 = [
     "kvbm-connector/static-kernels",
     "dep:kvbm-common",
 ]
-cuda = ["kvbm-connector/cuda"]
-xpu-sycl = ["kvbm-connector/xpu-sycl"]
-kernels = ["dep:kvbm-kernels", "dep:cudarc", "dep:once_cell"]
+cuda = ["kvbm-connector/cuda", "dynamo-device/cuda"]
+xpu-sycl = [
+    "kvbm-connector/xpu-sycl",
+    "dynamo-device/xpu-sycl",
+    "kvbm-kernels?/xpu-sycl-permute",
+]
+kernels = ["dep:kvbm-kernels", "dep:cudarc", "dep:once_cell", "dep:dynamo-device"]
 # Hub-facing pyclasses: `PrefillRouterHandler` + `CompletionEvent`. Pulls
 # kvbm-hub + velo. Independent of the v2 connector, so a slim hub-only
 # wheel is possible by disabling the v2 default feature.
@@ -60,6 +64,7 @@ kvbm-connector = { path = "../../kvbm-connector", optional = true, default-featu
 
 # kernels deps (optional)
 kvbm-kernels = { path = "../../kvbm-kernels", optional = true }
+dynamo-device = { path = "../../device", optional = true, default-features = false }
 
 # hub deps (optional)
 kvbm-hub = { path = "../../kvbm-hub", optional = true }

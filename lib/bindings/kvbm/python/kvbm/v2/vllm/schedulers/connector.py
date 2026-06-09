@@ -303,10 +303,10 @@ class DynamoConnector(KVConnectorBase_V1):
                 select_fc_for_model,
             )
             from vllm.distributed.kv_transfer.kv_connector.utils import (
-                get_current_attn_backends,
+                get_current_attn_backend,
             )
 
-            backends = list(get_current_attn_backends(self._vllm_config))
+            backends = list(get_current_attn_backend(self._vllm_config))
         except Exception as e:
             print(
                 f"[KVBM] prefer_cross_layer_blocks auto-detect failed to "

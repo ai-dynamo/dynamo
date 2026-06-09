@@ -59,6 +59,31 @@ use kvbm_engine::worker::{DirectWorker, WorkerTransfers};
 use kvbm_physical::TransferOptions;
 use kvbm_physical::device::{DeviceEvent, DeviceStream};
 
+fn effective_device_backend(configured: DeviceBackend) -> DeviceBackend {
+    if configured.is_available() {
+        return configured;
+    }
+
+    match DeviceBackend::detect_backend() {
+        Ok(detected) => {
+            tracing::warn!(
+                configured = %configured.name(),
+                detected = %detected.name(),
+                "Configured backend unavailable; falling back to detected backend"
+            );
+            detected
+        }
+        Err(err) => {
+            tracing::warn!(
+                configured = %configured.name(),
+                error = %err,
+                "Configured backend unavailable and auto-detect failed; keeping configured backend"
+            );
+            configured
+        }
+    }
+}
+
 pub trait ConnectorWorkerInterface: Send + Sync {
     /// Register KV cache tensors (deferred mode - caches state for later).
     ///
@@ -215,7 +240,7 @@ impl ConnectorWorker {
         velo::service::init(&messenger, Arc::clone(&state));
 
         // Get backend from runtime config
-        let backend = runtime.config().backend;
+        let backend = effective_device_backend(runtime.config().backend);
 
         Self {
             runtime,

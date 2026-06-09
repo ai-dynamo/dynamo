@@ -36,7 +36,7 @@ from kvbm.v2.vllm.dim_probe import (
     derive_block_layout,
     select_fc_variant,
 )
-from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
+from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backend
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
 )
@@ -141,15 +141,15 @@ class SchedulerConnectorWorker:
         # Sentinel-probed in `register_kv_caches` to derive `KvDimLayout` /
         # `KvBlockLayout`. Mirrors NIXL's pattern at
         # `vllm/distributed/kv_transfer/kv_connector/v1/nixl/worker.py:316`.
-        self._attn_backends = get_current_attn_backends(vllm_config)
+        self._attn_backends = [get_current_attn_backend(vllm_config)]
         if not self._attn_backends:
-            # `get_current_attn_backends` is supposed to fall back to
+            # `get_current_attn_backend` is supposed to fall back to
             # `get_attn_backend(...)` when `static_forward_context` is empty
             # (`utils.py:873-886`); an empty result here indicates an
             # unexpected vLLM init order — fail loudly so register_kv_caches
             # doesn't blow up later with a confusing IndexError.
             raise RuntimeError(
-                "get_current_attn_backends(vllm_config) returned an empty "
+                "get_current_attn_backend(vllm_config) returned an empty "
                 "list — vLLM static_forward_context appears to be empty at "
                 "connector init time. File a bug."
             )
@@ -503,6 +503,55 @@ class SchedulerConnectorWorker:
         """
         self.worker.start_load_kv()
 
+    def _get_current_stream_handle(self) -> int:
+        """Return raw stream handle for the active backend (CUDA or XPU/SYCL)."""
+        stream = None
+
+        # Prefer XPU stream when available to match SYCL runtime execution.
+        if (
+            hasattr(torch, "xpu")
+            and hasattr(torch.xpu, "is_available")
+            and torch.xpu.is_available()
+        ):
+            stream = torch.xpu.current_stream()
+        elif torch.cuda.is_available():
+            stream = torch.cuda.current_stream()
+        elif hasattr(torch, "cuda") and hasattr(torch.cuda, "current_stream"):
+            stream = torch.cuda.current_stream()
+
+        if stream is None:
+            raise RuntimeError(
+                "No active CUDA/XPU stream found while waiting for layer load"
+            )
+
+        # PyTorch stream objects expose backend-specific raw handles.
+        for attr in ("cuda_stream", "sycl_queue", "stream", "handle"):
+            if not hasattr(stream, attr):
+                continue
+
+            value = getattr(stream, attr)
+            if callable(value):
+                value = value()
+            if value is None:
+                continue
+
+            if hasattr(value, "value"):
+                value = value.value
+
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+
+        try:
+            return int(stream)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "Unable to derive raw stream handle from current stream "
+                f"object of type {type(stream).__name__}. "
+                "Expected one of: cuda_stream, sycl_queue, stream, or handle."
+            ) from exc
+
     def save_kv_layer(
         self,
         layer_name: str,
@@ -523,9 +572,7 @@ class SchedulerConnectorWorker:
         """
         layer_index = self.layer_name_to_index[layer_name]
 
-        # Get the current CUDA stream handle
-        stream = torch.cuda.current_stream()
-        stream_handle = stream.cuda_stream
+        stream_handle = self._get_current_stream_handle()
 
         # Call Rust - returns early if no action needed for this layer
         self.worker.save_kv_layer(layer_index, stream_handle)
@@ -537,14 +584,12 @@ class SchedulerConnectorWorker:
         """
         Wait for a specific layer's KV cache load to complete.
 
-        If intra-pass onboarding was triggered, this inserts a cudaStreamWaitEvent
+        If intra-pass onboarding was triggered, this inserts a stream wait-event
         on the current torch stream to synchronize with the layer's onboard completion.
         """
         layer_index = self.layer_name_to_index[layer_name]
 
-        # Get the current CUDA stream handle
-        stream = torch.cuda.current_stream()
-        stream_handle = stream.cuda_stream
+        stream_handle = self._get_current_stream_handle()
 
         # Call Rust - returns early if no intra-pass onboarding is active
         self.worker.wait_for_layer_load(layer_index, stream_handle)

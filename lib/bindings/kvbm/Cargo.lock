@@ -3146,6 +3146,7 @@ version = "1.2.0"
 dependencies = [
  "anyhow",
  "cudarc",
+ "dynamo-device",
  "kvbm-common",
  "kvbm-connector",
  "kvbm-hub",
