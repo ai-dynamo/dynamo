@@ -10,7 +10,7 @@ import uvloop
 from dynamo.common.config_dump import dump_config
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.runtime import create_runtime
-from dynamo.common.utils.snapshot.restore_context import (
+from dynamo.common.snapshot.restore_context import (
     apply_snapshot_restore_config,
     maybe_run_restore_placeholder_mode,
 )

@@ -9,8 +9,6 @@ import os
 from pathlib import Path
 from typing import Any, Mapping
 
-from dynamo.common.utils.namespace import get_worker_namespace
-
 from .constants import (
     KUBERNETES_OPTIONAL_PODINFO_FILES,
     KUBERNETES_REQUIRED_PODINFO_FILES,
@@ -63,7 +61,9 @@ def apply_snapshot_restore_config(config: Any) -> None:
             raise RuntimeError("snapshot restore context requires an object payload")
         version = restore_context.get("version")
         if version != 1:
-            raise RuntimeError(f"unsupported snapshot restore context version {version!r}")
+            raise RuntimeError(
+                f"unsupported snapshot restore context version {version!r}"
+            )
 
         env_config = restore_context.get("env")
         if not isinstance(env_config, dict):
@@ -121,7 +121,11 @@ def apply_snapshot_restore_config(config: Any) -> None:
                 "snapshot restore context requires a non-empty "
                 f"{env_name} for kubernetes discovery"
             )
-    config.namespace = get_worker_namespace()
+    namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
+    suffix = os.environ.get("DYN_NAMESPACE_WORKER_SUFFIX")
+    if suffix:
+        namespace = f"{namespace}-{suffix}"
+    config.namespace = namespace
     config.discovery_backend = "kubernetes"
     _apply_restore_planes(config, restore_env)
 

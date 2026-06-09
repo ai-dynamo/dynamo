@@ -6,7 +6,7 @@ import os
 if "PYTHONHASHSEED" not in os.environ:
     os.environ["PYTHONHASHSEED"] = "0"
 
-from dynamo.common.utils.snapshot.restore_context import (
+from dynamo.common.snapshot.restore_context import (
     maybe_run_restore_placeholder_mode,
 )
 

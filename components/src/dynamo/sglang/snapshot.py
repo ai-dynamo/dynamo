@@ -9,7 +9,7 @@ import time
 
 import sglang as sgl
 
-from dynamo.common.utils.snapshot import CheckpointConfig, EngineSnapshotController
+from dynamo.common.snapshot import CheckpointConfig, EngineSnapshotController
 
 from .pause import SGLangEnginePauseController
 
