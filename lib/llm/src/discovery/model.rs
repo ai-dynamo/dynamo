@@ -480,15 +480,13 @@ impl Model {
     /// The `extract` closure should return `Some(value)` if the WorkerSet has the
     /// desired engine, or `None` if it doesn't.
     ///
-    /// Selection is also confined to namespaces whose worker set is
-    /// topologically complete (`is_workers_ready`). Without this, a model with
-    /// two deployments — one ready, one missing a role (e.g. a decode-only
-    /// namespace with no prefill peer) — could route a request to the
-    /// incomplete deployment, which would accept it and then fail. The
-    /// model-level gate (`has_ready_workers`) only guarantees *some* namespace
-    /// is ready; this filter ensures we actually pick from a ready one.
-    /// Legacy (pre-`worker_type`) cards are treated as ready when live by
-    /// `is_workers_ready`, so cross-version behavior is preserved.
+    /// Selection is also confined to namespaces with a complete worker set
+    /// (`is_workers_ready` — all required roles present and live). Without this,
+    /// a model with two deployments — one ready, one missing a role (e.g. a
+    /// decode-only namespace with no prefill peer) — could route to the
+    /// incomplete one, which accepts the request then fails. Legacy
+    /// (pre-`worker_type`) cards are treated as ready when live, so
+    /// cross-version behavior is preserved.
     fn select_worker_set_with<T, F>(&self, extract: F) -> Option<T>
     where
         F: Fn(&WorkerSet) -> Option<T>,
