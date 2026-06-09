@@ -16,6 +16,7 @@ use modelexpress_common::providers::{HuggingFaceProvider, ModelProviderTrait as 
 
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
+use crate::http::service::admission::FrontendAdmissionConfig;
 use crate::model_card::{ModelDeploymentCard, is_weight_file};
 use crate::model_type::{ModelInput, ModelType};
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
@@ -65,6 +66,7 @@ pub struct LocalModelBuilder {
     tls_key_path: Option<PathBuf>,
     migration_limit: u32,
     migration_max_seq_len: Option<u32>,
+    frontend_admission_config: FrontendAdmissionConfig,
     is_mocker: bool,
     extra_engine_args: Option<PathBuf>,
     runtime_config: ModelRuntimeConfig,
@@ -95,6 +97,7 @@ impl Default for LocalModelBuilder {
             router_config: Default::default(),
             migration_limit: Default::default(),
             migration_max_seq_len: Default::default(),
+            frontend_admission_config: Default::default(),
             is_mocker: Default::default(),
             extra_engine_args: Default::default(),
             runtime_config: Default::default(),
@@ -212,6 +215,11 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn frontend_admission_config(&mut self, config: FrontendAdmissionConfig) -> &mut Self {
+        self.frontend_admission_config = config;
+        self
+    }
+
     pub fn is_mocker(&mut self, is_mocker: bool) -> &mut Self {
         self.is_mocker = is_mocker;
         self
@@ -303,6 +311,7 @@ impl LocalModelBuilder {
                 namespace_prefix: self.namespace_prefix.clone(),
                 migration_limit: self.migration_limit,
                 migration_max_seq_len: self.migration_max_seq_len,
+                frontend_admission_config: self.frontend_admission_config.clone(),
                 self_host_metadata: self.self_host_metadata,
                 attached_self_host_suffix: None,
             });
@@ -360,6 +369,7 @@ impl LocalModelBuilder {
             namespace_prefix: self.namespace_prefix.clone(),
             migration_limit: self.migration_limit,
             migration_max_seq_len: self.migration_max_seq_len,
+            frontend_admission_config: self.frontend_admission_config.clone(),
             self_host_metadata: self.self_host_metadata,
             attached_self_host_suffix: None,
         })
@@ -383,6 +393,7 @@ pub struct LocalModel {
     namespace_prefix: Option<String>,
     migration_limit: u32,
     migration_max_seq_len: Option<u32>,
+    frontend_admission_config: FrontendAdmissionConfig,
     self_host_metadata: bool,
     /// Set by `move_to_self_host` so `clear_self_hosted_artifacts`
     /// scopes its unregister to this model's `(slug, suffix)` only.
@@ -456,6 +467,10 @@ impl LocalModel {
 
     pub fn migration_max_seq_len(&self) -> Option<u32> {
         self.migration_max_seq_len
+    }
+
+    pub fn frontend_admission_config(&self) -> &FrontendAdmissionConfig {
+        &self.frontend_admission_config
     }
 
     pub fn namespace(&self) -> Option<&str> {

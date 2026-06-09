@@ -2795,8 +2795,13 @@ class EntrypointArgs:
         is_prefill: bool = False,
         is_decode: bool = False,
         migration_limit: int = 0,
+        migration_max_seq_len: Optional[int] = None,
         chat_engine_factory: Optional[Callable] = None,
         aic_perf_config: Optional[AicPerfConfig] = None,
+        frontend_admission_control: str = "none",
+        frontend_lag_threshold_ms: int = 50,
+        frontend_lag_check_interval_ms: int = 10,
+        frontend_lag_cooldown_ms: int = 1000,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -2823,8 +2828,13 @@ class EntrypointArgs:
             is_prefill: Whether this is a prefill worker
             is_decode: Whether this is a decode worker (disaggregated); pairs with a prefill peer for readiness
             migration_limit: Maximum number of request migrations (0=disabled)
+            migration_max_seq_len: Maximum sequence length eligible for request migration
             chat_engine_factory: Optional Python chat completions engine factory callback
             aic_perf_config: Optional AIC perf-model configuration for default KV routing
+            frontend_admission_control: Frontend admission control mode (none or tokio-lag)
+            frontend_lag_threshold_ms: Tokio scheduling lag threshold for frontend admission
+            frontend_lag_check_interval_ms: Tokio scheduling lag canary check interval
+            frontend_lag_cooldown_ms: Frontend admission overload cooldown
         """
         ...
 

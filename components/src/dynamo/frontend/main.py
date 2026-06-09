@@ -249,6 +249,10 @@ async def async_main():
         "kv_cache_block_size": config.kv_cache_block_size,
         "router_config": router_config,
         "migration_limit": config.migration_limit,
+        "frontend_admission_control": config.frontend_admission_control,
+        "frontend_lag_threshold_ms": config.frontend_lag_threshold_ms,
+        "frontend_lag_check_interval_ms": config.frontend_lag_check_interval_ms,
+        "frontend_lag_cooldown_ms": config.frontend_lag_cooldown_ms,
     }
     if config.migration_max_seq_len is not None:
         kwargs["migration_max_seq_len"] = config.migration_max_seq_len
