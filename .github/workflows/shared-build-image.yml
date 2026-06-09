@@ -307,16 +307,20 @@ jobs:
 
           CACHE_ARGS=""
           if [[ "${{ inputs.no_cache }}" == "true" ]]; then
-            # Probe: bypass the EPP :cache import too — the registry-mode
-            # cache for EPP may be importing a stage-2 layer from a build
-            # that predated the recent /sbom-go.cdx.json COPY addition,
-            # which would explain why the just-built EPP image is missing
-            # /sbom-go.cdx.json despite the Dockerfile clearly emitting it.
             CACHE_ARGS+="--no-cache "
           else
-            CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/${EPP_REPOSITORY}:cache "
+            # Content-addressed cache tag: key the registry :cache on a hash of
+            # the EPP Dockerfile so any Dockerfile change (e.g. adding the
+            # /sbom-go.cdx.json COPY) lands in a fresh cache namespace. A fixed
+            # :cache tag could otherwise import a go-builder layer pushed by a
+            # build that predated a new COPY, silently producing an EPP image
+            # missing /sbom-go.cdx.json — BuildKit validates layer digests, not
+            # file contents. The old fixed :cache tag is simply orphaned.
+            EPP_CACHE_KEY="$(sha256sum deploy/inference-gateway/epp/Dockerfile | cut -c1-12)"
+            EPP_CACHE_REF="${ECR_HOSTNAME}/${EPP_REPOSITORY}:cache-${EPP_CACHE_KEY}"
+            CACHE_ARGS+="--cache-from type=registry,ref=${EPP_CACHE_REF} "
             if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-              CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/${EPP_REPOSITORY}:cache,mode=max "
+              CACHE_ARGS+="--cache-to type=registry,ref=${EPP_CACHE_REF},mode=max "
             fi
           fi
 
