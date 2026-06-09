@@ -66,6 +66,13 @@ RUN --mount=from=wheel_builder,source=/usr/local/libfabric,target=/tmp/libfabric
         echo "[aws] libfabric overlay: skipped (EFA stock ${EFA_LIBFABRIC_RAW:-unknown} >= ${REF_VER})"; \
     fi
 
+{% if device == "cuda" %}
+# Reuse the gdrcopy userspace libs built in wheel_builder. /usr/lib64 is not on
+# the default ldconfig path on Ubuntu, so register it like dev.Dockerfile does.
+COPY --from=wheel_builder /usr/lib64/libgdrapi.so* /usr/lib64/
+RUN echo "/usr/lib64" >> /etc/ld.so.conf.d/gdrcopy.conf && ldconfig
+{% endif %}
+
 {% if framework == "trtllm" %}
 # After the upstream mesonpy refactor, libplugin_LIBFABRIC.so lands under the
 # Dynamo venv while the rest of the NIXL plugin set (GDS/UCX/POSIX) remains at
