@@ -226,19 +226,22 @@ impl PrefillRouter {
             .generate_to_worker(request, target_worker)
             .await
             .map_err(|e| {
-                // A shed prefill worker returns ResourceExhausted; the generic
-                // PrefillError wrapper erases its downcast identity, so emit the
-                // dedicated WorkerOverloaded variant to keep the chain mappable to 503.
+                // A shed prefill worker returns ResourceExhausted. Carry it as the
+                // source so the chain stays downcastable to 503; boxing the raw
+                // anyhow error instead would hide that identity.
                 if match_error_chain(e.as_ref(), &[ErrorType::ResourceExhausted], &[]) {
                     tracing::info!(
                         worker_error = %e,
                         "Request rejected by prefill worker (at capacity) — returning HTTP 503"
                     );
-                    return PrefillError::WorkerOverloaded(
-                        DynamoError::builder()
-                            .error_type(ErrorType::ResourceExhausted)
-                            .message(e.to_string())
-                            .build(),
+                    return PrefillError::PrefillError(
+                        "prefill worker overloaded".to_string(),
+                        Some(Box::new(
+                            DynamoError::builder()
+                                .error_type(ErrorType::ResourceExhausted)
+                                .message(e.to_string())
+                                .build(),
+                        )),
                     );
                 }
                 PrefillError::PrefillError(
