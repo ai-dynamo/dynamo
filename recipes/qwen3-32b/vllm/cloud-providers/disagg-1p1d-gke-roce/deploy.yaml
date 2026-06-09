@@ -127,11 +127,10 @@ spec:
           # own, so no explicit NIC pin is needed.
           - { name: NCCL_SOCKET_IFNAME, value: "eth0" }
           - { name: NCCL_CROSS_NIC,     value: "0" }
-          # --- GKE NCCL/GIB plugin + driver libs (mounted from host) ---
-          # /opt/nvidia/nvda_nixl/lib64 must come FIRST so NIXL_TELEMETRY_ENABLE=y can
-          # load libcore.so.1.3 (otherwise libtelemetry_exporter_prometheus.so fails
-          # and engine init crashes — same gotcha as the AWS EFA recipe).
-          - { name: LD_LIBRARY_PATH,    value: "/opt/nvidia/nvda_nixl/lib64:/usr/local/gib/lib64:/usr/local/nvidia/lib64" }
+          # --- GKE NCCL/GIB plugin + driver libs are host-mounted (volumes below) ---
+          # No LD_LIBRARY_PATH override needed: the image default already carries
+          # /opt/nvidia/nvda_nixl/lib64 (so NIXL telemetry loads), and the GPU runtime
+          # resolves the host-mounted driver libs.
           - { name: NCCL_DEBUG,         value: "WARN" }
           # --- Dynamo / vLLM ---
           - { name: DYN_HEALTH_CHECK_ENABLED, value: "false" }
@@ -259,10 +258,7 @@ spec:
           # NOTE: no UCX_TLS and no UCX_NET_DEVICES — see prefill block; let UCX auto-probe.
           - { name: NCCL_SOCKET_IFNAME, value: "eth0" }
           - { name: NCCL_CROSS_NIC,     value: "0" }
-          # /opt/nvidia/nvda_nixl/lib64 must come FIRST so NIXL_TELEMETRY_ENABLE=y can
-          # load libcore.so.1.3 (otherwise libtelemetry_exporter_prometheus.so fails
-          # and engine init crashes — same gotcha as the AWS EFA recipe).
-          - { name: LD_LIBRARY_PATH,    value: "/opt/nvidia/nvda_nixl/lib64:/usr/local/gib/lib64:/usr/local/nvidia/lib64" }
+          # No LD_LIBRARY_PATH override — see prefill block.
           - { name: NCCL_DEBUG,         value: "WARN" }
           - { name: DYN_HEALTH_CHECK_ENABLED, value: "false" }
           - { name: HF_HOME,                  value: /shared-models }

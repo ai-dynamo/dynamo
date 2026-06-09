@@ -8,7 +8,7 @@ This is the **GCP GKE / A4X / RoCEv2-over-ConnectX-7** member of the cross-provi
 |---|---|
 | **RDMA NIC attachment** | Pod-level Multus annotation `networking.gke.io/interfaces` listing `rdma-0..rdma-3` (4 NICs) |
 | **NIXL backend selection** | Defaults (UCX); no `DYN_KVBM_NIXL_BACKEND_*` env |
-| **Transport env** | `LD_LIBRARY_PATH=/opt/nvidia/nvda_nixl/lib64:/usr/local/gib/lib64:/usr/local/nvidia/lib64`. **No `UCX_TLS`** and **no `UCX_NET_DEVICES`** — UCX auto-probe binds the 4 RoCE NICs (rc_mlx5 over mlx5_0..3) on A4X; allowlists break wireup AM selection. |
+| **Transport env** | None overridden — UCX auto-probe binds the 4 RoCE NICs (rc_mlx5 over mlx5_0..3) on A4X, so `UCX_TLS`/`UCX_NET_DEVICES` stay unset, and the image's default `LD_LIBRARY_PATH` (already carries the NIXL libs) is used as-is. |
 | **HostPath mounts** | `/home/kubernetes/bin/gib` → `/usr/local/gib`, `/home/kubernetes/bin/nvidia` → `/usr/local/nvidia` (GIB NCCL plugin + GKE-injected NVIDIA driver libs) |
 
 ## GKE-A4X-specific findings
