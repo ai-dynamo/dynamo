@@ -12,7 +12,7 @@ const SUPPORTED_CONTROLS: [&str; 3] = ["sleep", "wake_up", "reset_prefix_cache"]
 pub(crate) fn supported_controls() -> Vec<String> {
     SUPPORTED_CONTROLS
         .iter()
-        .map(|control| (*control).to_string())
+        .map(|control| control.to_string())
         .collect()
 }
 

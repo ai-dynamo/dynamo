@@ -4,6 +4,7 @@
 //! Rust-based native vLLM backend using the backend-common [`LLMEngine`] contract.
 
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -147,7 +148,7 @@ impl VllmBackend {
             disaggregation_mode,
             args.engine_ready_timeout_secs,
             args.managed_engine,
-            args.extra.clone(),
+            args.extra,
         );
         let (tool_call_parser, reasoning_parser) = if disaggregation_mode.is_prefill() {
             (None, None)
@@ -402,16 +403,21 @@ impl LLMEngine for VllmBackend {
         let llm_result = llm.shutdown().await;
         let engine_result = engine_handle.shutdown(Duration::from_secs(0)).await;
 
+        let mut shutdown_errors = Vec::new();
         if let Err(error) = llm_result {
-            return Err(engine_shutdown(format!(
+            shutdown_errors.push(format!(
                 "failed to shut down vLLM engine-core client: {error}"
-            )));
+            ));
         }
         if let Err(error) = engine_result {
-            return Err(engine_shutdown(format!(
+            shutdown_errors.push(format!(
                 "failed to shut down managed vLLM engine: {error:#}"
-            )));
+            ));
         }
+        if !shutdown_errors.is_empty() {
+            return Err(engine_shutdown(shutdown_errors.join("; ")));
+        }
+
         info!(model = %self.model, "vLLM backend cleanup complete");
         Ok(())
     }
