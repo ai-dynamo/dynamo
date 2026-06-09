@@ -529,10 +529,9 @@ class ReplayPlannerAdapter:
         self, tick: ScheduledTick, result: dict[str, Any]
     ) -> TickInput:
         """Convert bridge result dict to planner TickInput."""
-        # ``advance_to(tick.at_s)`` may leave the bridge's logical clock at the
-        # last engine event before the scheduled tick. The planner cadence must
-        # advance on the scheduled replay clock, otherwise an idle gap before
-        # the next arrival can repeatedly reschedule the same tick.
+        # Keep planner cadence on the scheduled replay clock. The Rust bridge
+        # also advances idle gaps to this timestamp so traffic windows drain
+        # with the same duration the planner sees.
         now_s = tick.at_s
 
         worker_counts = None

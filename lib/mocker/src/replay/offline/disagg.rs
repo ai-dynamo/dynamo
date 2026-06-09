@@ -919,6 +919,9 @@ impl DisaggRuntime {
             };
 
             if next_timestamp_ms > until_ms {
+                if until_ms > self.now_ms {
+                    self.now_ms = until_ms;
+                }
                 break;
             }
 
@@ -1608,6 +1611,26 @@ mod tests {
             DisaggPhase::RunningPrefill
         );
         assert_eq!(runtime.stats.prefill_assignments[&Uuid::from_u128(2)], 1);
+    }
+
+    #[test]
+    fn test_advance_to_moves_clock_across_idle_gap() {
+        let config = disagg_config();
+        let mut runtime = DisaggRuntime::new(
+            &config,
+            None,
+            None,
+            VecDeque::from([request(1, 64, 2, 1000.0)]),
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        runtime.advance_to(500.0).unwrap();
+
+        assert_eq!(runtime.now_ms(), 500.0);
+        let stats = runtime.drain_traffic();
+        assert!((stats.duration_s - 0.5).abs() < 1e-9);
     }
 
     /// Setting `max_sim_time_ms` causes `run()` to break before scheduled
