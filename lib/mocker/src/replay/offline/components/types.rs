@@ -168,7 +168,7 @@ impl TrafficAccumulator {
                 self.total_ttft_ms += ttft_ms;
                 self.ttft_count += 1;
             }
-            if mean_itl_ms > 0.0 {
+            if output_tokens > 1 && mean_itl_ms.is_finite() && mean_itl_ms >= 0.0 {
                 self.total_itl_ms += mean_itl_ms;
                 self.itl_count += 1;
             }
@@ -300,5 +300,14 @@ mod tests {
         assert_eq!(stats.avg_isl, 0.0);
         assert_eq!(stats.avg_osl, 0.0);
         assert_eq!(stats.avg_kv_hit_rate, 0.0);
+    }
+
+    #[test]
+    fn traffic_accumulator_retains_zero_millisecond_itl_samples() {
+        let mut acc = TrafficAccumulator::new();
+        acc.on_request(10, 3, Some((1.0, 0.0)));
+        acc.on_request(10, 3, Some((1.0, 10.0)));
+        let stats = acc.drain(1_000.0);
+        assert_eq!(stats.avg_itl_ms, 5.0);
     }
 }

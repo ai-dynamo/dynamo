@@ -12,13 +12,8 @@ from dynamo._internal.aic import (
     estimate_num_gpu_blocks,
 )
 from dynamo.common.utils.topology import apply_topology_config
-from dynamo.llm import (
-    MockEngineArgs,
-    ModelRuntimeConfig,
-    ReasoningConfig,
-    SglangArgs,
-    TrtllmArgs,
-)
+from dynamo.llm import ModelRuntimeConfig
+from dynamo.mocker import MockEngineArgs, ReasoningConfig, SglangArgs, TrtllmArgs
 
 _DEFAULT_NUM_GPU_BLOCKS = 16384
 _DEFAULT_MAX_NUM_SEQS = 256
@@ -292,6 +287,9 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         aic_moe_tp_size=aic_moe_tp_size,
         aic_moe_ep_size=aic_moe_ep_size,
         aic_attention_dp_size=aic_attention_dp_size,
+        aic_nextn=getattr(args, "aic_nextn", None),
+        aic_nextn_accept_rates=getattr(args, "aic_nextn_accept_rates", None),
+        aic_mtp_seed=getattr(args, "aic_mtp_seed", 42),
         gpu_memory_utilization=getattr(args, "gpu_memory_utilization", None),
         mem_fraction_static=getattr(args, "mem_fraction_static", None),
         free_gpu_memory_fraction=getattr(args, "free_gpu_memory_fraction", None),
@@ -334,12 +332,14 @@ def apply_worker_engine_args_overrides(
     bootstrap_port: int | None = None,
     zmq_kv_events_port: int | None = None,
     zmq_replay_port: int | None = None,
+    aic_mtp_seed: int | None = None,
 ) -> MockEngineArgs:
     return engine_args.with_overrides(
         bootstrap_port=bootstrap_port,
         zmq_kv_events_port=zmq_kv_events_port,
         zmq_replay_port=zmq_replay_port,
         kv_bytes_per_token=kv_bytes_per_token,
+        aic_mtp_seed=aic_mtp_seed,
     )
 
 

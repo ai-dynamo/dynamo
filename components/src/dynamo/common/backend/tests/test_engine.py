@@ -24,16 +24,18 @@ pytest.importorskip(
 )
 
 from dynamo.common.backend.engine import (  # noqa: E402
-    TEST_LOGITS_PROCESSOR_ENV,
+    DYN_ENABLE_TEST_LOGITS_PROCESSOR,
     EngineConfig,
     ForcedTokenSequenceSpec,
     GenerateChunk,
     LLMEngine,
     LogitsProcessorSpec,
     PythonProcessorSpec,
+    deserialize_logits_processor_entries,
     is_generation_stage,
     logits_processors_for_request,
     resolve_test_logits_processor_spec,
+    serialize_logits_processor_entries,
 )
 from dynamo.common.constants import DisaggregationMode  # noqa: E402
 
@@ -117,9 +119,9 @@ async def test_default_logits_processor_spec_is_none():
 
 def _logits_processor_set_env(monkeypatch, value):
     if value is None:
-        monkeypatch.delenv(TEST_LOGITS_PROCESSOR_ENV, raising=False)
+        monkeypatch.delenv(DYN_ENABLE_TEST_LOGITS_PROCESSOR, raising=False)
     else:
-        monkeypatch.setenv(TEST_LOGITS_PROCESSOR_ENV, value)
+        monkeypatch.setenv(DYN_ENABLE_TEST_LOGITS_PROCESSOR, value)
 
 
 def test_is_generation_stage():
@@ -333,7 +335,7 @@ def test_engine_usage_pattern(monkeypatch):
     # backend (TRT-LLM dict, SGLang ServerArgs attribute, vLLM
     # EngineArgs) writes this differently; the env-var name is the
     # only thing that's shared.
-    if _os.getenv(TEST_LOGITS_PROCESSOR_ENV) == "1":
+    if _os.getenv(DYN_ENABLE_TEST_LOGITS_PROCESSOR) == "1":
         engine_args["skip_tokenizer_init"] = False
     assert engine_args["skip_tokenizer_init"] is False
 
@@ -379,11 +381,52 @@ def test_python_processor_spec_is_carried_through():
     assert activation == [desc]
 
 
+# ---------------------------------------------------------------------------
+# Serializable wire format (vLLM / SGLang request boundary)
+# ---------------------------------------------------------------------------
+
+
+def test_serialize_forced_token_sequence_round_trips():
+    """ForcedTokenSequenceSpec survives serialize → deserialize unchanged.
+    This is the contract vLLM (`extra_args`) and SGLang (`custom_params`)
+    rely on to carry per-request activation across the engine boundary."""
+    entries = [
+        ForcedTokenSequenceSpec(token_ids=(7, 8, 9), eos_token_id=2),
+        ForcedTokenSequenceSpec(token_ids=(1,), eos_token_id=0),
+    ]
+    payload = serialize_logits_processor_entries(entries)
+    # Payload is plain JSON-safe data (lists/ints), not tuples.
+    assert payload == [
+        {"kind": "forced_sequence", "token_ids": [7, 8, 9], "eos_token_id": 2},
+        {"kind": "forced_sequence", "token_ids": [1], "eos_token_id": 0},
+    ]
+    assert deserialize_logits_processor_entries(payload) == entries
+
+
+def test_serialize_empty_entries_is_empty():
+    assert serialize_logits_processor_entries([]) == []
+    assert deserialize_logits_processor_entries([]) == []
+
+
+def test_serialize_rejects_python_processor_spec():
+    """PythonProcessorSpec wraps a live callable — not serializable. This
+    is how vLLM/SGLang reject the TRT-LLM-only in-process escape hatch."""
+    with pytest.raises(TypeError):
+        serialize_logits_processor_entries([PythonProcessorSpec(factory=lambda: None)])
+
+
+def test_deserialize_unknown_kind_raises():
+    """A forward-incompatible entry kind fails loudly rather than silently
+    dropping a processor."""
+    with pytest.raises(ValueError):
+        deserialize_logits_processor_entries([{"kind": "mystery", "data": 1}])
+
+
 async def test_default_engine_controls_are_empty():
     """Engines opt into management controls explicitly."""
     engine = _Complete()
     assert engine.supported_controls() == set()
-    assert await engine.engine_control("sleep", {}) == {
+    assert await engine.engine_control("pause", {}) == {
         "status": "error",
-        "message": "unsupported engine control: sleep",
+        "message": "unsupported engine control: pause",
     }

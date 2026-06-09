@@ -13,11 +13,13 @@ For the general mechanics of DynoSim runs (input format, arrival speedup, router
 
 ### Build
 
-Build the Dynamo Python bindings so `python -m dynamo.replay` is available:
+Install the Dynamo Python components and build the Rust runtime bindings. The
+`python -m dynamo.replay` CLI is part of the Python components, and it imports the
+runtime `_core` module from the bindings package:
 
 ```bash
-cd lib/bindings/python
-.venv/bin/maturin develop --release
+.venv/bin/maturin develop --release -m lib/bindings/python/Cargo.toml
+uv pip install -e .
 ```
 
 The `--release` flag is strongly recommended. DynoSim execution is largely single-threaded and CPU-bound on the mocker engine core; a debug build can be 5–10× slower, which compounds across sweep runs.

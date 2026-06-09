@@ -91,3 +91,22 @@ cases:
         normal_text: <think>plain answer
       vllm: *d_s4
       sglang: *d_s4
+  REASONING.stream.2.c:
+    description: Stray end marker after a complete reasoning span, across chunks(unbalanced-tag; passthrough — chunks reassemble without leading <think>)
+    ref: dynamo
+    spec_ref: tests/parity/README.md
+    chunks:
+    - 'preamble</think>'
+    - 'body</think>'
+    - 'answer'
+    expected:
+      dynamo:
+        reasoning_text: ''
+        normal_text: '<think>preamble</think>body</think>answer'
+        reason: 'MiniMaxAppendThinkParser prepends <think> before parsing (matching the append-think chat template); in default mode (no force_reasoning) the parser does not split on </think>, so the entire output stays in normal_text. This mirrors REASONING.batch.6.a passthrough behavior.'
+      vllm:
+        reasoning_text: ''
+        normal_text: '<think>preamble</think>body</think>answer'
+      sglang:
+        reasoning_text: ''
+        normal_text: '<think>preamble</think>body</think>answer'

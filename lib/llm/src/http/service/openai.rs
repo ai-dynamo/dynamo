@@ -71,6 +71,7 @@ use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
 use dynamo_protocols::types::ChatCompletionMessageContent;
+use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
 use dynamo_runtime::logging::get_distributed_tracing_context;
@@ -160,6 +161,28 @@ fn find_dynamo_error_in_chain<'a>(
     None
 }
 
+/// Match `InvalidArgument` at top-level OR under `Backend()`.
+/// `py_err_to_dynamo` wraps Python `ValueError`/`TypeError` as
+/// `Backend(InvalidArgument)`; both variants are 400-worthy.
+fn find_invalid_argument_in_chain<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a dynamo_runtime::error::DynamoError> {
+    use dynamo_runtime::error::{BackendError, ErrorType};
+    let mut current = Some(err);
+    while let Some(e) = current {
+        if let Some(dynamo_err) = e.downcast_ref::<dynamo_runtime::error::DynamoError>()
+            && matches!(
+                dynamo_err.error_type(),
+                ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
+            )
+        {
+            return Some(dynamo_err);
+        }
+        current = e.source();
+    }
+    None
+}
+
 impl ErrorMessage {
     /// Not Found Error
     pub fn model_not_found() -> ErrorResponse {
@@ -207,6 +230,22 @@ impl ErrorMessage {
             code,
             Json(ErrorMessage {
                 message: "Service is not ready".to_string(),
+                error_type,
+                code: code.as_u16(),
+            }),
+        )
+    }
+
+    /// Service Unavailable with a structured message body. Used by topology
+    /// readiness to distinguish "model registered but topology incomplete"
+    /// from generic "service not ready".
+    pub fn service_unavailable_with_body(message: String) -> ErrorResponse {
+        let code = StatusCode::SERVICE_UNAVAILABLE;
+        let error_type = map_error_code_to_error_type(code);
+        (
+            code,
+            Json(ErrorMessage {
+                message,
                 error_type,
                 code: code.as_u16(),
             }),
@@ -285,15 +324,8 @@ impl ErrorMessage {
             );
         }
 
-        // Check for DynamoError with InvalidArgument anywhere in the chain → HTTP 400.
-        // This matches *any* nested InvalidArgument DynamoError, not only the NATS
-        // oversized-payload case, so previously-opaque nested InvalidArgument errors
-        // now surface as 400 instead of 500. Intentional: 400 is the correct class
-        // for a malformed/invalid request.
-        if let Some(dynamo_err) = find_dynamo_error_in_chain(
-            err.as_ref(),
-            dynamo_runtime::error::ErrorType::InvalidArgument,
-        ) {
+        // InvalidArgument (top-level OR Backend) → 400.
+        if let Some(dynamo_err) = find_invalid_argument_in_chain(err.as_ref()) {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorMessage {
@@ -774,8 +806,9 @@ async fn handler_completions(
     headers: HeaderMap,
     Json(mut request): Json<NvCreateCompletionRequest>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service is not ready
+    // return a 503 if the service or per-model topology is not ready
     check_ready(&state)?;
+    check_model_serving_ready(&state, &request.inner.model)?;
 
     request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
@@ -1201,8 +1234,9 @@ async fn embeddings(
     headers: HeaderMap,
     Json(request): Json<NvCreateEmbeddingRequest>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service is not ready
+    // return a 503 if the service or per-model topology is not ready
     check_ready(&state)?;
+    check_model_serving_ready(&state, &request.inner.model)?;
 
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
@@ -1359,8 +1393,15 @@ async fn handler_chat_completions(
     headers: HeaderMap,
     Json(mut request): Json<NvCreateChatCompletionRequest>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service is not ready
+    // return a 503 if the service is not ready (process-level + per-model
+    // serving readiness). An aggregated request to a decode-only namespace
+    // would otherwise hang/crash on the decode worker. Resolve the templated
+    // model first so empty/missing `model` fields don't bypass the gate.
     check_ready(&state)?;
+    let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
+    if !resolved_model.is_empty() {
+        check_model_serving_ready(&state, resolved_model)?;
+    }
 
     request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
@@ -1528,16 +1569,28 @@ pub(super) async fn check_for_backend_error(
     }
 }
 
-/// Serialize `payload` and wrap it as an SSE event with the given name.
-fn make_dispatch_event(
+#[derive(Serialize)]
+struct ToolCallDispatchPayload<'a> {
+    choice_index: u32,
+    tool_call: &'a ChatCompletionMessageToolCallChunk,
+}
+
+#[derive(Serialize)]
+struct ReasoningDispatchPayload<'a> {
+    index: u32,
+    reasoning_content: &'a str,
+}
+
+/// Serialize `payload` and append it as an SSE event with the given name.
+fn push_dispatch_event(
     event_name: &str,
     payload: &impl serde::Serialize,
-) -> Option<Result<Event, axum::Error>> {
+    out: &mut Vec<Result<Event, axum::Error>>,
+) {
     match serde_json::to_string(payload) {
-        Ok(json) => Some(Ok(Event::default().event(event_name).data(json))),
+        Ok(json) => out.push(Ok(Event::default().event(event_name).data(json))),
         Err(e) => {
             tracing::warn!("streaming_{event_name}: failed to serialize: {e}");
-            None
         }
     }
 }
@@ -1602,12 +1655,12 @@ fn is_empty_completion_stream_response(resp: &NvCreateCompletionResponse) -> boo
 fn streaming_tool_dispatch_events(
     response: &crate::types::Annotated<NvCreateChatCompletionStreamResponse>,
     dispatched_ids: &mut HashSet<String>,
-) -> Vec<Result<Event, axum::Error>> {
+    out: &mut Vec<Result<Event, axum::Error>>,
+) {
     let Some(data) = &response.data else {
-        return vec![];
+        return;
     };
 
-    let mut events = vec![];
     for choice in &data.inner.choices {
         let Some(tool_calls) = &choice.delta.tool_calls else {
             continue;
@@ -1625,15 +1678,14 @@ fn streaming_tool_dispatch_events(
                 if !dispatched_ids.insert(id.clone()) {
                     continue;
                 }
-                let payload = serde_json::json!({
-                    "choice_index": choice.index,
-                    "tool_call": chunk,
-                });
-                events.extend(make_dispatch_event("tool_call_dispatch", &payload));
+                let payload = ToolCallDispatchPayload {
+                    choice_index: choice.index,
+                    tool_call: chunk,
+                };
+                push_dispatch_event("tool_call_dispatch", &payload, out);
             }
         }
     }
-    events
 }
 
 /// Accumulates reasoning tokens and emits a single `event: reasoning_dispatch` SSE event
@@ -1645,12 +1697,12 @@ fn streaming_tool_dispatch_events(
 fn accumulate_reasoning_dispatch(
     response: &crate::types::Annotated<NvCreateChatCompletionStreamResponse>,
     buffers: &mut HashMap<u32, String>,
-) -> Vec<Result<Event, axum::Error>> {
+    out: &mut Vec<Result<Event, axum::Error>>,
+) {
     let Some(data) = &response.data else {
-        return vec![];
+        return;
     };
 
-    let mut events = vec![];
     for choice in &data.inner.choices {
         let buffer = buffers.entry(choice.index).or_default();
         let has_reasoning = choice
@@ -1665,15 +1717,14 @@ fn accumulate_reasoning_dispatch(
 
         // Emit when reasoning transitions to None OR when the stream ends (finish_reason).
         if !buffer.is_empty() && (!has_reasoning || choice.finish_reason.is_some()) {
-            let payload = serde_json::json!({
-                "index": choice.index,
-                "reasoning_content": buffer.as_str(),
-            });
-            events.extend(make_dispatch_event("reasoning_dispatch", &payload));
+            let payload = ReasoningDispatchPayload {
+                index: choice.index,
+                reasoning_content: buffer.as_str(),
+            };
+            push_dispatch_event("reasoning_dispatch", &payload, out);
             buffer.clear();
         }
     }
-    events
 }
 
 /// OpenAI Chat Completions Request Handler
@@ -1828,46 +1879,56 @@ async fn chat_completions(
         let mut reasoning_buffer: HashMap<u32, String> = HashMap::new();
         let mut dispatched_tool_ids: HashSet<String> = HashSet::new();
 
-        // flat_map lets us optionally prepend extra SSE events before each regular chunk:
+        // Optionally prepend extra SSE events before each regular chunk:
         //   - `event: tool_call_dispatch`  — complete tool call detected early (tool dispatch)
         //   - `event: reasoning_dispatch`  — complete reasoning block (emitted once)
-        // When both flags are off the flat_map is equivalent to the original map + filter_map.
-        let stream = stream.flat_map(move |response| {
-            // Extract side-channel events before the response is consumed by EventConverter.
-            let mut events: Vec<Result<Event, axum::Error>> = vec![];
-            // Drop empty chunks from multi-byte token assembly.
-            if response.data.as_ref().is_some_and(is_empty_stream_response) {
-                return stream::iter(events);
-            }
-            if tool_dispatch_enabled {
-                events.extend(streaming_tool_dispatch_events(
-                    &response,
-                    &mut dispatched_tool_ids,
-                ));
-            }
-            if reasoning_dispatch_enabled {
-                events.extend(accumulate_reasoning_dispatch(
-                    &response,
-                    &mut reasoning_buffer,
-                ));
-            }
+        let stream = async_stream::stream! {
+            let mut stream = Box::pin(stream);
+            let mut events: Vec<Result<Event, axum::Error>> = Vec::with_capacity(4);
 
-            // Convert to SSE event (this consumes the response).
-            // EventConverter will detect `event: "error"` and convert to SSE error events.
-            let sse_result = process_response_using_event_converter_and_observe_metrics(
-                EventConverter::from(response),
-                &mut response_collector,
-                &mut http_queue_guard,
-            );
+            while let Some(response) = stream.next().await {
+                events.clear();
 
-            // Side-channel events come first, then the regular data event.
-            match sse_result {
-                Ok(Some(ev)) => events.push(Ok(ev)),
-                Ok(None) => {}
-                Err(e) => events.push(Err(e)),
+                // Drop empty chunks from multi-byte token assembly.
+                if response.data.as_ref().is_some_and(is_empty_stream_response) {
+                    continue;
+                }
+                if tool_dispatch_enabled {
+                    streaming_tool_dispatch_events(
+                        &response,
+                        &mut dispatched_tool_ids,
+                        &mut events,
+                    );
+                }
+                if reasoning_dispatch_enabled {
+                    accumulate_reasoning_dispatch(
+                        &response,
+                        &mut reasoning_buffer,
+                        &mut events,
+                    );
+                }
+
+                // Convert to SSE event (this consumes the response).
+                // EventConverter will detect `event: "error"` and convert to SSE error events.
+                let sse_result = process_response_using_event_converter_and_observe_metrics(
+                    EventConverter::from(response),
+                    &mut response_collector,
+                    &mut http_queue_guard,
+                );
+
+                // Side-channel events come first, then the regular data event.
+                match sse_result {
+                    Ok(Some(ev)) => events.push(Ok(ev)),
+                    Ok(None) => {}
+                    Err(e) => events.push(Err(e)),
+                }
+
+                events.reverse();
+                while let Some(event) = events.pop() {
+                    yield event;
+                }
             }
-            stream::iter(events)
-        });
+        };
         let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
 
         let mut sse_stream = Sse::new(stream);
@@ -2049,8 +2110,17 @@ async fn handler_responses(
     headers: HeaderMap,
     Json(mut request): Json<NvCreateResponse>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service is not ready
+    // return a 503 if the service or per-model topology is not ready.
+    // Resolve the templated model first so empty/missing `model` fields
+    // don't bypass the gate.
     check_ready(&state)?;
+    let resolved_model = resolve_request_model(
+        request.inner.model.as_deref().unwrap_or(""),
+        template.as_ref(),
+    );
+    if !resolved_model.is_empty() {
+        check_model_serving_ready(&state, resolved_model)?;
+    }
 
     request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
@@ -2443,6 +2513,37 @@ pub(crate) fn check_ready(_state: &Arc<service_v2::State>) -> Result<(), ErrorRe
     Ok(())
 }
 
+/// Per-model serving readiness gate.
+///
+/// Composes AND-wise with [`check_ready`]: a request is admitted only when
+/// (a) the process is ready (`check_ready`) AND (b) at least one namespace
+/// for this specific model has a complete set of workers — every worker's
+/// `needs` DNF is satisfied by the worker types currently present in that
+/// namespace.
+///
+/// Returns `503 Service Unavailable` with a structured body when the model
+/// isn't ready to serve. Models the frontend has never heard of fall through
+/// here; the per-handler engine lookup later in the request path returns a
+/// 404 instead, which is the right shape for "unknown model".
+pub(crate) fn check_model_serving_ready(
+    state: &Arc<service_v2::State>,
+    model_name: &str,
+) -> Result<(), ErrorResponse> {
+    let Some(model) = state.manager().get_model(model_name) else {
+        // Unknown model — let the per-endpoint engine accessor produce the
+        // canonical 404. The readiness gate has nothing to say.
+        return Ok(());
+    };
+    if model.has_ready_workers() {
+        return Ok(());
+    }
+    Err(ErrorMessage::service_unavailable_with_body(format!(
+        "Model `{model_name}` is registered but no namespace has a complete worker set. \
+         At least one prefill/decode/encode role required by a registered worker is missing. \
+         Check worker startup logs for the affected namespace."
+    )))
+}
+
 /// openai compatible format
 /// Example:
 /// {
@@ -2485,6 +2586,16 @@ async fn list_models_openai(
 
     let models: HashSet<String> = state.manager().model_display_names();
     for model_name in models {
+        // Only list models whose worker set is complete in at least one
+        // namespace. A registered-but-broken deployment (e.g. decode-only
+        // with no prefill peer) is hidden until a peer joins.
+        let serving_ready = state
+            .manager()
+            .get_model(&model_name)
+            .is_some_and(|m| m.has_ready_workers());
+        if !serving_ready {
+            continue;
+        }
         let context_window = cw_override.or_else(|| card_map.get(&model_name).map(|&cl| cl as u64));
         data.push(ModelListing {
             id: model_name.clone(),
@@ -2757,6 +2868,10 @@ async fn get_model_openai(
         return Err(ErrorMessage::model_not_found());
     }
 
+    // GET /v1/models/{model} reports the model only if it is ready to
+    // serve. Mirrors the filter applied in list_models_openai.
+    check_model_serving_ready(&state, model_id)?;
+
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -2809,6 +2924,8 @@ async fn images(
     Json(request): Json<NvCreateImageRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
+    // (per-model topology check is deferred until after we resolve the
+    // ImageModel enum into a string; see below)
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
@@ -2832,6 +2949,10 @@ async fn images(
             dynamo_protocols::types::ImageModel::Other(s) => s.clone(),
         })
         .unwrap_or_else(|| "diffusion".to_string());
+
+    // Per-model serving readiness gate (now that we have a resolved model
+    // name string).
+    check_model_serving_ready(&state, &model)?;
 
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
@@ -2940,8 +3061,9 @@ async fn videos(
     headers: HeaderMap,
     Json(request): Json<NvCreateVideoRequest>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service is not ready
+    // return a 503 if the service or per-model topology is not ready
     check_ready(&state)?;
+    check_model_serving_ready(&state, &request.model)?;
 
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
@@ -3062,6 +3184,7 @@ async fn video_stream(
     Json(request): Json<NvCreateVideoRequest>,
 ) -> Result<Response, ErrorResponse> {
     check_ready(&state)?;
+    check_model_serving_ready(&state, &request.model)?;
 
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
@@ -3225,6 +3348,8 @@ async fn audio_speech(
     Json(request): Json<NvCreateAudioSpeechRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
+    // (per-model topology check is deferred until after we resolve the
+    // Option<String> model field; see below)
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
@@ -3243,6 +3368,10 @@ async fn audio_speech(
             .unwrap_or_default()
     });
     let metric_model = state.manager().metric_model_for(&model).to_string();
+
+    // Per-model serving readiness gate (now that we have a resolved model
+    // name string).
+    check_model_serving_ready(&state, &model)?;
 
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
@@ -3570,6 +3699,26 @@ mod tests {
         assert!(response.1.message.contains("Request payload is too large"));
         assert!(!response.1.message.contains("NATS"));
         assert!(!response.1.message.contains("payload_bytes"));
+    }
+
+    #[test]
+    fn test_backend_invalid_argument_surfaces_as_400() {
+        // `Backend(InvalidArgument)` is what `py_err_to_dynamo` produces
+        // for Python `ValueError` / `TypeError` raised inside an engine's
+        // `generate()` — must map to 400, not 500.
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+
+        let err: anyhow::Error = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("Dynamo's SGLang backend does not currently support logprobs >= 1")
+            .build()
+            .into();
+
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.code, StatusCode::BAD_REQUEST.as_u16());
+        assert!(response.1.message.contains("does not currently support"));
     }
 
     #[test]
@@ -5124,6 +5273,24 @@ mod tests {
         }
     }
 
+    fn collect_tool_dispatch_events(
+        response: &Annotated<NvCreateChatCompletionStreamResponse>,
+        dispatched_ids: &mut HashSet<String>,
+    ) -> Vec<Result<Event, axum::Error>> {
+        let mut events = Vec::new();
+        streaming_tool_dispatch_events(response, dispatched_ids, &mut events);
+        events
+    }
+
+    fn collect_reasoning_dispatch_events(
+        response: &Annotated<NvCreateChatCompletionStreamResponse>,
+        buffers: &mut HashMap<u32, String>,
+    ) -> Vec<Result<Event, axum::Error>> {
+        let mut events = Vec::new();
+        accumulate_reasoning_dispatch(response, buffers, &mut events);
+        events
+    }
+
     fn make_choice_with_reasoning(
         index: u32,
         reasoning: Option<&str>,
@@ -5187,7 +5354,7 @@ mod tests {
             Some(r#"{"city":"Paris"}"#),
         )]);
 
-        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
         assert_eq!(events.len(), 1);
 
         let event = events[0].as_ref().unwrap();
@@ -5211,7 +5378,7 @@ mod tests {
             Some(r#"{"city":"Paris"}"#),
         )]);
 
-        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
         assert!(events.is_empty(), "should not dispatch without id");
     }
 
@@ -5224,7 +5391,7 @@ mod tests {
             Some(r#"{"city":"Paris"}"#),
         )]);
 
-        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
         assert!(events.is_empty(), "should not dispatch without name");
     }
 
@@ -5237,7 +5404,7 @@ mod tests {
             None, // no arguments
         )]);
 
-        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
         assert!(events.is_empty(), "should not dispatch without arguments");
     }
 
@@ -5277,7 +5444,7 @@ mod tests {
         };
 
         let response = make_stream_response(vec![choice]);
-        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
         assert_eq!(events.len(), 2, "should dispatch both tool calls");
 
         // Verify each dispatched event has the correct tool call data
@@ -5299,14 +5466,14 @@ mod tests {
             comment: None,
             error: None,
         };
-        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
         assert!(events.is_empty());
     }
 
     #[test]
     fn test_tool_dispatch_empty_choices() {
         let response = make_stream_response(vec![]);
-        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
         assert!(events.is_empty());
     }
 
@@ -5348,7 +5515,7 @@ mod tests {
         };
 
         let response = make_stream_response(vec![choice]);
-        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
         assert_eq!(
             events.len(),
             1,
@@ -5384,7 +5551,7 @@ mod tests {
         };
 
         let response = make_stream_response(vec![choice]);
-        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
         assert!(events.is_empty(), "function: None should not dispatch");
     }
 
@@ -5399,7 +5566,7 @@ mod tests {
             Some(""),
         )]);
 
-        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
         assert_eq!(events.len(), 1, "empty arguments should still dispatch");
 
         let json = extract_sse_data_json(events[0].as_ref().unwrap());
@@ -5426,7 +5593,7 @@ mod tests {
         );
 
         let response = make_stream_response(vec![choice_0, choice_1]);
-        let events = streaming_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
         assert_eq!(events.len(), 2, "should dispatch from both choices");
 
         let json0 = extract_sse_data_json(events[0].as_ref().unwrap());
@@ -5452,11 +5619,11 @@ mod tests {
         let mut dispatched = HashSet::new();
 
         // First call — should dispatch
-        let events = streaming_tool_dispatch_events(&response, &mut dispatched);
+        let events = collect_tool_dispatch_events(&response, &mut dispatched);
         assert_eq!(events.len(), 1);
 
         // Second call with same response — should be deduped
-        let events = streaming_tool_dispatch_events(&response, &mut dispatched);
+        let events = collect_tool_dispatch_events(&response, &mut dispatched);
         assert!(events.is_empty(), "duplicate id should not dispatch twice");
     }
 
@@ -5468,7 +5635,7 @@ mod tests {
 
         // Chunk 1: reasoning token "Let me"
         let r1 = make_stream_response(vec![make_choice_with_reasoning(0, Some("Let me"), None)]);
-        let events = accumulate_reasoning_dispatch(&r1, &mut buffers);
+        let events = collect_reasoning_dispatch_events(&r1, &mut buffers);
         assert!(
             events.is_empty(),
             "should not emit yet — still accumulating"
@@ -5477,7 +5644,7 @@ mod tests {
 
         // Chunk 2: reasoning token " think"
         let r2 = make_stream_response(vec![make_choice_with_reasoning(0, Some(" think"), None)]);
-        let events = accumulate_reasoning_dispatch(&r2, &mut buffers);
+        let events = collect_reasoning_dispatch_events(&r2, &mut buffers);
         assert!(
             events.is_empty(),
             "should not emit yet — still accumulating"
@@ -5486,7 +5653,7 @@ mod tests {
 
         // Chunk 3: reasoning ends (None), meaning normal content follows
         let r3 = make_stream_response(vec![make_choice_with_reasoning(0, None, None)]);
-        let events = accumulate_reasoning_dispatch(&r3, &mut buffers);
+        let events = collect_reasoning_dispatch_events(&r3, &mut buffers);
         assert_eq!(events.len(), 1, "should emit single reasoning_dispatch");
 
         let event = events[0].as_ref().unwrap();
@@ -5512,7 +5679,7 @@ mod tests {
             Some("Thinking..."),
             None,
         )]);
-        accumulate_reasoning_dispatch(&r1, &mut buffers);
+        collect_reasoning_dispatch_events(&r1, &mut buffers);
 
         // Chunk 2: finish_reason=length while still in reasoning (max_tokens hit)
         let r2 = make_stream_response(vec![make_choice_with_reasoning(
@@ -5520,7 +5687,7 @@ mod tests {
             Some(" more"),
             Some(FinishReason::Length),
         )]);
-        let events = accumulate_reasoning_dispatch(&r2, &mut buffers);
+        let events = collect_reasoning_dispatch_events(&r2, &mut buffers);
         assert_eq!(events.len(), 1, "should flush on finish_reason");
 
         let json = extract_sse_data_json(events[0].as_ref().unwrap());
@@ -5537,7 +5704,7 @@ mod tests {
             Some("Analysis complete"),
             None,
         )]);
-        accumulate_reasoning_dispatch(&r1, &mut buffers);
+        collect_reasoning_dispatch_events(&r1, &mut buffers);
 
         // Chunk 2: finish_reason=stop while still in reasoning
         let r2 = make_stream_response(vec![make_choice_with_reasoning(
@@ -5545,7 +5712,7 @@ mod tests {
             Some("."),
             Some(FinishReason::Stop),
         )]);
-        let events = accumulate_reasoning_dispatch(&r2, &mut buffers);
+        let events = collect_reasoning_dispatch_events(&r2, &mut buffers);
         assert_eq!(events.len(), 1, "should flush on FinishReason::Stop");
 
         let json = extract_sse_data_json(events[0].as_ref().unwrap());
@@ -5558,7 +5725,7 @@ mod tests {
 
         // Chunk with no reasoning content at all
         let r = make_stream_response(vec![make_choice_with_reasoning(0, None, None)]);
-        let events = accumulate_reasoning_dispatch(&r, &mut buffers);
+        let events = collect_reasoning_dispatch_events(&r, &mut buffers);
         assert!(events.is_empty(), "no reasoning content = no event");
     }
 
@@ -5568,7 +5735,7 @@ mod tests {
 
         // Chunk with empty string reasoning (treated as no-reasoning)
         let r = make_stream_response(vec![make_choice_with_reasoning(0, Some(""), None)]);
-        let events = accumulate_reasoning_dispatch(&r, &mut buffers);
+        let events = collect_reasoning_dispatch_events(&r, &mut buffers);
         assert!(events.is_empty());
         assert!(
             buffers.get(&0).is_none_or(|s| s.is_empty()),
@@ -5586,7 +5753,7 @@ mod tests {
             comment: None,
             error: None,
         };
-        let events = accumulate_reasoning_dispatch(&response, &mut buffers);
+        let events = collect_reasoning_dispatch_events(&response, &mut buffers);
         assert!(events.is_empty());
     }
 
@@ -5594,7 +5761,7 @@ mod tests {
     fn test_reasoning_dispatch_empty_choices() {
         let mut buffers: HashMap<u32, String> = HashMap::new();
         let response = make_stream_response(vec![]);
-        let events = accumulate_reasoning_dispatch(&response, &mut buffers);
+        let events = collect_reasoning_dispatch_events(&response, &mut buffers);
         assert!(events.is_empty());
     }
 
@@ -5607,7 +5774,7 @@ mod tests {
             make_choice_with_reasoning(0, Some("Thinking A"), None),
             make_choice_with_reasoning(1, Some("Thinking B"), None),
         ]);
-        let events = accumulate_reasoning_dispatch(&r1, &mut buffers);
+        let events = collect_reasoning_dispatch_events(&r1, &mut buffers);
         assert!(events.is_empty(), "both still accumulating");
         assert_eq!(buffers.get(&0).map(|s| s.as_str()), Some("Thinking A"));
         assert_eq!(buffers.get(&1).map(|s| s.as_str()), Some("Thinking B"));
@@ -5617,7 +5784,7 @@ mod tests {
             make_choice_with_reasoning(0, None, None),
             make_choice_with_reasoning(1, Some(" more"), None),
         ]);
-        let events = accumulate_reasoning_dispatch(&r2, &mut buffers);
+        let events = collect_reasoning_dispatch_events(&r2, &mut buffers);
         assert_eq!(events.len(), 1, "only choice 0 should emit");
         let json = extract_sse_data_json(events[0].as_ref().unwrap());
         assert_eq!(json["reasoning_content"], "Thinking A");
@@ -5625,7 +5792,7 @@ mod tests {
 
         // Choice 1 stops reasoning
         let r3 = make_stream_response(vec![make_choice_with_reasoning(1, None, None)]);
-        let events = accumulate_reasoning_dispatch(&r3, &mut buffers);
+        let events = collect_reasoning_dispatch_events(&r3, &mut buffers);
         assert_eq!(events.len(), 1, "choice 1 should emit");
         let json = extract_sse_data_json(events[0].as_ref().unwrap());
         assert_eq!(json["reasoning_content"], "Thinking B more");
@@ -5641,20 +5808,20 @@ mod tests {
 
         // First reasoning block
         let r1 = make_stream_response(vec![make_choice_with_reasoning(0, Some("First"), None)]);
-        accumulate_reasoning_dispatch(&r1, &mut buffers);
+        collect_reasoning_dispatch_events(&r1, &mut buffers);
 
         let r2 = make_stream_response(vec![make_choice_with_reasoning(0, None, None)]);
-        let events = accumulate_reasoning_dispatch(&r2, &mut buffers);
+        let events = collect_reasoning_dispatch_events(&r2, &mut buffers);
         assert_eq!(events.len(), 1);
         let json = extract_sse_data_json(events[0].as_ref().unwrap());
         assert_eq!(json["reasoning_content"], "First");
 
         // Second reasoning block — buffer was cleared, should accumulate fresh
         let r3 = make_stream_response(vec![make_choice_with_reasoning(0, Some("Second"), None)]);
-        accumulate_reasoning_dispatch(&r3, &mut buffers);
+        collect_reasoning_dispatch_events(&r3, &mut buffers);
 
         let r4 = make_stream_response(vec![make_choice_with_reasoning(0, None, None)]);
-        let events = accumulate_reasoning_dispatch(&r4, &mut buffers);
+        let events = collect_reasoning_dispatch_events(&r4, &mut buffers);
         assert_eq!(events.len(), 1);
         let json = extract_sse_data_json(events[0].as_ref().unwrap());
         assert_eq!(
@@ -5673,17 +5840,17 @@ mod tests {
             Some("让我想想 🤔"),
             None,
         )]);
-        accumulate_reasoning_dispatch(&r1, &mut buffers);
+        collect_reasoning_dispatch_events(&r1, &mut buffers);
 
         let r2 = make_stream_response(vec![make_choice_with_reasoning(
             0,
             Some(" 分析完成 ✅"),
             None,
         )]);
-        accumulate_reasoning_dispatch(&r2, &mut buffers);
+        collect_reasoning_dispatch_events(&r2, &mut buffers);
 
         let r3 = make_stream_response(vec![make_choice_with_reasoning(0, None, None)]);
-        let events = accumulate_reasoning_dispatch(&r3, &mut buffers);
+        let events = collect_reasoning_dispatch_events(&r3, &mut buffers);
         assert_eq!(events.len(), 1);
 
         let json = extract_sse_data_json(events[0].as_ref().unwrap());

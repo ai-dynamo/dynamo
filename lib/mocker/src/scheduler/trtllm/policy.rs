@@ -27,8 +27,7 @@ pub(crate) fn blocks_needed_to_finish(
     block_size: usize,
     kv_manager: &KvManager,
 ) -> usize {
-    let full_blocks =
-        (sequence.num_input_tokens() + sequence.max_output_tokens()).div_ceil(block_size);
+    let full_blocks = sequence.to_completion_blocks();
     if sequence.num_allocated_tokens() == 0 {
         let reusable_blocks =
             kv_manager.get_prefill_cost(sequence).active_cached_tokens / block_size;

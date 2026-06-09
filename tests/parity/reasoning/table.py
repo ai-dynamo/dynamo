@@ -72,7 +72,7 @@ CASE_GROUPS = [
         ("stream.1.a", "stream.1.b"),
     ),
     ("Reasoning extraction", ("stream.2.a",)),
-    ("Multi-span", ("stream.2.b",)),
+    ("Multi-span", ("stream.2.b", "stream.2.c")),
     ("Chunk boundaries", ("stream.3.a", "stream.3.b", "stream.3.c")),
 ]
 _CASE_GROUP_BY_CASE = {
@@ -145,9 +145,9 @@ _FAMILY_METADATA = {
     },
     "nemotron_deci": {
         "models": [
-            "Nemotron-Super / -Ultra / -Deci",
+            "Nemotron-Super-v1 / Nemotron-Ultra-v1 / Nemotron-Deci-v1",
             "Llama-Nemotron",
-            "GLM-4.5 / GLM-4.7 via glm45 alias",
+            "GLM-4.5 / GLM-4.6 via glm45 alias",
         ],
         "rust_enum": "ReasoningParserType::NemotronDeci",
         "implementation": "BasicReasoningParser `<think>` / `</think>`",
@@ -465,10 +465,16 @@ def _reasoning_markup_re(family: str | None) -> re.Pattern[str]:
 
 
 def _is_gpt_oss_tool_handoff(family: str | None, field: str, value: str) -> bool:
+    # Both `commentary to=functions.X` and `analysis to=functions.X` are
+    # tool-call handoffs after PR #10366: the recipient is the signal, not
+    # the channel label. Either lands in normal_text as the jail's input.
     return (
         family == "gpt_oss"
         and field == "normal_text"
-        and "<|channel|>commentary to=functions." in value
+        and (
+            "<|channel|>commentary to=functions." in value
+            or "<|channel|>analysis to=functions." in value
+        )
         and "<|call|>" in value
     )
 
