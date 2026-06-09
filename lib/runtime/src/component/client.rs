@@ -258,7 +258,7 @@ impl RoutingInstances {
         )
     }
 
-    /// Add a single instance to the overloaded set (DGH-897 immediate
+    /// Add a single instance to the overloaded set (immediate
     /// backpressure mark). Short-lived: the next metric-driven
     /// `set_overloaded` recompute overwrites the whole set.
     fn mark_overloaded(&self, instance_id: u64) -> Self {

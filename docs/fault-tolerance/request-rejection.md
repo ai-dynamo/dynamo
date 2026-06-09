@@ -292,7 +292,7 @@ If using Kubernetes HPA, ensure rejection thresholds trigger before autoscaling:
 --active-decode-blocks-threshold 0.85
 ```
 
-## Worker-Side Request Admission (DGH-897)
+## Worker-Side Request Admission
 
 In addition to the frontend's metric-driven busy detection above, a worker can
 enforce a hard concurrency cap directly at its request-plane ingress. This is

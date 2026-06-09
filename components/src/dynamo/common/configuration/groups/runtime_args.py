@@ -43,7 +43,7 @@ class DynamoRuntimeConfig(ConfigBase):
     # Honored only by the unified backend's `Worker`, where it overrides the engine's
     # default `health_check_payload()` for the runtime canary.
     health_check_payload: Optional[str] = None
-    # DGH-897 worker-side request admission/rejection knobs. Disabled (None) by
+    # Worker-side request admission/rejection knobs. Disabled (None) by
     # default; when set, these surface env vars that the Rust runtime reads
     # directly (see lib/runtime/src/pipeline/network/ingress/shared_tcp_endpoint.rs).
     engine_request_limit: Optional[int] = None
@@ -269,7 +269,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
             "default health_check_payload(). Unified backend only.",
         )
 
-        # DGH-897 worker-side request admission/rejection. Both default to None
+        # Worker-side request admission/rejection. Both default to None
         # (disabled); when unset the worker behaves exactly as before. These only
         # surface env vars — the Rust runtime reads DYN_ENGINE_REQUEST_LIMIT /
         # DYN_DYNAMO_REQUEST_QUEUE_LIMIT directly.

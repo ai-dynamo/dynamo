@@ -53,7 +53,7 @@ fn get_work_queue_size() -> usize {
 }
 
 /// Default small overflow queue when the engine-request limit is set but the
-/// queue limit is left unset (DGH-897). Keeps the hard cap close to N.
+/// queue limit is left unset. Keeps the hard cap close to N.
 const DEFAULT_DYNAMO_REQUEST_QUEUE_LIMIT: usize = 16;
 
 /// Resolved worker-pool / overflow-queue sizing for the TCP ingress.
@@ -105,7 +105,7 @@ struct ActiveTaskGuard;
 impl ActiveTaskGuard {
     fn new() -> Self {
         WORK_HANDLER_POOL_ACTIVE_TASKS.inc();
-        // DGH-897 `dynamo_engine_request`: requests currently in the engine.
+        // `dynamo_engine_request`: requests currently in the engine.
         // Driven from the same site as the back-compat active-tasks gauge.
         ENGINE_REQUEST_GAUGE.inc();
         Self
