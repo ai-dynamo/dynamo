@@ -1637,12 +1637,17 @@ mod tests {
     }
 
     #[test]
-    fn test_potential_load_requires_active_requests() {
-        let result = serde_json::from_str::<crate::scheduling::PotentialLoad>(
+    fn test_potential_load_defaults_active_requests() {
+        let load = serde_json::from_str::<crate::scheduling::PotentialLoad>(
             r#"{"worker_id":1,"dp_rank":0,"potential_prefill_tokens":16,"potential_decode_blocks":4}"#,
-        );
+        )
+        .unwrap();
 
-        assert!(result.is_err());
+        assert_eq!(load.worker_id, 1);
+        assert_eq!(load.dp_rank, 0);
+        assert_eq!(load.potential_prefill_tokens, 16);
+        assert_eq!(load.potential_decode_blocks, 4);
+        assert_eq!(load.active_requests, 0);
     }
 
     #[test]

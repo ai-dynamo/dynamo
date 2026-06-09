@@ -35,6 +35,7 @@ pub struct PotentialLoad {
     pub dp_rank: DpRank,
     pub potential_prefill_tokens: usize,
     pub potential_decode_blocks: usize,
+    #[serde(default)]
     pub active_requests: usize,
 }
 
