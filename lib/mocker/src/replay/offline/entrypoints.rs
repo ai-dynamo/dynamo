@@ -1044,4 +1044,59 @@ mod tests {
             "expected second request to wait for completion plus delay"
         );
     }
+
+    #[test]
+    fn test_mtp_artifacts_emit_ordered_same_timestamp_bursts() {
+        let args = MockEngineArgs::builder()
+            .block_size(2)
+            .num_gpu_blocks(32)
+            .max_num_batched_tokens(None)
+            .max_num_seqs(None)
+            .enable_prefix_caching(false)
+            .speedup_ratio(1000.0)
+            .aic_nextn(Some(2))
+            .aic_nextn_accept_rates(Some("1,1".to_string()))
+            .build()
+            .unwrap();
+        let trace = Trace {
+            block_size: 2,
+            sessions: vec![SessionTrace {
+                session_id: "mtp-session".to_string(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![TurnTrace {
+                    input_length: 4,
+                    max_output_tokens: 5,
+                    hash_ids: vec![1, 2],
+                    delay_after_previous_ms: 0.0,
+                }],
+            }],
+        };
+
+        let artifacts = generate_trace_worker_artifacts(args, trace).unwrap();
+        assert_eq!(artifacts.output_signals.len(), 5);
+        assert_eq!(
+            artifacts.output_signals[0].timestamp_us,
+            artifacts.output_signals[1].timestamp_us
+        );
+        assert_eq!(
+            artifacts.output_signals[1].timestamp_us,
+            artifacts.output_signals[2].timestamp_us
+        );
+        assert!(
+            artifacts.output_signals[2].timestamp_us < artifacts.output_signals[3].timestamp_us
+        );
+        assert_eq!(
+            artifacts.output_signals[3].timestamp_us,
+            artifacts.output_signals[4].timestamp_us
+        );
+        assert_eq!(
+            artifacts
+                .output_signals
+                .iter()
+                .filter(|output| output.signal.completed)
+                .count(),
+            1
+        );
+        assert!(artifacts.output_signals.last().unwrap().signal.completed);
+    }
 }
