@@ -207,24 +207,35 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
         let kvbm_metrics_clone = kvbm_metrics.clone();
         let cache_stats_clone = cache_stats.clone();
         let block_manager_metrics = block_manager.clone();
+        let metrics_cancel = get_current_cancel_token();
 
-        // Spawn a background task to periodically update metrics and log cache hit rates
+        // Spawn a background task to periodically update metrics and log cache hit rates.
+        // It is cancellation-aware (issue #10066 review): the cloned block manager holds
+        // KvBlockManager's drop-driven cancellation owner, so the task must exit on shutdown to
+        // release it, otherwise the block manager progress engines would never shut down.
         let handle = get_current_tokio_handle();
         handle.spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    _ = metrics_cancel.cancelled() => break,
+                    _ = interval.tick() => {}
+                }
                 // Update Prometheus metrics
                 let host_rate = cache_stats_clone.host_hit_rate();
                 let disk_rate = cache_stats_clone.disk_hit_rate();
                 kvbm_metrics_clone.update_cache_hit_rates(host_rate, disk_rate, 0.0);
-                // Publish G2 (host) / G3 (disk) block-state gauges (issue #10066).
-                // Tiers are optional; only update when both pools are present and queryable.
-                if let (Some(host_pool), Some(disk_pool)) =
-                    (block_manager_metrics.host(), block_manager_metrics.disk())
-                    && let (Ok(g2), Ok(g3)) = (host_pool.status().await, disk_pool.status().await)
+                // Publish G2 (host) / G3 (disk) block-state gauges (issue #10066). Each tier is
+                // optional and queried independently so a host-only deployment still reports G2.
+                if let Some(host_pool) = block_manager_metrics.host()
+                    && let Ok(g2) = host_pool.status().await
                 {
-                    kvbm_metrics_clone.update_block_states(&g2, &g3);
+                    kvbm_metrics_clone.update_g2_block_states(&g2);
+                }
+                if let Some(disk_pool) = block_manager_metrics.disk()
+                    && let Ok(g3) = disk_pool.status().await
+                {
+                    kvbm_metrics_clone.update_g3_block_states(&g3);
                 }
                 // Also log cache hit rates periodically
                 cache_stats_clone.maybe_log();

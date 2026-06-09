@@ -297,16 +297,21 @@ impl KvbmMetrics {
         self.object_cache_hit_rate.set(object_rate as f64);
     }
 
-    /// Update G2 (host) / G3 (disk) block-state gauges from pool status snapshots (issue #10066).
+    /// Update the G2 (host tier) block-state gauges from a pool status snapshot (issue #10066).
     /// Total = active + inactive + empty (the pool's fixed capacity); active reads 0 in practice
-    /// for these tiers and is not surfaced as its own gauge. Call from the periodic metrics task in
-    /// slot.rs alongside `update_cache_hit_rates`, passing
-    /// `host_pool.status().await` / `disk_pool.status().await`.
-    pub fn update_block_states(&self, g2: &BlockPoolStatus, g3: &BlockPoolStatus) {
+    /// for this tier and is not surfaced as its own gauge. Updated independently of G3 so a
+    /// host-only deployment still reports G2. Call with `host_pool.status().await`.
+    pub fn update_g2_block_states(&self, g2: &BlockPoolStatus) {
         self.g2_inactive_blocks.set(g2.inactive_blocks as i64);
         self.g2_empty_blocks.set(g2.empty_blocks as i64);
         self.g2_total_blocks
             .set((g2.active_blocks + g2.inactive_blocks + g2.empty_blocks) as i64);
+    }
+
+    /// Update the G3 (disk tier) block-state gauges from a pool status snapshot (issue #10066).
+    /// See [`Self::update_g2_block_states`]; updated independently of G2. Call with
+    /// `disk_pool.status().await`.
+    pub fn update_g3_block_states(&self, g3: &BlockPoolStatus) {
         self.g3_inactive_blocks.set(g3.inactive_blocks as i64);
         self.g3_empty_blocks.set(g3.empty_blocks as i64);
         self.g3_total_blocks
