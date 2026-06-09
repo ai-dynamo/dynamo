@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -41,6 +42,13 @@ func NewRestorePod(pod *corev1.Pod, opts PodOptions) (*corev1.Pod, error) {
 		pod.Annotations = map[string]string{}
 	}
 	ApplyRestoreTargetMetadata(pod.Labels, pod.Annotations, true, opts.CheckpointID, opts.ArtifactVersion)
+	targets, err := TargetContainersFromAnnotations(pod.Annotations, 1, 0)
+	if err != nil {
+		return nil, err
+	}
+	if err := ApplyRendezvousMetadataFromPodSpec(pod.Annotations, &pod.Spec, targets); err != nil {
+		return nil, err
+	}
 	if err := PrepareRestorePodSpec(&pod.Spec, pod.Annotations, opts.Storage, opts.SeccompProfile, true); err != nil {
 		return nil, err
 	}
@@ -90,6 +98,77 @@ func PrepareRestorePodSpec(
 		}
 	}
 	return nil
+}
+
+func ApplyRendezvousMetadataFromPodSpec(
+	annotations map[string]string,
+	podSpec *corev1.PodSpec,
+	targets []string,
+) error {
+	if annotations == nil || podSpec == nil {
+		return nil
+	}
+	delete(annotations, RendezvousHostAnnotation)
+	delete(annotations, RendezvousPortAnnotation)
+
+	targetSet := map[string]struct{}{}
+	for _, target := range targets {
+		target = strings.TrimSpace(target)
+		if target != "" {
+			targetSet[target] = struct{}{}
+		}
+	}
+	for i := range podSpec.Containers {
+		container := &podSpec.Containers[i]
+		if len(targetSet) > 0 {
+			if _, ok := targetSet[container.Name]; !ok {
+				continue
+			}
+		}
+		args := containerCommandAndArgs(container)
+		host := flagValue(args, "--master-addr")
+		if host == "" {
+			continue
+		}
+		port := flagValue(args, "--master-port")
+		if port == "" {
+			port = "29500"
+		}
+		if n, err := strconv.Atoi(port); err != nil || n <= 0 {
+			return fmt.Errorf("invalid %s value %q on container %q", RendezvousPortAnnotation, port, container.Name)
+		}
+		annotations[RendezvousHostAnnotation] = host
+		annotations[RendezvousPortAnnotation] = port
+		return nil
+	}
+	return nil
+}
+
+func containerCommandAndArgs(container *corev1.Container) []string {
+	if container == nil {
+		return nil
+	}
+	args := make([]string, 0, len(container.Command)+len(container.Args))
+	for _, arg := range container.Command {
+		args = append(args, strings.Fields(arg)...)
+	}
+	for _, arg := range container.Args {
+		args = append(args, strings.Fields(arg)...)
+	}
+	return args
+}
+
+func flagValue(args []string, name string) string {
+	prefix := name + "="
+	for i, arg := range args {
+		if strings.HasPrefix(arg, prefix) {
+			return strings.TrimPrefix(arg, prefix)
+		}
+		if arg == name && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 // ensureRestoreStartupProbe installs a StartupProbe that gates Ready until

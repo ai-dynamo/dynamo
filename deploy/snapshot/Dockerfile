@@ -91,7 +91,8 @@ RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
     ./cmd/cuda-checkpoint-helper/main.c \
     -I/usr/local/cuda/include \
     -L/usr/local/cuda/lib64/stubs \
-    -lcuda
+    -lcuda \
+    -ldl
 
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
@@ -122,11 +123,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     uuid-dev \
     && rm -rf /var/lib/apt/lists/*
 
+COPY criu-patches /tmp/criu-patches
+
 RUN git init /tmp/criu \
     && cd /tmp/criu \
     && git remote add origin ${CRIU_REPO} \
     && git fetch --depth 1 origin ${CRIU_REF} \
     && git checkout FETCH_HEAD \
+    && for patch in /tmp/criu-patches/*.patch; do git apply "$patch"; done \
     && make -j$(nproc) \
     && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
 
@@ -138,6 +142,7 @@ RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
 FROM ${AGENT_BASE_IMAGE} AS agent
 
 ARG TARGETARCH=amd64
+ENV CRIU_LIBS_DIR=/usr/local/lib/criu
 
 RUN if [ "${TARGETARCH}" != "amd64" ]; then \
       echo "ERROR: Dynamo Snapshot requires x86_64 (cuda-checkpoint has no ${TARGETARCH} binary)" >&2; exit 1; \
@@ -195,6 +200,7 @@ FROM ${BASE_IMAGE} AS placeholder
 ARG BASE_IMAGE
 ARG TARGETARCH=amd64
 ENV ORIGINAL_BASE_IMAGE=${BASE_IMAGE}
+ENV CRIU_LIBS_DIR=/usr/local/lib/criu
 
 USER root
 

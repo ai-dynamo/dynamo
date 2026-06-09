@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +33,7 @@ type RestoreRequest struct {
 	NSRestorePath               string
 	PodName                     string
 	PodNamespace                string
+	PodUID                      string
 	ContainerName               string
 	Clientset                   kubernetes.Interface
 }
@@ -60,6 +62,19 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		return 0, err
 	}
 	hostInspectDuration := time.Since(hostInspectStart)
+
+	m, err := types.ReadManifest(snap.CheckpointPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read checkpoint manifest for restore preflight: %w", err)
+	}
+	if err := prepareKubeletMountpointsForRestore(
+		log,
+		req,
+		m,
+		filepath.Join(snapshotruntime.HostProcPath, "1", "root"),
+	); err != nil {
+		return 0, err
+	}
 
 	// Phase 2: Execute — nsrestore handles rootfs, CRIU restore, and CUDA restore inside namespace
 	result, err := execNSRestore(ctx, log, req, snap)
@@ -189,6 +204,153 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 	}, nil
 }
 
+func prepareKubeletMountpointsForRestore(log logr.Logger, req RestoreRequest, m *types.CheckpointManifest, hostRoot string) error {
+	if m == nil || strings.TrimSpace(req.PodUID) == "" || len(m.CRIUDump.ExtMnt) == 0 {
+		return nil
+	}
+
+	prepared := 0
+	for _, val := range m.CRIUDump.ExtMnt {
+		sourcePath, targetPath, ok := kubeletMountpointPaths(val, req.PodUID, req.ContainerName, hostRoot)
+		if !ok || sourcePath == targetPath {
+			continue
+		}
+		info, err := os.Stat(targetPath)
+		if err != nil {
+			continue
+		}
+		if info.IsDir() {
+			if err := os.MkdirAll(sourcePath, 0755); err != nil {
+				return fmt.Errorf("failed to create checkpoint-time kubelet mountpoint %s: %w", sourcePath, err)
+			}
+			prepared++
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(sourcePath), 0755); err != nil {
+			return fmt.Errorf("failed to create checkpoint-time kubelet mountpoint parent %s: %w", filepath.Dir(sourcePath), err)
+		}
+		f, err := os.OpenFile(sourcePath, os.O_CREATE|os.O_WRONLY, info.Mode().Perm())
+		if err != nil {
+			return fmt.Errorf("failed to create checkpoint-time kubelet mountpoint file %s: %w", sourcePath, err)
+		}
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("failed to close checkpoint-time kubelet mountpoint file %s: %w", sourcePath, err)
+		}
+		prepared++
+	}
+	if prepared > 0 {
+		log.Info("Prepared checkpoint-time kubelet mountpoints for CRIU restore",
+			"count", prepared,
+			"restore_pod_uid", req.PodUID,
+		)
+	}
+	return nil
+}
+
+func kubeletMountpointPaths(path string, restorePodUID string, restoreContainerName string, hostRoot string) (string, string, bool) {
+	restorePodUID = strings.TrimSpace(restorePodUID)
+	if restorePodUID == "" {
+		return "", "", false
+	}
+	cleanPath := filepath.Clean(path)
+	rel, ok := strings.CutPrefix(cleanPath, "/host/var/lib/kubelet/pods"+string(os.PathSeparator))
+	if !ok {
+		return "", "", false
+	}
+	parts := strings.Split(rel, string(os.PathSeparator))
+	if len(parts) < 3 {
+		return "", "", false
+	}
+
+	sourceParts := append([]string{hostRoot, "var", "lib", "kubelet", "pods"}, parts...)
+	sourcePath := filepath.Join(sourceParts...)
+	switch parts[1] {
+	case "volumes":
+		targetPath, ok := kubeletVolumeTargetPath(parts, restorePodUID, hostRoot)
+		return sourcePath, targetPath, ok
+	case "volume-subpaths":
+		targetPath, ok := kubeletVolumeSubpathTargetPath(parts, restorePodUID, restoreContainerName, hostRoot)
+		return sourcePath, targetPath, ok
+	default:
+		return "", "", false
+	}
+}
+
+func kubeletVolumeTargetPath(parts []string, restorePodUID string, hostRoot string) (string, bool) {
+	if len(parts) < 4 {
+		return "", false
+	}
+	targetParts := append([]string{hostRoot, "var", "lib", "kubelet", "pods", restorePodUID, "volumes"}, parts[2:]...)
+	targetPath := filepath.Join(targetParts...)
+	if _, err := os.Stat(targetPath); err == nil {
+		return targetPath, true
+	}
+	if parts[2] != "kubernetes.io~projected" || !strings.HasPrefix(parts[3], "kube-api-access-") {
+		return targetPath, true
+	}
+
+	matches, err := filepath.Glob(filepath.Join(
+		hostRoot,
+		"var",
+		"lib",
+		"kubelet",
+		"pods",
+		restorePodUID,
+		"volumes",
+		parts[2],
+		"kube-api-access-*",
+	))
+	if err != nil || len(matches) == 0 {
+		return "", false
+	}
+	sort.Strings(matches)
+	for _, match := range matches {
+		targetPath := filepath.Join(append([]string{match}, parts[4:]...)...)
+		if _, err := os.Stat(targetPath); err == nil {
+			return targetPath, true
+		}
+	}
+	return "", false
+}
+
+func kubeletVolumeSubpathTargetPath(parts []string, restorePodUID string, restoreContainerName string, hostRoot string) (string, bool) {
+	if len(parts) < 5 {
+		return "", false
+	}
+	if strings.TrimSpace(restoreContainerName) == "" {
+		restoreContainerName = parts[3]
+	}
+	targetParts := append(
+		[]string{hostRoot, "var", "lib", "kubelet", "pods", restorePodUID, "volume-subpaths", parts[2], restoreContainerName},
+		parts[4:]...,
+	)
+	targetPath := filepath.Join(targetParts...)
+	if _, err := os.Stat(targetPath); err == nil {
+		return targetPath, true
+	}
+
+	matches, err := filepath.Glob(filepath.Join(
+		hostRoot,
+		"var",
+		"lib",
+		"kubelet",
+		"pods",
+		restorePodUID,
+		"volume-subpaths",
+		parts[2],
+		restoreContainerName,
+		"*",
+	))
+	if err != nil || len(matches) != 1 {
+		return "", false
+	}
+	targetPath = filepath.Join(append([]string{matches[0]}, parts[5:]...)...)
+	if _, err := os.Stat(targetPath); err == nil {
+		return targetPath, true
+	}
+	return "", false
+}
+
 // execNSRestore launches the nsrestore binary inside the placeholder container's
 // namespaces via nsenter and parses the restored PID from stdout JSON.
 func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot) (*RestoreInNamespaceResult, error) {
@@ -212,6 +374,12 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	}
 	if snap.CgroupRoot != "" {
 		args = append(args, "--cgroup-root", snap.CgroupRoot)
+	}
+	if req.PodUID != "" {
+		args = append(args, "--restore-pod-uid", req.PodUID)
+	}
+	if req.ContainerName != "" {
+		args = append(args, "--restore-container-name", req.ContainerName)
 	}
 
 	cmd := exec.CommandContext(ctx, "nsenter", args...)

@@ -1,0 +1,551 @@
+diff --git a/plugins/cuda/cuda_plugin.c b/plugins/cuda/cuda_plugin.c
+index 9ccb042..65d81e6 100644
+--- a/plugins/cuda/cuda_plugin.c
++++ b/plugins/cuda/cuda_plugin.c
+@@ -11,10 +11,16 @@
+ #include <compel/infect.h>
+ 
+ #include <ctype.h>
++#include <errno.h>
+ #include <fcntl.h>
++#include <limits.h>
+ #include <stdio.h>
++#include <stdint.h>
++#include <string.h>
+ #include <unistd.h>
+ #include <sys/ptrace.h>
++#include <sys/stat.h>
++#include <sys/sysmacros.h>
+ #include <sys/wait.h>
+ 
+ /* cuda-checkpoint binary should live in your PATH */
+@@ -34,6 +40,12 @@ typedef enum {
+ } cuda_task_state_t;
+ 
+ #define CUDA_CKPT_BUF_SIZE (128)
++#define CUDA_NVIDIA_FD_IMAGE "cuda-nvidia-fd.%x"
++#define CUDA_NVIDIA_FD_IMAGE_VERSION 1
++#define NVIDIA_DEV_MAJOR 195
++#define NVIDIA_CTL_MINOR 255
++#define NVIDIA_MODESET_MINOR 254
++#define CUDA_SETFL_MASK (O_APPEND | O_ASYNC | O_NONBLOCK | O_NDELAY | O_DIRECT | O_NOATIME)
+ 
+ #ifdef LOG_PREFIX
+ #undef LOG_PREFIX
+@@ -54,6 +66,14 @@ struct pid_info {
+ 	struct list_head list;
+ };
+ 
++struct cuda_nvidia_fd_image {
++	uint32_t version;
++	uint32_t major;
++	uint32_t minor;
++	int32_t flags;
++	char path[PATH_MAX];
++};
++
+ /* Used to track which PID's we've paused CUDA operations on so far so we can
+  * release them after we're done with the DUMP
+  */
+@@ -70,22 +90,6 @@ static void dealloc_pid_buffer(struct list_head *pid_buf)
+ 	}
+ }
+ 
+-static int add_pid_to_buf(struct list_head *pid_buf, int pid, cuda_task_state_t state)
+-{
+-	struct pid_info *new = xmalloc(sizeof(*new));
+-
+-	if (new == NULL) {
+-		return -1;
+-	}
+-
+-	new->pid = pid;
+-	new->checkpointed = 0;
+-	new->initial_task_state = state;
+-	list_add_tail(&new->list, pid_buf);
+-
+-	return 0;
+-}
+-
+ static int launch_cuda_checkpoint(const char **args, char *buf, int buf_size)
+ {
+ #define READ  0
+@@ -185,6 +189,286 @@ err:
+ 	return -1;
+ }
+ 
++static bool cuda_all_digits(const char *s)
++{
++	if (!s[0])
++		return false;
++
++	for (; s[0]; s++) {
++		if (!isdigit((unsigned char)s[0]))
++			return false;
++	}
++	return true;
++}
++
++static bool cuda_is_nvidia_device_name(const char *name)
++{
++	if (!strcmp(name, "nvidiactl") || !strcmp(name, "nvidia-modeset") ||
++	    !strcmp(name, "nvidia-uvm") || !strcmp(name, "nvidia-uvm-tools"))
++		return true;
++
++	if (!strncmp(name, "nvidia-cap", strlen("nvidia-cap")))
++		return cuda_all_digits(name + strlen("nvidia-cap"));
++
++	if (!strncmp(name, "nvidia", strlen("nvidia")))
++		return cuda_all_digits(name + strlen("nvidia"));
++
++	return false;
++}
++
++static int cuda_normalize_nvidia_device_path(int fd, const struct stat *st, char *path, size_t path_size)
++{
++	char fd_path[64];
++	char link_path[PATH_MAX];
++	const char *name;
++	ssize_t len;
++	int ret;
++
++	snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", fd);
++	len = readlink(fd_path, link_path, sizeof(link_path) - 1);
++	if (len >= 0) {
++		link_path[len] = '\0';
++		name = strrchr(link_path, '/');
++		name = name ? name + 1 : link_path;
++
++		if (cuda_is_nvidia_device_name(name)) {
++			if (!strncmp(name, "nvidia-cap", strlen("nvidia-cap"))) {
++				ret = snprintf(path, path_size, "/dev/nvidia-caps/%s", name);
++				if (ret < 0 || (size_t)ret >= path_size)
++					return -1;
++			} else {
++				ret = snprintf(path, path_size, "/dev/%s", name);
++				if (ret < 0 || (size_t)ret >= path_size)
++					return -1;
++			}
++			return 0;
++		}
++	}
++
++	if (major(st->st_rdev) != NVIDIA_DEV_MAJOR)
++		return -ENOTSUP;
++
++	switch (minor(st->st_rdev)) {
++	case NVIDIA_CTL_MINOR:
++		name = "nvidiactl";
++		break;
++	case NVIDIA_MODESET_MINOR:
++		name = "nvidia-modeset";
++		break;
++	default:
++		ret = snprintf(path, path_size, "/dev/nvidia%u", minor(st->st_rdev));
++		if (ret < 0 || (size_t)ret >= path_size)
++			return -1;
++		return 0;
++	}
++
++	ret = snprintf(path, path_size, "/dev/%s", name);
++	if (ret < 0 || (size_t)ret >= path_size)
++		return -1;
++	return 0;
++}
++
++static int cuda_read_full(int fd, void *buf, size_t len)
++{
++	char *p = buf;
++
++	while (len > 0) {
++		ssize_t ret = read(fd, p, len);
++		if (ret < 0) {
++			if (errno == EINTR)
++				continue;
++			return -errno;
++		}
++		if (ret == 0)
++			return -EIO;
++		p += ret;
++		len -= ret;
++	}
++	return 0;
++}
++
++static int cuda_write_full(int fd, const void *buf, size_t len)
++{
++	const char *p = buf;
++
++	while (len > 0) {
++		ssize_t ret = write(fd, p, len);
++		if (ret < 0) {
++			if (errno == EINTR)
++				continue;
++			return -errno;
++		}
++		if (ret == 0)
++			return -EIO;
++		p += ret;
++		len -= ret;
++	}
++	return 0;
++}
++
++static int cuda_restore_fd_status_flags(int fd, int flags)
++{
++	int ret;
++	int restored;
++
++	ret = fcntl(fd, F_GETFL, 0);
++	if (ret < 0)
++		return -errno;
++
++	restored = (ret & ~CUDA_SETFL_MASK) | (flags & CUDA_SETFL_MASK);
++	if (fcntl(fd, F_SETFL, restored) < 0)
++		return -errno;
++
++	return 0;
++}
++
++int cuda_plugin_dump_file(int fd, int id)
++{
++	struct cuda_nvidia_fd_image image = {
++		.version = CUDA_NVIDIA_FD_IMAGE_VERSION,
++	};
++	char img_path[PATH_MAX];
++	struct stat st;
++	int ret;
++	int img_fd;
++
++	if (plugin_disabled)
++		return -ENOTSUP;
++
++	if (fstat(fd, &st) < 0) {
++		pr_perror("Unable to stat fd %d", fd);
++		return -1;
++	}
++
++	if (!S_ISCHR(st.st_mode))
++		return -ENOTSUP;
++
++	ret = cuda_normalize_nvidia_device_path(fd, &st, image.path, sizeof(image.path));
++	if (ret == -ENOTSUP)
++		return -ENOTSUP;
++	if (ret < 0)
++		return -1;
++
++	ret = fcntl(fd, F_GETFL, 0);
++	if (ret < 0) {
++		pr_perror("Unable to get status flags for NVIDIA fd %d", fd);
++		return -1;
++	}
++
++	image.flags = ret;
++	image.major = major(st.st_rdev);
++	image.minor = minor(st.st_rdev);
++
++	if (!plugin_added_to_inventory) {
++		if (add_inventory_plugin(CR_PLUGIN_DESC.name)) {
++			pr_err("Failed to add CUDA plugin to inventory image\n");
++			return -1;
++		}
++		plugin_added_to_inventory = true;
++	}
++
++	snprintf(img_path, sizeof(img_path), CUDA_NVIDIA_FD_IMAGE, id);
++	img_fd = openat(criu_get_image_dir(), img_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
++	if (img_fd < 0) {
++		pr_perror("Unable to open %s", img_path);
++		return -1;
++	}
++
++	ret = cuda_write_full(img_fd, &image, sizeof(image));
++	if (ret < 0) {
++		errno = -ret;
++		pr_perror("Unable to write %s", img_path);
++		close(img_fd);
++		return -1;
++	}
++
++	if (close(img_fd) < 0) {
++		pr_perror("Unable to close %s", img_path);
++		return -1;
++	}
++
++	pr_info("Dumped NVIDIA device fd %d id %#x path %s dev %u:%u flags %#x\n",
++		fd, id, image.path, image.major, image.minor, image.flags);
++	return 0;
++}
++CR_PLUGIN_REGISTER_HOOK(CR_PLUGIN_HOOK__DUMP_EXT_FILE, cuda_plugin_dump_file)
++
++int cuda_plugin_restore_file(int id, bool *retry_needed)
++{
++	struct cuda_nvidia_fd_image image;
++	char img_path[PATH_MAX];
++	int ret;
++	int img_fd;
++	int fd;
++	struct stat restored_st;
++
++	*retry_needed = false;
++
++	if (plugin_disabled)
++		return -ENOTSUP;
++
++	snprintf(img_path, sizeof(img_path), CUDA_NVIDIA_FD_IMAGE, id);
++	img_fd = openat(criu_get_image_dir(), img_path, O_RDONLY);
++	if (img_fd < 0) {
++		if (errno == ENOENT)
++			return -ENOTSUP;
++		pr_perror("Unable to open %s", img_path);
++		return -1;
++	}
++
++	ret = cuda_read_full(img_fd, &image, sizeof(image));
++	close(img_fd);
++	if (ret < 0) {
++		errno = -ret;
++		pr_perror("Unable to read %s", img_path);
++		return -1;
++	}
++
++	if (image.version != CUDA_NVIDIA_FD_IMAGE_VERSION ||
++	    !cuda_is_nvidia_device_name(strrchr(image.path, '/') ? strrchr(image.path, '/') + 1 : image.path)) {
++		pr_err("Invalid NVIDIA fd image %s for id %#x\n", img_path, id);
++		return -1;
++	}
++
++	fd = open(image.path, (image.flags & O_ACCMODE) | O_CLOEXEC);
++	if (fd < 0) {
++		pr_perror("Unable to restore NVIDIA device fd id %#x path %s", id, image.path);
++		return -1;
++	}
++
++	if (fstat(fd, &restored_st) < 0) {
++		pr_perror("Unable to stat restored NVIDIA device fd id %#x path %s", id, image.path);
++		close(fd);
++		return -1;
++	}
++	if (!S_ISCHR(restored_st.st_mode)) {
++		pr_err("Restored NVIDIA fd id %#x path %s is not a character device\n", id, image.path);
++		close(fd);
++		return -1;
++	}
++	if (image.major == NVIDIA_DEV_MAJOR &&
++	    (major(restored_st.st_rdev) != image.major || minor(restored_st.st_rdev) != image.minor)) {
++		pr_err("Restored NVIDIA fd id %#x path %s dev changed from %u:%u to %u:%u\n",
++		       id, image.path, image.major, image.minor,
++		       major(restored_st.st_rdev), minor(restored_st.st_rdev));
++		close(fd);
++		return -1;
++	}
++
++	ret = cuda_restore_fd_status_flags(fd, image.flags);
++	if (ret < 0) {
++		errno = -ret;
++		pr_perror("Unable to restore status flags for NVIDIA device fd id %#x path %s", id, image.path);
++		close(fd);
++		return -1;
++	}
++
++	pr_info("Restored NVIDIA device fd id %#x path %s dev %u:%u flags %#x as fd %d\n",
++		id, image.path, image.major, image.minor, image.flags, fd);
++	return fd;
++}
++CR_PLUGIN_REGISTER_HOOK(CR_PLUGIN_HOOK__RESTORE_EXT_FILE, cuda_plugin_restore_file)
++
+ /**
+  * Checks if a given flag is supported by the cuda-checkpoint utility
+  *
+@@ -225,37 +509,6 @@ static int get_cuda_restore_tid(int root_pid)
+ 	return atoi(pid_out);
+ }
+ 
+-static cuda_task_state_t get_task_state_enum(const char *state_str)
+-{
+-	if (strncmp(state_str, "running", 7) == 0)
+-		return CUDA_TASK_RUNNING;
+-
+-	if (strncmp(state_str, "locked", 6) == 0)
+-		return CUDA_TASK_LOCKED;
+-
+-	if (strncmp(state_str, "checkpointed", 12) == 0)
+-		return CUDA_TASK_CHECKPOINTED;
+-
+-	pr_err("Unknown CUDA state: %s\n", state_str);
+-	return CUDA_TASK_UNKNOWN;
+-}
+-
+-static cuda_task_state_t get_cuda_state(pid_t pid)
+-{
+-	char pid_buf[16];
+-	char state_str[CUDA_CKPT_BUF_SIZE];
+-	const char *args[] = { CUDA_CHECKPOINT, "--get-state", "--pid", pid_buf, NULL };
+-
+-	snprintf(pid_buf, sizeof(pid_buf), "%d", pid);
+-
+-	if (launch_cuda_checkpoint(args, state_str, sizeof(state_str))) {
+-		pr_err("Failed to launch cuda-checkpoint to retrieve state: %s\n", state_str);
+-		return CUDA_TASK_UNKNOWN;
+-	}
+-
+-	return get_task_state_enum(state_str);
+-}
+-
+ static int cuda_process_checkpoint_action(int pid, const char *action, unsigned int timeout, char *msg_buf,
+ 					  int buf_size)
+ {
+@@ -339,135 +592,23 @@ static int resume_restore_thread(int restore_tid, k_rtsigset_t *save_sigset)
+ 
+ int cuda_plugin_checkpoint_devices(int pid)
+ {
+-	int restore_tid;
+-	char msg_buf[CUDA_CKPT_BUF_SIZE];
+-	int int_ret;
+-	int status;
+-	k_rtsigset_t save_sigset;
+-	struct pid_info *task_info;
+-	bool pid_found = false;
+-
+ 	if (plugin_disabled) {
+ 		return -ENOTSUP;
+ 	}
+ 
+-	restore_tid = get_cuda_restore_tid(pid);
+-
+-	/* We can possibly hit a race with cuInit() where we are past the point of
+-	 * locking the process but at lock time cuInit() hadn't completed in which
+-	 * case cuda-checkpoint will report that we're in an invalid state to
+-	 * checkpoint
+-	 */
+-	if (restore_tid == -1) {
+-		pr_info("No need to checkpoint devices on pid %d\n", pid);
+-		return 0;
+-	}
+-
+-	/* Check if the process is already in a checkpointed state */
+-	list_for_each_entry(task_info, &cuda_pids, list) {
+-		if (task_info->pid == pid) {
+-			if (task_info->initial_task_state == CUDA_TASK_CHECKPOINTED) {
+-				pr_info("pid %d already in a checkpointed state\n", pid);
+-				return 0;
+-			}
+-			pid_found = true;
+-			break;
+-		}
+-	}
+-
+-	if (pid_found == false) {
+-		/* We return an error here. The task should be restored
+-		 * to its original state at cuda_plugin_fini().
+-		 */
+-		pr_err("Failed to track pid %d\n", pid);
+-		return -1;
+-	}
+-
+-	pr_info("Checkpointing CUDA devices on pid %d restore_tid %d\n", pid, restore_tid);
+-	/* We need to resume the checkpoint thread to prepare the mappings for
+-	 * checkpointing
+-	 */
+-	if (resume_restore_thread(restore_tid, &save_sigset)) {
+-		return -1;
+-	}
+-
+-	task_info->checkpointed = 1;
+-	status = cuda_process_checkpoint_action(pid, ACTION_CHECKPOINT, 0, msg_buf, sizeof(msg_buf));
+-	if (status) {
+-		pr_err("CHECKPOINT_DEVICES failed with %s\n", msg_buf);
+-	}
+-
+-	int_ret = interrupt_restore_thread(restore_tid, &save_sigset);
+-	return status != 0 ? -1 : int_ret;
++	pr_info("Dynamo snapshot-agent owns CUDA checkpoint; skipping checkpoint devices on pid %d\n", pid);
++	return 0;
+ }
+ CR_PLUGIN_REGISTER_HOOK(CR_PLUGIN_HOOK__CHECKPOINT_DEVICES, cuda_plugin_checkpoint_devices);
+ 
+ int cuda_plugin_pause_devices(int pid)
+ {
+-	int restore_tid;
+-	char msg_buf[CUDA_CKPT_BUF_SIZE];
+-	cuda_task_state_t task_state;
+-
+ 	if (plugin_disabled) {
+ 		return -ENOTSUP;
+ 	}
+ 
+-	restore_tid = get_cuda_restore_tid(pid);
+-
+-	if (restore_tid == -1) {
+-		pr_info("no need to pause devices on pid %d\n", pid);
+-		return 0;
+-	}
+-
+-	task_state = get_cuda_state(restore_tid);
+-	if (task_state == CUDA_TASK_UNKNOWN) {
+-		pr_err("Failed to get CUDA state for PID %d\n", restore_tid);
+-		return -1;
+-	}
+-
+-	if (!plugin_added_to_inventory) {
+-		if (add_inventory_plugin(CR_PLUGIN_DESC.name)) {
+-			pr_err("Failed to add CUDA plugin to inventory image\n");
+-			return -1;
+-		}
+-		plugin_added_to_inventory = true;
+-	}
+-
+-	if (task_state == CUDA_TASK_LOCKED) {
+-		pr_info("pid %d already in a locked state\n", pid);
+-		/* Leave this PID in a "locked" state at resume_device() */
+-		add_pid_to_buf(&cuda_pids, pid, CUDA_TASK_LOCKED);
+-		return 0;
+-	}
+-
+-	if (task_state == CUDA_TASK_CHECKPOINTED) {
+-		/* We need to skip this PID in cuda_plugin_checkpoint_devices(),
+-		 * and leave it in a "checkpoined" state at resume_device(). */
+-		add_pid_to_buf(&cuda_pids, pid, CUDA_TASK_CHECKPOINTED);
+-		return 0;
+-	}
+-
+-	pr_info("pausing devices on pid %d\n", pid);
+-	int status = cuda_process_checkpoint_action(pid, ACTION_LOCK, opts.timeout * 1000, msg_buf, sizeof(msg_buf));
+-	if (status) {
+-		pr_err("PAUSE_DEVICES failed with %s\n", msg_buf);
+-		if (alarm_timeouted())
+-			goto unlock;
+-		return -1;
+-	}
+-
+-	if (add_pid_to_buf(&cuda_pids, pid, CUDA_TASK_RUNNING)) {
+-		pr_err("unable to track paused pid %d\n", pid);
+-		goto unlock;
+-	}
+-
++	pr_info("Dynamo snapshot-agent owns CUDA checkpoint; skipping pause devices on pid %d\n", pid);
+ 	return 0;
+-unlock:
+-	status = cuda_process_checkpoint_action(pid, ACTION_UNLOCK, 0, msg_buf, sizeof(msg_buf));
+-	if (status) {
+-		pr_err("Failed to unlock process status %s, pid %d may hang\n", msg_buf, pid);
+-	}
+-	return -1;
+ }
+ CR_PLUGIN_REGISTER_HOOK(CR_PLUGIN_HOOK__PAUSE_DEVICES, cuda_plugin_pause_devices)
+ 
+@@ -534,12 +675,8 @@ int cuda_plugin_resume_devices_late(int pid)
+ 		return -ENOTSUP;
+ 	}
+ 
+-	/* RESUME_DEVICES_LATE is used during `criu restore`.
+-	 * Here, we assume that users expect the target process
+-	 * to be in a "running" state after restore, even if it was
+-	 * in a "locked" or "checkpointed" state during `criu dump`.
+-	 */
+-	return resume_device(pid, 1, CUDA_TASK_RUNNING);
++	pr_info("Dynamo snapshot-agent owns CUDA restore; skipping resume devices on pid %d\n", pid);
++	return 0;
+ }
+ CR_PLUGIN_REGISTER_HOOK(CR_PLUGIN_HOOK__RESUME_DEVICES_LATE, cuda_plugin_resume_devices_late)
+ 

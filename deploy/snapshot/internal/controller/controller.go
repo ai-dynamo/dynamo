@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -786,6 +787,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		NSRestorePath:               w.config.Restore.NSRestorePath,
 		PodName:                     pod.Name,
 		PodNamespace:                pod.Namespace,
+		PodUID:                      string(pod.UID),
 		ContainerName:               containerName,
 		Clientset:                   w.clientset,
 	}
@@ -806,6 +808,31 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		}
 		return nil
 	}
+
+	rendezvousConfig, err := restoreRendezvousConfig(pod, containerName, checkpointID)
+	if err != nil {
+		log.Error(err, "Failed to build rendezvous file")
+		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
+		if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
+			return statusErr
+		}
+		if killErr := snapshotruntime.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "restore rendezvous failed"); killErr != nil {
+			log.Error(killErr, "Failed to kill placeholder after rendezvous failure")
+		}
+		return fmt.Errorf("failed to build rendezvous file: %w", err)
+	}
+	if err := snapshotruntime.WriteRendezvousFile(placeholderHostPID, rendezvousConfig); err != nil {
+		log.Error(err, "Failed to write rendezvous file")
+		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
+		if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
+			return statusErr
+		}
+		if killErr := snapshotruntime.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "restore rendezvous failed"); killErr != nil {
+			log.Error(killErr, "Failed to kill placeholder after rendezvous failure")
+		}
+		return fmt.Errorf("failed to write rendezvous file: %w", err)
+	}
+
 	// Any PID inside the container mount namespace reaches the control
 	// volume through /host/proc/<pid>/root.
 	if err := snapshotruntime.WriteControlSentinel(placeholderHostPID, snapshotprotocol.RestoreCompleteFile); err != nil {
@@ -835,6 +862,158 @@ func (w *NodeController) tryAcquire(podKey string) bool {
 	}
 	w.inFlight[podKey] = struct{}{}
 	return true
+}
+
+func restoreRendezvousConfig(pod *corev1.Pod, containerName string, checkpointID string) (snapshotruntime.RendezvousConfig, error) {
+	host := pod.Status.PodIP
+	port := 29500
+	env := map[string]string{}
+	for i := range pod.Spec.Containers {
+		container := &pod.Spec.Containers[i]
+		if container.Name != containerName {
+			continue
+		}
+		env = containerEnvMap(pod, container)
+		args := containerCommandAndArgs(container)
+		if parsedHost := flagValue(args, "--master-addr"); parsedHost != "" {
+			host = parsedHost
+		}
+		if parsedPort := flagValue(args, "--master-port"); parsedPort != "" {
+			parsedPort = expandEnvReferences(parsedPort, env)
+			n, err := strconv.Atoi(parsedPort)
+			if err != nil || n <= 0 {
+				return snapshotruntime.RendezvousConfig{}, fmt.Errorf("invalid --master-port value %q", parsedPort)
+			}
+			port = n
+		}
+		break
+	}
+	if annotatedHost := strings.TrimSpace(pod.Annotations[snapshotprotocol.RendezvousHostAnnotation]); annotatedHost != "" {
+		host = annotatedHost
+	}
+	if annotatedPort := strings.TrimSpace(pod.Annotations[snapshotprotocol.RendezvousPortAnnotation]); annotatedPort != "" {
+		annotatedPort = expandEnvReferences(annotatedPort, env)
+		n, err := strconv.Atoi(annotatedPort)
+		if err != nil || n <= 0 {
+			return snapshotruntime.RendezvousConfig{}, fmt.Errorf("invalid %s value %q", snapshotprotocol.RendezvousPortAnnotation, annotatedPort)
+		}
+		port = n
+	}
+	host = expandEnvReferences(host, env)
+	if hasUnresolvedEnvReference(host) {
+		return snapshotruntime.RendezvousConfig{}, fmt.Errorf("rendezvous host %q still contains unresolved env references", host)
+	}
+	return snapshotruntime.RendezvousConfig{
+		RestoreID: checkpointID,
+		Store: snapshotruntime.RendezvousStore{
+			Host:       host,
+			Port:       port,
+			MasterRank: 0,
+		},
+	}, nil
+}
+
+func flagValue(args []string, name string) string {
+	prefix := name + "="
+	for i, arg := range args {
+		if strings.HasPrefix(arg, prefix) {
+			return strings.TrimPrefix(arg, prefix)
+		}
+		if arg == name && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+func containerCommandAndArgs(container *corev1.Container) []string {
+	if container == nil {
+		return nil
+	}
+	args := make([]string, 0, len(container.Command)+len(container.Args))
+	for _, arg := range container.Command {
+		args = append(args, strings.Fields(arg)...)
+	}
+	for _, arg := range container.Args {
+		args = append(args, strings.Fields(arg)...)
+	}
+	return args
+}
+
+func containerEnvMap(pod *corev1.Pod, container *corev1.Container) map[string]string {
+	env := map[string]string{}
+	if pod != nil {
+		env["POD_NAME"] = pod.Name
+		env["POD_NAMESPACE"] = pod.Namespace
+		env["POD_IP"] = pod.Status.PodIP
+	}
+	if container == nil {
+		return env
+	}
+	for _, e := range container.Env {
+		if e.Value != "" {
+			env[e.Name] = e.Value
+			continue
+		}
+		if e.ValueFrom == nil || e.ValueFrom.FieldRef == nil || pod == nil {
+			continue
+		}
+		switch e.ValueFrom.FieldRef.FieldPath {
+		case "metadata.name":
+			env[e.Name] = pod.Name
+		case "metadata.namespace":
+			env[e.Name] = pod.Namespace
+		case "status.podIP":
+			env[e.Name] = pod.Status.PodIP
+		}
+	}
+	return env
+}
+
+func expandEnvReferences(value string, env map[string]string) string {
+	value = expandDelimitedEnvReferences(value, "$(", ")", env)
+	return expandDelimitedEnvReferences(value, "${", "}", env)
+}
+
+func expandDelimitedEnvReferences(value, prefix, suffix string, env map[string]string) string {
+	for {
+		start := strings.Index(value, prefix)
+		if start < 0 {
+			return value
+		}
+		end := strings.Index(value[start+len(prefix):], suffix)
+		if end < 0 {
+			return value
+		}
+		end += start + len(prefix)
+		name := value[start+len(prefix) : end]
+		if !isSimpleEnvName(name) {
+			return value[:end+len(suffix)] + expandDelimitedEnvReferences(value[end+len(suffix):], prefix, suffix, env)
+		}
+		replacement, ok := env[name]
+		if !ok {
+			return value[:end+len(suffix)] + expandDelimitedEnvReferences(value[end+len(suffix):], prefix, suffix, env)
+		}
+		value = value[:start] + replacement + value[end+len(suffix):]
+	}
+}
+
+func isSimpleEnvName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		if r == '_' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || i > 0 && r >= '0' && r <= '9' {
+			continue
+		}
+		return false
+	}
+	first := name[0]
+	return first == '_' || first >= 'A' && first <= 'Z' || first >= 'a' && first <= 'z'
+}
+
+func hasUnresolvedEnvReference(value string) bool {
+	return strings.Contains(value, "$(") || strings.Contains(value, "${")
 }
 
 func (w *NodeController) release(podKey string) {
