@@ -26,6 +26,24 @@ struct HysteresisState {
     last_scale_down_tick: u64,
 }
 
+/// Process-global guard ensuring at most one LoRA controller owns the (unlabeled, process-global)
+/// Prometheus LoRA gauges at a time. See [`LoraController::start`].
+static CONTROLLER_RUNNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// RAII release for [`CONTROLLER_RUNNING`]. Held inside the controller's spawned task only when
+/// this controller actually acquired the guard; its `Drop` clears the flag on ANY task exit —
+/// clean cancel, a panic that escapes the per-tick `catch_unwind`, or task abort (the future is
+/// dropped) — so a legitimate restart is never wedged. A controller that did NOT acquire the guard
+/// (a duplicate) carries no releaser and so cannot clear the real owner's flag.
+struct ControllerRunningGuard;
+
+impl Drop for ControllerRunningGuard {
+    fn drop(&mut self) {
+        CONTROLLER_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// The LoRA allocation controller.
 ///
 /// Runs a periodic background loop that:
@@ -104,12 +122,13 @@ impl LoraController {
         load_estimator: Arc<LoadEstimator>,
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::Ordering;
         // Process-global guard: the LoRA metrics gauges are unlabeled singletons, so only one
-        // controller may own them. Reset to false when the loop exits (below) so a clean
-        // stop/restart of the single controller does not trip the warning.
-        static CONTROLLER_RUNNING: AtomicBool = AtomicBool::new(false);
-        if CONTROLLER_RUNNING.swap(true, Ordering::SeqCst) {
+        // controller may own them. `acquired` is true iff we won the swap; only the winner carries
+        // a `ControllerRunningGuard` into the task, whose Drop releases the flag on ANY exit
+        // (cancel/panic/abort) so a clean restart is never wedged.
+        let acquired = !CONTROLLER_RUNNING.swap(true, Ordering::SeqCst);
+        if !acquired {
             tracing::error!(
                 "A LoRA allocation controller is already running in this process. Starting a \
                  second one is unsupported: they share process-global, unlabeled Prometheus LoRA \
@@ -117,11 +136,14 @@ impl LoraController {
                  one LoRA controller per process."
             );
         }
+        let release_guard = acquired.then_some(ControllerRunningGuard);
 
         let timestep = Duration::from_secs(config.timestep_secs);
         let mut controller = Self::new(config, routing_table, state_tracker, load_estimator);
 
         tokio::spawn(async move {
+            // Released on ANY exit of this task (clean cancel, escaped panic, or abort).
+            let _release_guard = release_guard;
             let mut interval = tokio::time::interval(timestep);
             tracing::info!(
                 timestep_secs = controller.config.timestep_secs,
@@ -133,9 +155,7 @@ impl LoraController {
                 tokio::select! {
                     _ = cancel_token.cancelled() => {
                         tracing::debug!("LoRA allocation controller shutting down");
-                        // Release the process-global guard so a clean restart of the single
-                        // controller does not falsely trip the "already running" warning.
-                        CONTROLLER_RUNNING.store(false, Ordering::SeqCst);
+                        // `_release_guard` Drop clears CONTROLLER_RUNNING as this task unwinds.
                         break;
                     }
                     _ = interval.tick() => {
@@ -565,43 +585,6 @@ impl LoraController {
         changed
     }
 
-    /// Pick a single deterministic HRW worker that still has a FREE LoRA slot under `projected`
-    /// per-worker usage, or `None` when every live worker is already at capacity.
-    ///
-    /// Unlike [`LoraAllocator::compute_replica_set_with_slots`] (which, by REQ 7, falls back to a
-    /// full worker when all are full so a LoRA always has at least one home), this returns `None`
-    /// in the all-full case. Callers handling genuine capacity overflow use that to REFUSE
-    /// creating a cold route, rather than pinning onto a full worker — a pin would let the filter
-    /// lazy-load the adapter there, exceeding `max_*_lora_count` / causing repeated backend load
-    /// failures and defeating the solver's overflow decision.
-    fn slot_aware_free_pin(
-        &self,
-        lora_name: &str,
-        workers: &[WorkerWithDpRank],
-        projected: &HashMap<WorkerWithDpRank, usize>,
-        caps: &HashMap<WorkerWithDpRank, u32>,
-    ) -> Option<WorkerWithDpRank> {
-        let proj_usage: HashMap<WorkerWithDpRank, (usize, usize)> = workers
-            .iter()
-            .map(|w| {
-                let used = projected.get(w).copied().unwrap_or(0);
-                let cap = caps.get(w).copied().unwrap_or(0) as usize;
-                (*w, (used, cap))
-            })
-            .collect();
-        let pin = self
-            .allocator
-            .compute_replica_set_with_slots(lora_name, workers, 1, &proj_usage);
-        // compute_replica_set_with_slots falls back to a full worker when ALL are full, so verify
-        // the returned worker genuinely has a free slot; otherwise refuse (None).
-        pin.into_iter().find(|w| {
-            proj_usage
-                .get(w)
-                .map(|&(used, cap)| used < cap)
-                .unwrap_or(false)
-        })
-    }
-
     /// Global MCF allocation path: solves all LoRA placements simultaneously.
     fn recompute_mcf(
         &mut self,
@@ -751,23 +734,29 @@ impl LoraController {
                     }
                 }
 
-                // F8: the MCF solver omits fully-overflowed LoRAs from `assignment`. Such an
-                // unplaced LoRA must stay routable WHERE CAPACITY ALLOWS (REQ 7) without thrashing
-                // the routing table, polluting the solver's keep/delta state, or overriding the
-                // overflow decision:
-                //   * Warm-first — keep only the workers where the adapter is still loaded (prior
-                //     set ∩ loaded ∩ live). These are pure existing routes (no new load), and the
-                //     filter's runtime loaded-worker fallback (N5) also keeps them reachable.
-                //   * Otherwise pin to a single deterministic slot-aware HRW worker that still has
-                //     a FREE slot. If no worker has a free slot, REFUSE (remove the entry) rather
-                //     than pin onto a full worker — a cold route there would let the filter
-                //     lazy-load the adapter the solver already rejected, exceeding capacity.
+                // F8: the MCF solver omits fully-overflowed LoRAs from `assignment`. A
+                // still-loaded LoRA left unplaced must stay routable (REQ 7) without thrashing the
+                // routing table, polluting the solver's keep/delta state, or overriding the overflow
+                // decision by ignoring slot capacity:
+                //   * Warm-first — narrow any existing entry to the workers where it is STILL warm
+                //     (prior set ∩ loaded ∩ live): pure existing routes, no new load. (The full
+                //     prior entry must NOT be kept as-is — the filter's tier-2 lazy-load path
+                //     `replica_set ∩ available` would reload the adapter onto a still-live replica
+                //     it was evicted from, defeating the overflow cap.)
+                //   * Otherwise pin to a single deterministic SLOT-AWARE HRW worker via
+                //     `compute_replica_set_with_slots`, EXACTLY as the HRW `dropped_active` path
+                //     does (parity — the previous MCF fallback used the slot-blind
+                //     `compute_replica_set`, which could cold-pin onto a full worker even while a
+                //     free slot existed elsewhere; the slot-aware variant prefers a free slot and
+                //     only falls back to a single bounded worker when every worker is full, which is
+                //     unavoidable and bounded to one worker, never scattered). The backend enforces
+                //     `max_*_lora_count`, so the bounded last-resort pin cannot over-subscribe.
                 //   * Crucially, fallback pins are NEVER inserted into `result.assignment`: that
                 //     value becomes `prev_assignment`, and feeding it phantom (non-MCF) placements
                 //     corrupts the keep-reward/delta logic on the next tick and inflates churn.
                 // LoRAs intentionally dropped by the capacity cap (active but truncated out of
                 // active_replica_counts) are handled separately in recompute_allocations and must
-                // NOT be re-pinned here (RR3-1) — they rely on the runtime loaded-worker fallback.
+                // NOT be re-pinned here (RR3-1).
                 let intended: std::collections::HashSet<&str> = active_replica_counts
                     .keys()
                     .map(String::as_str)
@@ -781,15 +770,12 @@ impl LoraController {
                     .cloned()
                     .collect();
 
-                // Slot-aware overflow fallback. A non-warm unplaced LoRA must NOT be pinned onto a
-                // worker that has no free LoRA slot: a plain HRW cold pin (the old behavior) ignored
-                // slot capacity, and the filter's tier-2 lazy-load path would then load the adapter
-                // onto a worker the solver already determined had no room — exceeding
-                // `max_*_lora_count` or causing repeated backend load failures. Build this tick's
-                // projected per-worker usage from the committed routing table (the placements the
-                // MCF solve already wrote above), excluding the unplaced LoRAs' own stale entries
-                // since those are re-decided here, and only pin to a worker that still has a free
-                // slot. This mirrors the slot-aware HRW `dropped_active` path.
+                // Build this tick's projected per-worker usage from the committed routing table (the
+                // placements the MCF solve already wrote above), excluding the unplaced LoRAs' own
+                // stale entries since those are re-decided here. The slot-aware pin reads this so it
+                // prefers a worker that still has a free slot and never overfills the same slot
+                // across multiple unplaced LoRAs within the tick. Mirrors the HRW `dropped_active`
+                // path so both algorithms place capacity-pressured LoRAs identically.
                 let caps = self.state_tracker.get_worker_capacities();
                 let unplaced_set: HashSet<&str> = unplaced.iter().map(String::as_str).collect();
                 let mut projected: HashMap<WorkerWithDpRank, usize> = HashMap::new();
@@ -804,19 +790,6 @@ impl LoraController {
 
                 for lora_name in unplaced {
                     let is_active = active_set.contains(lora_name.as_str());
-                    // The solver produced NO placement for this LoRA (capacity overflow), but it
-                    // must stay routable where possible (REQ 7) without bypassing that decision. We
-                    // must NOT keep its full prior entry: the filter's tier-2 lazy-load path
-                    // (`replica_set ∩ available`) would reload the adapter onto a still-live replica
-                    // it was evicted from, defeating the overflow cap. So narrow any existing entry
-                    // to the workers where it is STILL warm (prior set ∩ loaded ∩ live) — pure
-                    // existing routes, no new load. If nothing is warm, pin to a single
-                    // deterministic slot-aware HRW worker that still has a free slot. If no worker
-                    // has a free slot (genuine overflow with no headroom), REFUSE: remove the entry
-                    // so the LoRA stays reachable only via the filter's runtime loaded-worker
-                    // fallback if/when it loads, rather than creating a cold route onto a full
-                    // worker. Fallback pins are never inserted into `result.assignment`, so
-                    // `prev_assignment` stays the pure solver output.
                     let loaded = self.state_tracker.get_loaded_workers(&lora_name);
                     let warm: Vec<WorkerWithDpRank> = self
                         .routing_table
@@ -830,20 +803,31 @@ impl LoraController {
                     let chosen = if !warm.is_empty() {
                         warm
                     } else {
-                        match self.slot_aware_free_pin(&lora_name, workers, &projected, &caps) {
-                            Some(w) => vec![w],
-                            None => Vec::new(),
-                        }
+                        // Slot-aware bounded pin against this tick's projected usage (parity with
+                        // the HRW dropped_active path). Prefers a free slot; falls back to a single
+                        // worker only when all are full.
+                        let proj_usage: HashMap<WorkerWithDpRank, (usize, usize)> = workers
+                            .iter()
+                            .map(|w| {
+                                let used = projected.get(w).copied().unwrap_or(0);
+                                let cap = caps.get(w).copied().unwrap_or(0) as usize;
+                                (*w, (used, cap))
+                            })
+                            .collect();
+                        self.allocator.compute_replica_set_with_slots(
+                            &lora_name,
+                            workers,
+                            1,
+                            &proj_usage,
+                        )
                     };
                     if chosen.is_empty() {
-                        // No warm worker and no free slot anywhere (or no live worker at all): drop
-                        // any stale entry rather than keep a dead/over-capacity route.
+                        // No live worker at all — drop any stale entry rather than keep a dead route.
                         self.routing_table.remove_lora(&lora_name);
                         self.hysteresis.remove(&lora_name);
                         continue;
                     }
-                    // Charge the chosen worker(s) so later unplaced pins see them occupied and don't
-                    // overfill the same slot within this tick.
+                    // Charge the chosen worker(s) so later unplaced pins see them occupied.
                     for w in &chosen {
                         *projected.entry(*w).or_insert(0) += 1;
                     }
@@ -856,7 +840,7 @@ impl LoraController {
                         tracing::warn!(
                             lora = %lora_name,
                             workers = ?chosen.iter().map(|w| w.worker_id).collect::<Vec<_>>(),
-                            "MCF left LoRA unplaced (capacity overflow); narrowed to warm workers or slot-aware pin"
+                            "MCF left LoRA unplaced (capacity overflow); narrowed to warm workers or slot-aware bounded pin"
                         );
                     }
                 }
@@ -1646,36 +1630,41 @@ mod tests {
     }
 
     #[test]
-    fn test_mcf_overflow_refuses_pin_when_no_free_slot() {
+    fn test_mcf_overflow_uses_slot_aware_bounded_pin() {
         // MCF genuine overflow: more cold-start LoRAs than slots. The MCF solver places what fits
-        // and OMITS the rest from its assignment. An omitted (unplaced) LoRA that is NOT warm must
-        // NOT be pinned onto the only worker once it is full — the old plain-HRW fallback ignored
-        // slot capacity and created exactly such a cold route, which the filter would then
-        // lazy-load onto a worker the solver already determined had no room (exceeding
-        // max_*_lora_count). With no free slot anywhere, the controller must refuse: remove the
-        // entry so the adapter stays reachable only via the filter's runtime loaded-worker
-        // fallback, not via a route onto a full worker.
+        // and OMITS the rest from its assignment. An omitted (unplaced) LoRA must be re-placed via
+        // the SLOT-AWARE allocator (compute_replica_set_with_slots), in parity with the HRW
+        // dropped_active path — NOT the slot-blind compute_replica_set the previous MCF fallback
+        // used. With a single full worker, the slot-aware pin bounds the LoRA to that one worker
+        // (REQ 7 keep-one-home; backend enforces max_*_lora_count), never scattering it across all
+        // workers. The key property: each unplaced LoRA gets a single bounded replica, not the full
+        // worker set.
         let (mut controller, st, _le, rt) = setup_mcf_controller();
         let w1 = make_worker(1);
-        // One worker, capacity 1, with two cold-start (inactive) adapters known/loaded on it.
+        let w2 = make_worker(2);
+        // Two workers, each cap 1 (budget 2). Three cold-start (inactive) adapters loaded across
+        // them, so at least one overflows the MCF solve and hits the slot-aware fallback.
         st.handle_mdc_addition(w1, &make_lora_info("lora-a", 1));
-        st.handle_mdc_addition(w1, &make_lora_info("lora-b", 1));
-        assert_eq!(st.total_lora_slots(), 1, "single cap=1 worker => one slot");
+        st.handle_mdc_addition(w2, &make_lora_info("lora-b", 1));
+        st.handle_mdc_addition(w1, &make_lora_info("lora-c", 1));
+        assert_eq!(st.total_lora_slots(), 2, "two cap=1 workers => two slots");
 
         controller.recompute_now();
 
         let entries = rt.snapshot_configs();
         assert_eq!(
             entries.len(),
-            1,
-            "only one cold-start LoRA fits the single slot; the overflow must be refused (entry \
-             removed), not pinned onto the already-full worker"
+            3,
+            "every cold-start LoRA stays routable (placed or slot-aware bounded pin)"
         );
-        let (_, cfg) = &entries[0];
-        assert_eq!(
-            cfg.replica_set,
-            vec![w1],
-            "the one placed LoRA pins to the only worker"
-        );
+        for (name, cfg) in &entries {
+            assert_eq!(
+                cfg.replica_set.len(),
+                1,
+                "LoRA {name} must get a single bounded replica, not be scattered across all workers"
+            );
+            let w = cfg.replica_set[0];
+            assert!(w == w1 || w == w2, "LoRA {name} must pin to a live worker");
+        }
     }
 }
