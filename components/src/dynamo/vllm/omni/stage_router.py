@@ -38,6 +38,7 @@ from dynamo.vllm.omni.types import StageOutput
 from dynamo.vllm.omni.utils import (
     coerce_token_ids_to_list,
     ensure_awaited,
+    is_empty_payload,
     is_tensor_payload,
     shm_deserialize,
     unwrap_connector_payload,
@@ -220,6 +221,8 @@ class OmniStageRouter:
                     )
                 )
                 payload_data = unwrap_connector_payload(get_result)
+                if is_empty_payload(payload_data):
+                    raise RuntimeError("empty payload returned by connector.get()")
 
                 if is_tensor_payload(payload_data):
                     payload_data = _restore_stage_to_router_tensor_payload(payload_data)
