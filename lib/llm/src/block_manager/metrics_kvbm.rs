@@ -11,11 +11,22 @@ use dynamo_runtime::metrics::prometheus_names::{
     },
     sanitize_prometheus_name,
 };
-use prometheus::{Gauge, IntCounter, Opts, Registry};
+use prometheus::{Gauge, IntCounter, IntGauge, Opts, Registry};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, thread};
 use tokio::{net::TcpListener, sync::Notify};
 
+use crate::block_manager::pool::BlockPoolStatus;
 use crate::http::service::{RouteDoc, metrics::router};
+
+// Block-state gauge names (issue #10066). The registry prefixes these with `kvbm_`.
+// G2 = host tier pool, G3 = disk tier pool. Total = inactive + empty (active reads 0 in
+// practice for the G2/G3 tiers, so it is not surfaced; see issue #10066).
+const G2_INACTIVE_BLOCKS: &str = "g2_inactive_blocks";
+const G2_EMPTY_BLOCKS: &str = "g2_empty_blocks";
+const G2_TOTAL_BLOCKS: &str = "g2_total_blocks";
+const G3_INACTIVE_BLOCKS: &str = "g3_inactive_blocks";
+const G3_EMPTY_BLOCKS: &str = "g3_empty_blocks";
+const G3_TOTAL_BLOCKS: &str = "g3_total_blocks";
 
 #[derive(Clone, Debug)]
 pub struct KvbmMetrics {
@@ -57,6 +68,16 @@ pub struct KvbmMetrics {
 
     // number of failed object storage write operations (blocks)
     pub object_write_failures: IntCounter,
+
+    // G2 (host tier) block-state gauges (issue #10066)
+    pub g2_inactive_blocks: IntGauge,
+    pub g2_empty_blocks: IntGauge,
+    pub g2_total_blocks: IntGauge,
+
+    // G3 (disk tier) block-state gauges (issue #10066)
+    pub g3_inactive_blocks: IntGauge,
+    pub g3_empty_blocks: IntGauge,
+    pub g3_total_blocks: IntGauge,
 
     shutdown_notify: Option<Arc<Notify>>,
 }
@@ -154,6 +175,27 @@ impl KvbmMetrics {
                 &[],
             )
             .unwrap();
+
+        // block-state gauges (issue #10066)
+        let g2_inactive_blocks = mr
+            .create_intgauge(G2_INACTIVE_BLOCKS, "G2 (host tier) inactive blocks", &[])
+            .unwrap();
+        let g2_empty_blocks = mr
+            .create_intgauge(G2_EMPTY_BLOCKS, "G2 (host tier) empty blocks", &[])
+            .unwrap();
+        let g2_total_blocks = mr
+            .create_intgauge(G2_TOTAL_BLOCKS, "G2 (host tier) total blocks", &[])
+            .unwrap();
+        let g3_inactive_blocks = mr
+            .create_intgauge(G3_INACTIVE_BLOCKS, "G3 (disk tier) inactive blocks", &[])
+            .unwrap();
+        let g3_empty_blocks = mr
+            .create_intgauge(G3_EMPTY_BLOCKS, "G3 (disk tier) empty blocks", &[])
+            .unwrap();
+        let g3_total_blocks = mr
+            .create_intgauge(G3_TOTAL_BLOCKS, "G3 (disk tier) total blocks", &[])
+            .unwrap();
+
         // early return if no endpoint is needed
         if !create_endpoint {
             return Self {
@@ -170,6 +212,12 @@ impl KvbmMetrics {
                 object_cache_hit_rate,
                 object_read_failures,
                 object_write_failures,
+                g2_inactive_blocks,
+                g2_empty_blocks,
+                g2_total_blocks,
+                g3_inactive_blocks,
+                g3_empty_blocks,
+                g3_total_blocks,
                 shutdown_notify: None,
             };
         }
@@ -232,6 +280,12 @@ impl KvbmMetrics {
             object_cache_hit_rate,
             object_read_failures,
             object_write_failures,
+            g2_inactive_blocks,
+            g2_empty_blocks,
+            g2_total_blocks,
+            g3_inactive_blocks,
+            g3_empty_blocks,
+            g3_total_blocks,
             shutdown_notify: Some(notify),
         }
     }
@@ -241,6 +295,22 @@ impl KvbmMetrics {
         self.host_cache_hit_rate.set(host_rate as f64);
         self.disk_cache_hit_rate.set(disk_rate as f64);
         self.object_cache_hit_rate.set(object_rate as f64);
+    }
+
+    /// Update G2 (host) / G3 (disk) block-state gauges from pool status snapshots (issue #10066).
+    /// Total = active + inactive + empty (the pool's fixed capacity); active reads 0 in practice
+    /// for these tiers and is not surfaced as its own gauge. Call from the periodic metrics task in
+    /// slot.rs alongside `update_cache_hit_rates`, passing
+    /// `host_pool.status().await` / `disk_pool.status().await`.
+    pub fn update_block_states(&self, g2: &BlockPoolStatus, g3: &BlockPoolStatus) {
+        self.g2_inactive_blocks.set(g2.inactive_blocks as i64);
+        self.g2_empty_blocks.set(g2.empty_blocks as i64);
+        self.g2_total_blocks
+            .set((g2.active_blocks + g2.inactive_blocks + g2.empty_blocks) as i64);
+        self.g3_inactive_blocks.set(g3.inactive_blocks as i64);
+        self.g3_empty_blocks.set(g3.empty_blocks as i64);
+        self.g3_total_blocks
+            .set((g3.active_blocks + g3.inactive_blocks + g3.empty_blocks) as i64);
     }
     /// Record failed object storage read operations
     pub fn record_object_read_failure(&self, num_blocks: u64) {
@@ -310,6 +380,23 @@ impl KvbmMetricsRegistry {
             .collect();
         let opts = Opts::new(metrics_name, description).const_labels(const_labels);
         let g = Gauge::with_opts(opts)?;
+        self.registry.register(Box::new(g.clone()))?;
+        Ok(g)
+    }
+
+    pub fn create_intgauge(
+        &self,
+        name: &str,
+        description: &str,
+        labels: &[(&str, &str)],
+    ) -> anyhow::Result<IntGauge> {
+        let metrics_name = sanitize_prometheus_name(&format!("{}_{}", self.prefix, name))?;
+        let const_labels: HashMap<String, String> = labels
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let opts = Opts::new(metrics_name, description).const_labels(const_labels);
+        let g = IntGauge::with_opts(opts)?;
         self.registry.register(Box::new(g.clone()))?;
         Ok(g)
     }
