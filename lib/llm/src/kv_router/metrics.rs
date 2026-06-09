@@ -60,7 +60,7 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use prometheus::{HistogramOpts, IntCounter, IntCounterVec, IntGaugeVec, Opts};
 
 use crate::http::service::metrics::generate_log_buckets;
-use dynamo_kv_router::remote_g2_plan::RemoteKvReuseDecision;
+use dynamo_kv_router::remote_g2_plan::{RemoteG2CandidateScore, RemoteKvReuseDecision};
 
 /// Buckets for CPU-bound compute phases (block hashing, sequence hashing).
 fn compute_overhead_buckets() -> Vec<f64> {
@@ -70,6 +70,14 @@ fn compute_overhead_buckets() -> Vec<f64> {
 /// Buckets for async phases (indexer find_matches, scheduling, total).
 fn async_overhead_buckets() -> Vec<f64> {
     prometheus::exponential_buckets(0.01, 3.0, 17).unwrap()
+}
+
+fn remote_g2_candidate_count_buckets() -> Vec<f64> {
+    prometheus::linear_buckets(0.0, 1.0, 17).unwrap()
+}
+
+fn remote_g2_block_buckets() -> Vec<f64> {
+    prometheus::exponential_buckets(1.0, 2.0, 16).unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -513,6 +521,15 @@ pub struct RouterRequestMetrics {
     pub kv_transfer_estimated_latency_seconds: prometheus::Histogram,
     pub shared_cache_hit_rate: prometheus::Histogram,
     pub shared_cache_beyond_blocks: prometheus::Histogram,
+    pub remote_g2_candidate_count: prometheus::Histogram,
+    pub remote_g2_selected_benefit_blocks: prometheus::Histogram,
+    pub remote_g2_selected_score_blocks: prometheus::Histogram,
+    pub remote_g2_selected_effective_score_blocks: prometheus::Histogram,
+    pub remote_g2_selected_cost_blocks: prometheus::Histogram,
+    pub remote_g2_selected_incremental_blocks: prometheus::Histogram,
+    pub remote_g2_selected_planned_prefix_blocks: prometheus::Histogram,
+    pub remote_g2_zero_score_candidate_count: prometheus::Histogram,
+    pub remote_g2_zero_score_incremental_blocks: prometheus::Histogram,
     pub remote_g2_plans_total: prometheus::IntCounter,
     pub remote_g2_planned_tokens: prometheus::IntCounter,
     pub remote_g2_rejected_g1_candidates_total: prometheus::IntCounter,
@@ -612,6 +629,78 @@ impl RouterRequestMetrics {
                         Some(prometheus::exponential_buckets(1.0, 2.0, 12).unwrap()),
                     )
                     .expect("failed to create router_shared_cache_beyond_blocks");
+                let remote_g2_candidate_count = metrics
+                    .create_histogram(
+                        &router_metric("remote_g2_candidate_count"),
+                        "Remote G2 candidate count considered by the router for each request",
+                        extra_labels,
+                        Some(remote_g2_candidate_count_buckets()),
+                    )
+                    .expect("failed to create router_remote_g2_candidate_count");
+                let remote_g2_selected_benefit_blocks = metrics
+                    .create_histogram(
+                        &router_metric("remote_g2_selected_benefit_blocks"),
+                        "Remote G2 selected candidate weighted benefit blocks before transfer cost",
+                        extra_labels,
+                        Some(remote_g2_block_buckets()),
+                    )
+                    .expect("failed to create router_remote_g2_selected_benefit_blocks");
+                let remote_g2_selected_score_blocks = metrics
+                    .create_histogram(
+                        &router_metric("remote_g2_selected_score_blocks"),
+                        "Remote G2 selected candidate scheduler score blocks after transfer cost",
+                        extra_labels,
+                        Some(remote_g2_block_buckets()),
+                    )
+                    .expect("failed to create router_remote_g2_selected_score_blocks");
+                let remote_g2_selected_effective_score_blocks = metrics
+                    .create_histogram(
+                        &router_metric("remote_g2_selected_effective_score_blocks"),
+                        "Remote G2 selected candidate non-negative scheduler score blocks after transfer cost",
+                        extra_labels,
+                        Some(remote_g2_block_buckets()),
+                    )
+                    .expect("failed to create router_remote_g2_selected_effective_score_blocks");
+                let remote_g2_selected_cost_blocks = metrics
+                    .create_histogram(
+                        &router_metric("remote_g2_selected_cost_blocks"),
+                        "Remote G2 selected candidate estimated transfer cost in blocks",
+                        extra_labels,
+                        Some(remote_g2_block_buckets()),
+                    )
+                    .expect("failed to create router_remote_g2_selected_cost_blocks");
+                let remote_g2_selected_incremental_blocks = metrics
+                    .create_histogram(
+                        &router_metric("remote_g2_selected_incremental_blocks"),
+                        "Remote G2 selected candidate incremental blocks beyond the target local prefix",
+                        extra_labels,
+                        Some(remote_g2_block_buckets()),
+                    )
+                    .expect("failed to create router_remote_g2_selected_incremental_blocks");
+                let remote_g2_selected_planned_prefix_blocks = metrics
+                    .create_histogram(
+                        &router_metric("remote_g2_selected_planned_prefix_blocks"),
+                        "Remote G2 selected candidate planned prefix blocks",
+                        extra_labels,
+                        Some(remote_g2_block_buckets()),
+                    )
+                    .expect("failed to create router_remote_g2_selected_planned_prefix_blocks");
+                let remote_g2_zero_score_candidate_count = metrics
+                    .create_histogram(
+                        &router_metric("remote_g2_zero_score_candidate_count"),
+                        "Remote G2 candidates with a non-positive scheduler score for each request",
+                        extra_labels,
+                        Some(remote_g2_candidate_count_buckets()),
+                    )
+                    .expect("failed to create router_remote_g2_zero_score_candidate_count");
+                let remote_g2_zero_score_incremental_blocks = metrics
+                    .create_histogram(
+                        &router_metric("remote_g2_zero_score_incremental_blocks"),
+                        "Incremental blocks on remote G2 candidates with a non-positive scheduler score",
+                        extra_labels,
+                        Some(remote_g2_block_buckets()),
+                    )
+                    .expect("failed to create router_remote_g2_zero_score_incremental_blocks");
                 let remote_g2_plans_total = metrics
                     .create_intcounter(
                         &router_metric("remote_g2_plans_total"),
@@ -651,6 +740,15 @@ impl RouterRequestMetrics {
                     kv_transfer_estimated_latency_seconds,
                     shared_cache_hit_rate,
                     shared_cache_beyond_blocks,
+                    remote_g2_candidate_count,
+                    remote_g2_selected_benefit_blocks,
+                    remote_g2_selected_score_blocks,
+                    remote_g2_selected_effective_score_blocks,
+                    remote_g2_selected_cost_blocks,
+                    remote_g2_selected_incremental_blocks,
+                    remote_g2_selected_planned_prefix_blocks,
+                    remote_g2_zero_score_candidate_count,
+                    remote_g2_zero_score_incremental_blocks,
                     remote_g2_plans_total,
                     remote_g2_planned_tokens,
                     remote_g2_rejected_g1_candidates_total,
@@ -658,6 +756,39 @@ impl RouterRequestMetrics {
                 })
             })
             .clone()
+    }
+
+    pub fn observe_remote_g2_candidates(
+        &self,
+        candidate_count: usize,
+        zero_score_candidate_count: usize,
+        zero_score_incremental_blocks: u64,
+        selected_candidate: Option<&RemoteG2CandidateScore>,
+    ) {
+        self.remote_g2_candidate_count
+            .observe(candidate_count as f64);
+        self.remote_g2_zero_score_candidate_count
+            .observe(zero_score_candidate_count as f64);
+        self.remote_g2_zero_score_incremental_blocks
+            .observe(zero_score_incremental_blocks as f64);
+
+        let Some(candidate) = selected_candidate else {
+            return;
+        };
+
+        let benefit_blocks = candidate.score_blocks + candidate.cost_blocks;
+        self.remote_g2_selected_benefit_blocks
+            .observe(benefit_blocks.max(0.0));
+        self.remote_g2_selected_score_blocks
+            .observe(candidate.score_blocks);
+        self.remote_g2_selected_effective_score_blocks
+            .observe(candidate.score_blocks.max(0.0));
+        self.remote_g2_selected_cost_blocks
+            .observe(candidate.cost_blocks);
+        self.remote_g2_selected_incremental_blocks
+            .observe(f64::from(candidate.incremental_blocks));
+        self.remote_g2_selected_planned_prefix_blocks
+            .observe(f64::from(candidate.planned_blocks));
     }
 
     pub fn observe_remote_g2_decision(&self, decision: &RemoteKvReuseDecision, block_size: u32) {

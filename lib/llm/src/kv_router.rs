@@ -821,9 +821,11 @@ where
                     .remote_g2_cost_model(router_config_override),
             ),
         };
+        let mut selected_remote_g2_candidate = None;
         let mut remote_kv_reuse = if self.kv_router_config.remote_g2_reuse_enabled {
             match select_remote_g2_candidate(selected_remote_g2_input) {
                 RemoteG2CandidateDecision::Candidate { candidate, .. } => {
+                    selected_remote_g2_candidate = Some(candidate);
                     materialize_remote_g2_reuse_plan(selected_remote_g2_input, candidate)
                 }
                 RemoteG2CandidateDecision::NoCandidate { reason, stats } => {
@@ -962,6 +964,21 @@ where
         }
 
         if let Some(m) = metrics::RouterRequestMetrics::get() {
+            let zero_score_candidate_count = remote_g2_candidates
+                .values()
+                .filter(|candidate| candidate.score_blocks <= 0.0)
+                .count();
+            let zero_score_incremental_blocks = remote_g2_candidates
+                .values()
+                .filter(|candidate| candidate.score_blocks <= 0.0)
+                .map(|candidate| u64::from(candidate.incremental_blocks))
+                .sum();
+            m.observe_remote_g2_candidates(
+                remote_g2_candidates.len(),
+                zero_score_candidate_count,
+                zero_score_incremental_blocks,
+                selected_remote_g2_candidate.as_ref(),
+            );
             m.observe_remote_g2_decision(&remote_kv_reuse, self.block_size);
         }
 
