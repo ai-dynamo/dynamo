@@ -308,7 +308,7 @@ kubectl apply -f recipes/llama-3-70b/vllm/disagg-single-node/gaie/http-route.yam
 
 ```yaml
 frontendSidecar:
-  image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+  image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
   args:
     - --router-mode
     - direct
