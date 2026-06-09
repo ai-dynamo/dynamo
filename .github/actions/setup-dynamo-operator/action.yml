@@ -37,6 +37,26 @@ inputs:
     description: 'Kubernetes version for the vCluster control plane (must be supported by kr8s)'
     required: false
     default: 'v1.32.13'
+  checkpoint_enabled:
+    description: 'Enable operator checkpoint/restore injection'
+    required: false
+    default: 'false'
+  checkpoint_storage_pvc_name:
+    description: 'Checkpoint PVC name created in workload namespaces when checkpointing is enabled'
+    required: false
+    default: snapshot-pvc
+  checkpoint_storage_base_path:
+    description: 'Checkpoint PVC mount path inside checkpoint and restore pods'
+    required: false
+    default: /checkpoints
+  checkpoint_storage_size:
+    description: 'Checkpoint PVC size created by the operator'
+    required: false
+    default: 1Gi
+  checkpoint_storage_access_mode:
+    description: 'Checkpoint PVC access mode created by the operator'
+    required: false
+    default: ReadWriteOnce
 
 outputs:
   namespace:
@@ -74,6 +94,7 @@ runs:
           BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
           BRANCH_SANITIZED="${BRANCH_SANITIZED:0:10}"
           echo "namespace=gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt" >> "$GITHUB_OUTPUT"
+          echo "namespace_suffix=${BRANCH_SANITIZED}" >> "$GITHUB_OUTPUT"
         fi
 
         echo "operator_tag=${{ inputs.operator_tag }}" >> "$GITHUB_OUTPUT"
@@ -93,16 +114,24 @@ runs:
       shell: bash
       env:
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+        NAMESPACE_SUFFIX: ${{ steps.resolve-names.outputs.namespace_suffix }}
       run: |
         echo "::group::Create host namespace $NAMESPACE"
+        set -euo pipefail
         set -x
-        kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
-        kubectl label namespaces ${NAMESPACE} \
+        kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+
+        LABELS=(
           nscleanup/enabled=true \
           nscleanup/ttl=7200 \
+          dynamo.github/run-id="${{ github.run_id }}" \
           ngc-api=enabled \
-          nvcr-imagepull=enabled \
-          --overwrite
+          nvcr-imagepull=enabled
+        )
+        if [[ -n "${NAMESPACE_SUFFIX}" ]]; then
+          LABELS+=(dynamo.github/cleanup-key="${NAMESPACE_SUFFIX}")
+        fi
+        kubectl label namespaces "${NAMESPACE}" "${LABELS[@]}" --overwrite
         echo "::endgroup::"
 
     - name: Create vCluster
@@ -110,17 +139,37 @@ runs:
       env:
         VCLUSTER_NAME: ${{ steps.resolve-names.outputs.vcluster_name }}
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+        CHECKPOINT_ENABLED: ${{ inputs.checkpoint_enabled }}
       run: |
         echo "::group::Create vCluster ${VCLUSTER_NAME} in ${NAMESPACE}"
         set -x
         # The K8s version must be supported by the kr8s Python library used in deploy tests.
         # This is independent of the host cluster version.
+        VCLUSTER_HELM_ARGS=()
+        if [[ "${CHECKPOINT_ENABLED}" == "true" ]]; then
+          VCLUSTER_CHECKPOINT_VALUES="$(mktemp)"
+          cat > "${VCLUSTER_CHECKPOINT_VALUES}" <<'EOF'
+        sync:
+          fromHost:
+            nodes:
+              enabled: true
+              clearImageStatus: true
+              selector:
+                labels:
+                  kubernetes.azure.com/mode: "user"
+            runtimeClasses:
+              enabled: true
+        EOF
+          VCLUSTER_HELM_ARGS+=(--values "${VCLUSTER_CHECKPOINT_VALUES}")
+        fi
+
         vcluster create ${VCLUSTER_NAME} \
           --namespace ${NAMESPACE} \
           --connect=false \
           --upgrade \
           --set controlPlane.distro.k8s.enabled=true \
-          --set controlPlane.distro.k8s.version=${{ inputs.vcluster_k8s_version }}
+          --set controlPlane.distro.k8s.version=${{ inputs.vcluster_k8s_version }} \
+          "${VCLUSTER_HELM_ARGS[@]}"
         echo "::endgroup::"
 
     - name: Wait for vCluster pod to be ready
@@ -136,6 +185,38 @@ runs:
           -l app=vcluster,release=${VCLUSTER_NAME} \
           -n ${NAMESPACE} \
           --timeout=900s
+        echo "::endgroup::"
+
+    - name: Install vCluster HostPath Mapper
+      if: inputs.checkpoint_enabled == 'true'
+      shell: bash
+      env:
+        VCLUSTER_NAME: ${{ steps.resolve-names.outputs.vcluster_name }}
+        NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+      run: |
+        echo "::group::Install vCluster HostPath Mapper"
+        set -euo pipefail
+
+        HPM_VALUES="$(mktemp)"
+        cat > "${HPM_VALUES}" <<'EOF'
+        nodeSelector:
+          nvidia.com/gpu.present: "true"
+        tolerations:
+          - operator: Exists
+        EOF
+
+        helm upgrade --install vcluster-hpm vcluster-hpm \
+          --repo https://charts.loft.sh \
+          --namespace "${NAMESPACE}" \
+          --wait \
+          --timeout 10m \
+          --set VclusterReleaseName="${VCLUSTER_NAME}" \
+          --values "${HPM_VALUES}" \
+          --debug
+
+        kubectl rollout status daemonset/vcluster-hpm-hostpath-mapper \
+          -n "${NAMESPACE}" \
+          --timeout=600s
         echo "::endgroup::"
 
     - name: Connect to vCluster
@@ -173,6 +254,11 @@ runs:
       env:
         REGISTRY: ${{ inputs.registry }}
         OPERATOR_TAG: ${{ inputs.operator_tag }}
+        CHECKPOINT_ENABLED: ${{ inputs.checkpoint_enabled }}
+        CHECKPOINT_STORAGE_PVC_NAME: ${{ inputs.checkpoint_storage_pvc_name }}
+        CHECKPOINT_STORAGE_BASE_PATH: ${{ inputs.checkpoint_storage_base_path }}
+        CHECKPOINT_STORAGE_SIZE: ${{ inputs.checkpoint_storage_size }}
+        CHECKPOINT_STORAGE_ACCESS_MODE: ${{ inputs.checkpoint_storage_access_mode }}
       run: |
         echo "::group::Install Dynamo platform via Helm (inside vCluster)"
         set -x
@@ -183,11 +269,26 @@ runs:
         cd deploy/helm/charts/platform/
         helm dep build .
 
+        CHECKPOINT_HELM_ARGS=(
+          --set dynamo-operator.checkpoint.enabled="${CHECKPOINT_ENABLED}"
+        )
+        if [[ "${CHECKPOINT_ENABLED}" == "true" ]]; then
+          CHECKPOINT_HELM_ARGS+=(
+            --set dynamo-operator.checkpoint.storage.type=pvc
+            --set dynamo-operator.checkpoint.storage.pvc.pvcName="${CHECKPOINT_STORAGE_PVC_NAME}"
+            --set dynamo-operator.checkpoint.storage.pvc.basePath="${CHECKPOINT_STORAGE_BASE_PATH}"
+            --set dynamo-operator.checkpoint.storage.pvc.create=true
+            --set dynamo-operator.checkpoint.storage.pvc.size="${CHECKPOINT_STORAGE_SIZE}"
+            --set dynamo-operator.checkpoint.storage.pvc.accessMode="${CHECKPOINT_STORAGE_ACCESS_MODE}"
+          )
+        fi
+
         KUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster \
         helm upgrade --install dynamo-platform . --namespace default \
           --set dynamo-operator.controllerManager.manager.image.repository=${OPERATOR_REPO} \
           --set dynamo-operator.controllerManager.manager.image.tag=${OPERATOR_TAG} \
           --set dynamo-operator.gpuDiscovery.enabled=false \
+          "${CHECKPOINT_HELM_ARGS[@]}" \
           --set global.grove.install=true \
           --set global.kai-scheduler.install=false \
           --debug

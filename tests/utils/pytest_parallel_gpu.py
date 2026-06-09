@@ -699,9 +699,18 @@ def run_parallel(
         # (pytest-cov collapses data_suffix=True shards into the unsuffixed
         # path) doesn't clobber siblings. Harmless when pytest-cov is not
         # active — the env var is just unread.
+        #
+        # Key only on w_id, which is a permanent, globally-unique per-test index
+        # (assigned via enumerate() above), so it already guarantees uniqueness.
+        # Do NOT append the test node-id: pytest-cov adds its own
+        # ".<hostname>.<pid>.<random>" parallel suffix (plus a temp suffix during
+        # the atomic save), so a long node-id here can push the filename past the
+        # filesystem's 255-byte NAME_MAX and crash the run with
+        # "OSError: [Errno 36] File name too long". The w_id->test mapping stays
+        # recoverable from the orchestrator log and the per-test JUnit filenames.
         parent_cov_file = env.get("COVERAGE_FILE")
         if parent_cov_file:
-            env["COVERAGE_FILE"] = f"{parent_cov_file}.w{test.w_id}.{safe_name}"
+            env["COVERAGE_FILE"] = f"{parent_cov_file}.w{test.w_id}"
         junit_path = os.path.join(_JUNIT_DIR, f"{safe_name}.xml")
         has_tb = extra_pytest_args and any(
             a.startswith("--tb") for a in extra_pytest_args

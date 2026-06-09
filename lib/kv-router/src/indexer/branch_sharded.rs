@@ -113,7 +113,10 @@ pub struct BranchShardedIndexer<S: AsyncShardHandle> {
     kv_block_size: u32,
     root: Arc<RoutingNode>,
     worker_block_index: DashMap<WorkerWithDpRank, WorkerRoutingLookup, FxBuildHasher>,
-    installed_worker_anchors: DashSet<(usize, WorkerWithDpRank, u64), FxBuildHasher>,
+    /// Single-owner anchor dedup map: worker → set of (shard_idx, anchor_id).
+    /// Sole source of truth for installed anchors for each worker.
+    worker_anchor_index:
+        DashMap<WorkerWithDpRank, DashSet<(usize, u64), FxBuildHasher>, FxBuildHasher>,
     #[cfg(feature = "bench")]
     metrics: ShardedIndexerMetrics,
 }
@@ -173,7 +176,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
             kv_block_size,
             root: Arc::new(RoutingNode::root()),
             worker_block_index: DashMap::with_hasher(FxBuildHasher),
-            installed_worker_anchors: DashSet::with_hasher(FxBuildHasher),
+            worker_anchor_index: DashMap::with_hasher(FxBuildHasher),
             #[cfg(feature = "bench")]
             metrics: ShardedIndexerMetrics::new(),
         }
@@ -405,8 +408,14 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
     }
 
     fn ensure_worker_anchor(&self, shard_idx: usize, worker: WorkerWithDpRank, anchor: AnchorRef) {
-        let key = (shard_idx, worker, anchor.anchor_id.0);
-        if self.installed_worker_anchors.contains(&key) {
+        let anchor_key = (shard_idx, anchor.anchor_id.0);
+
+        // Fast-path dedup: read lock only, no write.
+        if self
+            .worker_anchor_index
+            .get(&worker)
+            .is_some_and(|set| set.contains(&anchor_key))
+        {
             #[cfg(feature = "bench")]
             self.metrics
                 .counters
@@ -425,19 +434,25 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
         // while backend anchor application is idempotent by anchor_id.
         match self.shards[shard_idx].enqueue_anchor(worker, task) {
             Ok(()) => {
-                if self.installed_worker_anchors.insert(key) {
-                    #[cfg(feature = "bench")]
+                let newly_inserted = self
+                    .worker_anchor_index
+                    .entry(worker)
+                    .or_insert_with(|| DashSet::with_hasher(FxBuildHasher))
+                    .insert(anchor_key);
+                #[cfg(feature = "bench")]
+                if newly_inserted {
                     self.metrics
                         .counters
                         .anchor_installs
                         .fetch_add(1, Ordering::Relaxed);
                 } else {
-                    #[cfg(feature = "bench")]
                     self.metrics
                         .counters
                         .anchor_reuses
                         .fetch_add(1, Ordering::Relaxed);
                 }
+                #[cfg(not(feature = "bench"))]
+                let _ = newly_inserted;
             }
             Err(error) => {
                 tracing::warn!(?error, shard_idx, ?worker, "Failed to enqueue anchor");
@@ -446,28 +461,20 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
     }
 
     fn remove_worker_anchor_entries(&self, worker: WorkerWithDpRank) {
-        let keys: Vec<_> = self
-            .installed_worker_anchors
-            .iter()
-            .filter_map(|entry| {
-                let key = *entry.key();
-                (key.1 == worker).then_some(key)
-            })
-            .collect();
-        for key in keys {
-            self.installed_worker_anchors.remove(&key);
-        }
+        self.worker_anchor_index.remove(&worker);
     }
 
     fn tracked_workers_for_worker_id(&self, worker_id: WorkerId) -> FxHashSet<WorkerWithDpRank> {
         let mut workers: FxHashSet<_> = self
             .worker_block_index
             .iter()
-            .filter(|entry| entry.key().worker_id == worker_id)
-            .map(|entry| *entry.key())
+            .filter_map(|entry| {
+                let worker = *entry.key();
+                (worker.worker_id == worker_id).then_some(worker)
+            })
             .collect();
-        workers.extend(self.installed_worker_anchors.iter().filter_map(|entry| {
-            let worker = entry.key().1;
+        workers.extend(self.worker_anchor_index.iter().filter_map(|entry| {
+            let worker = *entry.key();
             (worker.worker_id == worker_id).then_some(worker)
         }));
         workers
@@ -1080,9 +1087,9 @@ mod tests {
 
     fn has_anchor_for_worker(index: &TestBSI, worker: WorkerWithDpRank) -> bool {
         index
-            .installed_worker_anchors
-            .iter()
-            .any(|entry| entry.key().1 == worker)
+            .worker_anchor_index
+            .get(&worker)
+            .is_some_and(|set| !set.is_empty())
     }
 
     async fn normalized_scores(index: &TestBSI, query: &[u64]) -> Vec<(WorkerWithDpRank, u32)> {
@@ -1375,7 +1382,12 @@ mod tests {
         assert_eq!(b.children.len(), 2);
         assert_eq!(e.shard(), 1);
         assert_eq!(e.live_workers.len(), worker_count);
-        assert_eq!(index.installed_worker_anchors.len(), worker_count + 1);
+        let total_anchors: usize = index
+            .worker_anchor_index
+            .iter()
+            .map(|e| e.value().len())
+            .sum();
+        assert_eq!(total_anchors, worker_count + 1);
         #[cfg(feature = "bench")]
         {
             assert_eq!(
@@ -1557,6 +1569,32 @@ mod tests {
         index.apply_event(clear_event(0)).await;
         let after_clear = index.find_matches(local_hashes(&[1, 2])).await.unwrap();
         assert!(after_clear.scores.is_empty());
+    }
+
+    #[tokio::test]
+    async fn worker_wide_cleanup_scans_block_and_anchor_worker_keys() {
+        let index = make_indexer(2, 3);
+        let dp0 = WorkerWithDpRank::new(7, 0);
+        let dp1 = WorkerWithDpRank::new(7, 1);
+
+        index
+            .apply_event(store_event_with_dp_rank(7, 0, &[1, 2, 3, 4]))
+            .await;
+        index
+            .apply_event(store_event_with_dp_rank(7, 1, &[1, 2, 5, 6]))
+            .await;
+        index.flush().await;
+
+        let before = index.tracked_workers_for_worker_id(7);
+        assert!(before.contains(&dp0));
+        assert!(before.contains(&dp1));
+        assert!(has_anchor_for_worker(&index, dp0));
+        assert!(has_anchor_for_worker(&index, dp1));
+
+        index.apply_event(clear_event(7)).await;
+        assert!(index.tracked_workers_for_worker_id(7).is_empty());
+        assert!(!has_anchor_for_worker(&index, dp0));
+        assert!(!has_anchor_for_worker(&index, dp1));
     }
 
     #[tokio::test]

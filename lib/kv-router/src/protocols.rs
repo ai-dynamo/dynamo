@@ -57,6 +57,19 @@ fn hash_block_no_mm(chunk: &[u32], seed: u64, scratch_bytes: &mut Vec<u8>) -> Lo
     }
 }
 
+/// sglang's `MultimodalItem._compute_pad_value` constants — must track upstream;
+/// if they drift, MM routing silently degrades to text-prefix. Pinned by
+/// `pad_value_matches_sglang_protocol`.
+pub const MM_PAD_SHIFT_VALUE: u64 = 1_000_000;
+pub const MM_PAD_HASH_MASK: u64 = (1 << 30) - 1;
+
+/// Canonical per-image pad_value from a routing-side `mm_hash`, called by both
+/// the frontend and the kv-router so request- and event-side hashes agree.
+/// Keeps the low 30 bits only (sglang's limit).
+pub fn pad_value_for_mm_hash(mm_hash: u64) -> u32 {
+    (MM_PAD_SHIFT_VALUE + (mm_hash & MM_PAD_HASH_MASK)) as u32
+}
+
 /// Compute the hash for a sequence of tokens, optionally including multimodal metadata
 /// and LoRA adapter identity.
 ///
@@ -1115,6 +1128,28 @@ mod tests {
     use super::*;
     use rstest::rstest;
     use serde_json;
+
+    /// Pin the sglang pad_value constants and formula against upstream
+    /// `MultimodalItem._compute_pad_value`. If sglang bumps a constant, this
+    /// fails — otherwise routing-side pad_value would silently diverge from
+    /// sglang's `BlockStored` bytes and MM-routing would degrade to text-prefix.
+    #[test]
+    fn pad_value_matches_sglang_protocol() {
+        assert_eq!(MM_PAD_SHIFT_VALUE, 1_000_000);
+        assert_eq!(MM_PAD_HASH_MASK, (1u64 << 30) - 1);
+        assert_eq!(pad_value_for_mm_hash(0), MM_PAD_SHIFT_VALUE as u32);
+        let fits = (1u64 << 30) - 1;
+        assert_eq!(
+            pad_value_for_mm_hash(fits),
+            (MM_PAD_SHIFT_VALUE + fits) as u32
+        );
+        let overflow = (1u64 << 30) | 0xCAFE;
+        assert_eq!(
+            pad_value_for_mm_hash(overflow),
+            (MM_PAD_SHIFT_VALUE + 0xCAFE) as u32,
+            "high bits above the 30-bit mask must be discarded"
+        );
+    }
 
     #[test]
     fn test_router_event_new() {
