@@ -63,6 +63,7 @@ For **v1.1.0-dev.2**, **v1.1.0-dev.3**, **v1.2.0-deepseek-v4-dev.2**, and **v1.2
 
 - **1.3.0 (main / ToT)** reflects the current development branch.
 - Releases marked *(experimental, partial)* are pre-releases: the table shows branch build pins, which may include backends with no NGC image for that dev tag yet.
+- Releases marked *(in progress)* or *(planned)* show target versions that may change before final release.
 
 ### Version Compatibility
 
@@ -77,7 +78,7 @@ Dynamo container images include CUDA toolkit libraries. The host machine must ha
 | :--- | :--- | :--- | :--- | :--- |
 | **1.2.0** | **SGLang** | 12.9 | 575.xx+ | |
 | | | 13.0 | 580.xx+ | |
-| | **TensorRT-LLM** | 13.1 | 580.xx+ | CUDA 13 only |
+| | **TensorRT-LLM** | 13.1 | 580.xx+ | |
 | | **vLLM** | 12.9 | 575.xx+ | |
 | | | 13.0 | 580.xx+ | |
 | **1.1.1** | **SGLang** | 12.9 | 575.xx+ | |
@@ -233,4 +234,4 @@ For version-specific artifact details, installation commands, and release histor
   - [dynamo-mocker](https://crates.io/crates/dynamo-mocker/) *(New in v1.0.0)*
   - [dynamo-kv-router](https://crates.io/crates/dynamo-kv-router/) *(New in v1.0.0)*
 
-Once you've confirmed that your platform and architecture are compatible, you can install **Dynamo** by following the [Local Quick Start](https://github.com/ai-dynamo/dynamo/blob/main/README.md#local-quick-start) in the README.
+Once you've confirmed that your platform and architecture are compatible, you can install **Dynamo** by following the [Quickstart](https://docs.nvidia.com/dynamo/getting-started/quickstart) in the docs.
