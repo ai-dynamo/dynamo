@@ -12,8 +12,9 @@ generalizes. Aggregated only: the multi-stage disaggregated form
 single-Worker unified model can't express, so it stays on
 ``python -m dynamo.vllm.omni``.
 
-All vLLM/omni imports are lazy (inside methods) so this module imports without
-vLLM installed.
+The heavier vLLM-Omni handler imports (``OmniHandler``, the health-check
+payload) stay lazy inside ``start``/``health_check_payload`` so they only load
+when the engine actually runs — same pattern as ``sglang/unified_diffusion.py``.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
 from dynamo.common.storage import get_fs
 from dynamo.llm import ModelInput
+from dynamo.vllm.omni.args import parse_omni_args
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +60,6 @@ class VllmOmniEngine(RawEngine):
     async def from_args(
         cls, argv: list[str] | None = None
     ) -> tuple["VllmOmniEngine", WorkerConfig]:
-        from dynamo.vllm.omni.args import parse_omni_args
-
         # parse_omni_args() reads sys.argv; honor an explicit argv when given.
         if argv is not None:
             saved, sys.argv = sys.argv, [sys.argv[0], *argv]
