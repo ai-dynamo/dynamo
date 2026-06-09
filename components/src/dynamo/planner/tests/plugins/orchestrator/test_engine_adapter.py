@@ -239,7 +239,12 @@ def test_tick_input_to_context_maps_observations_and_fpm():
     ti = TickInput(
         now_s=10.0,
         traffic=TrafficObservation(
-            duration_s=60.0, num_req=100.0, isl=1000.0, osl=150.0, kv_hit_rate=0.4
+            duration_s=60.0,
+            num_req=100.0,
+            isl=1000.0,
+            osl=150.0,
+            kv_hit_rate=0.4,
+            accept_length=2.5,
         ),
         worker_counts=WorkerCounts(
             ready_num_prefill=2,
@@ -253,6 +258,7 @@ def test_tick_input_to_context_maps_observations_and_fpm():
 
     assert ctx.observations.traffic.num_req == 100.0
     assert ctx.observations.traffic.kv_hit_rate == 0.4
+    assert ctx.observations.traffic.accept_length == 2.5
     assert ctx.observations.workers.ready_decode == 4
     assert ctx.observations.workers.prefill_scaling_in_progress is True
     assert ctx.observations.workers.decode_scaling_in_progress is False
@@ -681,15 +687,15 @@ def test_lazy_traffic_pull_matches_dot_path_sub_paths_of_observations_traffic():
         "p_sibling", ["observations.traffic_legacy"]
     )
     sched = adapter._compute_next_scheduled_tick()
-    assert (
-        sched.need_traffic_metrics is False
-    ), "prefix match must not over-fire on sibling field 'observations.traffic_legacy'"
+    assert sched.need_traffic_metrics is False, (
+        "prefix match must not over-fire on sibling field 'observations.traffic_legacy'"
+    )
 
     # --- Case 4: completely unrelated needs must NOT match ---
     adapter._orchestrator._registry._plugins["p_other"] = _make_traffic_plugin(
         "p_other", ["observations.fpm", "predictions"]
     )
     sched = adapter._compute_next_scheduled_tick()
-    assert (
-        sched.need_traffic_metrics is False
-    ), "unrelated needs must not trigger the traffic pull"
+    assert sched.need_traffic_metrics is False, (
+        "unrelated needs must not trigger the traffic pull"
+    )

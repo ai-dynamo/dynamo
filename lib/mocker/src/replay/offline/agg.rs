@@ -509,8 +509,12 @@ impl AggRuntime {
         _completed_requests: usize,
         output_signals: Vec<OutputSignal>,
         kv_events: Vec<RouterEvent>,
+        accept_length_output_tokens: usize,
+        accept_length_decode_forwards: usize,
     ) -> anyhow::Result<()> {
         self.apply_router_events(kv_events)?;
+        self.traffic
+            .on_accept_length_sample(accept_length_output_tokens, accept_length_decode_forwards);
         for signal in output_signals {
             self.process_output_signal(signal)?;
         }
@@ -528,6 +532,8 @@ impl AggRuntime {
                 payload.completed_requests,
                 payload.output_signals,
                 payload.kv_events,
+                payload.accept_length_output_tokens,
+                payload.accept_length_decode_forwards,
             )?;
             changed = true;
         }
@@ -585,6 +591,8 @@ impl AggRuntime {
                 payload.completed_requests,
                 payload.output_signals,
                 payload.kv_events,
+                payload.accept_length_output_tokens,
+                payload.accept_length_decode_forwards,
             )?;
         }
         for ScheduledWorkerCompletion { at_ms, payload } in effects.scheduled_completions {

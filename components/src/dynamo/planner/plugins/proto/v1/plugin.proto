@@ -257,6 +257,12 @@ message TrafficMetrics
   // scaling consumes this — external throughput-propose plugins
   // replicating PSM behaviour need it for parity.
   optional double kv_hit_rate = 5;
+
+  // Speculative decode accept length over the window: visible output tokens
+  // per decode request-forward, including the base token. ``optional``
+  // distinguishes "no datapoint" from a real 1.0 "no speculative benefit"
+  // observation. PSM throughput/load scaling consumes this for MTP parity.
+  optional double accept_length = 6;
 }
 
 // Mirrors FpmObservations (types.py).

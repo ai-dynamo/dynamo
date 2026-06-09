@@ -46,9 +46,9 @@ def test_class_coverage_pydantic_side():
     }
     registered = set(_PYD_TO_PROTO.keys())
     missing = pyd_classes - registered
-    assert (
-        not missing
-    ), f"Pydantic classes missing proto registration: {sorted(c.__name__ for c in missing)}"
+    assert not missing, (
+        f"Pydantic classes missing proto registration: {sorted(c.__name__ for c in missing)}"
+    )
 
 
 def test_class_coverage_proto_side():
@@ -245,9 +245,9 @@ def test_prediction_data_optional_unset_vs_zero():
     # Explicit 0.0 (rare but valid)
     p2 = pyd.PredictionData(predicted_num_req=0.0)
     pb2 = pydantic_to_proto(p2)
-    assert pb2.HasField(
-        "predicted_num_req"
-    ), "predicted_num_req=0.0 must round-trip as set"
+    assert pb2.HasField("predicted_num_req"), (
+        "predicted_num_req=0.0 must round-trip as set"
+    )
     assert pb2.predicted_num_req == 0.0
     assert not pb2.HasField("predicted_isl")  # still unset
 
@@ -281,6 +281,7 @@ def test_kv_hit_rate_round_trip_traffic_and_prediction():
     )
     tm_none_back = proto_to_pydantic(pb_tm_none)
     assert tm_none_back.kv_hit_rate is None
+    assert tm_none_back.accept_length is None
 
     # TrafficMetrics: kv_hit_rate=0.0 (cold cache, valid datapoint)
     tm_cold = pyd.TrafficMetrics(
@@ -291,15 +292,24 @@ def test_kv_hit_rate_round_trip_traffic_and_prediction():
     assert pb_tm_cold.kv_hit_rate == 0.0
     tm_cold_back = proto_to_pydantic(pb_tm_cold)
     assert tm_cold_back.kv_hit_rate == 0.0
+    assert not pb_tm_cold.HasField("accept_length")
 
     # TrafficMetrics: kv_hit_rate=0.42 (typical warm cache)
     tm_warm = pyd.TrafficMetrics(
-        duration_s=60.0, num_req=100, isl=512, osl=128, kv_hit_rate=0.42
+        duration_s=60.0,
+        num_req=100,
+        isl=512,
+        osl=128,
+        kv_hit_rate=0.42,
+        accept_length=1.0,
     )
     pb_tm_warm = pydantic_to_proto(tm_warm)
     assert pb_tm_warm.kv_hit_rate == pytest.approx(0.42)
+    assert pb_tm_warm.HasField("accept_length")
+    assert pb_tm_warm.accept_length == 1.0
     tm_warm_back = proto_to_pydantic(pb_tm_warm)
     assert tm_warm_back.kv_hit_rate == pytest.approx(0.42)
+    assert tm_warm_back.accept_length == 1.0
 
     # PredictionData: predicted_kv_hit_rate unset/set parity with the
     # other predicted_* fields.

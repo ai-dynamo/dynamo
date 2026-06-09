@@ -656,7 +656,11 @@ impl DisaggRuntime {
         _worker_idx: usize,
         _completed_requests: usize,
         output_signals: Vec<OutputSignal>,
+        accept_length_output_tokens: usize,
+        accept_length_decode_forwards: usize,
     ) -> Result<()> {
+        self.traffic
+            .on_accept_length_sample(accept_length_output_tokens, accept_length_decode_forwards);
         for signal in output_signals {
             self.process_decode_signal(signal)?;
         }
@@ -683,6 +687,8 @@ impl DisaggRuntime {
                         payload.worker_idx,
                         payload.completed_requests,
                         payload.output_signals,
+                        payload.accept_length_output_tokens,
+                        payload.accept_length_decode_forwards,
                     )?;
                 }
                 SimulationWorkerStage::Aggregated => {
@@ -816,6 +822,8 @@ impl DisaggRuntime {
                 payload.worker_idx,
                 payload.completed_requests,
                 payload.output_signals,
+                payload.accept_length_output_tokens,
+                payload.accept_length_decode_forwards,
             )?;
         }
         for ScheduledWorkerCompletion { at_ms, payload } in effects.scheduled_completions {
