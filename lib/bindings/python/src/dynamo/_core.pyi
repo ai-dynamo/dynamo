@@ -1836,6 +1836,7 @@ class MockEngineArgs:
         aic_attention_dp_size: Optional[int] = None,
         aic_nextn: Optional[int] = None,
         aic_nextn_accept_rates: Optional[str] = None,
+        aic_mtp_seed: int = 42,
         gpu_memory_utilization: Optional[float] = None,
         mem_fraction_static: Optional[float] = None,
         free_gpu_memory_fraction: Optional[float] = None,
@@ -1990,6 +1991,12 @@ class MockEngineArgs:
     def aic_nextn_accept_rates(self, value: Optional[str]) -> None: ...
 
     @property
+    def aic_mtp_seed(self) -> int: ...
+
+    @aic_mtp_seed.setter
+    def aic_mtp_seed(self, value: int) -> None: ...
+
+    @property
     def gpu_memory_utilization(self) -> Optional[float]: ...
 
     @gpu_memory_utilization.setter
@@ -2034,6 +2041,7 @@ class MockEngineArgs:
         aic_attention_dp_size: Optional[int] = None,
         aic_nextn: Optional[int] = None,
         aic_nextn_accept_rates: Optional[str] = None,
+        aic_mtp_seed: Optional[int] = None,
         gpu_memory_utilization: Optional[float] = None,
         mem_fraction_static: Optional[float] = None,
         free_gpu_memory_fraction: Optional[float] = None,
