@@ -259,7 +259,6 @@ func injectCheckpointIntoPodSpec(
 		return err
 	}
 
-	EnsurePodInfoVolume(podSpec)
 	targetContainers := make([]*corev1.Container, 0, len(targets))
 	for _, name := range targets {
 		var container *corev1.Container
@@ -287,7 +286,6 @@ func injectCheckpointIntoPodSpec(
 				Value: "1",
 			})
 		}
-		EnsurePodInfoMount(container)
 		targetContainers = append(targetContainers, container)
 	}
 	if info.Ready && info.GPUMemoryService != nil && info.GPUMemoryService.Enabled {

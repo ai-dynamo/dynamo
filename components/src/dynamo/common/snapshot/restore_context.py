@@ -10,9 +10,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .constants import (
-    KUBERNETES_OPTIONAL_PODINFO_FILES,
-    KUBERNETES_REQUIRED_PODINFO_FILES,
-    PODINFO_ROOT,
+    KUBERNETES_OPTIONAL_ENV_NAMES,
+    KUBERNETES_REQUIRED_ENV_NAMES,
     RESTORE_RUNTIME_ENV_NAMES,
     SNAPSHOT_CONTROL_DIR,
     SNAPSHOT_CONTROL_DIR_ENV,
@@ -23,8 +22,8 @@ from .constants import (
 logger = logging.getLogger(__name__)
 
 _SUPPORTED_RESTORE_ENV_NAMES = {
-    *KUBERNETES_REQUIRED_PODINFO_FILES,
-    *KUBERNETES_OPTIONAL_PODINFO_FILES,
+    *KUBERNETES_REQUIRED_ENV_NAMES,
+    *KUBERNETES_OPTIONAL_ENV_NAMES,
     *RESTORE_RUNTIME_ENV_NAMES,
 }
 
@@ -40,55 +39,26 @@ def apply_snapshot_restore_config(config: Any) -> None:
     or a missing ``DYN_SYSTEM_PORT``.
     """
 
-    # Prefer the restore-context JSON captured by the placeholder. It contains
+    # Load the restore-context JSON captured by the placeholder. It contains
     # the target container's actual restore-time env after Kubernetes resolved
     # literals, Downward API values, ConfigMaps, and Secrets.
     control_dir = os.environ.get(SNAPSHOT_CONTROL_DIR_ENV, SNAPSHOT_CONTROL_DIR)
     context_path = Path(control_dir) / SNAPSHOT_RESTORE_CONTEXT_FILE
-    restore_env: dict[str, str | None]
-    if context_path.is_file() and (
-        payload := context_path.read_text(encoding="utf-8").strip()
-    ):
-        source = str(context_path)
-        try:
-            restore_context = json.loads(payload)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                f"invalid snapshot restore context from {source}: {exc}"
-            ) from exc
+    if not context_path.is_file():
+        raise RuntimeError(f"snapshot restore context file not found: {context_path}")
 
-        if not isinstance(restore_context, dict):
-            raise RuntimeError("snapshot restore context requires an object payload")
-        version = restore_context.get("version")
-        if version != 1:
-            raise RuntimeError(
-                f"unsupported snapshot restore context version {version!r}"
-            )
+    source = str(context_path)
+    try:
+        restore_context = json.loads(context_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid snapshot restore context from {source}: {exc}") from exc
 
-        env_config = restore_context.get("env")
-        if not isinstance(env_config, dict):
-            raise RuntimeError("snapshot restore context requires an object env field")
-
-        restore_env = _apply_restore_env(env_config, source=source)
-        env_applied = True
-    else:
-        # Legacy fallback: older restore pods only projected Kubernetes identity
-        # through /etc/podinfo. Keep that path so old restore shaping still works
-        # for identity refresh, even though it cannot refresh runtime endpoints.
-        source = PODINFO_ROOT
-        restore_env = {}
-        for env_name, podinfo_file in {
-            **KUBERNETES_REQUIRED_PODINFO_FILES,
-            **KUBERNETES_OPTIONAL_PODINFO_FILES,
-        }.items():
-            podinfo_path = os.path.join(PODINFO_ROOT, podinfo_file)
-            if not os.path.isfile(podinfo_path):
-                restore_env[env_name] = None
-                continue
-            with open(podinfo_path, encoding="utf-8") as podinfo:
-                value = podinfo.read().strip()
-            restore_env[env_name] = value or None
-        env_applied = False
+    if not isinstance(restore_context, dict):
+        raise RuntimeError("snapshot restore context requires an object payload")
+    env_config = restore_context.get("env")
+    if not isinstance(env_config, dict):
+        raise RuntimeError("snapshot restore context requires an object env field")
+    restore_env = _apply_restore_env(env_config, source=source)
 
     # Refresh the parsed config fields that were originally derived from env.
     # Null entries in restore-context mean "unset in the restore pod", so keep
@@ -113,9 +83,7 @@ def apply_snapshot_restore_config(config: Any) -> None:
     # Kubernetes discovery depends on env that is read during registration, so
     # make sure os.environ is updated before create_runtime() is called.
     os.environ["DYN_DISCOVERY_BACKEND"] = "kubernetes"
-    if not env_applied:
-        _apply_restore_env(restore_env, source=source)
-    for env_name in KUBERNETES_REQUIRED_PODINFO_FILES:
+    for env_name in KUBERNETES_REQUIRED_ENV_NAMES:
         if not os.environ.get(env_name):
             raise RuntimeError(
                 "snapshot restore context requires a non-empty "
@@ -146,7 +114,6 @@ def write_snapshot_restore_context(control_dir: str | None = None) -> None:
     # Capture only the non-secret env names Dynamo needs after restore. Missing
     # values are written as null so stale checkpoint-time env can be cleared.
     context = {
-        "version": 1,
         "env": {
             name: os.environ.get(name) if name in os.environ else None
             for name in sorted(_SUPPORTED_RESTORE_ENV_NAMES)

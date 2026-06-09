@@ -3,14 +3,13 @@
 
 """Constants shared by Dynamo snapshot helpers."""
 
-PODINFO_ROOT = "/etc/podinfo"
-KUBERNETES_REQUIRED_PODINFO_FILES = {
+KUBERNETES_REQUIRED_ENV_NAMES = {
     "DYN_NAMESPACE": "dyn_namespace",
     "DYN_COMPONENT": "dyn_component",
     "DYN_PARENT_DGD_K8S_NAME": "dyn_parent_dgd_k8s_name",
     "DYN_PARENT_DGD_K8S_NAMESPACE": "dyn_parent_dgd_k8s_namespace",
 }
-KUBERNETES_OPTIONAL_PODINFO_FILES = {
+KUBERNETES_OPTIONAL_ENV_NAMES = {
     "DYN_NAMESPACE_WORKER_SUFFIX": "dyn_namespace_worker_suffix",
 }
 SNAPSHOT_CONTROL_DIR_ENV = "DYN_SNAPSHOT_CONTROL_DIR"

@@ -576,44 +576,19 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		for _, volume := range podSpec.Volumes {
 			assert.NotEqual(t, snapshotprotocol.SnapshotControlVolumeName, volume.Name)
 			assert.NotEqual(t, snapshotprotocol.CheckpointVolumeName, volume.Name)
-			assert.NotEqual(t, consts.PodInfoVolumeName, volume.Name)
 		}
 		for _, env := range podSpec.Containers[0].Env {
 			assert.NotEqual(t, snapshotprotocol.SnapshotControlDirEnv, env.Name)
 		}
 	})
 
-	t.Run("ready checkpoint injects podinfo and enables restore placeholder mode", func(t *testing.T) {
+	t.Run("ready checkpoint enables restore placeholder mode", func(t *testing.T) {
 		podSpec := testPodSpec()
 		info := &CheckpointInfo{Enabled: true, Ready: true, Identity: ptr.To(testIdentity())}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
 		assertRestorePlaceholderMode(t, &podSpec.Containers[0], []string{"python3"}, []string{"-m", "dynamo.vllm"})
 
-		volumes := map[string]corev1.Volume{}
-		for _, volume := range podSpec.Volumes {
-			volumes[volume.Name] = volume
-		}
-		require.Contains(t, volumes, consts.PodInfoVolumeName)
-		require.NotNil(t, volumes[consts.PodInfoVolumeName].DownwardAPI)
-
-		fields := map[string]string{}
-		for _, item := range volumes[consts.PodInfoVolumeName].DownwardAPI.Items {
-			if item.FieldRef != nil {
-				fields[item.Path] = item.FieldRef.FieldPath
-			}
-		}
-		assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoNamespace+"']", fields[consts.PodInfoFileDynNamespace])
-		assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoWorkerHash+"']", fields[consts.PodInfoFileDynNamespaceWorkerSuffix])
-		assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoComponentType+"']", fields[consts.PodInfoFileDynComponent])
-		assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoGraphDeploymentName+"']", fields[consts.PodInfoFileDynParentDGDName])
-		assert.Equal(t, consts.PodInfoFieldPodNamespace, fields[consts.PodInfoFileDynParentDGDNamespace])
-
-		mountPaths := map[string]string{}
-		for _, mount := range podSpec.Containers[0].VolumeMounts {
-			mountPaths[mount.Name] = mount.MountPath
-		}
-		assert.Equal(t, consts.PodInfoMountPath, mountPaths[consts.PodInfoVolumeName])
 	})
 
 	t.Run("ready checkpoint targets the container named main", func(t *testing.T) {
