@@ -73,11 +73,11 @@ func TestNewRestorePod(t *testing.T) {
 		t.Fatalf("expected restartPolicy Never, got %#v", restorePod.Spec.RestartPolicy)
 	}
 	main := &restorePod.Spec.Containers[0]
-	if len(main.Command) != 2 || main.Command[0] != "sleep" || main.Command[1] != "infinity" {
-		t.Fatalf("expected placeholder command, got %#v", main.Command)
+	if got, want := main.Command, []string{"python3", "-m", "dynamo.vllm"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("expected command %#v, got %#v", want, got)
 	}
-	if main.Args != nil {
-		t.Fatalf("expected restore args to be cleared: %#v", main.Args)
+	if got, want := main.Args, []string{"--model", "Qwen"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("expected args %#v, got %#v", want, got)
 	}
 	if main.ReadinessProbe == nil {
 		t.Fatalf("expected readiness probe to be preserved")
@@ -159,11 +159,11 @@ func TestNewRestorePodShapesMultipleTargets(t *testing.T) {
 
 	for _, name := range []string{"engine-0", "engine-1"} {
 		c := findRestoreContainer(t, restorePod.Spec.Containers, name)
-		if len(c.Command) != 2 || c.Command[0] != "sleep" || c.Command[1] != "infinity" {
-			t.Fatalf("expected placeholder command on %s, got %#v", name, c.Command)
+		if len(c.Command) != 1 || c.Command[0] != "python3" {
+			t.Fatalf("expected command to be preserved on %s, got %#v", name, c.Command)
 		}
-		if c.Args != nil {
-			t.Fatalf("expected args cleared on %s, got %#v", name, c.Args)
+		if len(c.Args) != 1 || c.Args[0] != "--serve" {
+			t.Fatalf("expected args to be preserved on %s, got %#v", name, c.Args)
 		}
 		assertRestoreStartupGate(t, c.StartupProbe)
 		found := false
@@ -299,11 +299,11 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 	if envCount != 1 {
 		t.Fatalf("expected single %s env after repeated calls, got %#v", SnapshotControlDirEnv, container.Env)
 	}
-	if len(container.Command) != 2 || container.Command[0] != "sleep" || container.Command[1] != "infinity" {
-		t.Fatalf("expected placeholder command, got %#v", container.Command)
+	if got, want := container.Command, []string{"python3", "-m", "dynamo.vllm"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("expected command %#v, got %#v", want, got)
 	}
-	if container.Args != nil {
-		t.Fatalf("expected restore args to be cleared: %#v", container.Args)
+	if got, want := container.Args, []string{"--model", "Qwen"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("expected args %#v, got %#v", want, got)
 	}
 	if container.ReadinessProbe == nil {
 		t.Fatalf("expected readiness probe to be preserved")
@@ -316,6 +316,38 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 	}
 	if got := container.LivenessProbe.TimeoutSeconds; got != livenessProbe.TimeoutSeconds {
 		t.Fatalf("expected liveness timeout %d, got %d", livenessProbe.TimeoutSeconds, got)
+	}
+	if container.StartupProbe == nil {
+		t.Fatalf("expected startup probe to gate restore completion")
+	}
+	assertRestoreStartupGate(t, container.StartupProbe)
+}
+
+func TestPrepareRestorePodSpecPreservesTargetEntrypoint(t *testing.T) {
+	podSpec := corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:    "main",
+			Command: []string{"python3"},
+			Args:    []string{"-m", "dynamo.vllm"},
+		}},
+	}
+
+	if err := PrepareRestorePodSpec(
+		&podSpec,
+		map[string]string{TargetContainersAnnotation: "main"},
+		Storage{},
+		"",
+		true,
+	); err != nil {
+		t.Fatalf("PrepareRestorePodSpec error: %v", err)
+	}
+
+	container := &podSpec.Containers[0]
+	if got, want := container.Command, []string{"python3"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("expected command %#v, got %#v", want, got)
+	}
+	if got, want := container.Args, []string{"-m", "dynamo.vllm"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("expected args %#v, got %#v", want, got)
 	}
 	if container.StartupProbe == nil {
 		t.Fatalf("expected startup probe to gate restore completion")

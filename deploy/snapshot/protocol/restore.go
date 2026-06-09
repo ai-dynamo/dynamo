@@ -50,6 +50,8 @@ func NewRestorePod(pod *corev1.Pod, opts PodOptions) (*corev1.Pod, error) {
 }
 
 // PrepareRestorePodSpec applies restore shaping to annotated target containers.
+// It does not change container command/args; callers that need an inert
+// pre-restore process should set that entrypoint before calling this function.
 func PrepareRestorePodSpec(
 	podSpec *corev1.PodSpec,
 	annotations map[string]string,
@@ -84,8 +86,6 @@ func PrepareRestorePodSpec(
 		}
 		EnsureControlVolume(podSpec, container)
 		if isCheckpointReady {
-			container.Command = []string{"sleep", "infinity"}
-			container.Args = nil
 			ensureRestoreStartupProbe(container)
 		}
 	}
