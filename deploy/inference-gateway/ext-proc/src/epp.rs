@@ -28,6 +28,15 @@ use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 
+fn decode_router_config_override(is_disaggregated: bool) -> Option<RouterConfigOverride> {
+    is_disaggregated.then_some(RouterConfigOverride {
+        overlap_score_credit: Some(0.0),
+        assume_kv_reuse: Some(false),
+        track_prefill_tokens: Some(false),
+        ..Default::default()
+    })
+}
+
 /// Name of the inference-serving HTTP port on a Dynamo worker pod.
 ///
 /// Mirrors `commonconsts.DynamoContainerPortName` in
@@ -305,16 +314,7 @@ impl Router {
             self.decode_router.register_workers(ids);
         }
 
-        let config_override = if is_disaggregated {
-            Some(RouterConfigOverride {
-                overlap_score_credit: Some(0.0),
-                assume_kv_reuse: Some(false),
-                track_prefill_tokens: Some(false),
-                ..Default::default()
-            })
-        } else {
-            None
-        };
+        let config_override = decode_router_config_override(is_disaggregated);
 
         self.decode_router
             .find_best_match(
@@ -340,6 +340,7 @@ impl Router {
         tokens: &[u32],
         worker_id: u64,
         dp_rank: u32,
+        is_disaggregated: bool,
     ) -> Result<()> {
         let decode_router = self.decode_router.clone();
         let request_id = request_id.to_owned();
@@ -347,12 +348,7 @@ impl Router {
 
         tokio::time::timeout(BOOKKEEPING_TIMEOUT, async {
             let worker = WorkerWithDpRank::new(worker_id, dp_rank);
-            let router_config_override = RouterConfigOverride {
-                overlap_score_credit: Some(0.0),
-                assume_kv_reuse: Some(false),
-                track_prefill_tokens: Some(false),
-                ..Default::default()
-            };
+            let router_config_override = decode_router_config_override(is_disaggregated);
 
             let overlap_blocks = decode_router
                 .get_overlap_blocks(&tokens, None, worker, None)
@@ -370,7 +366,7 @@ impl Router {
                     None,
                     worker,
                     None,
-                    Some(&router_config_override),
+                    router_config_override.as_ref(),
                 )
                 .await;
 
@@ -996,6 +992,7 @@ impl EndpointPicker for Router {
                     &tokens,
                     decode_worker.worker_id,
                     decode_worker.dp_rank,
+                    is_disaggregated,
                 )
                 .await
         {
@@ -1090,6 +1087,21 @@ impl EndpointPicker for Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aggregated_decode_uses_configured_bookkeeping() {
+        assert!(decode_router_config_override(false).is_none());
+    }
+
+    #[test]
+    fn disaggregated_decode_disables_decode_side_prefill_tracking() {
+        let override_config =
+            decode_router_config_override(true).expect("disaggregated mode must override config");
+
+        assert_eq!(override_config.overlap_score_credit, Some(0.0));
+        assert_eq!(override_config.assume_kv_reuse, Some(false));
+        assert_eq!(override_config.track_prefill_tokens, Some(false));
+    }
 
     /// Proves the core feature: `nvext.agent_hints.priority` lifts into a
     /// non-zero `priority_jump`, and absence collapses to `0.0`. If this

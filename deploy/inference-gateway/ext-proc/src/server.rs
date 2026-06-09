@@ -50,7 +50,6 @@ struct RequestContext {
     response_size: usize,
     response_complete: bool,
     model_server_streaming: bool,
-    is_disaggregated: bool,
     prefill_complete_signaled: bool,
 
     /// Set once we've validated the gateway's `ProtocolConfiguration`.
@@ -83,7 +82,6 @@ impl RequestContext {
             response_size: 0,
             response_complete: false,
             model_server_streaming: false,
-            is_disaggregated: false,
             prefill_complete_signaled: false,
             protocol_validated: false,
             request_headers: Vec::new(),
@@ -287,11 +285,6 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         ctx.target_endpoint = result.endpoint.clone();
         ctx.incoming_model_name = model;
         ctx.target_model_name = ctx.incoming_model_name.clone();
-        ctx.is_disaggregated = result
-            .headers
-            .iter()
-            .any(|(k, v)| k == "x-dynamo-routing-mode" && v == "disaggregated");
-
         tracing::info!(
             request_id = %ctx.request_id,
             endpoint = %result.endpoint,
@@ -491,10 +484,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                             // bookkeeping before decode actually starts. The
                             // first non-empty body chunk is the earliest signal
                             // that prefill produced output and decode is underway.
-                            if ctx.is_disaggregated
-                                && !ctx.prefill_complete_signaled
-                                && !body.body.is_empty()
-                            {
+                            if !ctx.prefill_complete_signaled && !body.body.is_empty() {
                                 ctx.prefill_complete_signaled = true;
                                 picker.on_prefill_complete(&ctx.request_id).await;
                             }
@@ -855,7 +845,14 @@ mod tests {
             },
             ProcessingRequest {
                 request: Some(ProcReq::ResponseBody(HttpBody {
-                    body: b"{}".to_vec(),
+                    body: b"{".to_vec(),
+                    end_of_stream: false,
+                })),
+                ..Default::default()
+            },
+            ProcessingRequest {
+                request: Some(ProcReq::ResponseBody(HttpBody {
+                    body: b"}".to_vec(),
                     end_of_stream: true,
                 })),
                 ..Default::default()
@@ -881,13 +878,15 @@ mod tests {
         assert_eq!(t.add.load(Ordering::SeqCst), 1);
     }
 
-    /// mark_prefill_complete: on_prefill_complete() fires on the first non-empty
-    /// ResponseBody chunk (the first generated token) in disagg mode.
+    /// mark_prefill_complete: on_prefill_complete() fires exactly once on the first
+    /// non-empty ResponseBody chunk (the first generated token) in both routing modes.
     #[tokio::test]
-    async fn test_mark_prefill_complete_called() {
-        let t = Arc::new(Tracker::disagg());
-        run(&mut connect(t.clone()).await).await;
-        assert_eq!(t.prefill_complete.load(Ordering::SeqCst), 1);
+    async fn test_mark_prefill_complete_called_once_for_both_routing_modes() {
+        for tracker in [Tracker::agg(), Tracker::disagg()] {
+            let tracker = Arc::new(tracker);
+            run(&mut connect(tracker.clone()).await).await;
+            assert_eq!(tracker.prefill_complete.load(Ordering::SeqCst), 1);
+        }
     }
 
     /// free_request: on_request_complete() fires when the stream ends.
