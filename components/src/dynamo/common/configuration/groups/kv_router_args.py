@@ -16,6 +16,8 @@ from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 
+DEFAULT_REMOTE_G2_COST_BLOCKS = 16.0
+
 # Authoritative field list — used by kv_router_kwargs() to extract values.
 _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "overlap_score_weight",
@@ -70,7 +72,7 @@ class KvRouterConfigBase(ConfigBase):
     shared_cache_multiplier: float = 0.0
     shared_cache_type: str = "none"
     remote_g2_reuse_enabled: bool = False
-    remote_g2_cost_blocks: float = 0.0
+    remote_g2_cost_blocks: float = DEFAULT_REMOTE_G2_COST_BLOCKS
     remote_g2_cost_per_block: float = 0.0
     remote_g2_max_planned_blocks: Optional[int] = None
     remote_g2_max_local_overlap_gap_blocks: Optional[int] = None
@@ -334,11 +336,12 @@ class KvRouterArgGroup(ArgGroup):
             g,
             flag_name="--remote-g2-cost-blocks",
             env_var="DYN_REMOTE_G2_COST_BLOCKS",
-            default=0.0,
+            default=DEFAULT_REMOTE_G2_COST_BLOCKS,
             help=(
                 "[EXPERIMENTAL] KV Router: Direct G2 transfer tax in block-equivalent units. "
                 "The router scores Direct G2 as shared_cache_multiplier * incremental_blocks "
-                "minus this cost."
+                "minus this cost. Default 16 blocks, matching SGLang HiCache's default "
+                "256-token prefetch threshold for 16-token KV blocks."
             ),
             arg_type=float,
         )

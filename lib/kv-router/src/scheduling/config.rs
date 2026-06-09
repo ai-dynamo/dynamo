@@ -44,6 +44,10 @@ const fn default_disk_cache_hit_weight() -> f64 {
     0.25
 }
 
+const fn default_remote_g2_cost_blocks() -> f64 {
+    16.0
+}
+
 /// Type of external shared KV cache to query during routing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -276,7 +280,9 @@ pub struct KvRouterConfig {
     /// Whether to plan live source-worker HostPinned KV transfer for scored remote G2 candidates.
     pub remote_g2_reuse_enabled: bool,
 
-    /// Direct G2 transfer tax in block-equivalent units.
+    /// Direct G2 transfer tax in block-equivalent units. Default: 16 blocks,
+    /// matching SGLang HiCache's default 256-token prefetch threshold for
+    /// 16-token KV blocks.
     #[validate(range(min = 0.0))]
     pub remote_g2_cost_blocks: f64,
 
@@ -321,7 +327,7 @@ impl Default for KvRouterConfig {
             shared_cache_multiplier: 0.0,
             shared_cache_type: SharedCacheType::default(),
             remote_g2_reuse_enabled: false,
-            remote_g2_cost_blocks: 0.0,
+            remote_g2_cost_blocks: default_remote_g2_cost_blocks(),
             remote_g2_cost_per_block: 0.0,
             remote_g2_max_planned_blocks: None,
             remote_g2_max_local_overlap_gap_blocks: None,
@@ -577,5 +583,14 @@ mod tests {
     #[test]
     fn test_kv_router_config_default_shared_cache_multiplier_is_disabled() {
         assert_eq!(KvRouterConfig::default().shared_cache_multiplier, 0.0);
+    }
+
+    #[test]
+    fn test_kv_router_config_default_remote_g2_policy_matches_hicache_prefetch_threshold() {
+        let config = KvRouterConfig::default();
+
+        assert_eq!(config.remote_g2_cost_blocks, 16.0);
+        assert_eq!(config.remote_g2_cost_per_block, 0.0);
+        assert_eq!(config.remote_g2_max_planned_blocks, None);
     }
 }
