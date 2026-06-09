@@ -31,5 +31,6 @@ class DynamoRLTestWorkerExtension(Worker):
         return None
 
     def update_weights_from_path(self, weight_path: str) -> None:
-        assert weight_path
+        if not weight_path:
+            raise ValueError("weight_path must be a non-empty string")
         return None

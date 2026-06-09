@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import time
 from typing import Any, Generator
 from urllib.parse import urlparse, urlunparse
@@ -22,12 +21,17 @@ from tests.utils.port_utils import ServicePorts, allocate_port, deallocate_port
 TEST_MODEL = QWEN
 
 pytestmark = [
-    pytest.mark.pre_merge,
+    # Heavy e2e (model startup + admin flows, timeout 900s): keep out of pre-merge gating.
+    pytest.mark.post_merge,
     pytest.mark.e2e,
     pytest.mark.vllm,
     pytest.mark.core,
     pytest.mark.gpu_1,
     pytest.mark.model(TEST_MODEL),
+    # VRAM/KV budget so CI schedulers can place this model-loading test.
+    # Mirrors the vLLM Qwen3-0.6B e2e values in tests/router/test_router_e2e_with_vllm.py.
+    pytest.mark.profiled_vram_gib(6.9),
+    pytest.mark.requested_vllm_kv_cache_bytes(331_801_000),
 ]
 
 
@@ -88,9 +92,12 @@ def _process_env(**extra: str) -> dict[str, str]:
 
 
 def _prepare_log_dir(request: pytest.FixtureRequest, suffix: str) -> str:
-    log_dir = f"{request.node.name}_{suffix}"
-    shutil.rmtree(log_dir, ignore_errors=True)
-    return log_dir
+    # Use pytest's per-test temp dir instead of a repo-relative path so process logs
+    # never land in the repo tree and never collide across parallel runs.
+    tmp_path = request.getfixturevalue("tmp_path")
+    log_dir = tmp_path / suffix
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return str(log_dir)
 
 
 class RLVllmWorkerProcess(ManagedProcess):
