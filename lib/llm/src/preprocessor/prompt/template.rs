@@ -201,6 +201,12 @@ struct HfTokenizerConfigJsonFormatter {
     /// arrays natively (Qwen-VL family) or when we have no flatten strategy
     /// for it (no MM-aware routing benefit either way).
     image_placeholder_template: Option<&'static str>,
+    /// Placeholder token string for audio content parts when flattening mixed
+    /// content arrays for string-format templates (e.g. Qwen2-Audio). Derived
+    /// from `additional_special_tokens` in the tokenizer config at load time.
+    /// `None` for models that handle content arrays natively or have no audio
+    /// tokens in their vocabulary.
+    audio_placeholder: Option<String>,
 }
 
 // /// OpenAI Standard Prompt Formatter

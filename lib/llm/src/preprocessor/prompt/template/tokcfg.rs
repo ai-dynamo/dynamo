@@ -100,6 +100,10 @@ impl ChatTemplate {
             Either::Right(ref added) => Some(added.content.clone()),
         }
     }
+
+    pub fn additional_special_tokens(&self) -> Option<&[String]> {
+        self.additional_special_tokens.as_deref()
+    }
 }
 
 #[allow(dead_code)]

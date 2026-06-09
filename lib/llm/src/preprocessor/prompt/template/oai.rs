@@ -105,14 +105,15 @@ fn may_be_fix_msg_content(
     messages: serde_json::Value,
     preserve_arrays: bool,
     image_placeholder_template: Option<&str>,
+    audio_placeholder: Option<&str>,
 ) -> Value {
     // preserve_arrays=true: strings → arrays (multimodal)
     // preserve_arrays=false: text-only arrays → strings (standard)
-    // image_placeholder_template: when `preserve_arrays=false` and the array
-    // mixes text + image parts, this template (e.g. `<|image_{n}|>`) lets us
-    // flatten by substituting image parts with model-family placeholders
-    // instead of leaving the raw array for the template, which would crash
-    // string-content templates like Phi-3-vision's `'+' message.content`.
+    // image_placeholder_template / audio_placeholder: when `preserve_arrays=false`
+    // and the array mixes text + media parts, these let us flatten by substituting
+    // media parts with model-family placeholder tokens instead of leaving the raw
+    // array for the template, which would crash string-content templates (e.g.
+    // Phi-3-vision's `'+' message.content`, Qwen2-Audio's `message['content']`).
 
     let Some(arr) = messages.as_array() else {
         return Value::from_serialize(&messages);
@@ -166,16 +167,21 @@ fn may_be_fix_msg_content(
                             );
                         } else if !preserve_arrays
                             && !content_array.is_empty()
-                            && let Some(placeholder_tpl) = image_placeholder_template
+                            && has_placeholder_for_media(
+                                &content_array,
+                                image_placeholder_template,
+                                audio_placeholder,
+                            )
                         {
-                            // Mixed text+image array for a string-content
-                            // template — flatten with model-family image
-                            // placeholders inlined where the image parts were.
-                            // The `is_empty` guard preserves a literal `[]`
-                            // content (matches pre-PR behavior); flattening
-                            // an empty array to `""` would silently change
-                            // what the template renders.
-                            let flattened = flatten_mixed_content(&content_array, placeholder_tpl);
+                            // Mixed-media array for a string-content template, and we have
+                            // a placeholder for at least one non-text type — flatten.
+                            // `is_empty` guard: preserve a literal `[]` (matches pre-PR
+                            // behavior; flattening to `""` would silently change rendering).
+                            let flattened = flatten_mixed_content(
+                                &content_array,
+                                image_placeholder_template,
+                                audio_placeholder,
+                            );
                             msg_object.insert(
                                 "content".to_string(),
                                 serde_json::Value::String(flattened),
@@ -208,28 +214,65 @@ fn may_be_fix_msg_content(
 /// template knows a placeholder convention — currently Phi-3-vision
 /// (`<|image_{n}|>`) and LLaVA-1.5 (`<image>`).
 ///
-/// **Caveat — non-text index slot:** `img_idx` increments for every non-text
-/// part, not just images. The current supported families (Phi-3, LLaVA-1.5)
-/// are image-only so there's no collision today, but a future image+video
-/// family would silently consume an image-index slot for each video/audio
-/// part and emit the image placeholder there. When adding a family that
-/// mixes modalities in one message, either:
-///   1. expand this function with per-modality placeholder strings, or
-///   2. assert in `convert_media_url_to_placeholder` that only "image"
-///      placeholders reach this path.
-fn flatten_mixed_content(parts: &[serde_json::Value], placeholder_tpl: &str) -> String {
+/// Returns true when at least one non-text content part has a configured
+/// placeholder, meaning we can safely flatten the array to a string.
+/// When no placeholder exists for a given media type we skip it silently,
+/// which is safe only if the caller guarantees all non-text types are covered.
+/// Requiring *at least one* match avoids regressing callers that pass
+/// `image_placeholder=None, audio_placeholder=None` (unchanged behaviour:
+/// array is kept as-is).
+fn has_placeholder_for_media(
+    parts: &[serde_json::Value],
+    image_placeholder: Option<&str>,
+    audio_placeholder: Option<&str>,
+) -> bool {
+    parts.iter().any(|part| {
+        matches!(
+            part.get("type").and_then(|t| t.as_str()).unwrap_or(""),
+            "image" | "image_url" if image_placeholder.is_some()
+        ) || matches!(
+            part.get("type").and_then(|t| t.as_str()).unwrap_or(""),
+            "audio" | "audio_url" if audio_placeholder.is_some()
+        )
+    })
+}
+
+/// Flatten a content array to a string for models with string-format chat templates.
+///
+/// - Text parts are concatenated verbatim.
+/// - Image parts use `image_placeholder_tpl` (e.g. `<|image_{n}|>`) with `{n}`
+///   substituted by the 1-based image index.
+/// - Audio parts use `audio_placeholder` verbatim (e.g.
+///   `<|audio_bos|><|AUDIO|><|audio_eos|>`).
+/// - Parts whose type has no matching placeholder are silently dropped; callers
+///   should only invoke this when at least one placeholder is configured.
+fn flatten_mixed_content(
+    parts: &[serde_json::Value],
+    image_placeholder_tpl: Option<&str>,
+    audio_placeholder: Option<&str>,
+) -> String {
     let mut out = String::new();
     let mut img_idx: u32 = 1;
     for part in parts {
         let type_str = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        if type_str == "text" {
-            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                out.push_str(text);
+        match type_str {
+            "text" => {
+                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                    out.push_str(text);
+                }
             }
-        } else if !type_str.is_empty() {
-            let placeholder = placeholder_tpl.replace("{n}", &img_idx.to_string());
-            out.push_str(&placeholder);
-            img_idx += 1;
+            "image" | "image_url" => {
+                if let Some(tpl) = image_placeholder_tpl {
+                    out.push_str(&tpl.replace("{n}", &img_idx.to_string()));
+                    img_idx += 1;
+                }
+            }
+            "audio" | "audio_url" => {
+                if let Some(ph) = audio_placeholder {
+                    out.push_str(ph);
+                }
+            }
+            _ => {}
         }
     }
     out
@@ -486,6 +529,10 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
         self.image_placeholder_template
     }
 
+    fn audio_placeholder(&self) -> Option<&str> {
+        self.audio_placeholder.as_deref()
+    }
+
     fn render(&self, req: &dyn OAIChatLikeRequest) -> Result<String> {
         let mixins = Value::from_dyn_object(self.mixins.clone());
 
@@ -518,6 +565,7 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
             messages_for_template,
             self.requires_content_arrays,
             self.image_placeholder_template,
+            self.audio_placeholder.as_deref(),
         ))
         .unwrap();
 
@@ -837,7 +885,7 @@ mod tests {
 
         // Test array → string normalization (preserve_arrays=false for standard templates)
         let messages =
-            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None, None)).unwrap();
 
         // Verify: text-only array is concatenated into a single string
         assert_eq!(
@@ -884,7 +932,7 @@ mod tests {
 
         // Test array → string normalization (preserve_arrays=false for standard templates)
         let messages =
-            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None, None)).unwrap();
 
         // Verify: System message with string content remains unchanged
         assert_eq!(
@@ -929,7 +977,7 @@ mod tests {
 
         // Empty arrays should be preserved regardless of preserve_arrays setting
         let messages =
-            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None, None)).unwrap();
 
         // Verify: Empty arrays are preserved as-is
         assert!(messages[0]["content"].is_array());
@@ -959,11 +1007,7 @@ mod tests {
 
         // preserve_arrays=false + image_placeholder_template=Some(...) is
         // the combination that previously flattened `[]` to `""`.
-        let messages = serde_json::to_value(may_be_fix_msg_content(
-            messages_raw,
-            false,
-            Some("<|image_{n}|>"),
-        ))
+        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false, Some("<|image_{n}|>"), None))
         .unwrap();
 
         assert!(
@@ -991,7 +1035,7 @@ mod tests {
 
         // Test with preserve_arrays=false (standard templates)
         let messages =
-            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None, None)).unwrap();
 
         // Verify: String content is not modified
         assert_eq!(
@@ -1023,7 +1067,7 @@ mod tests {
 
         // Mixed content should be preserved regardless of preserve_arrays setting
         let messages =
-            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None, None)).unwrap();
 
         // Verify: Mixed content types are preserved as array for template handling
         // image_url should be converted to image placeholder
@@ -1061,11 +1105,7 @@ mod tests {
         let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
-        let messages = serde_json::to_value(may_be_fix_msg_content(
-            messages_raw,
-            false,
-            Some("<|image_{n}|>"),
-        ))
+        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false, Some("<|image_{n}|>"), None))
         .unwrap();
 
         let content = messages[0]["content"].as_str().expect("content flattened");
@@ -1091,7 +1131,7 @@ mod tests {
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         let messages =
-            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, Some("<image>")))
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, Some("<image>"), None))
                 .unwrap();
 
         let content = messages[0]["content"].as_str().expect("content flattened");
@@ -1120,7 +1160,7 @@ mod tests {
 
         // Non-text arrays should be preserved regardless of preserve_arrays setting
         let messages =
-            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None, None)).unwrap();
 
         // Verify: Non-text content arrays are preserved, with image_url converted to image
         assert!(messages[0]["content"].is_array());
@@ -1218,7 +1258,7 @@ NORMAL MODE
         let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
         let messages =
-            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None, None)).unwrap();
 
         // Mixed types should preserve array structure, with image_url converted to image
         assert!(messages[0]["content"].is_array());
@@ -1248,7 +1288,7 @@ NORMAL MODE
         let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
         let messages =
-            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None, None)).unwrap();
 
         // Unknown types mixed with text should preserve array
         assert!(messages[0]["content"].is_array());
@@ -1390,7 +1430,7 @@ NORMAL MODE
 
         // Apply content normalization with preserve_arrays=false (standard templates)
         let mut messages =
-            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None, None)).unwrap();
 
         normalize_tool_arguments_in_messages(&mut messages);
 
@@ -1424,7 +1464,7 @@ NORMAL MODE
 
         // Test with preserve_arrays=true (multimodal templates)
         let messages =
-            serde_json::to_value(may_be_fix_msg_content(messages_raw, true, None)).unwrap();
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, true, None, None)).unwrap();
 
         // Verify: String is converted to array format
         assert!(messages[0]["content"].is_array());
@@ -1455,7 +1495,7 @@ NORMAL MODE
 
         // Test with preserve_arrays=true (multimodal templates)
         let messages =
-            serde_json::to_value(may_be_fix_msg_content(messages_raw, true, None)).unwrap();
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, true, None, None)).unwrap();
 
         // Verify: Array is preserved as-is
         assert!(messages[0]["content"].is_array());
@@ -1906,5 +1946,122 @@ NORMAL_MODE
             "must have exactly one <think> block (from template), got {} in: {}",
             think_count, rendered
         );
+    }
+
+    /// Qwen2-Audio uses a string-format template: `message['content']` is
+    /// concatenated directly. Without the fix the Rust renderer would receive
+    /// a content array and fail with "unsupported types string and sequence".
+    /// With the fix, audio_url parts are replaced by the audio placeholder
+    /// tokens derived from `additional_special_tokens`.
+    #[test]
+    fn test_qwen2_audio_string_template_renders_with_audio_url() {
+        use super::tokcfg::ChatTemplate;
+        use super::{ContextMixins, HfTokenizerConfigJsonFormatter, OAIPromptFormatter};
+
+        // Real Qwen2-Audio-7B-Instruct chat template (string-format).
+        let qwen2_audio_template = r#"{% for message in messages %}{% if loop.first and messages[0]['role'] != 'system' %}{{ '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n' }}{% endif %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"#;
+
+        // Tokenizer config includes the Qwen2-Audio audio special tokens so
+        // detect_audio_placeholder can derive the placeholder at load time.
+        let tokenizer_cfg: ChatTemplate = serde_json::from_value(serde_json::json!({
+            "chat_template": qwen2_audio_template,
+            "additional_special_tokens": [
+                "<|AUDIO|>",
+                "<|audio_bos|>",
+                "<|audio_eos|>",
+                "<|im_start|>",
+                "<|im_end|>"
+            ]
+        }))
+        .unwrap();
+
+        let formatter =
+            HfTokenizerConfigJsonFormatter::new(tokenizer_cfg, ContextMixins::new(&[])).unwrap();
+
+        // String-format template — must not require content arrays.
+        assert!(
+            !formatter.requires_content_arrays,
+            "Qwen2-Audio template is string-format; requires_content_arrays must be false"
+        );
+
+        // Placeholder was auto-detected from additional_special_tokens.
+        assert_eq!(
+            formatter.audio_placeholder(),
+            Some("<|audio_bos|><|AUDIO|><|audio_eos|>"),
+            "audio placeholder must be derived from additional_special_tokens"
+        );
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "Qwen/Qwen2-Audio-7B-Instruct",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What is said in the following audio?"},
+                        {"type": "audio_url", "audio_url": {"url": "https://example.com/audio.wav"}}
+                    ]
+                }
+            ]
+        }))
+        .unwrap();
+
+        let rendered = formatter.render(&request).unwrap();
+
+        // Audio placeholder tokens must appear in the rendered prompt so vLLM's
+        // multimodal processor can locate them and inject audio embeddings.
+        assert!(
+            rendered.contains("<|audio_bos|><|AUDIO|><|audio_eos|>"),
+            "rendered prompt must contain audio placeholder tokens, got: {rendered}"
+        );
+        // Text content must survive.
+        assert!(
+            rendered.contains("What is said in the following audio?"),
+            "rendered prompt must contain text content, got: {rendered}"
+        );
+        // Confirm the overall structure looks correct.
+        assert!(
+            rendered.contains("<|im_start|>user"),
+            "rendered prompt must have user turn, got: {rendered}"
+        );
+    }
+
+    /// Multiple audio items in one message each get their own placeholder.
+    #[test]
+    fn test_qwen2_audio_multiple_audio_items() {
+        use super::tokcfg::ChatTemplate;
+        use super::{ContextMixins, HfTokenizerConfigJsonFormatter, OAIPromptFormatter};
+
+        let qwen2_audio_template = r#"{% for message in messages %}{% if loop.first and messages[0]['role'] != 'system' %}{{ '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n' }}{% endif %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"#;
+
+        let tokenizer_cfg: ChatTemplate = serde_json::from_value(serde_json::json!({
+            "chat_template": qwen2_audio_template,
+            "additional_special_tokens": ["<|AUDIO|>", "<|audio_bos|>", "<|audio_eos|>"]
+        }))
+        .unwrap();
+
+        let formatter =
+            HfTokenizerConfigJsonFormatter::new(tokenizer_cfg, ContextMixins::new(&[])).unwrap();
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "Qwen/Qwen2-Audio-7B-Instruct",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Compare these two:"},
+                    {"type": "audio_url", "audio_url": {"url": "https://example.com/a1.wav"}},
+                    {"type": "text", "text": "vs"},
+                    {"type": "audio_url", "audio_url": {"url": "https://example.com/a2.wav"}}
+                ]
+            }]
+        }))
+        .unwrap();
+
+        let rendered = formatter.render(&request).unwrap();
+
+        // Both audio placeholders must appear.
+        let count = rendered.matches("<|AUDIO|>").count();
+        assert_eq!(count, 2, "expected two <|AUDIO|> tokens, got {count} in: {rendered}");
+        assert!(rendered.contains("Compare these two:"));
+        assert!(rendered.contains("vs"));
     }
 }

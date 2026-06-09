@@ -70,6 +70,47 @@ fn detect_image_placeholder_template(env: &Environment) -> Option<&'static str> 
     None
 }
 
+/// Derives an audio placeholder string from `additional_special_tokens` in the
+/// tokenizer config. Returns `None` when no audio tokens are found.
+///
+/// Pattern (Qwen2-Audio family):
+///   `additional_special_tokens` contains `<|audio_bos|>`, `<|AUDIO|>`,
+///   `<|audio_eos|>`. We identify the feature token as the one whose inner
+///   content (stripped of `<|` / `|>`) is the uppercase modality name
+///   (`AUDIO`), and wrap it with any bos/eos tokens found for that modality.
+///
+/// The resulting string (e.g. `<|audio_bos|><|AUDIO|><|audio_eos|>`) is
+/// inserted verbatim in place of each `audio_url` / `audio` content part when
+/// flattening a mixed-content array to a string. vLLM's multimodal processor
+/// finds the `<|AUDIO|>` token ID in the rendered sequence and replaces it
+/// with the actual audio embeddings.
+fn detect_audio_placeholder(config: &super::tokcfg::ChatTemplate) -> Option<String> {
+    let tokens = config.additional_special_tokens()?;
+
+    // Feature token: inner name is "AUDIO" (exact uppercase, like "<|AUDIO|>").
+    let feature = tokens.iter().find(|t| {
+        let inner = t
+            .trim_start_matches('<')
+            .trim_start_matches('|')
+            .trim_end_matches('>')
+            .trim_end_matches('|');
+        inner == "AUDIO"
+    })?;
+
+    let bos = tokens
+        .iter()
+        .find(|t| t.to_lowercase().contains("audio_bos"))
+        .map(String::as_str)
+        .unwrap_or("");
+    let eos = tokens
+        .iter()
+        .find(|t| t.to_lowercase().contains("audio_eos"))
+        .map(String::as_str)
+        .unwrap_or("");
+
+    Some(format!("{bos}{feature}{eos}"))
+}
+
 /// Remove known non-standard Jinja2 tags from chat templates
 ///
 /// Some models use custom Jinja2 extensions that minijinja doesn't recognize. These tags
@@ -193,13 +234,15 @@ impl HfTokenizerConfigJsonFormatter {
         // Detect at model load time whether this template requires content arrays
         let requires_content_arrays = detect_content_array_usage(&env);
 
-        // Pick a per-family placeholder for the mixed-content → string flatten
-        // path. `None` is the safe default — the existing behavior in
-        // `may_be_fix_msg_content` leaves mixed arrays untouched.
-        let image_placeholder_template = if requires_content_arrays {
-            None
+        // Pick per-family placeholders for the mixed-content → string flatten path.
+        // `None` is the safe default — leaves mixed arrays untouched (existing behavior).
+        let (image_placeholder_template, audio_placeholder) = if requires_content_arrays {
+            (None, None)
         } else {
-            detect_image_placeholder_template(&env)
+            (
+                detect_image_placeholder_template(&env),
+                detect_audio_placeholder(&config),
+            )
         };
 
         // Detect if the template natively handles reasoning_content (e.g. Nemotron, Qwen3).
@@ -217,6 +260,7 @@ impl HfTokenizerConfigJsonFormatter {
             exclude_tools_when_tool_choice_none,
             template_handles_reasoning,
             image_placeholder_template,
+            audio_placeholder,
         })
     }
 }

@@ -129,6 +129,14 @@ pub trait OAIPromptFormatter: Send + Sync + 'static {
     fn image_placeholder_template(&self) -> Option<&'static str> {
         None
     }
+
+    /// Audio placeholder token string used when the chat template requires
+    /// string content (not content arrays) and the request contains audio.
+    /// Derived from `additional_special_tokens` in the tokenizer config.
+    /// `None` when no audio tokens are found in the model vocabulary.
+    fn audio_placeholder(&self) -> Option<&str> {
+        None
+    }
 }
 
 #[derive(Clone)]
