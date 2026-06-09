@@ -27,7 +27,18 @@ from dynamo.llm import HttpAsyncEngine, HttpError, HttpService
 from dynamo.runtime import DistributedRuntime
 
 MSG_CONTAINS_ERROR = "This message contains an 400error."
+MSG_CONTAINS_STATUS_ERROR = "This message contains a 415 status error."
 MSG_CONTAINS_INTERNAL_ERROR = "This message contains an internal server error."
+
+
+class _StatusLikeError(Exception):
+    """Mimics dynamo.common.http.HttpStatusError's .status + .message shape."""
+
+    def __init__(self, status: int, message: str):
+        super().__init__(f"HTTP {status}: {message}")
+        self.status = status
+        self.message = message
+
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -58,6 +69,8 @@ class MockHttpEngine:
 
         if MSG_CONTAINS_ERROR.lower() in user_message.lower():
             raise HttpError(code=400, message=MSG_CONTAINS_ERROR)
+        elif MSG_CONTAINS_STATUS_ERROR.lower() in user_message.lower():
+            raise _StatusLikeError(status=415, message=MSG_CONTAINS_STATUS_ERROR)
         elif MSG_CONTAINS_INTERNAL_ERROR.lower() in user_message.lower():
             raise ValueError("Simulated internal error")
 
@@ -165,11 +178,9 @@ async def test_chat_completion_success(http_server):
 @pytest.mark.parametrize(
     "msg_to_code",
     [
-        (MSG_CONTAINS_ERROR, 500),  # # TODO: should be 400, but currently 500
-        (
-            MSG_CONTAINS_INTERNAL_ERROR,
-            500,
-        ),  # Placeholder for future internal error test
+        (MSG_CONTAINS_ERROR, 400),
+        (MSG_CONTAINS_STATUS_ERROR, 415),
+        (MSG_CONTAINS_INTERNAL_ERROR, 500),
     ],
 )
 @pytest.mark.forked
@@ -187,11 +198,16 @@ async def test_chat_completion_http_error(http_server, msg_to_code: tuple[str, i
         async with session.post(url, json=data) as response:
             assert response.status == msg_to_code[1]
             error_json = await response.json()
-            # Error responses are sanitized: the client receives a static
-            # message and never the raw backend error text. The underlying
-            # detail is logged server-side instead.
-            assert "internal server error" in str(error_json).lower()
             if msg_to_code[0] == MSG_CONTAINS_ERROR:
-                assert MSG_CONTAINS_ERROR not in str(error_json)
+                # 4xx HTTP protocol contract: backend message is forwarded
+                # to the client so callers can react to validation errors.
+                assert MSG_CONTAINS_ERROR in str(error_json)
+            elif msg_to_code[0] == MSG_CONTAINS_STATUS_ERROR:
+                # Same 4xx contract via the duck-typed `.status` path.
+                assert MSG_CONTAINS_STATUS_ERROR in str(error_json)
             elif msg_to_code[0] == MSG_CONTAINS_INTERNAL_ERROR:
+                # 5xx is sanitized: the client receives a static message
+                # and never the raw backend error text; the underlying
+                # detail is logged server-side.
                 assert "simulated internal error" not in str(error_json).lower()
+                assert "internal server error" in str(error_json).lower()

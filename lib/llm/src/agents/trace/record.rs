@@ -131,7 +131,11 @@ mod tests {
 
         let record = loop {
             let r = rx.recv().await.expect("trace record should publish");
-            if r.event_type == TraceEventType::RequestEnd {
+            if r.event_type == TraceEventType::RequestEnd
+                && r.request
+                    .as_ref()
+                    .is_some_and(|request| request.request_id == "req-non-finite")
+            {
                 break r;
             }
         };

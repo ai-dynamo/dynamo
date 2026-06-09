@@ -14,10 +14,6 @@ pub struct HttpError {
     pub message: String,
 }
 
-/// Admission-control rejection hint appended to overload responses.
-pub const ADMISSION_CONTROL_REJECTION_HINT: &str =
-    "If this rejection is not intended, consider passing --admission-control none to the frontend.";
-
 /// Canonical sanitized error responses returned at the HTTP boundary.
 ///
 /// Each variant fixes the `(status, public message, protocol error_type)`
@@ -30,7 +26,7 @@ pub const ADMISSION_CONTROL_REJECTION_HINT: &str =
 pub enum SanitizedError {
     /// 499 Client Closed Request.
     Cancelled,
-    /// 503 Service Unavailable, with admission-control hint.
+    /// 503 Service Unavailable.
     Overloaded,
     /// 500 Internal Server Error.
     Internal,
@@ -124,10 +120,7 @@ impl std::fmt::Display for SanitizedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SanitizedError::Cancelled => f.write_str("Request cancelled"),
-            SanitizedError::Overloaded => write!(
-                f,
-                "Service temporarily overloaded. {ADMISSION_CONTROL_REJECTION_HINT}"
-            ),
+            SanitizedError::Overloaded => f.write_str("Service temporarily overloaded"),
             SanitizedError::Internal | SanitizedError::PreserveServerError(_) => {
                 f.write_str("Internal server error")
             }

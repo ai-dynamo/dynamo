@@ -395,7 +395,24 @@ def _run_planner_replay(
     # feed the throughput regression (its decode formula is quadratic in
     # utilization ratio, causing negative regression coefficients).
     if not adapter._is_easy_mode():
-        ref_args = extra_engine_args or prefill_engine_args or MockEngineArgs()
+        ref_args = (
+            extra_engine_args
+            or (
+                decode_engine_args
+                if decode_engine_args is not None
+                and decode_engine_args.aic_backend is not None
+                else None
+            )
+            or prefill_engine_args
+            or decode_engine_args
+            or MockEngineArgs()
+        )
+        p_args = (
+            extra_engine_args if planner_config.mode == "agg" else prefill_engine_args
+        ) or ref_args
+        d_args = (
+            extra_engine_args if planner_config.mode == "agg" else decode_engine_args
+        ) or ref_args
         aic_backend = ref_args.aic_backend
         if (
             aic_backend is None
@@ -425,6 +442,14 @@ def _run_planner_replay(
                     moe_tp_size=ref_args.aic_moe_tp_size,
                     moe_ep_size=ref_args.aic_moe_ep_size,
                     attention_dp_size=ref_args.aic_attention_dp_size,
+                    nextn=d_args.aic_nextn,
+                    # Model the full verification round; real conditional rates
+                    # are consumed only by the mocker's burst sampler.
+                    nextn_accept_rates=(
+                        ",".join(["0"] * d_args.aic_nextn)
+                        if d_args.aic_nextn is not None
+                        else None
+                    ),
                 )
             except (
                 ImportError,
@@ -446,16 +471,6 @@ def _run_planner_replay(
             # predict_* can raise on unsupported model/system combos or
             # numerical edge cases; log and fall back in those cases.
             if aic_session is not None:
-                p_args = (
-                    extra_engine_args
-                    if planner_config.mode == "agg"
-                    else prefill_engine_args
-                ) or ref_args
-                d_args = (
-                    extra_engine_args
-                    if planner_config.mode == "agg"
-                    else decode_engine_args
-                ) or ref_args
                 try:
                     prefill_fpms = _generate_aic_prefill_fpms(
                         aic_session, p_args, benchmark_granularity

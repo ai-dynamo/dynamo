@@ -16,6 +16,7 @@ from vllm.config import VllmConfig
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo import prometheus_names
+from dynamo.common.rl import first_endpoint_response, register_rl_routes
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
@@ -388,11 +389,18 @@ class WorkerFactory:
         clear_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.clear_kv_blocks"
         )
+        rl_endpoint = (
+            runtime.endpoint(f"{config.namespace}.{config.component}.rl")
+            if config.enable_rl
+            else None
+        )
 
         shutdown_endpoints[:] = [
             generate_endpoint,
             clear_endpoint,
         ]
+        if rl_endpoint is not None:
+            shutdown_endpoints.append(rl_endpoint)
 
         lora_enabled = config.engine_args.enable_lora
         if lora_enabled:
@@ -521,7 +529,7 @@ class WorkerFactory:
             )
 
         # Register engine routes
-        self.register_engine_routes(runtime, handler)
+        self.register_engine_routes(runtime, handler, lora_enabled=lora_enabled)
 
         # Parse endpoint types from --endpoint-types flag
         model_type = parse_endpoint_types(config.endpoint_types)
@@ -616,6 +624,14 @@ class WorkerFactory:
                 ),
             ]
 
+            if rl_endpoint is not None:
+                serve_tasks.append(
+                    rl_endpoint.serve_endpoint(
+                        handler.rl_dispatch,
+                        metrics_labels=model_metrics_labels,
+                    )
+                )
+
             if lora_enabled:
                 serve_tasks.extend(
                     [
@@ -660,6 +676,11 @@ class WorkerFactory:
         )
         clear_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.clear_kv_blocks"
+        )
+        rl_endpoint = (
+            runtime.endpoint(f"{config.namespace}.{config.component}.rl")
+            if config.enable_rl
+            else None
         )
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
@@ -750,7 +771,9 @@ class WorkerFactory:
             )
 
         # Register engine routes
-        self.register_engine_routes(runtime, handler)
+        self.register_engine_routes(
+            runtime, handler, lora_enabled=config.engine_args.enable_lora
+        )
 
         await self._maybe_wait_for_failover_lock(handler, runtime, config)
 
@@ -765,6 +788,8 @@ class WorkerFactory:
             f"{config.namespace}.{config.component}.get_perf_metrics"
         )
         shutdown_endpoints[:] = [generate_endpoint, clear_endpoint, perf_endpoint]
+        if rl_endpoint is not None:
+            shutdown_endpoints.append(rl_endpoint)
 
         # Prefill workers expose no OpenAI surface — the role is carried by
         # `worker_type=Prefill`. We register the legacy `ModelType.Prefill`
@@ -809,7 +834,7 @@ class WorkerFactory:
 
         try:
             logger.debug("Starting serve_endpoint for prefill worker")
-            await asyncio.gather(
+            serve_tasks = [
                 generate_endpoint.serve_endpoint(
                     handler.generate,  # type: ignore
                     graceful_shutdown=True,
@@ -824,7 +849,15 @@ class WorkerFactory:
                     handler.get_perf_metrics,
                     metrics_labels=prefill_metrics_labels,
                 ),
-            )
+            ]
+            if rl_endpoint is not None:
+                serve_tasks.append(
+                    rl_endpoint.serve_endpoint(
+                        handler.rl_dispatch,
+                        metrics_labels=prefill_metrics_labels,
+                    )
+                )
+            await asyncio.gather(*serve_tasks)
             logger.debug("serve_endpoint completed for prefill worker")
         except Exception as e:
             logger.error(f"Failed to serve endpoints: {e}")
@@ -849,7 +882,10 @@ class WorkerFactory:
         return None
 
     def register_engine_routes(
-        self, runtime: DistributedRuntime, handler: BaseWorkerHandler
+        self,
+        runtime: DistributedRuntime,
+        handler: BaseWorkerHandler,
+        lora_enabled: bool = False,
     ) -> None:
         """Register all engine routes for this handler.
 
@@ -862,6 +898,41 @@ class WorkerFactory:
         runtime.register_engine_route("wake_up", handler.wake_up)
         runtime.register_engine_route("scale_elastic_ep", handler.scale_elastic_ep)
 
+        rl_routes: dict = {
+            "liveness_probe": handler.liveness_probe,
+            "pause_generation": handler.pause_generation,
+            "resume_generation": handler.resume_generation,
+            "flush_cache": handler.flush_cache,
+            "abort_request": handler.abort_request,
+            "update_weights_from_disk": handler.update_weights_from_disk,
+            "update_weights_from_distributed": handler.update_weights_from_distributed,
+            "update_weights_from_tensor": handler.update_weights_from_tensor,
+            "init_weights_update_group": handler.init_weights_update_group,
+            "destroy_weights_update_group": handler.destroy_weights_update_group,
+            "get_weight_version": handler.get_weight_version,
+        }
+
+        if lora_enabled:
+
+            async def load_lora(body: dict) -> dict:
+                return await first_endpoint_response(handler.load_lora, body)
+
+            async def unload_lora(body: dict) -> dict:
+                return await first_endpoint_response(handler.unload_lora, body)
+
+            rl_routes["load_lora"] = load_lora
+            rl_routes["unload_lora"] = unload_lora
+
+        register_rl_routes(
+            runtime,
+            handler.rl_route_registry,
+            rl_routes,
+            enable_dispatch=handler.config.enable_rl,
+        )
+
         logger.info(
-            "Registered engine routes: /engine/sleep, /engine/wake_up, /engine/scale_elastic_ep, /engine/start_profile, /engine/stop_profile"
+            "Registered engine routes: sleep, wake_up, scale_elastic_ep, "
+            "start_profile, stop_profile, and RL admin routes: %s%s",
+            ", ".join(sorted(rl_routes)),
+            " (LoRA routes: load_lora, unload_lora)" if lora_enabled else "",
         )
