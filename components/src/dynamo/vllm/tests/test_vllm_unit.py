@@ -784,6 +784,39 @@ def test_build_sampling_params_maps_max_thinking_tokens():
     assert sp.thinking_token_budget == 1024
 
 
+def test_build_sampling_params_caps_omitted_max_tokens_to_generation_default():
+    from dynamo.vllm.handlers import build_sampling_params
+
+    model_max_len = 100
+    defaults = {"max_tokens": 32}
+
+    def make(stop_conditions):
+        return {
+            "token_ids": [1, 2, 3],
+            "sampling_options": {},
+            "stop_conditions": stop_conditions,
+            "output_options": {},
+        }
+
+    remaining = model_max_len - 3
+
+    sp = build_sampling_params(make({}), defaults, model_max_len)
+    assert sp.max_tokens == 32
+
+    injected = {"max_tokens": remaining}
+    sp = build_sampling_params(make(injected), defaults, model_max_len)
+    assert sp.max_tokens == 32
+
+    sp = build_sampling_params(make({"max_tokens": 10}), defaults, model_max_len)
+    assert sp.max_tokens == 10
+
+    sp = build_sampling_params(make({"max_tokens": 64}), defaults, model_max_len)
+    assert sp.max_tokens == 64
+
+    sp = build_sampling_params(make({}), {}, model_max_len)
+    assert sp.max_tokens == remaining
+
+
 def _make_dynamo_config(**overrides):
     """Build a minimal fake DynamoConfig for update_engine_config_with_dynamo tests."""
     defaults = {
