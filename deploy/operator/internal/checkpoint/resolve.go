@@ -39,6 +39,7 @@ type CheckpointInfo struct {
 	StartupPolicy    nvidiacomv1alpha1.CheckpointStartupPolicy
 	// Empty means the restore pod targets the default main container.
 	RestoreTargetContainers []string
+	RestoreRole             string
 }
 
 func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*CheckpointInfo, error) {

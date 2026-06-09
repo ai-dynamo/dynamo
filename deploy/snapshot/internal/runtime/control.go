@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
@@ -60,6 +61,30 @@ func WriteRendezvousFile(hostPID int, config RendezvousConfig) error {
 		return fmt.Errorf("marshal rendezvous file: %w", err)
 	}
 	return writeFileInDir(dir, snapshotprotocol.TorchC10dRendezvousFile, append(data, '\n'))
+}
+
+func WriteNCCLCheckpointKVSFile(hostPID int, endpoint string) error {
+	if hostPID <= 0 {
+		return fmt.Errorf("invalid host PID %d for NCCL checkpoint KVS file", hostPID)
+	}
+	root := filepath.Join(HostProcPath, strconv.Itoa(hostPID), "root")
+	return writeNCCLCheckpointKVSFileInRoot(root, endpoint)
+}
+
+func writeNCCLCheckpointKVSFileInRoot(root string, endpoint string) error {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return fmt.Errorf("NCCL checkpoint KVS endpoint is empty")
+	}
+	if strings.ContainsAny(endpoint, "\r\n") {
+		return fmt.Errorf("NCCL checkpoint KVS endpoint must fit on one line")
+	}
+	controlDir := filepath.Join(root, snapshotprotocol.SnapshotControlMountPath)
+	return writeFileInDir(
+		controlDir,
+		snapshotprotocol.NCCLCheckpointKVSFile,
+		[]byte(endpoint+"\n"),
+	)
 }
 
 func writeSentinelInDir(dir, name string) error {

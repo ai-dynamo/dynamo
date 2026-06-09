@@ -988,6 +988,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 			return nil, errors.Wrap(err, "failed to apply checkpoint gpuMemoryService config")
 		}
 		checkpointInfo = info
+		checkpointInfo.RestoreRole = string(role)
 		if err := checkpoint.EnsureStoragePVC(ctx, r.Client, opt.dynamoComponentDeployment.Namespace, r.Config.Checkpoint.Storage); err != nil {
 			return nil, errors.Wrap(err, "failed to ensure checkpoint storage PVC")
 		}
@@ -1051,6 +1052,9 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		}
 	} else if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(podLabels, podAnnotations, checkpointInfo, r.Config.Checkpoint.Storage); err != nil {
 		return nil, errors.Wrap(err, "failed to apply checkpoint metadata")
+	}
+	if checkpointInfo != nil {
+		checkpoint.ApplyRestoreRoleMetadata(podAnnotations, string(role))
 	}
 
 	if podSpec.ServiceAccountName == "" {

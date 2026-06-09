@@ -26,6 +26,7 @@ func TestEnsureControlVolume(t *testing.T) {
 		}
 		assertEnv(t, c.Env, SnapshotControlDirEnv, SnapshotControlMountPath)
 		assertEnv(t, c.Env, TorchC10dRendezvousFileEnv, SnapshotControlMountPath+"/"+TorchC10dRendezvousFile)
+		assertEnv(t, c.Env, NCCLCheckpointKVSPathEnv, SnapshotControlMountPath+"/"+NCCLCheckpointKVSFile)
 	})
 
 	t.Run("per-container subPath isolates multi-container pods", func(t *testing.T) {
@@ -52,7 +53,7 @@ func TestEnsureControlVolume(t *testing.T) {
 		EnsureControlVolume(ps, &ps.Containers[0])
 		EnsureControlVolume(ps, &ps.Containers[0])
 		c := ps.Containers[0]
-		if len(ps.Volumes) != 1 || len(c.VolumeMounts) != 1 || len(c.Env) != 2 {
+		if len(ps.Volumes) != 1 || len(c.VolumeMounts) != 1 || len(c.Env) != 3 {
 			t.Fatalf("expected single volume/mount/env after two calls, got volumes=%d mounts=%d env=%d", len(ps.Volumes), len(c.VolumeMounts), len(c.Env))
 		}
 	})
@@ -88,7 +89,7 @@ func TestEnsureControlVolume(t *testing.T) {
 		}
 		EnsureControlVolume(ps, &ps.Containers[0])
 		c := ps.Containers[0]
-		if len(ps.Volumes) != 2 || len(c.VolumeMounts) != 2 || len(c.Env) != 3 {
+		if len(ps.Volumes) != 2 || len(c.VolumeMounts) != 2 || len(c.Env) != 4 {
 			t.Fatalf("expected existing + control entries, got volumes=%#v mounts=%#v env=%#v", ps.Volumes, c.VolumeMounts, c.Env)
 		}
 	})

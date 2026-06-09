@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
 func TestWriteSentinelInDir_CreatesFileAtomically(t *testing.T) {
@@ -65,5 +67,35 @@ func TestWriteControlSentinel_RejectsInvalidPID(t *testing.T) {
 	}
 	if err := WriteControlSentinel(-1, "snapshot-complete"); err == nil {
 		t.Fatal("expected error for negative PID")
+	}
+}
+
+func TestWriteNCCLCheckpointKVSFileInRoot(t *testing.T) {
+	root := t.TempDir()
+	controlDir := filepath.Join(root, "snapshot-control")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatalf("failed to create control dir: %v", err)
+	}
+
+	endpoint := "leader-pod.default.svc:46379/checkpoint-1_main"
+	if err := writeNCCLCheckpointKVSFileInRoot(root, endpoint); err != nil {
+		t.Fatalf("writeNCCLCheckpointKVSFileInRoot failed: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(controlDir, snapshotprotocol.NCCLCheckpointKVSFile))
+	if err != nil {
+		t.Fatalf("expected NCCL KVS file: %v", err)
+	}
+	if string(data) != endpoint+"\n" {
+		t.Fatalf("unexpected NCCL KVS file contents: %q", data)
+	}
+}
+
+func TestWriteNCCLCheckpointKVSFileInRootRejectsInvalidEndpoint(t *testing.T) {
+	if err := writeNCCLCheckpointKVSFileInRoot(t.TempDir(), ""); err == nil {
+		t.Fatal("expected empty endpoint to be rejected")
+	}
+	if err := writeNCCLCheckpointKVSFileInRoot(t.TempDir(), "leader:46379/prefix\nother"); err == nil {
+		t.Fatal("expected multiline endpoint to be rejected")
 	}
 }

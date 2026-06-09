@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -272,6 +273,39 @@ func TestCheckpointLocationsFromPod(t *testing.T) {
 			t.Fatal("expected error for missing host PID")
 		}
 	})
+}
+
+func TestRestoreNCCLCheckpointKVSEndpoint(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{
+				"nvidia.com/dynamo-graph-deployment-name": "test-dgd",
+				"nvidia.com/dynamo-component":             "decode",
+				"nvidia.com/dynamo-worker-hash":           "hash/1",
+				"pod-template-hash":                       "template-1",
+				"leaderworkerset.sigs.k8s.io/group-index": "0",
+				"grove.io/podclique-pod-index":            "1",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				Kind: "ReplicaSet",
+				Name: "decode-rs",
+				UID:  "owner/1",
+			}},
+		},
+	}
+	got := restoreNCCLCheckpointKVSEndpoint(
+		"leader-pod.default.svc",
+		pod,
+		"checkpoint-1",
+		"main",
+	)
+	want := fmt.Sprintf(
+		"leader-pod.default.svc:%d/checkpoint-1_main_test-dgd_decode_hash_1_0",
+		snapshotprotocol.NCCLCheckpointRedisPort,
+	)
+	if got != want {
+		t.Fatalf("restoreNCCLCheckpointKVSEndpoint() = %q, want %q", got, want)
+	}
 }
 
 func TestRestoreCheckpointReady(t *testing.T) {

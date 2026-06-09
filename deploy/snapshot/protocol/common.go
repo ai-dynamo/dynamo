@@ -38,11 +38,16 @@ const (
 	CheckpointStorageBasePathAnnotation = "nvidia.com/snapshot-storage-base-path"
 	RendezvousHostAnnotation            = "nvidia.com/snapshot-rendezvous-host"
 	RendezvousPortAnnotation            = "nvidia.com/snapshot-rendezvous-port"
+	RestoreRoleAnnotation               = "nvidia.com/snapshot-restore-role"
 	CheckpointVolumeName                = "checkpoint-storage"
 	DefaultCheckpointArtifactVersion    = "1"
 	DefaultCheckpointJobTTLSeconds      = int32(300)
 	DefaultSeccompLocalhostProfile      = "profiles/block-iouring.json"
 	StorageTypePVC                      = "pvc"
+
+	RestoreRoleMain   = "main"
+	RestoreRoleLeader = "leader"
+	RestoreRoleWorker = "worker"
 
 	CheckpointStatusCompleted = "completed"
 	CheckpointStatusFailed    = "failed"
@@ -193,6 +198,9 @@ func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string
 	delete(annotations, CheckpointStatusAnnotation)
 	delete(annotations, RendezvousHostAnnotation)
 	delete(annotations, RendezvousPortAnnotation)
+	if !enabled {
+		delete(annotations, RestoreRoleAnnotation)
+	}
 	clearRestoreStatusKeys(annotations)
 
 	if !enabled {

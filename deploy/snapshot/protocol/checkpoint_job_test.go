@@ -80,6 +80,7 @@ func TestNewCheckpointJob(t *testing.T) {
 	if main.VolumeMounts[0].SubPath != "main" {
 		t.Fatalf("expected control mount subPath=main, got %#v", main.VolumeMounts[0])
 	}
+	assertEnv(t, main.Env, NCCLCheckpointKVSPathEnv, SnapshotControlMountPath+"/"+NCCLCheckpointKVSFile)
 	if main.ReadinessProbe == nil || main.ReadinessProbe.Exec == nil {
 		t.Fatalf("expected ready-file readiness probe, got %#v", main.ReadinessProbe)
 	}

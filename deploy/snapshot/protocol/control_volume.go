@@ -35,6 +35,26 @@ const (
 	// processes can recreate TCPStore/Gloo state with fresh pod addresses.
 	TorchC10dRendezvousFile = "rendezvous.json"
 
+	// NCCLCheckpointKVSPathEnv points the NCCL checkpoint shim at an
+	// indirection file that the snapshot agent rewrites before restore-complete.
+	NCCLCheckpointKVSPathEnv = "NCCL_CHECKPOINT_KVS_PATH"
+
+	// NCCLCheckpointKVSFile is captured in restored process env and contains
+	// the Redis endpoint and prefix to use for this restore attempt.
+	NCCLCheckpointKVSFile = "nccl-kvs.txt"
+
+	// NCCLCheckpointRedisContainerName is the implicit restore-only Redis
+	// sidecar used by NCCL checkpoint_restore to exchange fresh unique IDs.
+	NCCLCheckpointRedisContainerName = "nccl-checkpoint-redis"
+
+	// NCCLCheckpointRedisImage is intentionally internal: checkpoint restore
+	// always injects the same lightweight Redis sidecar on leader pods.
+	NCCLCheckpointRedisImage = "redis:7-alpine"
+
+	// NCCLCheckpointRedisPort avoids the common Ray Redis port while keeping
+	// the service inside the leader pod.
+	NCCLCheckpointRedisPort = 46379
+
 	// SnapshotCompleteFile is written by the snapshot agent inside the
 	// control volume when a checkpoint has completed successfully.
 	SnapshotCompleteFile = "snapshot-complete"
@@ -102,12 +122,16 @@ func EnsureControlVolume(podSpec *corev1.PodSpec, container *corev1.Container) {
 
 	hasControlEnv := false
 	hasRendezvousEnv := false
+	hasNCCLKvsEnv := false
 	for _, e := range container.Env {
 		if e.Name == SnapshotControlDirEnv {
 			hasControlEnv = true
 		}
 		if e.Name == TorchC10dRendezvousFileEnv {
 			hasRendezvousEnv = true
+		}
+		if e.Name == NCCLCheckpointKVSPathEnv {
+			hasNCCLKvsEnv = true
 		}
 	}
 	if !hasControlEnv {
@@ -120,6 +144,12 @@ func EnsureControlVolume(podSpec *corev1.PodSpec, container *corev1.Container) {
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  TorchC10dRendezvousFileEnv,
 			Value: SnapshotControlMountPath + "/" + TorchC10dRendezvousFile,
+		})
+	}
+	if !hasNCCLKvsEnv {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  NCCLCheckpointKVSPathEnv,
+			Value: SnapshotControlMountPath + "/" + NCCLCheckpointKVSFile,
 		})
 	}
 }

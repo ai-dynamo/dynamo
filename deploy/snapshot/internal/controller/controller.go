@@ -833,6 +833,24 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		return fmt.Errorf("failed to write rendezvous file: %w", err)
 	}
 
+	ncclKVSEndpoint := restoreNCCLCheckpointKVSEndpoint(
+		rendezvousConfig.Store.Host,
+		pod,
+		checkpointID,
+		containerName,
+	)
+	if err := snapshotruntime.WriteNCCLCheckpointKVSFile(placeholderHostPID, ncclKVSEndpoint); err != nil {
+		log.Error(err, "Failed to write NCCL checkpoint KVS file", "kvs_endpoint", ncclKVSEndpoint)
+		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
+		if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
+			return statusErr
+		}
+		if killErr := snapshotruntime.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "restore NCCL KVS failed"); killErr != nil {
+			log.Error(killErr, "Failed to kill placeholder after NCCL KVS failure")
+		}
+		return fmt.Errorf("failed to write NCCL checkpoint KVS file: %w", err)
+	}
+
 	// Any PID inside the container mount namespace reaches the control
 	// volume through /host/proc/<pid>/root.
 	if err := snapshotruntime.WriteControlSentinel(placeholderHostPID, snapshotprotocol.RestoreCompleteFile); err != nil {
@@ -911,6 +929,45 @@ func restoreRendezvousConfig(pod *corev1.Pod, containerName string, checkpointID
 			MasterRank: 0,
 		},
 	}, nil
+}
+
+func restoreNCCLCheckpointKVSEndpoint(host string, pod *corev1.Pod, checkpointID string, containerName string) string {
+	prefix := safePathComponent(restoreNCCLCheckpointKVSGroup(pod, checkpointID, containerName))
+	return fmt.Sprintf("%s:%d/%s", host, snapshotprotocol.NCCLCheckpointRedisPort, prefix)
+}
+
+func restoreNCCLCheckpointKVSGroup(pod *corev1.Pod, checkpointID string, containerName string) string {
+	parts := []string{checkpointID, containerName}
+	if pod != nil {
+		for _, key := range []string{
+			"nvidia.com/dynamo-graph-deployment-name",
+			"nvidia.com/dynamo-component",
+			"nvidia.com/dynamo-worker-hash",
+			"leaderworkerset.sigs.k8s.io/group-index",
+			"grove.io/podcliquescalinggroup-replica-index",
+		} {
+			value := strings.TrimSpace(pod.Labels[key])
+			if value != "" {
+				parts = append(parts, value)
+			}
+		}
+	}
+	return strings.Join(parts, "_")
+}
+
+func safePathComponent(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		if r == '-' || r == '_' || r == '.' || r >= '0' && r <= '9' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' {
+			b.WriteRune(r)
+			continue
+		}
+		b.WriteByte('_')
+	}
+	if b.Len() == 0 {
+		return "container"
+	}
+	return b.String()
 }
 
 func flagValue(args []string, name string) string {

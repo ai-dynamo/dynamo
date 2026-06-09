@@ -20,6 +20,7 @@ package checkpoint
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -92,6 +93,18 @@ func ApplyRestorePodMetadataWithStorageConfig(
 	return nil
 }
 
+func ApplyRestoreRoleMetadata(annotations map[string]string, role string) {
+	if annotations == nil {
+		return
+	}
+	role = strings.TrimSpace(role)
+	if role == "" {
+		delete(annotations, snapshotprotocol.RestoreRoleAnnotation)
+		return
+	}
+	annotations[snapshotprotocol.RestoreRoleAnnotation] = role
+}
+
 func ApplyRestoreCandidateMetadata(labels map[string]string, annotations map[string]string, checkpointInfo *CheckpointInfo) error {
 	if labels == nil {
 		return fmt.Errorf("checkpoint restore candidate labels map is required")
@@ -110,6 +123,7 @@ func ApplyRestoreCandidateMetadata(labels map[string]string, annotations map[str
 	delete(annotations, commonconsts.CheckpointNameAnnotation)
 	delete(annotations, commonconsts.CheckpointStartupPolicyAnnotation)
 	delete(annotations, snapshotprotocol.TargetContainersAnnotation)
+	delete(annotations, snapshotprotocol.RestoreRoleAnnotation)
 	if checkpointInfo == nil || !checkpointInfo.Enabled || !checkpointInfo.Exists || checkpointInfo.CheckpointName == "" {
 		return nil
 	}
@@ -235,6 +249,7 @@ func injectCheckpointIntoPodSpec(
 	annotations := map[string]string{
 		snapshotprotocol.TargetContainersAnnotation: snapshotprotocol.FormatTargetContainers(targets),
 	}
+	ApplyRestoreRoleMetadata(annotations, info.RestoreRole)
 
 	storage, err := ResolveStorage(
 		ctx,

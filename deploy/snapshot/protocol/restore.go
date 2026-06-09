@@ -13,6 +13,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -76,6 +77,7 @@ func PrepareRestorePodSpec(
 	if storage.PVCName != "" {
 		InjectCheckpointVolume(podSpec, storage.PVCName)
 	}
+	needsNCCLRedis := false
 	for _, name := range targets {
 		var container *corev1.Container
 		for i := range podSpec.Containers {
@@ -91,13 +93,73 @@ func PrepareRestorePodSpec(
 			InjectCheckpointVolumeMount(container, storage.BasePath)
 		}
 		EnsureControlVolume(podSpec, container)
+		if isCheckpointReady && needsNCCLCheckpointRedis(annotations, container) {
+			needsNCCLRedis = true
+		}
 		if isCheckpointReady {
 			container.Command = []string{"sleep", "infinity"}
 			container.Args = nil
 			ensureRestoreStartupProbe(container)
 		}
 	}
+	if needsNCCLRedis {
+		EnsureNCCLCheckpointRedisSidecar(podSpec)
+	}
 	return nil
+}
+
+func needsNCCLCheckpointRedis(annotations map[string]string, container *corev1.Container) bool {
+	switch strings.TrimSpace(annotations[RestoreRoleAnnotation]) {
+	case RestoreRoleMain, RestoreRoleLeader:
+		return true
+	case RestoreRoleWorker:
+		return false
+	default:
+		return isRestoreLeader(container)
+	}
+}
+
+func isRestoreLeader(container *corev1.Container) bool {
+	nodeRank := strings.TrimSpace(flagValue(containerCommandAndArgs(container), "--node-rank"))
+	return nodeRank == "" || nodeRank == "0"
+}
+
+func EnsureNCCLCheckpointRedisSidecar(podSpec *corev1.PodSpec) {
+	if podSpec == nil {
+		return
+	}
+	for _, container := range podSpec.Containers {
+		if container.Name == NCCLCheckpointRedisContainerName {
+			return
+		}
+	}
+
+	port := int32(NCCLCheckpointRedisPort)
+	podSpec.Containers = append(podSpec.Containers, corev1.Container{
+		Name:    NCCLCheckpointRedisContainerName,
+		Image:   NCCLCheckpointRedisImage,
+		Command: []string{"redis-server"},
+		Args: []string{
+			"--port", strconv.Itoa(NCCLCheckpointRedisPort),
+			"--bind", "0.0.0.0",
+			"--protected-mode", "no",
+			"--save", "",
+			"--appendonly", "no",
+		},
+		Ports: []corev1.ContainerPort{{
+			Name:          "nccl-kvs",
+			ContainerPort: port,
+		}},
+		ReadinessProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				TCPSocket: &corev1.TCPSocketAction{
+					Port: intstr.FromInt(int(port)),
+				},
+			},
+			PeriodSeconds:    1,
+			FailureThreshold: 30,
+		},
+	})
 }
 
 func ApplyRendezvousMetadataFromPodSpec(
@@ -289,6 +351,16 @@ func ValidateRestorePodSpec(
 		}
 		if !hasControlEnv {
 			return fmt.Errorf("missing %s env var on container %q", SnapshotControlDirEnv, name)
+		}
+		hasNCCLKvsEnv := false
+		for _, env := range container.Env {
+			if env.Name == NCCLCheckpointKVSPathEnv {
+				hasNCCLKvsEnv = true
+				break
+			}
+		}
+		if !hasNCCLKvsEnv {
+			return fmt.Errorf("missing %s env var on container %q", NCCLCheckpointKVSPathEnv, name)
 		}
 		if container.StartupProbe == nil {
 			return fmt.Errorf("missing restore-complete startup probe on container %q", name)

@@ -118,14 +118,24 @@ func TestNewRestorePod(t *testing.T) {
 		t.Fatalf("expected %s mount, got %#v", SnapshotControlVolumeName, main.VolumeMounts)
 	}
 	foundEnv := false
+	foundNCCLKvsEnv := false
 	for _, e := range main.Env {
 		if e.Name == SnapshotControlDirEnv {
 			foundEnv = true
-			break
+		}
+		if e.Name == NCCLCheckpointKVSPathEnv {
+			foundNCCLKvsEnv = true
 		}
 	}
 	if !foundEnv {
 		t.Fatalf("expected %s env, got %#v", SnapshotControlDirEnv, main.Env)
+	}
+	if !foundNCCLKvsEnv {
+		t.Fatalf("expected %s env, got %#v", NCCLCheckpointKVSPathEnv, main.Env)
+	}
+	redis := findRestoreContainer(t, restorePod.Spec.Containers, NCCLCheckpointRedisContainerName)
+	if redis.Image != NCCLCheckpointRedisImage {
+		t.Fatalf("expected Redis image %q, got %q", NCCLCheckpointRedisImage, redis.Image)
 	}
 }
 
@@ -364,6 +374,93 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 		t.Fatalf("expected startup probe to gate restore completion")
 	}
 	assertRestoreStartupGate(t, container.StartupProbe)
+	redisCount := 0
+	for _, c := range podSpec.Containers {
+		if c.Name == NCCLCheckpointRedisContainerName {
+			redisCount++
+		}
+	}
+	if redisCount != 1 {
+		t.Fatalf("expected one Redis sidecar after repeated calls, got %#v", podSpec.Containers)
+	}
+}
+
+func TestPrepareRestorePodSpecInjectsRedisOnlyForLeader(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		args        []string
+		annotations map[string]string
+		wantRedis   bool
+	}{
+		{
+			name:      "single-node has implicit leader",
+			args:      []string{"--model", "Qwen"},
+			wantRedis: true,
+		},
+		{
+			name:      "leader rank zero",
+			args:      []string{"--node-rank", "0"},
+			wantRedis: true,
+		},
+		{
+			name:      "worker concrete rank",
+			args:      []string{"--node-rank", "1"},
+			wantRedis: false,
+		},
+		{
+			name:      "worker shell rank expression",
+			args:      []string{"--node-rank", "$((GROVE_PCLQ_POD_INDEX + 1))"},
+			wantRedis: false,
+		},
+		{
+			name:      "worker LWS rank reference",
+			args:      []string{"--node-rank", "$(LWS_WORKER_INDEX)"},
+			wantRedis: false,
+		},
+		{
+			name: "annotated worker without node-rank",
+			annotations: map[string]string{
+				RestoreRoleAnnotation: RestoreRoleWorker,
+			},
+			args:      []string{"ray", "start", "--address=$(LWS_LEADER_ADDRESS):6379", "--block"},
+			wantRedis: false,
+		},
+		{
+			name: "annotated leader without node-rank",
+			annotations: map[string]string{
+				RestoreRoleAnnotation: RestoreRoleLeader,
+			},
+			args:      []string{"ray", "start", "--head", "--port=6379", "--block"},
+			wantRedis: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			podSpec := corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name:    "main",
+					Command: []string{"python3", "-m", "dynamo.vllm"},
+					Args:    tc.args,
+				}},
+			}
+			annotations := map[string]string{TargetContainersAnnotation: "main"}
+			for key, value := range tc.annotations {
+				annotations[key] = value
+			}
+			if err := PrepareRestorePodSpec(
+				&podSpec,
+				annotations,
+				Storage{},
+				"",
+				true,
+			); err != nil {
+				t.Fatalf("PrepareRestorePodSpec error: %v", err)
+			}
+			gotRedis := findContainer(&podSpec, NCCLCheckpointRedisContainerName) != nil
+			if gotRedis != tc.wantRedis {
+				t.Fatalf("Redis sidecar present = %t, want %t; containers=%#v", gotRedis, tc.wantRedis, podSpec.Containers)
+			}
+		})
+	}
 }
 
 func TestPrepareRestorePodSpecSynthesizesStartupProbeFromLiveness(t *testing.T) {
@@ -500,7 +597,10 @@ func validRestoreSpecFixture(profile string, targets ...string) (*corev1.PodSpec
 				{Name: CheckpointVolumeName, MountPath: "/checkpoints"},
 				{Name: SnapshotControlVolumeName, MountPath: SnapshotControlMountPath, SubPath: name},
 			},
-			Env: []corev1.EnvVar{{Name: SnapshotControlDirEnv, Value: SnapshotControlMountPath}},
+			Env: []corev1.EnvVar{
+				{Name: SnapshotControlDirEnv, Value: SnapshotControlMountPath},
+				{Name: NCCLCheckpointKVSPathEnv, Value: SnapshotControlMountPath + "/" + NCCLCheckpointKVSFile},
+			},
 		}
 		ensureRestoreStartupProbe(&container)
 		containers = append(containers, container)
@@ -571,6 +671,12 @@ func TestValidateRestorePodSpec(t *testing.T) {
 	badSpec.Containers[0].Env = nil
 	if err := ValidateRestorePodSpec(badSpec, annotations, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != fmt.Sprintf(`missing %s env var on container "main"`, SnapshotControlDirEnv) {
 		t.Fatalf("expected missing control env error, got %v", err)
+	}
+
+	badSpec = podSpec.DeepCopy()
+	badSpec.Containers[0].Env = []corev1.EnvVar{{Name: SnapshotControlDirEnv, Value: SnapshotControlMountPath}}
+	if err := ValidateRestorePodSpec(badSpec, annotations, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != fmt.Sprintf(`missing %s env var on container "main"`, NCCLCheckpointKVSPathEnv) {
+		t.Fatalf("expected missing NCCL KVS env error, got %v", err)
 	}
 
 	badSpec = podSpec.DeepCopy()
@@ -706,5 +812,14 @@ func findRestoreContainer(t *testing.T, containers []corev1.Container, name stri
 		}
 	}
 	t.Fatalf("container %q not found in spec", name)
+	return nil
+}
+
+func findContainer(podSpec *corev1.PodSpec, name string) *corev1.Container {
+	for i := range podSpec.Containers {
+		if podSpec.Containers[i].Name == name {
+			return &podSpec.Containers[i]
+		}
+	}
 	return nil
 }

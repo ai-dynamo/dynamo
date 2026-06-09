@@ -1994,9 +1994,16 @@ type cliqueParams struct {
 // buildCliqueForRole generates a single PodCliqueTemplateSpec for the given role,
 // injecting labels, annotations, checkpoint config, and scheduler settings.
 func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, error) {
+	checkpointInfo := p.checkpointInfo
+	if checkpointInfo != nil {
+		info := *checkpointInfo
+		info.RestoreRole = string(p.r.Role)
+		checkpointInfo = &info
+	}
+
 	podSpec, err := generatePodSpecForRole(
 		p.r, p.component, p.backendFramework, p.secretsRetriever,
-		p.dynamoDeployment, p.numberOfNodes, p.operatorConfig, p.componentName, p.checkpointInfo,
+		p.dynamoDeployment, p.numberOfNodes, p.operatorConfig, p.componentName, checkpointInfo,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", p.r.Name, err)
@@ -2005,12 +2012,12 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	// GMS weight servers load weights fresh from disk and are not CRIU targets.
 	shouldUseAdmissionRestore := p.operatorConfig.Checkpoint.Enabled &&
 		p.r.Role != RoleGMS &&
-		p.checkpointInfo != nil &&
-		(p.checkpointInfo.StartupPolicy == "" ||
-			p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyImmediate)
+		checkpointInfo != nil &&
+		(checkpointInfo.StartupPolicy == "" ||
+			checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyImmediate)
 	if p.operatorConfig.Checkpoint.Enabled && p.r.Role != RoleGMS && !shouldUseAdmissionRestore {
 		if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
-			p.ctx, p.kubeClient, p.dynamoDeployment.Namespace, podSpec, p.checkpointInfo,
+			p.ctx, p.kubeClient, p.dynamoDeployment.Namespace, podSpec, checkpointInfo,
 			p.operatorConfig.Checkpoint.Storage,
 			p.operatorConfig.Checkpoint.EffectiveSeccompProfile(),
 		); err != nil {
@@ -2052,10 +2059,10 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	}
 	replicas := p.r.Replicas
 	if p.r.Role != RoleGMS &&
-		p.checkpointInfo != nil &&
-		p.checkpointInfo.Enabled &&
-		p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
-		!p.checkpointInfo.Ready {
+		checkpointInfo != nil &&
+		checkpointInfo.Enabled &&
+		checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
+		!checkpointInfo.Ready {
 		replicas = 0
 		minAvailable = 0
 	}
@@ -2104,13 +2111,16 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	}
 	if p.r.Role != RoleGMS {
 		if shouldUseAdmissionRestore {
-			if err := checkpoint.ApplyRestoreCandidateMetadata(labels, annotations, p.checkpointInfo); err != nil {
+			if err := checkpoint.ApplyRestoreCandidateMetadata(labels, annotations, checkpointInfo); err != nil {
 				return nil, fmt.Errorf("failed to apply checkpoint candidate metadata for role %s: %w", p.r.Name, err)
 			}
 		} else {
-			if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(labels, annotations, p.checkpointInfo, p.operatorConfig.Checkpoint.Storage); err != nil {
+			if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(labels, annotations, checkpointInfo, p.operatorConfig.Checkpoint.Storage); err != nil {
 				return nil, fmt.Errorf("failed to apply checkpoint metadata for role %s: %w", p.r.Name, err)
 			}
+		}
+		if checkpointInfo != nil {
+			checkpoint.ApplyRestoreRoleMetadata(annotations, string(p.r.Role))
 		}
 	}
 	annotations = applyRestartAnnotation(annotations, p.componentName, p.restartState, p.existingRestartAnnotations)
