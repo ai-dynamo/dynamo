@@ -171,7 +171,7 @@ impl MockEngineArgs {
 #[pymethods]
 impl MockEngineArgs {
     #[new]
-    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, kv_bytes_per_token=None, kv_transfer_bandwidth=None, reasoning=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, num_g2_blocks=None, num_g3_blocks=None, offload_batch_size=None, bandwidth_g1_to_g2_gbps=None, bandwidth_g2_to_g1_gbps=None, bandwidth_g2_to_g3_gbps=None, bandwidth_g3_to_g2_gbps=None, enable_g4_storage=false, bandwidth_g2_to_g4_gbps=None, bandwidth_g4_to_g2_gbps=None))]
+    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=42, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, kv_bytes_per_token=None, kv_transfer_bandwidth=None, reasoning=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, num_g2_blocks=None, num_g3_blocks=None, offload_batch_size=None, bandwidth_g1_to_g2_gbps=None, bandwidth_g2_to_g1_gbps=None, bandwidth_g2_to_g3_gbps=None, bandwidth_g3_to_g2_gbps=None, enable_g4_storage=false, bandwidth_g2_to_g4_gbps=None, bandwidth_g4_to_g2_gbps=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         engine_type: &str,
@@ -197,6 +197,7 @@ impl MockEngineArgs {
         aic_attention_dp_size: Option<usize>,
         aic_nextn: Option<usize>,
         aic_nextn_accept_rates: Option<String>,
+        aic_mtp_seed: u64,
         gpu_memory_utilization: Option<f64>,
         mem_fraction_static: Option<f64>,
         free_gpu_memory_fraction: Option<f64>,
@@ -256,6 +257,7 @@ impl MockEngineArgs {
             .aic_attention_dp_size(aic_attention_dp_size)
             .aic_nextn(aic_nextn)
             .aic_nextn_accept_rates(aic_nextn_accept_rates)
+            .aic_mtp_seed(aic_mtp_seed)
             .gpu_memory_utilization(gpu_memory_utilization)
             .mem_fraction_static(mem_fraction_static)
             .free_gpu_memory_fraction(free_gpu_memory_fraction)
@@ -535,6 +537,16 @@ impl MockEngineArgs {
     }
 
     #[getter]
+    fn aic_mtp_seed(&self) -> u64 {
+        self.inner.aic_mtp_seed
+    }
+
+    #[setter]
+    fn set_aic_mtp_seed(&mut self, value: u64) {
+        self.inner.aic_mtp_seed = value;
+    }
+
+    #[getter]
     fn gpu_memory_utilization(&self) -> Option<f64> {
         self.inner.gpu_memory_utilization
     }
@@ -618,7 +630,7 @@ impl MockEngineArgs {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None, num_gpu_blocks=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_prefix_caching=None, worker_type=None))]
+    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None, num_gpu_blocks=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_prefix_caching=None, worker_type=None))]
     fn with_overrides(
         &self,
         bootstrap_port: Option<u16>,
@@ -636,6 +648,7 @@ impl MockEngineArgs {
         aic_attention_dp_size: Option<usize>,
         aic_nextn: Option<usize>,
         aic_nextn_accept_rates: Option<String>,
+        aic_mtp_seed: Option<u64>,
         gpu_memory_utilization: Option<f64>,
         mem_fraction_static: Option<f64>,
         free_gpu_memory_fraction: Option<f64>,
@@ -689,6 +702,9 @@ impl MockEngineArgs {
         }
         if let Some(rates) = aic_nextn_accept_rates {
             inner.aic_nextn_accept_rates = Some(rates);
+        }
+        if let Some(seed) = aic_mtp_seed {
+            inner.aic_mtp_seed = seed;
         }
         if let Some(gpu_memory_utilization) = gpu_memory_utilization {
             inner.gpu_memory_utilization = Some(gpu_memory_utilization);
@@ -1255,7 +1271,7 @@ fn materialize_replay_mocker_args(
         let moe_ep_size = args.aic_moe_ep_size;
         let attention_dp_size = args.aic_attention_dp_size;
         let nextn = args.aic_nextn;
-        let nextn_accept_rates = args.aic_nextn_accept_rates.clone();
+        let undiscounted_accept_rates = args.undiscounted_aic_accept_rates();
         // AIC-backed config may intentionally omit num_gpu_blocks. Estimate it
         // here, after candidate TP/backend/model overrides have been applied.
         if !extra_args.num_gpu_blocks_explicit() {
@@ -1295,7 +1311,7 @@ fn materialize_replay_mocker_args(
             moe_ep_size,
             attention_dp_size,
             nextn,
-            nextn_accept_rates.as_deref(),
+            undiscounted_accept_rates.as_deref(),
         )
         .map_err(|e| {
             PyException::new_err(format!(

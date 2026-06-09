@@ -82,10 +82,9 @@ where
         .await
         .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?;
 
-        let watch_worker_configs = !kv_router_config.skip_initial_worker_wait;
-        if !watch_worker_configs {
-            tracing::info!("skipping discovery-based worker monitoring");
-        }
+        // `skip_initial_worker_wait` only controls boot-time blocking. The scheduler must
+        // keep monitoring runtime config changes so late-joining workers enter routing.
+        let watch_worker_configs = true;
 
         let policy = RouterSchedulingPolicy::new(kv_router_config.router_queue_policy);
         tracing::info!(
@@ -312,5 +311,80 @@ where
 fn router_backpressure_reason_label(reason: &RouterBackpressureReason) -> &'static str {
     match reason {
         RouterBackpressureReason::MaxQueuedIslTokensExceeded => "max_queued_isl_tokens_exceeded",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+    use tokio::sync::watch;
+
+    async fn make_test_component(name: &str) -> Component {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let namespace = drt.namespace(format!("test-ns-{name}")).unwrap();
+        namespace
+            .component(format!("test-component-{name}"))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn skip_initial_worker_wait_still_monitors_worker_config_updates() {
+        let component = make_test_component("skip-initial-worker-watch").await;
+        let mut workers = HashMap::new();
+        workers.insert(0, ModelRuntimeConfig::default());
+        let (cfg_tx, cfg_rx) = watch::channel(workers);
+        let config = KvRouterConfig {
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            ..Default::default()
+        };
+
+        let scheduler = KvScheduler::start(
+            component.clone(),
+            64,
+            cfg_rx,
+            DefaultWorkerSelector::new(Some(config.clone()), "decode"),
+            &config,
+            None,
+            None::<Arc<NoopOverlapScoresRefresh>>,
+            None,
+            "decode",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            scheduler
+                .get_potential_loads(None, 64, HashMap::new(), true)
+                .len(),
+            1
+        );
+
+        let mut updated_workers = HashMap::new();
+        updated_workers.insert(0, ModelRuntimeConfig::default());
+        updated_workers.insert(1, ModelRuntimeConfig::default());
+        cfg_tx.send(updated_workers).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if scheduler
+                    .get_potential_loads(None, 64, HashMap::new(), true)
+                    .iter()
+                    .any(|load| load.worker_id == 1)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        component.drt().primary_token().cancel();
     }
 }

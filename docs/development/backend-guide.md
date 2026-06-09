@@ -6,8 +6,6 @@ sidebar-title: Writing Python Workers
 subtitle: Create custom Python workers and engines for Dynamo
 ---
 
-# Writing Python Workers in Dynamo
-
 > **Lower-level Python worker path.** This guide documents the
 > `@dynamo_worker()` + `register_model()` + `endpoint.serve_endpoint()`
 > entry point. For new engines, prefer Dynamo's
