@@ -38,6 +38,7 @@ from tests.router.common import (
     _test_router_query_instance_id,
     _test_router_threshold_none_disables_rejection,
     _test_router_two_routers,
+    _test_sticky_routing_via_x_session_header,
 )
 from tests.router.helper import (
     generate_random_suffix,
@@ -1679,6 +1680,42 @@ def test_disagg_background_prefill_sticky(
                 event_plane="nats",
                 frontend_already_running=True,
             )
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+def test_sticky_routing_via_x_session_header_mockers(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    request_plane,
+):
+    """Header-driven sticky routing pins requests to one decode worker (mocker)."""
+    _ = (runtime_services_dynamic_ports, predownload_tokenizers)
+
+    mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+    }
+
+    with MockerProcess(
+        request,
+        mocker_args=mocker_args,
+        num_mockers=NUM_MOCKERS,
+        request_plane=request_plane,
+    ) as mockers:
+        frontend_port = get_unique_ports(
+            request, num_ports=1, request_plane=request_plane
+        )[0]
+
+        _test_sticky_routing_via_x_session_header(
+            engine_workers=mockers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=frontend_port,
+            model_name=MODEL_NAME,
+            request_plane=request_plane,
+        )
 
 
 @pytest.mark.timeout(180)

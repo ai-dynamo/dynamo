@@ -11,6 +11,7 @@ from tests.router.common import (
     _test_router_decisions,
     _test_router_decisions_disagg,
     _test_router_indexers_sync,
+    _test_sticky_routing_via_x_session_header,
 )
 from tests.router.helper import generate_random_suffix, get_runtime
 from tests.utils.constants import DefaultPort
@@ -330,4 +331,48 @@ def run_indexers_sync_test(
             test_zmq_replay=bool(
                 getattr(engine_workers, "standalone_indexer_url", None)
             ),
+        )
+
+
+def run_sticky_routing_via_x_session_header_test(
+    *,
+    engine_process_cls,
+    engine_args_name: str,
+    engine_args: dict[str, Any],
+    num_workers: int,
+    single_gpu: bool,
+    request,
+    request_plane: str,
+    block_size: int,
+    model_name: str,
+    extra_process_kwargs: dict[str, Any] | None = None,
+    frontend_timeout: int = 120,
+):
+    """Backend-agnostic harness for the X-Session-ID sticky-routing scenario.
+
+    Mirrors `run_basic_router_test` shape: spins up `num_workers` engine
+    instances and invokes the shared scenario in `common.py`. Used by both
+    mocker and vLLM e2e wrappers.
+
+    `frontend_timeout` is the wait_for_frontend_ready cap; bump it for
+    real-backend tests where cold-start can exceed the mocker default.
+    """
+    process_kwargs = extra_process_kwargs or {}
+    with engine_process_cls(
+        request,
+        num_workers=num_workers,
+        single_gpu=single_gpu,
+        request_plane=request_plane,
+        **{engine_args_name: engine_args},
+        **process_kwargs,
+    ) as engine_workers:
+        frontend_port = allocate_frontend_ports(request, 1)[0]
+        _test_sticky_routing_via_x_session_header(
+            engine_workers=engine_workers,
+            block_size=block_size,
+            request=request,
+            frontend_port=frontend_port,
+            model_name=model_name,
+            request_plane=request_plane,
+            frontend_timeout=frontend_timeout,
         )

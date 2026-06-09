@@ -21,6 +21,7 @@ from tests.router.e2e_harness import (
     run_disagg_router_decisions_test,
     run_indexers_sync_test,
     run_router_decisions_test,
+    run_sticky_routing_via_x_session_header_test,
 )
 from tests.router.helper import (
     generate_random_suffix,
@@ -541,6 +542,50 @@ def test_vllm_kv_router_without_block_size_specified_in_vllm_args(
         request_plane=request_plane,
         block_size=BLOCK_SIZE,
         model_name=MODEL_NAME,
+    )
+
+
+# Used by the X-Session-ID sticky-routing test below. A smaller model keeps
+# the per-worker startup well under the wait_for_frontend_ready deadline so
+# the routing assertions, not vLLM cold-start, are what gate the test.
+_SESSION_HEADER_TEST_MODEL = "Qwen/Qwen3-0.6B"
+_SESSION_HEADER_VLLM_ARGS: Dict[str, Any] = {
+    "block_size": BLOCK_SIZE,
+    "model": _SESSION_HEADER_TEST_MODEL,
+    "gpu_memory_utilization": 0.3,
+    "max_model_len": 1024,
+    "enforce_eager": True,
+}
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_1
+@pytest.mark.profiled_vram_gib(6.9)
+@pytest.mark.requested_vllm_kv_cache_bytes(331_801_000)
+@pytest.mark.timeout(540)
+@pytest.mark.model(_SESSION_HEADER_TEST_MODEL)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+def test_sticky_routing_via_x_session_header_vllm(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    set_ucx_tls_no_mm,
+    request_plane,
+):
+    """Header-driven sticky routing pins requests to one decode worker (vLLM)."""
+    run_sticky_routing_via_x_session_header_test(
+        engine_process_cls=VLLMProcess,
+        engine_args_name="vllm_args",
+        engine_args=_SESSION_HEADER_VLLM_ARGS,
+        num_workers=2,
+        single_gpu=True,
+        request=request,
+        request_plane=request_plane,
+        block_size=BLOCK_SIZE,
+        model_name=_SESSION_HEADER_TEST_MODEL,
+        # vLLM cold-start with 2 workers on one GPU is right at the
+        # 120s edge — bump for real-backend variance.
+        frontend_timeout=240,
     )
 
 

@@ -20,6 +20,10 @@ pub const HEADER_DP_RANK: &str = "x-dp-rank";
 /// Alias for data-parallel rank routing.
 pub const HEADER_DP_RANK_ALIAS: &str = "x-data-parallel-rank";
 pub const HEADER_PREFILL_DP_RANK: &str = "x-prefill-dp-rank";
+/// Session-affinity routing key. When set, dynamo treats the value as
+/// `nvext.session_control.session_id` and defaults `action` to `bind`
+/// (router-only sticky routing) unless the body already specified one.
+pub const HEADER_SESSION_ID: &str = "x-session-id";
 const UNSET_DP_RANK_SENTINEL: u32 = u32::MAX;
 
 /// Apply routing overrides from HTTP headers to nvext.
@@ -29,6 +33,9 @@ const UNSET_DP_RANK_SENTINEL: u32 = u32::MAX;
 /// - `x-prefill-instance-id` -> `prefill_worker_id`
 /// - `x-dp-rank` -> `dp_rank` (decode worker's DP rank)
 /// - `x-prefill-dp-rank` -> `prefill_dp_rank`
+/// - `x-session-id` -> `session_control.session_id` (defaults `action` to
+///   `bind` and `timeout` to [`default_session_timeout`] when the body did
+///   not already supply them)
 ///
 /// Headers take priority over existing nvext values when present.
 /// If no headers are present, returns the original nvext unchanged.
@@ -56,7 +63,17 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         .and_then(|s| s.parse::<u32>().ok());
     let prefill_dp_rank = prefill_dp_rank.filter(|rank| *rank != UNSET_DP_RANK_SENTINEL);
 
-    if worker_id.is_none() && prefill_id.is_none() && dp_rank.is_none() && prefill_dp_rank.is_none()
+    let session_id_header = headers
+        .get(HEADER_SESSION_ID)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
+
+    if worker_id.is_none()
+        && prefill_id.is_none()
+        && dp_rank.is_none()
+        && prefill_dp_rank.is_none()
+        && session_id_header.is_none()
     {
         return nvext;
     }
@@ -74,6 +91,25 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
     }
     if let Some(rank) = prefill_dp_rank {
         ext.prefill_dp_rank = Some(rank);
+    }
+    if let Some(session_id) = session_id_header {
+        // Preserve any explicit action/timeout the caller put in the body;
+        // only the session_id is sourced from the header. Default action is
+        // `Bind` (router-only sticky routing) so the header alone is enough
+        // to engage the sticky coordinator without per-session engine RPCs.
+        let mut sc = ext
+            .session_control
+            .take()
+            .unwrap_or_else(|| SessionControl {
+                session_id: String::new(),
+                action: None,
+                timeout: default_session_timeout(),
+            });
+        sc.session_id = session_id;
+        if sc.action.is_none() {
+            sc.action = Some(SessionAction::Bind);
+        }
+        ext.session_control = Some(sc);
     }
     Some(ext)
 }
@@ -788,6 +824,83 @@ mod tests {
         assert_eq!(result.prefill_worker_id, Some(456));
         assert_eq!(result.dp_rank, Some(3));
         assert_eq!(result.prefill_dp_rank, Some(5));
+    }
+
+    #[test]
+    fn test_apply_header_session_id_creates_session_control_with_bind_default() {
+        use axum::http::HeaderMap;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_SESSION_ID, "sess-abc".parse().unwrap());
+
+        let result = apply_header_routing_overrides(None, &headers).unwrap();
+        let sc = result.session_control.expect("session_control populated");
+
+        assert_eq!(sc.session_id, "sess-abc");
+        assert_eq!(sc.action, Some(SessionAction::Bind));
+        assert_eq!(sc.timeout, super::default_session_timeout());
+    }
+
+    #[test]
+    fn test_apply_header_session_id_preserves_body_action_and_timeout() {
+        use axum::http::HeaderMap;
+
+        let body = NvExt::builder()
+            .session_control(SessionControl {
+                session_id: "body-id".to_string(),
+                action: Some(SessionAction::Open),
+                timeout: 600,
+            })
+            .build()
+            .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_SESSION_ID, "header-id".parse().unwrap());
+
+        let result = apply_header_routing_overrides(Some(body), &headers).unwrap();
+        let sc = result.session_control.expect("session_control populated");
+
+        // Header wins for session_id; body wins for the other fields.
+        assert_eq!(sc.session_id, "header-id");
+        assert_eq!(sc.action, Some(SessionAction::Open));
+        assert_eq!(sc.timeout, 600);
+    }
+
+    #[test]
+    fn test_apply_header_no_session_header_leaves_body_session_control_untouched() {
+        use axum::http::HeaderMap;
+
+        let body = NvExt::builder()
+            .session_control(SessionControl {
+                session_id: "body-id".to_string(),
+                action: Some(SessionAction::Close),
+                timeout: 42,
+            })
+            .build()
+            .unwrap();
+
+        let result =
+            apply_header_routing_overrides(Some(body), &HeaderMap::new()).expect("nvext returned");
+        let sc = result
+            .session_control
+            .expect("session_control passes through");
+
+        assert_eq!(sc.session_id, "body-id");
+        assert_eq!(sc.action, Some(SessionAction::Close));
+        assert_eq!(sc.timeout, 42);
+    }
+
+    #[test]
+    fn test_apply_header_empty_session_id_treated_as_absent() {
+        use axum::http::HeaderMap;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_SESSION_ID, "".parse().unwrap());
+
+        // No other routing headers, empty session header -> nvext should
+        // pass through unchanged (no session_control fabricated).
+        let result = apply_header_routing_overrides(None, &headers);
+        assert!(result.is_none());
     }
 
     #[test]

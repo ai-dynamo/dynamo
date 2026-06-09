@@ -2444,6 +2444,256 @@ def _test_disagg_background_prefill_sticky_routing(
         asyncio.run(test_sync())
 
 
+def _test_sticky_routing_via_x_session_header(
+    engine_workers,
+    block_size: int,
+    request,
+    frontend_port: int,
+    model_name: str,
+    store_backend: str = "etcd",
+    request_plane: str = "nats",
+    event_plane: str = "zmq",
+    frontend_already_running: bool = False,
+    requests_per_session: int = 4,
+    frontend_timeout: int = 120,
+):
+    """Verify the `X-Session-ID` HTTP header pins requests to one decode worker.
+
+    Header-based sticky routing path (no body `session_control`). Asserts:
+
+      1. Same `X-Session-ID` across requests with unique prompts always
+         returns the same `nvext.worker_id.decode_worker_id`. The prompts
+         differ so KV overlap routing would not naturally cluster them.
+      2. A request without `X-Session-ID` still succeeds (the no-header
+         path is untouched) and returns a `decode_worker_id` we can read.
+      3. Two distinct `X-Session-ID` values produce bindings independently
+         — verified probabilistically when the cluster has >=2 workers by
+         observing that not all session-B requests land on the same worker
+         that session A was pinned to (tolerates collisions; if every probe
+         pinned to the same worker, that is recorded but not asserted).
+
+    Assertions use the structured `nvext.worker_id` response field rather
+    than logs, per `tests/router/CLAUDE.md`.
+
+    The scenario assumes aggregated (non-disagg) workers and `kv` router
+    mode; the request body carries no `session_control`, so any sticky
+    behavior must come from the header path.
+    """
+
+    frontend_context = contextlib.nullcontext()
+    if not frontend_already_running:
+        frontend_context = FrontendRouterProcess(
+            request,
+            block_size,
+            frontend_port,
+            engine_workers.namespace,
+            store_backend,
+            request_plane=request_plane,
+            event_plane=event_plane,
+            durable_kv_events=False,
+            min_initial_workers=engine_workers.num_workers,
+        )
+
+    with frontend_context:
+        frontend_url = f"http://localhost:{frontend_port}"
+        chat_url = f"{frontend_url}/v1/chat/completions"
+
+        async def send_chat(
+            session: aiohttp.ClientSession,
+            content: str,
+            *,
+            session_header: Optional[str] = None,
+        ) -> Optional[int]:
+            payload: dict[str, Any] = {
+                "model": model_name,
+                "messages": [{"role": "user", "content": content}],
+                "stream": True,
+                "max_tokens": 2,
+                "nvext": {"extra_fields": ["worker_id"]},
+            }
+            headers: dict[str, str] = {}
+            if session_header is not None:
+                headers["X-Session-ID"] = session_header
+
+            decode_worker_id: Optional[int] = None
+            body_lines: list[str] = []
+            async with session.post(
+                chat_url, json=payload, headers=headers
+            ) as response:
+                assert response.status == 200, (
+                    f"Request failed status={response.status}: "
+                    f"{await response.text()}"
+                )
+                async for line in response.content:
+                    line_str = line.decode("utf-8", errors="replace").strip()
+                    body_lines.append(line_str)
+                    if not line_str.startswith("data:"):
+                        continue
+                    data_str = line_str[5:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    worker_id_info = data.get("nvext", {}).get("worker_id", {})
+                    decode_worker_id = worker_id_info.get(
+                        "decode_worker_id", decode_worker_id
+                    )
+
+            assert decode_worker_id is not None, (
+                "Missing decode_worker_id in response body. Lines:\n"
+                + "\n".join(body_lines)
+            )
+            return int(decode_worker_id)
+
+        async def test_async():
+            await wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=engine_workers.num_workers,
+                timeout=frontend_timeout,
+            )
+
+            suffix = random.randint(100_000, 999_999)
+            session_a = f"x-session-a-{suffix}"
+            session_b = f"x-session-b-{suffix}"
+
+            async with aiohttp.ClientSession() as session:
+                # ---- Phase 1: pin session A to whichever worker the
+                # router picks on the first request. Subsequent requests
+                # in this session use unique prompts (no shared prefix) so
+                # the KV router has no overlap-based reason to keep
+                # routing them to the same worker. Stickiness must come
+                # from the header.
+                first_prompt = (
+                    f"session alpha {suffix} bootstrap: "
+                    "anchor tokens for unique session A "
+                ) + "redwood vectors amber matrix " * 12
+                session_a_worker = await send_chat(
+                    session, first_prompt, session_header=session_a
+                )
+
+                follow_up_ids: list[int] = []
+                for idx in range(requests_per_session - 1):
+                    prompt = (
+                        f"session alpha {suffix} follow-up {idx}: "
+                        f"distinct payload {idx} "
+                    ) + "cerulean ledger quartz valley transit " * 12
+                    worker = await send_chat(
+                        session, prompt, session_header=session_a
+                    )
+                    follow_up_ids.append(worker)
+
+                assert all(w == session_a_worker for w in follow_up_ids), (
+                    f"Sticky binding violated: session_a={session_a!r} first "
+                    f"request pinned to decode_worker_id={session_a_worker} but "
+                    f"follow-up requests landed on {follow_up_ids}. "
+                    f"With the same X-Session-ID and the kv-router mode, all "
+                    f"requests must return the same decode_worker_id."
+                )
+                logger.info(
+                    f"Session A ({session_a}) pinned to decode_worker_id="
+                    f"{session_a_worker} across {requests_per_session} requests"
+                )
+
+                # ---- Phase 2: no header. Just confirm the no-header path
+                # still works (the change must not have broken baseline
+                # routing). We don't assert a specific worker_id here.
+                no_header_worker = await send_chat(
+                    session,
+                    f"no header probe {suffix}: " + "fresh prompt " * 10,
+                    session_header=None,
+                )
+                assert no_header_worker is not None
+                logger.info(
+                    f"No-header request landed on decode_worker_id="
+                    f"{no_header_worker}"
+                )
+
+                # ---- Phase 3: drive an independent session onto a
+                # different worker. With num_workers >= 2 we require at
+                # least one session-B candidate to bind to a worker that
+                # is NOT session A's worker — otherwise the cluster has
+                # no observable routing diversity and "sticky to one
+                # worker" is indistinguishable from "always picks the
+                # same worker." Retry loop borrowed from the existing
+                # disagg sticky test, which faces the same idle-cluster
+                # routing-bias problem.
+                session_b_worker: Optional[int] = None
+                session_b_id_used: Optional[str] = None
+                max_b_attempts = 6 if engine_workers.num_workers >= 2 else 1
+                for attempt in range(max_b_attempts):
+                    candidate_session = f"{session_b}-{attempt}"
+                    first_b_prompt = (
+                        f"session beta {suffix} attempt {attempt}: "
+                    ) + "golden harbor cipher meadow lattice " * 16
+                    first_b_worker = await send_chat(
+                        session, first_b_prompt, session_header=candidate_session
+                    )
+                    if (
+                        engine_workers.num_workers < 2
+                        or first_b_worker != session_a_worker
+                    ):
+                        session_b_worker = first_b_worker
+                        session_b_id_used = candidate_session
+                        break
+
+                if engine_workers.num_workers >= 2:
+                    assert session_b_worker is not None and session_b_id_used, (
+                        f"Could not bind a competing session to a worker "
+                        f"different from session A's worker "
+                        f"(={session_a_worker}) after {max_b_attempts} "
+                        f"attempts. The cluster did not exhibit routing "
+                        f"diversity, so 'all session-A requests on the same "
+                        f"worker' is indistinguishable from 'router always "
+                        f"picks the same worker.' Sticky-routing claim is "
+                        f"unverified in this run."
+                    )
+                else:
+                    # Single-worker cluster: session B necessarily binds
+                    # to the same worker as session A. The test cannot
+                    # verify cross-session diversity but Phase 1 still
+                    # proves that the header is read and acted on.
+                    session_b_id_used = session_b_id_used or f"{session_b}-0"
+
+                # Now verify session B is itself sticky — distinct prompts
+                # all return the binding worker.
+                follow_up_b_ids: list[int] = []
+                for idx in range(requests_per_session - 1):
+                    prompt = (
+                        f"session beta {suffix} follow-up {idx}: "
+                        f"distinct payload b{idx} "
+                    ) + "obsidian rampart syllable kestrel beacon " * 12
+                    worker = await send_chat(
+                        session, prompt, session_header=session_b_id_used
+                    )
+                    follow_up_b_ids.append(worker)
+
+                assert all(w == session_b_worker for w in follow_up_b_ids), (
+                    f"Session B was not sticky: first request landed on "
+                    f"{session_b_worker} but follow-ups landed on "
+                    f"{follow_up_b_ids}. All requests with "
+                    f"X-Session-ID={session_b_id_used!r} must return the "
+                    f"same decode_worker_id."
+                )
+
+                if engine_workers.num_workers >= 2:
+                    assert session_a_worker != session_b_worker, (
+                        f"Sessions A and B bound to the same worker "
+                        f"({session_a_worker}). With num_workers="
+                        f"{engine_workers.num_workers} we require at least "
+                        f"one cross-session worker-id mismatch to prove "
+                        f"the cluster has effective routing diversity."
+                    )
+                    logger.info(
+                        "Confirmed independent bindings on multi-worker "
+                        f"cluster: session A -> {session_a_worker}, "
+                        f"session B -> {session_b_worker}"
+                    )
+
+        asyncio.run(test_async())
+
+
 def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
     decode_workers,
     block_size: int,
