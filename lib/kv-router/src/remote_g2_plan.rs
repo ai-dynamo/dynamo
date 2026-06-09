@@ -176,6 +176,9 @@ fn choose_better_candidate_score(
     input: RemoteKvReuseSelectionInput<'_>,
 ) {
     let start_block_index = start as u32;
+    if start_block_index > input.target_local_prefix_blocks {
+        return;
+    }
     let planned_blocks = input
         .cost_model
         .map(|model| model.capped_planned_blocks(hits as u32))
@@ -308,27 +311,33 @@ pub fn select_remote_g2_candidate(
         // after the source worker's Device match. With write-through HiCache,
         // the same blocks are present in both GPU and CPU, so that continuation
         // can be zero even though a valid CPU-pinned chain exists from root.
-        // Prefer real HostPinned continuations first; only fall back to a root
-        // candidate if no positive HostPinned continuation exists. Otherwise a
-        // zero-hit write-through fallback can beat a smaller but real write-back
-        // HostPinned chain, only to fail the later source-side chain walk.
-        let (start, hits) = if host_continuation_hits > 0 {
-            (device_match.min(request_blocks), host_continuation_hits)
-        } else if device_match > 0 {
-            (0, device_match.min(request_blocks))
-        } else {
-            continue;
-        };
+        // Prefer real HostPinned continuations first. Fall back to a root
+        // candidate when the continuation cannot be attached to the target's
+        // local prefix, or when write-through HiCache reports no lower-tier
+        // continuation despite the source's device prefix also being CPU-pinned.
+        let device_prefix = device_match.min(request_blocks);
+        let continuation_hits =
+            host_continuation_hits.min(request_blocks.saturating_sub(device_prefix));
 
-        let hits = hits.min(request_blocks.saturating_sub(start));
-        if hits == 0 {
-            continue;
-        }
+        if host_continuation_hits > 0 && continuation_hits > 0 {
+            choose_better_candidate_score(
+                &mut best_continuation,
+                worker,
+                device_prefix,
+                continuation_hits,
+                input,
+            );
 
-        if host_continuation_hits > 0 {
-            choose_better_candidate_score(&mut best_continuation, worker, start, hits, input);
-        } else {
-            choose_better_candidate_score(&mut best_root_fallback, worker, start, hits, input);
+            // If the target cannot attach the source's HostPinned suffix after
+            // the source's device prefix, try the source's HostPinned chain from
+            // root. The post-selection chain walk remains authoritative and
+            // will demote the plan if that root chain is not actually present.
+            if device_prefix as u32 > input.target_local_prefix_blocks {
+                let root_hits = device_prefix.saturating_add(continuation_hits);
+                choose_better_candidate_score(&mut best_root_fallback, worker, 0, root_hits, input);
+            }
+        } else if device_prefix > 0 {
+            choose_better_candidate_score(&mut best_root_fallback, worker, 0, device_prefix, input);
         }
     }
 
@@ -786,7 +795,11 @@ mod tests {
         let source = WorkerWithDpRank::new(7, 0);
         let matches = tiered_matches(&[(source, 2)], &[(source, 2)]);
 
-        let decision = select_remote_g2_reuse_plan(selection_input(target, &hashes, &matches));
+        let input = RemoteKvReuseSelectionInput {
+            target_local_prefix_blocks: 2,
+            ..selection_input(target, &hashes, &matches)
+        };
+        let decision = select_remote_g2_reuse_plan(input);
 
         match decision {
             RemoteKvReuseDecision::Plan { plan, .. } => {
@@ -795,6 +808,28 @@ mod tests {
                 assert_eq!(plan.router_block_hashes, hashes[2..4].to_vec());
             }
             other => panic!("expected plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scenario_infeasible_g1_tail_falls_back_to_root_host_chain() {
+        // Source A has 2 device-tier matches and 2 HostPinned hits after them,
+        // but the target has no local prefix. The suffix at [2, 4) cannot be
+        // attached, so plan a root HostPinned transfer for [0, 4) instead.
+        let hashes = block_hashes(6);
+        let target = WorkerWithDpRank::new(9, 0);
+        let source = WorkerWithDpRank::new(7, 0);
+        let matches = tiered_matches(&[(source, 2)], &[(source, 2)]);
+
+        let decision = select_remote_g2_reuse_plan(selection_input(target, &hashes, &matches));
+
+        match decision {
+            RemoteKvReuseDecision::Plan { plan, .. } => {
+                assert_eq!(plan.start_block_index, 0);
+                assert_eq!(plan.planned_prefix_blocks, 4);
+                assert_eq!(plan.router_block_hashes, hashes[..4].to_vec());
+            }
+            other => panic!("expected root fallback plan, got {other:?}"),
         }
     }
 
@@ -1086,7 +1121,7 @@ mod tests {
     }
 
     #[test]
-    fn scenario_full_g1_extra_g2_no_contiguous_prefix() {
+    fn scenario_full_g1_extra_g2_falls_back_to_root_host_chain() {
         let hashes = block_hashes(4);
         let target = WorkerWithDpRank::new(9, 0);
         let source = WorkerWithDpRank::new(7, 0);
@@ -1095,11 +1130,13 @@ mod tests {
         let decision = select_remote_g2_reuse_plan(selection_input(target, &hashes, &matches));
 
         match decision {
-            RemoteKvReuseDecision::NoPlan { reason, stats } => {
-                assert_eq!(reason, RemoteKvReuseNoPlanReason::NoContiguousPrefix);
+            RemoteKvReuseDecision::Plan { plan, stats, .. } => {
+                assert_eq!(plan.start_block_index, 0);
+                assert_eq!(plan.planned_prefix_blocks, 4);
+                assert_eq!(plan.router_block_hashes, hashes);
                 assert!(stats.rejected_g1_candidates > 0);
             }
-            other => panic!("expected no plan, got {other:?}"),
+            other => panic!("expected root fallback plan, got {other:?}"),
         }
     }
 }
