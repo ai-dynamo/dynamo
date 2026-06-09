@@ -48,7 +48,12 @@ def _make_candidates(
     """Build candidates from (tp, pp, dp, moe_tp, moe_ep) tuples."""
     return [
         _FakeCandidate(
-            tp=tp, pp=pp, dp=dp, moe_tp=mtp, moe_ep=mep, num_gpus=tp * pp * dp,
+            tp=tp,
+            pp=pp,
+            dp=dp,
+            moe_tp=mtp,
+            moe_ep=mep,
+            num_gpus=tp * pp * dp,
         )
         for tp, pp, dp, mtp, mep in specs
     ]
@@ -75,20 +80,24 @@ class TestPrefilterPrefill:
         assert result == candidates
 
     def test_selects_top_n_by_ttft(self):
-        candidates = _make_candidates([
-            (1, 1, 1, 1, 1),   # label: tp1
-            (2, 1, 1, 1, 1),   # label: tp2
-            (4, 1, 1, 1, 1),   # label: tp4
-            (1, 1, 2, 1, 2),   # label: dep2
-            (1, 1, 4, 1, 4),   # label: dep4
-        ])
-        pareto_df = pd.DataFrame([
-            {"parallel": "tp1", "ttft": 50.0},
-            {"parallel": "tp2", "ttft": 30.0},
-            {"parallel": "tp4", "ttft": 10.0},
-            {"parallel": "dep2", "ttft": 40.0},
-            {"parallel": "dep4", "ttft": 20.0},
-        ])
+        candidates = _make_candidates(
+            [
+                (1, 1, 1, 1, 1),  # label: tp1
+                (2, 1, 1, 1, 1),  # label: tp2
+                (4, 1, 1, 1, 1),  # label: tp4
+                (1, 1, 2, 1, 2),  # label: dep2
+                (1, 1, 4, 1, 4),  # label: dep4
+            ]
+        )
+        pareto_df = pd.DataFrame(
+            [
+                {"parallel": "tp1", "ttft": 50.0},
+                {"parallel": "tp2", "ttft": 30.0},
+                {"parallel": "tp4", "ttft": 10.0},
+                {"parallel": "dep2", "ttft": 40.0},
+                {"parallel": "dep4", "ttft": 20.0},
+            ]
+        )
 
         result = prefilter_prefill_candidates(candidates, 3, pareto_df)
 
@@ -97,10 +106,12 @@ class TestPrefilterPrefill:
         assert labels == ["tp4", "dep4", "tp2"]  # ttft: 10, 20, 30
 
     def test_unmatched_candidates_sorted_last(self):
-        candidates = _make_candidates([
-            (1, 1, 1, 1, 1),   # tp1 — has prediction
-            (2, 1, 1, 1, 1),   # tp2 — no prediction
-        ])
+        candidates = _make_candidates(
+            [
+                (1, 1, 1, 1, 1),  # tp1 — has prediction
+                (2, 1, 1, 1, 1),  # tp2 — no prediction
+            ]
+        )
         pareto_df = pd.DataFrame([{"parallel": "tp1", "ttft": 50.0}])
 
         result = prefilter_prefill_candidates(candidates, 1, pareto_df)
@@ -126,14 +137,18 @@ class TestPrefilterPrefill:
         assert len(result) == 5
 
     def test_nan_ttft_treated_as_infinity(self):
-        candidates = _make_candidates([
-            (1, 1, 1, 1, 1),  # tp1
-            (2, 1, 1, 1, 1),  # tp2
-        ])
-        pareto_df = pd.DataFrame([
-            {"parallel": "tp1", "ttft": float("nan")},
-            {"parallel": "tp2", "ttft": 10.0},
-        ])
+        candidates = _make_candidates(
+            [
+                (1, 1, 1, 1, 1),  # tp1
+                (2, 1, 1, 1, 1),  # tp2
+            ]
+        )
+        pareto_df = pd.DataFrame(
+            [
+                {"parallel": "tp1", "ttft": float("nan")},
+                {"parallel": "tp2", "ttft": 10.0},
+            ]
+        )
         result = prefilter_prefill_candidates(candidates, 1, pareto_df)
         assert len(result) == 1
         assert result[0].tp == 2  # NaN treated as inf, so tp2 (10.0) wins
@@ -150,20 +165,24 @@ class TestPrefilterPrefill:
 
 class TestPrefilterDecode:
     def test_selects_top_n_by_throughput_descending(self):
-        candidates = _make_candidates([
-            (1, 1, 1, 1, 1),   # tp1
-            (2, 1, 1, 1, 1),   # tp2
-            (4, 1, 1, 1, 1),   # tp4
-            (1, 1, 2, 1, 2),   # dep2
-            (1, 1, 4, 1, 4),   # dep4
-        ])
-        pareto_df = pd.DataFrame([
-            {"parallel": "tp1", "seq/s/gpu": 100.0},
-            {"parallel": "tp2", "seq/s/gpu": 500.0},
-            {"parallel": "tp4", "seq/s/gpu": 300.0},
-            {"parallel": "dep2", "seq/s/gpu": 200.0},
-            {"parallel": "dep4", "seq/s/gpu": 400.0},
-        ])
+        candidates = _make_candidates(
+            [
+                (1, 1, 1, 1, 1),  # tp1
+                (2, 1, 1, 1, 1),  # tp2
+                (4, 1, 1, 1, 1),  # tp4
+                (1, 1, 2, 1, 2),  # dep2
+                (1, 1, 4, 1, 4),  # dep4
+            ]
+        )
+        pareto_df = pd.DataFrame(
+            [
+                {"parallel": "tp1", "seq/s/gpu": 100.0},
+                {"parallel": "tp2", "seq/s/gpu": 500.0},
+                {"parallel": "tp4", "seq/s/gpu": 300.0},
+                {"parallel": "dep2", "seq/s/gpu": 200.0},
+                {"parallel": "dep4", "seq/s/gpu": 400.0},
+            ]
+        )
 
         result = prefilter_decode_candidates(candidates, 3, pareto_df)
 
@@ -194,28 +213,36 @@ class TestPrefilterDecode:
         assert len(result) == 5
 
     def test_nan_throughput_treated_as_zero(self):
-        candidates = _make_candidates([
-            (1, 1, 1, 1, 1),  # tp1
-            (2, 1, 1, 1, 1),  # tp2
-        ])
-        pareto_df = pd.DataFrame([
-            {"parallel": "tp1", "seq/s/gpu": float("nan")},
-            {"parallel": "tp2", "seq/s/gpu": 100.0},
-        ])
+        candidates = _make_candidates(
+            [
+                (1, 1, 1, 1, 1),  # tp1
+                (2, 1, 1, 1, 1),  # tp2
+            ]
+        )
+        pareto_df = pd.DataFrame(
+            [
+                {"parallel": "tp1", "seq/s/gpu": float("nan")},
+                {"parallel": "tp2", "seq/s/gpu": 100.0},
+            ]
+        )
         result = prefilter_decode_candidates(candidates, 1, pareto_df)
         assert len(result) == 1
         assert result[0].tp == 2  # NaN treated as 0, so tp2 (100.0) wins
 
     def test_prefers_tokens_per_s_gpu_over_seq_s_gpu(self):
         """When both throughput columns exist, prefer tokens/s/gpu."""
-        candidates = _make_candidates([
-            (1, 1, 1, 1, 1),   # tp1
-            (2, 1, 1, 1, 1),   # tp2
-        ])
-        pareto_df = pd.DataFrame([
-            {"parallel": "tp1", "tokens/s/gpu": 200.0, "seq/s/gpu": 999.0},
-            {"parallel": "tp2", "tokens/s/gpu": 100.0, "seq/s/gpu": 1.0},
-        ])
+        candidates = _make_candidates(
+            [
+                (1, 1, 1, 1, 1),  # tp1
+                (2, 1, 1, 1, 1),  # tp2
+            ]
+        )
+        pareto_df = pd.DataFrame(
+            [
+                {"parallel": "tp1", "tokens/s/gpu": 200.0, "seq/s/gpu": 999.0},
+                {"parallel": "tp2", "tokens/s/gpu": 100.0, "seq/s/gpu": 1.0},
+            ]
+        )
 
         result = prefilter_decode_candidates(candidates, 1, pareto_df)
         assert len(result) == 1

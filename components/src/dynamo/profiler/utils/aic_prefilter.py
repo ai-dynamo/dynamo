@@ -117,7 +117,9 @@ def prefilter_prefill_candidates(
 
         label_to_ttft: dict[str, float] = {}
         if "parallel" not in pareto_df.columns:
-            logger.warning("AIC pareto_df has no 'parallel' column; skipping pre-filter.")
+            logger.warning(
+                "AIC pareto_df has no 'parallel' column; skipping pre-filter."
+            )
             return list(candidates)
         for _, row in pareto_df.iterrows():
             label = str(row["parallel"])
@@ -139,7 +141,9 @@ def prefilter_prefill_candidates(
         for candidate in selected:
             logger.info(
                 "Selected prefill DGD: tp=%d pp=%d dp=%d moe_tp=%d moe_ep=%d",
-                candidate.tp, candidate.pp, candidate.dp,
+                candidate.tp,
+                candidate.pp,
+                candidate.dp,
                 getattr(candidate, "moe_tp", 1),
                 getattr(candidate, "moe_ep", 1),
             )
@@ -190,7 +194,9 @@ def prefilter_decode_candidates(
 
         label_to_thpt: dict[str, float] = {}
         if "parallel" not in pareto_df.columns:
-            logger.warning("AIC pareto_df has no 'parallel' column; skipping pre-filter.")
+            logger.warning(
+                "AIC pareto_df has no 'parallel' column; skipping pre-filter."
+            )
             return list(candidates)
         for _, row in pareto_df.iterrows():
             label = str(row["parallel"])
@@ -212,7 +218,9 @@ def prefilter_decode_candidates(
         for candidate in selected:
             logger.info(
                 "Selected decode DGD: tp=%d pp=%d dp=%d moe_tp=%d moe_ep=%d",
-                candidate.tp, candidate.pp, candidate.dp,
+                candidate.tp,
+                candidate.pp,
+                candidate.dp,
                 getattr(candidate, "moe_tp", 1),
                 getattr(candidate, "moe_ep", 1),
             )
