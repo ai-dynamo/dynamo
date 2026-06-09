@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "event_plane_bench"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "event_plane_bench_sub"
+path = "src/bin/event_plane_bench_sub.rs"
+
+[dependencies]
+anyhow.workspace = true
+dynamo-runtime.workspace = true
+tokio = { version = "1", features = ["time"] }
