@@ -4,7 +4,6 @@
 //! Rust-based native vLLM backend using the backend-common [`LLMEngine`] contract.
 
 use std::ffi::OsString;
-use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -323,43 +322,34 @@ impl LLMEngine for VllmBackend {
                 .map_err(|e| backend_unknown(format!("failed to submit vLLM request: {e}")))?
         };
 
-        Ok(Box::pin(async_stream::stream! {
+        Ok(Box::pin(async_stream::try_stream! {
             let mut completion_tokens = 0_u32;
             loop {
-                tokio::select! {
+                let next = tokio::select! {
                     _ = ctx.stopped() => {
                         debug!(request_id = %ctx.id(), "vLLM backend request cancelled");
-                        yield Ok(LLMEngineOutput::cancelled()
-                            .with_usage(usage(prompt_tokens, completion_tokens)));
+                        yield LLMEngineOutput::cancelled()
+                            .with_usage(usage(prompt_tokens, completion_tokens));
                         break;
                     }
-                    next = output_stream.next() => {
-                        let Some(next) = next else {
-                            yield Err(backend_unknown(
-                                "vLLM backend stream ended before a terminal output".to_string()
-                            ));
-                            break;
-                        };
+                    next = output_stream.next() => next,
+                };
 
-                        match next {
-                            Ok(output) => {
-                                completion_tokens = completion_tokens
-                                    .saturating_add(output.token_ids.len() as u32);
-                                let finished = output.finished();
-                                let mapped = map_output(output, prompt_tokens, completion_tokens);
-                                yield Ok(mapped);
-                                if finished {
-                                    break;
-                                }
-                            }
-                            Err(error) => {
-                                yield Err(backend_unknown(
-                                    format!("vLLM backend stream failed: {error}")
-                                ));
-                                break;
-                            }
-                        }
-                    }
+                let next = next.ok_or_else(|| {
+                    backend_unknown(
+                        "vLLM backend stream ended before a terminal output".to_string(),
+                    )
+                })?;
+
+                let output = next.map_err(|error| {
+                    backend_unknown(format!("vLLM backend stream failed: {error}"))
+                })?;
+                completion_tokens = completion_tokens
+                    .saturating_add(output.token_ids.len() as u32);
+                let finished = output.finished();
+                yield map_output(output, prompt_tokens, completion_tokens)?;
+                if finished {
+                    break;
                 }
             }
         }))

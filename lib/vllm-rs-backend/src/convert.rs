@@ -15,7 +15,7 @@ use vllm_engine_core_client::protocol::{
 };
 use vllm_llm::{FinishReason as VllmFinishReason, GenerateOutput, GenerateRequest};
 
-use crate::error::invalid_arg;
+use crate::error::{backend_unknown, invalid_arg};
 
 /// Converts a preprocessed Dynamo request into a token-level vLLM generate request.
 ///
@@ -272,7 +272,7 @@ pub(crate) fn map_output(
     output: GenerateOutput,
     prompt_tokens: u32,
     completion_tokens: u32,
-) -> LLMEngineOutput {
+) -> Result<LLMEngineOutput, DynamoError> {
     let mut mapped = match output.finish_reason {
         None => LLMEngineOutput::default(),
         Some(VllmFinishReason::Stop(reason)) => {
@@ -298,13 +298,13 @@ pub(crate) fn map_output(
 
     mapped.token_ids = output.token_ids;
     if let Some(logprobs) = output.logprobs.as_ref() {
-        let (log_probs, top_logprobs) = map_logprobs(logprobs);
+        let (log_probs, top_logprobs) = map_logprobs(logprobs)?;
         mapped.log_probs = Some(log_probs);
         mapped.top_logprobs = Some(top_logprobs);
     }
     mapped.index = Some(0);
     mapped.disaggregated_params = output.kv_transfer_params;
-    mapped
+    Ok(mapped)
 }
 
 fn map_stop_reason(reason: &VllmStopReason) -> DynamoStopReason {
@@ -314,17 +314,19 @@ fn map_stop_reason(reason: &VllmStopReason) -> DynamoStopReason {
     }
 }
 
-fn map_logprobs(logprobs: &VllmLogprobs) -> (Vec<f64>, Vec<Vec<TopLogprob>>) {
-    let log_probs = logprobs
-        .positions
-        .iter()
-        .filter_map(|position| position.entries.first())
-        .map(|entry| f64::from(entry.logprob))
-        .collect();
-    let top_logprobs = logprobs
-        .positions
-        .iter()
-        .map(|position| {
+fn map_logprobs(logprobs: &VllmLogprobs) -> Result<(Vec<f64>, Vec<Vec<TopLogprob>>), DynamoError> {
+    let mut log_probs = Vec::with_capacity(logprobs.positions.len());
+    let mut top_logprobs = Vec::with_capacity(logprobs.positions.len());
+
+    for (position_index, position) in logprobs.positions.iter().enumerate() {
+        let Some((selected, _)) = position.entries.split_first() else {
+            return Err(backend_unknown(format!(
+                "vLLM logprobs position {position_index} unexpectedly had no token candidates"
+            )));
+        };
+
+        log_probs.push(f64::from(selected.logprob));
+        top_logprobs.push(
             position
                 .entries
                 .iter()
@@ -335,11 +337,11 @@ fn map_logprobs(logprobs: &VllmLogprobs) -> (Vec<f64>, Vec<Vec<TopLogprob>>) {
                     logprob: f64::from(entry.logprob),
                     bytes: None,
                 })
-                .collect()
-        })
-        .collect();
+                .collect(),
+        );
+    }
 
-    (log_probs, top_logprobs)
+    Ok((log_probs, top_logprobs))
 }
 
 fn u32_to_i32(value: u32) -> Result<i32, DynamoError> {
@@ -672,7 +674,7 @@ mod tests {
             kv_transfer_params: Some(json!({"connector": "kv"})),
         };
 
-        let mapped = map_output(output, 3, 1);
+        let mapped = map_output(output, 3, 1).unwrap();
 
         assert_eq!(mapped.token_ids, vec![42]);
         assert_eq!(mapped.finish_reason, Some(FinishReason::Stop));
@@ -692,8 +694,33 @@ mod tests {
     }
 
     #[test]
+    fn map_output_rejects_empty_logprob_positions() {
+        let output = GenerateOutput {
+            request_id: "req-1".to_string(),
+            prompt_info: None,
+            token_ids: vec![42],
+            logprobs: Some(Logprobs {
+                positions: vec![PositionLogprobs { entries: vec![] }],
+            }),
+            finish_reason: None,
+            kv_transfer_params: None,
+        };
+
+        let error = map_output(output, 3, 1).unwrap_err();
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::Unknown)
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("logprobs position 0 unexpectedly had no token candidates")
+        );
+    }
+
+    #[test]
     fn map_output_maps_terminal_finish_reasons() {
-        let eos_stop = map_output(finished(VllmFinishReason::Stop(None)), 3, 2);
+        let eos_stop = map_output(finished(VllmFinishReason::Stop(None)), 3, 2).unwrap();
         assert_eq!(eos_stop.finish_reason, Some(FinishReason::Stop));
         assert_eq!(eos_stop.stop_reason, None);
 
@@ -703,24 +730,25 @@ mod tests {
             )))),
             3,
             2,
-        );
+        )
+        .unwrap();
         assert_eq!(text_stop.finish_reason, Some(FinishReason::Stop));
         assert_eq!(
             text_stop.stop_reason,
             Some(DynamoStopReason::String("</stop>".to_string()))
         );
 
-        let length = map_output(finished(VllmFinishReason::Length), 3, 2);
+        let length = map_output(finished(VllmFinishReason::Length), 3, 2).unwrap();
         assert_eq!(length.finish_reason, Some(FinishReason::Length));
         assert_eq!(length.stop_reason, None);
 
-        let abort = map_output(finished(VllmFinishReason::Abort), 3, 2);
+        let abort = map_output(finished(VllmFinishReason::Abort), 3, 2).unwrap();
         assert_eq!(abort.finish_reason, Some(FinishReason::Cancelled));
 
-        let error = map_output(finished(VllmFinishReason::Error), 3, 2);
+        let error = map_output(finished(VllmFinishReason::Error), 3, 2).unwrap();
         assert!(matches!(error.finish_reason, Some(FinishReason::Error(_))));
 
-        let repetition = map_output(finished(VllmFinishReason::Repetition), 3, 2);
+        let repetition = map_output(finished(VllmFinishReason::Repetition), 3, 2).unwrap();
         assert_eq!(repetition.finish_reason, Some(FinishReason::Stop));
     }
 
