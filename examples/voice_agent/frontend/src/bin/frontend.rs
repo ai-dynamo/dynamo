@@ -194,11 +194,19 @@ impl AsyncEngine<ManyIn<RealtimeClientEvent>, ManyOut<Annotated<RealtimeServerEv
 {
     async fn generate(
         &self,
-        mut incoming: ManyIn<RealtimeClientEvent>,
+        incoming: ManyIn<RealtimeClientEvent>,
     ) -> Result<ManyOut<Annotated<RealtimeServerEvent>>, Error> {
         let ctx = incoming.context();
         let ctx_for_stream = ctx.clone();
         let bridge = self.bridge.clone();
+
+        // `ManyIn<T>` is `Context<RequestStream<T>>`: the client-event stream is
+        // wrapped in a `Sync` ownership cell. Move the inner `DataStream` out once
+        // (the mutex guards against a double-take) so the loop below can poll it.
+        let (request_stream, _ctx_unit) = incoming.into_parts();
+        let mut incoming = request_stream.take().ok_or_else(|| {
+            anyhow::anyhow!("RequestStream::take called twice on bidirectional input")
+        })?;
 
         let output = stream! {
             let ctx = ctx_for_stream;
