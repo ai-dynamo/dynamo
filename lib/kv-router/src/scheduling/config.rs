@@ -893,6 +893,41 @@ mod tests {
     }
 
     #[test]
+    fn should_subscribe_to_kv_events_gates_overlap_routing() {
+        // Gates whether the router does prefix-overlap routing — the same
+        // signal the frontend uses to decide if MM-aware routing (per-image
+        // mm_hash) is worth computing. Pinned here so the gate can't silently
+        // drift from the load-aware preset.
+
+        // Default = overlap routing on (use_kv_events=true, overlap_credit=1.0).
+        assert!(KvRouterConfig::default().should_subscribe_to_kv_events());
+
+        // `--load-aware` preset → load-balancing only → no overlap.
+        let load_aware = KvRouterConfig {
+            overlap_score_credit: 0.0,
+            use_kv_events: false,
+            ..Default::default()
+        };
+        assert!(!load_aware.should_subscribe_to_kv_events());
+
+        // Either knob alone disables overlap.
+        assert!(
+            !KvRouterConfig {
+                overlap_score_credit: 0.0,
+                ..Default::default()
+            }
+            .should_subscribe_to_kv_events()
+        );
+        assert!(
+            !KvRouterConfig {
+                use_kv_events: false,
+                ..Default::default()
+            }
+            .should_subscribe_to_kv_events()
+        );
+    }
+
+    #[test]
     fn test_kv_router_config_rejects_out_of_range_shared_cache_multiplier() {
         let too_small = KvRouterConfig {
             shared_cache_multiplier: -0.1,

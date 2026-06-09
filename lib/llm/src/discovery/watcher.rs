@@ -758,6 +758,17 @@ impl ModelWatcher {
         // otherwise fall back to the frontend-level global config.
         let router_config = card.router_config.as_ref().unwrap_or(&self.router_config);
 
+        // MM-aware routing only helps when the KV router actually uses
+        // prefix-overlap (so the per-image `mm_hash` affects the routing
+        // decision). When the router is load-balancing only (`--load-aware`,
+        // `overlap_score_credit=0`, `use_kv_events=false`) or not in KV mode,
+        // computing `mm_hash` + the per-image dim fetches is wasted work, so we
+        // tell the preprocessor to skip it. Media transfer is unaffected.
+        let mm_routing_enabled = router_config.router_mode == RouterMode::KV
+            && router_config
+                .kv_router_config
+                .should_subscribe_to_kv_events();
+
         let component = self
             .drt
             .namespace(&mcid.namespace)?
@@ -1006,9 +1017,13 @@ impl ModelWatcher {
                     })?;
                     let PromptFormatter::OAI(formatter) =
                         prompt_formatter_from_mdc(card).context("prompt_formatter_from_mdc")?;
-                    let preprocessor =
-                        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tk.clone())
-                            .context("OpenAIPreprocessor.new_with_parts")?;
+                    let preprocessor = OpenAIPreprocessor::new_with_parts(
+                        card.clone(),
+                        formatter,
+                        tk.clone(),
+                        mm_routing_enabled,
+                    )
+                    .context("OpenAIPreprocessor.new_with_parts")?;
                     routing
                         .build_pipeline::<
                             NvCreateChatCompletionRequest,
@@ -1033,9 +1048,13 @@ impl ModelWatcher {
                 if let Some(tk) = tokenizer {
                     let formatter = PromptFormatter::no_op();
                     let PromptFormatter::OAI(formatter) = formatter;
-                    let preprocessor =
-                        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tk.clone())
-                            .context("OpenAIPreprocessor::new_with_parts")?;
+                    let preprocessor = OpenAIPreprocessor::new_with_parts(
+                        card.clone(),
+                        formatter,
+                        tk.clone(),
+                        mm_routing_enabled,
+                    )
+                    .context("OpenAIPreprocessor::new_with_parts")?;
                     let routing = preprocessed_routing.as_ref().ok_or_else(|| {
                         anyhow::anyhow!("completions pipeline requires preprocessed routing")
                     })?;
