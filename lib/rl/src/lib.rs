@@ -15,7 +15,11 @@
 //! available RL admin routes with `{"method": "routes"}` over the request
 //! plane. It does not expose a frontend fan-out method endpoint.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use dynamo_runtime::{
@@ -33,6 +37,9 @@ use futures::{StreamExt, future::join_all};
 const DEFAULT_NAMESPACE: &str = "dynamo";
 const DEFAULT_RL_ENDPOINT: &str = "rl";
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
+/// Global cap on concurrent per-worker probes (across all in-flight discovery
+/// requests), so a large fleet or many concurrent callers can't fan out without bound.
+const DEFAULT_MAX_CONCURRENT_PROBES: usize = 32;
 
 type ModelKey = (String, String, u64);
 
@@ -43,6 +50,7 @@ pub struct RlDiscoveryConfig {
     pub rl_endpoint: String,
     pub component_filter: Option<Vec<String>>,
     pub request_timeout: Duration,
+    pub max_concurrent_probes: usize,
 }
 
 impl RlDiscoveryConfig {
@@ -57,6 +65,11 @@ impl RlDiscoveryConfig {
             .and_then(|value| value.parse::<u64>().ok())
             .map(Duration::from_secs)
             .unwrap_or_else(|| Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS));
+        let max_concurrent_probes = std::env::var("DYN_RL_MAX_CONCURRENT_PROBES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_MAX_CONCURRENT_PROBES);
 
         Self {
             runtime,
@@ -64,6 +77,7 @@ impl RlDiscoveryConfig {
             rl_endpoint,
             component_filter,
             request_timeout,
+            max_concurrent_probes,
         }
     }
 }
@@ -112,13 +126,18 @@ pub struct RlDiscoveryState {
     /// Drop cleanup, so building one per request would leak a task per (request*worker).
     /// Cache and reuse one client per endpoint instead.
     clients: Arc<tokio::sync::Mutex<HashMap<EndpointKey, Client>>>,
+    /// Caps concurrent per-worker probes across all in-flight discovery requests,
+    /// so a large fleet (or many concurrent callers) can't fan out without bound.
+    probe_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl RlDiscoveryState {
     pub fn new(config: RlDiscoveryConfig) -> Self {
+        let permits = config.max_concurrent_probes.max(1);
         Self {
             config: Arc::new(config),
             clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            probe_semaphore: Arc::new(tokio::sync::Semaphore::new(permits)),
         }
     }
 
@@ -150,6 +169,14 @@ impl RlDiscoveryState {
             .await?;
         guard.insert(key, client.clone());
         Ok(client)
+    }
+
+    /// Drop cached clients for endpoints no longer present, so the cache can't grow
+    /// without bound under endpoint/component churn. Stable components (the common
+    /// case) are always in `live`, so this is a no-op for them.
+    async fn retain_endpoints(&self, live: &HashSet<EndpointKey>) {
+        let mut guard = self.clients.lock().await;
+        guard.retain(|key, _| live.contains(key));
     }
 }
 
@@ -216,6 +243,21 @@ async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerIn
         })
         .collect::<Vec<_>>();
 
+    // Bound the client cache (N2): drop clients for endpoints that are no longer
+    // present. Live endpoints are retained, so the fan-out below still reuses their
+    // cached clients rather than recreating them.
+    let live_endpoints: HashSet<EndpointKey> = rl_endpoints
+        .iter()
+        .map(|endpoint| {
+            (
+                endpoint.namespace.clone(),
+                endpoint.component.clone(),
+                endpoint.endpoint.clone(),
+            )
+        })
+        .collect();
+    state.retain_endpoints(&live_endpoints).await;
+
     let mut workers = join_all(rl_endpoints.into_iter().map(|endpoint| {
         let state = state.clone();
         let timeout = config.request_timeout;
@@ -255,6 +297,21 @@ async fn describe_worker(
     model: Option<String>,
     timeout: Duration,
 ) -> RlWorkerInfo {
+    // Bound global probe concurrency (N1): acquire a permit before doing any work.
+    // The wait is intentionally outside the per-worker timeout below, so time spent
+    // queued for a permit does not consume the probe's own deadline.
+    let _permit = match state.probe_semaphore.acquire().await {
+        Ok(permit) => permit,
+        Err(_) => {
+            return worker_info(
+                endpoint,
+                model,
+                Vec::new(),
+                None,
+                Some("rl discovery is shutting down".to_string()),
+            );
+        }
+    };
     // Single end-to-end deadline for the whole per-worker probe (client lookup +
     // readiness wait + routes RPC), so total discovery latency stays bounded by
     // request_timeout instead of summing several independent timeouts.
