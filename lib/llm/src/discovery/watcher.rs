@@ -954,7 +954,7 @@ impl ModelWatcher {
                     tk.clone(),
                     chat_formatter.clone(),
                     model_info.clone(),
-                    card.context_length,
+                    card.effective_context_length(),
                 ))
             });
 

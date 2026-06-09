@@ -707,6 +707,7 @@ fn render_tokenize_chat_tokens_from_handle(
     Ok(token_ids)
 }
 
+#[cfg(test)]
 fn render_tokenize_chat_prompt(
     card: &ModelDeploymentCard,
     model: String,
@@ -2712,7 +2713,7 @@ impl TokenizeSource {
     fn context_length(&self) -> u32 {
         match self {
             Self::Handle(h) => h.context_length,
-            Self::Card(c) => c.context_length,
+            Self::Card(c) => c.effective_context_length(),
         }
     }
     fn display_name(&self) -> &str {
@@ -4966,7 +4967,7 @@ mod tests {
 
             assert_eq!(body.tokens, expected.token_ids());
             assert_eq!(body.count, expected.token_ids().len());
-            assert_eq!(body.max_model_len, card.context_length);
+            assert_eq!(body.max_model_len, card.effective_context_length());
             assert!(body.token_strs.is_none());
         }
     }
