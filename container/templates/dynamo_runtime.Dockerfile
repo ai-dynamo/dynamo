@@ -7,7 +7,7 @@
 ########## Runtime image ##############
 #######################################
 
-FROM dynamo_base AS runtime_pre
+FROM dynamo_base AS pre_runtime
 
 ARG PYTHON_VERSION
 
@@ -42,13 +42,17 @@ COPY --chown=dynamo: --from=wheel_builder ${NIXL_PREFIX}/ ${NIXL_PREFIX}/
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
-# Always copy FFmpeg so libs are available for Rust checks in CI
+# Always copy FFmpeg so libs are available for Rust checks in CI.
+# libvpx.so* is included because the in-tree ffmpeg is built with --enable-libvpx,
+# so libavcodec.so has a runtime dependency on libvpx.so.9.
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
     mkdir -p /usr/local/lib/pkgconfig && \
     cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
     cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/ && \
+    cp -nL /tmp/usr/local/lib/lib*vpx*.so* /usr/local/lib/ 2>/dev/null || true && \
     cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
-    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
+    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/ && \
+    ldconfig
 
 {% if target not in ("dev", "local-dev") %}
 # Copy built artifacts (not needed for dev/local-dev; users build from source)
@@ -75,9 +79,14 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libclang-dev \
         patchelf \
         git \
-        git-lfs && \
+        git-lfs \
+        libjemalloc2 && \
     rm -rf /var/lib/apt/lists/* && \
     ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python3
+
+# libjemalloc2 is installed above so user may opt into jemalloc for memory allocation
+# tuning. We deliberately do NOT set ENV LD_PRELOAD here — that would force jemalloc
+# on every process in the image.
 
 # Switch to dynamo user and create virtual environment
 USER dynamo
@@ -168,7 +177,7 @@ CMD []
 ########## Final runtime image ########
 #######################################
 
-FROM runtime_pre AS runtime
+FROM pre_runtime AS runtime
 COPY --from=licenses /legal /legal
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []

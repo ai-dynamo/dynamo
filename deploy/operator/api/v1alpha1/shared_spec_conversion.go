@@ -1054,13 +1054,67 @@ func checkpointModeFromV1beta1(mode v1beta1.CheckpointMode) CheckpointMode {
 	}
 }
 
+func checkpointStartupPolicyToV1beta1(policy CheckpointStartupPolicy) v1beta1.CheckpointStartupPolicy {
+	switch policy {
+	case CheckpointStartupPolicyImmediate:
+		return v1beta1.CheckpointStartupPolicyImmediate
+	case CheckpointStartupPolicyWaitForCheckpoint:
+		return v1beta1.CheckpointStartupPolicyWaitForCheckpoint
+	default:
+		return v1beta1.CheckpointStartupPolicy(policy)
+	}
+}
+
+func checkpointStartupPolicyFromV1beta1(policy v1beta1.CheckpointStartupPolicy) CheckpointStartupPolicy {
+	switch policy {
+	case v1beta1.CheckpointStartupPolicyImmediate:
+		return CheckpointStartupPolicyImmediate
+	case v1beta1.CheckpointStartupPolicyWaitForCheckpoint:
+		return CheckpointStartupPolicyWaitForCheckpoint
+	default:
+		return CheckpointStartupPolicy(policy)
+	}
+}
+
+func checkpointDeletionPolicyToV1beta1(policy CheckpointDeletionPolicy) v1beta1.CheckpointDeletionPolicy {
+	switch policy {
+	case CheckpointDeletionPolicyDelete:
+		return v1beta1.CheckpointDeletionPolicyDelete
+	case CheckpointDeletionPolicyRetain:
+		return v1beta1.CheckpointDeletionPolicyRetain
+	default:
+		return v1beta1.CheckpointDeletionPolicy(policy)
+	}
+}
+
+func checkpointDeletionPolicyFromV1beta1(policy v1beta1.CheckpointDeletionPolicy) CheckpointDeletionPolicy {
+	switch policy {
+	case v1beta1.CheckpointDeletionPolicyDelete:
+		return CheckpointDeletionPolicyDelete
+	case v1beta1.CheckpointDeletionPolicyRetain:
+		return CheckpointDeletionPolicyRetain
+	default:
+		return CheckpointDeletionPolicy(policy)
+	}
+}
+
 // ConvertFromGPUMemoryServiceSpec converts an enabled GMS config into the
 // v1beta1 experimental GMS config. Disabled configs are represented by absence
 // in v1beta1 and are skipped by the caller.
 func ConvertFromGPUMemoryServiceSpec(src *GPUMemoryServiceSpec, dst *v1beta1.GPUMemoryServiceSpec) {
 	*dst = v1beta1.GPUMemoryServiceSpec{
-		Mode:            gmsModeToV1beta1(src.Mode),
-		DeviceClassName: src.DeviceClassName,
+		Mode:                  gmsModeToV1beta1(src.Mode),
+		DeviceClassName:       src.DeviceClassName,
+		ExtraClientContainers: slices.Clone(src.ExtraClientContainers),
+	}
+	if len(src.ExtraClientPods) > 0 {
+		dst.ExtraClientPods = make([]v1beta1.GMSClientPodSpec, len(src.ExtraClientPods))
+		for i := range src.ExtraClientPods {
+			dst.ExtraClientPods[i] = v1beta1.GMSClientPodSpec{
+				Name:        src.ExtraClientPods[i].Name,
+				PodTemplate: *src.ExtraClientPods[i].PodTemplate.DeepCopy(),
+			}
+		}
 	}
 }
 
@@ -1068,9 +1122,19 @@ func ConvertFromGPUMemoryServiceSpec(src *GPUMemoryServiceSpec, dst *v1beta1.GPU
 // into the GMS config.
 func ConvertToGPUMemoryServiceSpec(src *v1beta1.GPUMemoryServiceSpec, dst *GPUMemoryServiceSpec) {
 	*dst = GPUMemoryServiceSpec{
-		Enabled:         true,
-		Mode:            gmsModeFromV1beta1(src.Mode),
-		DeviceClassName: src.DeviceClassName,
+		Enabled:               true,
+		Mode:                  gmsModeFromV1beta1(src.Mode),
+		DeviceClassName:       src.DeviceClassName,
+		ExtraClientContainers: slices.Clone(src.ExtraClientContainers),
+	}
+	if len(src.ExtraClientPods) > 0 {
+		dst.ExtraClientPods = make([]GMSClientPodSpec, len(src.ExtraClientPods))
+		for i := range src.ExtraClientPods {
+			dst.ExtraClientPods[i] = GMSClientPodSpec{
+				Name:        src.ExtraClientPods[i].Name,
+				PodTemplate: *src.ExtraClientPods[i].PodTemplate.DeepCopy(),
+			}
+		}
 	}
 }
 
@@ -1099,7 +1163,10 @@ func ConvertToFailoverSpec(src *v1beta1.FailoverSpec, dst *FailoverSpec) {
 // by absence in v1beta1 and are skipped by the caller.
 func ConvertFromServiceCheckpointConfig(src *ServiceCheckpointConfig, dst *v1beta1.ComponentCheckpointConfig) {
 	*dst = v1beta1.ComponentCheckpointConfig{
-		Mode: checkpointModeToV1beta1(src.Mode),
+		Mode:                checkpointModeToV1beta1(src.Mode),
+		StartupPolicy:       checkpointStartupPolicyToV1beta1(src.StartupPolicy),
+		DeletionPolicy:      checkpointDeletionPolicyToV1beta1(src.DeletionPolicy),
+		TargetContainerName: src.TargetContainerName,
 	}
 	if src.CheckpointRef != nil {
 		dst.CheckpointRef = src.CheckpointRef
@@ -1108,14 +1175,25 @@ func ConvertFromServiceCheckpointConfig(src *ServiceCheckpointConfig, dst *v1bet
 		dst.Identity = &v1beta1.DynamoCheckpointIdentity{}
 		ConvertFromDynamoCheckpointIdentity(src.Identity, dst.Identity)
 	}
+	if src.Job != nil {
+		dst.Job = &v1beta1.ComponentCheckpointJobConfig{
+			GMSClientContainers: slices.Clone(src.Job.GMSClientContainers),
+		}
+		if src.Job.PodTemplate != nil {
+			dst.Job.PodTemplate = src.Job.PodTemplate.DeepCopy()
+		}
+	}
 }
 
 // ConvertToServiceCheckpointConfig converts the v1beta1 experimental checkpoint
 // config into the checkpoint config.
 func ConvertToServiceCheckpointConfig(src *v1beta1.ComponentCheckpointConfig, dst *ServiceCheckpointConfig) {
 	*dst = ServiceCheckpointConfig{
-		Enabled: true,
-		Mode:    checkpointModeFromV1beta1(src.Mode),
+		Enabled:             true,
+		Mode:                checkpointModeFromV1beta1(src.Mode),
+		StartupPolicy:       checkpointStartupPolicyFromV1beta1(src.StartupPolicy),
+		DeletionPolicy:      checkpointDeletionPolicyFromV1beta1(src.DeletionPolicy),
+		TargetContainerName: src.TargetContainerName,
 	}
 	if src.CheckpointRef != nil {
 		dst.CheckpointRef = src.CheckpointRef
@@ -1123,6 +1201,14 @@ func ConvertToServiceCheckpointConfig(src *v1beta1.ComponentCheckpointConfig, ds
 	if src.Identity != nil {
 		dst.Identity = &DynamoCheckpointIdentity{}
 		ConvertToDynamoCheckpointIdentity(src.Identity, dst.Identity)
+	}
+	if src.Job != nil {
+		dst.Job = &ServiceCheckpointJobConfig{
+			GMSClientContainers: slices.Clone(src.Job.GMSClientContainers),
+		}
+		if src.Job.PodTemplate != nil {
+			dst.Job.PodTemplate = src.Job.PodTemplate.DeepCopy()
+		}
 	}
 }
 

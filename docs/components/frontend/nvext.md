@@ -108,6 +108,9 @@ The `agent_hints` sub-object carries per-request hints that the router uses for 
 
 When `--router-queue-threshold` is set and the queue is active, higher-priority requests are shifted earlier in the router queue. Once dispatched, Dynamo forwards the same semantic priority to the backend engine for queue ordering, preemption, and KV cache eviction. Dynamo normalizes backend-specific polarity internally, including vLLM's lower-is-higher convention.
 
+For layer-by-layer behavior and backend requirements, see
+[Priority Scheduling](../../agents/priority-scheduling.md).
+
 ```json
 {
     "nvext": {
@@ -158,8 +161,8 @@ How it works:
 
 Backend details:
 
-- **SGLang**: Requires `--enable-priority-scheduling` for queue ordering and `--radix-eviction-policy priority` for priority-based eviction.
-- **vLLM**: Requires `--scheduling-policy priority`.
+- **SGLang**: Requires [`--enable-priority-scheduling`](../../backends/sglang/agents.md#priority-scheduling) for queue ordering and [`--radix-eviction-policy priority`](../../backends/sglang/agents.md#priority-based-kv-cache-eviction) for priority-based eviction.
+- **vLLM**: Requires [`--scheduling-policy priority`](../../backends/vllm/vllm-reference-guide.md#priority-scheduling).
 - **TensorRT-LLM**: Does not currently support per-request priority.
 
 ```json
@@ -174,13 +177,13 @@ Backend details:
 
 ## Session Control
 
-`session_control` enables subagent KV isolation with sticky routing. The router uses `session_id` to keep a session on the same worker and can issue `open` / `close` lifecycle RPCs around streaming sessions.
+`session_control` enables sticky routing by `session_id`. Use `action: "bind"` for router-only sticky affinity without backend engine RPCs. Use `action: "open"` / `"close"` for backend streaming-session lifecycle when the engine supports it.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `session_control.session_id` | `string` | — | Unique session identifier. Present on every turn. |
-| `session_control.action` | `string` | omitted | Optional lifecycle action: `"open"` or `"close"`. |
-| `session_control.timeout` | `integer` | `300` | Inactivity timeout in seconds. Only used with `action: "open"`. |
+| `session_control.action` | `string` | omitted | Optional action: `"bind"`, `"open"`, or `"close"`. Omit on intermediate turns. |
+| `session_control.timeout` | `integer` | `300` | Inactivity timeout in seconds. Used with `action: "bind"` and `action: "open"`. |
 
 ```json
 {
@@ -194,7 +197,7 @@ Backend details:
 }
 ```
 
-Requires `--router-mode=kv` on the frontend. Session control activates automatically when requests carry `nvext.session_control`. See [SGLang for Agentic Workloads](../../backends/sglang/agents.md) for backend setup details.
+Requires `--router-mode=kv` on the frontend. Router-only sticky routing uses `action: "bind"` and does not require backend session support. Engine-backed session lifecycle requires backend support; see [SGLang for Agentic Workloads](../../backends/sglang/agents.md) for SGLang streaming-session setup details.
 
 
 ## Response Extensions

@@ -1,10 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: How to Build and Publish Dynamo Docs
 sidebar-title: Dynamo Docs Guide
 ---
-
-# How to Build and Publish Dynamo Docs
 
 This document describes the architecture, workflows, and maintenance procedures for the
 NVIDIA Dynamo documentation website powered by [Fern](https://buildwithfern.com).
@@ -54,7 +53,7 @@ the navigation in `docs/index.yml`, and running `fern check` to validate.
 
 | Skill | Description |
 |-------|-------------|
-| [dynamo-docs](https://github.com/ai-dynamo/dynamo/blob/main/.agents/skills/dynamo-docs/SKILL.md) | Add, update, move, or remove a docs page |
+| [dynamo-docs](https://github.com/ai-dynamo/dynamo/blob/main/.agents/contributor-skills/dynamo-docs/SKILL.md) | Add, update, move, or remove a docs page |
 
 ---
 

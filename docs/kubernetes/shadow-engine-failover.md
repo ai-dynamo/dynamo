@@ -93,12 +93,12 @@ active and standby engines share the same weight memory boundary instead of
 loading independent copies.
 
 Direct GMS enablement is useful for backend integration testing and
-sleep/wake-style lifecycle experiments. By itself, it does not configure
+pause/resume-style lifecycle experiments. By itself, it does not configure
 active/passive failover; use the `failover` field for the shadow engine flow.
 
 ## Prerequisites
 
-- Kubernetes 1.32 or newer with DRA enabled.
+- Kubernetes 1.34 or newer with DRA v1 (`resource.k8s.io/v1`) enabled.
 - NVIDIA GPU DRA driver installed.
 - A matching DRA `DeviceClass`, defaulting to `gpu.nvidia.com`.
 - A supported backend image. The current failover examples are vLLM-focused.

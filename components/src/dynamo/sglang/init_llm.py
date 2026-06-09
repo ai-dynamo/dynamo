@@ -8,10 +8,11 @@ import time
 from typing import Awaitable, Callable, Optional
 
 import sglang as sgl
+from sglang.srt.observability.trace import set_global_trace_level
 
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
-from dynamo.llm import ModelInput, ModelType
+from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import (
@@ -32,31 +33,12 @@ async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
     """Perform warmup request for prefill engine to reduce initial TTFT.
 
     Raises on failure so the caller can prevent the worker from registering
-    with a broken engine (silent request drops).
+    with a broken engine (silent request drops). Shared with the unified
+    backend (`dynamo.sglang.llm_engine`) via `_disagg.warmup_prefill_engine`.
     """
-    logging.info("Start of prefill disaggregation warmup ...")
-    from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
+    from dynamo.sglang._disagg import warmup_prefill_engine
 
-    sampling_params = {
-        "temperature": 0.0,
-        "max_new_tokens": 8,
-        "ignore_eos": True,
-    }
-
-    async def _do_warmup():
-        results = await engine.async_generate(
-            input_ids=[0, 1, 2, 3],
-            sampling_params=sampling_params,
-            stream=True,
-            bootstrap_host=FAKE_BOOTSTRAP_HOST,
-            bootstrap_port=server_args.disaggregation_bootstrap_port,
-            bootstrap_room=999999,
-        )
-        async for _ in results:
-            pass
-
-    await asyncio.wait_for(_do_warmup(), timeout=1800)
-    logging.info("Prefill warmup completed")
+    await warmup_prefill_engine(engine, server_args.disaggregation_bootstrap_port)
 
 
 async def init_decode(
@@ -93,6 +75,9 @@ async def init_decode(
         engine = sgl.Engine(server_args=server_args)
         load_time = time.time() - start_time
 
+    if server_args.enable_trace:
+        set_global_trace_level(dynamo_args.sglang_trace_level)
+
     load_lora_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.load_lora"
     )
@@ -108,6 +93,9 @@ async def init_decode(
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, generate_endpoint
     )
+    # ``setup_sgl_metrics`` only returns ``None`` for embedding workers,
+    # which take a different init path entirely. Narrow for mypy.
+    assert publisher is not None, "setup_sgl_metrics returned None on chat path"
 
     publisher.component_gauges.set_model_load_time(load_time)
     logging.debug(f"SGLang model load time: {load_time:.2f}s")
@@ -119,7 +107,12 @@ async def init_decode(
     ready_event = asyncio.Event()
 
     handler = DecodeWorkerHandler(
-        engine, config, publisher, generate_endpoint, shutdown_event
+        engine,
+        config,
+        publisher,
+        generate_endpoint,
+        shutdown_event,
+        enable_frontend_decoding=dynamo_args.frontend_decoding,
     )
     handler.register_engine_routes(runtime)
 
@@ -145,6 +138,14 @@ async def init_decode(
             f"{dynamo_args.namespace}.{dynamo_args.component}.session_control"
         )
         shutdown_endpoints.append(session_control_endpoint)
+
+    # Worker type and needs, derived from serving_mode.
+    if config.serving_mode == DisaggregationMode.DECODE:
+        decode_worker_type = WorkerType.Decode
+        decode_needs: list[list[WorkerType]] = [[WorkerType.Prefill]]
+    else:
+        decode_worker_type = WorkerType.Aggregated
+        decode_needs = []
 
     try:
         gather_tasks = [
@@ -173,6 +174,8 @@ async def init_decode(
                 dynamo_args,
                 output_type=parse_endpoint_types(dynamo_args.endpoint_types),
                 readiness_gate=ready_event,
+                worker_type=decode_worker_type,
+                needs=decode_needs,
             ),
         ]
         if getattr(server_args, "enable_streaming_session", False):
@@ -230,6 +233,9 @@ async def init_prefill(
         engine = sgl.Engine(server_args=server_args)
         load_time = time.time() - start_time
 
+    if server_args.enable_trace:
+        set_global_trace_level(dynamo_args.sglang_trace_level)
+
     load_lora_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.load_lora"
     )
@@ -245,6 +251,9 @@ async def init_prefill(
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, generate_endpoint
     )
+    # ``setup_sgl_metrics`` only returns ``None`` for embedding workers,
+    # which take a different init path entirely. Narrow for mypy.
+    assert publisher is not None, "setup_sgl_metrics returned None on chat path"
 
     publisher.component_gauges.set_model_load_time(load_time)
 
@@ -298,8 +307,16 @@ async def init_prefill(
                 server_args,
                 dynamo_args,
                 input_type=ModelInput.Tokens,
+                # Prefill workers have no OpenAI surface — the role is carried
+                # by `worker_type=Prefill` below. We register the legacy
+                # `ModelType.Prefill` marker bit (not a surface) so an OLD
+                # frontend, which detects prefill via that bit, still routes
+                # disaggregated traffic during the cross-version rollout. A new
+                # frontend ignores it and dispatches off `worker_type`.
                 output_type=ModelType.Prefill,
                 readiness_gate=ready_event,
+                worker_type=WorkerType.Prefill,
+                needs=[[WorkerType.Decode]],
             ),
         )
     except Exception as e:

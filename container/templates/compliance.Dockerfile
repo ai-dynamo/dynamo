@@ -19,13 +19,13 @@
 #   5. sources_archive   -- FROM scratch; exposes /sources.zip.
 #
 # The caller (each per-framework runtime template) is expected to:
-#   - have defined `runtime_pre` / `frontend_pre` / `planner_builder` already
+#   - have defined `pre_runtime` / `pre_frontend` / `pre_planner` already
 #   - end with its own final stage (typically `runtime`) that does
 #     `COPY --from=licenses /legal /legal` to inherit NOTICES.
 #
 # Jinja variables consumed:
 #
-#   compliance_base_stage     -- "runtime_pre" / "frontend_pre" / "planner_builder";
+#   compliance_base_stage     -- "pre_runtime" / "pre_frontend" / "pre_planner";
 #                                set by container/render.py:_render_context()
 #                                from `target`.
 #   compliance_baseline_sbom  -- filename under base_sboms/ (or empty string

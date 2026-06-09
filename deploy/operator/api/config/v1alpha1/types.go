@@ -201,10 +201,10 @@ type KaiSchedulerConfiguration struct {
 	Enabled *bool `json:"enabled,omitempty"`
 }
 
-// DRAConfiguration holds Dynamic Resource Allocation (resource.k8s.io) settings.
+// DRAConfiguration holds Dynamic Resource Allocation (resource.k8s.io/v1) settings.
 //
-// NOTE: auto-detection here only verifies that the resource.k8s.io API group is
-// registered on the apiserver (Kubernetes 1.32+). It does NOT verify that a
+// NOTE: auto-detection here only verifies that the resource.k8s.io/v1 API is
+// registered on the apiserver (Kubernetes 1.34+). It does NOT verify that a
 // GPU-specific DRA resource driver (e.g. nvidia/k8s-dra-driver-gpu) is
 // installed, that its DeviceClass exists, or that node-level GPU drivers are
 // compatible. An admin can use `enabled: false` to force-off DRA integration
@@ -213,7 +213,7 @@ type KaiSchedulerConfiguration struct {
 // with a clear error instead of letting pods Pend with a confusing
 // "resourceclaim not found" at schedule time.
 type DRAConfiguration struct {
-	// Enabled overrides auto-detection of the resource.k8s.io API group.
+	// Enabled overrides auto-detection of the resource.k8s.io/v1 API.
 	// nil = auto-detect. Setting true requires detection to also succeed (the
 	// operator will exit at startup otherwise).
 	Enabled *bool `json:"enabled,omitempty"`
@@ -275,12 +275,26 @@ func (s *ServiceMeshConfiguration) IsEnabled() bool {
 
 // IstioMeshConfiguration holds Istio-specific mesh settings.
 type IstioMeshConfiguration struct {
-	// TLSMode is the Istio TLS mode for DestinationRules (e.g., "DISABLE", "SIMPLE", "ISTIO_MUTUAL").
+	// TLSMode is the Istio TLS mode for DestinationRules.
+	// Supported values: "DISABLE", "SIMPLE", "ISTIO_MUTUAL", "MUTUAL".
 	// Defaults to "SIMPLE".
 	TLSMode string `json:"tlsMode"`
 	// InsecureSkipVerify skips TLS certificate verification in DestinationRules.
 	// Defaults to true (matching upstream GAIE behavior with self-signed certs).
 	InsecureSkipVerify *bool `json:"insecureSkipVerify,omitempty"`
+	// ClientCertificate is the path (in the istio-proxy sidecar's filesystem)
+	// to the file holding the client-side TLS certificate used for mTLS.
+	// REQUIRED when TLSMode is "MUTUAL"; ignored for other modes.
+	ClientCertificate string `json:"clientCertificate,omitempty"`
+	// PrivateKey is the path (in the istio-proxy sidecar's filesystem) to the
+	// file holding the client-side TLS private key used for mTLS.
+	// REQUIRED when TLSMode is "MUTUAL"; ignored for other modes.
+	PrivateKey string `json:"privateKey,omitempty"`
+	// CaCertificates is the optional path (in the istio-proxy sidecar's
+	// filesystem) to the file holding CA certificates used to verify the
+	// server certificate. Used only when TLSMode is "MUTUAL"; for other modes
+	// the field is ignored.
+	CaCertificates string `json:"caCertificates,omitempty"`
 }
 
 // RBACConfiguration holds RBAC settings for cluster-wide mode.
@@ -318,6 +332,10 @@ type CheckpointConfiguration struct {
 	// behavior of discovering storage from a snapshot-agent DaemonSet in the
 	// workload namespace.
 	Storage CheckpointStorageConfiguration `json:"storage"`
+	// CleanupImage is the image used by best-effort artifact cleanup Jobs for
+	// automatically-created checkpoints. It must provide a POSIX shell and `rm`.
+	// +kubebuilder:default="busybox:1.36"
+	CleanupImage string `json:"cleanupImage,omitempty"`
 }
 
 // CheckpointSeccompConfiguration controls the localhost seccomp profile applied

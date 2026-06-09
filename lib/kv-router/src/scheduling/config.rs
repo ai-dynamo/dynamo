@@ -143,6 +143,134 @@ impl FromStr for SharedCacheType {
     }
 }
 
+/// One row of the cache-miss-keyed pending ISL token cap table.
+///
+/// Requests whose best-case cache-miss tokens (ISL minus best cached tokens
+/// across eligible workers) meet `missing_cache_tokens_floor` are subject to
+/// this tier's `max_queue_depth` cap. A request matches every tier whose
+/// floor it clears; the tier with the highest matched floor wins (i.e. the
+/// most expensive bucket the request falls into determines the cap).
+///
+/// `max_queue_depth` is a per-worker pending ISL token cap — the effective cap
+/// is `max_queue_depth * worker_count` where worker_count is the total
+/// number of registered workers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Validate)]
+pub struct RouterQueueDepthByMissingIslTier {
+    /// Minimum cache-miss tokens (ISL minus best cached tokens across eligible
+    /// workers) for this tier to apply. Tier 0 matches all requests.
+    pub missing_cache_tokens_floor: usize,
+    /// Per-worker pending ISL token cap. Effective cap is `max_queue_depth * worker_count`.
+    #[validate(range(min = 1, message = "max_queue_depth must be > 0"))]
+    pub max_queue_depth: usize,
+}
+
+/// Validated, sorted pending ISL token cap tiers keyed by cache-miss tokens.
+///
+/// Guarantees:
+/// - Non-empty vec starts with `missing_cache_tokens_floor == 0`
+/// - Floors are strictly ascending
+/// - All `max_queue_depth > 0`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    try_from = "Vec<RouterQueueDepthByMissingIslTier>",
+    into = "Vec<RouterQueueDepthByMissingIslTier>"
+)]
+pub struct RouterQueueDepthTiers(Vec<RouterQueueDepthByMissingIslTier>);
+
+impl RouterQueueDepthTiers {
+    /// Disable capping entirely (unbounded queue).
+    pub fn unbounded_cap() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Check if capping is disabled (unbounded queue).
+    pub fn is_unbounded(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Get effective cap for a request's cache-miss tokens, scaled by worker count.
+    pub fn cap_for(&self, cache_miss_tokens: usize, worker_count: usize) -> Option<usize> {
+        if self.0.is_empty() {
+            return None;
+        }
+        self.0
+            .iter()
+            .rev()
+            .find(|tier| cache_miss_tokens >= tier.missing_cache_tokens_floor)
+            .map(|tier| tier.max_queue_depth.saturating_mul(worker_count))
+    }
+
+    /// Create from tuples `[(floor, cap), ...]`.
+    pub fn from_tuples(tuples: Vec<(usize, usize)>) -> Result<Self, String> {
+        let tiers: Vec<RouterQueueDepthByMissingIslTier> = tuples
+            .into_iter()
+            .map(
+                |(missing_cache_tokens_floor, max_queue_depth)| RouterQueueDepthByMissingIslTier {
+                    missing_cache_tokens_floor,
+                    max_queue_depth,
+                },
+            )
+            .collect();
+        Self::try_from(tiers)
+    }
+}
+
+impl TryFrom<Vec<RouterQueueDepthByMissingIslTier>> for RouterQueueDepthTiers {
+    type Error = String;
+
+    fn try_from(tiers: Vec<RouterQueueDepthByMissingIslTier>) -> Result<Self, Self::Error> {
+        if tiers.is_empty() {
+            return Ok(Self::unbounded_cap());
+        }
+
+        // Must start with floor 0
+        if tiers[0].missing_cache_tokens_floor != 0 {
+            return Err("router_queue_by_incoming_missing_isl: first tier must have missing_cache_tokens_floor == 0".to_string());
+        }
+
+        // Floors must be strictly ascending
+        for window in tiers.windows(2) {
+            if window[1].missing_cache_tokens_floor <= window[0].missing_cache_tokens_floor {
+                return Err(
+                    "router_queue_by_incoming_missing_isl: floors must be strictly ascending"
+                        .to_string(),
+                );
+            }
+        }
+
+        // max_queue_depth must be > 0
+        for tier in &tiers {
+            if tier.max_queue_depth == 0 {
+                return Err(
+                    "router_queue_by_incoming_missing_isl: max_queue_depth must be > 0".to_string(),
+                );
+            }
+        }
+
+        Ok(Self(tiers))
+    }
+}
+
+impl Default for RouterQueueDepthTiers {
+    fn default() -> Self {
+        Self::unbounded_cap()
+    }
+}
+
+impl From<RouterQueueDepthTiers> for Vec<RouterQueueDepthByMissingIslTier> {
+    fn from(tiers: RouterQueueDepthTiers) -> Self {
+        tiers.0
+    }
+}
+
+impl TryFrom<Vec<(usize, usize)>> for RouterQueueDepthTiers {
+    type Error = String;
+
+    fn try_from(tuples: Vec<(usize, usize)>) -> Result<Self, Self::Error> {
+        Self::from_tuples(tuples)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RouterQueuePolicy {
@@ -304,6 +432,8 @@ struct KvRouterConfigSerde {
     router_reset_states: bool,
     router_ttl_secs: f64,
     router_queue_threshold: Option<f64>,
+    #[serde(default)]
+    router_queue_by_incoming_missing_isl: RouterQueueDepthTiers,
     router_event_threads: u32,
     skip_initial_worker_wait: bool,
     router_queue_policy: RouterQueuePolicy,
@@ -311,6 +441,7 @@ struct KvRouterConfigSerde {
     serve_indexer: bool,
     shared_cache_multiplier: f64,
     shared_cache_type: SharedCacheType,
+    router_predicted_ttl_secs: Option<f64>,
 }
 
 impl Default for KvRouterConfigSerde {
@@ -335,6 +466,7 @@ impl Default for KvRouterConfigSerde {
             router_reset_states: config.router_reset_states,
             router_ttl_secs: config.router_ttl_secs,
             router_queue_threshold: config.router_queue_threshold,
+            router_queue_by_incoming_missing_isl: config.router_queue_by_incoming_missing_isl,
             router_event_threads: config.router_event_threads,
             skip_initial_worker_wait: config.skip_initial_worker_wait,
             router_queue_policy: config.router_queue_policy,
@@ -342,6 +474,7 @@ impl Default for KvRouterConfigSerde {
             serve_indexer: config.serve_indexer,
             shared_cache_multiplier: config.shared_cache_multiplier,
             shared_cache_type: config.shared_cache_type,
+            router_predicted_ttl_secs: config.router_predicted_ttl_secs,
         }
     }
 }
@@ -417,9 +550,35 @@ pub struct KvRouterConfig {
     /// Queue threshold fraction for prefill token capacity.
     /// When set, requests are queued if all workers exceed this fraction of max_num_batched_tokens.
     /// If None, queueing is disabled and all requests go directly to ready.
-    /// Default: 4.0. Must be >= 0. Use 0.0 for maximum queueing sensitivity.
+    /// Default: 16.0. Must be >= 0. Use 0.0 for maximum queueing sensitivity.
     #[validate(range(min = 0.0))]
     pub router_queue_threshold: Option<f64>,
+
+    /// Tiered per-worker pending ISL token caps keyed on incoming missing ISL
+    /// (ISL minus best cached tokens across eligible workers).
+    ///
+    /// For each request, the tier with the highest matched floor wins, and
+    /// that tier's `max_queue_depth * worker_count` is the effective ISL token cap.
+    /// The cap is compared against the sum of ISL tokens for all requests currently
+    /// parked in the pending queue.
+    ///
+    /// Example with 4 workers:
+    ///   [(0, 4194304), (3072, 2097152)]  # 4M and 2M ISL tokens per worker
+    /// - request missing 500 tokens  → matches (0, 4194304)    → cap = 4M*4 = 16M tokens
+    /// - request missing 3500 tokens → matches (3072, 2097152) → cap = 2M*4 = 8M tokens
+    ///
+    /// Semantics across config surfaces:
+    /// - omitted / `None` disables ISL-token capping (unbounded queue cap)
+    /// - when provided, the tier list must be non-empty, start at floor 0,
+    ///   have strictly ascending floors, and use `max_queue_depth > 0`
+    ///
+    /// **Note:** This cap applies only to the SchedulerQueue, not to upstream
+    /// buffers. The TCP request plane has a fixed 1024-slot buffer per
+    /// connection (see `REQUEST_CHANNEL_BUFFER` in tcp_client.rs). Requests
+    /// may accumulate there before reaching the scheduler, so the effective
+    /// end-to-end backlog can exceed the tier caps.
+    #[serde(default)]
+    pub router_queue_by_incoming_missing_isl: RouterQueueDepthTiers,
 
     /// Number of KV indexer worker threads.
     /// When > 1, uses ConcurrentRadixTree with a thread pool for event-driven
@@ -454,6 +613,16 @@ pub struct KvRouterConfig {
     /// Type of external shared KV cache to query during routing.
     /// "none" (default): disabled. "hicache": query sglang workers for L3 cache state.
     pub shared_cache_type: SharedCacheType,
+
+    /// TTL in seconds applied to entries in the local predict-on-route side
+    /// indexer. `None` disables predict-on-route. A value requires
+    /// `use_kv_events=true` and enables a secondary approximate indexer
+    /// populated by routing decisions; `find_matches` queries both the
+    /// event-driven primary and local side indexer and returns the per-worker
+    /// maximum overlap.
+    #[serde(default)]
+    #[validate(range(min = 0.0))]
+    pub router_predicted_ttl_secs: Option<f64>,
 }
 
 impl Default for KvRouterConfig {
@@ -475,7 +644,8 @@ impl Default for KvRouterConfig {
             router_snapshot_threshold: Some(1000000),
             router_reset_states: false,
             router_ttl_secs: 120.0,
-            router_queue_threshold: Some(4.0),
+            router_queue_threshold: Some(16.0),
+            router_queue_by_incoming_missing_isl: RouterQueueDepthTiers::unbounded_cap(),
             router_event_threads: 4,
             skip_initial_worker_wait: false,
             router_queue_policy: RouterQueuePolicy::default(),
@@ -483,6 +653,7 @@ impl Default for KvRouterConfig {
             serve_indexer: false,
             shared_cache_multiplier: 0.0,
             shared_cache_type: SharedCacheType::default(),
+            router_predicted_ttl_secs: None,
         }
     }
 }
@@ -520,6 +691,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             router_reset_states: compat.router_reset_states,
             router_ttl_secs: compat.router_ttl_secs,
             router_queue_threshold: compat.router_queue_threshold,
+            router_queue_by_incoming_missing_isl: compat.router_queue_by_incoming_missing_isl,
             router_event_threads: compat.router_event_threads,
             skip_initial_worker_wait: compat.skip_initial_worker_wait,
             router_queue_policy: compat.router_queue_policy,
@@ -527,6 +699,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             serve_indexer: compat.serve_indexer,
             shared_cache_multiplier: compat.shared_cache_multiplier,
             shared_cache_type: compat.shared_cache_type,
+            router_predicted_ttl_secs: compat.router_predicted_ttl_secs,
         })
     }
 }
@@ -570,6 +743,12 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
             "serve_indexer requires overlap_score_credit > 0",
         ));
     }
+    if config.router_predicted_ttl_secs.is_some() && !config.use_kv_events {
+        return Err(ValidationError::new(
+            "router_predicted_ttl_secs requires use_kv_events=true",
+        ));
+    }
+    // Validation for router_queue_by_incoming_missing_isl is handled by RouterQueueDepthTiers::try_from
     Ok(())
 }
 
@@ -587,6 +766,10 @@ impl KvRouterConfig {
         }
 
         DEFAULT_RECHECK_INTERVAL
+    }
+
+    pub fn predict_on_route_enabled(&self) -> bool {
+        self.router_predicted_ttl_secs.is_some()
     }
 
     pub fn assume_kv_reuse(&self, config_override: Option<&RouterConfigOverride>) -> bool {
@@ -722,6 +905,83 @@ mod tests {
 
         assert!(too_small.validate().is_err());
         assert!(too_large.validate().is_err());
+    }
+
+    #[test]
+    fn test_kv_router_config_rejects_local_approx_with_predicted_ttl() {
+        let config = KvRouterConfig {
+            use_kv_events: false,
+            router_predicted_ttl_secs: Some(5.0),
+            ..Default::default()
+        };
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_kv_router_config_rejects_remote_approx_with_predicted_ttl() {
+        let config = KvRouterConfig {
+            use_kv_events: false,
+            use_remote_indexer: true,
+            router_predicted_ttl_secs: Some(5.0),
+            ..Default::default()
+        };
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_kv_router_config_allows_remote_events_with_predicted_ttl() {
+        let config = KvRouterConfig {
+            use_kv_events: true,
+            use_remote_indexer: true,
+            router_predicted_ttl_secs: Some(5.0),
+            ..Default::default()
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_kv_router_config_allows_served_events_with_predicted_ttl() {
+        let config = KvRouterConfig {
+            use_kv_events: true,
+            serve_indexer: true,
+            router_predicted_ttl_secs: Some(5.0),
+            ..Default::default()
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_kv_router_config_deserializes_predicted_ttl() {
+        let config: KvRouterConfig =
+            serde_json::from_str(r#"{"router_predicted_ttl_secs":5.0}"#).unwrap();
+
+        assert_eq!(config.router_predicted_ttl_secs, Some(5.0));
+    }
+
+    #[test]
+    fn test_kv_router_config_defaults_to_unbounded_queue_cap() {
+        let config = KvRouterConfig::default();
+
+        assert!(config.router_queue_by_incoming_missing_isl.is_unbounded());
+    }
+
+    #[test]
+    fn test_kv_router_config_deserializes_missing_queue_tiers_as_unbounded() {
+        let config: KvRouterConfig = serde_json::from_str(r#"{}"#).unwrap();
+
+        assert!(config.router_queue_by_incoming_missing_isl.is_unbounded());
+    }
+
+    #[test]
+    fn test_kv_router_config_deserializes_empty_queue_tiers_as_unbounded() {
+        let config: KvRouterConfig =
+            serde_json::from_str(r#"{"router_queue_by_incoming_missing_isl":[]}"#).unwrap();
+
+        assert!(config.router_queue_by_incoming_missing_isl.is_unbounded());
     }
 
     #[test]

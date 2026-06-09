@@ -20,6 +20,7 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::{EventPublisher, EventSubscriber};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use super::metrics::WORKER_LOAD_METRICS;
 use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, KV_METRICS_SUBJECT};
@@ -51,6 +52,21 @@ impl SequencePublisher for RuntimeSequencePublisher {
         });
     }
 
+    fn publish_load_batch(&self, loads: Vec<ActiveLoad>) {
+        let publisher = self.metrics_publisher.clone();
+        tokio::spawn(async move {
+            for load in loads {
+                if let Err(e) = publisher.publish(&load).await {
+                    tracing::trace!(
+                        "Failed to publish ActiveLoad to NATS for worker (id={}, dp_rank={}): {e:?}",
+                        load.worker_id,
+                        load.dp_rank
+                    );
+                }
+            }
+        });
+    }
+
     fn observe_load(
         &self,
         worker: &WorkerWithDpRank,
@@ -78,6 +94,18 @@ impl SequenceSubscriber for RuntimeSequenceSubscriber {
         match self.inner.next().await? {
             Ok((_envelope, event)) => Some(Ok(event)),
             Err(e) => Some(Err(e)),
+        }
+    }
+
+    fn poll_next_event(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<anyhow::Result<ActiveSequenceEvent>>> {
+        match self.inner.poll_next(cx) {
+            Poll::Ready(Some(Ok((_envelope, event)))) => Poll::Ready(Some(Ok(event))),
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
     }
 }

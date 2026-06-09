@@ -347,7 +347,7 @@ let workers_at_128 = index.get(&(128, local_hashes[128]));  // O(1) lookup
 
 ## Indexer Selection Guide
 
-There are five production indexer variants. This section maps deployment scenarios to the right choice.
+There are four main production indexer shapes. This section maps deployment scenarios to the right choice.
 
 ### Variant Summary
 
@@ -356,8 +356,7 @@ There are five production indexer variants. This section maps deployment scenari
 | `RadixTree` | `RadixTree` | Single-threaded | N/A (local) | Worker-side `LocalKvIndexer`, unit tests |
 | `ConcurrentRadixTree` (CRT) | `ConcurrentRadixTree` | Thread-safe reads | N/A (local) | Single-node, moderate traffic |
 | `ThreadPoolIndexer<CRT>` (CRTC) | `ThreadPoolIndexer<ConcurrentRadixTree>` | N write threads + inline reads | Full-mesh, all workers | Default for most deployments |
-| `BranchShardedIndexer<CRTC>` (BSI) | `BranchShardedIndexer<ThreadPoolIndexer<CRT>>` | Sharded write pools | FNV prefix hash | High worker counts, approximate pruning needed |
-| `AnchorAwareBranchShardedIndexer<CRTC>` | `AnchorAwareBranchShardedIndexer<ThreadPoolIndexer<CRT>>` | Sharded write pools | Prefix-TRIE routing | High worker counts, correctness-first (no approximate pruning) |
+| `BranchShardedIndexer<CRTC>` (BSI) | `BranchShardedIndexer<ThreadPoolIndexer<CRT>>` | Sharded write pools | Prefix TRIE + anchors | High worker counts, correctness-first sharding |
 
 ### When to use each
 
@@ -377,17 +376,12 @@ There are five production indexer variants. This section maps deployment scenari
 - Does not shard; a single hot branch can become a write bottleneck at extreme scale.
 
 **`BranchShardedIndexer<CRTC>` (BSI)**
-- Routes each conversation to one shard via a fixed-depth FNV prefix hash. Read path scans one shard for the routed prefix key.
-- Enables *approximate pruning*: a shard can evict its least-recently-used entries independently without coordinating with others.
-- Use when: worker count > ~1 000, you need per-shard approximate pruning, and you can tolerate the flat-map router's shallow-chain and out-of-order limitations.
-- **Shard-crossing**: `branch_sharded.rs` stores `block_to_fnv_state` for shallow roots and registers prefix aliases for short queries, but the flat map does not provide the stronger anchor/replay model needed to guarantee every shallow continuation stays with its parent shard. Out-of-order delivery remains a caveat when a continuation arrives before its parent is known.
-- Not the right choice if you need a guarantee that every conversation stays on one shard even under out-of-order events (use anchor-aware BSI for that).
-
-**`AnchorAwareBranchShardedIndexer<CRTC>` (anchor-aware BSI)**
-- Uses a routing TRIE instead of a flat hash map. Before dispatching a continuation, it pre-installs *anchor* nodes on the target shard so the CRTC already has the parent chain at lookup time.
-- Architecturally prevents shard crossing: the routing decision is made before the event is dispatched, not after.
-- Trade-off: does **not** support approximate pruning (anchor nodes are shared state; pruning one shard would corrupt the TRIE).
-- Use when: correctness of routing is the top priority and you can live without approximate pruning.
+- Uses a bounded routing TRIE. Router-owned nodes track live workers for shallow reads, and deeper suffixes are dispatched to one shard through explicit backend anchors.
+- Before dispatching a continuation across the routing-depth boundary, BSI pre-installs the parent anchor on the target shard so the CRTC already has the parent chain at lookup time.
+- This prevents the stale shallow-prefix failure mode where a continuation is written to one shard while lookups for the finalized prefix route to another.
+- Trade-off: BSI does **not** support approximate pruning. Router anchors and shard state must stay consistent, so a shard cannot independently prune its anchored subtree without coordinating with the routing TRIE.
+- Known issue: static divergent-child assignment can still collapse a dominant hot branch onto one shard. Adaptive hot-branch splitting/rebalancing is future work.
+- Use when: worker count is high enough that one global CRTC scan is too expensive, and routing correctness is more important than approximate pruning.
 
 ### Quick decision tree
 
@@ -400,11 +394,11 @@ Start
   ├─ < ~1 000 workers, no sharding needed?
   │      └─ CRTC (ThreadPoolIndexer<ConcurrentRadixTree>)
   │
-  └─ ≥ ~1 000 workers (or want per-shard pruning)?
+  └─ ≥ ~1 000 workers or need one-shard lookups?
          │
-         ├─ Need approximate pruning / full BSI feature set?
-         │      └─ BranchShardedIndexer<CRTC>  (flat-map routing)
+         ├─ Need approximate pruning?
+         │      └─ CRTC or a future coordinated-pruning design
          │
-         └─ Need routing-correctness guarantee, no pruning needed?
-                └─ AnchorAwareBranchShardedIndexer<CRTC>
+         └─ Need routing-correct sharding without approximate pruning?
+                └─ BranchShardedIndexer<CRTC>
 ```

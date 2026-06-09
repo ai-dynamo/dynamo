@@ -50,6 +50,18 @@ controllerManager:
   tolerations: []
   affinity: {}
 
+  # -- Extra labels to add to the controller-manager pod template.
+  # Useful for unified service tagging conventions
+  # (e.g. Datadog `tags.datadoghq.com/manager.{service,env,version}`)
+  # and external selectors that target the controller pods directly.
+  podLabels: {}
+
+  # -- Extra annotations to add to the controller-manager pod template.
+  # Useful for autodiscovery integrations that key off pod annotations
+  # (e.g. Datadog `ad.datadoghq.com/manager.checks`, Prometheus
+  # `prometheus.io/scrape`) without forking the chart.
+  podAnnotations: {}
+
   # Leader election configuration
   leaderElection:
     # Leader election ID for cluster-wide coordination
@@ -139,8 +151,11 @@ modelExpressURL: ""
 # namespace. In podMount mode, install one shared snapshot-agent DaemonSet and
 # configure storage below so the operator mounts/ensures namespace-local PVCs.
 checkpoint:
-  # Enable checkpoint/restore functionality
+  # -- Enable checkpoint/restore functionality
   enabled: false
+  # -- Image used by best-effort artifact cleanup Jobs for automatically-created
+  # checkpoints. The image must provide /bin/sh and rm.
+  cleanupImage: busybox:1.36
   # Localhost seccomp profile applied to checkpoint+restore pods to block
   # io_uring (which CRIU cannot dump). The default profile is applied unless
   # seccomp.disabled=true is set. Set seccomp.disabled=true on OpenShift
@@ -192,6 +207,10 @@ webhook:
   # Fail: Reject requests if webhook is unavailable (recommended for production)
   # Ignore: Allow requests if webhook is unavailable
   failurePolicy: Fail
+  # -- Failure policy for the Pod CREATE checkpoint-restore mutating webhook.
+  # Defaults to Ignore so a webhook outage falls back to cold-start instead of
+  # blocking workload Pods.
+  podCheckpointRestoreFailurePolicy: Ignore
 
   # Timeout for webhook calls (in seconds)
   timeoutSeconds: 10

@@ -17,8 +17,9 @@ base-image SBOM corpus. Catches two classes of drift:
       data — e.g., copying a NOTICES from a different image, or a
       dist-info dir orphaned in site-packages from a previous install.
 
-Wired into shared-compliance.yml as a final step after extracting
-/legal and /sboms artifacts. Failure blocks the PR.
+Wired into the compliance-extract action (.github/actions/compliance-extract)
+as a final step after extracting /legal and /sboms artifacts from the inline
+build. Failure blocks the PR.
 
 Inputs:
   --target-sboms-dir   /tmp/sboms/   (per-ecosystem deps CSVs from --target sboms)

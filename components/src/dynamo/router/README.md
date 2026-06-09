@@ -32,17 +32,18 @@ All router options use the `--router-*` prefix (e.g., `--router-block-size`, `--
 
 ## Architecture
 
-The standalone router exposes two endpoints via the Dynamo runtime:
+The standalone router exposes three endpoints via the Dynamo runtime:
 
 1. **`generate`**: Routes requests to the best worker and streams back generation results (KV-aware routing).
 2. **`best_worker_id`**: Given token IDs, returns the best worker ID for the request without routing; useful for debugging or custom routing logic.
+3. **`get_overlap_scores`**: Given token IDs, returns per-worker/per-DP-rank matched block counts for device, host-pinned, disk, and configured shared-cache tiers without routing.
 
-Clients call the `generate` endpoint to stream completions, or call `best_worker_id` to decide which worker to use and then contact that worker directly.
+Clients call the `generate` endpoint to stream completions, call `best_worker_id` to decide which worker to use and then contact that worker directly, or call `get_overlap_scores` when an external scheduler wants the raw tiered overlap signal.
 
 ## Example: Manual Disaggregated Serving (Alternative Setup)
 
 > [!Note]
-> **This is an alternative advanced setup.** The recommended approach for disaggregated serving is to use the frontend's automatic prefill routing, which activates when you register workers with `ModelType.Prefill`. See [Disaggregated Serving](/docs/components/router/router-disaggregated-serving.md) for the default setup.
+> **This is an alternative advanced setup.** The recommended approach for disaggregated serving is to use the frontend's automatic prefill routing, which activates when you register workers with `WorkerType.Prefill`. See [Disaggregated Serving](/docs/components/router/router-disaggregated-serving.md) for the default setup.
 >
 > Use this manual setup if you need explicit control over prefill routing configuration or want to manage prefill and decode routers separately.
 

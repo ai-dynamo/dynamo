@@ -66,8 +66,8 @@ pub enum BatchSwapInOutcome {
     NoHits,
     /// Swap-in reservation accepted. Caller parks the request with this
     /// handle and polls `SwapInHandle::is_complete()` on subsequent
-    /// scheduler passes. Matched G2 blocks are pinned via RAII inside
-    /// the handle for the duration of the transfer, while
+    /// scheduler passes. Matched lower-tier blocks are held by the
+    /// engine/handle for the duration of the transfer, while
     /// `destination_slots` pins the G1 write targets.
     Scheduled {
         handle: SwapInHandle,
@@ -125,6 +125,20 @@ enum G1AllocationAttempt {
         evicted_plhs: Vec<PositionalLineageHash>,
         source_slots: Vec<MutableBlock<G1>>,
     },
+}
+
+pub struct DecodeBlockReservation {
+    blocks: Vec<MutableBlock<G1>>,
+}
+
+impl DecodeBlockReservation {
+    fn take(&mut self) -> Option<MutableBlock<G1>> {
+        self.blocks.pop()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.blocks.len()
+    }
 }
 
 #[derive(Clone)]
@@ -455,13 +469,14 @@ impl KvManager {
     ///
     /// Admission path stays linear: `active → inactive → (this) →
     /// allocate fresh`. Returns [`BatchSwapInOutcome::NoHits`] when no
-    /// engine is attached or when G2 holds none of `remaining_plhs`.
+    /// engine is attached or when no configured lower tier holds
+    /// `remaining_plhs`.
     ///
-    /// The G2 tier is keyed by `PositionalLineageHash` (kvbm-engine's
+    /// Lower tiers are keyed by `PositionalLineageHash` (kvbm-engine's
     /// native identity), not the router-facing `u64` SequenceHash — the
-    /// caller already holds these on the admission path. We first pin the
-    /// matched G2 blocks, then reserve destination G1 slots, and only then
-    /// reserve G2→G1 bandwidth. That prevents swap-in from borrowing
+    /// caller already holds these on the admission path. We first prepare the
+    /// lower-tier match, then reserve destination G1 slots, and only then
+    /// reserve onboard bandwidth. That prevents swap-in from borrowing
     /// imaginary HBM capacity while the transfer is in flight.
     #[cfg(feature = "kvbm-offload")]
     pub fn try_batch_swap_in(
@@ -479,6 +494,11 @@ impl KvManager {
             return BatchSwapInOutcome::NoHits;
         };
         let block_count = prepared.block_count();
+        // Do not hold the offload-engine mutex while reserving G1 slots:
+        // allocation may evict G1 blocks and enqueue G1→G2 work back into
+        // the same engine. `PreparedSwapIn` pins ready G2 blocks, and for
+        // deferred G3 staging it holds only the G2 staging capacity so a failed
+        // admission probe does not start a G3→G2 copy.
         let destination_slots = match self.reserve_swap_in_destination_slots(block_count) {
             SwapInSlotReservation::Reserved(slots) => slots,
             SwapInSlotReservation::BlockedOnG1Offload => {
@@ -653,6 +673,7 @@ impl KvManager {
     ///
     /// For `Deref` / `Promote`, returns 1 on success and panics on
     /// invalid state (consistent with the old `vllm_backend` semantics).
+    #[cfg_attr(feature = "profile", inline(never))]
     pub fn process(&mut self, event: &MoveBlock) -> usize {
         match event {
             MoveBlock::Use(blocks, local_hashes, plhs, token_ids, parent) => self.process_use(
@@ -661,6 +682,7 @@ impl KvManager {
                 plhs,
                 token_ids.as_deref(),
                 parent.as_ref(),
+                None,
             ),
             MoveBlock::Deref(hashes) => {
                 self.process_deref(hashes);
@@ -676,6 +698,44 @@ impl KvManager {
                     token_ids.clone(),
                 );
                 1
+            }
+        }
+    }
+
+    pub fn reserve_decode_blocks(&mut self, count: usize) -> Option<DecodeBlockReservation> {
+        let (blocks, evicted_plhs) = self.block_manager.allocate_blocks_with_evictions(count)?;
+        if self.should_block_on_g1_offload(&evicted_plhs) {
+            self.handle_evictions_with_source_slots(evicted_plhs, blocks);
+            return None;
+        }
+
+        self.handle_evictions(evicted_plhs);
+        Some(DecodeBlockReservation { blocks })
+    }
+
+    pub fn process_decode_signal(
+        &mut self,
+        event: &MoveBlock,
+        reservation: &mut DecodeBlockReservation,
+    ) {
+        match event {
+            MoveBlock::Use(blocks, local_hashes, plhs, token_ids, parent) => {
+                let allocated = self.process_use(
+                    blocks,
+                    local_hashes,
+                    plhs,
+                    token_ids.as_deref(),
+                    parent.as_ref(),
+                    Some(reservation),
+                );
+                assert_eq!(
+                    allocated,
+                    blocks.len(),
+                    "reserved decode allocation must be infallible"
+                );
+            }
+            _ => {
+                self.process(event);
             }
         }
     }
@@ -823,6 +883,7 @@ impl KvManager {
         plhs: &[PositionalLineageHash],
         token_ids: Option<&[Vec<u32>]>,
         parent: Option<&UniqueBlock>,
+        mut reservation: Option<&mut DecodeBlockReservation>,
     ) -> usize {
         // Upstream invariant: caller must supply exactly one PLH per FullBlock in
         // `blocks`.
@@ -889,7 +950,21 @@ impl KvManager {
                                 .push(immutable);
                             UseOutcome::InactiveHit
                         } else {
-                            let Some(allocation) = self.allocate_one_g1_slot() else {
+                            let allocation = reservation
+                                .as_deref_mut()
+                                .and_then(DecodeBlockReservation::take)
+                                .map(|mutable| G1AllocationAttempt::Allocated {
+                                    mutable,
+                                    evicted_plhs: Vec::new(),
+                                })
+                                .or_else(|| {
+                                    if reservation.is_some() {
+                                        None
+                                    } else {
+                                        self.allocate_one_g1_slot()
+                                    }
+                                });
+                            let Some(allocation) = allocation else {
                                 break; // capacity exhausted; scheduler will preempt
                             };
                             let mutable = match allocation {
@@ -948,7 +1023,21 @@ impl KvManager {
                     if self.active_partial.contains_key(uuid) {
                         UseOutcome::ActiveHit
                     } else {
-                        let Some(allocation) = self.allocate_one_g1_slot() else {
+                        let allocation = reservation
+                            .as_deref_mut()
+                            .and_then(DecodeBlockReservation::take)
+                            .map(|mutable| G1AllocationAttempt::Allocated {
+                                mutable,
+                                evicted_plhs: Vec::new(),
+                            })
+                            .or_else(|| {
+                                if reservation.is_some() {
+                                    None
+                                } else {
+                                    self.allocate_one_g1_slot()
+                                }
+                            });
+                        let Some(allocation) = allocation else {
                             break;
                         };
                         let mutable = match allocation {
@@ -1230,14 +1319,18 @@ impl KvManager {
         // randomised hash that can't possibly be in the cache across requests
         // — skip the PLH lookup (PLH is deterministic from tokens) to stay
         // consistent with that no-reuse contract.
-        let overlap_blocks = if sequence.enable_prefix_caching() {
+        // overlap = all reusable prefix blocks (compute); active_overlap = only
+        // those backed by an active block (capacity — inactive reuse is re-consumed).
+        let (overlap_blocks, active_overlap_blocks) = if sequence.enable_prefix_caching() {
             let plhs = sequence.positional_lineage_hashes();
             let mut overlap = 0;
+            let mut active_overlap = 0;
             for (i, block) in seq_blocks.iter().enumerate() {
                 match block {
                     UniqueBlock::FullBlock(seq_hash) => {
                         if self.active_full.contains_key(seq_hash) {
                             overlap += 1;
+                            active_overlap += 1;
                             continue;
                         }
                         let Some(plh) = plhs.get(i) else {
@@ -1252,19 +1345,22 @@ impl KvManager {
                     UniqueBlock::PartialBlock(_) => break,
                 }
             }
-            overlap
+            (overlap, active_overlap)
         } else {
-            0
+            (0, 0)
         };
 
         let new_blocks = seq_blocks.len() - overlap_blocks;
         let cached_tokens = (overlap_blocks * self.block_size).min(sequence.num_input_tokens());
+        let active_cached_tokens =
+            (active_overlap_blocks * self.block_size).min(sequence.num_input_tokens());
         let new_tokens = sequence.num_input_tokens() - cached_tokens;
 
         PrefillCost {
             new_blocks,
             new_tokens,
             cached_tokens,
+            active_cached_tokens,
         }
     }
 }
@@ -1373,6 +1469,36 @@ mod tests {
         assert_eq!(mgr.num_active_blocks(), 1);
     }
 
+    /// `get_prefill_cost` must report an inactive cached prefix as reusable for
+    /// compute (`cached_tokens`) but NOT for no-evict capacity reservation
+    /// (`active_cached_tokens`), since reactivation re-consumes the block.
+    #[test]
+    fn prefill_cost_splits_active_and_inactive_cached_reuse() {
+        let mut mgr = make_mgr(10, 4);
+        // 2 full blocks (8 tokens, block_size 4), prefix caching on.
+        let seq = ActiveSequence::new((0u32..8).collect(), 4, Some(4), true, false);
+        let blocks = seq.unique_blocks();
+        let plhs = seq.positional_lineage_hashes();
+        let h0 = match &blocks[0] {
+            UniqueBlock::FullBlock(h) => *h,
+            other => panic!("expected a full block, got {other:?}"),
+        };
+        // Register block 0, then deref so it falls inactive (still registered;
+        // only eviction prunes registered_blocks).
+        use_full(&mut mgr, h0, plhs[0]);
+        deref_full(&mut mgr, h0);
+
+        let cost = mgr.get_prefill_cost(&seq);
+        assert!(
+            cost.cached_tokens >= 4,
+            "inactive prefix should count for compute reuse: {cost:?}"
+        );
+        assert_eq!(
+            cost.active_cached_tokens, 0,
+            "inactive reuse must not be discounted for capacity: {cost:?}"
+        );
+    }
+
     #[test]
     fn use_rejects_short_token_ids_before_mutating_state() {
         let (mut mgr, sink) = make_mgr_capturing(10, 4);
@@ -1430,6 +1556,25 @@ mod tests {
         deref_full(&mut mgr, 1);
         // Use with same PLH reuses the inactive block.
         assert_eq!(use_full(&mut mgr, 2, p), 1);
+    }
+
+    #[test]
+    fn failed_decode_reservation_preserves_inactive_cache() {
+        let (mut mgr, sink) = make_mgr_capturing(2, 16);
+        let first = plh(100);
+        let second = plh(200);
+        use_full(&mut mgr, 1, first);
+        use_full(&mut mgr, 2, second);
+        deref_full(&mut mgr, 1);
+        deref_full(&mut mgr, 2);
+        assert_eq!(mgr.num_inactive_blocks(), 2);
+        sink.events.lock().unwrap().clear();
+
+        assert!(mgr.reserve_decode_blocks(3).is_none());
+        assert_eq!(mgr.num_inactive_blocks(), 2);
+        assert!(sink.events.lock().unwrap().is_empty());
+        assert_eq!(use_full(&mut mgr, 3, first), 1);
+        assert_eq!(use_full(&mut mgr, 4, second), 1);
     }
 
     #[test]

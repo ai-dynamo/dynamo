@@ -70,6 +70,12 @@ pub(in crate::replay::offline) struct ReadyArrival {
     pub(in crate::replay::offline) request: DirectRequest,
     pub(in crate::replay::offline) arrival_time_ms: f64,
     pub(in crate::replay::offline) replay_hashes: Option<ReplayRequestHashes>,
+    /// Session identifier and turn index, when the trace source carries them
+    /// (Mooncake workload, applied-compute-agentic). `None` for raw request
+    /// lists (`Requests` admission source) and for any path that doesn't
+    /// preserve session structure.
+    pub(in crate::replay::offline) session_id: Option<String>,
+    pub(in crate::replay::offline) turn_index: Option<usize>,
 }
 
 /// Accumulated traffic statistics returned by [`TrafficAccumulator::drain`].
@@ -162,7 +168,7 @@ impl TrafficAccumulator {
                 self.total_ttft_ms += ttft_ms;
                 self.ttft_count += 1;
             }
-            if mean_itl_ms > 0.0 {
+            if output_tokens > 1 && mean_itl_ms.is_finite() && mean_itl_ms >= 0.0 {
                 self.total_itl_ms += mean_itl_ms;
                 self.itl_count += 1;
             }
@@ -294,5 +300,14 @@ mod tests {
         assert_eq!(stats.avg_isl, 0.0);
         assert_eq!(stats.avg_osl, 0.0);
         assert_eq!(stats.avg_kv_hit_rate, 0.0);
+    }
+
+    #[test]
+    fn traffic_accumulator_retains_zero_millisecond_itl_samples() {
+        let mut acc = TrafficAccumulator::new();
+        acc.on_request(10, 3, Some((1.0, 0.0)));
+        acc.on_request(10, 3, Some((1.0, 10.0)));
+        let stats = acc.drain(1_000.0);
+        assert_eq!(stats.avg_itl_ms, 5.0);
     }
 }

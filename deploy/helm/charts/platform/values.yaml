@@ -184,6 +184,18 @@ dynamo-operator:
         tlsMode: "SIMPLE"
         # -- Skip TLS certificate verification (for self-signed EPP certs)
         insecureSkipVerify: true
+        # -- Path (in the istio-proxy sidecar's filesystem) to the client TLS
+        # certificate used for mTLS. REQUIRED when tlsMode is "MUTUAL"; ignored
+        # for other modes.
+        clientCertificate: ""
+        # -- Path (in the istio-proxy sidecar's filesystem) to the client TLS
+        # private key used for mTLS. REQUIRED when tlsMode is "MUTUAL"; ignored
+        # for other modes.
+        privateKey: ""
+        # -- Optional path (in the istio-proxy sidecar's filesystem) to CA
+        # certificates used to verify the EPP server certificate. Used only
+        # when tlsMode is "MUTUAL".
+        caCertificates: ""
 
     # Metrics configuration
     metrics:
@@ -210,6 +222,9 @@ dynamo-operator:
 
     # -- Webhook failure policy controls how Kubernetes handles requests when the webhook is unavailable. 'Fail' (recommended for production) rejects requests if the webhook cannot be reached, ensuring strict validation. 'Ignore' allows requests through if the webhook is unavailable, providing availability over validation guarantees.
     failurePolicy: Fail
+
+    # -- Failure policy for the Pod CREATE checkpoint-restore mutating webhook. Defaults to Ignore so a webhook outage falls back to cold-start instead of blocking workload Pods.
+    podCheckpointRestoreFailurePolicy: Ignore
 
     # -- Timeout in seconds for webhook validation calls. If the webhook doesn't respond within this time, the request will be handled according to the failurePolicy.
     timeoutSeconds: 10
@@ -246,6 +261,8 @@ dynamo-operator:
   checkpoint:
     # -- Whether to enable checkpoint/restore functionality
     enabled: false
+    # -- Image used by best-effort artifact cleanup Jobs for automatically-created checkpoints. The image must provide /bin/sh and rm.
+    cleanupImage: busybox:1.36
     # -- Optional PVC storage used when the snapshot-agent is installed outside
     # workload namespaces with snapshot.storage.accessMode=podMount. Set
     # create=true for operator-managed namespace PVCs, or omit/create=false to
@@ -640,6 +657,18 @@ nats:
     # Advanced pod template configuration
     # https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.24/#pod-v1-core
     merge:
+      metadata:
+        annotations:
+          # Opt NATS pods out of Istio sidecar injection. NATS uses a custom
+          # binary protocol on TCP ports 4222 (client) and 6222 (cluster
+          # gossip) that the istio-proxy sidecar cannot transparently
+          # intercept; with sidecar injection enabled, NATS clients fail to
+          # connect and cluster gossip stalls. The annotation is a no-op on
+          # clusters without Istio installed (Kubernetes ignores unknown
+          # annotations), so leaving it on by default is safe; users running
+          # NATS in a service mesh on purpose can override it via
+          # `nats.podTemplate.merge.metadata.annotations`.
+          sidecar.istio.io/inject: "false"
       spec:
         # Node tolerations for NATS pods (allows scheduling on specific nodes)
         tolerations: []

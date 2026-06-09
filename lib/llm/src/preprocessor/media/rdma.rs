@@ -62,7 +62,7 @@ impl RdmaMediaDataDescriptor {
     /// happen to share a raw byte buffer but differ in dimensions or
     /// element layout (e.g. `3x224x224` vs `224x224x3`) don't collide on
     /// the same routing hash.
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     pub(crate) fn content_hash(&self) -> Option<u64> {
         use dynamo_memory::MemoryDescriptor;
         use xxhash_rust::xxh3::Xxh3;
