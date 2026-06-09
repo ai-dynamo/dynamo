@@ -61,8 +61,7 @@ jobs:
   prepare-branch:
     name: Create release branch + version bump
     runs-on: prod-default-small-v2
-    # The PAT (OPS_BOT_PAT) authenticates the push; the job's GITHUB_TOKEN is not
-    # used to write, so it stays read-only.
+    environment: automated-release
     permissions:
       contents: read
     outputs:
@@ -75,13 +74,8 @@ jobs:
           RELEASE_VERSION: ${{ inputs.release_version || '0.0.0' }}
           SOURCE_REF: ${{ inputs.source_ref || 'main' }}
           RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/0.0.0test' || '') }}
-          OPS_BOT_PAT: ${{ secrets.OPS_BOT_PAT }}
         run: |
           set -euo pipefail
-          if [[ -z "${OPS_BOT_PAT}" ]]; then
-            echo "::error::OPS_BOT_PAT is not set. The dynamo-ops PAT is required to create release/* (the github-actions token is not a ruleset bypass actor and its push won't trigger post-merge CI)."
-            exit 1
-          fi
           if [[ ! "${RELEASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?$ ]]; then
             echo "::error::release_version must be X.Y.Z[.postN] (got '${RELEASE_VERSION}')"
             exit 1
@@ -95,22 +89,27 @@ jobs:
             exit 1
           fi
 
+      - name: Mint app token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
       - name: Checkout source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ inputs.source_ref || 'main' }}
           fetch-depth: 0
-          # dynamo-ops PAT: must be a bypass actor on the release/* ruleset to
-          # create the branch, and (being a PAT, not github.token) its push
-          # triggers post-merge CI. Same identity used by auto-dep-upgrade.
-          # Swap to a GitHub App installation token here when the App is set up.
-          token: ${{ secrets.OPS_BOT_PAT }}
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Set version and create branch
         id: bump
         env:
           RELEASE_VERSION: ${{ inputs.release_version || '0.0.0' }}
           RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/0.0.0test' || '') }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
 
@@ -147,10 +146,13 @@ jobs:
           # Keep Cargo.lock in sync so post-merge `cargo test --locked` passes.
           cargo update --workspace
 
-          # Commit as the pushing principal (dynamo-ops); -s satisfies the
-          # repo-wide DCO check (.github/dco.yml require: members: false).
-          git config user.name "dynamo-ops"
-          git config user.email "170655669+dynamo-ops@users.noreply.github.com"
+          APP_USER_ID=$(curl -fsSL --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/users/${APP_SLUG}%5Bbot%5D" \
+            | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${APP_USER_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
           git checkout -b "${BRANCH}"
           git add -A
           git commit -s -m "release: set version ${RELEASE_VERSION}"
