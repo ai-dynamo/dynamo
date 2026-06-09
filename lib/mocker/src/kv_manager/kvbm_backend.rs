@@ -127,6 +127,20 @@ enum G1AllocationAttempt {
     },
 }
 
+pub struct DecodeBlockReservation {
+    blocks: Vec<MutableBlock<G1>>,
+}
+
+impl DecodeBlockReservation {
+    fn take(&mut self) -> Option<MutableBlock<G1>> {
+        self.blocks.pop()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.blocks.len()
+    }
+}
+
 #[derive(Clone)]
 struct RegisteredBlockInfo {
     seq_hash: SequenceHash,
@@ -668,6 +682,7 @@ impl KvManager {
                 plhs,
                 token_ids.as_deref(),
                 parent.as_ref(),
+                None,
             ),
             MoveBlock::Deref(hashes) => {
                 self.process_deref(hashes);
@@ -683,6 +698,44 @@ impl KvManager {
                     token_ids.clone(),
                 );
                 1
+            }
+        }
+    }
+
+    pub fn reserve_decode_blocks(&mut self, count: usize) -> Option<DecodeBlockReservation> {
+        let (blocks, evicted_plhs) = self.block_manager.allocate_blocks_with_evictions(count)?;
+        if self.should_block_on_g1_offload(&evicted_plhs) {
+            self.handle_evictions_with_source_slots(evicted_plhs, blocks);
+            return None;
+        }
+
+        self.handle_evictions(evicted_plhs);
+        Some(DecodeBlockReservation { blocks })
+    }
+
+    pub fn process_decode_signal(
+        &mut self,
+        event: &MoveBlock,
+        reservation: &mut DecodeBlockReservation,
+    ) {
+        match event {
+            MoveBlock::Use(blocks, local_hashes, plhs, token_ids, parent) => {
+                let allocated = self.process_use(
+                    blocks,
+                    local_hashes,
+                    plhs,
+                    token_ids.as_deref(),
+                    parent.as_ref(),
+                    Some(reservation),
+                );
+                assert_eq!(
+                    allocated,
+                    blocks.len(),
+                    "reserved decode allocation must be infallible"
+                );
+            }
+            _ => {
+                self.process(event);
             }
         }
     }
@@ -830,6 +883,7 @@ impl KvManager {
         plhs: &[PositionalLineageHash],
         token_ids: Option<&[Vec<u32>]>,
         parent: Option<&UniqueBlock>,
+        mut reservation: Option<&mut DecodeBlockReservation>,
     ) -> usize {
         // Upstream invariant: caller must supply exactly one PLH per FullBlock in
         // `blocks`.
@@ -896,7 +950,21 @@ impl KvManager {
                                 .push(immutable);
                             UseOutcome::InactiveHit
                         } else {
-                            let Some(allocation) = self.allocate_one_g1_slot() else {
+                            let allocation = reservation
+                                .as_deref_mut()
+                                .and_then(DecodeBlockReservation::take)
+                                .map(|mutable| G1AllocationAttempt::Allocated {
+                                    mutable,
+                                    evicted_plhs: Vec::new(),
+                                })
+                                .or_else(|| {
+                                    if reservation.is_some() {
+                                        None
+                                    } else {
+                                        self.allocate_one_g1_slot()
+                                    }
+                                });
+                            let Some(allocation) = allocation else {
                                 break; // capacity exhausted; scheduler will preempt
                             };
                             let mutable = match allocation {
@@ -955,7 +1023,21 @@ impl KvManager {
                     if self.active_partial.contains_key(uuid) {
                         UseOutcome::ActiveHit
                     } else {
-                        let Some(allocation) = self.allocate_one_g1_slot() else {
+                        let allocation = reservation
+                            .as_deref_mut()
+                            .and_then(DecodeBlockReservation::take)
+                            .map(|mutable| G1AllocationAttempt::Allocated {
+                                mutable,
+                                evicted_plhs: Vec::new(),
+                            })
+                            .or_else(|| {
+                                if reservation.is_some() {
+                                    None
+                                } else {
+                                    self.allocate_one_g1_slot()
+                                }
+                            });
+                        let Some(allocation) = allocation else {
                             break;
                         };
                         let mutable = match allocation {
@@ -1474,6 +1556,25 @@ mod tests {
         deref_full(&mut mgr, 1);
         // Use with same PLH reuses the inactive block.
         assert_eq!(use_full(&mut mgr, 2, p), 1);
+    }
+
+    #[test]
+    fn failed_decode_reservation_preserves_inactive_cache() {
+        let (mut mgr, sink) = make_mgr_capturing(2, 16);
+        let first = plh(100);
+        let second = plh(200);
+        use_full(&mut mgr, 1, first);
+        use_full(&mut mgr, 2, second);
+        deref_full(&mut mgr, 1);
+        deref_full(&mut mgr, 2);
+        assert_eq!(mgr.num_inactive_blocks(), 2);
+        sink.events.lock().unwrap().clear();
+
+        assert!(mgr.reserve_decode_blocks(3).is_none());
+        assert_eq!(mgr.num_inactive_blocks(), 2);
+        assert!(sink.events.lock().unwrap().is_empty());
+        assert_eq!(use_full(&mut mgr, 3, first), 1);
+        assert_eq!(use_full(&mut mgr, 4, second), 1);
     }
 
     #[test]

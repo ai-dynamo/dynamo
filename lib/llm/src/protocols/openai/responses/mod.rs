@@ -704,6 +704,51 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             }
         }
 
+        // Merge any run of leading system messages into one.
+        //
+        // Some chat templates (e.g. Qwen's tool_use template) reject requests
+        // that have more than one system message at the start.  A Codex CLI
+        // first-turn request commonly produces two: one from `instructions` and
+        // one from a `developer`-role input item.  Concatenate them here with a
+        // newline separator so the backend sees exactly one system message.
+        {
+            let leading_system_count = messages
+                .iter()
+                .take_while(|m| matches!(m, ChatCompletionRequestMessage::System(_)))
+                .count();
+            if leading_system_count > 1 {
+                let combined: String = messages[..leading_system_count]
+                    .iter()
+                    .map(|m| match m {
+                        ChatCompletionRequestMessage::System(s) => match &s.content {
+                            ChatCompletionRequestSystemMessageContent::Text(t) => t.as_str(),
+                            // Today this converter only ever builds `Text` system
+                            // content, so the merge is lossless.  Log loudly if a
+                            // non-text variant (e.g. `Array`, should async-openai
+                            // start emitting it) reaches here so the dropped
+                            // content is diagnosable instead of silently lost.
+                            other => {
+                                tracing::debug!(
+                                    "dropping non-text system message content during leading-system merge: {other:?}"
+                                );
+                                ""
+                            }
+                        },
+                        _ => unreachable!(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                messages.drain(0..leading_system_count);
+                messages.insert(
+                    0,
+                    ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+                        content: ChatCompletionRequestSystemMessageContent::Text(combined),
+                        name: None,
+                    }),
+                );
+            }
+        }
+
         let top_logprobs = convert_top_logprobs(resp.inner.top_logprobs);
 
         // Convert tools if present
@@ -1244,6 +1289,68 @@ mod tests {
             },
             _ => panic!("expected system message first"),
         }
+    }
+
+    #[test]
+    fn test_instructions_and_developer_role_merged_into_single_system_message() {
+        // Codex CLI sends `instructions` + a `developer`-role input item.
+        // Both convert to System messages; backends like Qwen reject more than one.
+        let req = NvCreateResponse {
+            inner: CreateResponse {
+                instructions: Some("You are a coding agent.".into()),
+                input: InputParam::Items(vec![
+                    InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
+                        content: vec![InputContent::InputText(InputTextContent {
+                            text: "Follow safety guidelines.".into(),
+                        })],
+                        role: InputRole::Developer,
+                        status: None,
+                    }))),
+                    InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
+                        content: vec![InputContent::InputText(InputTextContent {
+                            text: "What is 2+2?".into(),
+                        })],
+                        role: InputRole::User,
+                        status: None,
+                    }))),
+                ]),
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+            nvext: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let messages = &chat_req.inner.messages;
+
+        // Must be exactly 2 messages: one merged System + one User
+        assert_eq!(
+            messages.len(),
+            2,
+            "expected merged system + user, got {messages:?}"
+        );
+
+        match &messages[0] {
+            ChatCompletionRequestMessage::System(sys) => match &sys.content {
+                ChatCompletionRequestSystemMessageContent::Text(t) => {
+                    assert!(
+                        t.contains("You are a coding agent."),
+                        "merged text missing instructions: {t}"
+                    );
+                    assert!(
+                        t.contains("Follow safety guidelines."),
+                        "merged text missing developer content: {t}"
+                    );
+                }
+                _ => panic!("expected text content"),
+            },
+            _ => panic!("expected system message at index 0"),
+        }
+
+        assert!(
+            matches!(messages[1], ChatCompletionRequestMessage::User(_)),
+            "expected user message at index 1"
+        );
     }
 
     #[test]

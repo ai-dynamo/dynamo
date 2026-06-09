@@ -13,7 +13,7 @@ use crate::zmq_wire::{ZmqEventNormalizer, decode_event_batch};
 
 use super::backend::Indexer;
 use super::registry::ListenerRecord;
-use super::zmq::{
+use crate::services::zmq::{
     MultipartMessage, SharedSocket, connect_dealer_socket, connect_sub_socket, recv_multipart,
     send_multipart,
 };
@@ -541,7 +541,7 @@ async fn connect_replay_socket(
 mod tests {
     use super::{WATERMARK_UNSET, cursor_from_watermark};
     use crate::recovery::CursorObservation;
-    use crate::services::indexer::zmq::{
+    use crate::services::zmq::{
         SharedSocket, bind_pub_socket, connect_sub_socket, recv_multipart, send_multipart,
     };
 

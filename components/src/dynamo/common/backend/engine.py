@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Optional, Required, TypedDict
 
@@ -244,7 +244,7 @@ class LLMEngine(ABC):
 
         Overrides typically delegate to
         :func:`resolve_test_logits_processor_spec` to honour
-        ``DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1``; the future public
+        ``DYN_ENABLE_TEST_LOGITS_PROCESSOR=1``; the future public
         CLI/config loader will resolve from that source instead."""
         return None
 
@@ -326,7 +326,7 @@ class LLMEngine(ABC):
 
 
 #: Env var that activates the built-in smoke hook on any unified backend.
-TEST_LOGITS_PROCESSOR_ENV = "DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR"
+DYN_ENABLE_TEST_LOGITS_PROCESSOR = "DYN_ENABLE_TEST_LOGITS_PROCESSOR"
 
 
 @dataclass(frozen=True)
@@ -405,7 +405,7 @@ def logits_processors_for_request(
 def resolve_test_logits_processor_spec(
     get_tokenizer: Callable[[], Any],
 ) -> LogitsProcessorSpec | None:
-    """Resolve the `DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1` smoke hook into a
+    """Resolve the `DYN_ENABLE_TEST_LOGITS_PROCESSOR=1` smoke hook into a
     `LogitsProcessorSpec`, or ``None`` when the env var is unset.
 
     ``get_tokenizer`` is called lazily, only after the env check passes, so
@@ -413,17 +413,95 @@ def resolve_test_logits_processor_spec(
     does not crash. The fixed ``"Hello world!"`` token IDs are resolved here
     once (not per request) into a single :class:`ForcedTokenSequenceSpec`.
     """
-    if os.getenv(TEST_LOGITS_PROCESSOR_ENV) != "1":
+    if os.getenv(DYN_ENABLE_TEST_LOGITS_PROCESSOR) != "1":
         return None
     tokenizer = get_tokenizer()
     eos = tokenizer.eos_token_id
     if eos is None:
         raise ValueError(
-            "DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR requires a tokenizer "
-            "with eos_token_id"
+            "DYN_ENABLE_TEST_LOGITS_PROCESSOR requires a tokenizer with eos_token_id"
         )
     token_ids = tuple(tokenizer.encode("Hello world!", add_special_tokens=False))
     return LogitsProcessorSpec(
         entries=(ForcedTokenSequenceSpec(token_ids=token_ids, eos_token_id=eos),),
         generation_only=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# Wire format for backends that activate processors across a serialization
+# boundary.
+#
+# TRT-LLM attaches live Python callables in-process, so it never serializes.
+# vLLM and SGLang both load a batch-level adapter class at engine init and
+# carry per-request activation through a JSON-ish side channel
+# (`SamplingParams.extra_args` for vLLM, `sampling_params["custom_params"]`
+# for SGLang). Both cross that boundary with the SAME entry shape, so the
+# format lives here once rather than in each backend adapter.
+#
+# Only JSON-safe entries are serializable: `ForcedTokenSequenceSpec` carries
+# plain ints. `PythonProcessorSpec` wraps a live callable and is rejected —
+# it is a TRT-LLM-only in-process escape hatch (the docstring on the class
+# says as much), so a backend that needs serialization cannot realize it.
+# ---------------------------------------------------------------------------
+
+
+#: Discriminator stored on each serialized entry so the reader can pick the
+#: right `LogitsProcessorEntry` subtype back out.
+_FORCED_SEQUENCE_KIND = "forced_sequence"
+
+
+def serialize_logits_processor_entries(
+    entries: Sequence[LogitsProcessorEntry],
+) -> list[dict[str, Any]]:
+    """Encode spec entries into JSON-safe dicts for a per-request side channel.
+
+    Used by backends (vLLM, SGLang) whose engine-loaded adapter runs in a
+    process that only sees the serialized request, not the engine's cached
+    spec. Raises ``TypeError`` on `PythonProcessorSpec` (a live callable is
+    not serializable), which is how vLLM/SGLang reject the TRT-LLM-only
+    escape hatch.
+    """
+    payload: list[dict[str, Any]] = []
+    for entry in entries:
+        if isinstance(entry, ForcedTokenSequenceSpec):
+            payload.append(
+                {
+                    "kind": _FORCED_SEQUENCE_KIND,
+                    "token_ids": list(entry.token_ids),
+                    "eos_token_id": entry.eos_token_id,
+                }
+            )
+        else:
+            raise TypeError(
+                f"logits-processor entry of type {type(entry).__name__} is not "
+                "serializable; only ForcedTokenSequenceSpec crosses the "
+                "vLLM/SGLang request boundary (PythonProcessorSpec is "
+                "TRT-LLM-only, in-process)"
+            )
+    return payload
+
+
+def deserialize_logits_processor_entries(
+    payload: Sequence[dict[str, Any]],
+) -> list[LogitsProcessorEntry]:
+    """Inverse of :func:`serialize_logits_processor_entries`.
+
+    Runs inside the backend's engine-loaded adapter to rebuild spec entries
+    from the per-request payload. Unknown ``kind`` values raise ``ValueError``
+    so a forward-incompatible request fails loudly instead of silently
+    skipping a processor.
+    """
+    entries: list[LogitsProcessorEntry] = []
+    for item in payload:
+        kind = item.get("kind")
+        if kind == _FORCED_SEQUENCE_KIND:
+            entries.append(
+                ForcedTokenSequenceSpec(
+                    token_ids=tuple(item["token_ids"]),
+                    eos_token_id=item["eos_token_id"],
+                )
+            )
+        else:
+            raise ValueError(f"unknown logits-processor entry kind: {kind!r}")
+    return entries
