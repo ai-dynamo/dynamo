@@ -6,7 +6,6 @@
 #
 
 import asyncio
-import json
 import logging
 import os
 import time
@@ -16,6 +15,7 @@ from typing import Any
 
 from msgspec.structs import replace as msgspec_replace
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
+from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import GENERATION_TASKS
@@ -43,6 +43,7 @@ from .utils import (
     handle_engine_error,
     make_internal_error,
     random_uuid,
+    resolve_chat_template,
 )
 
 logger = logging.getLogger(__name__)
@@ -791,35 +792,16 @@ class EngineFactory:
         input_processor = InputProcessor(vllm_config)
         tokenizer = input_processor.get_tokenizer()
 
-        # Some models (e.g. Qwen3-Omni) ship their chat template in a separate
-        # chat_template.json rather than tokenizer_config.json. The HF tokenizer
-        # loaded above does not merge that file, so tokenizer.chat_template is
-        # None. vLLM's renderer skips the AutoProcessor fallback when tools are
-        # present, so tool-calling requests then crash with
-        # ChatTemplateResolutionError. fetch_model already downloads
-        # chat_template.json into source_path, so load it as a fallback.
+        # vLLM's renderer skips its AutoProcessor fallback when tools are present,
+        # so tool calls crash unless the tokenizer has an inline template.
         if tokenizer.chat_template is None:
-            chat_template_json = os.path.join(source_path, "chat_template.json")
-            if os.path.exists(chat_template_json):
-                try:
-                    with open(chat_template_json) as f:
-                        tokenizer.chat_template = json.load(f).get("chat_template")
-                    logger.info("Loaded chat template from %s", chat_template_json)
-                except (OSError, ValueError) as e:
-                    logger.warning(
-                        "Failed to load chat template from %s: %s",
-                        chat_template_json,
-                        e,
-                    )
+            tokenizer.chat_template = resolve_chat_template(source_path)
 
-        # Honor the --chat-template flag. It is parsed into self.flags by vLLM's
-        # FrontendArgs but was previously never applied here. An explicit flag
-        # overrides any template discovered above.
+        # --chat-template overrides; load_chat_template accepts a path or an
+        # inline Jinja literal.
         chat_template_flag = getattr(self.flags, "chat_template", None)
         if chat_template_flag:
-            with open(chat_template_flag) as f:
-                tokenizer.chat_template = f.read()
-            logger.info("Applied --chat-template from %s", chat_template_flag)
+            tokenizer.chat_template = load_chat_template(chat_template_flag)
 
         # Resolve stream_interval: env var override > backend config > default (20)
         stream_interval = self.stream_interval
