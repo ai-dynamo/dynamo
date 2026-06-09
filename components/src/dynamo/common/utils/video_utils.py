@@ -219,8 +219,20 @@ def _rgb_to_yuv420p(frames: np.ndarray) -> bytes:
     n, h, w = y.shape
     y = y.round().clip(0, 255).astype(np.uint8)
     # 4:2:0 -- box-average each 2x2 chroma block
-    u = u.reshape(n, h // 2, 2, w // 2, 2).mean((2, 4)).round().clip(0, 255).astype(np.uint8)
-    v = v.reshape(n, h // 2, 2, w // 2, 2).mean((2, 4)).round().clip(0, 255).astype(np.uint8)
+    u = (
+        u.reshape(n, h // 2, 2, w // 2, 2)
+        .mean((2, 4))
+        .round()
+        .clip(0, 255)
+        .astype(np.uint8)
+    )
+    v = (
+        v.reshape(n, h // 2, 2, w // 2, 2)
+        .mean((2, 4))
+        .round()
+        .clip(0, 255)
+        .astype(np.uint8)
+    )
     out = bytearray()
     for i in range(n):
         out += y[i].tobytes() + u[i].tobytes() + v[i].tobytes()
@@ -267,10 +279,28 @@ def encode_to_video_bytes(
     yuv = _rgb_to_yuv420p(frames)
     ffmpeg = os.environ.get("IMAGEIO_FFMPEG_EXE", "ffmpeg")
     cmd = [
-        ffmpeg, "-y", "-v", "error",
-        "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", f"{w}x{h}",
-        "-r", str(fps), "-color_range", "pc", "-i", "-",
-        "-c:v", codec, "-pix_fmt", "yuv420p", "-color_range", "pc",
+        ffmpeg,
+        "-y",
+        "-v",
+        "error",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "yuv420p",
+        "-s",
+        f"{w}x{h}",
+        "-r",
+        str(fps),
+        "-color_range",
+        "pc",
+        "-i",
+        "-",
+        "-c:v",
+        codec,
+        "-pix_fmt",
+        "yuv420p",
+        "-color_range",
+        "pc",
     ]
     with tempfile.NamedTemporaryFile(suffix=f".{output_format}") as tmp:
         try:
