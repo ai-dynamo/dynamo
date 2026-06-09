@@ -391,7 +391,7 @@ def test_capacity_request_passes_kv_hit_rate(monkeypatch):
     assert fake.capacity_requests[0].kwargs["kv_hit_rate"] == 0.4
 
 
-def test_decode_capacity_applies_accept_length_to_rps_and_itl(monkeypatch):
+def test_decode_capacity_passes_accept_length_to_rust(monkeypatch):
     fake = _FakeRustModel(
         diagnostics={
             "source": "aic",
@@ -400,7 +400,7 @@ def test_decode_capacity_applies_accept_length_to_rps_and_itl(monkeypatch):
             "correction_ready_buckets": 0,
             "last_warning": None,
         },
-        capacity=_FakeCapacity(rps=100.0, itl_ms=50.0),
+        capacity=_FakeCapacity(rps=200.0, itl_ms=25.0),
     )
     _install_fake_rust(monkeypatch, fake)
     model = PlannerEnginePerfModel(
@@ -416,13 +416,14 @@ def test_decode_capacity_applies_accept_length_to_rps_and_itl(monkeypatch):
         accept_length=2.0,
     )
 
-    assert fake.capacity_requests[0].kwargs["itl_sla_ms"] == 60.0
+    assert fake.capacity_requests[0].kwargs["itl_sla_ms"] == 30.0
+    assert fake.capacity_requests[0].kwargs["accept_length"] == 2.0
     assert capacity is not None
     assert capacity.rps == 200.0
     assert capacity.itl_ms == 25.0
 
 
-def test_agg_capacity_caps_spec_decode_rps_by_prefill_admission(monkeypatch):
+def test_agg_capacity_passes_accept_length_to_rust(monkeypatch):
     fake = _FakeRustModel(
         diagnostics={
             "source": "aic",
@@ -431,7 +432,7 @@ def test_agg_capacity_caps_spec_decode_rps_by_prefill_admission(monkeypatch):
             "correction_ready_buckets": 0,
             "last_warning": None,
         },
-        capacity=_FakeCapacity(rps=100.0, ttft_ms=10.0, itl_ms=50.0),
+        capacity=_FakeCapacity(rps=100.0, ttft_ms=10.0, itl_ms=25.0),
     )
     _install_fake_rust(monkeypatch, fake)
     model = PlannerEnginePerfModel(
@@ -453,11 +454,9 @@ def test_agg_capacity_caps_spec_decode_rps_by_prefill_admission(monkeypatch):
         accept_length=2.0,
     )
 
-    assert fake.capacity_requests[0].kwargs["itl_sla_ms"] == 60.0
+    assert fake.capacity_requests[0].kwargs["itl_sla_ms"] == 30.0
+    assert fake.capacity_requests[0].kwargs["accept_length"] == 2.0
     assert capacity is not None
-    # Raw rps=100 and raw itl=50ms imply batch=500. Doubling decode egress
-    # would report 200 rps, but only 500 prefill tokens remain per forward:
-    # 500 / (100 ISL * 0.050s) = 100 rps.
     assert capacity.rps == 100.0
     assert capacity.itl_ms == 25.0
 

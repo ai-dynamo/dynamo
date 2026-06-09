@@ -597,19 +597,16 @@ class PlannerEnginePerfModel:
         if self._worker_type != "prefill" and osl <= 0:
             return None
         accept_length = max(1.0, float(accept_length))
-        discount_decode = self._worker_type != "prefill"
-        query_itl_sla_ms = itl_sla_ms
-        if discount_decode and query_itl_sla_ms is not None:
-            query_itl_sla_ms *= accept_length
         try:
             request = EngineCapacityRequest(
                 isl=int(math.ceil(isl)),
                 osl=max(1, int(math.ceil(osl))),
                 ttft_sla_ms=ttft_sla_ms,
-                itl_sla_ms=query_itl_sla_ms,
+                itl_sla_ms=itl_sla_ms,
                 e2e_latency_sla_ms=e2e_latency_sla_ms,
                 kv_hit_rate=kv_hit_rate,
                 optimization_target=OptimizationTarget.Throughput,
+                accept_length=accept_length,
             )
             result = self._rust_model.find_engine_capacity_rps(request)
         except _RUST_SHIM_FALLBACK_EXCEPTIONS as e:
@@ -618,20 +615,7 @@ class PlannerEnginePerfModel:
         if result is None:
             return None
         rps = result.rps
-        if self._worker_type == "decode":
-            rps *= accept_length
-        elif self._worker_type == "aggregated":
-            rps = self._cap_aggregated_spec_decode_rps(
-                raw_rps=result.rps,
-                raw_itl_ms=result.itl_ms,
-                isl=isl,
-                osl=osl,
-                kv_hit_rate=kv_hit_rate,
-                accept_length=accept_length,
-            )
         itl_ms = result.itl_ms
-        if discount_decode and itl_ms is not None:
-            itl_ms /= accept_length
         return PlannerEngineCapacity(
             rps=rps,
             ttft_ms=result.ttft_ms,
@@ -639,49 +623,6 @@ class PlannerEnginePerfModel:
             e2e_latency_ms=result.e2e_latency_ms,
             eligible=result.eligible,
         )
-
-    def _cap_aggregated_spec_decode_rps(
-        self,
-        *,
-        raw_rps: float,
-        raw_itl_ms: Optional[float],
-        isl: float,
-        osl: float,
-        kv_hit_rate: Optional[float],
-        accept_length: float,
-    ) -> float:
-        """Apply speculative decode speedup without exceeding prefill admission.
-
-        The Rust capacity search returns an aggregated-engine RPS for raw OSL.
-        Speculative decoding reduces decode forwards per request, but an agg
-        worker can only realize that extra decode egress if its per-forward
-        prefill budget can admit the matching requests.  Infer the raw decode
-        batch from ``rps = batch / (osl * forward_wall_s)`` and cap the
-        discounted decode RPS by the prefill tokens left in the same forward.
-        """
-        if accept_length <= 1.0:
-            return raw_rps
-        if raw_itl_ms is None or raw_itl_ms <= 0.0 or osl <= 0.0:
-            return raw_rps
-
-        values = self._limit_values()
-        if values is None:
-            return raw_rps
-        max_num_batched_tokens, _max_num_seqs, _max_kv_tokens = values
-
-        forward_wall_s = raw_itl_ms / 1000.0
-        if forward_wall_s <= 0.0:
-            return raw_rps
-
-        decode_rps = raw_rps * accept_length
-        inferred_batch = raw_rps * float(osl) * forward_wall_s
-        prefill_budget = max(0.0, float(max_num_batched_tokens) - inferred_batch)
-        effective_isl = float(isl) * (1.0 - _clamp_kv_hit_rate(kv_hit_rate))
-        if effective_isl <= 0.0:
-            return decode_rps
-
-        prefill_rps = prefill_budget / (effective_isl * forward_wall_s)
-        return max(0.0, min(decode_rps, prefill_rps))
 
     # ------------------------------------------------------------------
     # Readiness and moving-average accessors used by load scaling and query
