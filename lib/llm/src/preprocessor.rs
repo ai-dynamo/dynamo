@@ -986,6 +986,10 @@ impl OpenAIPreprocessor {
         // `gather_mm_exact_routing_info`, so the two never diverge.
         token_ids: &[crate::protocols::TokenIdType],
     ) -> Result<Vec<MmImageEntry>> {
+        // `token_ids` is only consumed by the mm-routing `mm_hashes` gate below.
+        #[cfg(not(feature = "mm-routing"))]
+        let _ = token_ids;
+
         let mut media_map: MultimodalDataMap = HashMap::new();
         let mut fetch_tasks: Vec<(String, &ChatCompletionRequestUserMessageContentPart)> =
             Vec::new();
