@@ -91,7 +91,13 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
             ),
             "agg_video": TopologyConfig(
-                marks=[pytest.mark.pre_merge, pytest.mark.xpu_1],
+                marks=[
+                    pytest.mark.skip(
+                        reason="flaky test, local video file downloading may fail due to network issues"
+                    ),
+                    pytest.mark.nightly,
+                    pytest.mark.multimodal,
+                ],
                 timeout_s=600,
                 delayed_start=60,
                 profiled_vram_gib=8.2,

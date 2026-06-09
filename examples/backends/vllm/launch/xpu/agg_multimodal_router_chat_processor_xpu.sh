@@ -188,6 +188,8 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
     if (( NUM_WORKERS > 1 )); then
         SYSTEM_PORT_VAR="DYN_SYSTEM_PORT${i}"
         WORKER_PORT="${!SYSTEM_PORT_VAR}"
+        # Fallback: derive port from VLLM_SYSTEM_PORT_BASE when DYN_SYSTEM_PORT${i} is not set
+        : "${WORKER_PORT:=$(($VLLM_SYSTEM_PORT_BASE + ($i - 1) * 2))}"
     else
         WORKER_PORT="${DYN_SYSTEM_PORT}"
     fi
@@ -220,6 +222,8 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
     if (( NUM_WORKERS > 1 )); then
         SYSTEM_PORT_VAR="DYN_SYSTEM_PORT${i}"
         WORKER_PORT="${!SYSTEM_PORT_VAR}"
+        # Fallback: derive port from VLLM_SYSTEM_PORT_BASE when DYN_SYSTEM_PORT${i} is not set
+        : "${WORKER_PORT:=$(($VLLM_SYSTEM_PORT_BASE + ($i - 1) * 2))}"
     else
         WORKER_PORT="${DYN_SYSTEM_PORT}"
     fi
@@ -302,6 +306,8 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
     if (( NUM_WORKERS > 1 )); then
         SYSTEM_PORT_VAR="DYN_SYSTEM_PORT${i}"
         WORKER_PORT="${!SYSTEM_PORT_VAR}"
+        # Fallback: derive port from VLLM_SYSTEM_PORT_BASE when DYN_SYSTEM_PORT${i} is not set
+        : "${WORKER_PORT:=$(($VLLM_SYSTEM_PORT_BASE + ($i - 1) * 2))}"
     else
         WORKER_PORT="${DYN_SYSTEM_PORT}"
     fi
