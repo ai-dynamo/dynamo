@@ -1094,8 +1094,7 @@ fn spawn_kv_event_reconciler(
                 }
                 let worker_id = hash_pod_name(name);
                 seen.insert(worker_id);
-                if let std::collections::hash_map::Entry::Vacant(slot) =
-                    registered.entry(worker_id)
+                if let std::collections::hash_map::Entry::Vacant(slot) = registered.entry(worker_id)
                 {
                     let endpoint = format!("tcp://{ip}:{kv_event_port}");
                     let token = decode_router.register_worker_kv_events(
