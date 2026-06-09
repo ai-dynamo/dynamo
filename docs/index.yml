@@ -338,6 +338,8 @@ navigation:
             path: development/unified-backends.md
           - page: Python Workers (lower-level)
             path: development/backend-guide.md
+          - page: Realtime Python Workers
+            path: development/realtime-bidirectional-workers.md
           - page: Runtime Containers
             path: development/custom-containers.md
 

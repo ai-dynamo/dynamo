@@ -21,7 +21,9 @@ subtitle: Create custom Python workers and engines for Dynamo
 > the [unified-path feature gaps](unified-backends.md#python-feature-gaps)
 > for the current matrix.
 
-This guide explains how to create your own Python worker in Dynamo.
+This guide explains how to create your own Python worker in Dynamo. For
+streaming-input, streaming-output Realtime workers, see
+[Realtime Bidirectional Python Workers](realtime-bidirectional-workers.md).
 
 The [dynamo](https://pypi.org/project/ai-dynamo/) Python library allows you to build your own engine and attach it to Dynamo.
 
@@ -31,7 +33,7 @@ The Python file must do three things:
 3. Attach a request handler
 
 ```
-from dynamo.llm import ModelInput, ModelType, register_model
+from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
    # 1. Decorate a function to get the runtime
@@ -46,7 +48,13 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
     model_input = ModelInput.Tokens # or ModelInput.Text if engine handles pre-processing
     model_type = ModelType.Chat # or ModelType.Chat | ModelType.Completions if model can be deployed on chat and completions endpoints
     # Optional last param to register_model is model_name. If not present derives it from model_path
-    await register_model(model_input, model_type, endpoint, model_path)
+    await register_model(
+        model_input,
+        model_type,
+        endpoint,
+        model_path,
+        worker_type=WorkerType.Aggregated,
+    )
 
     # Initialize your engine here
     # engine = ...
@@ -82,12 +90,14 @@ The `model_input` can be:
 The `model_type` can be:
 - ModelType.Chat. Your `generate` method receives a `request` and must return a response dict of type [OpenAI Chat Completion](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).
 - ModelType.Completions. Your `generate` method receives a `request` and must return a response dict of the older [Completions](https://developers.openai.com/api/reference/resources/completions/methods/create).
+- ModelType.Realtime. Your bidirectional `generate` method receives a `request_stream` and yields OpenAI Realtime server events. Use `endpoint.serve_bidirectional_endpoint()` instead of `endpoint.serve_endpoint()`; see [Realtime Bidirectional Python Workers](realtime-bidirectional-workers.md).
 
 `register_model` can also take the following kwargs:
 - `model_name`: The name to call the model. Your incoming HTTP requests model name must match this. Defaults to the hugging face repo name or the folder name.
 - `context_length`: Max model length in tokens. Defaults to the model's set max. Only set this if you need to reduce KV cache allocation to fit into VRAM.
 - `kv_cache_block_size`: Size of a KV block for the engine, in tokens. Defaults to 16.
 - `user_data`: Optional dictionary containing custom metadata for worker behavior (e.g., LoRA configuration). Defaults to None.
+- `worker_type`: Required processing role for the worker. Standalone workers normally use `WorkerType.Aggregated`.
 
 See `examples/backends` for full code examples.
 
