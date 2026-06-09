@@ -28,10 +28,7 @@ from dynamo.common.utils.prometheus import (
     register_engine_metrics_callback,
 )
 from dynamo.common.utils.runtime import create_runtime
-from dynamo.common.snapshot.restore_context import (
-    apply_snapshot_restore_config,
-    maybe_run_restore_placeholder_mode,
-)
+from dynamo.common.snapshot.restore_context import apply_snapshot_restore_config
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
     KvEventPublisher,
@@ -117,8 +114,6 @@ def run_dynamo_headless(config: Config) -> None:
 
 
 async def worker() -> None:
-    maybe_run_restore_placeholder_mode()
-
     config = parse_args()
 
     dump_config(config.dump_config_to, config)
