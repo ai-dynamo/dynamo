@@ -188,8 +188,19 @@ fn choose_better_candidate_score(
         planned_blocks,
         input.target_local_prefix_blocks,
     );
+    if incremental_blocks == 0 {
+        return;
+    }
+    let score_incremental_blocks = remote_g2_incremental_blocks(
+        start_block_index,
+        planned_blocks,
+        input.best_local_prefix_blocks,
+    );
+    // The transfer must help the target, but its scheduler credit is only the
+    // prefix it adds beyond the best local-only worker. This matches L3-style
+    // prefetch scoring: local cache remains the baseline.
     let (cost_blocks, score_blocks) =
-        remote_g2_score_for_candidate(input.cost_model, incremental_blocks, planned_blocks);
+        remote_g2_score_for_candidate(input.cost_model, score_incremental_blocks, planned_blocks);
     let candidate = RemoteG2CandidateScore {
         target: input.target,
         source: worker,
@@ -873,6 +884,7 @@ mod tests {
         let matches = tiered_matches(&[], &[(source, 8)]);
         let input = RemoteKvReuseSelectionInput {
             target_local_prefix_blocks: 3,
+            best_local_prefix_blocks: 3,
             cost_model: Some(RemoteG2CostModel {
                 score_weight: 0.5,
                 cost_blocks: 1.0,
@@ -904,6 +916,7 @@ mod tests {
         let matches = tiered_matches(&[], &[(source, 8)]);
         let input = RemoteKvReuseSelectionInput {
             target_local_prefix_blocks: 3,
+            best_local_prefix_blocks: 3,
             cost_model: Some(RemoteG2CostModel {
                 score_weight: 0.5,
                 cost_blocks: 1.0,
@@ -924,6 +937,66 @@ mod tests {
                 assert!((candidate.score_blocks - 0.7).abs() < f64::EPSILON);
             }
             other => panic!("expected candidate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_candidate_scores_remote_g2_against_best_local_prefix() {
+        let hashes = block_hashes(8);
+        let target = WorkerWithDpRank::new(9, 0);
+        let source = WorkerWithDpRank::new(7, 0);
+        let matches = tiered_matches(&[], &[(source, 8)]);
+        let input = RemoteKvReuseSelectionInput {
+            target_local_prefix_blocks: 1,
+            best_local_prefix_blocks: 6,
+            cost_model: Some(RemoteG2CostModel {
+                score_weight: 1.0,
+                cost_blocks: 0.0,
+                cost_per_block: 0.0,
+                max_planned_blocks: None,
+                max_local_overlap_gap_blocks: None,
+            }),
+            ..selection_input(target, &hashes, &matches)
+        };
+
+        let decision = select_remote_g2_candidate(input);
+
+        match decision {
+            RemoteG2CandidateDecision::Candidate { candidate, .. } => {
+                assert_eq!(candidate.planned_blocks, 8);
+                assert_eq!(candidate.incremental_blocks, 7);
+                assert_eq!(candidate.score_blocks, 2.0);
+            }
+            other => panic!("expected candidate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_candidate_rejects_when_best_local_already_covers_remote_prefix() {
+        let hashes = block_hashes(8);
+        let target = WorkerWithDpRank::new(9, 0);
+        let source = WorkerWithDpRank::new(7, 0);
+        let matches = tiered_matches(&[], &[(source, 8)]);
+        let input = RemoteKvReuseSelectionInput {
+            target_local_prefix_blocks: 1,
+            best_local_prefix_blocks: 8,
+            cost_model: Some(RemoteG2CostModel {
+                score_weight: 1.0,
+                cost_blocks: 0.0,
+                cost_per_block: 0.0,
+                max_planned_blocks: None,
+                max_local_overlap_gap_blocks: None,
+            }),
+            ..selection_input(target, &hashes, &matches)
+        };
+
+        let decision = select_remote_g2_candidate(input);
+
+        match decision {
+            RemoteG2CandidateDecision::NoCandidate { reason, .. } => {
+                assert_eq!(reason, RemoteKvReuseNoPlanReason::BelowRemoteG2Cost);
+            }
+            other => panic!("expected no candidate, got {other:?}"),
         }
     }
 
