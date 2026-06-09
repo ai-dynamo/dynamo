@@ -1095,9 +1095,10 @@ impl ModelWatcher {
             )
             .await
             {
-                Ok(indexer) => Some(
-                    Arc::new(indexer) as Arc<dyn dynamo_runtime::pipeline::MultimodalCacheIndex>
-                ),
+                Ok(indexer) => {
+                    Some(Arc::new(indexer)
+                        as Arc<dyn dynamo_runtime::pipeline::MultimodalCacheIndex>)
+                }
                 Err(error) => {
                     tracing::warn!(
                         "Embedding cache indexer subscriber not available ({}), skipping cache-state sync.",

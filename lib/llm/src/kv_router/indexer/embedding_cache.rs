@@ -12,11 +12,9 @@ use std::{
 use dashmap::DashMap;
 use dynamo_kv_router::protocols::WorkerId;
 use dynamo_runtime::{
-    component::Component, traits::DistributedRuntimeProvider,
-    pipeline::MultimodalCacheIndex,
+    component::Component, pipeline::MultimodalCacheIndex, traits::DistributedRuntimeProvider,
     transports::event_plane::EventSubscriber,
 };
-use tokio_stream::StreamExt;
 
 use crate::kv_router::{
     MULTIMODAL_EMBEDDING_CACHE_SUBJECT,
@@ -134,7 +132,7 @@ impl EmbeddingCacheIndexer {
             Ok(subscriber) => subscriber.typed::<MultimodalEmbeddingCacheEvent>(),
             Err(error) => {
                 self.started.store(false, Ordering::SeqCst);
-                return Err(error.into());
+                return Err(error);
             }
         };
 

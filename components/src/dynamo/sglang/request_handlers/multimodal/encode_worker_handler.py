@@ -148,9 +148,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
     def _publish_cache_delta(
         self, added_keys: list[str], removed_keys: list[str]
     ) -> None:
-        if self._cache_publisher is None or (
-            not added_keys and not removed_keys
-        ):
+        if self._cache_publisher is None or (not added_keys and not removed_keys):
             return
         self._cache_publisher.publish_delta(added_keys, removed_keys)
 
@@ -306,7 +304,9 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                     tensor=tensor.contiguous(),
                     image_grid_thw=grid_thw,
                 )
-                mutation = self._embedding_cache.set_with_delta(self._url_hash(url), entry)
+                mutation = self._embedding_cache.set_with_delta(
+                    self._url_hash(url), entry
+                )
                 self._publish_cache_delta(mutation.added_keys, mutation.removed_keys)
                 new_entries[orig_idx] = entry
 

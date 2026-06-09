@@ -88,15 +88,12 @@ impl MultimodalEmbeddingCachePublisher {
     }
 
     fn publish_update(&self, update: MultimodalEmbeddingCacheUpdate) -> Result<()> {
-        let worker_id = *self
-            .worker_id
-            .get()
-            .ok_or_else(|| anyhow::anyhow!("multimodal embedding cache publisher not initialized"))?;
-        let publisher = self
-            .publisher
-            .get()
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("multimodal embedding cache publisher not initialized"))?;
+        let worker_id = *self.worker_id.get().ok_or_else(|| {
+            anyhow::anyhow!("multimodal embedding cache publisher not initialized")
+        })?;
+        let publisher = self.publisher.get().cloned().ok_or_else(|| {
+            anyhow::anyhow!("multimodal embedding cache publisher not initialized")
+        })?;
         let runtime_handle = self.runtime_handle.get().cloned().ok_or_else(|| {
             anyhow::anyhow!("multimodal embedding cache publisher runtime not initialized")
         })?;
@@ -104,7 +101,10 @@ impl MultimodalEmbeddingCachePublisher {
 
         runtime_handle.spawn(async move {
             if let Err(error) = publisher.publish(&event).await {
-                tracing::warn!("Failed to publish multimodal embedding cache state: {}", error);
+                tracing::warn!(
+                    "Failed to publish multimodal embedding cache state: {}",
+                    error
+                );
             }
         });
 

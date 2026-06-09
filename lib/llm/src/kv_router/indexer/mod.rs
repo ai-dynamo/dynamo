@@ -23,11 +23,11 @@ pub(crate) use dynamo_kv_router::indexer::WireTieredMatchDetails;
 use dynamo_runtime::{component::Component, traits::DistributedRuntimeProvider};
 use tokio::sync::oneshot;
 
+mod embedding_cache;
 mod lookup;
 mod recording;
 mod recovery;
 pub mod remote;
-mod embedding_cache;
 mod side;
 
 pub use self::embedding_cache::EmbeddingCacheIndexer;

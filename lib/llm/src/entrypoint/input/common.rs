@@ -12,6 +12,7 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig},
     http::service::metrics::Metrics,
+    kv_router::indexer::EmbeddingCacheIndexer,
     kv_router::{
         DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics,
     },
@@ -21,7 +22,6 @@ use crate::{
     preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
-    kv_router::indexer::EmbeddingCacheIndexer,
     types::{
         Annotated,
         openai::chat_completions::{
@@ -157,9 +157,9 @@ pub async fn build_preprocessed_routing(
     )
     .await
     {
-        Ok(indexer) => Some(
-            Arc::new(indexer) as Arc<dyn dynamo_runtime::pipeline::MultimodalCacheIndex>
-        ),
+        Ok(indexer) => {
+            Some(Arc::new(indexer) as Arc<dyn dynamo_runtime::pipeline::MultimodalCacheIndex>)
+        }
         Err(error) => {
             tracing::warn!(
                 "Embedding cache indexer subscriber not available ({}), skipping cache-state sync.",

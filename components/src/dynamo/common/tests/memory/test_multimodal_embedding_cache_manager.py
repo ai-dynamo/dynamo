@@ -7,8 +7,8 @@ import pytest
 import torch
 
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
-    CacheMutation,
     CachedEmbedding,
+    CacheMutation,
     MultimodalEmbeddingCacheManager,
 )
 
