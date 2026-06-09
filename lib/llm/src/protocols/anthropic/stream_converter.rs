@@ -868,6 +868,18 @@ mod tests {
         assert_eq!(events.len(), 4);
         assert_eq!(events.capacity(), capacity);
         assert!(events.iter().all(Result::is_ok));
+
+        events.clear();
+        conv.append_end_events(&mut events);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events.capacity(), capacity);
+        assert!(events.iter().all(Result::is_ok));
+
+        events.clear();
+        conv.append_error_events(&mut events);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events.capacity(), capacity);
+        assert!(events.iter().all(Result::is_ok));
     }
 
     /// Regression test: text block must be closed (content_block_stop)
