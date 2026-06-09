@@ -174,7 +174,13 @@ COMMON_ENV=(
 # launches, pass a comma-separated list (for example: 0,1).
 # Default to empty so the single-worker path doesn't error under set -euo pipefail.
 IFS=',' read -r -a ZE_AFFINITY_LIST <<< "${ZE_AFFINITY:-}"
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-18083}
+# Validate that ZE_AFFINITY has at least NUM_WORKERS entries when multi-worker.
+if (( NUM_WORKERS > 1 )) && [[ ${#ZE_AFFINITY_LIST[@]} -lt ${NUM_WORKERS} ]]; then
+    echo "ERROR: ZE_AFFINITY must have at least ${NUM_WORKERS} comma-separated values (got ${#ZE_AFFINITY_LIST[@]})" >&2
+    exit 1
+fi
+# Align single-worker fallback with VLLM_SYSTEM_PORT_BASE (18081).
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-18081}
 # Phase 1: launch all workers in parallel.
 # Under SINGLE_GPU=true, requires the KV-bytes cap (CI sets it via the
 # requested_vllm_kv_cache_bytes marker) - otherwise vLLM's 0.9 default races.
