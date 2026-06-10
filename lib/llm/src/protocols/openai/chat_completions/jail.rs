@@ -17,7 +17,7 @@ use dynamo_parsers::tool_calling::{
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::utils::{MarkerMatcher, MatchResult};
@@ -1415,7 +1415,8 @@ impl JailedStream {
     {
         stream! {
             tokio::pin!(input_stream);
-            let mut has_tool_calls_per_choice: HashMap<u32, bool> = HashMap::new();
+            // Choices that emitted a non-empty tool_calls delta.
+            let mut tool_call_choices: HashSet<u32> = HashSet::new();
             // Choices that carried a non-null finish_reason at some point. Used to
             // synthesize the OpenAI-required terminal `finish_reason: "tool_calls"`
             // chunk when the engine never emits a finish_reason for a choice that
@@ -1451,7 +1452,7 @@ impl JailedStream {
                             .as_ref()
                             .is_some_and(|tc| !tc.is_empty())
                         {
-                            has_tool_calls_per_choice.insert(choice.index, true);
+                            tool_call_choices.insert(choice.index);
                         }
                     }
                 }
@@ -1463,7 +1464,7 @@ impl JailedStream {
                             finish_reason_seen.insert(choice.index);
                             // Only modify Stop finish reason, preserve Length/ContentFilter
                             if finish == FinishReason::Stop {
-                                let has_tool_calls = has_tool_calls_per_choice.get(&choice.index).copied().unwrap_or(false);
+                                let has_tool_calls = tool_call_choices.contains(&choice.index);
 
                                 // OpenAI spec: whenever tool_calls were emitted on this
                                 // choice, finish_reason MUST be "tool_calls" — regardless of
@@ -1506,9 +1507,13 @@ impl JailedStream {
             // never got one (skipped if the stream errored — an error frame must
             // not be followed by a clean terminal state), then flush usage chunks.
             if !error_seen {
-                for chunk in Self::synthesize_missing_tool_calls_finish(
-                    &has_tool_calls_per_choice,
-                    &mut finish_reason_seen,
+                let mut missing: Vec<u32> = tool_call_choices
+                    .difference(&finish_reason_seen)
+                    .copied()
+                    .collect();
+                missing.sort_unstable();
+                for chunk in Self::synthesize_tool_calls_finish_chunks(
+                    &missing,
                     &last_id,
                     &last_model,
                     last_created,
@@ -1522,28 +1527,17 @@ impl JailedStream {
         }
     }
 
-    /// Build synthetic `finish_reason: "tool_calls"` chunks for every choice that
-    /// emitted tool calls but never carried a non-null finish_reason. Marks the
-    /// indices as seen so callers can invoke this more than once without
-    /// duplicating chunks.
-    fn synthesize_missing_tool_calls_finish(
-        has_tool_calls_per_choice: &HashMap<u32, bool>,
-        finish_reason_seen: &mut HashSet<u32>,
+    /// Build synthetic empty-delta `finish_reason: "tool_calls"` chunks for the
+    /// given choice indices.
+    fn synthesize_tool_calls_finish_chunks(
+        indices: &[u32],
         id: &str,
         model: &str,
         created: u32,
     ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
-        let mut missing: Vec<u32> = has_tool_calls_per_choice
+        indices
             .iter()
-            .filter(|(idx, has)| **has && !finish_reason_seen.contains(idx))
-            .map(|(idx, _)| *idx)
-            .collect();
-        missing.sort_unstable();
-
-        missing
-            .into_iter()
-            .map(|index| {
-                finish_reason_seen.insert(index);
+            .map(|&index| {
                 tracing::debug!(
                     choice_index = index,
                     "Synthesizing missing finish_reason=tool_calls chunk for tool-call choice"
