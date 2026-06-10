@@ -403,6 +403,8 @@ overrides:
   # upstream sglang image alone; surfaced by the CI build's licenses stage)
   - { ecosystem: python, name: cache_dit,                       license: "Apache-2.0",   source: "vipshop/cache-dit — https://github.com/vipshop/cache-dit (Apache-2.0 badge in README)" }
   - { ecosystem: python, name: deep_ep,                         license: "MIT",          source: "DeepSeek DeepEP — https://github.com/deepseek-ai/DeepEP (MIT)" }
+  - { ecosystem: python, name: flash_mla,                       license: "MIT",          source: "DeepSeek FlashMLA — https://github.com/deepseek-ai/FlashMLA/blob/main/LICENSE (MIT, (c) 2025 DeepSeek)" }
+  - { ecosystem: python, name: flash-mla,                       license: "MIT",          source: "DeepSeek FlashMLA — https://github.com/deepseek-ai/FlashMLA/blob/main/LICENSE (MIT, (c) 2025 DeepSeek)" }
   - { ecosystem: python, name: tiktoken,                        license: "MIT",          source: "OpenAI tiktoken — https://github.com/openai/tiktoken/blob/main/LICENSE" }
   - { ecosystem: python, name: torch_memory_saver,              license: "Apache-2.0",   source: "sgl-project torch_memory_saver — Apache-2.0" }
   - { ecosystem: python, name: torchcodec,                      license: "BSD-3-Clause", source: "PyTorch torchcodec — https://github.com/pytorch/torchcodec/blob/main/LICENSE" }

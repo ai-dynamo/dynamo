@@ -8,15 +8,13 @@
 ##############################################
 FROM ${EPP_IMAGE} AS epp
 
-# Compliance pipeline needs EPP's CycloneDX Go SBOM (/sbom-go.cdx.json),
-# which is only emitted in the upstream EPP image's amd64 builder. The
-# SBOM is architecture-independent JSON, so pin a dedicated amd64 stage
-# (via the global EPP_SBOM_PLATFORM ARG declared in args.Dockerfile) and
-# have compliance.Dockerfile's licenses stage COPY from THIS stage
-# instead of `epp`. Without the pin, the arm64 sub-build of multi-arch
-# frontends fails with "/sbom-go.cdx.json: not found" because the arm64
-# EPP view doesn't carry that file.
-FROM --platform=${EPP_SBOM_PLATFORM} ${EPP_IMAGE} AS epp_sbom
+# NOTE: EPP's Go compliance SBOM (/sbom-go.cdx.json) + harvested license texts are
+# NO LONGER pulled from the EPP image here. compliance.Dockerfile's licenses stage
+# reads them from the build context (.epp-sbom/), populated by the CI EPP-build
+# step's `make sbom-export` while the build cache is warm. This replaced a fragile
+# `COPY --from=epp_sbom` that re-pulled the pushed EPP image (whose runtime layer
+# could miss the files after a BuildKit cache refresh). Only the /epp binary is
+# taken from the EPP image (below).
 
 # Build `crick` as a wheel in an isolated stage so the C toolchain never
 # reaches the final frontend image. aiperf 0.8.0 depends on crick==0.0.8,

@@ -65,16 +65,17 @@ ENV PYTHONPATH=/opt
 # creates the dir, so this COPY never fails even for wheel-less targets.
 COPY --from=wheel_builder /opt/dynamo/rust-licenses /tmp/rust-licenses
 {% if target == "frontend" %}
-# Approach A: EPP self-describes. frontend.Dockerfile pulls a dedicated
-# amd64-pinned EPP stage `epp_sbom` whose only purpose is to expose the
-# CycloneDX SBOM (emitted by cyclonedx-gomod in EPP's amd64 go-builder).
-# The arm64 EPP view doesn't carry /sbom-go.cdx.json so we MUST pull
-# from the amd64-pinned stage regardless of TARGETPLATFORM. The SBOM
-# itself is architecture-independent JSON, so this is safe.
-COPY --from=epp_sbom /sbom-go.cdx.json /tmp/sbom-go-epp.cdx.json
-# Real Go module LICENSE files harvested from EPP's go module cache, so the go
-# generator inlines upstream license text instead of canonical SPDX fallback.
-COPY --from=epp_sbom /sbom-go-licenses /tmp/go-licenses
+# EPP's Go compliance SBOM + harvested module LICENSE files, read from the build
+# CONTEXT (.epp-sbom/) rather than COPY --from the EPP image. The CI EPP-build
+# step exports them there via `make sbom-export` while the build cache is warm
+# (see deploy/inference-gateway/epp/Dockerfile sbom-export stage). This avoids
+# re-pulling the pushed EPP image — whose runtime layer could be served from a
+# stale cache and miss these files after the BuildKit builder is refreshed. The
+# SBOM is architecture-independent JSON, exported once on amd64.
+COPY .epp-sbom/sbom-go.cdx.json /tmp/sbom-go-epp.cdx.json
+# Real Go module LICENSE files so the go generator inlines upstream license text
+# instead of canonical SPDX fallback.
+COPY .epp-sbom/sbom-go-licenses /tmp/go-licenses
 {% endif %}
 
 # BASELINE_SBOM_FILE: the per-arch baseline SBOM *stem* (e.g.
@@ -87,11 +88,27 @@ COPY --from=epp_sbom /sbom-go-licenses /tmp/go-licenses
 # unfiltered).
 ARG BASELINE_SBOM_FILE="{{ compliance_baseline_sbom }}"
 ARG TARGETARCH
-RUN python3 -m compliance.generators \
-    --ecosystem python,rust,dpkg{% if target == "frontend" %},go{% endif %}{% if make_efa %},native{% endif %} \
-{% if framework == "sglang" %}    --site-packages "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
-{% else %}    --venv ${VIRTUAL_ENV} \
-{% endif %}{% if target == "frontend" %}    --go-sbom /tmp/sbom-go-epp.cdx.json \
+# Resolve where this image's Python packages live at runtime rather than per
+# framework: venv-based images export VIRTUAL_ENV (trtllm, planner, frontend,
+# vllm xpu/cpu, dev), while images that install into system Python leave it
+# unset (vllm cuda via `pip --system`, sglang via `pip --break-system-packages`).
+# Pick the matching generator flag so it always finds the deps — passing an
+# empty `--venv ${VIRTUAL_ENV}` is what broke system-Python images.
+# dpkg is scoped out for planner: it ships a distroless RUNTIME image, but its
+# licenses stage runs against the python:3.12-slim BUILD stage (pre_planner) so a
+# Python interpreter is available. Scanning that build image's full dpkg set
+# attributes ~120 OS packages that never ship in the distroless runtime (and trips
+# the policy gate on e.g. libcom-err2's GPL, which isn't redistributed). Like the
+# operator/snapshot distroless images, the runtime base OS is NGC's responsibility
+# (tracked via the baseline corpus); planner attributes only what it adds — the
+# venv (python+rust). NOTE: the few raw OS artifacts planner copies into distroless
+# (libgomp.so, etcd, nats-server, dash) are a cross-image native-attribution gap
+# tracked separately, not unique to planner.
+RUN {% if framework == "sglang" %}PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then PKG_ARG="--venv ${VIRTUAL_ENV}"; else PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
+    python3 -m compliance.generators \
+    --ecosystem python,rust{% if target != "planner" %},dpkg{% endif %}{% if target == "frontend" %},go{% endif %}{% if make_efa %},native{% endif %} \
+    ${PKG_ARG} \
+{% if target == "frontend" %}    --go-sbom /tmp/sbom-go-epp.cdx.json \
     --go-licenses-dir /tmp/go-licenses \
 {% endif %}    --rust-licenses-dir /tmp/rust-licenses \
     --output-dir /legal \
@@ -145,14 +162,14 @@ ARG ENABLE_SOURCE_ARCHIVAL=false
 ARG BASELINE_SBOM_FILE="{{ compliance_baseline_sbom }}"
 ARG TARGETARCH
 RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
+        {% if framework == "sglang" %}RUST_PKG_ARG="--rust-site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then RUST_PKG_ARG="--rust-venv ${VIRTUAL_ENV}"; else RUST_PKG_ARG="--rust-site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
         python3 -m compliance.collect_sources \
             --ecosystem dpkg --ecosystem rust --ecosystem native \
             --output-zip /sources.zip \
             --sources-root /sources \
             --native-source-dir /opt/native-sources \
-{% if framework == "sglang" %}            --rust-site-packages "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
-{% else %}            --rust-venv ${VIRTUAL_ENV} \
-{% endif %}            --rust-vendor-full /opt/dynamo-vendor-full \
+            ${RUST_PKG_ARG} \
+            --rust-vendor-full /opt/dynamo-vendor-full \
             ${BASELINE_SBOM_FILE:+--baseline-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
             -v ; \
     else \
