@@ -26,7 +26,7 @@ use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
 use dynamo_runtime::DistributedRuntime;
-use dynamo_runtime::config::env_is_truthy;
+use dynamo_runtime::config::{env_is_falsey, env_is_truthy};
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::discovery::Discovery;
 use dynamo_runtime::logging::{make_inference_request_span, make_system_request_span};
@@ -61,6 +61,11 @@ pub struct State {
     discovery_client: Arc<dyn Discovery>,
     flags: StateFlags,
     cancel_token: CancellationToken,
+    /// When false, the chat / completions / responses handlers drop
+    /// `request.nvext` at the boundary and ignore the routing-override
+    /// headers. Read once at construction from `DYN_ENABLE_NVEXT` (default
+    /// `true`); never mutated after that, so a plain `bool` suffices.
+    nvext_enabled: bool,
 }
 
 #[derive(Default, Debug)]
@@ -132,10 +137,23 @@ impl State {
         discovery_client: Arc<dyn Discovery>,
         cancel_token: CancellationToken,
     ) -> Self {
+        Self::new_with_flags(manager, discovery_client, cancel_token, true)
+    }
+
+    /// Constructor that lets the caller seed the runtime-immutable
+    /// `nvext_enabled` master switch. `State::new` defaults it to `true`
+    /// for callers that don't care.
+    pub fn new_with_flags(
+        manager: Arc<ModelManager>,
+        discovery_client: Arc<dyn Discovery>,
+        cancel_token: CancellationToken,
+        nvext_enabled: bool,
+    ) -> Self {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
             discovery_client,
+            nvext_enabled,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
@@ -171,6 +189,14 @@ impl State {
     /// Check if the service is shutting down
     pub fn is_cancelled(&self) -> bool {
         self.cancel_token.is_cancelled()
+    }
+
+    /// Whether the `nvext` extension protocol is active for this service.
+    /// `false` ⇒ chat / completions / responses handlers drop `request.nvext`
+    /// and ignore routing-override headers (`DYN_ENABLE_NVEXT=false`).
+    #[inline]
+    pub fn nvext_enabled(&self) -> bool {
+        self.nvext_enabled
     }
 
     /// Get the cancellation token
@@ -278,6 +304,20 @@ pub struct HttpServiceConfig {
     /// When true, serve the RL worker discovery API on `rl_port`.
     #[builder(default = "false")]
     enable_rl: bool,
+
+    /// Master switch for the `nvext` extension protocol. Default `true`.
+    /// Mirrored via the `DYN_ENABLE_NVEXT` env var at service-construction
+    /// time (env-falsy ⇒ disabled). When disabled, the frontend handlers
+    /// drop `request.nvext` and ignore routing-override headers.
+    #[builder(default = "true")]
+    enable_nvext: bool,
+
+    /// Master switch for the frontend's HTTP admin API surface
+    /// (`POST/GET /busy_threshold`, `POST /clear_kv_blocks`). Default `true`.
+    /// Mirrored via `DYN_ENABLE_FRONTEND_ADMIN_API`. When disabled, those
+    /// routes are not registered.
+    #[builder(default = "true")]
+    enable_admin_api: bool,
 
     /// Port for the RL worker discovery listener. Defaults to `DYN_RL_PORT` or 8001.
     #[builder(default = "default_rl_port()")]
@@ -567,7 +607,23 @@ impl HttpServiceConfigBuilder {
                 cancel_token.child_token(),
             )) as Arc<dyn Discovery>
         });
-        let state = Arc::new(State::new(model_manager, discovery_client, cancel_token));
+        // Env-var mirrors for the two master switches. Read once at
+        // service-construction time so the per-request hot path is a single
+        // struct-field load (no env::var on every request, no atomics).
+        // `enable_nvext` / `enable_admin_api` come from the builder
+        // (Python frontend_args sets them from CLI); the env vars give
+        // operators a way to flip the switch without a CLI change.
+        let nvext_enabled = config.enable_nvext
+            && !env_is_falsey(env_llm::DYN_ENABLE_NVEXT);
+        let admin_api_enabled = config.enable_admin_api
+            && !env_is_falsey(env_llm::DYN_ENABLE_FRONTEND_ADMIN_API);
+
+        let state = Arc::new(State::new_with_flags(
+            model_manager,
+            discovery_client,
+            cancel_token,
+            nvext_enabled,
+        ));
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
@@ -641,7 +697,7 @@ impl HttpServiceConfigBuilder {
         };
 
         // System routes (health, metrics, models) — debug-level spans
-        let system_routes = vec![
+        let mut system_routes = vec![
             metrics::router(
                 registry,
                 var(HTTP_SVC_METRICS_PATH_ENV).ok(),
@@ -657,8 +713,29 @@ impl HttpServiceConfigBuilder {
             },
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
-            super::busy_threshold::busy_threshold_router(state.clone(), None),
         ];
+        if admin_api_enabled {
+            // GET /busy_threshold + POST /busy_threshold are the
+            // cluster-mutating admin surface on the frontend. Gated under a
+            // single switch so operators can close off "out-of-band
+            // scheduler / worker control" without affecting inference,
+            // metrics, models, or health/liveness probes.
+            //
+            // Note: the historical `POST /clear_kv_blocks` route was removed
+            // in PR #1629 ("fix: remove http endpoint for clearing kv
+            // blocks"); the handler module is orphaned and not re-exposed
+            // here.
+            system_routes.push(super::busy_threshold::busy_threshold_router(
+                state.clone(),
+                None,
+            ));
+        } else {
+            tracing::info!(
+                "frontend admin API disabled — busy_threshold routes not \
+                 registered (DYN_ENABLE_FRONTEND_ADMIN_API=false or \
+                 builder enable_admin_api=false)"
+            );
+        }
         let mut system_router = axum::Router::new();
         for (route_docs, route) in system_routes {
             system_router = system_router.merge(route);

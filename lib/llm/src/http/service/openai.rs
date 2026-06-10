@@ -551,7 +551,16 @@ async fn handler_completions(
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.inner.model)?;
 
-    request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
+    // DYN_ENABLE_NVEXT master switch (default on). When the operator turns
+    // it off, drop any client-supplied nvext and ignore routing-override
+    // headers — closes off the entire nvext surface for default-secure
+    // deployments. Read from State (set once at service construction),
+    // so this is a single bool deref, no atomic, on the hot path.
+    if state.nvext_enabled() {
+        request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
+    } else {
+        request.nvext = None;
+    }
 
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
@@ -1142,7 +1151,16 @@ async fn handler_chat_completions(
         check_model_serving_ready(&state, resolved_model)?;
     }
 
-    request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
+    // DYN_ENABLE_NVEXT master switch (default on). When the operator turns
+    // it off, drop any client-supplied nvext and ignore routing-override
+    // headers — closes off the entire nvext surface for default-secure
+    // deployments. Read from State (set once at service construction),
+    // so this is a single bool deref, no atomic, on the hot path.
+    if state.nvext_enabled() {
+        request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
+    } else {
+        request.nvext = None;
+    }
 
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
@@ -1891,7 +1909,16 @@ async fn handler_responses(
         check_model_serving_ready(&state, resolved_model)?;
     }
 
-    request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
+    // DYN_ENABLE_NVEXT master switch (default on). When the operator turns
+    // it off, drop any client-supplied nvext and ignore routing-override
+    // headers — closes off the entire nvext surface for default-secure
+    // deployments. Read from State (set once at service construction),
+    // so this is a single bool deref, no atomic, on the hot path.
+    if state.nvext_enabled() {
+        request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
+    } else {
+        request.nvext = None;
+    }
 
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);

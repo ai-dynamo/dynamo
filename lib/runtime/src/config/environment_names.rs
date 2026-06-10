@@ -284,6 +284,35 @@ pub mod llm {
     /// Enable the experimental Anthropic Messages API endpoint (/v1/messages)
     pub const DYN_ENABLE_ANTHROPIC_API: &str = "DYN_ENABLE_ANTHROPIC_API";
 
+    /// Master switch for the `nvext` extension protocol on the frontend.
+    ///
+    /// Default `true` — preserves current behavior. When set to a falsy value
+    /// (`0` / `false` / `no` / `off`, case-insensitive), the frontend drops
+    /// `request.nvext` at handler entry and ignores the routing-override
+    /// headers (`x-worker-instance-id`, `x-prefill-instance-id`, `x-dp-rank`,
+    /// `x-prefill-dp-rank`). Response-side `extra_fields` opt-in is also
+    /// silently ignored. Useful as a default-secure stance for deployments
+    /// that do not run an EPP-fronted GAIE protocol.
+    ///
+    /// Compatibility note: disabling this breaks EPP / GAIE serving,
+    /// Prime-RL-style training that relies on `nvext.cache_salt` for KV cache
+    /// isolation, multi-tenant agent platforms that forward
+    /// `nvext.agent_hints` / `nvext.agent_context`, and clients that opt into
+    /// response disclosure via `nvext.extra_fields`.
+    pub const DYN_ENABLE_NVEXT: &str = "DYN_ENABLE_NVEXT";
+
+    /// Master switch for the frontend's HTTP admin API surface.
+    ///
+    /// Default `true` — preserves current behavior. When set to a falsy value,
+    /// the frontend does not register routes that mutate or read worker /
+    /// scheduler state from outside the request plane:
+    /// - `POST /busy_threshold` (set busy thresholds on workers)
+    /// - `GET  /busy_threshold` (read current busy thresholds)
+    /// - `POST /clear_kv_blocks` (clear all KV cache blocks on workers)
+    ///
+    /// Inference, metrics, models, health, and liveness routes are unaffected.
+    pub const DYN_ENABLE_FRONTEND_ADMIN_API: &str = "DYN_ENABLE_FRONTEND_ADMIN_API";
+
     /// Strip the Claude Code billing preamble (`x-anthropic-billing-header: ...`)
     /// from the system prompt before forwarding to the target model. The preamble
     /// varies per session and per release, wasting tokens and breaking prompt caching.
