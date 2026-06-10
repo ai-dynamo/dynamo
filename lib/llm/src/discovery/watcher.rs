@@ -993,9 +993,12 @@ impl ModelWatcher {
                             self.metrics.clone(),
                         )
                         .context("PreprocessedRouting::build_preprocessed_pipeline")?;
-                    factory(mcid.clone(), card.clone(), routed_engine)
+                    let engine = factory(mcid.clone(), card.clone(), routed_engine)
                         .await
-                        .context("python chat_engine_factory")?
+                        .context("python chat_engine_factory")?;
+                    // Wrap the python chat engine so audit records are captured
+                    // on the chat-completions path (no-op when audit is disabled).
+                    crate::audit::engine_wrap::wrap_chat_engine(engine)
                 } else {
                     let tk = tokenizer.clone().ok_or_else(|| {
                         anyhow::anyhow!(

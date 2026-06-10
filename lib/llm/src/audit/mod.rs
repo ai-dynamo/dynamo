@@ -3,7 +3,9 @@
 
 pub mod bus;
 pub mod config;
+pub mod engine_wrap;
 pub mod handle;
+pub mod otel_sink;
 pub mod sink;
 pub mod stream;
 
@@ -18,11 +20,14 @@ pub async fn init_from_env() -> anyhow::Result<()> {
 pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow::Result<()> {
     let policy = policy();
     if !policy.enabled {
+        config::mark_capture_inactive();
         return Ok(());
     }
 
+    config::mark_capture_inactive();
     bus::init(policy.capacity);
     sink::spawn_workers_from_env(shutdown).await?;
+    config::mark_capture_active();
 
     tracing::info!(capacity = policy.capacity, "Audit initialized");
     Ok(())

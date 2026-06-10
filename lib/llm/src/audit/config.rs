@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use dynamo_runtime::config::environment_names::llm::audit as env_audit;
 
@@ -11,6 +12,11 @@ const DEFAULT_CAPACITY: usize = 1024;
 const DEFAULT_JSONL_BUFFER_BYTES: usize = 1024 * 1024;
 const DEFAULT_JSONL_FLUSH_INTERVAL_MS: u64 = 1000;
 const DEFAULT_JSONL_GZ_ROLL_BYTES: u64 = 256 * 1024 * 1024;
+const DEFAULT_OTEL_MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+
+const CAPTURE_UNINITIALIZED: u8 = 0;
+const CAPTURE_ACTIVE: u8 = 1;
+const CAPTURE_INACTIVE: u8 = 2;
 
 #[derive(Clone, Debug)]
 pub struct AuditPolicy {
@@ -23,9 +29,11 @@ pub struct AuditPolicy {
     pub jsonl_flush_interval_ms: u64,
     pub jsonl_gz_roll_bytes: u64,
     pub jsonl_gz_roll_lines: Option<u64>,
+    pub otel_max_payload_bytes: usize,
 }
 
 static POLICY: OnceLock<AuditPolicy> = OnceLock::new();
+static CAPTURE_STATE: AtomicU8 = AtomicU8::new(CAPTURE_UNINITIALIZED);
 
 /// Audit is enabled if we have at least one sink
 fn load_from_env() -> AuditPolicy {
@@ -59,6 +67,11 @@ fn load_from_env() -> AuditPolicy {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|v| *v > 0);
+    let otel_max_payload_bytes = std::env::var(env_audit::DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_OTEL_MAX_PAYLOAD_BYTES);
 
     AuditPolicy {
         enabled: !sinks.is_empty(),
@@ -73,9 +86,37 @@ fn load_from_env() -> AuditPolicy {
         jsonl_flush_interval_ms,
         jsonl_gz_roll_bytes,
         jsonl_gz_roll_lines,
+        otel_max_payload_bytes,
     }
 }
 
 pub fn policy() -> &'static AuditPolicy {
     POLICY.get_or_init(load_from_env)
+}
+
+pub(crate) fn mark_capture_active() {
+    CAPTURE_STATE.store(CAPTURE_ACTIVE, Ordering::Release);
+}
+
+pub(crate) fn mark_capture_inactive() {
+    CAPTURE_STATE.store(CAPTURE_INACTIVE, Ordering::Release);
+}
+
+pub fn capture_enabled() -> bool {
+    // Require the explicit ACTIVE transition so that publishes happening before
+    // `init_from_env_with_shutdown` finishes — i.e. while the bus is still
+    // uninitialized — are skipped at the `create_handle` gate rather than
+    // silently dropped at `bus::publish`. Pre-init `create_handle` calls used
+    // to succeed and then lose their record on publish; with the request-side
+    // emit now firing synchronously at preprocessor entry, that race window is
+    // worth closing.
+    let policy = policy();
+    policy.enabled && CAPTURE_STATE.load(Ordering::Acquire) == CAPTURE_ACTIVE
+}
+
+pub fn otel_sink_capture_enabled() -> bool {
+    let policy = policy();
+    policy.enabled
+        && CAPTURE_STATE.load(Ordering::Acquire) == CAPTURE_ACTIVE
+        && policy.sinks.iter().any(|sink| sink == "otel")
 }
