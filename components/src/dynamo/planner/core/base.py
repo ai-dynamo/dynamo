@@ -813,7 +813,7 @@ class NativePlannerBase:
             # a cheap kv-hit-rate-only scrape (over the load interval) on
             # each load tick so the planner can still discount prefill work
             # by recent prefix reuse.
-            if tick.run_throughput_scaling:
+            if tick.use_full_traffic_metrics:
                 traffic = await self._collect_traffic()
             else:
                 traffic = await self._collect_kv_hit_rate_observation(
@@ -968,6 +968,25 @@ class NativePlannerBase:
                 diag.throughput_decision_reason or "unset"
             )
 
+    @staticmethod
+    def _should_emit_tick_diagnostics(
+        tick: ScheduledTick, effects: PlannerEffects
+    ) -> bool:
+        """Return True for ticks that should affect operator diagnostics.
+
+        The plugin pipeline may run more frequently than the legacy load /
+        throughput loops.  No-op pipeline ticks should not overwrite
+        Prometheus gauges, add blank report rows, or spam summary logs.
+        """
+        diag = effects.diagnostics
+        return (
+            tick.run_load_scaling
+            or tick.run_throughput_scaling
+            or effects.scale_to is not None
+            or bool(diag.audit_events)
+            or bool(diag.short_circuit_reason)
+        )
+
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
@@ -996,10 +1015,14 @@ class NativePlannerBase:
                 # Drive ticks through the builtin orchestrator EngineProtocol.
                 effects = await engine.tick(next_tick, tick_input)
                 await self._apply_effects(effects)
-                self._report_diagnostics(next_tick, effects.diagnostics)
-                self._log_decision_summary(effects)
+                emit_diagnostics = self._should_emit_tick_diagnostics(
+                    next_tick, effects
+                )
+                if emit_diagnostics:
+                    self._report_diagnostics(next_tick, effects.diagnostics)
+                    self._log_decision_summary(effects)
 
-                if self._recorder.enabled:
+                if self._recorder.enabled and emit_diagnostics:
                     try:
                         self._recorder.record(
                             tick_input,

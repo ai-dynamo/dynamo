@@ -143,10 +143,13 @@ async def chain_augment(
     prediction: Optional[PredictionData] = None
     final_from = ""
     chain_break_warnings: list[str] = []
+    reasons: list[str] = []
 
     for p in chain:
         ctx = initial_context.model_copy(update={"predictions": prediction})
         resp = await p.call("Predict", ctx)
+        if resp.reason:
+            reasons.append(resp.reason)
         if resp.predictions is not None:
             prediction = _partial_merge(prediction, resp.predictions)
         if resp.final:
@@ -173,6 +176,7 @@ async def chain_augment(
         final_from=final_from,
         degraded=[],
         chain_break_warnings=chain_break_warnings,
+        reasons=reasons,
     )
 
 

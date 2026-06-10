@@ -35,6 +35,10 @@ class ScheduledTick:
 
     # What data the adapter should collect before calling on_tick
     need_traffic_metrics: bool = False
+    # True requests the full throughput traffic snapshot; False with
+    # need_traffic_metrics=True requests the cheaper load-only
+    # kv-hit-rate observation.
+    use_full_traffic_metrics: bool = False
     traffic_metrics_duration_s: float = 0.0
     need_worker_states: bool = False
     need_worker_fpm: bool = False

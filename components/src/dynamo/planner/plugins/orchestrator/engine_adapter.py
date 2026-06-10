@@ -38,10 +38,10 @@ Internal responsibilities
    External plugins declaring ``needs=["observations.fpm"]`` receive
    the FPM map; an empty/absent submap means "no FPM this tick".
 3. **FPM regression observation**:
-   Before the orchestrator tick, feeds FPM into the shared scaling-state
-   regression models. This is a
-   planner-internal regression-fit path, distinct from delivering FPM
-   to plugins.
+   Before legacy load-loop ticks, feeds FPM into the shared scaling-state
+   regression models. This is a planner-internal regression-fit path,
+   distinct from delivering FPM to plugins that request
+   ``observations.fpm``.
 4. **PipelineOutcome → PlannerEffects projection**:
    Reads the orchestrator's ``final_proposal.targets``, detects "no
    change" against ``worker_counts``, applies final min_endpoint / GPU
@@ -166,7 +166,8 @@ class OrchestratorEngineAdapter:
         # ``tick_input.now_s`` at the top of ``tick()``.
         self._last_tick_s: float = 0.0
         self._last_tick_monotonic: float = 0.0
-        self._last_fpm_observation_monotonic: float = 0.0
+        self._last_load_loop_monotonic: float = 0.0
+        self._last_throughput_loop_monotonic: float = 0.0
 
         # Plugin-framework metrics live alongside the adapter so they
         # share the orchestrator's lifecycle.  Use the default global
@@ -503,7 +504,8 @@ class OrchestratorEngineAdapter:
         """
         self._last_tick_s = start_s
         self._last_tick_monotonic = self._clock.monotonic()
-        self._last_fpm_observation_monotonic = self._last_tick_monotonic
+        self._last_load_loop_monotonic = self._last_tick_monotonic
+        self._last_throughput_loop_monotonic = self._last_tick_monotonic
         for plugin in self._orchestrator._registry.all_plugins():
             if plugin.is_builtin and plugin.last_call_at == float("-inf"):
                 plugin.registered_at = self._last_tick_monotonic
@@ -543,13 +545,11 @@ class OrchestratorEngineAdapter:
         #    the fitted perf models.
         is_easy = self._config.optimization_target != "sla"
         if (
-            scheduled_tick.need_worker_fpm
+            scheduled_tick.run_load_scaling
             and not is_easy
             and tick_input.fpm_observations is not None
         ):
             self._scaling_state.observe_fpm(tick_input.fpm_observations)
-        if scheduled_tick.need_worker_fpm:
-            self._last_fpm_observation_monotonic = self._clock.monotonic()
 
         # 2. Advance the scale_interval cadence pointer. Under the
         #    model there is one base interval; pipeline tick fires every
@@ -563,6 +563,10 @@ class OrchestratorEngineAdapter:
         # wall-clock deployments see the
         # boot-relative value that plugin ``last_call_at`` is recorded in.
         self._last_tick_monotonic = self._clock.monotonic()
+        if scheduled_tick.run_load_scaling:
+            self._last_load_loop_monotonic = self._last_tick_monotonic
+        if scheduled_tick.run_throughput_scaling:
+            self._last_throughput_loop_monotonic = self._last_tick_monotonic
 
         # 3. Build PipelineContext + baseline and drive the orchestrator.
         ctx = self._tick_input_to_context(tick_input)
@@ -586,6 +590,19 @@ class OrchestratorEngineAdapter:
             diagnostics.predicted_isl = p.predicted_isl
             diagnostics.predicted_osl = p.predicted_osl
             diagnostics.predicted_kv_hit_rate = p.predicted_kv_hit_rate
+        elif (
+            scheduled_tick.run_throughput_scaling
+            and outcome.predict_outcome is not None
+            and diagnostics.throughput_decision_reason is None
+        ):
+            reasons = outcome.predict_outcome.reasons
+            if "predict_failed" in reasons:
+                diagnostics.throughput_decision_reason = "predict_failed"
+            elif "no_traffic_data" in reasons:
+                diagnostics.throughput_decision_reason = "no_traffic_data"
+
+        if scheduled_tick.run_load_scaling and not self._config.enable_load_scaling:
+            diagnostics.load_decision_reason = "disabled"
 
         # Surface pipeline execute_action / short_circuit_reason /
         # audit_events.  Same data is emitted as Prometheus
@@ -773,6 +790,19 @@ class OrchestratorEngineAdapter:
         # ``RegisteredPlugin.last_call_at`` lives in — NOT wall-epoch.
         # ``at_s`` (wall-epoch) is for ``ScheduledTick.at_s`` only.
         at_monotonic = self._last_tick_monotonic + self._scale_interval
+        load_loop_due = self._interval_due(
+            self._last_load_loop_monotonic,
+            float(self._config.load_adjustment_interval_seconds),
+            at_monotonic,
+        )
+        throughput_loop_due = (
+            self._config.enable_throughput_scaling
+            and self._interval_due(
+                self._last_throughput_loop_monotonic,
+                float(self._config.throughput_adjustment_interval_seconds),
+                at_monotonic,
+            )
+        )
 
         # Lazy traffic pull: only when some currently-registered,
         # currently-due plugin actually consumes
@@ -801,6 +831,13 @@ class OrchestratorEngineAdapter:
         traffic_consumers_due = due_consumers("observations.traffic")
         if traffic_consumers_due:
             need_traffic = True
+            use_full_traffic = any(
+                not (
+                    p.plugin_id == "builtin_load_propose"
+                    and not self._config.enable_throughput_scaling
+                )
+                for p in traffic_consumers_due
+            )
             # Aggregation window: max declared
             # ``observation_window_seconds`` across due consumers.
             # Declared 0.0 means "scale_interval freshness" — i.e. the
@@ -816,32 +853,31 @@ class OrchestratorEngineAdapter:
             )
         else:
             need_traffic = False
+            use_full_traffic = False
             traffic_duration_s = 0.0
 
         fpm_consumers_due = due_consumers("observations.fpm")
-        internal_fpm_due = (
-            self._config.optimization_target == "sla"
-            and (
-                at_monotonic - self._last_fpm_observation_monotonic
-                >= float(self._config.load_adjustment_interval_seconds)
-            )
-        )
+        internal_fpm_due = self._config.optimization_target == "sla" and load_loop_due
 
         # ``run_load_scaling`` / ``run_throughput_scaling`` flags are
-        # preserved on ScheduledTick for back-compat and input collection.
-        # The pipeline still fires every scale_interval; these flags only
-        # decide how the adapter gathers observations. In particular,
-        # load-only SLA planners must keep using the cheap KV-hit-rate /
-        # accept-length scrape instead of the full throughput scrape.
+        # preserved on ScheduledTick for back-compat observability: they
+        # mean the corresponding legacy builtin loop is due on this tick,
+        # not merely that the plugin pipeline fired.  Input collection is
+        # described by the separate need_* fields below.
         return ScheduledTick(
             at_s=at_s,
-            run_load_scaling=True,
-            run_throughput_scaling=self._config.enable_throughput_scaling,
+            run_load_scaling=load_loop_due,
+            run_throughput_scaling=throughput_loop_due,
             need_worker_states=True,
             need_worker_fpm=bool(fpm_consumers_due) or internal_fpm_due,
             need_traffic_metrics=need_traffic,
+            use_full_traffic_metrics=use_full_traffic,
             traffic_metrics_duration_s=traffic_duration_s,
         )
+
+    @staticmethod
+    def _interval_due(last_s: float, interval_s: float, at_s: float) -> bool:
+        return at_s - last_s >= interval_s - 1e-9
 
     def _observe_fpm(self, obs: FpmObservations) -> None:
         """Mirror ``PlannerScalingState._observe_fpm`` — feeds observations

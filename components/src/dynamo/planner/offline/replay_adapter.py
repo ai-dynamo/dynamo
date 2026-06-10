@@ -245,11 +245,17 @@ class ReplayPlannerAdapter:
                 effects: PlannerEffects = self._run_sync(
                     self._engine.tick(next_tick, tick_input)
                 )
-                diagnostics_log.append(effects.diagnostics)
+                emit_diagnostics = self._should_emit_tick_diagnostics(
+                    next_tick, effects
+                )
+                if emit_diagnostics:
+                    diagnostics_log.append(effects.diagnostics)
                 total_ticks += 1
 
                 # Update GPU-hours and record diagnostics snapshot
-                self._record_diagnostics(tick_input, effects, result)
+                self._record_diagnostics(
+                    tick_input, effects, result, emit_diagnostics
+                )
 
                 # Clear scaling targets once active counts match
                 active_p = result["active_prefill_count"]
@@ -293,6 +299,7 @@ class ReplayPlannerAdapter:
         tick_input: TickInput,
         effects: PlannerEffects,
         result: dict[str, Any],
+        emit_diagnostics: bool,
     ) -> None:
         """Update GPU-hours tracking and feed the diagnostics recorder."""
         if not self._recorder.enabled:
@@ -308,11 +315,27 @@ class ReplayPlannerAdapter:
             self._cumulative_gpu_hours += (num_p * gpu_p + num_d * gpu_d) * dt_h
         self._last_tick_s = now_s
 
+        if not emit_diagnostics:
+            return
+
         self._recorder.record(
             tick_input,
             effects,
             self._last_traffic,
             self._cumulative_gpu_hours,
+        )
+
+    @staticmethod
+    def _should_emit_tick_diagnostics(
+        tick: ScheduledTick, effects: PlannerEffects
+    ) -> bool:
+        diag = effects.diagnostics
+        return (
+            tick.run_load_scaling
+            or tick.run_throughput_scaling
+            or effects.scale_to is not None
+            or bool(diag.audit_events)
+            or bool(diag.short_circuit_reason)
         )
 
     def _apply_scaling(
