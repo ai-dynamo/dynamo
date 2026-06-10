@@ -27,9 +27,14 @@ from dynamo.llm import (
 from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig
-from dynamo.sglang.capacity import model_card_dp_rank_bounds, runtime_capacity
+from dynamo.sglang.capacity import (
+    get_spec_decode_runtime_data,
+    model_card_dp_rank_bounds,
+    runtime_capacity,
+)
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
+SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 
 
 def _build_media_decoder_and_fetcher():
@@ -339,6 +344,22 @@ async def _get_runtime_config(
 
     if server_args.speculative_algorithm in ("EAGLE", "NEXTN"):
         runtime_config.enable_eagle = True
+
+    spec_decode_runtime_data = get_spec_decode_runtime_data(server_args)
+    if spec_decode_runtime_data is not None:
+        try:
+            runtime_config.set_engine_specific(
+                SPEC_DECODE_RUNTIME_KEY,
+                json.dumps(spec_decode_runtime_data),
+            )
+            logging.info(
+                "Published SGLang spec decode runtime metadata: %s",
+                spec_decode_runtime_data,
+            )
+        except Exception as e:
+            logging.warning(
+                f"Failed to attach SGLang spec decode runtime metadata: {e}"
+            )
 
     mooncake_runtime_data = _get_mooncake_runtime_data(server_args)
     if mooncake_runtime_data is not None:

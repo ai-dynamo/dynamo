@@ -107,6 +107,37 @@ class TestWorkerInfoFromMdc:
         assert info.kv_cache_block_size == 16
         assert info.context_length == 8192
 
+    def test_runtime_data_spec_decode_nextn_populates_worker_info(self):
+        entry = MdcEntry(
+            card_json=_card(
+                runtime_data={
+                    "spec_decode": {
+                        "nextn": 2,
+                        "method": "eagle3",
+                        "source": "backend_config",
+                    }
+                }
+            ),
+            component="backend",
+            endpoint="generate",
+        )
+        info = worker_info_from_mdc(entry, SubComponentType.DECODE, backend="vllm")
+        assert info.speculative_nextn == 2
+
+    @pytest.mark.parametrize(
+        "runtime_data",
+        [
+            {},
+            {"spec_decode": {}},
+            {"spec_decode": {"nextn": 0}},
+            {"spec_decode": {"nextn": "bad"}},
+        ],
+    )
+    def test_invalid_spec_decode_nextn_is_ignored(self, runtime_data):
+        entry = MdcEntry(card_json=_card(runtime_data=runtime_data))
+        info = worker_info_from_mdc(entry, SubComponentType.DECODE, backend="vllm")
+        assert info.speculative_nextn is None
+
     def test_missing_wrapper_fields_fall_back_to_defaults(self):
         entry = MdcEntry(card_json=_card())
         info = worker_info_from_mdc(entry, SubComponentType.DECODE, backend="vllm")

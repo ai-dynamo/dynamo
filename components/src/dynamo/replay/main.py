@@ -237,6 +237,7 @@ def _engine_caps(args: MockEngineArgs) -> EngineCapabilities:
         max_num_seqs=args.max_num_seqs,
         context_length=max_kv_tokens if max_kv_tokens > 0 else None,
         max_kv_tokens=max_kv_tokens if max_kv_tokens > 0 else None,
+        speculative_nextn=args.aic_nextn,
     )
 
 
@@ -603,7 +604,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--planner-config",
-        help="path to planner config YAML/JSON or inline JSON; enables planner-in-the-loop replay (offline agg only)",
+        help="path to planner config YAML/JSON or inline JSON; enables planner-in-the-loop replay (offline agg/disagg)",
     )
     parser.add_argument(
         "--benchmark-granularity",

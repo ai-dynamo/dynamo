@@ -119,6 +119,11 @@ impl ActiveSequence {
         self.tokens.total_tokens() == 0
     }
 
+    /// Current known sequence footprint in blocks: prompt plus generated tokens.
+    pub(crate) fn current_known_blocks(&self) -> usize {
+        self.len().div_ceil(self.block_size)
+    }
+
     /// To-completion footprint in blocks: `ceil((prompt + max_output) / block_size)`.
     ///
     /// The full physical residency a request needs to run end to end, with no

@@ -992,12 +992,13 @@ spec:
                             type: boolean
                           identity:
                             description: |-
-                              Deprecated: Identity is ignored by DGD-managed automatic checkpoints.
-                              Automatic checkpoints are scoped to the owning DGD/component generation and
-                              are never reused across DGDs.
+                              Deprecated: omit for DGD-managed checkpoints; no action is needed.
+                              Use CheckpointRef to restore an existing checkpoint.
                             properties:
                               backendFramework:
-                                description: BackendFramework is the runtime framework (vllm, sglang, trtllm)
+                                description: |-
+                                  BackendFramework is the runtime framework (vllm, sglang, trtllm)
+                                  Deprecated: legacy spec.identity only.
                                 enum:
                                   - vllm
                                   - sglang
@@ -1006,14 +1007,12 @@ spec:
                               dtype:
                                 description: |-
                                   Dtype is the data type (fp16, bf16, fp8, etc.).
-                                  Deprecated for DGD-managed automatic checkpoints; it only participates in
-                                  the legacy identity hash fallback for standalone objects.
+                                  Deprecated: legacy spec.identity only.
                                 type: string
                               dynamoVersion:
                                 description: |-
                                   DynamoVersion is the Dynamo platform version (optional).
-                                  Deprecated for DGD-managed automatic checkpoints; it only participates in
-                                  the legacy identity hash fallback for standalone objects.
+                                  Deprecated: legacy spec.identity only.
                                 type: string
                               extraParameters:
                                 additionalProperties:
@@ -1021,26 +1020,25 @@ spec:
                                 description: |-
                                   ExtraParameters are additional parameters that affect the checkpoint hash.
                                   Use for any framework-specific or custom parameters not covered above.
-                                  Deprecated for DGD-managed automatic checkpoints; it only participates in
-                                  the legacy identity hash fallback for standalone objects.
+                                  Deprecated: legacy spec.identity only.
                                 type: object
                               maxModelLen:
                                 description: |-
                                   MaxModelLen is the maximum sequence length.
-                                  Deprecated for DGD-managed automatic checkpoints; it only participates in
-                                  the legacy identity hash fallback for standalone objects.
+                                  Deprecated: legacy spec.identity only.
                                 format: int32
                                 minimum: 1
                                 type: integer
                               model:
-                                description: Model is the model identifier (e.g., "meta-llama/Llama-3-70B")
+                                description: |-
+                                  Model is the model identifier (e.g., "meta-llama/Llama-3-70B")
+                                  Deprecated: legacy spec.identity only.
                                 type: string
                               pipelineParallelSize:
                                 default: 1
                                 description: |-
                                   PipelineParallelSize is the pipeline parallel configuration.
-                                  Deprecated for DGD-managed automatic checkpoints; it only participates in
-                                  the legacy identity hash fallback for standalone objects.
+                                  Deprecated: checkpoint launch uses the pod template instead.
                                 format: int32
                                 minimum: 1
                                 type: integer
@@ -1048,8 +1046,7 @@ spec:
                                 default: 1
                                 description: |-
                                   TensorParallelSize is the tensor parallel configuration.
-                                  Deprecated for DGD-managed automatic checkpoints; it only participates in
-                                  the legacy identity hash fallback for standalone objects.
+                                  Deprecated: checkpoint launch uses the pod template instead.
                                 format: int32
                                 minimum: 1
                                 type: integer
@@ -1058,7 +1055,7 @@ spec:
                               - model
                             type: object
                           job:
-                            description: Job customizes the checkpoint Job that is created in Auto mode.
+                            description: Job customizes the DGD-managed checkpoint Job.
                             properties:
                               gmsClientContainers:
                                 description: |-
@@ -1080,11 +1077,10 @@ spec:
                                 x-kubernetes-preserve-unknown-fields: true
                             type: object
                           mode:
-                            default: Auto
                             description: |-
-                              Mode defines how checkpoint creation is handled
-                              - Auto: DGD controller creates Checkpoint CR automatically
-                              - Manual: User must create Checkpoint CR
+                              Deprecated: omit mode. Use enabled=true without checkpointRef for a
+                              DGD-managed automatic checkpoint, or use checkpointRef to restore the
+                              named checkpoint.
                             enum:
                               - Auto
                               - Manual
@@ -1113,8 +1109,6 @@ spec:
                         x-kubernetes-validations:
                           - message: checkpoint.job cannot be set when checkpointRef is specified
                             rule: '!has(self.job) || !has(self.checkpointRef) || size(self.checkpointRef) == 0'
-                          - message: checkpoint.job can only be set in Auto mode
-                            rule: '!has(self.job) || !has(self.mode) || self.mode == ''Auto'''
                       componentType:
                         description: ComponentType indicates the role of this component (for example, "main").
                         type: string
@@ -12268,11 +12262,13 @@ spec:
                           checkpoint:
                             description: |-
                               checkpoint configures container-image snapshotting and restore for
-                              this component. When set, the DGD controller can produce a DGD-scoped
-                              DynamoCheckpoint CR and later restore pods in the same DGD generation
-                              from that checkpoint for faster cold start. The user-facing shape of
-                              this field is still settling, which is why it lives under `experimental`
-                              in v1beta1 instead of at the top level.
+                              this component. Set `checkpoint.enabled: true` to opt in. Without
+                              checkpointRef, the DGD controller creates a DGD-scoped DynamoCheckpoint
+                              CR and later restores pods in the same DGD generation from that
+                              checkpoint. With checkpointRef, the DGD restores from that existing
+                              checkpoint instead. The user-facing shape of this field is still settling,
+                              which is why it lives under `experimental` in v1beta1 instead of at the
+                              top level.
                             properties:
                               checkpointRef:
                                 description: |-
@@ -12290,14 +12286,22 @@ spec:
                                   - Delete
                                   - Retain
                                 type: string
+                              enabled:
+                                description: |-
+                                  enabled indicates whether checkpointing is enabled for this component.
+                                  When true, omit checkpointRef for a DGD-managed automatic checkpoint or
+                                  set checkpointRef to restore an existing checkpoint. Omit the checkpoint
+                                  block, or set enabled=false, to disable checkpointing.
+                                type: boolean
                               identity:
                                 description: |-
-                                  Deprecated: identity is ignored by DGD-managed automatic checkpoints.
-                                  Automatic checkpoints are scoped to the owning DGD/component generation and
-                                  are never reused across DGDs.
+                                  Deprecated: omit for DGD-managed checkpoints; no action is needed.
+                                  Use checkpointRef to restore an existing checkpoint.
                                 properties:
                                   backendFramework:
-                                    description: backendFramework is the runtime framework (`vllm`, `sglang`, `trtllm`).
+                                    description: |-
+                                      backendFramework is the runtime framework (`vllm`, `sglang`, `trtllm`).
+                                      Deprecated: legacy identity only.
                                     enum:
                                       - vllm
                                       - sglang
@@ -12306,41 +12310,38 @@ spec:
                                   dtype:
                                     description: |-
                                       dtype is the data type (`fp16`, `bf16`, `fp8`, etc.).
-                                      Deprecated for DGD-managed automatic checkpoints; it only participates in
-                                      the legacy identity hash fallback for standalone objects.
+                                      Deprecated: legacy identity only.
                                     type: string
                                   dynamoVersion:
                                     description: |-
-                                      dynamoVersion is the Dynamo platform version. Deprecated for DGD-managed
-                                      automatic checkpoints; it only participates in the legacy identity hash
-                                      fallback for standalone objects.
+                                      dynamoVersion is the Dynamo platform version.
+                                      Deprecated: legacy identity only.
                                     type: string
                                   extraParameters:
                                     additionalProperties:
                                       type: string
                                     description: |-
                                       extraParameters are additional parameters that affect the checkpoint hash.
-                                      Deprecated for DGD-managed automatic checkpoints; it only participates in
-                                      the legacy identity hash fallback for standalone objects.
+                                      Deprecated: legacy identity only.
                                     type: object
                                   maxModelLen:
                                     description: |-
                                       maxModelLen is the maximum sequence length.
-                                      Deprecated for DGD-managed automatic checkpoints; it only participates in
-                                      the legacy identity hash fallback for standalone objects.
+                                      Deprecated: legacy identity only.
                                     format: int32
                                     minimum: 1
                                     type: integer
                                   model:
-                                    description: model is the model identifier (e.g. "meta-llama/Llama-3-70B").
+                                    description: |-
+                                      model is the model identifier (e.g. "meta-llama/Llama-3-70B").
+                                      Deprecated: legacy identity only.
                                     minLength: 1
                                     type: string
                                   pipelineParallelSize:
                                     default: 1
                                     description: |-
                                       pipelineParallelSize is the pipeline parallel configuration.
-                                      Deprecated for DGD-managed automatic checkpoints; it only participates in
-                                      the legacy identity hash fallback for standalone objects.
+                                      Deprecated: checkpoint launch uses the pod template instead.
                                     format: int32
                                     minimum: 1
                                     type: integer
@@ -12348,8 +12349,7 @@ spec:
                                     default: 1
                                     description: |-
                                       tensorParallelSize is the tensor parallel configuration.
-                                      Deprecated for DGD-managed automatic checkpoints; it only participates in
-                                      the legacy identity hash fallback for standalone objects.
+                                      Deprecated: checkpoint launch uses the pod template instead.
                                     format: int32
                                     minimum: 1
                                     type: integer
@@ -12358,7 +12358,7 @@ spec:
                                   - model
                                 type: object
                               job:
-                                description: job customizes the checkpoint Job that is created in Auto mode.
+                                description: job customizes the DGD-managed checkpoint Job.
                                 properties:
                                   gmsClientContainers:
                                     description: |-
@@ -12380,11 +12380,10 @@ spec:
                                     x-kubernetes-preserve-unknown-fields: true
                                 type: object
                               mode:
-                                default: Auto
                                 description: |-
-                                  mode defines how checkpoint creation is handled.
-                                  `Auto`: DGD controller creates the DynamoCheckpoint CR automatically.
-                                  `Manual`: user must create the DynamoCheckpoint CR.
+                                  Deprecated: omit mode. Use enabled=true without checkpointRef for a
+                                  DGD-managed automatic checkpoint, or use checkpointRef to restore the
+                                  named checkpoint.
                                 enum:
                                   - Auto
                                   - Manual
@@ -12409,12 +12408,12 @@ spec:
                                 minLength: 1
                                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                                 type: string
+                            required:
+                              - enabled
                             type: object
                             x-kubernetes-validations:
                               - message: checkpoint.job cannot be set when checkpointRef is specified
                                 rule: '!has(self.job) || !has(self.checkpointRef) || size(self.checkpointRef) == 0'
-                              - message: checkpoint.job can only be set in Auto mode
-                                rule: '!has(self.job) || !has(self.mode) || self.mode == ''Auto'''
                           failover:
                             description: |-
                               failover configures active-passive GPU failover for this component.

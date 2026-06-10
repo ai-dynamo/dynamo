@@ -17,7 +17,7 @@ spec:
                   nvidia.com/dynamo-graph-deployment-name: vllm-disagg
               topologyKey: topology.kubernetes.io/zone
         containers:
-        - image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1
+        - image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.0
           name: main
     replicas: 1
     type: frontend
@@ -49,7 +49,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-efa-amd64
           name: main
           resources:
             limits:
@@ -97,7 +97,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-efa-amd64
           name: main
           resources:
             limits:

@@ -2568,6 +2568,7 @@ class KvRouter:
         multi_modal_data: Optional[JsonLike] = None,
         mm_routing_info: Optional[JsonLike] = None,
         routing_constraints: Optional[RoutingConstraints] = None,
+        response_buffer_size: int = 100,
     ) -> AsyncIterator[JsonLike]:
         """
         Generate text using the KV-aware router.
@@ -2597,6 +2598,9 @@ class KvRouter:
                             (e.g., {"routing_token_ids": [...], "block_mm_infos": [...]})
                             used by router selection without changing execution token_ids.
             routing_constraints: Optional request routing constraints used to constrain or prefer tainted workers.
+            response_buffer_size: Maximum number of responses buffered by the Python
+                                  adapter. Set to 0 for demand-driven direct Python
+                                  consumption; negative values are rejected.
 
         Returns:
             An async iterator yielding generation responses
@@ -2613,11 +2617,14 @@ class KvRouter:
     async def generate_from_request(
         self,
         request: JsonLike,
+        response_buffer_size: int = 100,
     ) -> AsyncIterator[JsonLike]:
         """
         Generate from a preprocessed request dict (PreprocessedRequest format).
 
         Accepts a full request dict with token_ids, model, stop_conditions, etc.
+        Set response_buffer_size to 0 for demand-driven direct Python consumption;
+        negative values are rejected.
         Returns an async iterator yielding generation responses.
         """
         ...

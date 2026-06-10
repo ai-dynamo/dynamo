@@ -93,6 +93,22 @@ def select_entry(
     return None
 
 
+def _parse_speculative_nextn(runtime_cfg: dict) -> Optional[int]:
+    runtime_data = runtime_cfg.get("runtime_data")
+    if not isinstance(runtime_data, dict):
+        return None
+
+    spec_decode = runtime_data.get("spec_decode")
+    if not isinstance(spec_decode, dict):
+        return None
+
+    try:
+        nextn = int(spec_decode.get("nextn", 0))
+    except (TypeError, ValueError):
+        return None
+    return nextn if nextn > 0 else None
+
+
 def worker_info_from_mdc(
     entry: MdcEntry,
     sub_component_type: SubComponentType,
@@ -139,4 +155,5 @@ def worker_info_from_mdc(
         max_num_seqs=runtime_cfg.get("max_num_seqs"),
         max_num_batched_tokens=runtime_cfg.get("max_num_batched_tokens"),
         context_length=context_length,
+        speculative_nextn=_parse_speculative_nextn(runtime_cfg),
     )
