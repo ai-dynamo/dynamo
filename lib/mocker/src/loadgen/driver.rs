@@ -634,6 +634,23 @@ mod tests {
         }
     }
 
+    /// A: 2 turns (turn-1 has a 5ms think-time). B, C: 1 turn each. Used for the cap>1
+    /// transition / cancellation tests (w/ a third session pending behind a cap of 2).
+    fn three_session_trace() -> Trace {
+        let mut trace = two_session_trace();
+        trace.sessions.push(SessionTrace {
+            session_id: "c".into(),
+            first_arrival_timestamp_ms: Some(0.0),
+            turns: vec![TurnTrace {
+                input_length: 2,
+                max_output_tokens: 1,
+                hash_ids: vec![7, 8],
+                delay_after_previous_ms: 0.0,
+            }],
+        });
+        trace
+    }
+
     #[test]
     fn cap_clamps_pop_ready_when_limit_is_unbounded() {
         let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1, 1).unwrap();
@@ -695,6 +712,96 @@ mod tests {
         assert_ne!(b0[0].request_uuid, a0_uuid);
         assert!(!driver.is_drained(), "B still in flight");
         driver.on_complete(b0[0].request_uuid, 30.0).unwrap();
+        assert!(driver.is_drained());
+    }
+
+    #[test]
+    fn concurrency_cap2_admits_pending_when_active_session_finishes() {
+        // cap = 2: A (2 turns) and B (1 turn) start active; C (1 turn) is pending.
+        let mut driver = WorkloadDriver::new_concurrency(three_session_trace(), 1, 2).unwrap();
+
+        // Initial cohort: A.t0 and B.t0 (the cap-2 set); C stays pending.
+        let first = driver.pop_ready(0.0, usize::MAX);
+        let mut ids: Vec<&str> = first.iter().map(|r| r.session_id.as_str()).collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["a", "b"],
+            "cap-2 admits exactly A and B; C pending"
+        );
+        let a0 = first
+            .iter()
+            .find(|r| r.session_id == "a")
+            .unwrap()
+            .request_uuid;
+        let b0 = first
+            .iter()
+            .find(|r| r.session_id == "b")
+            .unwrap()
+            .request_uuid;
+
+        // A finishes turn-0 → enters think-time (A.t1 ready at 10+5=15); A keeps its slot.
+        driver.on_complete(a0, 10.0).unwrap();
+        // B finishes its only turn → frees a slot → C is activated.
+        driver.on_complete(b0, 10.0).unwrap();
+
+        // At t=10 only C is admittable (its freed slot); A is mid-think-time and retains
+        // its slot — neither dropped nor re-admitted early.
+        let at_10 = driver.pop_ready(10.0, usize::MAX);
+        assert_eq!(at_10.len(), 1, "only C is admittable at t=10");
+        assert_eq!(at_10[0].session_id, "c");
+        assert_eq!(at_10[0].turn_index, 0);
+
+        // A's retained slot resumes once its think-time elapses (t=15), proving it was
+        // never evicted by C's admission.
+        let at_15 = driver.pop_ready(15.0, usize::MAX);
+        assert_eq!(at_15.len(), 1);
+        assert_eq!(
+            (at_15[0].session_id.as_str(), at_15[0].turn_index),
+            ("a", 1)
+        );
+    }
+
+    #[test]
+    fn release_cap_slot_terminates_inflight_session_and_admits_pending() {
+        // Mirrors an online InFlightGuard drop (cancellation), which calls release_cap_slot.
+        // cap = 2: A (2 turns) + B (1 turn) active, C (1 turn) pending. A is in think-time,
+        // B is in flight and gets cancelled.
+        let mut driver = WorkloadDriver::new_concurrency(three_session_trace(), 1, 2).unwrap();
+
+        let first = driver.pop_ready(0.0, usize::MAX);
+        let a0 = first
+            .iter()
+            .find(|r| r.session_id == "a")
+            .unwrap()
+            .request_uuid;
+        let b0 = first
+            .iter()
+            .find(|r| r.session_id == "b")
+            .unwrap()
+            .request_uuid;
+
+        // A → think-time (A.t1 ready at 15), retains its slot.
+        driver.on_complete(a0, 10.0).unwrap();
+        // B cancelled in flight: the online guard drop releases B's slot and terminates it.
+        driver.release_cap_slot(b0, 10.0);
+
+        // B's freed slot admits C; A's continuation is untouched.
+        let at_10 = driver.pop_ready(10.0, usize::MAX);
+        assert_eq!(at_10.len(), 1);
+        assert_eq!(
+            at_10[0].session_id, "c",
+            "C admitted into the slot freed by B's cancellation"
+        );
+        driver.on_complete(at_10[0].request_uuid, 12.0).unwrap();
+
+        // A's continuation survived the cancellation and resumes after its think-time.
+        let a1 = driver.pop_ready(15.0, usize::MAX);
+        assert_eq!(a1.len(), 1);
+        assert_eq!((a1[0].session_id.as_str(), a1[0].turn_index), ("a", 1));
+        driver.on_complete(a1[0].request_uuid, 20.0).unwrap();
+
+        // A (2 turns), B (cancelled/terminated), C (1 turn) all resolved → drained.
         assert!(driver.is_drained());
     }
 
