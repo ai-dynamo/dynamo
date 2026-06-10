@@ -900,6 +900,33 @@ def test_build_sampling_params_maps_max_thinking_tokens():
     assert sp.thinking_token_budget == 1024
 
 
+def test_build_sampling_params_applies_nvext_routed_experts_prompt_start():
+    """routed_experts_prompt_start rides nvext (not sampling_options) and is
+    applied onto SamplingParams so vLLM trims routing engine-side."""
+    import pytest
+    from vllm.sampling_params import SamplingParams
+
+    from dynamo.vllm.handlers import build_sampling_params
+
+    if not hasattr(SamplingParams(), "routed_experts_prompt_start"):
+        pytest.skip("installed vLLM has no routed_experts_prompt_start support")
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": {},
+        "output_options": {},
+        "nvext": {"routed_experts_prompt_start": 4},
+    }
+    sp = build_sampling_params(request, default_sampling_params={})
+    assert sp.routed_experts_prompt_start == 4
+
+    # negative / bad values are clamped to 0
+    request["nvext"]["routed_experts_prompt_start"] = -1
+    sp = build_sampling_params(request, default_sampling_params={})
+    assert sp.routed_experts_prompt_start == 0
+
+
 def _make_dynamo_config(**overrides):
     """Build a minimal fake DynamoConfig for update_engine_config_with_dynamo tests."""
     defaults = {

@@ -313,6 +313,12 @@ impl OpenAIPreprocessor {
             if nvext.token_data.is_some() {
                 nvext_passthrough.insert("token_in".to_string(), serde_json::Value::Bool(true));
             }
+            if let Some(start) = nvext.routed_experts_prompt_start {
+                nvext_passthrough.insert(
+                    "routed_experts_prompt_start".to_string(),
+                    serde_json::json!(start),
+                );
+            }
         }
 
         if !nvext_passthrough.contains_key("cache_salt")

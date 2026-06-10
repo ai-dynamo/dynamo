@@ -448,6 +448,17 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     pub cache_salt: Option<String>,
 
+    /// RL routed-experts capture offset (MoE expert replay).
+    ///
+    /// When set, Dynamo forwards this to the backend's
+    /// `SamplingParams.routed_experts_prompt_start` so the engine trims the
+    /// leading prompt rows from the returned routing tensor (rather than the
+    /// client trimming after the full-sequence blob crosses the wire). Backends
+    /// without routed-experts capture ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub routed_experts_prompt_start: Option<u32>,
+
     /// Extra fields to be included in the response's nvext
     /// This is a list of field names that should be populated in the response
     /// Supported fields include "worker_id", "timing", "routed_experts", "engine_data",
