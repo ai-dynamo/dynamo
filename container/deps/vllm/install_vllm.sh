@@ -148,7 +148,7 @@ fi
 echo "\n=== Cloning vLLM repository ==="
 # Clone needed for DeepGEMM and EP kernels install scripts
 cd $INSTALLATION_DIR
-git clone https://github.com/vllm-project/vllm.git vllm
+git clone https://github.com/iyastreb/vllm.git vllm
 cd vllm
 git checkout $VLLM_REF
 echo "✓ vLLM repository cloned"
@@ -184,9 +184,27 @@ if [ "$DEVICE" = "cuda" ]; then
     # vLLM 0.20.x switches the default PyPI CUDA wheel to CUDA 13.0.
     # Use the release wheel variant index for CUDA-specific vLLM binaries,
     # and ask uv for the matching torch backend for the PyTorch stack.
-    echo "Installing vLLM $VLLM_VER (torch backend: $TORCH_BACKEND)..."
-    uv pip install ${VLLM_UV_ARGS} "vllm[flashinfer,runai,otel]==${VLLM_VER}"
-    echo "✓ vLLM ${VLLM_VER} installed from PyPI"
+    echo "Building vLLM from fork $VLLM_REF with precompiled kernels (torch backend: $TORCH_BACKEND)..."
+    # The iyastreb/vllm@iyastreb-write-op fork carries Python-only changes
+    # (NIXL connector: vllm/distributed/kv_transfer/kv_connector/v1/nixl/*.py),
+    # so VLLM_USE_PRECOMPILED=1 is valid: vLLM fetches the matching precompiled
+    # base wheel for the C/CUDA kernels and installs only the local Python on top.
+    #
+    # The fork forks at v0.21.1rc0 and reports a setuptools_scm dev version, so
+    # vLLM cannot auto-resolve a matching precompiled base wheel. Pin the nearest
+    # stable CUDA wheel explicitly (v0.21.0; the PyPI default-CUDA wheel is the
+    # CUDA 13.0 build, matching this arm's --cuda-version 13.0).
+    export VLLM_USE_PRECOMPILED=1
+    export VLLM_PRECOMPILED_WHEEL_LOCATION="https://files.pythonhosted.org/packages/a8/62/8cbf7c943b0aca0538d0f5324848a3f256b8284dd4d881cd65ae106c83d7/vllm-0.21.0-cp38-abi3-manylinux_2_24_x86_64.whl"
+    # vLLM 0.21+ declares setuptools_rust / setuptools_scm as build-system
+    # requirements; --no-build-isolation means they must already be present in
+    # the venv, otherwise setup.py metadata prep fails with ModuleNotFoundError.
+    uv pip install ${VLLM_UV_ARGS} setuptools setuptools_scm setuptools_rust wheel
+    # Build the cloned fork (cwd is $INSTALLATION_DIR/vllm). Install the
+    # precompiled base wheel's runtime deps via the extras and overlay the
+    # local fork Python. --no-build-isolation so the installed torch stack is used.
+    uv pip install ${VLLM_UV_ARGS} --no-build-isolation ".[flashinfer,runai,otel]"
+    echo "✓ vLLM (fork $VLLM_REF) installed via precompiled overlay"
     # Run outside /opt/vllm so Python inspects the installed wheel, not the cloned source tree.
     (cd / && python3 - <<PY
 from importlib import metadata

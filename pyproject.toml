@@ -51,7 +51,12 @@ trtllm =[
 vllm = [
     "uvloop",
     "nixl[cu12]<=0.10.1",
-    "vllm[flashinfer,runai,otel]==0.20.1",
+    # vLLM is installed from the iyastreb/vllm fork (precompiled overlay) in
+    # container/deps/vllm/install_vllm.sh; the source build reports a
+    # setuptools_scm dev version (e.g. 0.21.1rc?.devN+gHASH), so a hard ==
+    # pin won't match. Relax to an unpinned extra so the dynamo wheel install
+    # doesn't reinstall a different vLLM over the source one.
+    "vllm[flashinfer,runai,otel]",
     # vllm-omni is installed separately in container builds (see
     # container/deps/vllm/install_vllm.sh). Do not add it to ai-dynamo[vllm]:
     # pip/uv dependency resolution for omni can override the vLLM torch stack.

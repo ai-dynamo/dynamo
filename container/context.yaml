@@ -48,13 +48,13 @@ vllm:
     runtime_image: nvcr.io/nvidia/cuda
     base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
     runtime_image_tag: 12.9.1-runtime-ubuntu24.04
-    vllm_ref: v0.20.1
+    vllm_ref: iyastreb-write-op
   cuda13.0:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: nvcr.io/nvidia/cuda
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
     runtime_image_tag: 13.0.2-runtime-ubuntu24.04
-    vllm_ref: v0.20.1
+    vllm_ref: iyastreb-write-op
   xpu:
     base_image: intel/deep-learning-essentials
     runtime_image: intel/deep-learning-essentials
@@ -67,7 +67,7 @@ vllm:
     base_image_tag: 24.04
     runtime_image_tag: 24.04
     vllm_ref: v0.19.0
-  flashinf_ref: v0.6.8.post1
+  flashinf_ref: v0.6.11.post2
   lmcache_ref: 0.4.4
   vllm_omni_ref: "v0.20.0"
   nixl_ref: 0.10.1
