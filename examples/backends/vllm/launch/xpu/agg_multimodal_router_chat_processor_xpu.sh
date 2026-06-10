@@ -174,10 +174,22 @@ COMMON_ENV=(
 # launches, pass a comma-separated list (for example: 0,1).
 # Default to empty so the single-worker path doesn't error under set -euo pipefail.
 IFS=',' read -r -a ZE_AFFINITY_LIST <<< "${ZE_AFFINITY:-}"
-# Validate that ZE_AFFINITY has at least NUM_WORKERS entries when multi-worker.
-if (( NUM_WORKERS > 1 )) && [[ ${#ZE_AFFINITY_LIST[@]} -lt ${NUM_WORKERS} ]]; then
-    echo "ERROR: ZE_AFFINITY must have at least ${NUM_WORKERS} comma-separated values (got ${#ZE_AFFINITY_LIST[@]})" >&2
-    exit 1
+# Validate that ZE_AFFINITY has at least NUM_WORKERS non-empty entries when
+# multi-worker.
+if (( NUM_WORKERS > 1 )); then
+    if [[ ${#ZE_AFFINITY_LIST[@]} -lt ${NUM_WORKERS} ]]; then
+        echo "ERROR: ZE_AFFINITY must have at least ${NUM_WORKERS} comma-separated values (got ${#ZE_AFFINITY_LIST[@]})" >&2
+        exit 1
+    fi
+    for i in $(seq 1 "${NUM_WORKERS}"); do
+        ZE_AFFINITY_VALUE="${ZE_AFFINITY_LIST[$((i - 1))]-}"
+        ZE_AFFINITY_VALUE="${ZE_AFFINITY_VALUE#${ZE_AFFINITY_VALUE%%[![:space:]]*}}"
+        ZE_AFFINITY_VALUE="${ZE_AFFINITY_VALUE%${ZE_AFFINITY_VALUE##*[![:space:]]}}"
+        if [[ -z "${ZE_AFFINITY_VALUE}" ]]; then
+            echo "ERROR: ZE_AFFINITY entry ${i} must not be empty or whitespace-only" >&2
+            exit 1
+        fi
+    done
 fi
 # Align single-worker fallback with VLLM_SYSTEM_PORT_BASE (18081).
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-18081}
