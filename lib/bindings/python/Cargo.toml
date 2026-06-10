@@ -76,7 +76,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = tr
 
 # "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)
 # "abi3-py310" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.10, which is the minimum version in pyproject.toml
-pyo3 = { version = "0.23.4", default-features = false, features = [
+pyo3 = { version = "0.24.1", default-features = false, features = [
   "macros",
   "experimental-async",
   "experimental-inspect",
@@ -85,14 +85,14 @@ pyo3 = { version = "0.23.4", default-features = false, features = [
   "abi3-py310"
 ] }
 
-pyo3-async-runtimes = { version = "0.23.0", default-features = false, features = [
+pyo3-async-runtimes = { version = "0.24.0", default-features = false, features = [
   "attributes",
   "testing",
   "tokio-runtime",
   "unstable-streams",
 ] }
 
-pythonize = "0.23"
+pythonize = "0.24"
 
 
 [target.'cfg(target_os = "linux")'.dependencies]
