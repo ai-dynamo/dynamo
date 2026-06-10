@@ -424,7 +424,9 @@ impl KvManager {
                 },
             );
             stored_seq_hashes.push(entry.seq_hash);
-            stored_local_hashes.push(entry.local_hash);
+            if let Some(local_hash) = entry.local_hash {
+                stored_local_hashes.push(local_hash);
+            }
             metadata_parent_hash = Some(entry.seq_hash);
             consumed_entries += 1;
         }
@@ -454,7 +456,12 @@ impl KvManager {
         }
 
         let full_blocks = std::mem::take(stored_seq_hashes);
-        let local_hashes = std::mem::take(stored_local_hashes);
+        let local_hashes = if stored_local_hashes.len() == full_blocks.len() {
+            std::mem::take(stored_local_hashes)
+        } else {
+            stored_local_hashes.clear();
+            Vec::new()
+        };
         let token_ids = if stored_token_ids.len() == full_blocks.len() {
             Some(std::mem::take(stored_token_ids))
         } else {
