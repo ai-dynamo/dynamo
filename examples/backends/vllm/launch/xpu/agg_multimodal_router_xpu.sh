@@ -131,23 +131,23 @@ COMMON_ENV=(
 
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 
-# ZE_AFFINITY is expected to be provided by the caller. For multi-worker
+# ZE_AFFINITY_MASK is expected to be provided by the caller. For multi-worker
 # launches, pass a comma-separated list (for example: 0,1).
 # Default to empty so the single-worker path doesn't error under set -euo pipefail.
-IFS=',' read -r -a ZE_AFFINITY_LIST <<< "${ZE_AFFINITY:-}"
-# Validate that ZE_AFFINITY has at least NUM_WORKERS non-empty entries when
+IFS=',' read -r -a ZE_AFFINITY_MASK_LIST <<< "${ZE_AFFINITY_MASK:-}"
+# Validate that ZE_AFFINITY_MASK has at least NUM_WORKERS non-empty entries when
 # multi-worker.
 if (( NUM_WORKERS > 1 )); then
-    if [[ ${#ZE_AFFINITY_LIST[@]} -lt ${NUM_WORKERS} ]]; then
-        echo "ERROR: ZE_AFFINITY must have at least ${NUM_WORKERS} comma-separated values (got ${#ZE_AFFINITY_LIST[@]})" >&2
+    if [[ ${#ZE_AFFINITY_MASK_LIST[@]} -lt ${NUM_WORKERS} ]]; then
+        echo "ERROR: ZE_AFFINITY_MASK must have at least ${NUM_WORKERS} comma-separated values (got ${#ZE_AFFINITY_MASK_LIST[@]})" >&2
         exit 1
     fi
     for i in $(seq 1 "${NUM_WORKERS}"); do
-        ZE_AFFINITY_VALUE="${ZE_AFFINITY_LIST[$((i - 1))]-}"
-        ZE_AFFINITY_VALUE="${ZE_AFFINITY_VALUE#${ZE_AFFINITY_VALUE%%[![:space:]]*}}"
-        ZE_AFFINITY_VALUE="${ZE_AFFINITY_VALUE%${ZE_AFFINITY_VALUE##*[![:space:]]}}"
-        if [[ -z "${ZE_AFFINITY_VALUE}" ]]; then
-            echo "ERROR: ZE_AFFINITY entry ${i} must not be empty or whitespace-only" >&2
+        ZE_AFFINITY_MASK_VALUE="${ZE_AFFINITY_MASK_LIST[$((i - 1))]-}"
+        ZE_AFFINITY_MASK_VALUE="${ZE_AFFINITY_MASK_VALUE#${ZE_AFFINITY_MASK_VALUE%%[![:space:]]*}}"
+        ZE_AFFINITY_MASK_VALUE="${ZE_AFFINITY_MASK_VALUE%${ZE_AFFINITY_MASK_VALUE##*[![:space:]]}}"
+        if [[ -z "${ZE_AFFINITY_MASK_VALUE}" ]]; then
+            echo "ERROR: ZE_AFFINITY_MASK entry ${i} must not be empty or whitespace-only" >&2
             exit 1
         fi
     done
@@ -168,9 +168,9 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
     fi
     KV_EVENTS_PORT=$((KV_EVENTS_PORT_BASE + (i - 1)))
     if (( NUM_WORKERS > 1 )); then
-        GPU_ID="${ZE_AFFINITY_LIST[$((i - 1))]}"
+        GPU_ID="${ZE_AFFINITY_MASK_LIST[$((i - 1))]}"
     else
-        GPU_ID="${ZE_AFFINITY:-0}"
+        GPU_ID="${ZE_AFFINITY_MASK:-0}"
     fi
 
     KV_EVENTS_CONFIG="{\"enable_kv_cache_events\":true,\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_EVENTS_PORT}\"}"
