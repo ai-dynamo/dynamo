@@ -241,7 +241,7 @@ merge:
       link text describes the destination; every internal link and `#anchor` resolves
 - [ ] Code fences language-tagged, no shell prompts, output in `text`; admonitions GitHub-style
 - [ ] Lists typed by purpose; images have alt text and live under `assets/img/`
-- [ ] Title Case headings, no end punctuation; one page type (tutorial/how-to/reference/explanation)
+- [ ] Heading case is consistent within the page (Title Case for short labels, sentence case for full phrases); no end punctuation; one page type (tutorial/how-to/reference/explanation)
 - [ ] No internal or sensitive references (NVBug/JIRA/Linear IDs, internal hosts, secrets, TODO/FIXME)
 - [ ] Terminology: correct casing (vLLM / SGLang / TensorRT-LLM / Dynamo / Kubernetes), inclusive
       terms, acronyms expanded on first use, no needless jargon
