@@ -563,22 +563,54 @@ mod tests {
 
     #[test]
     fn test_tcp_request_into_frame_matches_encode() {
-        let payload = Bytes::from_static(b"payload-body");
-        let mut headers = std::collections::HashMap::new();
-        headers.insert("request-id".to_string(), "abc-123".to_string());
-        let msg =
-            TcpRequestMessage::with_headers("test.endpoint".to_string(), headers, payload.clone());
+        let mut basic_headers = std::collections::HashMap::new();
+        basic_headers.insert("request-id".to_string(), "abc-123".to_string());
 
-        let encoded = msg.clone().encode().unwrap();
-        let frame = msg.into_frame().unwrap();
+        let mut multibyte_headers = std::collections::HashMap::new();
+        multibyte_headers.insert("trace".to_string(), "snowman-☃".to_string());
+        multibyte_headers.insert("emoji".to_string(), "rocket-🚀".to_string());
 
-        assert_eq!(frame.encoded_len(), encoded.len());
-        assert_eq!(frame.payload.as_ptr(), payload.as_ptr());
+        let mut large_headers = std::collections::HashMap::new();
+        large_headers.insert("x-long".to_string(), "v".repeat(4096));
 
-        let mut combined = BytesMut::with_capacity(frame.encoded_len());
-        combined.put_slice(&frame.header);
-        combined.put_slice(&frame.payload);
-        assert_eq!(combined.freeze(), encoded);
+        let cases = [
+            (
+                "test.endpoint".to_string(),
+                basic_headers,
+                Bytes::from_static(b"payload-body"),
+            ),
+            (
+                "empty.payload".to_string(),
+                std::collections::HashMap::new(),
+                Bytes::new(),
+            ),
+            (
+                "unicode.endpoint".to_string(),
+                multibyte_headers,
+                Bytes::from("こんにちは"),
+            ),
+            (
+                "large.payload".to_string(),
+                large_headers,
+                Bytes::from(vec![42u8; 64 * 1024]),
+            ),
+        ];
+
+        for (endpoint, headers, payload) in cases {
+            let msg = TcpRequestMessage::with_headers(endpoint, headers, payload.clone());
+            let encoded = msg.clone().encode().unwrap();
+            let frame = msg.into_frame().unwrap();
+
+            assert_eq!(frame.encoded_len(), encoded.len());
+            if !payload.is_empty() {
+                assert_eq!(frame.payload.as_ptr(), payload.as_ptr());
+            }
+
+            let mut combined = BytesMut::with_capacity(frame.encoded_len());
+            combined.put_slice(&frame.header);
+            combined.put_slice(&frame.payload);
+            assert_eq!(combined.freeze(), encoded);
+        }
     }
 
     #[test]

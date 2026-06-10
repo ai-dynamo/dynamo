@@ -14,14 +14,16 @@ use super::unified_client::{ClientStats, Headers, RequestPlaneClient};
 use crate::metrics::transport_metrics::{
     TCP_BYTES_RECEIVED_TOTAL, TCP_BYTES_SENT_TOTAL, TCP_ERRORS_TOTAL,
 };
+use crate::pipeline::network::codec::TcpRequestFrame;
 use crate::pipeline::network::get_tcp_max_message_size;
 use anyhow::Result;
 use async_trait::async_trait;
-use bytes::{Buf, Bytes};
+use bytes::{Buf, Bytes, BytesMut};
 use crossbeam_queue::SegQueue;
 use dashmap::DashMap;
 use futures::{StreamExt, future::poll_fn};
 use lru::LruCache;
+use std::collections::VecDeque;
 use std::io::{self, IoSlice};
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
@@ -48,7 +50,7 @@ const DEFAULT_POOL_SIZE: usize = 100;
 /// Raised from 256 to 1024 for high-throughput frontends (1M+ RPS across ~100 backends).
 /// At 1ms round-trip a single connection already supports ~1,000 concurrent requests,
 /// so deeper pipelining avoids unnecessary connection proliferation and lets the
-/// the writer task drain larger batches per write_all (fewer syscalls at high rate).
+/// writer task keep byte-bounded batches in flight at high rate.
 /// Head-of-line blocking stays acceptable because the TCP transport layer targets
 /// sub-ms latency; later requests rarely wait long behind earlier ones.
 /// Per-host ceiling: DEFAULT_POOL_SIZE(100) x REQUEST_CHANNEL_BUFFER(1024) = 102,400.
@@ -66,8 +68,14 @@ const DEFAULT_HOST_IDLE_TTL_SECS: u64 = 300;
 /// Spin loop limit before falling back to async Notify in writer task
 const WRITER_SPIN_LIMIT: u32 = 64;
 
-/// Maximum number of chunks passed to one vectored write call.
-const MAX_WRITEV_CHUNKS: usize = 64;
+/// Soft limit for queued bytes in the TCP writer buffer.
+const WRITER_SOFT_WRITE_BUF_LIMIT: usize = 65_535;
+
+/// Buffers smaller than this are coalesced into the writer's flattened buffer.
+const WRITE_FLATTEN_THRESHOLD: usize = 4096;
+
+/// Number of chunks passed to one vectored write call.
+const WRITE_VECTORED_CHUNKS: usize = 64;
 
 /// Check if latency tracing is enabled via environment
 fn latency_trace_enabled() -> bool {
@@ -136,9 +144,126 @@ impl TcpRequestConfig {
 /// Pending request in the lock-free submit queue
 struct PendingRequest {
     /// Request frame split into header and payload chunks.
-    frame: crate::pipeline::network::codec::TcpRequestFrame,
+    frame: TcpRequestFrame,
     /// Oneshot channel to send response back to caller
     response_tx: oneshot::Sender<Result<Bytes>>,
+}
+
+/// Buffered TCP writer for header coalescing and chunked payload writes.
+///
+/// Small protocol/header chunks are coalesced into `flattened_writes`, while
+/// large payloads stay as `Bytes` chunks in `write_buf`. This preserves the
+/// zero-copy payload path without turning deep drains into a heap-allocated
+/// iovec list or an unbounded all-available-request batch.
+struct TcpWriteBuffer {
+    write_buf: VecDeque<Bytes>,
+    flattened_writes: BytesMut,
+    write_buf_len: usize,
+}
+
+impl TcpWriteBuffer {
+    fn new() -> Self {
+        Self {
+            write_buf: VecDeque::new(),
+            flattened_writes: BytesMut::new(),
+            write_buf_len: 0,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.write_buf_len == 0
+    }
+
+    fn is_full(&self) -> bool {
+        self.write_buf_len >= WRITER_SOFT_WRITE_BUF_LIMIT
+    }
+
+    fn queued_len(&self) -> usize {
+        self.write_buf_len
+    }
+
+    fn clear(&mut self) {
+        self.write_buf.clear();
+        self.flattened_writes.clear();
+        self.write_buf_len = 0;
+    }
+
+    fn push_frame(&mut self, frame: TcpRequestFrame) {
+        self.write(frame.header);
+        self.write(frame.payload);
+    }
+
+    fn write(&mut self, buf: Bytes) {
+        if buf.is_empty() {
+            return;
+        }
+
+        self.write_buf_len += buf.len();
+        if buf.len() < WRITE_FLATTEN_THRESHOLD {
+            self.flattened_writes.extend_from_slice(&buf);
+        } else {
+            self.flush_flattened();
+            self.write_buf.push_back(buf);
+        }
+    }
+
+    fn flush_flattened(&mut self) {
+        if !self.flattened_writes.is_empty() {
+            self.write_buf
+                .push_back(self.flattened_writes.split().freeze());
+        }
+    }
+
+    async fn write_all<W>(&mut self, writer: &mut W) -> io::Result<usize>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        self.flush_flattened();
+
+        let mut total_written = 0usize;
+        while !self.write_buf.is_empty() {
+            let n = {
+                let mut writes = [IoSlice::new(b""); WRITE_VECTORED_CHUNKS];
+                let mut writes_len = 0usize;
+                for buf in self.write_buf.iter().take(WRITE_VECTORED_CHUNKS) {
+                    writes[writes_len] = IoSlice::new(buf.as_ref());
+                    writes_len += 1;
+                }
+
+                poll_fn(|cx| Pin::new(&mut *writer).poll_write_vectored(cx, &writes[..writes_len]))
+                    .await?
+            };
+
+            if n == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write TCP request chunks",
+                ));
+            }
+
+            total_written += n;
+            self.advance(n);
+        }
+
+        Ok(total_written)
+    }
+
+    fn advance(&mut self, mut n: usize) {
+        self.write_buf_len = self.write_buf_len.saturating_sub(n);
+        while n > 0 {
+            let Some(front) = self.write_buf.front_mut() else {
+                break;
+            };
+
+            if n < front.len() {
+                front.advance(n);
+                break;
+            }
+
+            n -= front.len();
+            self.write_buf.pop_front();
+        }
+    }
 }
 
 /// RAII guard that decrements the inflight counter on drop.
@@ -404,18 +529,19 @@ impl TcpConnection {
     /// with vectored IO. This preserves large request payloads as `Bytes` rather
     /// than copying each body into a flattened batch buffer.
     ///
-    /// Compared with the previous BytesMut batch buffer, this trades the explicit
-    /// body-copy step for vectored writes over existing chunks. The protocol wire
-    /// format is unchanged: each request is still `[header][payload]`.
+    /// Small header chunks are coalesced, large payload chunks stay as `Bytes`,
+    /// and each drain is bounded by queued bytes before polling
+    /// the socket. The protocol wire format is unchanged: each request is still
+    /// `[header][payload]`.
     ///
     /// Flush-boundary tracking: response_txs are held locally during the write
-    /// phase and only pushed to response_queue AFTER write_all succeeds. This way:
+    /// phase and only pushed to response_queue after the batch write succeeds.
     /// - On write error, callers in the current batch get immediate errors
     ///   (not "Connection closed" via drain_pending)
     /// - Previously written batches stay in response_queue for the reader to
     ///   deliver -- they are NOT erroneously killed by drain_pending
-    /// - The server cannot respond before write_all returns, so the reader will
-    ///   never see a response before its response_tx is in the queue
+    /// - If a response races back before waiters are queued, the reader's
+    ///   existing spin-wait covers that small handoff window
     async fn writer_task(
         mut write_half: tokio::io::WriteHalf<TcpStream>,
         submit_queue: Arc<SegQueue<PendingRequest>>,
@@ -424,8 +550,8 @@ impl TcpConnection {
         healthy: Arc<AtomicBool>,
         closed: Arc<AtomicBool>,
     ) -> Result<()> {
-        // Hoisted outside the loop to reuse Vec allocations across drain cycles.
-        let mut write_chunks: Vec<Bytes> = Vec::with_capacity(128);
+        // Hoisted outside the loop to reuse allocations across drain cycles.
+        let mut write_buf = TcpWriteBuffer::new();
         let mut response_batch: Vec<oneshot::Sender<Result<Bytes>>> = Vec::with_capacity(64);
         let trace = latency_trace_enabled();
 
@@ -452,19 +578,19 @@ impl TcpConnection {
                     std::hint::spin_loop();
                 }
 
-                // Drain all available requests (reuse pre-allocated Vecs).
-                write_chunks.clear();
+                // Drain a byte-bounded batch: avoid one unbounded
+                // all-available-request drain, but always
+                // accept at least one request even if it exceeds the soft limit.
+                write_buf.clear();
                 response_batch.clear();
                 let mut count = 0usize;
-                let mut bytes_to_write = 0usize;
                 while let Some(req) = submit_queue.pop() {
                     count += 1;
-                    bytes_to_write += req.frame.encoded_len();
-                    write_chunks.push(req.frame.header);
-                    if !req.frame.payload.is_empty() {
-                        write_chunks.push(req.frame.payload);
-                    }
+                    write_buf.push_frame(req.frame);
                     response_batch.push(req.response_tx);
+                    if write_buf.is_full() {
+                        break;
+                    }
                 }
 
                 if count == 0 {
@@ -479,12 +605,13 @@ impl TcpConnection {
                     None
                 };
 
-                if let Err(e) = Self::write_all_chunks(&mut write_half, &mut write_chunks).await {
+                let bytes_to_write = write_buf.queued_len();
+                if let Err(e) = write_buf.write_all(&mut write_half).await {
                     // Data may be partially on the wire — the connection is in an
                     // unrecoverable state (broken framing). Fail the entire batch,
-                    // clear the chunk list defensively so stale data can never be
+                    // clear the write buffer defensively so stale data can never be
                     // re-sent if reconnect-and-retry is ever added, then exit.
-                    write_chunks.clear();
+                    write_buf.clear();
                     let err_msg = format!("Write failed: {}", e);
                     for tx in response_batch.drain(..) {
                         let _ = tx.send(Err(anyhow::anyhow!("{}", err_msg)));
@@ -492,7 +619,7 @@ impl TcpConnection {
                     return Err(e.into());
                 }
                 TCP_BYTES_SENT_TOTAL.inc_by(bytes_to_write as f64);
-                write_chunks.clear();
+                debug_assert!(write_buf.is_empty());
 
                 // Phase 3: write_all succeeded — data is committed to the wire.
                 // NOW push response_txs to response_queue so the reader can
@@ -557,56 +684,6 @@ impl TcpConnection {
         Self::drain_pending(&submit_queue);
 
         result
-    }
-
-    async fn write_all_chunks<W>(writer: &mut W, chunks: &mut [Bytes]) -> io::Result<usize>
-    where
-        W: AsyncWrite + Unpin,
-    {
-        let mut chunk_idx = 0usize;
-        let mut total_written = 0usize;
-
-        while chunk_idx < chunks.len() {
-            while chunk_idx < chunks.len() && chunks[chunk_idx].is_empty() {
-                chunk_idx += 1;
-            }
-            if chunk_idx == chunks.len() {
-                break;
-            }
-
-            let n = {
-                let iovecs: Vec<IoSlice<'_>> = chunks[chunk_idx..]
-                    .iter()
-                    .filter(|chunk| !chunk.is_empty())
-                    .take(MAX_WRITEV_CHUNKS)
-                    .map(|chunk| IoSlice::new(chunk.as_ref()))
-                    .collect();
-
-                poll_fn(|cx| Pin::new(&mut *writer).poll_write_vectored(cx, &iovecs)).await?
-            };
-
-            if n == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "failed to write TCP request chunks",
-                ));
-            }
-
-            total_written += n;
-            let mut remaining = n;
-            while remaining > 0 {
-                let chunk_len = chunks[chunk_idx].len();
-                if remaining < chunk_len {
-                    chunks[chunk_idx].advance(remaining);
-                    break;
-                }
-                remaining -= chunk_len;
-                chunks[chunk_idx].advance(chunk_len);
-                chunk_idx += 1;
-            }
-        }
-
-        Ok(total_written)
     }
 
     /// Reader task: reads responses using framed codec, pops response_tx from SegQueue.
@@ -1500,8 +1577,10 @@ impl RequestPlaneClient for TcpRequestClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::pin::Pin;
     use std::sync::atomic::AtomicUsize;
-    use tokio::io::AsyncReadExt;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncReadExt, AsyncWrite};
     use tokio::net::TcpListener;
 
     #[test]
@@ -1631,6 +1710,166 @@ mod tests {
         });
 
         (addr, conn_count)
+    }
+
+    struct RecordingWriter {
+        written: Vec<u8>,
+        max_per_write: Option<usize>,
+        error_after_calls: Option<usize>,
+        write_zero: bool,
+        calls: usize,
+    }
+
+    impl RecordingWriter {
+        fn new(max_per_write: Option<usize>) -> Self {
+            Self {
+                written: Vec::new(),
+                max_per_write,
+                error_after_calls: None,
+                write_zero: false,
+                calls: 0,
+            }
+        }
+
+        fn write_zero() -> Self {
+            Self {
+                write_zero: true,
+                ..Self::new(None)
+            }
+        }
+
+        fn error_after_calls(max_per_write: usize, error_after_calls: usize) -> Self {
+            Self {
+                max_per_write: Some(max_per_write),
+                error_after_calls: Some(error_after_calls),
+                ..Self::new(None)
+            }
+        }
+
+        fn write_slices(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+            if self.write_zero {
+                return Ok(0);
+            }
+            if self
+                .error_after_calls
+                .is_some_and(|limit| self.calls >= limit)
+            {
+                return Err(io::Error::other("injected write error"));
+            }
+            self.calls += 1;
+
+            let available: usize = bufs.iter().map(|buf| buf.len()).sum();
+            let to_write = self.max_per_write.unwrap_or(available).min(available);
+            let mut remaining = to_write;
+            for buf in bufs {
+                if remaining == 0 {
+                    break;
+                }
+                let n = remaining.min(buf.len());
+                self.written.extend_from_slice(&buf[..n]);
+                remaining -= n;
+            }
+            Ok(to_write)
+        }
+    }
+
+    impl AsyncWrite for RecordingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.poll_write_vectored(_cx, &[IoSlice::new(buf)])
+        }
+
+        fn poll_write_vectored(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            bufs: &[IoSlice<'_>],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(self.get_mut().write_slices(bufs))
+        }
+
+        fn is_write_vectored(&self) -> bool {
+            true
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tcp_write_buffer_coalesces_small_chunks_and_preserves_large_payload() {
+        let payload = Bytes::from(vec![b'p'; WRITE_FLATTEN_THRESHOLD]);
+        let payload_ptr = payload.as_ptr();
+        let mut write_buf = TcpWriteBuffer::new();
+
+        write_buf.write(Bytes::from_static(b"header"));
+        write_buf.write(payload.clone());
+        write_buf.write(Bytes::from_static(b"tail"));
+
+        assert_eq!(write_buf.write_buf.len(), 2);
+        assert_eq!(write_buf.write_buf.get(1).unwrap().as_ptr(), payload_ptr);
+        assert_eq!(write_buf.flattened_writes.as_ref(), b"tail");
+
+        let expected = [b"header".as_slice(), payload.as_ref(), b"tail".as_slice()].concat();
+        let queued_len = write_buf.queued_len();
+        let mut writer = RecordingWriter::new(None);
+        let written = write_buf.write_all(&mut writer).await.unwrap();
+
+        assert_eq!(written, queued_len);
+        assert_eq!(writer.written, expected);
+        assert!(write_buf.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_tcp_write_buffer_handles_partial_writes_across_chunk_boundaries() {
+        let payload = Bytes::from(vec![b'x'; WRITE_FLATTEN_THRESHOLD + 11]);
+        let mut write_buf = TcpWriteBuffer::new();
+        write_buf.write(Bytes::from_static(b"abc"));
+        write_buf.write(payload.clone());
+        write_buf.write(Bytes::from_static(b"xyz"));
+
+        let expected = [b"abc".as_slice(), payload.as_ref(), b"xyz".as_slice()].concat();
+        let mut writer = RecordingWriter::new(Some(7));
+        let written = write_buf.write_all(&mut writer).await.unwrap();
+
+        assert_eq!(written, expected.len());
+        assert_eq!(writer.written, expected);
+        assert!(writer.calls > 1);
+        assert!(write_buf.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_tcp_write_buffer_write_zero_errors() {
+        let mut write_buf = TcpWriteBuffer::new();
+        write_buf.write(Bytes::from_static(b"abc"));
+
+        let err = write_buf
+            .write_all(&mut RecordingWriter::write_zero())
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::WriteZero);
+    }
+
+    #[tokio::test]
+    async fn test_tcp_write_buffer_mid_batch_error_surfaces() {
+        let payload = Bytes::from(vec![b'x'; WRITE_FLATTEN_THRESHOLD + 11]);
+        let mut write_buf = TcpWriteBuffer::new();
+        write_buf.write(Bytes::from_static(b"abc"));
+        write_buf.write(payload);
+
+        let mut writer = RecordingWriter::error_after_calls(5, 1);
+        let err = write_buf.write_all(&mut writer).await.unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert_eq!(writer.written.len(), 5);
     }
 
     #[tokio::test]
