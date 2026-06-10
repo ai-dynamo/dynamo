@@ -724,7 +724,8 @@ where
     /// `None` for [`RouterMode::Direct`] (caller-supplied routing); panics for
     /// [`RouterMode::KV`], which selects via `kv_chooser::find_best_match`.
     pub fn peek_next_worker(&self) -> Option<u64> {
-        // DIS-2105: select among free workers — see round_robin for rationale.
+        // Select among free (admission-eligible) workers — see select_next_worker
+        // for the per-mode selection rationale.
         let instance_ids = self.client.routing_instances().free_ids().to_vec();
         let count = instance_ids.len();
         if count == 0 {

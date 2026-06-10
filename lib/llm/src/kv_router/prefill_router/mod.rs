@@ -150,13 +150,10 @@ impl
                     .get()
                     .and_then(|router| router.track_dispatch(worker_id));
 
-                // RoundRobin advances its counter here; LL/P2C/DAW are no-ops and
-                // rely on the permit above.
-                if !self.router_mode.is_kv_routing()
-                    && let Some(router) = self.prefill_router.get()
-                {
-                    router.select_next_worker();
-                }
+                // RoundRobin counter advance happens inside
+                // commit_selected_prefill_worker below (gated on
+                // preselected_worker.is_none()); LL/P2C/DAW rely on the permit
+                // above. Advancing here too would double-count RoundRobin.
 
                 // Bootstrap optimization path: spawn prefill in background
                 self.commit_selected_prefill_worker(
