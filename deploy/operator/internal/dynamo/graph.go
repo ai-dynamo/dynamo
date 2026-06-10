@@ -2120,6 +2120,9 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	// inter-pod failover (the only layout that combines >1 replicas per
 	// clique with no redundancy between them).
 	minAvailable := int32(1)
+	if p.r.Replicas == 0 {
+		minAvailable = 0
+	}
 	if p.isMultinode && !p.isInterPodFailover {
 		minAvailable = p.r.Replicas
 	}
@@ -2397,6 +2400,9 @@ func GenerateGrovePodCliqueSet(
 		if usesPCSG {
 			replicas := component.Replicas
 			minAvailable := ptr.To(int32(1))
+			if component.Replicas != nil && *component.Replicas == 0 {
+				minAvailable = ptr.To(int32(0))
+			}
 			if component.MinAvailable != nil {
 				minAvailable = ptr.To(*component.MinAvailable)
 			}

@@ -164,8 +164,8 @@ func (v *SharedSpecValidator) validateMinAvailable() error {
 	if v.spec.MinAvailable == nil {
 		return nil
 	}
-	if *v.spec.MinAvailable <= 0 {
-		return fmt.Errorf("%s.minAvailable must be greater than 0", v.fieldPath)
+	if *v.spec.MinAvailable < 0 {
+		return fmt.Errorf("%s.minAvailable must be non-negative", v.fieldPath)
 	}
 	replicas := int32(1)
 	if v.spec.Replicas != nil {
@@ -173,6 +173,9 @@ func (v *SharedSpecValidator) validateMinAvailable() error {
 	}
 	if *v.spec.MinAvailable > replicas {
 		return fmt.Errorf("%s.minAvailable must be less than or equal to replicas", v.fieldPath)
+	}
+	if *v.spec.MinAvailable == 0 && replicas != 0 {
+		return fmt.Errorf("%s.minAvailable may be 0 only when replicas is 0", v.fieldPath)
 	}
 	return nil
 }

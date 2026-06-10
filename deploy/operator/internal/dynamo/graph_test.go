@@ -8240,6 +8240,18 @@ func TestGenerateGrovePodCliqueSet_ComponentMinAvailable(t *testing.T) {
 			wantMinAvailable: int32(2),
 		},
 		{
+			name: "standalone pod clique zero replicas default",
+			service: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				Replicas:      ptr.To(int32(0)),
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{GPU: "1"},
+				},
+			},
+			wantClique:       true,
+			wantMinAvailable: int32(0),
+		},
+		{
 			name: "pod clique scaling group",
 			service: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: commonconsts.ComponentTypeWorker,
@@ -8252,6 +8264,19 @@ func TestGenerateGrovePodCliqueSet_ComponentMinAvailable(t *testing.T) {
 			},
 			wantScalingGroup: true,
 			wantMinAvailable: int32(2),
+		},
+		{
+			name: "pod clique scaling group zero replicas default",
+			service: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				Replicas:      ptr.To(int32(0)),
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{GPU: "1"},
+				},
+				Multinode: &v1alpha1.MultinodeSpec{NodeCount: 2},
+			},
+			wantScalingGroup: true,
+			wantMinAvailable: int32(0),
 		},
 	}
 

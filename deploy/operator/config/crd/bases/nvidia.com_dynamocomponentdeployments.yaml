@@ -11113,8 +11113,11 @@ spec:
                   description: |-
                     MinAvailable maps to Grove PodClique minAvailable for single-node and
                     Grove PodCliqueScalingGroup minAvailable for multi-node components.
-                    This field determines 1) the minimum number of replicas that are guaranteed to be gang-scheduled,
-                    and 2) if minAvailable replicas is violated, will result in gang termination.
+                    This field determines 1) the minimum number of replicas guaranteed to be
+                    gang-scheduled, and 2) when violating minAvailable replicas triggers gang
+                    termination.
+                    For Grove-backed DynamoGraphDeployment services, admission defaults this
+                    field to 0 when replicas is 0 and to 1 otherwise.
                     For non-Grove deployments, setting this field will result in a validation error.
                   format: int32
                   type: integer
@@ -11460,10 +11463,12 @@ spec:
                   type: array
               type: object
               x-kubernetes-validations:
-                - message: minAvailable must be greater than 0
-                  rule: '!has(self.minAvailable) || self.minAvailable > 0'
+                - message: minAvailable must be non-negative
+                  rule: '!has(self.minAvailable) || self.minAvailable >= 0'
                 - message: minAvailable must be less than or equal to replicas
                   rule: '!has(self.minAvailable) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
+                - message: minAvailable may be 0 only when replicas is 0
+                  rule: '!has(self.minAvailable) || self.minAvailable != 0 || (has(self.replicas) && self.replicas == 0)'
             status:
               description: Status reflects the current observed state of the component deployment.
               properties:
@@ -12116,8 +12121,11 @@ spec:
                   description: |-
                     minAvailable maps to Grove PodClique minAvailable for single-node and
                     Grove PodCliqueScalingGroup minAvailable for multi-node components.
-                    This field determines 1) the minimum number of replicas that are guaranteed to be gang-scheduled,
-                    and 2) if minAvailable replicas is violated, will result in gang termination.
+                    This field determines 1) the minimum number of replicas guaranteed to be
+                    gang-scheduled, and 2) when violating minAvailable replicas triggers gang
+                    termination.
+                    For Grove-backed DynamoGraphDeployment components, admission defaults this
+                    field to 0 when replicas is 0 and to 1 otherwise.
                     For non-Grove deployments, setting this field will result in a validation error.
                   format: int32
                   type: integer
@@ -20297,10 +20305,12 @@ spec:
               x-kubernetes-validations:
                 - message: eppConfig may only be set when type is epp
                   rule: '!has(self.eppConfig) || (has(self.type) && self.type == ''epp'')'
-                - message: minAvailable must be greater than 0
-                  rule: '!has(self.minAvailable) || self.minAvailable > 0'
+                - message: minAvailable must be non-negative
+                  rule: '!has(self.minAvailable) || self.minAvailable >= 0'
                 - message: minAvailable must be less than or equal to replicas
                   rule: '!has(self.minAvailable) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
+                - message: minAvailable may be 0 only when replicas is 0
+                  rule: '!has(self.minAvailable) || self.minAvailable != 0 || (has(self.replicas) && self.replicas == 0)'
             status:
               description: status reflects the current observed state of the component deployment.
               properties:

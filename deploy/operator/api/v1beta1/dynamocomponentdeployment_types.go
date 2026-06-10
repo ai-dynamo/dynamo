@@ -69,8 +69,9 @@ type DynamoComponentDeploymentSpec struct {
 // semantics. Users can add sidecars, init containers, and pod-level configuration
 // directly in `podTemplate` without any `extraPodSpec`-style escape hatch.
 // +kubebuilder:validation:XValidation:rule="!has(self.eppConfig) || (has(self.type) && self.type == 'epp')",message="eppConfig may only be set when type is epp"
-// +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || self.minAvailable > 0",message="minAvailable must be greater than 0"
+// +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || self.minAvailable >= 0",message="minAvailable must be non-negative"
 // +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas"
+// +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || self.minAvailable != 0 || (has(self.replicas) && self.replicas == 0)",message="minAvailable may be 0 only when replicas is 0"
 type DynamoComponentDeploymentSharedSpec struct {
 	// name is the stable logical identifier for this component within its
 	// DynamoGraphDeployment. It must be unique within the parent's
@@ -127,10 +128,13 @@ type DynamoComponentDeploymentSharedSpec struct {
 
 	// minAvailable maps to Grove PodClique minAvailable for single-node and
 	// Grove PodCliqueScalingGroup minAvailable for multi-node components.
-	// This field determines 1) the minimum number of replicas that are guaranteed to be gang-scheduled,
-	// and 2) if minAvailable replicas is violated, will result in gang termination.
+	// This field determines 1) the minimum number of replicas guaranteed to be
+	// gang-scheduled, and 2) when violating minAvailable replicas triggers gang
+	// termination.
+	// For Grove-backed DynamoGraphDeployment components, admission defaults this
+	// field to 0 when replicas is 0 and to 1 otherwise.
 	// For non-Grove deployments, setting this field will result in a validation error.
-	// + optional
+	// +optional
 	MinAvailable *int32 `json:"minAvailable,omitempty"`
 
 	// multinode configures multinode components.

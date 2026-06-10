@@ -48,8 +48,9 @@ type DynamoComponentDeploymentSpec struct {
 	DynamoComponentDeploymentSharedSpec `json:",inline"`
 }
 
-// +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || self.minAvailable > 0",message="minAvailable must be greater than 0"
+// +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || self.minAvailable >= 0",message="minAvailable must be non-negative"
 // +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas"
+// +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || self.minAvailable != 0 || (has(self.replicas) && self.replicas == 0)",message="minAvailable may be 0 only when replicas is 0"
 type DynamoComponentDeploymentSharedSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
@@ -124,10 +125,13 @@ type DynamoComponentDeploymentSharedSpec struct {
 
 	// MinAvailable maps to Grove PodClique minAvailable for single-node and
 	// Grove PodCliqueScalingGroup minAvailable for multi-node components.
-	// This field determines 1) the minimum number of replicas that are guaranteed to be gang-scheduled,
-	// and 2) if minAvailable replicas is violated, will result in gang termination.
+	// This field determines 1) the minimum number of replicas guaranteed to be
+	// gang-scheduled, and 2) when violating minAvailable replicas triggers gang
+	// termination.
+	// For Grove-backed DynamoGraphDeployment services, admission defaults this
+	// field to 0 when replicas is 0 and to 1 otherwise.
 	// For non-Grove deployments, setting this field will result in a validation error.
-	// + optional
+	// +optional
 	MinAvailable *int32 `json:"minAvailable,omitempty"`
 
 	// Multinode is the configuration for multinode components.
