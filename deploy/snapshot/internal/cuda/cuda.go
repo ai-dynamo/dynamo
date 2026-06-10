@@ -272,15 +272,15 @@ func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.
 	}
 
 	log.V(1).Info("Checkpointing locked CUDA process tree", "pids", checkpointPIDs)
-	for _, pid := range checkpointPIDs {
-		if state, ok := getCheckpointState(ctx, pid, log); ok && state == "checkpointed" {
+	if err := runPIDPhase(ctx, checkpointPIDs, "checkpoint", func(phaseCtx context.Context, pid int) error {
+		if state, ok := getCheckpointState(phaseCtx, pid, log); ok && state == "checkpointed" {
 			log.V(1).Info("CUDA process already checkpointed", "pid", pid)
-			continue
+			return nil
 		}
-		if err := checkpoint(ctx, pid, log); err != nil {
-			timings.TotalDuration = time.Since(start)
-			return timings, err
-		}
+		return checkpoint(phaseCtx, pid, log)
+	}); err != nil {
+		timings.TotalDuration = time.Since(start)
+		return timings, err
 	}
 	timings.TotalDuration = time.Since(start)
 

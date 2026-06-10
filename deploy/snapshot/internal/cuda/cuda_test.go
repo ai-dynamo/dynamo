@@ -129,15 +129,11 @@ printf '%s:%s\n' "$action" "$pid" >> "$HELPER_ACTIONS_PATH"
 		t.Fatalf("read helper actions: %v", err)
 	}
 	got := strings.Split(strings.TrimSpace(string(data)), "\n")
-	want := []string{
-		"checkpoint:103",
-		"checkpoint:102",
-		"checkpoint:101",
-	}
 	if len(got) != 6 {
 		t.Fatalf("helper actions = %q, want 6 actions", got)
 	}
 	seenLocks := map[string]bool{}
+	seenCheckpoints := map[string]bool{}
 	for i, action := range got {
 		if i < 3 {
 			if !strings.HasPrefix(action, "lock:") {
@@ -146,13 +142,17 @@ printf '%s:%s\n' "$action" "$pid" >> "$HELPER_ACTIONS_PATH"
 			seenLocks[strings.TrimPrefix(action, "lock:")] = true
 			continue
 		}
-		if action != want[i-3] {
-			t.Fatalf("action %d = %q, want %q; all actions %q", i, action, want[i-3], got)
+		if !strings.HasPrefix(action, "checkpoint:") {
+			t.Fatalf("action %d = %q, want checkpoint after locks; all actions %q", i, action, got)
 		}
+		seenCheckpoints[strings.TrimPrefix(action, "checkpoint:")] = true
 	}
 	for _, pid := range []string{"101", "102", "103"} {
 		if !seenLocks[pid] {
 			t.Fatalf("missing lock for pid %s in actions %q", pid, got)
+		}
+		if !seenCheckpoints[pid] {
+			t.Fatalf("missing checkpoint for pid %s in actions %q", pid, got)
 		}
 	}
 }
