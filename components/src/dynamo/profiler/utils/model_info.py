@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 from huggingface_hub import hf_hub_download, model_info
+from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
 from pydantic import BaseModel
 from transformers import AutoConfig
 
@@ -143,22 +144,37 @@ def model_has_auto_map(
             if not config_path.is_file():
                 return False
         else:
-            config_path = Path(
-                hf_hub_download(
-                    repo_id=str(model_name_or_path),
-                    filename="config.json",
-                    token=token,
+            try:
+                config_path = Path(
+                    hf_hub_download(
+                        repo_id=str(model_name_or_path),
+                        filename="config.json",
+                        token=token,
+                    )
                 )
-            )
+            except (RepositoryNotFoundError, EntryNotFoundError):
+                # Model or config.json doesn't exist — no custom code.
+                return False
         with open(config_path) as f:
             cfg = json.load(f)
-    except Exception as e:
-        logger.debug(
-            "model_has_auto_map: could not read config.json for %s: %s",
+    except json.JSONDecodeError as e:
+        logger.warning(
+            "model_has_auto_map: malformed config.json for %s: %s — assuming no auto_map.",
             model_name_or_path,
             e,
         )
         return False
+    except Exception as e:
+        # Unexpected failure (network, auth, I/O). We cannot determine whether
+        # the model needs trust_remote_code, so conservatively return True to
+        # avoid workers crashing at load time.
+        logger.warning(
+            "model_has_auto_map: unexpected error reading config.json for %s: %s "
+            "— defaulting to True (injecting --trust-remote-code).",
+            model_name_or_path,
+            e,
+        )
+        return True
     return bool(cfg.get("auto_map"))
 
 

@@ -967,3 +967,118 @@ def test_auto_inject_trust_remote_code_excludes_frontend_and_planner() -> None:
     assert "--trust-remote-code" not in (
         cfg["spec"]["services"]["Planner"]["extraPodSpec"]["mainContainer"]["args"]
     )
+
+
+def test_auto_inject_trust_remote_code_shell_form_worker() -> None:
+    """Shell-form workers (command=['sh','-c'], args=['<single string>']) must
+    have the flag appended inside the string, not as a second list element."""
+    from dynamo.profiler.utils.config_modifiers.protocol import (
+        auto_inject_trust_remote_code,
+    )
+
+    cfg = {
+        "spec": {
+            "services": {
+                "VllmDecodeWorker": {
+                    "extraPodSpec": {
+                        "mainContainer": {
+                            "command": ["sh", "-c"],
+                            "args": [
+                                "python3 -m vllm.entrypoints.openai.api_server "
+                                "--model some/model --tp 1"
+                            ],
+                        },
+                    },
+                },
+            }
+        }
+    }
+    with patch(
+        "dynamo.profiler.utils.model_info.model_has_auto_map", return_value=True
+    ):
+        modified = auto_inject_trust_remote_code(cfg, "some/model", "vllm")
+
+    assert modified == ["VllmDecodeWorker"]
+    result_args = cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    # Must still be a single-element list (shell form preserved).
+    assert isinstance(result_args, list) and len(result_args) == 1
+    assert result_args[0].endswith("--trust-remote-code")
+    # Idempotency: calling again must not duplicate the flag.
+    with patch(
+        "dynamo.profiler.utils.model_info.model_has_auto_map", return_value=True
+    ):
+        modified2 = auto_inject_trust_remote_code(cfg, "some/model", "vllm")
+    assert modified2 == []
+    assert result_args[0].count("--trust-remote-code") == 1
+
+
+def test_auto_inject_trust_remote_code_uses_per_service_model_arg() -> None:
+    """When a worker's args contain ``--model override/model``, that path is
+    used for auto_map detection rather than the fallback argument."""
+    from dynamo.profiler.utils.config_modifiers.protocol import (
+        auto_inject_trust_remote_code,
+    )
+
+    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    # Override the --model arg in the worker to a different model.
+    cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"][
+        "args"
+    ] = ["--model", "override/model", "--tp", "1"]
+
+    def _auto_map_only_for_override(model, *args, **kwargs):
+        return model == "override/model"
+
+    with patch(
+        "dynamo.profiler.utils.model_info.model_has_auto_map",
+        side_effect=_auto_map_only_for_override,
+    ):
+        # Fallback model does NOT have auto_map; the worker's --model does.
+        modified = auto_inject_trust_remote_code(cfg, "original/model", "vllm")
+
+    assert modified == ["VllmDecodeWorker"], (
+        "Should inject because the worker's --model arg points to a model with auto_map"
+    )
+    args = cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert "--trust-remote-code" in args
+
+
+def test_model_has_auto_map_returns_true_on_unexpected_error() -> None:
+    """Unexpected errors (network, auth) must return True (conservative default)
+    rather than silently returning False and risking a missed injection."""
+    from dynamo.profiler.utils.model_info import model_has_auto_map
+
+    with patch(
+        "dynamo.profiler.utils.model_info.hf_hub_download",
+        side_effect=OSError("simulated network failure"),
+    ):
+        result = model_has_auto_map("some/hf-model")
+
+    assert result is True
+
+
+def test_model_has_auto_map_returns_false_for_repo_not_found() -> None:
+    """RepositoryNotFoundError means the model doesn't exist — no custom code."""
+    from huggingface_hub.utils import RepositoryNotFoundError
+
+    from dynamo.profiler.utils.model_info import model_has_auto_map
+
+    with patch(
+        "dynamo.profiler.utils.model_info.hf_hub_download",
+        side_effect=RepositoryNotFoundError("404", response=None),
+    ):
+        result = model_has_auto_map("nonexistent/model")
+
+    assert result is False
+
+
+def test_model_has_auto_map_returns_false_for_malformed_json(tmp_path) -> None:
+    """Malformed config.json must return False (can't parse, assume no auto_map)."""
+    from dynamo.profiler.utils.model_info import model_has_auto_map
+
+    (tmp_path / "config.json").write_text("{this is not valid json}")
+    result = model_has_auto_map(tmp_path)
+    assert result is False
