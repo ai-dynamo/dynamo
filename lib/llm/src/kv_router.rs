@@ -20,9 +20,10 @@ use dynamo_kv_router::{
         WorkerWithDpRank, compute_block_hash_for_seq,
     },
     remote_g2_plan::{
-        RemoteG2CandidateDecision, RemoteG2CandidateScore, RemoteKvReuseDecision,
-        RemoteKvReuseNoPlanReason, RemoteKvReuseSelectionInput, RemoteKvReuseSelectionStats,
-        RemoteKvReuseSourceRoute, materialize_remote_g2_reuse_plan, select_remote_g2_candidate,
+        RemoteG2CandidateDecision, RemoteG2CandidateScore, RemoteG2CostModel,
+        RemoteKvReuseDecision, RemoteKvReuseNoPlanReason, RemoteKvReuseSelectionInput,
+        RemoteKvReuseSelectionStats, RemoteKvReuseSourceRoute, materialize_remote_g2_reuse_plan,
+        select_remote_g2_candidate,
     },
     scheduling::TierOverlapBlocks,
 };
@@ -620,6 +621,83 @@ where
         )
     }
 
+    fn remote_g2_transferable_candidate(
+        &self,
+        candidate: RemoteG2CandidateScore,
+        block_hashes: &[LocalBlockHash],
+        tiered_matches: &indexer::TieredMatchDetails,
+        cost_model: RemoteG2CostModel,
+    ) -> Option<RemoteG2CandidateScore> {
+        let start = candidate.start_block_index as usize;
+        let end = start.checked_add(candidate.planned_blocks as usize)?;
+        let candidate_hashes = block_hashes.get(start..end)?;
+
+        let parent_hash = if start == 0 {
+            None
+        } else {
+            tiered_matches
+                .device
+                .last_matched_hashes
+                .get(&candidate.source)
+                .copied()
+        };
+        let transferable_blocks = self
+            .indexer
+            .chain_block_hashes_for_host_pinned(candidate.source, parent_hash, candidate_hashes)
+            .len()
+            .min(candidate.planned_blocks as usize) as u32;
+        if transferable_blocks == 0 {
+            return None;
+        }
+        if transferable_blocks == candidate.planned_blocks {
+            return Some(candidate);
+        }
+
+        let target_local_prefix_blocks =
+            remote_g2_target_local_prefix_blocks(candidate.target, tiered_matches);
+        let incremental_blocks = candidate
+            .start_block_index
+            .saturating_add(transferable_blocks)
+            .saturating_sub(target_local_prefix_blocks.max(candidate.start_block_index));
+        if incremental_blocks == 0 {
+            return None;
+        }
+        let cost_blocks = cost_model.estimated_cost_blocks(transferable_blocks);
+        let score_blocks = cost_model.score_blocks(incremental_blocks, transferable_blocks);
+        if score_blocks <= 0.0 {
+            return None;
+        }
+
+        Some(RemoteG2CandidateScore {
+            planned_blocks: transferable_blocks,
+            incremental_blocks,
+            cost_blocks,
+            score_blocks,
+            ..candidate
+        })
+    }
+
+    fn remote_g2_transferable_candidates(
+        &self,
+        candidates: HashMap<WorkerWithDpRank, RemoteG2CandidateScore>,
+        block_hashes: &[LocalBlockHash],
+        tiered_matches: &indexer::TieredMatchDetails,
+        cost_model: RemoteG2CostModel,
+    ) -> HashMap<WorkerWithDpRank, RemoteG2CandidateScore> {
+        candidates
+            .into_iter()
+            .filter_map(|(target, candidate)| {
+                self.remote_g2_transferable_candidate(
+                    candidate,
+                    block_hashes,
+                    tiered_matches,
+                    cost_model,
+                )
+                .map(|candidate| (target, candidate))
+            })
+            .collect()
+    }
+
     fn cache_hit_for_worker(
         &self,
         cache_hit_estimates: &CacheHitEstimates,
@@ -742,6 +820,9 @@ where
         let find_matches_elapsed = start.elapsed();
         let created_at_ms = unix_epoch_ms();
         let expires_at_ms = created_at_ms.saturating_add(REMOTE_KV_REUSE_PLAN_TTL_MS);
+        let remote_g2_cost_model = self
+            .kv_router_config
+            .remote_g2_cost_model(router_config_override);
         let best_local_prefix_blocks = {
             let workers = self.workers_with_configs.borrow();
             if let Some(pinned_worker) = pinned_worker {
@@ -773,6 +854,12 @@ where
                 expires_at_ms,
             )
         };
+        let remote_g2_candidates = self.remote_g2_transferable_candidates(
+            remote_g2_candidates,
+            &block_hashes,
+            &tiered_matches,
+            remote_g2_cost_model,
+        );
 
         // Capture shared cache info for metrics before moving into schedule().
         // Clone the hits so we can compute `hits_beyond(overlap_blocks)` after
@@ -814,20 +901,24 @@ where
             tiered_matches: &tiered_matches,
             created_at_ms,
             expires_at_ms,
-            cost_model: Some(
-                self.kv_router_config
-                    .remote_g2_cost_model(router_config_override),
-            ),
+            cost_model: Some(remote_g2_cost_model),
         };
         let mut selected_remote_g2_candidate = None;
         let mut remote_kv_reuse = if self.kv_router_config.remote_g2_reuse_enabled {
-            match select_remote_g2_candidate(selected_remote_g2_input) {
-                RemoteG2CandidateDecision::Candidate { candidate, .. } => {
-                    selected_remote_g2_candidate = Some(candidate);
-                    materialize_remote_g2_reuse_plan(selected_remote_g2_input, candidate)
-                }
-                RemoteG2CandidateDecision::NoCandidate { reason, stats } => {
-                    RemoteKvReuseDecision::NoPlan { reason, stats }
+            if let Some(candidate) = remote_g2_candidates.get(&response.best_worker).copied() {
+                selected_remote_g2_candidate = Some(candidate);
+                materialize_remote_g2_reuse_plan(selected_remote_g2_input, candidate)
+            } else {
+                match select_remote_g2_candidate(selected_remote_g2_input) {
+                    RemoteG2CandidateDecision::Candidate { stats, .. } => {
+                        RemoteKvReuseDecision::NoPlan {
+                            reason: RemoteKvReuseNoPlanReason::NoContiguousPrefix,
+                            stats,
+                        }
+                    }
+                    RemoteG2CandidateDecision::NoCandidate { reason, stats } => {
+                        RemoteKvReuseDecision::NoPlan { reason, stats }
+                    }
                 }
             }
         } else {
