@@ -173,6 +173,20 @@ pub async fn detect_and_parse_tool_call_with_recovery(
     try_tool_call_parse(message, &cfg, tools).await
 }
 
+/// Deprecated compatibility shim retained for the published `dynamo-parsers`
+/// API. Batch/non-streaming and stream-end finalize now share one recovery
+/// path; call [`detect_and_parse_tool_call_with_recovery`] directly.
+#[deprecated(
+    note = "batch and stream finalize now share one recovery path; use detect_and_parse_tool_call_with_recovery"
+)]
+pub async fn detect_and_parse_tool_call_with_stream_finalize_recovery(
+    message: &str,
+    parser_str: Option<&str>,
+    tools: Option<&[ToolDefinition]>,
+) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
+    detect_and_parse_tool_call_with_recovery(message, parser_str, tools).await
+}
+
 // Base Detector to call for all tool parsing
 pub async fn detect_and_parse_tool_call(
     message: &str,

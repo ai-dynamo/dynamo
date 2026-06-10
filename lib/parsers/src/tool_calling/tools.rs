@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub use super::config::ToolCallConfig;
+#[allow(deprecated)]
+pub use super::parsers::detect_and_parse_tool_call_with_stream_finalize_recovery;
 pub use super::parsers::{detect_and_parse_tool_call, detect_and_parse_tool_call_with_recovery};
 pub use super::response::{
     CalledFunctionStream, ToolCallResponse, ToolCallResponseChunk, ToolCallType,
@@ -50,6 +52,20 @@ pub async fn try_tool_call_parse_aggregate_finalize(
         return Ok((vec![], content));
     }
     Ok((parsed, content))
+}
+
+/// Deprecated compatibility shim retained for the published `dynamo-parsers`
+/// API. Batch/non-streaming and stream-end finalize now share one recovery
+/// path; call [`try_tool_call_parse_aggregate_finalize`] directly.
+#[deprecated(
+    note = "batch and stream finalize now share one recovery path; use try_tool_call_parse_aggregate_finalize"
+)]
+pub async fn try_tool_call_parse_aggregate_stream_finalize(
+    message: &str,
+    parser_str: Option<&str>,
+    tools: Option<&[super::ToolDefinition]>,
+) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
+    try_tool_call_parse_aggregate_finalize(message, parser_str, tools).await
 }
 
 /// Try parsing a string as a structured tool call, for streaming (delta) usage.
