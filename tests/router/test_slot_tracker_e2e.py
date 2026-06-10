@@ -177,6 +177,16 @@ async def _drain(stream: AsyncIterator[dict[str, Any]]) -> None:
     await asyncio.wait_for(drain(), timeout=STREAM_TIMEOUT_S)
 
 
+async def _poll_through_terminal(stream: AsyncIterator[dict[str, Any]]) -> None:
+    async def poll() -> None:
+        async for response in stream:
+            if isinstance(response, dict) and response.get("finish_reason") is not None:
+                return
+        raise AssertionError("Stream ended before returning a terminal response")
+
+    await asyncio.wait_for(poll(), timeout=STREAM_TIMEOUT_S)
+
+
 async def _establish_replica_readiness(
     source: KvRouter,
     observer: KvRouter,
@@ -374,9 +384,7 @@ def test_unexpected_drop_and_normal_completion(
                 decode_active=True,
                 description="normally completed request Add",
             )
-            await _drain(completed_stream)
-            completed_stream = None
-            gc.collect()
+            await _poll_through_terminal(completed_stream)
             await _wait_for_phase(
                 router,
                 baseline,
@@ -384,6 +392,7 @@ def test_unexpected_drop_and_normal_completion(
                 decode_active=False,
                 description="normal completion cleanup",
             )
+            completed_stream = None
         finally:
             del dropped_stream, completed_stream
             gc.collect()

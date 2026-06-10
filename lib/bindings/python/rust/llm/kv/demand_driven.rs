@@ -33,7 +33,7 @@ impl Drop for TrackerFinishGuard {
 }
 
 struct KvDemandStream {
-    stream: rs::pipeline::EngineStream<RsAnnotated<LLMEngineOutput>>,
+    stream: Option<rs::pipeline::EngineStream<RsAnnotated<LLMEngineOutput>>>,
     tracker: Option<Arc<RequestTracker>>,
     finish_guard: TrackerFinishGuard,
     first_item: bool,
@@ -47,7 +47,7 @@ impl KvDemandStream {
         tracker: Option<Arc<RequestTracker>>,
     ) -> Self {
         Self {
-            stream,
+            stream: Some(stream),
             finish_guard: TrackerFinishGuard::new(tracker.clone()),
             tracker,
             first_item: true,
@@ -86,6 +86,11 @@ impl KvDemandStream {
             tracker.record_finish();
             inject_timing_from_tracker(data, tracker);
         }
+        if terminal {
+            self.finished = true;
+            self.stream.take();
+            self.finish_guard.observe();
+        }
 
         let py_response = Python::with_gil(|py| {
             pythonize(py, &response.data)
@@ -94,12 +99,7 @@ impl KvDemandStream {
         });
 
         match py_response {
-            Ok(response) => {
-                if terminal {
-                    self.finish_guard.observe();
-                }
-                Some(response)
-            }
+            Ok(response) => Some(response),
             Err(error) => {
                 tracing::error!("Failed to pythonize response: {}", error);
                 self.finish_guard.observe();
@@ -118,7 +118,12 @@ impl Stream for KvDemandStream {
         }
 
         let this = self.as_mut().get_mut();
-        match this.stream.as_mut().poll_next(cx) {
+        let Some(stream) = this.stream.as_mut() else {
+            this.finished = true;
+            return Poll::Ready(None);
+        };
+
+        match stream.as_mut().poll_next(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(response)) => match this.process_response(response) {
                 Some(response) => Poll::Ready(Some(response)),
