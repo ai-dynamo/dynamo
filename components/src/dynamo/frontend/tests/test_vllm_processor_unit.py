@@ -16,12 +16,13 @@ from transformers import AutoTokenizer
 from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
 
 from dynamo.frontend.prepost import _prepare_request
-from dynamo.frontend.vllm_processor import (
-    _build_reasoning_parser_metadata,
-    _group_mm_feature_metadata,
-    _inject_routing_metadata,
-    _single_transfer_modality,
-)
+
+# NOTE: dynamo.frontend.vllm_processor is imported lazily inside the tests that
+# need it (and via the vllm_processor_module fixture). Importing it at module
+# top level would run its `from vllm.tasks import ...` /
+# `from vllm.v1.engine.parallel_sampling import ...` imports during pytest
+# collection, which breaks the pytest-marker-report pre-commit hook (its vllm
+# stub list does not cover those submodules).
 
 # Needs vllm packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
@@ -149,14 +150,19 @@ class TestMultimodalFeatureMetadata:
         )
 
     def test_groups_hashes_and_placeholders_by_modality(self):
+        from dynamo.frontend.vllm_processor import _group_mm_feature_metadata
+
         features = [
             self._feature("image", "image_hash", 4, 8),
             self._feature("audio", "audio_hash", 20, 6),
         ]
 
-        flat_hashes, flat_placeholders, hashes_by_modality, placeholders_by_modality = (
-            _group_mm_feature_metadata(features)
-        )
+        (
+            flat_hashes,
+            flat_placeholders,
+            hashes_by_modality,
+            placeholders_by_modality,
+        ) = _group_mm_feature_metadata(features)
 
         assert flat_hashes == []
         assert flat_placeholders == []
@@ -170,14 +176,19 @@ class TestMultimodalFeatureMetadata:
         }
 
     def test_image_only_metadata_keeps_legacy_flat_fields(self):
+        from dynamo.frontend.vllm_processor import _group_mm_feature_metadata
+
         features = [
             self._feature("image", "image_hash_0", 4, 8),
             self._feature("image", "image_hash_1", 20, 6),
         ]
 
-        flat_hashes, flat_placeholders, hashes_by_modality, placeholders_by_modality = (
-            _group_mm_feature_metadata(features)
-        )
+        (
+            flat_hashes,
+            flat_placeholders,
+            hashes_by_modality,
+            placeholders_by_modality,
+        ) = _group_mm_feature_metadata(features)
 
         assert flat_hashes == ["image_hash_0", "image_hash_1"]
         assert flat_placeholders == [(4, 8), (20, 6)]
@@ -185,13 +196,15 @@ class TestMultimodalFeatureMetadata:
         assert placeholders_by_modality == {"image": [(4, 8), (20, 6)]}
 
     def test_placeholder_metadata_preserves_is_embed_mask(self):
+        from dynamo.frontend.vllm_processor import _group_mm_feature_metadata
+
         mask = [False, True, True, False]
         features = [
             self._feature("image", "image_hash", 4, 4, is_embed=mask),
         ]
 
-        _, flat_placeholders, _, placeholders_by_modality = (
-            _group_mm_feature_metadata(features)
+        _, flat_placeholders, _, placeholders_by_modality = _group_mm_feature_metadata(
+            features
         )
 
         expected = {"offset": 4, "length": 4, "is_embed": mask}
@@ -199,6 +212,8 @@ class TestMultimodalFeatureMetadata:
         assert placeholders_by_modality == {"image": [expected]}
 
     def test_missing_hash_skips_only_that_feature(self):
+        from dynamo.frontend.vllm_processor import _group_mm_feature_metadata
+
         features = [
             self._feature("image", "image_hash", 4, 8),
             self._feature("image", None, 20, 8),
@@ -212,6 +227,8 @@ class TestMultimodalFeatureMetadata:
         )
 
     def test_single_transfer_modality_rejects_mixed_features(self):
+        from dynamo.frontend.vllm_processor import _single_transfer_modality
+
         assert (
             _single_transfer_modality(
                 [
@@ -284,6 +301,8 @@ async def test_prepare_mm_routing_skips_single_modality_transfer_for_mixed_featu
 
 class TestReasoningParserMetadata:
     def test_no_reasoning_parser_returns_none(self):
+        from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
+
         assert _build_reasoning_parser_metadata(
             None,
             object(),
@@ -293,6 +312,8 @@ class TestReasoningParserMetadata:
         ) == (None, None)
 
     def test_include_reasoning_false_marks_reasoning_ended(self):
+        from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
+
         class ParserShouldNotBeBuilt:
             def __init__(self, *args, **kwargs):
                 raise AssertionError("parser should not be constructed")
@@ -309,6 +330,8 @@ class TestReasoningParserMetadata:
         assert parser_kwargs == {"chat_template_kwargs": {"reasoning_effort": "low"}}
 
     def test_parser_receives_chat_template_kwargs(self):
+        from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
+
         class FakeReasoningParser:
             def __init__(self, tokenizer, *, chat_template_kwargs):
                 self.tokenizer = tokenizer
@@ -330,6 +353,8 @@ class TestReasoningParserMetadata:
         assert parser_kwargs == {"chat_template_kwargs": {"reasoning_effort": "high"}}
 
     def test_kv_router_copies_reasoning_metadata_to_extra_args(self):
+        from dynamo.frontend.vllm_processor import _inject_routing_metadata
+
         kv_kwargs = {"extra_args": {"mm_hashes": [123]}}
         _inject_routing_metadata(
             {
