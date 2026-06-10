@@ -577,6 +577,11 @@ impl RadixTree {
                     first_error.get_or_insert(KvCacheEventError::BlockNotFound);
                     continue;
                 };
+                // TODO(CORRECTNESS): Invalidate this worker throughout the descendant
+                // subtree when a mid-edge removal leaves the node alive for another
+                // worker. Otherwise stale descendants can be reused as store parents,
+                // reactivated by restoring only the removed block, or emitted by dumps
+                // without a valid worker-specific parent.
                 let outcome = node_ref.state.remove_worker_at_pos(worker, pos, block_hash);
                 node_ref.clear_children_if_unreachable();
                 outcome
