@@ -166,8 +166,7 @@ jobs:
     - name: Set up Rust Toolchain Components
       run: rustup component add rustfmt
     - name: Install cargo-nextest
-      # Prebuilt binary (a few seconds) rather than `cargo install` (compiles for
-      # minutes). nextest emits JUnit natively (see .config/nextest.toml).
+      # Prebuilt binary (fast); nextest emits JUnit natively (see .config/nextest.toml).
       run: curl -LsSf https://get.nexte.st/0.9.137/linux | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
     - name: Verify Code Formatting
       working-directory: ${{ matrix.dir }}
@@ -186,24 +185,18 @@ jobs:
       run: cargo doc --no-deps && cargo test --locked --doc
     - name: Run Unit Tests
       working-directory: ${{ matrix.dir }}
-      # nextest runs the same libtest unit/integration tests as `cargo test`
-      # (doc tests run above; nextest doesn't cover them). --profile ci writes a
-      # JUnit report to <target>/nextest/ci/junit.xml for the Datadog upload.
-      # --config-file points the sub-workspaces at the repo-root nextest config.
-      # --no-tests=pass: some matrix dirs (e.g. lib/runtime/examples) have no Rust
-      # tests in this config; nextest otherwise exits non-zero on zero tests.
+      # Tests only (doc tests run above). --profile ci emits JUnit for Datadog;
+      # --config-file points sub-workspaces at the root config; --no-tests=pass
+      # tolerates matrix dirs with no Rust tests.
       run: cargo nextest run --locked --profile ci --config-file ${{ github.workspace }}/.config/nextest.toml --no-tests=pass
     - name: Run KVBM offload Mooncake trace test
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
-      # --profile ci-aux so this second run's JUnit doesn't overwrite the unit-test
-      # report (nextest writes one report per profile, no append).
+      # ci-aux profile so this run's JUnit doesn't overwrite the unit-test one.
       run: cargo nextest run --locked --profile ci-aux --config-file ${{ github.workspace }}/.config/nextest.toml --no-tests=pass -p dynamo-bench --test mooncake_trace --features mocker-kvbm-offload
     - name: Run benches and examples
       working-directory: ${{ matrix.dir }}
-      # nextest runs tests but not benches/examples; execute them under cargo test so
-      # coverage matches the previous `cargo test --all-targets` (their compilation is
-      # additionally checked by the rust-clippy --all-targets job).
+      # nextest skips benches/examples; run them here to keep `--all-targets` coverage.
       run: cargo test --locked --benches --examples
     - name: Install datadog-ci
       if: always()

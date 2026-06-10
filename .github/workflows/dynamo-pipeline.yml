@@ -140,11 +140,8 @@ jobs:
           SCCACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
           SCCACHE_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
         shell: bash
-        # nextest emits JUnit natively via --profile (see .config/nextest.toml). The
-        # two runs use distinct profiles (ci, ci-aux) so their reports don't overwrite
-        # each other under $CARGO_TARGET_DIR/nextest/<profile>/junit.xml. No --config-file
-        # needed: lib/llm and kvbm-physical are members of the root workspace, so nextest
-        # discovers the repo-root .config/nextest.toml automatically.
+        # ci/ci-aux profiles keep the two nextest runs' JUnit reports separate
+        # (see .config/nextest.toml; auto-discovered from the root workspace).
         run: |
           /workspace/container/use-sccache.sh install
           eval $(/workspace/container/use-sccache.sh setup-env)
@@ -155,8 +152,7 @@ jobs:
           cargo nextest run --locked --profile ci --no-tests=pass --features=block-manager,media-ffmpeg,testing-nixl,integration
           cargo clippy -p kvbm-physical --no-deps --all-targets -- -D warnings
           cargo nextest run --locked --profile ci-aux --no-tests=pass -p kvbm-physical --features testing-kvbm --test-threads=4
-          # nextest runs tests but not benches/examples; execute lib/llm's under cargo
-          # test so coverage matches the previous `cargo test --all-targets` run.
+          # nextest skips benches/examples; run them to keep `--all-targets` coverage.
           cargo test --locked --benches --examples --features=block-manager,media-ffmpeg,testing-nixl,integration
           /workspace/container/use-sccache.sh show-stats "Rust Checks"
       - name: Install datadog-ci

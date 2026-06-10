@@ -504,17 +504,13 @@ jobs:
       run: cargo test --locked --no-run
     - name: Run Unit Tests with Coverage
       working-directory: ${{ matrix.dir }}
-      # Run the suite through nextest under llvm-cov: coverage is collected as before,
-      # and nextest writes a JUnit report to <target>/nextest/ci/junit.xml for Datadog.
-      # NEXTEST_PROFILE selects the profile (cargo-llvm-cov's own --profile is the build
-      # profile, so a --profile flag would be ambiguous). --no-report defers coverage
-      # output so we can emit multiple formats without re-running.
+      # nextest under llvm-cov: collects coverage and emits JUnit for Datadog.
+      # NEXTEST_PROFILE avoids clashing with llvm-cov's own --profile (build profile).
       env:
         NEXTEST_PROFILE: ci
       run: |
         cargo llvm-cov --no-report --locked nextest --no-tests=pass --config-file ${{ github.workspace }}/.config/nextest.toml
-        # nextest doesn't run benches/examples; collect their coverage too (accumulates
-        # into the same --no-report data) so coverage matches the previous --all-targets.
+        # nextest skips benches/examples; cover them too (accumulates) for --all-targets parity.
         cargo llvm-cov --no-report --locked --benches --examples
         cargo llvm-cov report --output-path coverage-rust.txt
         cargo llvm-cov report --lcov --output-path coverage-rust.lcov

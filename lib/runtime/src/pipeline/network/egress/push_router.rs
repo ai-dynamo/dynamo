@@ -1592,12 +1592,9 @@ mod tests {
     /// rather than returning a 500 error.
     #[test]
     fn transport_resolution_falls_back_when_selected_instance_disappears() {
-        // Built explicitly rather than via #[tokio::test] so teardown can be bounded.
-        // generate()'s send targets an instance with no real worker, which leaves
-        // background work pending; under nextest's process-per-test model that work
-        // would block the runtime drop (and thus the test process from exiting) until
-        // the job timeout. `cargo test` tolerated it because the shared process only
-        // exits after all tests run. shutdown_timeout forces teardown to complete.
+        // Explicit runtime (not #[tokio::test]) so shutdown_timeout can bound teardown:
+        // generate()'s send to a worker-less instance leaves background work that would
+        // otherwise hang the test process under nextest's per-process isolation.
         let tokio_rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -1645,18 +1642,14 @@ mod tests {
         // that the error (if any) is a transport/network error, not
         // "Instance not found".
         let request = SingleIn::new(42u64);
-        // Bound the send: there is no real worker behind the resolved instance, so
-        // the network send never completes. Under `cargo test` other tests in the
-        // shared process incidentally unblocked this; under nextest's process-per-test
-        // isolation it would hang forever. A timeout here is correct for what the test
-        // checks — transport resolution falling back rather than returning "not found"
-        // (a "not found" error is returned immediately, well before any send).
+        // Bound the send: no worker is behind the resolved instance, so it never
+        // completes. A timeout still proves resolution fell back — a "not found"
+        // error would return immediately, before any send.
         let result =
             tokio::time::timeout(std::time::Duration::from_secs(5), router.generate(request)).await;
 
-        // The request may fail at the network level (no actual worker) or time out
-        // trying to reach it — both mean transport resolution succeeded. It must NOT
-        // fail with "Instance X not found", which would mean the fallback did not work.
+        // Success or timeout both mean resolution worked; only an immediate
+        // "Instance not found" means the fallback failed.
         if let Ok(Err(err)) = &result {
             let msg = format!("{err}");
             assert!(

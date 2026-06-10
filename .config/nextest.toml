@@ -4,30 +4,22 @@
 # cargo-nextest configuration.
 # Docs: https://nexte.st/docs/configuration/
 
-# CI profile: emit a JUnit report so CI can upload Rust test results to Datadog
-# Test Optimization. nextest writes it to <target-dir>/nextest/ci/junit.xml.
+# CI profile: emit JUnit for Datadog (written to <target-dir>/nextest/ci/junit.xml).
 [profile.ci]
-# nextest runs each test in its own process. A unit/integration test that hangs
-# (e.g. one that assumed in-process shared state or serial execution under
-# `cargo test`) would otherwise block the job until GitHub's 6h timeout. Warn at
-# 60s and terminate after 120s so a stuck test fails fast and is named in the log.
+# Terminate tests that hang under nextest's per-process model (warn 60s, kill 120s).
 slow-timeout = { period = "60s", terminate-after = 2 }
 
 [profile.ci.junit]
 path = "junit.xml"
 
-# test_span_events spawns a `cargo test` subprocess (it needs a fresh process with
-# specific logging env vars, since logging init is process-global via a `Once`), which
-# is legitimately slow under nextest — not a hang. Give it headroom above the default
-# hang-detection cap so it isn't terminated, while everything else keeps the tight cap.
+# test_span_events spawns a cargo-test subprocess (legitimately slow, not a hang);
+# give it headroom above the default cap.
 [[profile.ci.overrides]]
 filter = "test(test_span_events)"
 slow-timeout = { period = "120s", terminate-after = 3 }
 
-# Secondary profile for jobs that run nextest twice (e.g. a follow-up suite in the
-# same job). nextest writes one report per profile with no append, so a second run
-# under "ci" would clobber the first; "ci-aux" keeps it at
-# <target-dir>/nextest/ci-aux/junit.xml instead.
+# Second profile for jobs that run nextest twice, so the second run's JUnit
+# doesn't clobber the first (separate <target>/nextest/<profile>/junit.xml).
 [profile.ci-aux]
 slow-timeout = { period = "60s", terminate-after = 2 }
 
