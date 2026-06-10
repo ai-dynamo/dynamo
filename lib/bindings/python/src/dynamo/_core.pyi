@@ -713,6 +713,10 @@ class ModelDeploymentCard:
         ValueError if the path contains non-UTF-8 bytes."""
         ...
 
+    def name(self) -> str:
+        """Return the model name."""
+        ...
+
     def runtime_config(self) -> Any:
         """Return the runtime configuration as a dict."""
         ...
