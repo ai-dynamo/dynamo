@@ -2065,6 +2065,8 @@ type cliqueParams struct {
 
 // buildCliqueForRole generates a single PodCliqueTemplateSpec for the given role,
 // injecting labels, annotations, checkpoint config, and scheduler settings.
+//
+//nolint:gocyclo
 func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, error) {
 	podSpec, err := generatePodSpecForRole(
 		p.r, p.component, p.backendFramework, p.secretsRetriever,
