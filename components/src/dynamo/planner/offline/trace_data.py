@@ -7,14 +7,14 @@ from typing import Any, Dict, List
 
 
 def extract_metrics_from_mooncake(
-    dataset: str, throughput_adjustment_interval: int
+    dataset: str, throughput_adjustment_interval_seconds: int
 ) -> List[Dict[str, Any]]:
     """
     Extract metrics from mooncake-style JSONL data.
 
     Args:
         dataset: Path to the JSONL file containing mooncake trace data
-        throughput_adjustment_interval: Time interval in seconds to group requests
+        throughput_adjustment_interval_seconds: Time interval to group requests
 
     Returns:
         List of dictionaries containing metrics for each interval:
@@ -36,8 +36,8 @@ def extract_metrics_from_mooncake(
         timestamp_ms = record["timestamp"]
         timestamp_sec = timestamp_ms / 1000
         interval_start = (
-            int(timestamp_sec // throughput_adjustment_interval)
-            * throughput_adjustment_interval
+            int(timestamp_sec // throughput_adjustment_interval_seconds)
+            * throughput_adjustment_interval_seconds
         )
         interval_groups[interval_start].append(record)
 

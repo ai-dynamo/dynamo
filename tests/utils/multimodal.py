@@ -13,7 +13,7 @@ from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_bytes
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import chat_payload
-from tests.utils.payloads import BasePayload, ChatPayload
+from tests.utils.payloads import BasePayload, CachedTokensChatPayload, ChatPayload
 
 LOCAL_VIDEO_TEST_PATH = Path(
     WORKSPACE_DIR, "lib/llm/tests/data/media/240p_10.mp4"
@@ -34,6 +34,7 @@ AUDIO_TEST_URL = (
 _MULTIMODAL_COLOR_PROMPT = (
     "What colors are in the following image? Respond only with the colors."
 )
+IMAGE_COLOR_PROMPT = _MULTIMODAL_COLOR_PROMPT
 
 
 def make_image_payload(
@@ -59,6 +60,52 @@ def make_image_payload(
         temperature=0.0,
         max_tokens=100,
         max_attempts=max_attempts,
+    )
+
+
+def make_image_payload_cached_tokens(
+    expected_response: list[str],
+    *,
+    repeat_count: int = 3,
+    min_cached_tokens: int = 1,
+    require_rust_processor_init: bool = False,
+    require_vllm_mm_processor_init: bool = False,
+    min_routing_total_blocks: int = 0,
+    min_avg_kv_hit_rate: float = 0.0,
+) -> CachedTokensChatPayload:
+    """Image payload that asserts MM-aware KV cache reuse on repeats.
+
+    ``require_rust_processor_init`` / ``require_vllm_mm_processor_init`` assert
+    the MM-routing init log fired. ``min_routing_total_blocks`` asserts the
+    [ROUTING] block count is well above text-prefix fallback (~1-3 blocks).
+    ``min_avg_kv_hit_rate`` asserts the post-R1 mean of router_kv_hit_rate
+    >= threshold (fails closed when router-side hashes diverge from the worker).
+    """
+    return CachedTokensChatPayload(
+        body={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": _MULTIMODAL_COLOR_PROMPT},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": MULTIMODAL_IMG_URL},
+                        },
+                    ],
+                }
+            ],
+            "max_tokens": 50,
+            "temperature": 0.0,
+            "stream": False,
+        },
+        repeat_count=repeat_count,
+        expected_response=expected_response,
+        min_cached_tokens=min_cached_tokens,
+        require_rust_processor_init=require_rust_processor_init,
+        require_vllm_mm_processor_init=require_vllm_mm_processor_init,
+        min_routing_total_blocks=min_routing_total_blocks,
+        min_avg_kv_hit_rate=min_avg_kv_hit_rate,
     )
 
 
@@ -226,6 +273,7 @@ class TopologyConfig:
     marks: list[Any] = field(default_factory=list)  # default for cases
     profiled_vram_gib: Optional[float] = None
     requested_vllm_kv_cache_bytes: Optional[int] = None
+    requested_sglang_kv_tokens: Optional[int] = None
     delayed_start: int = 0
     directory: Optional[str] = None  # override profile-level directory
     gpu_marker: Optional[str] = None  # override profile-level gpu_marker
@@ -302,6 +350,7 @@ def make_multimodal_configs(
             marks: list[Any] = [
                 getattr(pytest.mark, gpu),
                 pytest.mark.timeout(timeout),
+                pytest.mark.multimodal,
             ]
             marks.extend(case.marks if case.marks else topo_cfg.marks)
             if topo_cfg.profiled_vram_gib is not None:
@@ -310,6 +359,12 @@ def make_multimodal_configs(
                 marks.append(
                     pytest.mark.requested_vllm_kv_cache_bytes(
                         topo_cfg.requested_vllm_kv_cache_bytes
+                    )
+                )
+            if topo_cfg.requested_sglang_kv_tokens is not None:
+                marks.append(
+                    pytest.mark.requested_sglang_kv_tokens(
+                        topo_cfg.requested_sglang_kv_tokens
                     )
                 )
             if profile.gated:

@@ -4,7 +4,7 @@ This directory contains the in-process offline replay harness used by `dynamo_mo
 
 The goal is to simulate trace execution without spinning up async runtimes, network planes, or real worker tasks. Instead, the harness advances a logical clock, steps mock engine cores directly, and records request/token timing into `TraceCollector` in `lib/mocker/src/replay/collector.rs`.
 
-For the harness-level picture (load driver → harness → SES/MES → trace collector) and operator-facing CLI docs, see [`docs/benchmarks/mocker-trace-replay.md`](../../../../../docs/benchmarks/mocker-trace-replay.md). This README dives into the offline-specific internals: logical clock, event queue, per-worker state machine.
+For the harness-level picture (load driver → harness → SES/MES → trace collector) and operator-facing CLI docs, see [`docs/dynosim/runs.md`](../../../../../docs/dynosim/runs.md). This README dives into the offline-specific internals: logical clock, event queue, per-worker state machine.
 
 ## Where It Sits
 
@@ -242,8 +242,10 @@ Both single and multi harnesses support two admission modes:
 
 - Concurrency mode
   - ignores original first-turn spacing
-  - keeps up to `max_in_flight` requests resident in the cluster
-  - for workloads, still unlocks follow-up turns only after completion plus inter-turn delay
+  - single-turn request lists: keeps up to `max_in_flight` requests in flight
+  - multi-turn session traces: `max_in_flight` caps active **sessions**, and a session holds
+    its slot across all its turns and inter-turn think-time (i.e. a new session starts only
+    when an active one finishes).
   - stamps synthetic arrival times as requests are admitted
 
 This split is why `lib/mocker/src/replay/offline/mod.rs` exposes both:

@@ -26,7 +26,7 @@ try:
         BaseConfigModifier,
         apply_dgd_overrides,
     )
-    from dynamo.profiler.utils.defaults import SearchStrategy
+    from dynamo.profiler.utils.defaults import EngineType, SearchStrategy
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         OverridesSpec,
@@ -48,7 +48,7 @@ def test_build_dgd_config_shapes_multinode_worker_resources() -> None:
     dgd_config = modifier.build_dgd_config(
         mode="disagg",
         model_name="Qwen/Qwen3-30B-A3B",
-        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.0",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1",
         prefill_cli_args=["--max-running-requests", "1"],
         prefill_replicas=1,
         prefill_gpus=1,
@@ -67,13 +67,124 @@ def test_build_dgd_config_shapes_multinode_worker_resources() -> None:
     assert decode_service.get("multinode") is None
 
 
+def test_build_dgd_config_sglang_prefill_mrr_one_sets_dp_safe_cuda_graph_bs() -> None:
+    """SGLang prefill capture bs must remain valid with DP attention."""
+    modifier = CONFIG_MODIFIERS["sglang"]
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="Qwen/Qwen3-30B-A3B",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-post.1",
+        prefill_cli_args=[
+            "--tensor-parallel-size",
+            "2",
+            "--data-parallel-size",
+            "2",
+            "--max-running-requests",
+            "1",
+            "--max-prefill-tokens",
+            "5500",
+            "--enable-dp-attention",
+        ],
+        prefill_replicas=2,
+        prefill_gpus=4,
+        decode_cli_args=[
+            "--max-running-requests",
+            "512",
+            "--cuda-graph-bs",
+            "1",
+        ],
+        decode_replicas=2,
+        decode_gpus=8,
+        num_gpus_per_node=8,
+    )
+
+    prefill_service = next(
+        service
+        for service in dgd_config["spec"]["services"].values()
+        if service.get("subComponentType") == "prefill"
+    )
+    prefill_args = prefill_service["extraPodSpec"]["mainContainer"]["args"]
+
+    assert prefill_args.count("--cuda-graph-bs") == 1
+    assert prefill_args[prefill_args.index("--cuda-graph-bs") + 1] == "2"
+
+
+def test_build_dgd_config_sglang_prefill_keeps_existing_cuda_graph_bs() -> None:
+    """Do not duplicate an explicit CUDA graph batch-size setting."""
+    modifier = CONFIG_MODIFIERS["sglang"]
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="Qwen/Qwen3-30B-A3B",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-post.1",
+        prefill_cli_args=[
+            "--max-running-requests",
+            "1",
+            "--cuda-graph-bs=1",
+        ],
+        prefill_replicas=2,
+        prefill_gpus=4,
+        decode_cli_args=["--max-running-requests", "512"],
+        decode_replicas=2,
+        decode_gpus=8,
+        num_gpus_per_node=8,
+    )
+
+    prefill_service = next(
+        service
+        for service in dgd_config["spec"]["services"].values()
+        if service.get("subComponentType") == "prefill"
+    )
+    prefill_args = prefill_service["extraPodSpec"]["mainContainer"]["args"]
+
+    cuda_graph_bs_args = [
+        arg
+        for arg in prefill_args
+        if arg == "--cuda-graph-bs" or arg.startswith("--cuda-graph-bs=")
+    ]
+    assert cuda_graph_bs_args == ["--cuda-graph-bs=1"]
+
+
+def test_sglang_set_prefill_config_uses_effective_mrr_override() -> None:
+    """Later MRR overrides must drive CUDA graph batch-size safety."""
+    modifier = CONFIG_MODIFIERS["sglang"]
+    config = modifier.convert_config(
+        modifier.load_default_config(mode="disagg"),
+        target=EngineType.PREFILL,
+    )
+    service = next(
+        service
+        for service in config["spec"]["services"].values()
+        if service.get("subComponentType") == "decode"
+    )
+    service["extraPodSpec"]["mainContainer"]["args"] = [
+        "--max-running-requests=512",
+        "--dp=2",
+    ]
+
+    result = modifier.set_prefill_config(
+        config,
+        max_batch_size=1,
+        max_num_tokens=5500,
+    )
+    worker = next(
+        service
+        for service in result["spec"]["services"].values()
+        if service.get("subComponentType") == "decode"
+    )
+    args = worker["extraPodSpec"]["mainContainer"]["args"]
+
+    assert args[args.index("--max-running-requests") + 1] == "1"
+    assert args.count("--cuda-graph-bs") == 1
+    assert args[args.index("--cuda-graph-bs") + 1] == "2"
+
+
 def test_build_dgd_config_multinode_when_tp_exceeds_node() -> None:
     """Single instances that exceed node capacity still get multinode config."""
     modifier = CONFIG_MODIFIERS["sglang"]
     dgd_config = modifier.build_dgd_config(
         mode="disagg",
         model_name="meta-llama/Llama-3-70B",
-        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.0",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1",
         prefill_cli_args=["--max-running-requests", "1"],
         prefill_replicas=1,
         prefill_gpus=1,
@@ -98,7 +209,7 @@ def test_build_dgd_config_multinode_parses_shell_joined_parallelism_args() -> No
     dgd_config = modifier.build_dgd_config(
         mode="disagg",
         model_name="meta-llama/Llama-3-70B",
-        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.0",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1",
         prefill_cli_args=["--max-running-requests", "1"],
         prefill_replicas=1,
         prefill_gpus=1,
@@ -468,7 +579,7 @@ def test_build_dgd_config_pvc_without_model_path_uses_hf_model_name(
     dgd_config = modifier.build_dgd_config(
         mode="agg",
         model_name=model_name,
-        image=f"nvcr.io/nvidia/ai-dynamo/{backend}-runtime:1.1.0",
+        image=f"nvcr.io/nvidia/ai-dynamo/{backend}-runtime:1.1.1",
         agg_cli_args=["--tp", "4"],
         agg_replicas=1,
         agg_gpus=4,
@@ -520,7 +631,7 @@ def test_build_dgd_config_pvc_with_model_path_uses_pvc_path(backend) -> None:
     dgd_config = modifier.build_dgd_config(
         mode="agg",
         model_name=model_name,
-        image=f"nvcr.io/nvidia/ai-dynamo/{backend}-runtime:1.1.0",
+        image=f"nvcr.io/nvidia/ai-dynamo/{backend}-runtime:1.1.1",
         agg_cli_args=["--tp", "4"],
         agg_replicas=1,
         agg_gpus=4,
@@ -541,3 +652,67 @@ def test_build_dgd_config_pvc_with_model_path_uses_pvc_path(backend) -> None:
             f"Worker '{svc_name}' should use PVC model path '{model_path}'. "
             f"args={args}"
         )
+
+
+def test_build_dgd_config_pvc_without_model_path_sets_hf_home() -> None:
+    """When pvc_name is set but model_path doesn't point inside the PVC,
+    HF_HOME must be set to pvc_mount_path so HuggingFace finds cached weights."""
+    modifier = CONFIG_MODIFIERS["sglang"]
+    mount = "/opt/model-cache"
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="Qwen/Qwen3-32B",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.0",
+        prefill_cli_args=["--max-running-requests", "1"],
+        prefill_replicas=1,
+        prefill_gpus=1,
+        decode_cli_args=["--tp", "4"],
+        decode_replicas=1,
+        decode_gpus=4,
+        pvc_name="model-cache",
+        pvc_mount_path=mount,
+    )
+
+    for svc_name, svc in dgd_config["spec"]["services"].items():
+        eps = svc.get("extraPodSpec", {})
+        mc = eps.get("mainContainer", {})
+        env_list = mc.get("env", [])
+        hf_homes = [
+            e for e in env_list if isinstance(e, dict) and e.get("name") == "HF_HOME"
+        ]
+        assert (
+            len(hf_homes) == 1
+        ), f"Expected exactly one HF_HOME env on {svc_name}, got {len(hf_homes)}"
+        assert hf_homes[0]["value"] == mount, f"HF_HOME on {svc_name} should be {mount}"
+
+
+def test_build_dgd_config_pvc_with_model_path_no_hf_home() -> None:
+    """When pvc_name is set and model_path points inside the PVC,
+    HF_HOME should NOT be injected — model is loaded by explicit path."""
+    modifier = CONFIG_MODIFIERS["sglang"]
+    mount = "/opt/model-cache"
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="Qwen/Qwen3-32B",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.0",
+        prefill_cli_args=["--max-running-requests", "1"],
+        prefill_replicas=1,
+        prefill_gpus=1,
+        decode_cli_args=["--tp", "4"],
+        decode_replicas=1,
+        decode_gpus=4,
+        pvc_name="model-cache",
+        pvc_mount_path=mount,
+        model_path=f"{mount}/qwen3-32b",
+    )
+
+    for svc_name, svc in dgd_config["spec"]["services"].items():
+        eps = svc.get("extraPodSpec", {})
+        mc = eps.get("mainContainer", {})
+        env_list = mc.get("env", [])
+        hf_homes = [
+            e for e in env_list if isinstance(e, dict) and e.get("name") == "HF_HOME"
+        ]
+        assert (
+            len(hf_homes) == 0
+        ), f"HF_HOME should not be set on {svc_name} when model_path is a PVC subpath"

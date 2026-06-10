@@ -36,6 +36,7 @@ JINJA_TEMPLATE_PATH = str(
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
+    pytest.mark.core,
     pytest.mark.gpu_1,  # needs sglang & GPU packages installed but does not actually use GPU
     pytest.mark.profiled_vram_gib(0),  # These unit tests do not actually use GPU VRAM
     pytest.mark.pre_merge,
@@ -307,6 +308,16 @@ async def test_namespace_flag_drives_default_endpoint_namespace(mock_sglang_cli)
 
 
 @pytest.mark.asyncio
+async def test_forward_pass_metrics_enabled_from_env(monkeypatch, mock_sglang_cli):
+    """Dynamo should enable FPM when DYN_FORWARDPASS_METRIC_PORT is set."""
+    monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", "1")
+    mock_sglang_cli("--model", "Qwen/Qwen3-0.6B")
+
+    config = await parse_args(sys.argv[1:])
+    assert config.server_args.enable_forward_pass_metrics is True
+
+
+@pytest.mark.asyncio
 async def test_obsolete_dyn_endpoint_types_flag_is_supported(mock_sglang_cli):
     """Obsolete --dyn-endpoint-types alias should map to endpoint_types."""
     mock_sglang_cli(
@@ -454,34 +465,43 @@ def test_prefill_health_check_payload_is_disagg_compatible_alias():
 
 
 # ---------------------------------------------------------------------------
-# LoRA registration model_type gate
+# LoRA registration model_type + worker_type gate
 # ---------------------------------------------------------------------------
-# Pins the serving_mode → model_type selection in LoraMixin.load_lora so a
-# refactor that flips prefill back to Chat|Completions cannot silently land:
-# it would re-introduce the disagg hang where the frontend routes
+# Pins the serving_mode → (model_type, worker_type) selection in
+# LoraMixin.load_lora. A refactor that flips prefill back to Chat|Completions
+# (or drops the explicit worker_type) cannot silently land: it would
+# re-introduce the disagg hang where the frontend routes
 # /v1/chat/completions directly to the prefill worker.
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "serving_mode, endpoint_types, expected_model_type_str",
+    "serving_mode, endpoint_types, expected_model_type_str, expected_worker_type",
     [
-        ("prefill", "chat,completions", "prefill"),
-        ("decode", "chat,completions", "chat,completions"),
-        ("agg", "chat,completions", "chat,completions"),
-        ("decode", "completions", "completions"),
-        ("agg", "chat", "chat"),
+        # Prefill workers register the legacy ModelType.Prefill marker bit
+        # (no OpenAI surface, dual-emitted for old-frontend compat) and
+        # worker_type=Prefill.
+        ("prefill", "chat,completions", "prefill", "prefill"),
+        ("decode", "chat,completions", "chat,completions", "decode"),
+        ("agg", "chat,completions", "chat,completions", "aggregated"),
+        ("decode", "completions", "completions", "decode"),
+        ("agg", "chat", "chat", "aggregated"),
     ],
 )
 async def test_lora_registration_model_type_gate(
-    monkeypatch, serving_mode, endpoint_types, expected_model_type_str
+    monkeypatch,
+    serving_mode,
+    endpoint_types,
+    expected_model_type_str,
+    expected_worker_type,
 ):
-    """LoraMixin.load_lora must select model_type based on serving_mode.
+    """LoraMixin.load_lora must select (model_type, worker_type) based on serving_mode.
 
-    PREFILL → ModelType.Prefill (so the prefill router activates and the frontend
-    does not route chat completions directly to prefill).
-    Otherwise → parse_endpoint_types(endpoint_types) (mirrors base-model
-    registration so --endpoint-types overrides are honored).
+    PREFILL → (ModelType.Prefill, WorkerType.Prefill). The prefill router
+    activates off worker_type; ModelType carries the legacy Prefill marker bit
+    (no OpenAI surface, dual-emitted for old-frontend compat). Otherwise
+    model_type follows parse_endpoint_types and worker_type follows the serving
+    mode.
     """
     from unittest.mock import AsyncMock, MagicMock
 
@@ -545,4 +565,7 @@ async def test_lora_registration_model_type_gate(
     assert (
         str(captured["model_type"]) == expected_model_type_str
     ), f"model_type {captured['model_type']} != expected {expected_model_type_str}"
+    assert (
+        str(captured["worker_type"]) == expected_worker_type
+    ), f"worker_type {captured['worker_type']} != expected {expected_worker_type}"
     assert captured["lora_name"] == "test_lora"

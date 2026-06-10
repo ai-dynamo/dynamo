@@ -13,9 +13,9 @@ Shared reference Dockerfiles for the DeepSeek-V4 family — used by both [`deeps
 | SGLang (GB200) | [`sglang/Dockerfile.dsv4.sglang.gb200`](sglang/Dockerfile.dsv4.sglang.gb200) | `lmsysorg/sglang:deepseek-v4-grace-blackwell` (digest-pinned, arm64) | Two-stage; Dynamo runtime image as donor |
 
 NVIDIA also publishes the prebuilt images for vLLM and SGLang which manifests pull directly:
-- `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2` (multi-arch)
-- `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.2` (arm64 only)
-- `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.2` (amd64 only)
+- `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3` (multi-arch)
+- `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.3` (arm64 only)
+- `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.3` (amd64 only)
 
 The `cudaXY` suffix encodes the CUDA major version baked into the image, not the hardware target.
 

@@ -95,9 +95,9 @@ WORKER_MAP = {
         "prefill": "prefill",
     },
     "trtllm": {
-        "decode": "TRTLLMDecodeWorker",
+        "decode": "decode",
         "decode_agg": "TRTLLMWorker",  # Aggregated uses different name
-        "prefill": "TRTLLMPrefillWorker",
+        "prefill": "prefill",
     },
 }
 
@@ -121,12 +121,6 @@ WORKER_READY_PATTERNS: Dict[str, Pattern] = {
     ),
     # TensorRT-LLM workers
     "TRTLLMWorker": re.compile(
-        r"TrtllmWorker for (?P<model_name>.*?) has been initialized|Model registration succeeded"
-    ),
-    "TRTLLMDecodeWorker": re.compile(
-        r"TrtllmWorker for (?P<model_name>.*?) has been initialized|Model registration succeeded"
-    ),
-    "TRTLLMPrefillWorker": re.compile(
         r"TrtllmWorker for (?P<model_name>.*?) has been initialized|Model registration succeeded"
     ),
 }

@@ -9,12 +9,13 @@ incremental detokenization, error handling, and deprecation warnings.
 Parallels test_vllm_unit.py for the vLLM backend.
 """
 
-
+import asyncio
 import json
 import sys
 import types
 
 import pytest
+from _routed_engine_fakes import FakeRoutedEngine, FakeRoutedItem
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
@@ -24,6 +25,7 @@ import dynamo.frontend.sglang_processor as sglang_processor_module
 from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
+    _flatten_message_content,
     _normalize_assistant_tool_call_arguments,
     _normalize_prompt_token_ids,
     _parse_json_array_buffer,
@@ -34,19 +36,26 @@ from dynamo.frontend.sglang_prepost import (
 )
 from dynamo.frontend.sglang_processor import (
     SglangPreprocessWorkerResult,
+    SglangProcessor,
     _build_dynamo_preproc,
     _init_worker,
     _map_finish_reason,
     _runtime_config_parser_name,
 )
-from dynamo.frontend.utils import PreprocessError, random_call_id, random_uuid
+from dynamo.frontend.utils import (
+    PreprocessError,
+    nvext_extra_field_requested,
+    random_call_id,
+    random_uuid,
+)
 
-# Needs sglang packages (gpu_1 container).  No need for parallel marker.
+# Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
+    pytest.mark.profiled_vram_gib(0),
 ]
 
 MODEL = "Qwen/Qwen3-0.6B"
@@ -251,6 +260,62 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         )
         assert result["model"] == "my-model"
         assert result["token_ids"] == [10, 20, 30]
+
+    def test_stop_token_id_array_maps_to_stop_token_ids(self):
+        """Integer stop arrays are token-id stops, not string stops."""
+        result = _build_dynamo_preproc(
+            {"model": "test", "stop": [32, 34]},
+            [1],
+            "test",
+            None,
+        )
+
+        assert result["stop_conditions"]["stop"] == []
+        assert result["stop_conditions"]["stop_token_ids"] == [32, 34]
+
+    def test_string_stops_remain_string_stops(self):
+        """String stops are forwarded as string stops."""
+        result = _build_dynamo_preproc(
+            {"model": "test", "stop": " The"},
+            [1],
+            "test",
+            None,
+        )
+
+        assert result["stop_conditions"]["stop"] == [" The"]
+        assert result["stop_conditions"]["stop_token_ids"] == []
+
+        result = _build_dynamo_preproc(
+            {"model": "test", "stop": ["A", "B"]},
+            [1],
+            "test",
+            None,
+        )
+
+        assert result["stop_conditions"]["stop"] == ["A", "B"]
+        assert result["stop_conditions"]["stop_token_ids"] == []
+
+    def test_token_id_display_string_remains_string_stop(self):
+        """token_id:N strings are output display strings, not token-id stops."""
+        result = _build_dynamo_preproc(
+            {"model": "test", "stop": "token_id:576"},
+            [1],
+            "test",
+            None,
+        )
+
+        assert result["stop_conditions"]["stop"] == ["token_id:576"]
+        assert result["stop_conditions"]["stop_token_ids"] == []
+
+        result = _build_dynamo_preproc(
+            {"model": "test", "stop": ["token_id:576"]},
+            [1],
+            "test",
+            None,
+        )
+
+        assert result["stop_conditions"]["stop"] == ["token_id:576"]
+        assert result["stop_conditions"]["stop_token_ids"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -869,6 +934,41 @@ class TestNormalizePromptTokenIds:  # FRONTEND.6 — prompt-token-id normalizati
         ) == [1, 2, 3]
 
 
+class TestFlattenMessageContent:  # FRONTEND.1 — DSv4 content-parts array → string
+    # Mirrors SGLang's "string" content format (serving_chat._process_messages):
+    # text parts joined by a single space, non-text parts dropped.
+    def test_string_passes_through(self):
+        assert _flatten_message_content("hello") == "hello"
+
+    def test_none_passes_through(self):
+        assert _flatten_message_content(None) is None
+
+    def test_single_text_part(self):
+        # The common case that crashed the DSv4 encoder.
+        assert _flatten_message_content([{"type": "text", "text": "hi"}]) == "hi"
+
+    def test_text_parts_array_is_space_joined(self):
+        content = [
+            {"type": "text", "text": "first"},
+            {"type": "text", "text": "second"},
+        ]
+        assert _flatten_message_content(content) == "first second"
+
+    def test_non_text_parts_are_dropped(self):
+        content = [
+            {"type": "text", "text": "caption"},
+            {"type": "image_url", "image_url": {"url": "http://x/y.png"}},
+        ]
+        assert _flatten_message_content(content) == "caption"
+
+    def test_bare_string_items_are_ignored(self):
+        # SGLang's string format only flattens {"type": "text"} dict parts.
+        assert _flatten_message_content(["a", "b"]) == ""
+
+    def test_empty_array_becomes_empty_string(self):
+        assert _flatten_message_content([]) == ""
+
+
 class TestRuntimeConfigParserName:  # FRONTEND.2 — parser name resolution from runtime config
     def test_missing_runtime_config_returns_none(self):
         class FakeMdc:
@@ -1290,7 +1390,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             request,
             tokenizer=NoTemplateTokenizer(),
             tool_call_parser_name=None,
-            reasoning_parser_name="deepseek_v4",
+            reasoning_parser_name="deepseek-v4",
         )
 
         assert result.prompt_token_ids == [1, 2, 3]
@@ -1299,6 +1399,81 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert captured["messages"][0]["role"] == "system"
         assert captured["messages"][0]["tools"][0]["function"]["name"] == "get_weather"
         assert captured["messages"][1]["role"] == "user"
+
+    def test_deepseek_v4_accepts_openai_thinking_payload(self, monkeypatch):
+        """OpenAI-style thinking payload maps to DS-V4 thinking."""
+        captured = {}
+        fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
+
+        def fake_encode_messages(messages, *, thinking_mode, reasoning_effort=None):
+            captured["thinking_mode"] = thinking_mode
+            captured["reasoning_effort"] = reasoning_effort
+            return "<dsv4-prompt>"
+
+        fake_module.encode_messages = fake_encode_messages
+        monkeypatch.setitem(
+            sys.modules,
+            "sglang.srt.entrypoints.openai.encoding_dsv4",
+            fake_module,
+        )
+
+        class NoTemplateTokenizer:
+            chat_template = None
+
+            def apply_chat_template(self, *args, **kwargs):
+                raise AssertionError("apply_chat_template should not be called")
+
+            def encode(self, prompt):
+                assert prompt == "<dsv4-prompt>"
+                return [1, 2, 3]
+
+        request = {
+            "model": "deepseek-ai/DeepSeek-V4-Pro",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "max",
+        }
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=NoTemplateTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name="deepseek-v4",
+        )
+
+        assert result.prompt_token_ids == [1, 2, 3]
+        assert captured["thinking_mode"] == "thinking"
+        assert captured["reasoning_effort"] == "max"
+
+    def test_openai_thinking_payload_reaches_generic_chat_template(self):
+        """Root thinking payload is normalized before generic rendering."""
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["messages"] = messages
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        request = {
+            "model": "generic-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "thinking": {"type": "enabled"},
+        }
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+        )
+
+        assert result.prompt_token_ids == [1, 2, 3]
+        assert captured["kwargs"]["thinking"] is True
+        assert result.request["chat_template_kwargs"]["thinking"] is True
+        assert "chat_template_kwargs" not in request
 
     def test_deepseek_v4_named_tool_choice_filters_encoder_tools(self, monkeypatch):
         captured = {}
@@ -1344,7 +1519,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             request,
             tokenizer=NoTemplateTokenizer(),
             tool_call_parser_name=None,
-            reasoning_parser_name="deepseek_v4",
+            reasoning_parser_name="deepseek-v4",
         )
 
         tools = captured["messages"][0]["tools"]
@@ -1567,6 +1742,113 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert choice is not None
         assert choice["finish_reason"] == "stop"
 
+    def test_stop_reason_not_emitted_on_choice(self, tokenizer):
+        """Backend stop_reason is not part of the OpenAI choice shape."""
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+        )
+
+        choice = post.process_output(
+            {"token_ids": [], "finish_reason": "stop", "stop_reason": "END"}
+        )
+
+        assert choice is not None
+        assert "stop_reason" not in choice
+
+    def test_stop_reason_emits_in_nvext_when_requested(self, tokenizer):
+        """Frontend emits backend stop_reason under nvext when requested."""
+
+        async def collect():
+            processor = SglangProcessor(
+                tokenizer=tokenizer,
+                routed_engine=FakeRoutedEngine(
+                    items=[
+                        {
+                            "token_ids": [],
+                            "finish_reason": "stop",
+                            "stop_reason": "END",
+                        }
+                    ]
+                ),
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+                eos_token_id=None,
+            )
+            post = SglangStreamingPostProcessor(
+                tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+            )
+            request = {
+                "model": "test-model",
+                "nvext": {"extra_fields": ["stop_reason"]},
+            }
+            return [
+                item
+                async for item in processor._generate_and_stream(
+                    "req-stop", request, {}, [], post
+                )
+            ]
+
+        items = asyncio.run(collect())
+
+        assert len(items) == 1
+        assert items[0]["nvext"]["stop_reason"] == "END"
+        assert "stop_reason" not in items[0]["choices"][0]
+
+    def _run_stream(self, tokenizer, items):
+        processor = SglangProcessor(
+            tokenizer=tokenizer,
+            routed_engine=FakeRoutedEngine(items=items),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            eos_token_id=None,
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+        )
+
+        async def collect():
+            return [
+                item
+                async for item in processor._generate_and_stream(
+                    "req-err", {"model": "test-model"}, {}, [], post
+                )
+            ]
+
+        return asyncio.run(collect())
+
+    def test_routed_engine_is_error_yields_internal_error(self, tokenizer):
+        """is_error() True yields a single internal_error chunk with the comment text."""
+        items = self._run_stream(
+            tokenizer,
+            [FakeRoutedItem(None, is_error=True, comments=["backend disconnected"])],
+        )
+        assert len(items) == 1
+        err = items[0]["error"]
+        assert err["type"] == "internal_error"
+        assert "backend disconnected" in err["message"]
+
+    def test_routed_engine_none_data_is_skipped(self, tokenizer):
+        """data() is None (e.g. comment-only event) is skipped, not yielded as error."""
+        items = self._run_stream(
+            tokenizer,
+            [
+                FakeRoutedItem(None),
+                {"token_ids": [], "finish_reason": "stop"},
+            ],
+        )
+        # Only the real chunk is yielded; the None-data item is dropped silently.
+        assert len(items) == 1
+        assert items[0]["choices"][0]["finish_reason"] == "stop"
+
+    def test_malformed_engine_response_yields_engine_error(self, tokenizer):
+        """A response dict missing token_ids goes through handle_engine_error."""
+        items = self._run_stream(
+            tokenizer,
+            [{"status": "error", "message": "kv cache exhausted"}],
+        )
+        assert len(items) == 1
+        assert "error" in items[0]
+
     def test_lookback_trimming(self, tokenizer):
         """Verify _all_token_ids doesn't grow unbounded."""
         post = SglangStreamingPostProcessor(
@@ -1684,6 +1966,13 @@ class TestUtilities:  # (mixed — see per-test annotations)
         err = PreprocessError("n=2 unsupported")
         assert "n=2" in str(err)
 
+    def test_nvext_extra_field_requested(self):
+        assert nvext_extra_field_requested(
+            {"nvext": {"extra_fields": ["stop_reason"]}}, "stop_reason"
+        )
+        assert not nvext_extra_field_requested({"nvext": {}}, "stop_reason")
+        assert not nvext_extra_field_requested({}, "stop_reason")
+
 
 # ---------------------------------------------------------------------------
 # SglangPreprocessWorkerResult picklability
@@ -1762,3 +2051,64 @@ class TestDeprecationWarning:  # FRONTEND.8 — legacy/deprecated field warnings
         assert "use_sglang_tokenizer" in source
         assert "FutureWarning" in source
         assert "--dyn-chat-processor sglang" in source
+
+
+# ---------------------------------------------------------------------------
+# chat_template_kwargs forwarding
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.core
+class TestChatTemplateKwargsForwarding:
+    """chat_template_kwargs from the request are forwarded to apply_chat_template.
+
+    Uses Qwen3 which supports enable_thinking: False to suppress <think> blocks.
+    """
+
+    @staticmethod
+    def _messages():
+        return [{"role": "user", "content": "Hello"}]
+
+    def _preprocess(self, request, tokenizer):
+        return preprocess_chat_request(
+            request,
+            tokenizer=tokenizer,
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+        )
+
+    def _decode(self, tokenizer, token_ids: list[int]) -> str:
+        return tokenizer.decode(token_ids, skip_special_tokens=False)
+
+    def test_qwen3_enable_thinking_true_no_closed_think_block(self, tokenizer):
+        """enable_thinking=True leaves reasoning open (model generates <think> itself)."""
+        result = self._preprocess(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "chat_template_kwargs": {"enable_thinking": True},
+            },
+            tokenizer,
+        )
+        prompt = self._decode(tokenizer, result.prompt_token_ids)
+        assert "</think>" not in prompt
+
+    def test_qwen3_thinking_flag_changes_tokens(self, tokenizer):
+        """enable_thinking=True vs False produces different token sequences."""
+        think = self._preprocess(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "chat_template_kwargs": {"enable_thinking": True},
+            },
+            tokenizer,
+        )
+        no_think = self._preprocess(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+            tokenizer,
+        )
+        assert think.prompt_token_ids != no_think.prompt_token_ids

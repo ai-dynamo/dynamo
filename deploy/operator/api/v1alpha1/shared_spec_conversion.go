@@ -354,10 +354,6 @@ func saveSharedAlphaOnlySpec(src, save *DynamoComponentDeploymentSharedSpec, inc
 		save.Failover = src.Failover.DeepCopy()
 		hasSave = true
 	}
-	if src.Checkpoint != nil && !src.Checkpoint.Enabled {
-		save.Checkpoint = src.Checkpoint.DeepCopy()
-		hasSave = true
-	}
 	if includeOriginSplits || hasSave || sharedMainContainerFieldOriginsNeedSave(src) {
 		saveSharedMainContainerOrigins(src, save)
 	}
@@ -548,6 +544,7 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 	}
 
 	fillSharedAlphaOnlyFromPreserved(dst, restored, sharedHasMainContainer(src))
+	restoreSharedPreservedFlatVolumeMounts(dst, restored, src)
 	pruneEmptyExtraPodSpec(dst, restored)
 	if save != nil {
 		if err := saveSharedHubOnlySpec(src, dst, save); err != nil {
@@ -914,6 +911,81 @@ func convertVolumeMountsFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec
 	}}
 }
 
+// Restore alpha-only cache flags only when live beta still matches their lossy projection.
+func restoreSharedPreservedFlatVolumeMounts(dst, preserved *DynamoComponentDeploymentSharedSpec, src *v1beta1.DynamoComponentDeploymentSharedSpec) {
+	if dst == nil || preserved == nil || src == nil || volumeMountsRoundTripThroughHub(preserved.VolumeMounts) {
+		return
+	}
+	if !firstPreservedCompilationCacheMatches(src.CompilationCache, preserved.VolumeMounts) {
+		return
+	}
+	if !volumeMountsEqual(dst.VolumeMounts, visiblePreservedVolumeMountProjection(src, preserved.VolumeMounts)) {
+		return
+	}
+	dst.VolumeMounts = mergePreservedCompilationCacheVolumeMounts(preserved.VolumeMounts, dst.VolumeMounts)
+}
+
+func firstPreservedCompilationCacheMatches(compilationCache *v1beta1.CompilationCacheConfig, mounts []VolumeMount) bool {
+	for _, mount := range mounts {
+		if !mount.UseAsCompilationCache {
+			continue
+		}
+		return compilationCache != nil &&
+			compilationCache.PVCName == mount.Name &&
+			compilationCache.MountPath == mount.MountPoint
+	}
+	return compilationCache == nil
+}
+
+func visiblePreservedVolumeMountProjection(src *v1beta1.DynamoComponentDeploymentSharedSpec, mounts []VolumeMount) []VolumeMount {
+	projected := make([]VolumeMount, 0, len(mounts))
+	firstCompilationCacheSeen := false
+	for _, mount := range mounts {
+		if !mount.UseAsCompilationCache {
+			continue
+		}
+		if firstCompilationCacheSeen {
+			continue
+		}
+		projected = append(projected, mount)
+		firstCompilationCacheSeen = true
+	}
+	if main, ok := sharedMainContainer(src); ok && len(main.VolumeMounts) > 0 {
+		projected = appendMissingVolumeMounts(projected, volumeMountsFromNative(main.VolumeMounts))
+	}
+	return projected
+}
+
+func sharedMainContainer(src *v1beta1.DynamoComponentDeploymentSharedSpec) (corev1.Container, bool) {
+	if src == nil || src.PodTemplate == nil {
+		return corev1.Container{}, false
+	}
+	return findContainerByName(src.PodTemplate.Spec.Containers, mainContainerName)
+}
+
+func volumeMountsEqual(a, b []VolumeMount) bool {
+	return slices.EqualFunc(a, b, func(left, right VolumeMount) bool {
+		return left.Name == right.Name &&
+			left.MountPoint == right.MountPoint &&
+			left.UseAsCompilationCache == right.UseAsCompilationCache
+	})
+}
+
+func mergePreservedCompilationCacheVolumeMounts(preserved, current []VolumeMount) []VolumeMount {
+	out := make([]VolumeMount, 0, len(preserved)+len(current))
+	for _, mount := range preserved {
+		if mount.UseAsCompilationCache && !flatVolumeMountHasNamePath(out, mount.Name, mount.MountPoint) {
+			out = append(out, mount)
+		}
+	}
+	for _, mount := range current {
+		if !flatVolumeMountHasNamePath(out, mount.Name, mount.MountPoint) {
+			out = append(out, mount)
+		}
+	}
+	return out
+}
+
 // ---------------------------------------------------------------------------
 // Scaling adapter (Enabled flag removed in v1beta1)
 // ---------------------------------------------------------------------------
@@ -978,13 +1050,67 @@ func checkpointModeFromV1beta1(mode v1beta1.CheckpointMode) CheckpointMode {
 	}
 }
 
+func checkpointStartupPolicyToV1beta1(policy CheckpointStartupPolicy) v1beta1.CheckpointStartupPolicy {
+	switch policy {
+	case CheckpointStartupPolicyImmediate:
+		return v1beta1.CheckpointStartupPolicyImmediate
+	case CheckpointStartupPolicyWaitForCheckpoint:
+		return v1beta1.CheckpointStartupPolicyWaitForCheckpoint
+	default:
+		return v1beta1.CheckpointStartupPolicy(policy)
+	}
+}
+
+func checkpointStartupPolicyFromV1beta1(policy v1beta1.CheckpointStartupPolicy) CheckpointStartupPolicy {
+	switch policy {
+	case v1beta1.CheckpointStartupPolicyImmediate:
+		return CheckpointStartupPolicyImmediate
+	case v1beta1.CheckpointStartupPolicyWaitForCheckpoint:
+		return CheckpointStartupPolicyWaitForCheckpoint
+	default:
+		return CheckpointStartupPolicy(policy)
+	}
+}
+
+func checkpointDeletionPolicyToV1beta1(policy CheckpointDeletionPolicy) v1beta1.CheckpointDeletionPolicy {
+	switch policy {
+	case CheckpointDeletionPolicyDelete:
+		return v1beta1.CheckpointDeletionPolicyDelete
+	case CheckpointDeletionPolicyRetain:
+		return v1beta1.CheckpointDeletionPolicyRetain
+	default:
+		return v1beta1.CheckpointDeletionPolicy(policy)
+	}
+}
+
+func checkpointDeletionPolicyFromV1beta1(policy v1beta1.CheckpointDeletionPolicy) CheckpointDeletionPolicy {
+	switch policy {
+	case v1beta1.CheckpointDeletionPolicyDelete:
+		return CheckpointDeletionPolicyDelete
+	case v1beta1.CheckpointDeletionPolicyRetain:
+		return CheckpointDeletionPolicyRetain
+	default:
+		return CheckpointDeletionPolicy(policy)
+	}
+}
+
 // ConvertFromGPUMemoryServiceSpec converts an enabled GMS config into the
 // v1beta1 experimental GMS config. Disabled configs are represented by absence
 // in v1beta1 and are skipped by the caller.
 func ConvertFromGPUMemoryServiceSpec(src *GPUMemoryServiceSpec, dst *v1beta1.GPUMemoryServiceSpec) {
 	*dst = v1beta1.GPUMemoryServiceSpec{
-		Mode:            gmsModeToV1beta1(src.Mode),
-		DeviceClassName: src.DeviceClassName,
+		Mode:                  gmsModeToV1beta1(src.Mode),
+		DeviceClassName:       src.DeviceClassName,
+		ExtraClientContainers: slices.Clone(src.ExtraClientContainers),
+	}
+	if len(src.ExtraClientPods) > 0 {
+		dst.ExtraClientPods = make([]v1beta1.GMSClientPodSpec, len(src.ExtraClientPods))
+		for i := range src.ExtraClientPods {
+			dst.ExtraClientPods[i] = v1beta1.GMSClientPodSpec{
+				Name:        src.ExtraClientPods[i].Name,
+				PodTemplate: *src.ExtraClientPods[i].PodTemplate.DeepCopy(),
+			}
+		}
 	}
 }
 
@@ -992,9 +1118,19 @@ func ConvertFromGPUMemoryServiceSpec(src *GPUMemoryServiceSpec, dst *v1beta1.GPU
 // into the GMS config.
 func ConvertToGPUMemoryServiceSpec(src *v1beta1.GPUMemoryServiceSpec, dst *GPUMemoryServiceSpec) {
 	*dst = GPUMemoryServiceSpec{
-		Enabled:         true,
-		Mode:            gmsModeFromV1beta1(src.Mode),
-		DeviceClassName: src.DeviceClassName,
+		Enabled:               true,
+		Mode:                  gmsModeFromV1beta1(src.Mode),
+		DeviceClassName:       src.DeviceClassName,
+		ExtraClientContainers: slices.Clone(src.ExtraClientContainers),
+	}
+	if len(src.ExtraClientPods) > 0 {
+		dst.ExtraClientPods = make([]GMSClientPodSpec, len(src.ExtraClientPods))
+		for i := range src.ExtraClientPods {
+			dst.ExtraClientPods[i] = GMSClientPodSpec{
+				Name:        src.ExtraClientPods[i].Name,
+				PodTemplate: *src.ExtraClientPods[i].PodTemplate.DeepCopy(),
+			}
+		}
 	}
 }
 
@@ -1018,12 +1154,15 @@ func ConvertToFailoverSpec(src *v1beta1.FailoverSpec, dst *FailoverSpec) {
 	}
 }
 
-// ConvertFromServiceCheckpointConfig converts an enabled checkpoint config into
-// the v1beta1 experimental checkpoint config. Disabled configs are represented
-// by absence in v1beta1 and are skipped by the caller.
+// ConvertFromServiceCheckpointConfig converts a checkpoint config into the
+// v1beta1 experimental checkpoint config.
 func ConvertFromServiceCheckpointConfig(src *ServiceCheckpointConfig, dst *v1beta1.ComponentCheckpointConfig) {
 	*dst = v1beta1.ComponentCheckpointConfig{
-		Mode: checkpointModeToV1beta1(src.Mode),
+		Enabled:             src.Enabled,
+		Mode:                checkpointModeToV1beta1(src.Mode),
+		StartupPolicy:       checkpointStartupPolicyToV1beta1(src.StartupPolicy),
+		DeletionPolicy:      checkpointDeletionPolicyToV1beta1(src.DeletionPolicy),
+		TargetContainerName: src.TargetContainerName,
 	}
 	if src.CheckpointRef != nil {
 		dst.CheckpointRef = src.CheckpointRef
@@ -1032,14 +1171,25 @@ func ConvertFromServiceCheckpointConfig(src *ServiceCheckpointConfig, dst *v1bet
 		dst.Identity = &v1beta1.DynamoCheckpointIdentity{}
 		ConvertFromDynamoCheckpointIdentity(src.Identity, dst.Identity)
 	}
+	if src.Job != nil {
+		dst.Job = &v1beta1.ComponentCheckpointJobConfig{
+			GMSClientContainers: slices.Clone(src.Job.GMSClientContainers),
+		}
+		if src.Job.PodTemplate != nil {
+			dst.Job.PodTemplate = src.Job.PodTemplate.DeepCopy()
+		}
+	}
 }
 
 // ConvertToServiceCheckpointConfig converts the v1beta1 experimental checkpoint
 // config into the checkpoint config.
 func ConvertToServiceCheckpointConfig(src *v1beta1.ComponentCheckpointConfig, dst *ServiceCheckpointConfig) {
 	*dst = ServiceCheckpointConfig{
-		Enabled: true,
-		Mode:    checkpointModeFromV1beta1(src.Mode),
+		Enabled:             src.Enabled,
+		Mode:                checkpointModeFromV1beta1(src.Mode),
+		StartupPolicy:       checkpointStartupPolicyFromV1beta1(src.StartupPolicy),
+		DeletionPolicy:      checkpointDeletionPolicyFromV1beta1(src.DeletionPolicy),
+		TargetContainerName: src.TargetContainerName,
 	}
 	if src.CheckpointRef != nil {
 		dst.CheckpointRef = src.CheckpointRef
@@ -1047,6 +1197,14 @@ func ConvertToServiceCheckpointConfig(src *v1beta1.ComponentCheckpointConfig, ds
 	if src.Identity != nil {
 		dst.Identity = &DynamoCheckpointIdentity{}
 		ConvertToDynamoCheckpointIdentity(src.Identity, dst.Identity)
+	}
+	if src.Job != nil {
+		dst.Job = &ServiceCheckpointJobConfig{
+			GMSClientContainers: slices.Clone(src.Job.GMSClientContainers),
+		}
+		if src.Job.PodTemplate != nil {
+			dst.Job.PodTemplate = src.Job.PodTemplate.DeepCopy()
+		}
 	}
 }
 
@@ -1099,7 +1257,7 @@ func convertExperimentalToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1b
 		ConvertFromFailoverSpec(src.Failover, exp.Failover)
 	}
 
-	if src.Checkpoint != nil && src.Checkpoint.Enabled {
+	if src.Checkpoint != nil {
 		ensureExp().Checkpoint = &v1beta1.ComponentCheckpointConfig{}
 		ConvertFromServiceCheckpointConfig(src.Checkpoint, exp.Checkpoint)
 	}
@@ -1963,7 +2121,8 @@ func pruneEmptyExtraPodSpec(dst, restored *DynamoComponentDeploymentSharedSpec) 
 	if dst == nil || dst.ExtraPodSpec == nil {
 		return
 	}
-	if containerIsEmpty(dst.ExtraPodSpec.MainContainer) {
+	if containerIsEmpty(dst.ExtraPodSpec.MainContainer) &&
+		!extraPodSpecOnlyPreservesMainContainerName(restoredExtraPodSpec(restored)) {
 		dst.ExtraPodSpec.MainContainer = nil
 	}
 	if extraPodSpecIsZero(dst.ExtraPodSpec) {
@@ -1972,6 +2131,13 @@ func pruneEmptyExtraPodSpec(dst, restored *DynamoComponentDeploymentSharedSpec) 
 		}
 		dst.ExtraPodSpec = nil
 	}
+}
+
+func restoredExtraPodSpec(restored *DynamoComponentDeploymentSharedSpec) *ExtraPodSpec {
+	if restored == nil {
+		return nil
+	}
+	return restored.ExtraPodSpec
 }
 
 func restoreMainContainerFieldOrigins(dst, preserved *DynamoComponentDeploymentSharedSpec, mainContainerPresent bool) {

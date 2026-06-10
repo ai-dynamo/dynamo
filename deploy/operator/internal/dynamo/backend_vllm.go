@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/featuregate"
 	corev1 "k8s.io/api/core/v1"
@@ -21,6 +21,7 @@ const (
 	pipelineParallelSizeFlag  = "--pipeline-parallel-size"
 	dataParallelSizeFlag      = "--data-parallel-size"
 	dataParallelSizeLocalFlag = "--data-parallel-size-local"
+	distributedExecutorFlag   = "--distributed-executor-backend"
 	enableElasticEPFlag       = "--enable-elastic-ep"
 )
 
@@ -28,33 +29,32 @@ type VLLMBackend struct {
 	ParentGraphDeploymentName string
 }
 
-func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	// The inter-pod GMS layout (with or without failover) requires the engine
 	// to load weights from the dedicated GMS weight-server pod rather than
-	// from disk. --load-format gms and DYN_VLLM_GMS_SHADOW_MODE activate the
-	// vLLM-side GMS client path and apply to both standalone inter-pod GMS
-	// and inter-pod GMS + failover; the "shadow mode" name is a vLLM upstream
-	// naming convention, not a statement about whether shadow pods are
-	// present.
+	// from disk.
 	if component.IsInterPodGMSEnabled() {
 		if !containerHasArg(container, "--load-format", "gms") {
 			injectFlagsIntoContainerCommand(container, "--load-format gms", false, "vllm")
 		}
-		// DYN_VLLM_GMS_SHADOW_MODE is a vLLM-engine-specific switch (activates
-		// the vLLM-side GMS client path for shadow weight loading). It is
-		// injected here — in the vLLM backend — rather than in the backend-
-		// agnostic GMS helpers so non-vLLM backends do not inherit a stray,
-		// meaningless env var if/when inter-pod GMS is extended to them.
-		container.Env = append(container.Env, corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"})
+		if component.IsInterPodFailoverEnabled() {
+			// DYN_VLLM_GMS_SHADOW_MODE activates vLLM's standby/failover behavior
+			// on top of --load-format gms. Standalone inter-pod GMS should not set
+			// it: those engines are active clients of the dedicated GMS weight
+			// server, not shadow engines waiting for failover activation.
+			container.Env = append(container.Env, corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"})
+		}
 	}
 
 	isMultinode := numberOfNodes > 1
+	annotations := GetPodTemplateAnnotations(component)
 
 	if isMultinode {
+		resources := resourceRequirementsWithFallback(container.Resources, GetMainContainerResources(component))
 		// Apply multinode-specific argument modifications
-		updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer, component.Resources, numberOfNodes, component.Annotations)
+		updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer, &resources, numberOfNodes, annotations)
 
-		if shouldUseMpBackend(component.Annotations) {
+		if shouldUseMpBackend(annotations) {
 			container.Env = append(container.Env, corev1.EnvVar{
 				Name: commonconsts.VLLMNixlSideChannelHostEnvVar,
 				ValueFrom: &corev1.EnvVarSource{
@@ -65,7 +65,7 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 			})
 		}
 
-		// Remove probes for multinode worker and leader
+		// Remove probes for multinode workers.
 		if role == RoleWorker {
 			container.LivenessProbe = nil
 			container.ReadinessProbe = nil
@@ -75,13 +75,8 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 
 	// Set compilation cache environment variables for VLLM
 	cacheDir := ""
-
-	// Check for volumeMounts with useAsCompilationCache=true
-	for _, volumeMount := range component.VolumeMounts {
-		if volumeMount.UseAsCompilationCache {
-			cacheDir = volumeMount.MountPoint
-			break
-		}
+	if component.CompilationCache != nil {
+		cacheDir = component.CompilationCache.MountPath
 	}
 
 	if cacheDir != "" {
@@ -216,28 +211,14 @@ func GenerateWaitLeaderConfigMap(dgdName, namespace string) *corev1.ConfigMap {
 	}
 }
 
-func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
-	if numberOfNodes <= 1 || role != RoleWorker || !shouldUseMpBackend(component.Annotations) {
+func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, _ *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+	if !b.shouldInjectVLLMMpWaitLeaderInit(podSpec, numberOfNodes, role) {
 		return
 	}
 
-	// Elastic EP workers use a Ray cluster, not the MP coordinator. The worker
-	// command (injected by injectElasticEPRayLaunchFlags) already contains an
-	// inline health gate that polls DynamoSystemPort (9090) before joining Ray.
-	// The MP init container waits on VLLMMpMasterPort (29500), which never opens
-	// in the elastic EP path — injecting it would cause the worker to hang forever.
-	if component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil {
-		if hasFlag(getExpandedArgs(component.ExtraPodSpec.MainContainer), enableElasticEPFlag) {
-			return
-		}
-	}
-
-	if len(podSpec.Containers) == 0 || b.ParentGraphDeploymentName == "" {
-		return
-	}
-
+	mainContainer := &podSpec.Containers[0]
 	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
-	mainImage := podSpec.Containers[0].Image
+	mainImage := mainContainer.Image
 	cmName := GetWaitLeaderConfigMapName(b.ParentGraphDeploymentName)
 
 	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
@@ -275,9 +256,17 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 	podSpec.InitContainers = append(podSpec.InitContainers, initContainer)
 }
 
+func (b *VLLMBackend) shouldInjectVLLMMpWaitLeaderInit(podSpec *corev1.PodSpec, numberOfNodes int32, role Role) bool {
+	if b.ParentGraphDeploymentName == "" || numberOfNodes <= 1 || role != RoleWorker || len(podSpec.Containers) == 0 {
+		return false
+	}
+
+	return containerCommandLineHasArg(&podSpec.Containers[0], distributedExecutorFlag, "mp")
+}
+
 // updateVLLMMultinodeArgs dispatches to the appropriate injection function based on
 // parallelism strategy (TP/PP distributed vs data-parallel) and executor backend (mp vs ray).
-func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *v1alpha1.Resources, numberOfNodes int32, annotations map[string]string) {
+func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *corev1.ResourceRequirements, numberOfNodes int32, annotations map[string]string) {
 	expandedArgs := getExpandedArgs(container)
 	needsDistributed := needsTensorParallelMultinodeLaunch(expandedArgs, resources)
 
@@ -353,7 +342,8 @@ func shouldUseMpBackend(annotations map[string]string) bool {
 // the leader's master port before the worker's main container starts.
 func injectMpDistributedLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, numberOfNodes int32) {
 	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
-	mpFlags := fmt.Sprintf("--distributed-executor-backend mp --nnodes %d --master-addr %s --master-port %s",
+	mpFlags := fmt.Sprintf("%s mp --nnodes %d --master-addr %s --master-port %s",
+		distributedExecutorFlag,
 		numberOfNodes, leaderHostname, commonconsts.VLLMMpMasterPort)
 
 	needsShell := false
@@ -383,7 +373,7 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 			quotedArgs[i] = shellQuoteForBashC(arg)
 		}
 		originalArgs := strings.Join(quotedArgs, " ")
-		vllmMultinodeFlags := "--distributed-executor-backend ray"
+		vllmMultinodeFlags := fmt.Sprintf("%s ray", distributedExecutorFlag)
 		container.Args = []string{fmt.Sprintf("ray start --head --port=%s && %s %s %s", VLLMPort, fullCommand, originalArgs, vllmMultinodeFlags)}
 	case RoleWorker:
 		// Worker nodes only run Ray agent - vLLM on leader will spawn Ray actors on workers
@@ -458,7 +448,7 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 		// Bounded at 720 × 15s = 3 hours to cover large models with slow disk I/O.
 		// Without a bound, a permanently broken leader leaves the worker looping
 		// forever with no Kubernetes liveness probe to detect it (probes are removed
-		// at the UpdatePodSpec level for elastic EP workers).
+		// from vLLM multinode containers in UpdateContainer).
 		healthGate := fmt.Sprintf(
 			`i=0; until python3 -c "import urllib.request; urllib.request.urlopen('http://%s:%d/live', timeout=5)" `+
 				`2>/dev/null; do `+
@@ -484,7 +474,7 @@ func hasFlag(expandedArgs []string, flag string) bool {
 	return false
 }
 
-func injectDataParallelLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *v1alpha1.Resources, numberOfNodes int32) {
+func injectDataParallelLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *corev1.ResourceRequirements, numberOfNodes int32) {
 	expandedArgs := getExpandedArgs(container)
 	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
 
@@ -543,7 +533,7 @@ func injectDataParallelLaunchFlags(container *corev1.Container, role Role, servi
 
 // needsMultinodeDistributedLaunch returns true when the model's world size (TP * PP)
 // exceeds the GPU count of a single node, requiring multi-node distribution (via mp or ray).
-func needsTensorParallelMultinodeLaunch(expandedArgs []string, resources *v1alpha1.Resources) bool {
+func needsTensorParallelMultinodeLaunch(expandedArgs []string, resources *corev1.ResourceRequirements) bool {
 	containerGPUs := getContainerGPUs(resources)
 	if containerGPUs == 0 {
 		return false
@@ -558,7 +548,7 @@ func getWorldSize(expandedArgs []string) int64 {
 }
 
 // if world size across all DP ranks > GPU count, then we need to inject data parallel multinode coordination
-func needsDataParallelMultinodeLaunch(expandedArgs []string, resources *v1alpha1.Resources) bool {
+func needsDataParallelMultinodeLaunch(expandedArgs []string, resources *corev1.ResourceRequirements) bool {
 	dataParallelSize := getFlagValue(expandedArgs, dataParallelSizeFlag)
 	containerGPUs := getContainerGPUs(resources)
 	if containerGPUs == 0 {
@@ -581,12 +571,54 @@ func getFlagValue(expandedArgs []string, flag string) int64 {
 	return flagValue
 }
 
-func getContainerGPUs(resources *v1alpha1.Resources) int64 {
-	if resources == nil || resources.Limits == nil || resources.Limits.GPU == "" {
+func getContainerGPUs(resources *corev1.ResourceRequirements) int64 {
+	return getGPUQuantity(resources)
+}
+
+func getGPUQuantity(resources *corev1.ResourceRequirements) int64 {
+	if resources == nil {
 		return 0
 	}
-	if gpus, err := strconv.ParseInt(resources.Limits.GPU, 10, 64); err == nil {
-		return gpus
+	if value, ok := resourceListGPUValue(resources.Requests); ok {
+		return value
+	}
+	if value, ok := resourceListGPUValue(resources.Limits); ok {
+		return value
 	}
 	return 0
+}
+
+func resourceListGPUValue(resources corev1.ResourceList) (int64, bool) {
+	if q, ok := resources[corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)]; ok {
+		return q.Value(), true
+	}
+	for name, q := range resources {
+		if resourceNameIsGPU(name) {
+			return q.Value(), true
+		}
+	}
+	return 0, false
+}
+
+func resourceNameIsGPU(name corev1.ResourceName) bool {
+	normalized := strings.ToLower(string(name))
+	return normalized == "gpu" ||
+		normalized == "nvidia/gpu" ||
+		strings.HasSuffix(normalized, "/gpu") ||
+		strings.Contains(normalized, ".com/gpu") ||
+		strings.HasPrefix(normalized, "mig-") ||
+		strings.Contains(normalized, "/mig-")
+}
+
+func resourceRequirementsWithFallback(resources, fallback corev1.ResourceRequirements) corev1.ResourceRequirements {
+	if len(resources.Requests) == 0 {
+		resources.Requests = fallback.Requests
+	}
+	if len(resources.Limits) == 0 {
+		resources.Limits = fallback.Limits
+	}
+	if len(resources.Claims) == 0 {
+		resources.Claims = fallback.Claims
+	}
+	return resources
 }

@@ -224,6 +224,38 @@ impl MediaFetcher {
         }
         Ok(())
     }
+
+    /// Build a `reqwest::Client` that enforces this fetcher's policy on every
+    /// request *and* every redirect hop: blocklist DNS resolution, redirect
+    /// revalidation against `check_if_url_allowed`, and the configured
+    /// user-agent / timeout. Callers that want a single security contract
+    /// across every outbound HTTP request in the frontend should reuse this
+    /// — the connection pool stays warm and SSRF policy can't be bypassed.
+    pub fn build_http_client(&self) -> Result<reqwest::Client> {
+        let fetcher_for_redirects = self.clone();
+        let redirect_policy = Policy::custom(move |attempt| {
+            if attempt.previous().len() >= MAX_REDIRECTS {
+                return attempt.error(anyhow::anyhow!("too many redirects (max={MAX_REDIRECTS})"));
+            }
+            match fetcher_for_redirects.check_if_url_allowed(attempt.url()) {
+                Ok(()) => attempt.follow(),
+                Err(e) => attempt.error(e),
+            }
+        });
+
+        let mut builder = reqwest::Client::builder()
+            .user_agent(&self.user_agent)
+            .redirect(redirect_policy)
+            .dns_resolver(Arc::new(BlocklistResolver {
+                allow_private_ips: self.allow_private_ips,
+            }));
+
+        if let Some(timeout) = self.timeout {
+            builder = builder.timeout(timeout);
+        }
+
+        Ok(builder.build()?)
+    }
 }
 
 /// DNS resolver that filters out blocked IP ranges before reqwest sees them.
@@ -363,34 +395,7 @@ impl MediaLoader {
         // Fall back to env-aware defaults so `DYN_MM_ALLOW_INTERNAL=1` is
         // honored even when the caller doesn't pass an explicit fetcher.
         let media_fetcher = media_fetcher.unwrap_or_else(MediaFetcher::from_env);
-
-        // Redirect policy: revalidate the policy-visible part of the URL
-        // (scheme, IP literals, hostname blocklist, direct-IP / direct-port
-        // rules) on every hop. DNS-based attacks on redirect targets are
-        // handled by the custom resolver below.
-        let fetcher_for_redirects = media_fetcher.clone();
-        let redirect_policy = Policy::custom(move |attempt| {
-            if attempt.previous().len() >= MAX_REDIRECTS {
-                return attempt.error(anyhow::anyhow!("too many redirects (max={MAX_REDIRECTS})"));
-            }
-            match fetcher_for_redirects.check_if_url_allowed(attempt.url()) {
-                Ok(()) => attempt.follow(),
-                Err(e) => attempt.error(e),
-            }
-        });
-
-        let mut http_client_builder = reqwest::Client::builder()
-            .user_agent(&media_fetcher.user_agent)
-            .redirect(redirect_policy)
-            .dns_resolver(Arc::new(BlocklistResolver {
-                allow_private_ips: media_fetcher.allow_private_ips,
-            }));
-
-        if let Some(timeout) = media_fetcher.timeout {
-            http_client_builder = http_client_builder.timeout(timeout);
-        }
-
-        let http_client = http_client_builder.build()?;
+        let http_client = media_fetcher.build_http_client()?;
 
         let nixl_agent = get_nixl_agent()?;
 

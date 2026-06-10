@@ -19,6 +19,7 @@ try:
 except ImportError:
     pytest.skip("forward_pass_metrics not available", allow_module_level=True)
 from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.core.perf_model.rust_adapter import PlannerEngineCapacity
 from dynamo.planner.core.state_machine import PlannerStateMachine
 from dynamo.planner.core.types import (
     EngineCapabilities,
@@ -89,12 +90,12 @@ def _make_config(**overrides) -> PlannerConfig:
     defaults = dict(
         mode="disagg",
         optimization_target="sla",
-        ttft=500.0,
-        itl=50.0,
+        ttft_ms=500.0,
+        itl_ms=50.0,
         min_endpoint=1,
         max_gpu_budget=-1,
-        throughput_adjustment_interval=60,
-        load_adjustment_interval=5,
+        throughput_adjustment_interval_seconds=60,
+        load_adjustment_interval_seconds=5,
         load_scaling_down_sensitivity=80,
         max_num_fpm_samples=50,
         fpm_sample_bucket_size=16,
@@ -135,6 +136,58 @@ def _make_core(config=None, caps=None, **config_overrides) -> PlannerStateMachin
 def _make_agg_core(config=None, caps=None, **config_overrides) -> PlannerStateMachine:
     cfg = config or _agg_config(**config_overrides)
     return PlannerStateMachine(cfg, caps or _agg_caps())
+
+
+def test_accept_length_clamp_uses_config_fallback_nextn():
+    core = _make_core(speculative_nextn=2)
+    core._observe_traffic(
+        TrafficObservation(
+            duration_s=60, num_req=1, isl=1000, osl=150, accept_length=4.5
+        )
+    )
+    assert core._current_decode_accept_length() == 3.0
+
+
+def test_accept_length_clamp_uses_mdc_nextn_before_config():
+    caps = WorkerCapabilities(
+        decode=EngineCapabilities(
+            num_gpu=1, max_num_batched_tokens=2048, speculative_nextn=1
+        )
+    )
+    core = _make_core(caps=caps, speculative_nextn=4)
+    core._observe_traffic(
+        TrafficObservation(
+            duration_s=60, num_req=1, isl=1000, osl=150, accept_length=4.5
+        )
+    )
+    assert core._current_decode_accept_length() == 2.0
+
+
+def test_accept_length_forced_to_one_without_spec_decode():
+    core = _make_core()
+    core._observe_traffic(
+        TrafficObservation(
+            duration_s=60, num_req=1, isl=1000, osl=150, accept_length=2.0
+        )
+    )
+    assert core._current_decode_accept_length() == 1.0
+
+
+def test_missing_accept_length_keeps_last_value():
+    core = _make_core(speculative_nextn=2)
+    core._observe_traffic(
+        TrafficObservation(
+            duration_s=60, num_req=1, isl=1000, osl=150, accept_length=2.5
+        )
+    )
+    assert core._current_decode_accept_length() == 2.5
+
+    core._observe_traffic(
+        TrafficObservation(
+            duration_s=60, num_req=1, isl=1000, osl=150, accept_length=None
+        )
+    )
+    assert core._current_decode_accept_length() == 2.5
 
 
 def _train_prefill_regression(core: PlannerStateMachine) -> None:
@@ -247,7 +300,7 @@ class TestFpmObservation:
 
 class TestPrefillLoadScaling:
     def test_scale_up_when_all_above_sla(self):
-        core = _make_core(mode="prefill", ttft=5.0)
+        core = _make_core(mode="prefill", ttft_ms=5.0)
         _train_prefill_regression(core)
 
         fpm = _make_fpm(
@@ -309,7 +362,7 @@ class TestPrefillLoadScaling:
 
 class TestDecodeLoadScaling:
     def test_scale_up_when_all_above_sla(self):
-        core = _make_core(mode="decode", itl=5.0)
+        core = _make_core(mode="decode", itl_ms=5.0)
         _train_decode_regression(core)
 
         fpm = _make_fpm(
@@ -333,12 +386,296 @@ class TestDecodeLoadScaling:
         assert effects.diagnostics.load_decision_reason == "scale_up"
 
 
-# ── Disagg load scaling ───────────────────────────────────────────────
+# ── Consolidation-aware scale-down ────────────────────────────────────
+
+
+def _decode_caps_with_max_kv(max_kv_tokens: int) -> WorkerCapabilities:
+    """Decode-only capabilities advertising a max_kv_tokens budget."""
+    return WorkerCapabilities(
+        decode=EngineCapabilities(
+            num_gpu=1,
+            max_num_batched_tokens=2048,
+            max_kv_tokens=max_kv_tokens,
+        ),
+    )
+
+
+class TestDecodeConsolidationAwareScaleDown:
+    """Decode scale-down uses two checks at the survivor's post-consolidation
+    KV (current sched+queued scaled by N/(N-1)):
+
+    1. **Cache feasibility** -- post_kv must fit within ``max_kv_tokens``;
+       crossing it forces block eviction / queueing, a non-linear regime
+       outside the regression's domain.
+    2. **SLA check** -- regression-predicted ITL at post_kv must stay
+       within ``SLA * sensitivity``.
+
+    Either failure refuses the scale-down.
+    """
+
+    def _setup(self, *, itl_sla: float = 100.0, max_kv_tokens: int = 100_000):
+        core = _make_core(
+            mode="decode",
+            itl_ms=itl_sla,
+            load_scaling_down_sensitivity=80,
+        )
+        core._capabilities = _decode_caps_with_max_kv(max_kv_tokens)
+        _train_decode_regression(core)
+        return core
+
+    def _tick(self, *, num_workers: int, sched_kv_per_worker: int) -> TickInput:
+        decode = {}
+        for i in range(num_workers):
+            decode[(f"w{i}", 0)] = _make_fpm(
+                worker_id=f"w{i}",
+                sum_decode_kv_tokens=sched_kv_per_worker,
+                num_decode_requests=max(1, sched_kv_per_worker // 1000),
+                # Match _train_decode_regression's wall_time formula so the
+                # post-bootstrap refit on each tick stays monotone in kv;
+                # otherwise the regression rejects the fit and decisions skip.
+                wall_time=0.00001 * sched_kv_per_worker + 0.001,
+            )
+        return TickInput(
+            now_s=5.0,
+            fpm_observations=FpmObservations(decode=decode),
+            worker_counts=WorkerCounts(ready_num_decode=num_workers),
+        )
+
+    def test_post_consolidation_within_sla_permits(self):
+        """Light load: post_kv well under cache and SLA -> ALLOW.
+
+        N=2, sched_kv=1500. post_kv = 3000. Predicted ITL ~= 0.001 +
+        0.00001 * 4000 ~= 41 ms (with internal avg_decode_len), under
+        the 80 ms threshold. No scale-up either (under 100 ms SLA).
+        """
+        core = self._setup(itl_sla=100.0)
+        tick = self._tick(num_workers=2, sched_kv_per_worker=1_500)
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is not None
+        assert effects.scale_to.num_decode == 1
+
+    def test_post_consolidation_breaches_sla_refuses(self):
+        """Cache fine but predicted ITL > SLA*sensitivity -> SLA check refuses.
+
+        N=2, sched_kv=8000. post_kv=16000 (well below 100K cache). Predicted
+        ITL ~= 0.001 + 0.00001 * 17000 ~= 171 ms, above the 80 ms threshold.
+        """
+        core = self._setup(itl_sla=100.0)
+        tick = self._tick(num_workers=2, sched_kv_per_worker=8_000)
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is None or effects.scale_to.num_decode == 2
+        assert (
+            effects.diagnostics.load_decision_reason
+            == "scale_down_refused_consolidation"
+        )
+
+    def test_post_consolidation_exceeds_max_kv_refuses(self):
+        """Hard cache fail-safe: post_kv >= max_kv -> refuse outright.
+
+        N=2, sched_kv=60_000. post_kv=120_000 >= max_kv 100_000. SLA is
+        effectively off (10s) so only the cache check can refuse.
+        """
+        core = self._setup(itl_sla=10_000.0, max_kv_tokens=100_000)
+        tick = self._tick(num_workers=2, sched_kv_per_worker=60_000)
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is None or effects.scale_to.num_decode == 2
+        assert (
+            effects.diagnostics.load_decision_reason
+            == "scale_down_refused_consolidation"
+        )
+
+    def test_no_max_kv_falls_through_to_sla_check(self):
+        """Without max_kv_tokens, only the SLA check governs.
+
+        Cache check is skipped (no denominator); the regression still gates
+        scale-down by predicted ITL. Light load passes -> ALLOW.
+        """
+        core = self._setup(itl_sla=100.0)
+        # Erase max_kv: cache check becomes a no-op.
+        core._capabilities = WorkerCapabilities(
+            decode=EngineCapabilities(num_gpu=1, max_num_batched_tokens=2048),
+        )
+        tick = self._tick(num_workers=2, sched_kv_per_worker=1_500)
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is not None
+        assert effects.scale_to.num_decode == 1
+
+
+def _train_slow_prefill_regression(core: PlannerStateMachine) -> None:
+    """Trains a regression with low slope so chunked TTFTs stay tractable.
+
+    Slope 1e-5 (not 1e-6) is the floor where np.linalg keeps the coefficient
+    reliably positive across small fits -- 1e-6 sometimes computes as
+    slightly negative from floating-point noise and the fit gets rejected.
+    """
+    fpms = [
+        _make_fpm(
+            sum_prefill_tokens=t,
+            num_prefill_requests=1,
+            wall_time=1e-5 * t + 1e-3,
+        )
+        for t in [500, 1000, 1500, 2000, 2500]
+    ]
+    core.load_benchmark_fpms(prefill_fpms=fpms)
+
+
+class TestPrefillConsolidationAwareScaleDown:
+    """Prefill scale-down re-runs ``estimate_next_ttft`` with scaled queue.
+
+    The regression's internal ``avg_isl`` (own-request compute) is unchanged
+    by consolidation -- only the queue input is scaled. This guards against
+    inflating the new request's prefill compute time.
+    """
+
+    def _setup(self, ttft: float = 100.0):
+        core = _make_core(
+            mode="prefill",
+            ttft_ms=ttft,
+            load_scaling_down_sensitivity=80,
+        )
+        _train_slow_prefill_regression(core)
+        return core
+
+    def _tick(self, *, num_workers: int, queued_per_worker: int) -> TickInput:
+        prefill = {}
+        for i in range(num_workers):
+            prefill[(f"w{i}", 0)] = _make_fpm(
+                worker_id=f"w{i}",
+                queued_prefill_tokens=queued_per_worker,
+                sum_prefill_tokens=500,
+                num_prefill_requests=1,
+                # Match _train_slow_prefill_regression to keep the per-tick
+                # refit monotone (1e-5 * 500 + 1e-3 = 0.006).
+                wall_time=1e-5 * 500 + 1e-3,
+            )
+        return TickInput(
+            now_s=5.0,
+            fpm_observations=FpmObservations(prefill=prefill),
+            worker_counts=WorkerCounts(ready_num_prefill=num_workers),
+        )
+
+    def test_n2_refuses_when_post_consolidation_breaks_sla(self):
+        """High queue at N=2: post-consolidation TTFT exceeds SLA * 0.8."""
+        core = self._setup(ttft=100.0)
+        # avg_isl=1500 from training; queue 30K per worker doubled to 60K
+        # post-consolidation -> ceil((60000+1500)/2048)=31 chunks ~= 95+ ms.
+        tick = self._tick(num_workers=2, queued_per_worker=30_000)
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert (
+            effects.scale_to is None
+            or effects.scale_to.num_prefill is None
+            or effects.scale_to.num_prefill >= 2
+        )
+
+    def test_n2_permits_when_queue_empty(self):
+        """At N=2 with empty queues, post-consolidation TTFT stays within SLA."""
+        core = self._setup(ttft=100.0)
+        tick = self._tick(num_workers=2, queued_per_worker=0)
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is not None
+        assert effects.scale_to.num_prefill == 1
+
+    def test_consolidation_only_inflates_queue_not_compute(self):
+        """At N=10 the queue-only scaling lets us scale down at queue sizes
+        that would refuse if we'd naively multiplied the whole TTFT by 10/9.
+
+        With queue=2000 per worker: avg_isl=1500 dominates the TTFT (~=3 ms)
+        and scaling N->N-1 only inflates the queue portion. Post-consolidation
+        queue ~= 2222, total ~= 3722 -> still 2 chunks -> predicted TTFT remains
+        well under 100ms * 0.8.
+        """
+        core = self._setup(ttft=100.0)
+        core._num_p_workers = 10  # ensure reconcile sees 10 workers
+        tick = self._tick(num_workers=10, queued_per_worker=2_000)
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is not None
+        assert effects.scale_to.num_prefill == 9
+
+
+def _train_prefill_regression_high_own_compute(core: PlannerStateMachine) -> None:
+    """Trains a steeper regression so own-compute is a sizeable fraction of SLA.
+
+    With wall_time = 1e-5*t + 1e-3 and ISLs in [1500..2500] (avg_isl=2000),
+    a single chunk at MBT=2048 is ~= 21.5 ms and T_own (queue=0) is ~= 21 ms.
+    """
+    fpms = [
+        _make_fpm(
+            sum_prefill_tokens=t,
+            num_prefill_requests=1,
+            wall_time=1e-5 * t + 1e-3,
+        )
+        for t in [1500, 1750, 2000, 2250, 2500]
+    ]
+    core.load_benchmark_fpms(prefill_fpms=fpms)
+
+
+class TestPrefillQueueBudgetRefinement:
+    """Sensitivity applies to the queue-induced TTFT, not the full TTFT.
+
+    When ``T_own`` (own-compute, fixed cost) is a meaningful fraction of SLA,
+    the old `TTFT(post_queue) < SLA * sensitivity` check over-penalises the
+    queue budget by spending sensitivity on the unavoidable own-compute.
+    The corrected check allows scale-down when the queue-induced TTFT after
+    consolidation fits within ``(SLA - T_own) * sensitivity``.
+    """
+
+    def _setup(self, ttft: float = 50.0):
+        core = _make_core(
+            mode="prefill",
+            ttft_ms=ttft,
+            load_scaling_down_sensitivity=80,
+        )
+        _train_prefill_regression_high_own_compute(core)
+        return core
+
+    def _tick(self, *, num_workers: int, queued_per_worker: int) -> TickInput:
+        prefill = {}
+        for i in range(num_workers):
+            prefill[(f"w{i}", 0)] = _make_fpm(
+                worker_id=f"w{i}",
+                queued_prefill_tokens=queued_per_worker,
+                sum_prefill_tokens=2000,
+                num_prefill_requests=1,
+                wall_time=0.021,
+            )
+        return TickInput(
+            now_s=5.0,
+            fpm_observations=FpmObservations(prefill=prefill),
+            worker_counts=WorkerCounts(ready_num_prefill=num_workers),
+        )
+
+    def test_high_own_compute_permits_scale_down(self):
+        """Old check would have refused; new queue-budget check allows.
+
+        N=2, queue=1000, SLA=50ms, T_own~=21ms.
+        Post-consolidation TTFT ~= 42ms -> exceeds old SLA*0.8 = 40ms (refuse).
+        Queue-induced post ~= 21ms < (50-21)*0.8 = 23.2ms (allow).
+        """
+        core = self._setup(ttft=50.0)
+        tick = self._tick(num_workers=2, queued_per_worker=1_000)
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is not None
+        assert effects.scale_to.num_prefill == 1
+
+    def test_t_own_above_sla_blocks_scale_down(self):
+        """When T_own alone exceeds SLA, queue_budget <= 0 -> refuse.
+
+        SLA=15ms but T_own~=21ms -> new request can't even meet SLA empty;
+        scaling down would only worsen contention.
+        """
+        core = self._setup(ttft=15.0)
+        tick = self._tick(num_workers=2, queued_per_worker=0)
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert (
+            effects.scale_to is None
+            or effects.scale_to.num_prefill is None
+            or effects.scale_to.num_prefill >= 2
+        )
 
 
 class TestDisaggLoadScaling:
     def test_disagg_scale_up(self):
-        core = _make_core(ttft=5.0, itl=5.0)
+        core = _make_core(ttft_ms=5.0, itl_ms=5.0)
         _train_prefill_regression(core)
         _train_decode_regression(core)
 
@@ -427,7 +764,7 @@ class TestThroughputScaling:
             mode="prefill",
             enable_load_scaling=False,
             enable_throughput_scaling=True,
-            ttft=200.0,
+            ttft_ms=200.0,
         )
         _train_prefill_regression(core)
 
@@ -480,8 +817,8 @@ class TestKvHitRatePlumbing:
         assert core._num_req_predictor.data_buffer == []
         assert core._isl_predictor.data_buffer == []
         assert core._osl_predictor.data_buffer == []
-        # kv predictor also untouched in load-only mode (no prediction needed)
-        assert core._kv_hit_rate_predictor.data_buffer == []
+        assert not hasattr(core, "_kv_hit_rate_predictor")
+        assert core._last_kv_hit_rate == 0.4
 
     def test_load_only_none_kv_hit_rate_leaves_last_value_unchanged(self):
         core = _make_core(enable_throughput_scaling=False)
@@ -512,10 +849,9 @@ class TestKvHitRatePlumbing:
         )
         assert core._last_kv_hit_rate == 0.5
 
-    def test_mixed_mode_observe_traffic_feeds_predictor_only(self):
-        """In mixed mode the raw observation feeds the predictor; the sticky
-        ``_last_kv_hit_rate`` is *not* updated until ``_advance_throughput``
-        promotes the predicted value to it."""
+    def test_mixed_mode_observe_traffic_updates_last_kv_hit_rate(self):
+        """KV hit rate uses last-value semantics even when traffic shape uses
+        configured predictors."""
         core = _make_core()  # both load + throughput scaling enabled
         assert core._last_kv_hit_rate is None
         core._observe_traffic(
@@ -523,21 +859,25 @@ class TestKvHitRatePlumbing:
                 duration_s=60, num_req=100, isl=1000, osl=150, kv_hit_rate=0.3
             )
         )
-        # Predictor saw the observation
-        assert len(core._kv_hit_rate_predictor.data_buffer) == 1
-        # Sticky value is *not* set from the raw observation in mixed mode
-        assert core._last_kv_hit_rate is None
+        assert not hasattr(core, "_kv_hit_rate_predictor")
+        assert core._last_kv_hit_rate == 0.3
 
-    def test_mixed_mode_advance_throughput_promotes_predicted_value(self):
-        """After a throughput tick fires, ``_last_kv_hit_rate`` should hold
-        the predicted value (used by all subsequent load ticks until the
-        next throughput tick)."""
+    def test_kv_hit_rate_ignores_configured_load_predictor(self):
+        core = _make_core(load_predictor="arima")
+        core._observe_traffic(
+            TrafficObservation(
+                duration_s=60, num_req=100, isl=1000, osl=150, kv_hit_rate=0.35
+            )
+        )
+        assert not hasattr(core, "_kv_hit_rate_predictor")
+        assert core._last_kv_hit_rate == 0.35
+
+    def test_mixed_mode_advance_throughput_uses_last_kv_hit_rate(self):
+        """Throughput scaling uses the most recent observed hit rate directly."""
         core = _make_core(
             mode="prefill", enable_load_scaling=True, enable_throughput_scaling=True
         )
         _train_prefill_regression(core)
-        # ConstantPredictor returns the last observed value once min_data_points=1.
-        # Feed a known value and run a throughput tick.
         traffic = TrafficObservation(
             duration_s=60, num_req=100, isl=1000, osl=150, kv_hit_rate=0.6
         )
@@ -547,7 +887,6 @@ class TestKvHitRatePlumbing:
             worker_counts=WorkerCounts(ready_num_prefill=1),
         )
         core.on_tick(_tick_for(tick_input), tick_input)
-        # Constant predictor returns 0.6, which is then promoted to sticky
         assert core._last_kv_hit_rate == pytest.approx(0.6)
 
     def test_load_only_scheduler_sets_need_traffic_on_load_tick(self):
@@ -555,7 +894,7 @@ class TestKvHitRatePlumbing:
             mode="prefill",
             enable_load_scaling=True,
             enable_throughput_scaling=False,
-            load_adjustment_interval=7,
+            load_adjustment_interval_seconds=7,
         )
         tick = core.initial_tick(start_s=0.0)
         # Load-only mode: the load tick should request a kv-hit-rate scrape
@@ -570,8 +909,8 @@ class TestKvHitRatePlumbing:
             mode="prefill",
             enable_load_scaling=True,
             enable_throughput_scaling=True,
-            load_adjustment_interval=5,
-            throughput_adjustment_interval=60,
+            load_adjustment_interval_seconds=5,
+            throughput_adjustment_interval_seconds=60,
         )
         tick = core.initial_tick(start_s=0.0)
         # First tick is a pure load tick (5s < 60s); traffic scrape is reserved
@@ -597,8 +936,7 @@ class TestKvHitRatePlumbing:
         assert core._last_kv_hit_rate == 0.7
 
     def test_warm_load_predictors_skips_kv_hit_rate(self):
-        """kv_hit_rate has no good offline-trace proxy, so it must not
-        receive warmup data (only live observations feed it)."""
+        """kv_hit_rate is runtime metadata, so warmup traces must not set it."""
         core = _make_core()
         observations = [
             TrafficObservation(
@@ -611,8 +949,8 @@ class TestKvHitRatePlumbing:
         assert len(core._num_req_predictor.data_buffer) == 3
         assert len(core._isl_predictor.data_buffer) == 3
         assert len(core._osl_predictor.data_buffer) == 3
-        # kv_hit_rate predictor stayed cold
-        assert core._kv_hit_rate_predictor.data_buffer == []
+        assert not hasattr(core, "_kv_hit_rate_predictor")
+        assert core._last_kv_hit_rate is None
 
     def test_throughput_diagnostics_include_predicted_kv_hit_rate(self):
         core = _make_core(
@@ -632,23 +970,44 @@ class TestKvHitRatePlumbing:
             worker_counts=WorkerCounts(ready_num_prefill=1),
         )
         effects = core.on_tick(_tick_for(tick), tick)
-        # ConstantPredictor predicts the last value it saw
+        # The API field is named "predicted" for compatibility; kv_hit_rate uses
+        # last-value semantics.
         assert effects.diagnostics.predicted_kv_hit_rate == 0.4
 
-    def test_high_predicted_hit_rate_reduces_prefill_replicas(self):
-        """With the same demand + regression, a high predicted hit rate
+    def test_high_last_observed_hit_rate_reduces_prefill_replicas(self, monkeypatch):
+        """With the same demand + regression, a high last-observed hit rate
         should yield fewer (or at worst equal) prefill replicas than no
         reuse."""
         core_base = _make_core(
             mode="prefill", enable_load_scaling=False, enable_throughput_scaling=True
         )
-        _train_prefill_regression(core_base)
         core_hit = _make_core(
             mode="prefill", enable_load_scaling=False, enable_throughput_scaling=True
         )
-        _train_prefill_regression(core_hit)
+        base_hit_rates: list[float | None] = []
+        cached_hit_rates: list[float | None] = []
 
-        # Feed several observations so the (constant) predictor locks in.
+        def _capacity_for(hit_rates: list[float | None]):
+            def _capacity(**kwargs) -> PlannerEngineCapacity:
+                hit_rate = kwargs.get("kv_hit_rate")
+                hit_rates.append(hit_rate)
+                rps = 5.0 if (hit_rate or 0.0) >= 0.8 else 1.0
+                return PlannerEngineCapacity(rps=rps, ttft_ms=100.0)
+
+            return _capacity
+
+        monkeypatch.setattr(
+            core_base._prefill_regression,
+            "find_engine_capacity_rps",
+            _capacity_for(base_hit_rates),
+        )
+        monkeypatch.setattr(
+            core_hit._prefill_regression,
+            "find_engine_capacity_rps",
+            _capacity_for(cached_hit_rates),
+        )
+
+        # Feed observations so last-value runtime metadata is available.
         traffic_base = TrafficObservation(
             duration_s=60, num_req=500, isl=4000, osl=150, kv_hit_rate=0.0
         )
@@ -672,6 +1031,8 @@ class TestKvHitRatePlumbing:
         effects_hit = core_hit.on_tick(_tick_for(tick_hit), tick_hit)
         assert effects_base.scale_to is not None
         assert effects_hit.scale_to is not None
+        assert base_hit_rates == [0.0]
+        assert cached_hit_rates == [0.8]
         assert effects_hit.scale_to.num_prefill <= effects_base.scale_to.num_prefill
 
 
@@ -680,7 +1041,7 @@ class TestKvHitRatePlumbing:
 
 class TestFpmReconciliation:
     def test_mismatch_skips_scaling(self):
-        core = _make_core(mode="prefill", ttft=5.0)
+        core = _make_core(mode="prefill", ttft_ms=5.0)
         _train_prefill_regression(core)
 
         tick = TickInput(
@@ -711,6 +1072,178 @@ class TestFpmReconciliation:
 
 
 # ── Agg planner core ──────────────────────────────────────────────────
+
+
+def _agg_caps_with_max_kv(max_kv_tokens: int) -> WorkerCapabilities:
+    """Agg capabilities advertising max_num_batched_tokens AND max_kv_tokens."""
+    return WorkerCapabilities(
+        decode=EngineCapabilities(
+            num_gpu=1,
+            max_num_batched_tokens=2048,
+            max_kv_tokens=max_kv_tokens,
+        ),
+    )
+
+
+class TestAggConsolidationAwareScaleDown:
+    """Agg dispatcher must respect consolidation refusal from either sub-decision.
+
+    Regression test for the dispatcher bug where ``_agg_prefill_scaling``
+    returning ``None`` because of an active safety refusal was conflated with
+    "no prefill signal", letting ``_advance_load_agg`` fall through to
+    decode-only scale-down via its line-327 fallback. Post-fix, the sub-
+    decisions return ``num_workers`` on refusal so the dispatcher distinguishes
+    "stay at current count" from "no signal at all".
+    """
+
+    def _train_agg_high_decode_kv_cost(self, core: PlannerStateMachine) -> None:
+        """Regression with a strong decode_kv coefficient.
+
+        ``T_own`` of a zero-queue prefill is ``a*avg_isl + b*decode_kv + c``.
+        With ``b=1e-5`` and ``decode_kv=30K`` we get ~0.31s; doubling
+        ``decode_kv`` to 60K (post-consolidation) pushes ``T_own`` to ~0.62s,
+        well past a 500ms TTFT SLA.
+        """
+        fpms = [
+            _make_fpm(
+                sum_prefill_tokens=p,
+                num_prefill_requests=1,
+                sum_decode_kv_tokens=d,
+                num_decode_requests=10,
+                wall_time=1e-4 * p + 1e-5 * d + 1e-3,
+            )
+            for p, d in [
+                (100, 5000),
+                (200, 15000),
+                (300, 25000),
+                (400, 35000),
+                (500, 45000),
+            ]
+        ]
+        core.load_benchmark_fpms(agg_fpms=fpms)
+
+    def _tick(
+        self,
+        *,
+        num_workers: int,
+        sched_decode_kv_per_worker: int,
+        queued_decode_kv_per_worker: int = 0,
+    ) -> TickInput:
+        decode = {}
+        for i in range(num_workers):
+            decode[(f"w{i}", 0)] = _make_fpm(
+                worker_id=f"w{i}",
+                sum_prefill_tokens=200,
+                num_prefill_requests=1,
+                sum_decode_kv_tokens=sched_decode_kv_per_worker,
+                num_decode_requests=10,
+                queued_prefill_tokens=0,
+                queued_decode_kv_tokens=queued_decode_kv_per_worker,
+                # Match the regression so per-tick refit stays monotone.
+                wall_time=1e-4 * 200 + 1e-5 * sched_decode_kv_per_worker + 1e-3,
+            )
+        return TickInput(
+            now_s=5.0,
+            fpm_observations=FpmObservations(decode=decode),
+            worker_counts=WorkerCounts(ready_num_decode=num_workers),
+        )
+
+    def test_prefill_refusal_blocks_decode_only_scale_down(self):
+        """Agg dispatcher: prefill safety refusal is NOT overridden.
+
+        Setup at N=2:
+          - decode util = 30K / 100K = 0.3, post-consolidation 0.6 < 0.8
+            (sensitivity) -> agg-decode would allow scale-down.
+          - prefill T_own_post at decode_kv=60K is ~620ms > 500ms SLA
+            -> agg-prefill refuses scale-down (queue_budget <= 0).
+
+        Pre-B1-fix the dispatcher would have dropped the prefill veto and
+        scaled down 2 -> 1 anyway. Post-fix we stay at 2.
+        """
+        core = _make_agg_core(
+            ttft_ms=500.0,
+            itl_ms=1000.0,
+            load_scaling_down_sensitivity=80,
+        )
+        core._capabilities = _agg_caps_with_max_kv(100_000)
+        self._train_agg_high_decode_kv_cost(core)
+
+        tick = self._tick(num_workers=2, sched_decode_kv_per_worker=30_000)
+        effects = core.on_tick(_tick_for(tick), tick)
+
+        # Must NOT scale down to 1.
+        assert (
+            effects.scale_to is None
+            or effects.scale_to.num_decode is None
+            or effects.scale_to.num_decode >= 2
+        )
+        # Operator-facing reason should distinguish the safety veto from
+        # generic "no_change".
+        assert (
+            effects.diagnostics.load_decision_reason
+            == "scale_down_refused_consolidation"
+        )
+
+    def test_queued_decode_kv_included_in_consolidation(self):
+        """Queued decode KV must be added to the post-consolidation input.
+
+        Scenario: low scheduled decode kv per worker but a sizable queued
+        decode backlog. Without summing the queue, the post-consolidation
+        ``current_decode_kv`` underestimates the survivor's decode pressure
+        and the prefill TTFT prediction lets scale-down through.
+
+        Setup at N=2, ttft=500ms, regression slope 1e-5 on decode_kv:
+          - sched_decode_kv = 5K per worker, queued_decode_kv = 25K per worker
+          - Combined = 30K; post-consolidation combined = 60K.
+          - Sched-only (buggy) ``T_own_post`` at decode_kv=10K is ~121ms,
+            queue_budget = (500-121)*0.8 = 303ms -> would ALLOW.
+          - Combined (fixed) ``T_own_post`` at decode_kv=60K is ~621ms >
+            500ms -> queue_budget <= 0 -> REFUSES.
+        """
+        core = _make_agg_core(
+            ttft_ms=500.0,
+            itl_ms=1000.0,
+            load_scaling_down_sensitivity=80,
+        )
+        core._capabilities = _agg_caps_with_max_kv(100_000)
+        self._train_agg_high_decode_kv_cost(core)
+
+        tick = self._tick(
+            num_workers=2,
+            sched_decode_kv_per_worker=5_000,
+            queued_decode_kv_per_worker=25_000,
+        )
+        effects = core.on_tick(_tick_for(tick), tick)
+
+        # Without the fix, agg-prefill would see post_decode_kv=10K and
+        # let scale-down through. With the fix, post_decode_kv=60K refuses.
+        assert (
+            effects.scale_to is None
+            or effects.scale_to.num_decode is None
+            or effects.scale_to.num_decode >= 2
+        )
+        assert (
+            effects.diagnostics.load_decision_reason
+            == "scale_down_refused_consolidation"
+        )
+
+    def test_both_sides_safe_permits_scale_down(self):
+        """Sanity: when neither side refuses, agg DOES scale down."""
+        core = _make_agg_core(
+            ttft_ms=2000.0,  # generous TTFT so prefill never refuses
+            itl_ms=1000.0,
+            load_scaling_down_sensitivity=80,
+        )
+        core._capabilities = _agg_caps_with_max_kv(100_000)
+        self._train_agg_high_decode_kv_cost(core)
+
+        # Light load: decode util 0.1 per worker -> post 0.2 < 0.8 (allow)
+        # Prefill T_own_post at decode_kv=20K ~ 0.221s < 2000ms (allow)
+        tick = self._tick(num_workers=2, sched_decode_kv_per_worker=10_000)
+        effects = core.on_tick(_tick_for(tick), tick)
+
+        assert effects.scale_to is not None
+        assert effects.scale_to.num_decode == 1
 
 
 class TestAggPlannerStateMachine:
@@ -792,7 +1325,7 @@ class TestDiagnostics:
         assert effects.diagnostics is not None
 
     def test_diagnostics_reset_each_tick(self):
-        core = _make_core(mode="prefill", ttft=5.0)
+        core = _make_core(mode="prefill", ttft_ms=5.0)
         _train_prefill_regression(core)
 
         fpm = _make_fpm(

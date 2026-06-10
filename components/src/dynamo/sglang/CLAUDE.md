@@ -20,7 +20,7 @@ support the current version plus 1 version back (N and N-1). The pattern:
    enough surface area to cover what Dynamo actually calls.
 4. Each fallback branch in `_compat.py` MUST have a comment noting which SGLang
    version it supports and when it can be removed, e.g.:
-   `# Fallback for sglang <= 0.5.9. Remove when min supported version is 0.6.0+`
+   `# Fallback for sglang <= 0.5.10. Remove when min supported version is 0.5.12+`
 5. When a new SGLang version is released and the old N-1 falls outside the support
    window, delete the corresponding fallback branches and polyfills from `_compat.py`.
    If `_compat.py` becomes trivial re-exports, inline the imports and delete the file.
@@ -141,6 +141,23 @@ BaseGenerativeHandler (handler_base.py)
 3. **Video generation** (`register_video_generation_model`): Same fast path with
    `ModelType.Videos`.
 
+### Multinode DP Rank Visibility
+
+SGLang multinode LLM workers have two different DP-rank views:
+
+- **Model registration / router scheduling** is global. In the legacy
+  `python -m dynamo.sglang` path, only the leader process (`node_rank == 0`)
+  serves the Dynamo endpoint and registers the model card. That single routable
+  worker must advertise `[0, dp_size)` via `ModelRuntimeConfig`; otherwise the
+  router cannot schedule remote DP ranks.
+- **KV events, FPM, and component metrics** are local. Each node subscribes only
+  to its own rank slice from `local_dp_rank_bounds(server_args)`, and non-leader
+  nodes publish those events using the leader worker id so the router-visible KV
+  trees remain keyed as `(leader_worker_id, dp_rank)`.
+
+Do not reuse the local per-node rank slice for model registration. Keep
+registration on the global range and local publishers on the local range.
+
 ## Init Flow (typical LLM decode)
 
 ```
@@ -227,6 +244,12 @@ in `lib/llm/src/protocols/common.rs`).
 absolute sequence position where logprob computation starts: `-1` (default) = output tokens
 only (`len(prompt) - 1`), `0` = from prompt start. We set it to 0 when `prompt_logprobs`
 is requested.
+
+**Top-logprobs gate**: `logprobs >= 1` (or `prompt_logprobs >= 1`) raises `ValueError`
+by default. SGLang's tokenizer manager detokenizes top-k tokens per-position serially,
+causing severe latency degradation (O(N) per generated token). Callers must use
+`logprobs=0` for chosen-token-only logprobs. Set `DYN_SGL_ALLOW_TOP_LOGPROBS=1` to
+override once upstream batches `detokenize_top_logprobs_tokens`.
 
 **Streaming behavior** (`_extract_logprobs`):
 
@@ -341,7 +364,7 @@ Checklist for adding a new worker (e.g., a new modality or serving mode):
 
 ```
 sglang/
-  _compat.py               # SGLang version compat shim (network imports + NetworkAddress polyfill)
+  _compat.py               # SGLang version compat shim (signature probing for async_generate kwargs)
   __main__.py              # Entry point
   main.py                  # Worker dispatch
   args.py                  # Config parsing (ServerArgs vs SimpleNamespace)

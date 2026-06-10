@@ -28,8 +28,15 @@ mod test_event_processing {
         let token_ids = vec![10, 20, 30, 40];
         let blk_hash = 0xdead_beef;
 
-        let stored =
-            create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, None, None, None);
+        let stored = create_stored_block_from_parts(
+            kv_block_size,
+            blk_hash,
+            &token_ids,
+            None,
+            None,
+            None,
+            None,
+        );
 
         assert_eq!(stored.block_hash.0, blk_hash);
         let expected_hash =
@@ -58,6 +65,7 @@ mod test_event_processing {
             &Arc::new(AtomicU32::new(0)),
             None,
             None,
+            None,
         );
 
         assert_eq!(blocks.len(), 2);
@@ -80,6 +88,7 @@ mod test_event_processing {
             &block_hashes,
             None,
             &warning_count,
+            None,
             None,
             None,
         );
@@ -115,6 +124,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
+            None,
         )
         .unwrap();
         assert!(matches!(out.event.data, KvCacheEventData::Stored(_)));
@@ -159,6 +169,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
+            None,
         )
         .unwrap();
         let lora_out = convert_event(
@@ -167,6 +178,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
+            None,
         )
         .unwrap();
 
@@ -223,6 +235,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
+            None,
         )
         .unwrap();
         let out2 = convert_event(
@@ -231,6 +244,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
+            None,
         )
         .unwrap();
 
@@ -320,6 +334,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
+            None,
         )
         .unwrap();
 
@@ -336,6 +351,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
+            None,
         )
         .unwrap();
         assert!(matches!(out.event.data, KvCacheEventData::Cleared));
@@ -963,13 +979,19 @@ mod tests_startup_helpers {
         // Spawn async listener (connects to publisher bound above)
         let listener_handle = tokio::spawn({
             let token = token.clone();
-            start_zmq_listener(endpoint.to_string(), topic, 1, tx, token, 4, next_event_id)
+            start_zmq_listener(
+                endpoint.to_string(),
+                topic,
+                1,
+                tx,
+                token,
+                4,
+                next_event_id,
+                None,
+            )
         });
 
-        // Give time for the connection to establish
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Send synthetic 3-frame message: [topic, seq(8B), payload]
+        // Build synthetic 3-frame message: [topic, seq(8B), payload]
         let seq: u64 = 77;
 
         let events = vec![
@@ -1003,14 +1025,29 @@ mod tests_startup_helpers {
             payload.clone().to_vec(),
         ];
 
-        // Send the multipart message
-        send_multipart(&pub_socket, frames).await.unwrap();
+        // Republish on a 50ms interval until the listener forwards an event
+        // (or the 5s deadline trips). ZMQ PUB drops messages destined for
+        // subscribers whose SUBSCRIBE handshake has not yet completed, so a
+        // one-shot send + fixed sleep is racy on contended runners.
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+            let mut publish_interval =
+                tokio::time::interval(tokio::time::Duration::from_millis(50));
+            loop {
+                tokio::select! {
+                    event = rx.recv() => {
+                        return event.expect("listener channel closed").event;
+                    }
+                    _ = publish_interval.tick() => {
+                        send_multipart(&pub_socket, frames.clone())
+                            .await
+                            .expect("failed to send ZMQ test event");
+                    }
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for listener event");
 
-        // Wait for message to be received
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Check that we received the message
-        let event = rx.try_recv().expect("no message received").event;
         assert_eq!(event.event_id, 0);
 
         let KvCacheEventData::Stored(KvCacheStoreData {
@@ -1051,7 +1088,7 @@ mod tests_startup_helpers {
         let listener_handle = tokio::spawn({
             let token = token.clone();
             let endpoint = endpoint.clone();
-            start_zmq_listener(endpoint, topic, 1, tx, token, 4, next_event_id)
+            start_zmq_listener(endpoint, topic, 1, tx, token, 4, next_event_id, None)
         });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;

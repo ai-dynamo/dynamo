@@ -18,6 +18,12 @@ from tests.hf_cache import (
     _enable_offline_with_mistral_patch,
     _restore_models_dir_env,
 )
+from tests.utils.collection_env_guard import (
+    collection_env_guard_disabled,
+    diff_collection_env,
+    format_collection_env_changes,
+    snapshot_collection_env,
+)
 from tests.utils.constants import TEST_MODELS, DefaultPort
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import (
@@ -36,8 +42,73 @@ _logger = logging.getLogger(__name__)
 _gpu_parallel_gpus_key: pytest.StashKey[list[dict]] = pytest.StashKey()
 _gpu_indices_key: pytest.StashKey[list[int] | None] = pytest.StashKey()
 _gpu_slots_key: pytest.StashKey[int | None] = pytest.StashKey()
+_collection_env_snapshot_key: pytest.StashKey[dict[str, str]] = pytest.StashKey()
+# Controller-side accumulator for collection-env changes reported by xdist workers.
+_collection_env_changes_key: pytest.StashKey[dict] = pytest.StashKey()
 
 _GPU_PARALLEL_DOWNLOADS_READY_ENV = "DYNAMO_GPU_PARALLEL_DOWNLOADS_READY"
+
+
+def _is_xdist_worker(config: pytest.Config) -> bool:
+    return hasattr(config, "workerinput")
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_sessionstart(session: pytest.Session) -> None:
+    if not collection_env_guard_disabled():
+        session.config.stash[_collection_env_snapshot_key] = snapshot_collection_env()
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_finish(session: pytest.Session) -> None:
+    # Gate solely on snapshot presence (taken at session start). Re-reading the
+    # disable flag here would let an import-time mutation switch the guard off
+    # mid-run and mask other mutations.
+    before = session.config.stash.get(_collection_env_snapshot_key, None)
+    if before is None:
+        return
+    changes = diff_collection_env(before)
+    if not changes:
+        return
+    # Under xdist the import (and therefore the mutation) happens on the worker,
+    # not the controller. Raising here crashes the worker after collection, which
+    # xdist surfaces as an opaque INTERNALERROR ("assert not crashitem") instead
+    # of our message. Report changes back to the controller via workeroutput and
+    # let it fail the session cleanly in pytest_sessionfinish.
+    if _is_xdist_worker(session.config):
+        session.config.workeroutput["collection_env_changes"] = changes
+    else:
+        raise pytest.UsageError(format_collection_env_changes(changes))
+
+
+# optionalhook: pytest_testnodedown is an xdist-provided hookspec. Mark it
+# optional so collection does not raise PluginValidationError in environments
+# without pytest-xdist installed (e.g. the pre-commit marker-report hook).
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node, error) -> None:
+    # Controller side: gather each xdist worker's reported collection-env changes
+    # as it shuts down (node.workeroutput is the worker's workeroutput dict).
+    changes = (getattr(node, "workeroutput", {}) or {}).get("collection_env_changes")
+    if changes:
+        node.config.stash.setdefault(_collection_env_changes_key, {}).update(changes)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    # Controller side: if any worker reported a collection-time env mutation,
+    # surface it with the readable message and fail the session.
+    if _is_xdist_worker(session.config):
+        return
+    reported = session.config.stash.get(_collection_env_changes_key, None)
+    if not reported:
+        return
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        reporter.write_line("")
+        reporter.write_line(format_collection_env_changes(reported), red=True)
+    # Don't mask a more severe outcome (e.g. real test failures = exit 1).
+    if session.exitstatus == pytest.ExitCode.OK:
+        session.exitstatus = pytest.ExitCode.USAGE_ERROR
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -263,6 +334,34 @@ def pytest_runtestloop(session: pytest.Session) -> bool | None:
     if config.getoption("skip_service_restart", default=None):
         extra_args.append("--skip-service-restart")
 
+    # Forward pytest-cov flags so orchestrator children record coverage.
+    # Without this, profiled GPU tests run under run_gpu_parallel_tests=true
+    # bypass --cov entirely and contribute no .coverage data to the nightly
+    # coverage-report merge. Per-child COVERAGE_FILE (set in run_parallel)
+    # prevents siblings from clobbering each other's session-end output.
+    if config.pluginmanager.get_plugin("_cov") is not None:
+        for src in config.getoption("cov_source", default=None) or []:
+            extra_args.append(f"--cov={src}")
+        for rpt in config.getoption("cov_report", default=None) or []:
+            extra_args.append(f"--cov-report={rpt}")
+
+    # Forward -o cache_dir= so workers don't fall back to <cwd>/.pytest_cache.
+    # In CI cwd=/workspace is read-only for the runner uid, and pyproject's
+    # filterwarnings=["error"] escalates the resulting PytestCacheWarning into
+    # a test failure. Only forward cache_dir when absolute -- pytest's default
+    # ini value is the relative ".pytest_cache", and forwarding it would
+    # needlessly pin every worker to an explicit override outside our CI
+    # scenario.
+    cache_dir = config.getini("cache_dir")
+    if cache_dir and os.path.isabs(str(cache_dir)):
+        extra_args.extend(["-o", f"cache_dir={cache_dir}"])
+    # --basetemp is racy if forwarded directly: pytest rmtrees the given
+    # basetemp at session startup, so concurrent children sharing one root
+    # would wipe each other's temp trees. The orchestrator suffixes a unique
+    # per-test subdir before passing it to each child.
+    raw_basetemp = config.getoption("basetemp", default=None)
+    parent_basetemp = str(raw_basetemp) if raw_basetemp else None
+
     old_downloads_ready = os.environ.get(_GPU_PARALLEL_DOWNLOADS_READY_ENV)
     old_hf_offline = os.environ.get("HF_HUB_OFFLINE")
     downloads_ready = False
@@ -288,6 +387,7 @@ def pytest_runtestloop(session: pytest.Session) -> bool | None:
             gpu_indices=gpu_indices,
             extra_pytest_args=extra_args or None,
             stream=is_stream,
+            parent_basetemp=parent_basetemp,
         )
     finally:
         if downloads_ready:
@@ -513,11 +613,38 @@ def _item_has_marker(item, marker_name):
     return False
 
 
+def _check_sglang_mm_hashes_present(items) -> None:
+    """Log whether the installed sglang has the mm_hashes interop hook
+    (sgl-project/sglang#25300). The dynamo sglang image bakes this patch
+    in at build time (`container/deps/sglang/patches/<ver>/`); this check
+    is just for diagnostic clarity when the strong-gate MM-routing
+    assertion later trips on an unpatched image."""
+    if not any("test_sglang" in i.nodeid and "mm_" in i.nodeid for i in items):
+        return
+    try:
+        import sglang
+
+        io_struct = Path(sglang.__file__).parent / "srt/managers/io_struct.py"
+        present = "mm_hashes:" in io_struct.read_text()
+    except Exception as exc:
+        _logger.warning("sglang mm_hashes interop probe failed: %s", exc)
+        return
+    _logger.info(
+        "sglang mm_hashes interop: %s",
+        "present"
+        if present
+        else "MISSING — image was built without the "
+        "vendored sgl-project/sglang#25300 patch; MM-aware routing tests "
+        "will degrade to text-prefix fallback.",
+    )
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config, items):
     """
     This function is called to modify the list of tests to run.
     """
+    _check_sglang_mm_hashes_present(items)
     # Auto-skip tests marked with a framework marker when the framework is not installed
     framework_markers = {
         "trtllm": "tensorrt_llm",
@@ -1154,15 +1281,27 @@ def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None
     - system_ports: List of worker metrics/system ports (configurable count via num_system_ports)
     - kv_event_port: ZMQ port for vLLM KV event publishing (avoids collisions under xdist)
     """
-    frontend_port = allocate_port(DefaultPort.FRONTEND.value)
-    system_port_list = allocate_ports(num_system_ports, DefaultPort.SYSTEM1.value)
-    kv_event_port = allocate_port(DefaultPort.SYSTEM1.value)
-    all_ports = [frontend_port, *system_port_list, kv_event_port]
+    # Track ports as they are allocated so a failure mid-sequence (e.g. NIXL
+    # allocation raising) still cleans up earlier reservations via finally,
+    # rather than leaking them until stale cleanup and exhausting the xdist pool.
+    all_ports: list[int] = []
     try:
+        frontend_port = allocate_port(DefaultPort.FRONTEND.value)
+        all_ports.append(frontend_port)
+        system_port_list = allocate_ports(num_system_ports, DefaultPort.SYSTEM1.value)
+        all_ports.extend(system_port_list)
+        kv_event_port = allocate_port(DefaultPort.SYSTEM1.value)
+        all_ports.append(kv_event_port)
+        # One NIXL side-channel port per worker (avoids xdist collisions on shared hosts).
+        nixl_side_channel_ports = allocate_ports(
+            num_system_ports, DefaultPort.SYSTEM1.value
+        )
+        all_ports.extend(nixl_side_channel_ports)
         yield ServicePorts(
             frontend_port=frontend_port,
             system_ports=system_port_list,
             kv_event_port=kv_event_port,
+            nixl_side_channel_ports=nixl_side_channel_ports,
         )
     finally:
         deallocate_ports(all_ports)

@@ -7,7 +7,7 @@ package dynamo
 
 import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	controller_common "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	corev1 "k8s.io/api/core/v1"
@@ -65,7 +65,7 @@ type ComponentContext struct {
 	ParentGraphDeploymentName      string
 	ParentGraphDeploymentNamespace string
 	Discovery                      DiscoveryContext
-	EPPConfig                      *v1alpha1.EPPConfig
+	EPPConfig                      *v1beta1.EPPConfig
 	WorkerHashSuffix               string
 }
 
@@ -93,10 +93,6 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 		},
 	}
 	container.Env = []corev1.EnvVar{
-		{
-			Name:  "CONTAINER_NAME",
-			Value: commonconsts.MainContainerName,
-		},
 		{
 			Name:  commonconsts.DynamoNamespaceEnvVar,
 			Value: context.DynamoNamespace,
@@ -148,9 +144,10 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 	}
 
 	if context.Discovery.Mode == configv1alpha1.KubeDiscoveryModeContainer {
-		// CONTAINER_NAME is already injected unconditionally above with
-		// MainContainerName (which equals container.Name here); do not append
-		// it again or we end up with two env entries of the same name.
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "CONTAINER_NAME",
+			Value: commonconsts.MainContainerName,
+		})
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  "DYN_KUBE_DISCOVERY_MODE",
 			Value: string(configv1alpha1.KubeDiscoveryModeContainer),

@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: harmony
+model_label: gpt-oss
+mode: stream
+cases:
+  TOOLCALLING.stream.3:
+    description: Complete single tool call with a grammar token split across chunk boundaries
+    ref: derived from TOOLCALLING.batch.1
+    chunks:
+    - delta_text: <|
+    - delta_text: cha
+    - delta_text: nnel|
+    - delta_text: '>commentary'
+    - delta_text: ' to=functions.get_w'
+    - delta_text: ea
+    - delta_text: the
+    - delta_text: r <|c
+    - delta_text: onstrain|>j
+    - delta_text: son<|message|>{"loc
+    - delta_text: at
+    - delta_text: ion
+    - delta_text: '":"NY'
+    - delta_text: C"}<|call|>
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: <|channel|>commentary to=functions.get_weather <|constrain|>j
+        reason: SGLang leaks a split Harmony commentary block into normal_text; Dynamo buffers the split marker and parses the complete `<|call|>`-terminated call.
+      vllm:
+        unavailable: vLLM streaming parser for family='harmony' requires `delta_token_ids` in fixture chunks

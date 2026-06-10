@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::OpenAIError;
 
-use super::{ChatCompletionStreamOptions, Choice, CompletionUsage, Prompt, Stop};
+use super::{ChatCompletionStreamOptions, Prompt, Stop};
 
 // Re-export response type from upstream (identical)
 pub use async_openai::types::completions::CreateCompletionResponse;
@@ -169,5 +169,84 @@ mod tests {
         assert!(err_msg.contains("invalid type"));
         assert!(err_msg.contains("string"));
         assert!(err_msg.contains("echo parameter"));
+    }
+
+    #[test]
+    fn completion_choice_serializes_openai_shape() {
+        use crate::types::{Choice, CompletionFinishReason};
+
+        let choice = Choice {
+            text: "hello".to_string(),
+            index: 0,
+            logprobs: None,
+            finish_reason: Some(CompletionFinishReason::Stop),
+        };
+
+        let value = serde_json::to_value(choice).expect("serialize choice");
+
+        assert_eq!(value["finish_reason"], "stop");
+        assert_eq!(value["text"], "hello");
+    }
+
+    #[test]
+    fn stop_accepts_token_id_array() {
+        let json = r#"{"model": "test_model", "prompt": [1, 2, 3], "stop": [32, 34]}"#;
+        let request: CreateCompletionRequest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(request.stop, Some(Stop::TokenIdArray(vec![32, 34])));
+    }
+
+    #[test]
+    fn stop_accepts_string_and_string_array() {
+        let one_stop = r#"{"model": "test_model", "prompt": "hello", "stop": " The"}"#;
+        let request: CreateCompletionRequest = serde_json::from_str(one_stop).unwrap();
+
+        assert_eq!(request.stop, Some(Stop::String(" The".to_string())));
+
+        let many_stops = r#"{"model": "test_model", "prompt": "hello", "stop": ["A", "B"]}"#;
+        let request: CreateCompletionRequest = serde_json::from_str(many_stops).unwrap();
+
+        assert_eq!(
+            request.stop,
+            Some(Stop::StringArray(vec!["A".to_string(), "B".to_string()]))
+        );
+    }
+
+    #[test]
+    fn stop_token_id_display_string_remains_string_stop() {
+        let json = r#"{"model": "test_model", "prompt": [1, 2, 3], "stop": "token_id:576"}"#;
+        let request: CreateCompletionRequest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(request.stop, Some(Stop::String("token_id:576".to_string())));
+
+        let json = r#"{"model": "test_model", "prompt": [1, 2, 3], "stop": ["token_id:576"]}"#;
+        let request: CreateCompletionRequest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            request.stop,
+            Some(Stop::StringArray(vec!["token_id:576".to_string()]))
+        );
+    }
+
+    #[test]
+    fn builder_accepts_upstream_stop_configuration() {
+        let upstream_stop = async_openai::types::chat::StopConfiguration::String("END".to_string());
+
+        let request = CreateCompletionRequestArgs::default()
+            .model("test_model")
+            .prompt(Prompt::String("hello".to_string()))
+            .stop(upstream_stop)
+            .build()
+            .unwrap();
+
+        assert_eq!(request.stop, Some(Stop::String("END".to_string())));
+    }
+
+    #[test]
+    fn stop_rejects_single_token_id() {
+        let json = r#"{"model": "test_model", "prompt": [1, 2, 3], "stop": 576}"#;
+        let result: Result<CreateCompletionRequest, _> = serde_json::from_str(json);
+
+        assert!(result.is_err());
     }
 }
