@@ -1770,8 +1770,8 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
     let mut annotated = annotated.0;
 
     if observe_annotation_metrics(&annotated, response_collector, http_queue_guard) {
-        // Chomp the LLMMetricAnnotation so it's not returned in the response stream
-        // TODO: add a flag to control what is returned in the SSE stream
+        // Preserve the previous SSE behavior: observe legacy metrics annotation
+        // frames internally, then strip them before building the outbound event.
         if annotated.event.as_deref() == Some(ANNOTATION_LLM_METRICS) {
             annotated.event = None;
             annotated.comment = None;
@@ -1782,6 +1782,9 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
 }
 
 /// Process chat-derived streaming responses with typed metrics before SSE conversion.
+///
+/// If the typed field is absent, this falls back to the same legacy annotation
+/// frame parsing and stripping behavior as `process_response_using_event_converter_and_observe_metrics`.
 pub fn process_chat_response_using_event_converter_and_observe_metrics(
     annotated: EventConverter<NvCreateChatCompletionStreamResponse>,
     response_collector: &mut ResponseMetricCollector,
@@ -1798,11 +1801,8 @@ pub fn process_chat_response_using_event_converter_and_observe_metrics(
     } else if observe_annotation_metrics(&annotated, response_collector, http_queue_guard)
         && annotated.event.as_deref() == Some(ANNOTATION_LLM_METRICS)
     {
-        annotated.event = None;
-        annotated.comment = None;
-    }
-
-    if annotated.event.as_deref() == Some(ANNOTATION_LLM_METRICS) {
+        // Legacy compatibility path: annotation frames were never emitted as
+        // client-visible SSE payloads after metrics collection.
         annotated.event = None;
         annotated.comment = None;
     }
