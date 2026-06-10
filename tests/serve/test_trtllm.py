@@ -234,6 +234,7 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="agg_router_approx.sh",
         marks=[
+            pytest.mark.router,
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.nightly,
