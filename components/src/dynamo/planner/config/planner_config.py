@@ -309,9 +309,7 @@ class SchedulingConfig(BaseModel):
     tick_max_duration_seconds: float = Field(
         default=30.0,
         gt=0,
-        description=(
-            "Outermost deadline wrapping the entire 4-stage plugin pipeline."
-        ),
+        description=("Outermost deadline wrapping the entire 4-stage plugin pipeline."),
     )
     external_plugins: list[ExternalPluginEntry] = Field(
         default_factory=list,
@@ -325,9 +323,7 @@ class SchedulingConfig(BaseModel):
     )
     gateway: GatewayConfig = Field(
         default_factory=GatewayConfig,
-        description=(
-            "gRPC registration gateway config. Default disabled."
-        ),
+        description=("gRPC registration gateway config. Default disabled."),
     )
     scale_interval_seconds: float = Field(
         default=5.0,
@@ -658,8 +654,7 @@ class PlannerConfig(BaseModel):
     scheduling: SchedulingConfig = Field(
         default_factory=SchedulingConfig,
         description=(
-            "Plugin-pipeline scheduling config — see ``SchedulingConfig`` "
-            "docstring."
+            "Plugin-pipeline scheduling config — see ``SchedulingConfig`` " "docstring."
         ),
     )
 

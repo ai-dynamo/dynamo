@@ -481,8 +481,7 @@ class PluginRegistryServer:
         )
         if reject_window is not None:
             raise ValueError(
-                "register_internal: "
-                f"plugin_id={plugin_id!r} {reject_window}"
+                "register_internal: " f"plugin_id={plugin_id!r} {reject_window}"
             )
         endpoint = f"inproc://{plugin_id}"
         transport = self._transport_factory(

@@ -126,12 +126,12 @@ def test_planner_config_scale_interval_defaults_to_legacy_loop_gcd():
         {
             "mode": "disagg",
             "environment": "kubernetes",
-                "optimization_target": "sla",
-                "enable_load_scaling": True,
-                "enable_throughput_scaling": True,
-                "load_adjustment_interval_seconds": 7.0,
-                "throughput_adjustment_interval_seconds": 60.0,
-            }
+            "optimization_target": "sla",
+            "enable_load_scaling": True,
+            "enable_throughput_scaling": True,
+            "load_adjustment_interval_seconds": 7.0,
+            "throughput_adjustment_interval_seconds": 60.0,
+        }
     )
     assert pc.scheduling.scale_interval_seconds == 1.0
 
@@ -153,7 +153,9 @@ def test_planner_config_scale_interval_ignores_disabled_throughput_loop():
 
 
 def test_planner_config_rejects_scale_interval_that_skips_legacy_fire_time():
-    with pytest.raises(ValidationError, match="scale_interval_seconds must evenly divide"):
+    with pytest.raises(
+        ValidationError, match="scale_interval_seconds must evenly divide"
+    ):
         PlannerConfig.model_validate(
             {
                 "mode": "disagg",

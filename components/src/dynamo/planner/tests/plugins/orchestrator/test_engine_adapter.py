@@ -323,9 +323,7 @@ def test_project_scale_to_single_component_proposal():
     # decode changed → decision emitted.
     adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps())
     wc = WorkerCounts(ready_num_prefill=2, ready_num_decode=4)
-    outcome = _apply_outcome(
-        [ComponentTarget(sub_component_type="decode", replicas=6)]
-    )
+    outcome = _apply_outcome([ComponentTarget(sub_component_type="decode", replicas=6)])
     dec = adapter._project_scale_to(outcome, wc)
     assert dec is not None
     assert dec.num_prefill is None
@@ -623,9 +621,7 @@ def test_lazy_traffic_pull_skips_prometheus_when_no_plugin_needs_traffic():
     pipeline tick when their execution interval is 180s.
     """
     vc = VirtualClock()
-    adapter = OrchestratorEngineAdapter(
-        _agg_config_throughput_on(), _caps(), clock=vc
-    )
+    adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps(), clock=vc)
     tick = adapter.initial_tick(start_s=0.0)
     assert tick.need_traffic_metrics is False
     assert tick.use_full_traffic_metrics is False
@@ -636,9 +632,7 @@ def test_lazy_traffic_pull_fires_when_builtin_predict_is_due():
     """At the throughput interval boundary, builtin predict/propose plugins
     are due and the adapter requests the throughput-sized traffic window."""
     vc = VirtualClock()
-    adapter = OrchestratorEngineAdapter(
-        _agg_config_throughput_on(), _caps(), clock=vc
-    )
+    adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps(), clock=vc)
     adapter.initial_tick(start_s=0.0)
     adapter._last_tick_s = 175.0
     adapter._last_tick_monotonic = 175.0

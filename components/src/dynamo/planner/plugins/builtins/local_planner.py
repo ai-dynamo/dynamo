@@ -8,8 +8,8 @@ from __future__ import annotations
 import logging
 import math
 
-from dynamo.common.forward_pass_metrics import decode as decode_fpm
 from dynamo.common.forward_pass_metrics import ForwardPassMetrics
+from dynamo.common.forward_pass_metrics import decode as decode_fpm
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.load.predictors import LOAD_PREDICTORS
 from dynamo.planner.core.state_machine import PlannerScalingState
@@ -78,7 +78,8 @@ def _decode_fpm_map(raw: dict[str, bytes]) -> dict[tuple[str, int], ForwardPassM
             decoded = decode_fpm(payload)
             if decoded is not None:
                 out[(worker_id, int(dp_rank))] = decoded
-        except Exception as exc:  # noqa: BLE001 - malformed plugin input should not crash tick
+        except Exception as exc:  # noqa: BLE001
+            # Malformed plugin input should not crash tick.
             log.warning("Skipping FPM payload %r: %s", key, exc)
     return out
 

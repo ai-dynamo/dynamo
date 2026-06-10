@@ -71,6 +71,7 @@ from dynamo.planner.core.budget import (
     proportional_clamp_pair,
     proportional_clamp_single,
 )
+from dynamo.planner.core.state_machine import PlannerScalingState
 from dynamo.planner.core.types import (
     FpmObservations,
     PlannerEffects,
@@ -82,7 +83,6 @@ from dynamo.planner.core.types import (
     WorkerCapabilities,
     WorkerCounts,
 )
-from dynamo.planner.core.state_machine import PlannerScalingState
 from dynamo.planner.plugins.builtins import (
     BuiltinLoadPredict,
     BuiltinLoadPropose,

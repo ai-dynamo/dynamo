@@ -243,11 +243,7 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
             self._diag_throughput_reason = "disabled"
             return None
 
-        if (
-            predicted_num_req is None
-            or predicted_isl is None
-            or predicted_osl is None
-        ):
+        if predicted_num_req is None or predicted_isl is None or predicted_osl is None:
             return None
 
         self._diag_predicted_num_req = predicted_num_req

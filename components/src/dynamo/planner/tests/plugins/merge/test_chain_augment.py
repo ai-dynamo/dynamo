@@ -152,9 +152,7 @@ async def test_predicted_accept_length_fills_from_later_plugin_when_unset():
     high = _StubPlugin(
         "high", 10, [PredictStageResponse(predictions=_pd(num_req=1200))]
     )
-    low = _StubPlugin(
-        "low", 100, [PredictStageResponse(predictions=_pd(accept=2.5))]
-    )
+    low = _StubPlugin("low", 100, [PredictStageResponse(predictions=_pd(accept=2.5))])
     out = await chain_augment([high, low], PipelineContext())
     assert out.prediction is not None
     assert out.prediction.predicted_accept_length == 2.5

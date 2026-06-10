@@ -252,9 +252,7 @@ class ReplayPlannerAdapter:
                 total_ticks += 1
 
                 # Update GPU-hours and record diagnostics snapshot
-                self._record_diagnostics(
-                    tick_input, effects, result, emit_diagnostics
-                )
+                self._record_diagnostics(tick_input, effects, result, emit_diagnostics)
 
                 # Clear scaling targets once active counts match
                 active_p = result["active_prefill_count"]

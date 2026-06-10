@@ -37,4 +37,5 @@ class EngineProtocol(Protocol):
     async def shutdown(self) -> None:
         """Release any engine-owned resources. Idempotent."""
 
+
 __all__ = ["EngineProtocol"]
