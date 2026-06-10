@@ -922,9 +922,58 @@ jobs:
             --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-dynamo-frontend
             --image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime
 
+  # ---------------------------------------------------------------------------
+  # EFA deploy test (DISABLED STUB).
+  #
+  # Verifies the EFA-tagged vLLM image runs Dynamo disaggregated with EFA fully
+  # enabled (tests/deploy/test_deploy_efa.py, marker `framework_with_efa`).
+  #
+  # Gated OFF by default: it runs only when the repo/org variable
+  # `EFA_DEPLOY_TEST_ENABLED` is set to 'true'. While disabled it evaluates to
+  # `skipped`, which `deploy-status-check` already treats as passing.
+  #
+  # The standard CI vCluster has no RDMA/EFA, so this CANNOT use the existing
+  # deploy cluster. Before enabling, provide:
+  #   - secret  EFA_KUBECONFIG_BASE64 : kubeconfig for an EFA-capable cluster
+  #                                      (p5 nodes, dynamo operator installed)
+  #   - var     EFA_DEPLOY_RUNNER     : a runner that can reach that cluster
+  #   - var     EFA_DEPLOY_NAMESPACE  : target namespace (has hf-token-secret)
+  #   - var     EFA_DEPLOY_IMAGE      : the EFA vllm-runtime image, in a registry
+  #                                      the EFA cluster can pull. The per-commit
+  #                                      EFA image is produced by `vllm-efa-build`
+  #                                      (tag main-vllm-efa-<sha> on main); a
+  #                                      copy/mirror step into the EFA cluster's
+  #                                      registry is the remaining follow-up.
+  # When enabling, also add `deploy-test-efa` to the `deploy-cleanup` needs.
+  # ---------------------------------------------------------------------------
+  deploy-test-efa:
+    name: EFA Deploy Test
+    needs: [vllm-efa-build]
+    if: ${{ vars.EFA_DEPLOY_TEST_ENABLED == 'true' }}
+    runs-on: ${{ vars.EFA_DEPLOY_RUNNER || 'prod-deploy-tester-v1' }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Run EFA Deploy Test
+        id: deploy-test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ secrets.EFA_KUBECONFIG_BASE64 }}
+          namespace: ${{ vars.EFA_DEPLOY_NAMESPACE }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          test_name: efa
+          test_file: tests/deploy/test_deploy_efa.py
+          extra_pytest_args: >-
+            -m framework_with_efa
+            --image=${{ vars.EFA_DEPLOY_IMAGE }}
+
   deploy-status-check:
     runs-on: ubuntu-latest
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-snapshot-agent, snapshot-placeholder, frontend-copy-to-acr, deploy-test-checkpoint, deploy-test-gaie, deploy-cleanup]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-snapshot-agent, snapshot-placeholder, frontend-copy-to-acr, deploy-test-checkpoint, deploy-test-gaie, deploy-test-efa, deploy-cleanup]
     if: always()
     steps:
       - name: "Check all deploy test jobs"

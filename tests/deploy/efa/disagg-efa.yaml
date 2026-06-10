@@ -1,0 +1,129 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Minimal vLLM disaggregated deployment for the EFA verification deploy test
+# (tests/deploy/test_deploy_efa.py).
+#
+# This manifest is intentionally NOT under examples/backends/*/deploy/ so it is
+# excluded from the auto-discovered deploy-test matrix (conftest.discover_example_targets)
+# and only ever runs on an EFA-capable cluster via `-m framework_with_efa`.
+#
+# It is kept small for CI: a tiny model (Qwen3-0.6B, downloaded from HF) and
+# TP=1 per worker, while still exercising the full EFA path. A successful
+# disaggregated completion REQUIRES the prefill->decode KV-cache transfer to
+# work, and on a p5/EFA node with the LIBFABRIC kv-transfer-config below that
+# transfer rides NIXL -> LIBFABRIC -> EFA. The companion test additionally
+# greps the decode worker logs to prove NIXL selected LIBFABRIC (not a silent
+# UCX fallback).
+#
+# The `image:` fields are placeholders; the test overrides every service image
+# via DeploymentSpec.set_image(--image), which should be the EFA-tagged
+# vllm-runtime built from the commit under test (e.g. main-vllm-efa-<sha>).
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg-efa
+spec:
+  backendFramework: vllm
+  envs:
+    - name: DYN_LOG
+      value: debug
+    - name: DYN_LOGGING_JSONL
+      value: "true"
+  services:
+    Frontend:
+      componentType: frontend
+      envFromSecret: hf-token-secret
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:efa
+          env:
+            - name: DYN_ROUTER_MODE
+              value: kv
+    VllmPrefillWorker:
+      componentType: worker
+      subComponentType: prefill
+      envFromSecret: hf-token-secret
+      replicas: 1
+      resources:
+        requests:
+          gpu: "1"
+          custom:
+            ephemeral-storage: 8Gi
+            vpc.amazonaws.com/efa: "1"
+        limits:
+          gpu: "1"
+          custom:
+            vpc.amazonaws.com/efa: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:efa
+          workingDir: /workspace/examples/backends/vllm
+          command: [python3, -m, dynamo.vllm]
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --disaggregation-mode
+            - prefill
+            - --tensor-parallel-size
+            - "1"
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+          env:
+            # --- EFA / libfabric selection ---
+            - { name: FI_PROVIDER, value: efa }
+            # FI_LOG_LEVEL=info is what surfaces the `libfabric:...:efa:mr:` memory-
+            # registration lines the test greps for as proof of the LIBFABRIC path.
+            - { name: FI_LOG_LEVEL, value: info }
+            - { name: FI_EFA_USE_DEVICE_RDMA, value: "1" }
+            - { name: FI_EFA_ENABLE_SHM_TRANSFER, value: "0" }
+            # NIXL telemetry plugin (libtelemetry_exporter_prometheus.so) must find
+            # libcore.so under /opt/nvidia/nvda_nixl/lib64, so that path MUST come
+            # before the EFA lib paths or the worker silently fails engine init.
+            - { name: LD_LIBRARY_PATH, value: /opt/nvidia/nvda_nixl/lib64:/opt/amazon/efa/lib:/opt/amazon/efa/lib64:/usr/local/lib }
+            - { name: PATH, value: /opt/dynamo/venv/bin:/opt/amazon/efa/bin:/usr/local/bin:/usr/bin:/bin }
+          securityContext:
+            privileged: true
+    VllmDecodeWorker:
+      componentType: worker
+      subComponentType: decode
+      envFromSecret: hf-token-secret
+      replicas: 1
+      resources:
+        requests:
+          gpu: "1"
+          custom:
+            ephemeral-storage: 8Gi
+            vpc.amazonaws.com/efa: "1"
+        limits:
+          gpu: "1"
+          custom:
+            vpc.amazonaws.com/efa: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:efa
+          workingDir: /workspace/examples/backends/vllm
+          command: [python3, -m, dynamo.vllm]
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --disaggregation-mode
+            - decode
+            - --tensor-parallel-size
+            - "1"
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+          env:
+            - { name: FI_PROVIDER, value: efa }
+            - { name: FI_LOG_LEVEL, value: info }
+            - { name: FI_EFA_USE_DEVICE_RDMA, value: "1" }
+            - { name: FI_EFA_ENABLE_SHM_TRANSFER, value: "0" }
+            - { name: LD_LIBRARY_PATH, value: /opt/nvidia/nvda_nixl/lib64:/opt/amazon/efa/lib:/opt/amazon/efa/lib64:/usr/local/lib }
+            - { name: PATH, value: /opt/dynamo/venv/bin:/opt/amazon/efa/bin:/usr/local/bin:/usr/bin:/bin }
+          securityContext:
+            privileged: true
