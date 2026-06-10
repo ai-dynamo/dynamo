@@ -468,6 +468,22 @@ jobs:
           helm cm-push "${CHART_FILE}" "${REPO_ALIAS}"
           echo "- \`${CHART_NAME}:${HELM_CHART_VERSION}\` pushed to NGC Helm registry" >> $GITHUB_STEP_SUMMARY
 
+          # Standalone power-agent chart (no subchart deps, so no `helm dep build`).
+          # Versioned to HELM_CHART_VERSION for parity with the platform chart;
+          # the agent image is pinned separately via `--set image.tag` at install.
+          POWER_AGENT_CHART_DIR="deploy/helm/charts/power-agent"
+          PA_CHART_NAME=$(awk '/^name:/ {print $2}' "${POWER_AGENT_CHART_DIR}/Chart.yaml")
+          echo "Packaging ${PA_CHART_NAME} with version ${HELM_CHART_VERSION}..."
+          helm package \
+            --version "${HELM_CHART_VERSION}" \
+            --app-version "${HELM_CHART_VERSION}" \
+            "${POWER_AGENT_CHART_DIR}"
+
+          PA_CHART_FILE="${PA_CHART_NAME}-${HELM_CHART_VERSION}.tgz"
+          echo "Pushing ${PA_CHART_FILE} to NGC Helm registry..."
+          helm cm-push "${PA_CHART_FILE}" "${REPO_ALIAS}"
+          echo "- \`${PA_CHART_NAME}:${HELM_CHART_VERSION}\` pushed to NGC Helm registry" >> $GITHUB_STEP_SUMMARY
+
           helm repo remove "${REPO_ALIAS}"
 
       - name: Create release summary
@@ -533,8 +549,9 @@ jobs:
             echo "Frontend images:" >> $GITHUB_STEP_SUMMARY
             echo "- \`dynamo-frontend:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Helm chart:" >> $GITHUB_STEP_SUMMARY
+            echo "Helm charts:" >> $GITHUB_STEP_SUMMARY
             echo "- \`dynamo-platform:${HELM_CHART_VERSION}\` (pushed to NGC Helm registry)" >> $GITHUB_STEP_SUMMARY
+            echo "- \`power-agent:${HELM_CHART_VERSION}\` (pushed to NGC Helm registry)" >> $GITHUB_STEP_SUMMARY
           fi
 
   # ============================================================================
