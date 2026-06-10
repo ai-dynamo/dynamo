@@ -448,12 +448,11 @@ pub(crate) struct EntrypointArgs {
     http_metrics_port: Option<u16>,
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
-    tokenizer_backend: Option<TokenizerBackend>,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     extra_engine_args: Option<PathBuf>,
     mocker_engine_args: Option<PyMockEngineArgs>,
-    runtime_config: Option<ModelRuntimeConfig>,
+    runtime_config: ModelRuntimeConfig,
     namespace: Option<String>,
     namespace_prefix: Option<String>,
     is_prefill: bool,
@@ -503,9 +502,6 @@ impl EntrypointArgs {
         tokenizer_backend: Option<String>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
-        if let Some(runtime_config) = &runtime_config {
-            runtime_config.validate_config()?;
-        }
         if (tls_cert_path.is_some() && tls_key_path.is_none())
             || (tls_cert_path.is_none() && tls_key_path.is_some())
         {
@@ -538,6 +534,14 @@ impl EntrypointArgs {
             })
             .transpose()?;
 
+        let mut runtime_config = runtime_config.unwrap_or_default();
+        if let Some(tokenizer_backend) = tokenizer_backend {
+            runtime_config
+                .inner
+                .set_tokenizer_backend(Some(tokenizer_backend));
+        }
+        runtime_config.validate_config()?;
+
         Ok(EntrypointArgs {
             engine_type,
             model_path,
@@ -557,7 +561,6 @@ impl EntrypointArgs {
                 enable_streaming_tool_dispatch,
                 enable_streaming_reasoning_dispatch,
             ),
-            tokenizer_backend,
             tls_cert_path,
             tls_key_path,
             extra_engine_args,
@@ -613,8 +616,7 @@ pub fn make_engine<'p>(
         .tls_key_path(args.tls_key_path.clone())
         .is_mocker(matches!(args.engine_type, EngineType::Mocker))
         .extra_engine_args(args.extra_engine_args.clone())
-        .runtime_config(args.runtime_config.clone().unwrap_or_default().inner)
-        .tokenizer_backend(args.tokenizer_backend)
+        .runtime_config(args.runtime_config.clone().inner)
         .namespace(args.namespace.clone())
         .namespace_prefix(args.namespace_prefix.clone());
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
