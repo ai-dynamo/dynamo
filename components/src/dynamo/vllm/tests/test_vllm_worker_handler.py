@@ -372,6 +372,10 @@ class TestReasoningParserForwarding:
         handler._extract_logprobs = MagicMock(return_value=(None, None))
         routed_experts = np.array([[[3]], [[4]]], dtype=np.int16)
 
+        # Prompt longer than the requested start, so the echoed offset is not
+        # clamped to the prompt length.
+        prompt_token_ids = [1, 2, 3, 4, 5, 6]
+
         async def fake_generate(*args, **kwargs):
             yield SimpleNamespace(
                 outputs=[
@@ -383,7 +387,7 @@ class TestReasoningParserForwarding:
                         stop_reason=None,
                     )
                 ],
-                prompt_token_ids=[1, 2],
+                prompt_token_ids=prompt_token_ids,
                 prompt_logprobs=None,
             )
 
@@ -392,13 +396,58 @@ class TestReasoningParserForwarding:
 
         chunks = []
         async for chunk in handler.generate_tokens(
-            PatchedTokensPrompt(prompt_token_ids=[1]),
+            PatchedTokensPrompt(prompt_token_ids=prompt_token_ids),
             sampling_params,
             "req-2",
         ):
             chunks.append(chunk)
 
         assert chunks[-1]["engine_data"]["routed_experts"]["start"] == 5
+
+    @pytest.mark.asyncio
+    async def test_generate_tokens_routed_experts_start_clamped_to_prompt_len(self):
+        """An out-of-range routed_experts_prompt_start is clamped to the prompt
+        length (vLLM clamps the returned rows the same way)."""
+        from vllm.sampling_params import SamplingParams
+
+        sampling_params = SamplingParams(max_tokens=1)
+        try:
+            sampling_params.routed_experts_prompt_start = 99
+        except (AttributeError, TypeError):
+            pytest.skip("installed vLLM has no routed_experts_prompt_start support")
+
+        handler = _make_handler()
+        handler._extract_logprobs = MagicMock(return_value=(None, None))
+        routed_experts = np.array([[[3]], [[4]]], dtype=np.int16)
+
+        async def fake_generate(*args, **kwargs):
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[12],
+                        routed_experts=routed_experts,
+                        finish_reason="stop",
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2, 3],
+                prompt_logprobs=None,
+            )
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        chunks = []
+        async for chunk in handler.generate_tokens(
+            PatchedTokensPrompt(prompt_token_ids=[1, 2, 3]),
+            sampling_params,
+            "req-3",
+        ):
+            chunks.append(chunk)
+
+        # start=99 clamped to prompt_len=3
+        assert chunks[-1]["engine_data"]["routed_experts"]["start"] == 3
 
 
 # ── Tests ────────────────────────────────────────────────────────────
