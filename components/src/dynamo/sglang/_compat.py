@@ -21,7 +21,9 @@ Runtime data-contract notes (not code-level shims):
 """
 
 import inspect
+import ipaddress
 import logging
+import socket
 from functools import lru_cache
 from typing import Any
 
@@ -108,6 +110,100 @@ def filter_supported_async_generate_kwargs(
     return {key: value for key, value in kwargs.items() if key in supported_kwarg_names}
 
 
+# ---------------------------------------------------------------------------
+# Network utilities: NetworkAddress, get_local_ip_auto, get_zmq_socket
+#
+# 0.5.10+: sglang.srt.utils.network (canonical)
+# 0.5.9:   sglang.srt.utils (get_local_ip_auto, get_zmq_socket only;
+#           NetworkAddress did not exist)
+# ---------------------------------------------------------------------------
+try:
+    from sglang.srt.utils.network import (  # noqa: F401
+        NetworkAddress,
+        get_local_ip_auto,
+        get_zmq_socket,
+    )
+except ImportError:
+    from sglang.srt.utils import (  # type: ignore[no-redef]  # noqa: F401
+        get_local_ip_auto,
+        get_zmq_socket,
+    )
+
+    logger.info(
+        "sglang.srt.utils.network not found (sglang 0.5.9); "
+        "using compatibility shim for NetworkAddress"
+    )
+
+    class NetworkAddress:  # type: ignore[no-redef]
+        """Minimal polyfill for sglang.srt.utils.network.NetworkAddress."""
+
+        def __init__(self, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+
+        @property
+        def is_ipv6(self) -> bool:
+            try:
+                ipaddress.IPv6Address(self.host)
+                return True
+            except ValueError:
+                return False
+
+        @classmethod
+        def parse(cls, addr: str) -> "NetworkAddress":
+            """Parse host:port, [IPv6]:port, or a bare host."""
+            addr = addr.strip()
+            if addr.startswith("["):
+                end = addr.find("]")
+                host = addr[1:end] if end != -1 else addr.strip("[]")
+                rest = addr[end + 1 :] if end != -1 else ""
+                if rest.startswith(":") and rest[1:].isdigit():
+                    return cls(host, int(rest[1:]))
+                return cls(host, 0)
+            if addr.count(":") == 1:
+                host_part, port_part = addr.rsplit(":", 1)
+                if port_part.isdigit():
+                    return cls(host_part, int(port_part))
+            return cls(addr, 0)
+
+        def resolved(self) -> "NetworkAddress":
+            """DNS-resolve the host while preserving the port."""
+            try:
+                infos = socket.getaddrinfo(
+                    self.host, None, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM
+                )
+                return NetworkAddress(infos[0][4][0], self.port)
+            except socket.gaierror:
+                return self
+
+        def to_host_port_str(self) -> str:
+            if self.is_ipv6:
+                return f"[{self.host}]:{self.port}"
+            return f"{self.host}:{self.port}"
+
+        def to_tcp(self) -> str:
+            if self.is_ipv6:
+                return f"tcp://[{self.host}]:{self.port}"
+            return f"tcp://{self.host}:{self.port}"
+
+
+def set_global_trace_level(level: int) -> None:
+    """Set SGLang's trace level when the installed release exposes it."""
+    try:
+        from sglang.srt.observability.trace import (
+            set_global_trace_level as set_trace_level,
+        )
+    except ImportError:
+        logger.warning(
+            "SGLang tracing level is unavailable in this SGLang release; "
+            "ignoring requested trace level %s",
+            level,
+        )
+        return
+
+    set_trace_level(level)
+
+
 def get_scheduler_info(engine: Any) -> dict:
     """Return the scheduler-info dict for rank-0 of an ``sgl.Engine``.
 
@@ -141,18 +237,24 @@ def get_scheduler_info(engine: Any) -> dict:
 
 
 def enable_disjoint_streaming_output(server_args: Any) -> None:
-    """Enable SGLang's disjoint streaming output.
+    """Enable SGLang's disjoint streaming output across field renames.
 
     Diffusion workers pass a ``SimpleNamespace`` stub that does not carry the
     field, so this is a no-op when the attribute is absent.
     """
     if hasattr(server_args, "incremental_streaming_output"):
         server_args.incremental_streaming_output = True
+    elif hasattr(server_args, "stream_output"):
+        server_args.stream_output = True
 
 
 __all__ = [
+    "NetworkAddress",
     "enable_disjoint_streaming_output",
     "ensure_sglang_top_level_exports",
     "filter_supported_async_generate_kwargs",
+    "get_local_ip_auto",
     "get_scheduler_info",
+    "get_zmq_socket",
+    "set_global_trace_level",
 ]

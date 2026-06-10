@@ -37,7 +37,7 @@ SGLANG_WORKER_GROUP_ID_KEY = "sglang_worker_group_id"
 def _network_address_cls():
     # Deferred to function body so pre-commit test collection can import
     # `_disagg` without the SGLang network helper available.
-    from sglang.srt.utils.network import NetworkAddress
+    from dynamo.sglang._compat import NetworkAddress
 
     return NetworkAddress
 
@@ -54,7 +54,7 @@ def compute_bootstrap_address(
     """
     # Deferred to function body so pre-commit test collection can import
     # `_disagg` without sglang installed.
-    from sglang.srt.utils.network import NetworkAddress, get_local_ip_auto
+    from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto
 
     try:
         inner_tm = engine.tokenizer_manager

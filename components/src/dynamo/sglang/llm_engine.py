@@ -30,7 +30,6 @@ from sglang.srt.managers.io_struct import (
     UpdateWeightsFromTensorReqInput,
     UpdateWeightVersionReqInput,
 )
-from sglang.srt.utils.network import get_local_ip_auto, get_zmq_socket
 
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
@@ -58,7 +57,11 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import ModelInput
-from dynamo.sglang._compat import get_scheduler_info
+from dynamo.sglang._compat import (
+    get_local_ip_auto,
+    get_scheduler_info,
+    get_zmq_socket,
+)
 from dynamo.sglang._disagg import (
     SGLANG_WORKER_GROUP_ID_KEY,
     compute_bootstrap_address,
@@ -759,9 +762,9 @@ class SglangLLMEngine(LLMEngine):
         Partial ``bootstrap_info`` is a router contract violation; we
         warn and fill the gaps so the request doesn't fail outright.
         """
-        assert (
-            self._bootstrap_host is not None and self._bootstrap_port is not None
-        ), "prefill workers must resolve bootstrap host/port in start()"
+        assert self._bootstrap_host is not None and self._bootstrap_port is not None, (
+            "prefill workers must resolve bootstrap host/port in start()"
+        )
 
         bootstrap_info_from_req = request.get("bootstrap_info") or {}
         if isinstance(bootstrap_info_from_req, dict) and bootstrap_info_from_req:
