@@ -346,10 +346,60 @@ class TestReasoningParserForwarding:
         routed = chunks[1]["engine_data"]["routed_experts"]
         assert routed["shape"] == [2, 1, 1]
         assert routed["dtype"] == "int32"
+        # start defaults to 0 when routed_experts_prompt_start is unset.
+        assert routed["start"] == 0
+        # base64 (not base85): the prime-rl RL consumer decodes with b64.
         decoded = np.frombuffer(
-            base64.b85decode(routed["data"]), dtype=np.dtype(routed["dtype"])
+            base64.b64decode(routed["data"]), dtype=np.dtype(routed["dtype"])
         )
         np.testing.assert_array_equal(decoded, routed_experts.reshape(-1))
+
+    @pytest.mark.asyncio
+    async def test_generate_tokens_routed_experts_start_echoes_prompt_start(self):
+        """routed_experts.start echoes SamplingParams.routed_experts_prompt_start
+        (the offset vLLM trimmed) so the RL consumer can align the completion."""
+        from vllm.sampling_params import SamplingParams
+
+        # routed_experts_prompt_start is an RL-patch field; set it post-construct
+        # so the test runs against stock vLLM too (the worker reads it via
+        # getattr, defaulting to 0 when absent).
+        sampling_params = SamplingParams(max_tokens=1)
+        try:
+            sampling_params.routed_experts_prompt_start = 5
+        except Exception:
+            pytest.skip("installed vLLM has no routed_experts_prompt_start support")
+
+        handler = _make_handler()
+        handler._extract_logprobs = MagicMock(return_value=(None, None))
+        routed_experts = np.array([[[3]], [[4]]], dtype=np.int32)
+
+        async def fake_generate(*args, **kwargs):
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[12],
+                        routed_experts=routed_experts,
+                        finish_reason="stop",
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2],
+                prompt_logprobs=None,
+            )
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        chunks = []
+        async for chunk in handler.generate_tokens(
+            PatchedTokensPrompt(prompt_token_ids=[1]),
+            sampling_params,
+            "req-2",
+        ):
+            chunks.append(chunk)
+
+        assert chunks[-1]["engine_data"]["routed_experts"]["start"] == 5
 
 
 # ── Tests ────────────────────────────────────────────────────────────

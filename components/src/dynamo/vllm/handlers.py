@@ -653,7 +653,9 @@ def _accumulate_engine_data(
     tok["engine_data"] = engine_data
 
 
-def _serialize_routed_experts(routed_experts: Any) -> Optional[Dict[str, Any]]:
+def _serialize_routed_experts(
+    routed_experts: Any, start: int = 0
+) -> Optional[Dict[str, Any]]:
     if routed_experts is None:
         return None
 
@@ -667,10 +669,16 @@ def _serialize_routed_experts(routed_experts: Any) -> Optional[Dict[str, Any]]:
         return None
 
     return {
-        "data": base64.b85encode(tobytes()).decode("ascii"),
+        # base64 (not base85): the prime-rl RL consumer decodes with
+        # pybase64.b64decode, matching the SGLang / SLIME / vLLM-native encoding.
+        "data": base64.b64encode(tobytes()).decode("ascii"),
         "shape": [int(dim) for dim in shape],
+        # Row offset of the first returned routing entry within the full
+        # sequence (= SamplingParams.routed_experts_prompt_start; vLLM trims the
+        # leading prompt rows). Lets the RL consumer align the completion.
+        "start": int(start),
         # Encode dtype so the consumer decodes the raw bytes with the right
-        # element type instead of assuming int32.
+        # element type instead of assuming a fixed width.
         "dtype": str(getattr(routed_experts, "dtype", "")),
     }
 
@@ -3024,7 +3032,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 out, prompt_logprobs_payload
                             )
                         routed_experts = _serialize_routed_experts(
-                            raw_routed_experts_by_output.get(output_idx)
+                            raw_routed_experts_by_output.get(output_idx),
+                            start=int(
+                                getattr(
+                                    sampling_params, "routed_experts_prompt_start", 0
+                                )
+                                or 0
+                            ),
                         )
                         if routed_experts is not None:
                             _attach_routed_experts_engine_data(out, routed_experts)
