@@ -151,6 +151,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--registry", default="artifactory", help="cargo registry alias")
     ap.add_argument("--root", default=".", help="repo root")
+    ap.add_argument("--expect-version", default=os.environ.get("EXPECT_VERSION", ""),
+                    help="fail fast if any publishable crate's version differs from this")
     args = ap.parse_args()
 
     # Reuse the wheel-upload token; keep the registry location out of the workflow
@@ -170,6 +172,17 @@ def main() -> int:
     pkgs = publishable(cargo_metadata(root))
     order = topo_order(pkgs)
     print("Publish order:", " ".join(order))
+
+    # Fail fast BEFORE any build/publish if a crate carries an unexpected version
+    # (e.g. a hardcoded version the bump missed) — never silently publish wrong tags.
+    if args.expect_version:
+        mismatched = [(n, pkgs[n]["version"]) for n in order if pkgs[n]["version"] != args.expect_version]
+        if mismatched:
+            for n, v in mismatched:
+                print(f"::error::crate {n} is at version {v}, expected {args.expect_version} (hardcoded/un-bumped version)", file=sys.stderr)
+            print(f"::error::aborting before publish: {len(mismatched)} crate(s) carry an unexpected version; "
+                  "set 'version.workspace = true' (or fix Cargo.toml) and re-run", file=sys.stderr)
+            return 1
 
     write_cargo_config(root, args.registry, index)
     inject_registry(root, order, args.registry)

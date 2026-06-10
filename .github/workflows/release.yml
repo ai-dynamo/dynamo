@@ -819,6 +819,7 @@ jobs:
         env:
           ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
           ARTIFACTORY_CARGO_INDEX: ${{ secrets.ARTIFACTORY_CARGO_INDEX }}
+          EXPECT_VERSION: ${{ needs.prepare-release.outputs.crate_version }}
         run: |
           set -euo pipefail
           python3 .ondemand-tools/.github/scripts/stage_crates.py --registry artifactory

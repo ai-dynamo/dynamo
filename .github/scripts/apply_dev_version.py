@@ -58,6 +58,13 @@ HELM_CHART_TARGETS = [
     "deploy/helm/charts/snapshot/Chart.yaml",
 ]
 
+# Dynamo first-party image `tag:` fields in values.yaml that pin a published image
+# and must track the release tag. (operator uses tag: "" -> inherits appVersion, so
+# it's intentionally omitted; 3rd-party tags like etcd/nats are left alone.)
+HELM_VALUES_IMAGE_TAGS = [
+    ("deploy/helm/charts/snapshot/values.yaml", "nvcr.io/nvidia/ai-dynamo/snapshot-agent"),
+]
+
 # X.Y.Z.postN -> X.Y.Z+postN so SemVer ecosystems (Cargo, Helm) stay valid.
 SET_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:\.(post\d+))?$")
 
@@ -218,6 +225,19 @@ def set_helm(path: Path, old: str, new: str) -> None:
     path.write_text(text)
 
 
+def set_helm_values_tag(path: Path, repo: str, new: str) -> None:
+    # Set the `tag:` that follows the image `repository: <repo>` line to `new`,
+    # regardless of its current value (the published image tag is the release tag).
+    pat = re.compile(
+        r'(repository:\s*' + re.escape(repo) + r'\s*\n(?:[^\n]*\n)*?\s*tag:\s*)"?[^"\n]*"?',
+        re.MULTILINE,
+    )
+    text, n = pat.subn(lambda m: f"{m.group(1)}{new}", path.read_text(), count=1)
+    if n != 1:
+        raise RuntimeError(f"could not find image tag for {repo} in {path}")
+    path.write_text(text)
+
+
 def set_release_version(root: Path, new_version: str) -> None:
     old = _workspace_version(root)
     semver = _semver_form(new_version)
@@ -228,6 +248,9 @@ def set_release_version(root: Path, new_version: str) -> None:
         set_cargo(root / rel, old, semver)
     for rel in HELM_CHART_TARGETS:
         set_helm(root / rel, old, semver)
+    # Image tags use the published NGC tag form (== new_version), not SemVer.
+    for rel, repo in HELM_VALUES_IMAGE_TAGS:
+        set_helm_values_tag(root / rel, repo, new_version)
     print(f"set_release_version: {old} -> py={new_version} semver={semver}", file=sys.stderr)
 
 
