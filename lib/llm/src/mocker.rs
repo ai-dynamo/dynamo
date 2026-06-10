@@ -260,7 +260,7 @@ impl MockEngine {
 
     /// Wait until the scheduler at `dp_rank` reports both **block** and **sequence**
     /// headroom for admitting a new request, up to `timeout`. Used by the decode side
-    /// of disagg before connecting to a prefill bootstrap server (DIS-2147).
+    /// of disagg before connecting to a prefill bootstrap server.
     ///
     /// Models real NIXL admission behavior in vLLM v1 and sglang — both engines gate
     /// the disaggregated KV recv on **two independent budgets**: a block/token budget
@@ -268,13 +268,13 @@ impl MockEngine {
     /// budget (a free slot in the per-request scheduling state — vLLM `max_num_seqs` /
     /// `len(self.running)`; sglang's `DecodeReqToTokenPool`). Both must have headroom;
     /// either alone blocks the NIXL recv from being armed. Without the seq-slot check
-    /// the DIS-2147 abort path is unreachable from realistic seq-bound load shapes.
+    /// the prefill-side abort path is unreachable from realistic seq-bound load shapes.
     ///
     /// Returns Ok(()) immediately if schedulers haven't reported metrics yet
     /// (total_blocks == 0) so warmup is graceful. Also treats `max_num_seqs == 0`
     /// as "no seq cap configured" (mirrors `MockEngineArgs.max_num_seqs == None`).
     ///
-    /// **No timeout on this side (DIS-2147 F1).** Real vLLM and sglang decode workers do
+    /// **No timeout on this side.** Real vLLM and sglang decode workers do
     /// not run an independent "give up waiting for capacity" timer — a
     /// WAITING_FOR_REMOTE_KVS request stays WAITING until the scheduler admits it, the
     /// request context is dropped, or the prefill side's `kv_transfer_abort_timeout_ms`
@@ -584,7 +584,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
             .await;
 
         // Bootstrap rendezvous for disaggregated serving
-        // - Decode: (DIS-2147) wait for own KV capacity, then send receiver metadata to prefill
+        // - Decode: wait for own KV capacity, then send receiver metadata to prefill
         //   and wait for prefill completion or abort
         // - Prefill: wait for decode metadata (bounded by abort_timeout when set) before emitting
         //   output, then complete_room(); on abort-timeout abort_room()
@@ -597,18 +597,18 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         if let Some(bootstrap_info) = &request.bootstrap_info
             && self.engine_args.is_decode()
         {
-            // DIS-2147: gate decode on local KV capacity before connecting (see
+            // Gate decode on local KV capacity before connecting (see
             // wait_for_decode_kv_capacity). Only when abort_timeout is configured, to
-            // preserve the pre-DIS-2147 "skip the wait" path for legacy DGDs.
+            // preserve the legacy "skip the wait" path for older DGDs.
             if abort_timeout.is_some() {
                 self.wait_for_decode_kv_capacity(dp_rank)
                     .await
                     .map_err(|e| Error::msg(format!("Decode KV wait failed: {e}")))?;
             }
-            // DIS-2147 forensic logging: emit decode-side wait-start event so post-hoc
+            // Forensic logging: emit decode-side wait-start event so post-hoc
             // analysis can reconstruct (decode_worker, target_prefill, room) stranding graphs.
             tracing::info!(
-                target: "mocker::dis2147",
+                target: "mocker::kv_abort",
                 decode_dp_rank = dp_rank,
                 room_id = bootstrap_info.bootstrap_room,
                 target_host = %bootstrap_info.bootstrap_host,
@@ -665,19 +665,19 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         // Spawn a task to handle the complex async logic
         tokio::spawn(async move {
             if let Some((server, room_id, sender, direct_request)) = delayed_prefill_submission {
-                // DIS-2147 forensic logging: pin-start event with room_id + prefill dp_rank.
+                // Forensic logging: pin-start event with room_id + prefill dp_rank.
                 // Lets post-hoc analysis join with decode logs on room_id to build the
                 // (prefill -> decode) stranding graph. While this prefill waits for decode to
                 // arrive, its scheduler request stays active so KV stays pinned.
                 let pin_start = std::time::Instant::now();
                 tracing::info!(
-                    target: "mocker::dis2147",
+                    target: "mocker::kv_abort",
                     prefill_dp_rank = dp_rank,
                     room_id,
                     "prefill_kv_pin_start"
                 );
                 tokio::select! {
-                    // DIS-2147: bound the decode-arrival wait by abort_timeout (when set). On
+                    // Bound the decode-arrival wait by abort_timeout (when set). On
                     // timeout, abort the room so waiting/late decodes get a clean ABORT instead
                     // of hanging, surface the abort to the client, and end the stream.
                     result = server.wait_for_decode_ready(room_id, abort_timeout) => {
@@ -687,7 +687,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             );
                             server.abort_room(room_id);
                             tracing::info!(
-                                target: "mocker::dis2147",
+                                target: "mocker::kv_abort",
                                 prefill_dp_rank = dp_rank,
                                 room_id,
                                 outcome = "aborted",
@@ -701,7 +701,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             return;
                         }
                         tracing::info!(
-                            target: "mocker::dis2147",
+                            target: "mocker::kv_abort",
                             prefill_dp_rank = dp_rank,
                             room_id,
                             outcome = "completed",
@@ -773,7 +773,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                         }
 
                         if signal.completed {
-                            // DIS-2147: by this point a disagg prefill has already waited for
+                            // By this point a disagg prefill has already waited for
                             // decode to arrive (or aborted) in wait_for_decode_ready below, so
                             // KV stayed pinned during the wait — modeling real NIXL behavior.
                             if stream_tx.send(output).is_err() {

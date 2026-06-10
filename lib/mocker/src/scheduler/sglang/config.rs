@@ -41,7 +41,7 @@ pub(super) struct SglangConfig {
     pub(super) kv_transfer_bandwidth: Option<f64>,
     pub(super) speculative_max_tokens: Option<usize>,
     /// Sequence-slot cap (MockEngineArgs.max_num_seqs). 0 == unlimited. Used by the
-    /// DIS-2147 decode-side admission wait to model the seq-slot budget.
+    /// decode-side admission wait to model the seq-slot budget.
     pub(super) max_num_seqs: u64,
 }
 

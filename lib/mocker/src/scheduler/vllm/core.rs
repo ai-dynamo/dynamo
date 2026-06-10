@@ -523,7 +523,7 @@ impl VllmCore {
             0,
             0,
         );
-        // DIS-2147: expose the seq-slot cap so the decode-side admission wait can gate
+        // Expose the seq-slot cap so the decode-side admission wait can gate
         // on a free sequence slot in addition to block capacity. 0 == "unlimited".
         metrics.max_num_seqs = self.args.max_num_seqs.map(|v| v as u64).unwrap_or(0);
         metrics

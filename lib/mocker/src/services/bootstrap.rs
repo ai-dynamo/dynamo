@@ -8,11 +8,11 @@
 //! emitting output, and decode waits for prefill completion before generating.
 //!
 //! - Prefill: waits for decode metadata via `wait_for_decode_ready(room_id, timeout)`. When a
-//!   DIS-2147 abort timeout is supplied and no decode arrives within it, prefill calls
+//!   abort timeout is supplied and no decode arrives within it, prefill calls
 //!   `abort_room(room_id)` so waiting/late decoders get a clean ABORT rather than hanging.
 //! - Prefill: calls `complete_room(room_id)` after first token to release KV to decode (ACK).
 //! - Decode: connects to prefill's bootstrap server, sends metadata, then waits for completion
-//!   or abort. Decode is expected to connect only AFTER its own KV cache has capacity (DIS-2147).
+//!   or abort. Decode is expected to connect only AFTER its own KV cache has capacity.
 //!
 //! Wire protocol:
 //! - Decode -> Prefill: room_id (8 bytes, little-endian u64)
@@ -36,7 +36,7 @@ const RENDEZVOUS_TIMEOUT: Duration = Duration::from_secs(30);
 /// ACK byte sent from server to decode when prefill completes successfully.
 const ACK_BYTE: u8 = 0x01;
 
-/// ABORT byte sent from server to decode when prefill aborted before transfer (DIS-2147).
+/// ABORT byte sent from server to decode when prefill aborted before transfer.
 const ABORT_BYTE: u8 = 0x02;
 
 /// How long an aborted room is retained so late-arriving decoders see ABORT instead of timing out.
@@ -159,7 +159,7 @@ impl BootstrapServer {
                         ImmediateOrWait::Immediate(ACK_BYTE)
                     }
                     RoomOutcome::Aborted => {
-                        // Late decode arrives after prefill aborted — clean error (DIS-2147).
+                        // Late decode arrives after prefill aborted — clean error.
                         entry.remove();
                         tracing::warn!(
                             "Bootstrap: room {room_id} prefill aborted, sending ABORT to decode"
@@ -220,13 +220,13 @@ impl BootstrapServer {
     }
 
     /// Wait until decode has sent receiver metadata for this room. The act of decode connecting
-    /// is its signal that it has KV capacity to receive the transfer (DIS-2147), so until then
+    /// is its signal that it has KV capacity to receive the transfer, so until then
     /// the caller (prefill) holds KV — modeling real NIXL backpressure.
     ///
-    /// `abort_timeout` (DIS-2147): when `Some`, the wait is bounded by it and an Err is returned
+    /// `abort_timeout`: when `Some`, the wait is bounded by it and an Err is returned
     /// on timeout — the caller is expected to call [`abort_room`] so waiting/late decoders get a
     /// clean ABORT rather than hanging. When `None`, the wait is bounded only by
-    /// [`RENDEZVOUS_TIMEOUT`] (pre-DIS-2147 behavior).
+    /// [`RENDEZVOUS_TIMEOUT`] (legacy behavior).
     pub async fn wait_for_decode_ready(
         &self,
         room_id: u64,
@@ -267,7 +267,7 @@ impl BootstrapServer {
                 }
                 Err(_) => {
                     // On abort-timeout, leave the room in place so abort_room can mark it Aborted
-                    // for waiting/late decodes. Otherwise (pre-DIS-2147) remove it.
+                    // for waiting/late decodes. Otherwise (legacy) remove it.
                     if abort_timeout.is_none() {
                         self.rooms.remove(&room_id);
                     }
@@ -287,7 +287,7 @@ impl BootstrapServer {
 
     /// Mark a room as aborted (prefill timed out waiting for decode, or other failure). Any
     /// already-waiting decode receives ABORT. The room is retained for [`ABORTED_ROOM_TTL`] so
-    /// late-arriving decodes also see ABORT rather than hanging until RENDEZVOUS_TIMEOUT. (DIS-2147)
+    /// late-arriving decodes also see ABORT rather than hanging until RENDEZVOUS_TIMEOUT.
     pub fn abort_room(&self, room_id: u64) {
         self.set_outcome(room_id, RoomOutcome::Aborted);
         // Schedule cleanup so the room doesn't leak forever after a late decode also fails to show
@@ -346,7 +346,7 @@ enum ImmediateOrWait {
 }
 
 /// Send decode receiver metadata to a prefill worker, then wait for KV to be ready.
-/// Returns Err on ABORT_BYTE (prefill timed out before transfer — DIS-2147).
+/// Returns Err on ABORT_BYTE (prefill timed out before transfer).
 pub async fn connect_to_prefill(host: &str, port: u16, room_id: u64) -> Result<()> {
     let host = host.trim_matches(|c| c == '[' || c == ']');
     let addr = format!("{host}:{port}");
@@ -587,7 +587,7 @@ mod tests {
         cancel_token.cancel();
     }
 
-    // DIS-2147 — new scenario tests
+    // Abort-timeout scenario tests
 
     #[tokio::test]
     async fn test_wait_for_decode_arrival_decode_present_first() {

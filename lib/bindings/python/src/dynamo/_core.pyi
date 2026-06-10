@@ -1893,6 +1893,7 @@ class MockEngineArgs:
         bootstrap_port: Optional[int] = None,
         kv_bytes_per_token: Optional[int] = None,
         kv_transfer_bandwidth: Optional[float] = None,
+        kv_transfer_abort_timeout_ms: Optional[int] = None,
         reasoning: Optional[ReasoningConfig] = None,
         zmq_kv_events_port: Optional[int] = None,
         zmq_replay_port: Optional[int] = None,

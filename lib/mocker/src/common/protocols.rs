@@ -734,9 +734,9 @@ pub struct MockEngineArgs {
     /// production `VLLM_NIXL_ABORT_REQUEST_TIMEOUT` env var. When a disagg prefill
     /// completes compute but no decode arrives within this window, the prefill aborts
     /// the request (KV released, abort error surfaced to the client); late-arriving
-    /// decodes for the same room receive a clean ABORT response. (DIS-2147)
+    /// decodes for the same room receive a clean ABORT response.
     ///
-    /// `None` (default) disables the prefill-side wait — preserves pre-DIS-2147
+    /// `None` (default) disables the prefill-side wait — preserves the legacy
     /// behavior where prefill ACKs immediately and never holds KV waiting for decode.
     #[builder(default = "None")]
     pub kv_transfer_abort_timeout_ms: Option<u64>,

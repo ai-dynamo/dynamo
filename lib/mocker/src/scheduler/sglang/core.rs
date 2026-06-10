@@ -260,7 +260,7 @@ impl SglangCore {
                     sglang_cache_hit_tokens,
                     sglang_cache_total_tokens,
                 );
-                // DIS-2147: expose the seq-slot cap for the decode-side admission wait.
+                // Expose the seq-slot cap for the decode-side admission wait.
                 metrics.max_num_seqs = self.config.max_num_seqs;
                 metrics
             },
