@@ -26,7 +26,7 @@ inputs:
     required: false
     default: 'linux/amd64'
   cuda_version:
-    description: 'CUDA version used on re-init (e.g. 12.9, 13.0). Leave empty for general flavor.'
+    description: 'CUDA version used on re-init (e.g. 13.0, 13.1). Leave empty for general flavor.'
     required: false
     default: ''
 

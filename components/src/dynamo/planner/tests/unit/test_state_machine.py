@@ -19,6 +19,7 @@ try:
 except ImportError:
     pytest.skip("forward_pass_metrics not available", allow_module_level=True)
 from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.core.perf_model.rust_adapter import PlannerEngineCapacity
 from dynamo.planner.core.state_machine import PlannerStateMachine
 from dynamo.planner.core.types import (
     EngineCapabilities,
@@ -135,6 +136,58 @@ def _make_core(config=None, caps=None, **config_overrides) -> PlannerStateMachin
 def _make_agg_core(config=None, caps=None, **config_overrides) -> PlannerStateMachine:
     cfg = config or _agg_config(**config_overrides)
     return PlannerStateMachine(cfg, caps or _agg_caps())
+
+
+def test_accept_length_clamp_uses_config_fallback_nextn():
+    core = _make_core(speculative_nextn=2)
+    core._observe_traffic(
+        TrafficObservation(
+            duration_s=60, num_req=1, isl=1000, osl=150, accept_length=4.5
+        )
+    )
+    assert core._current_decode_accept_length() == 3.0
+
+
+def test_accept_length_clamp_uses_mdc_nextn_before_config():
+    caps = WorkerCapabilities(
+        decode=EngineCapabilities(
+            num_gpu=1, max_num_batched_tokens=2048, speculative_nextn=1
+        )
+    )
+    core = _make_core(caps=caps, speculative_nextn=4)
+    core._observe_traffic(
+        TrafficObservation(
+            duration_s=60, num_req=1, isl=1000, osl=150, accept_length=4.5
+        )
+    )
+    assert core._current_decode_accept_length() == 2.0
+
+
+def test_accept_length_forced_to_one_without_spec_decode():
+    core = _make_core()
+    core._observe_traffic(
+        TrafficObservation(
+            duration_s=60, num_req=1, isl=1000, osl=150, accept_length=2.0
+        )
+    )
+    assert core._current_decode_accept_length() == 1.0
+
+
+def test_missing_accept_length_keeps_last_value():
+    core = _make_core(speculative_nextn=2)
+    core._observe_traffic(
+        TrafficObservation(
+            duration_s=60, num_req=1, isl=1000, osl=150, accept_length=2.5
+        )
+    )
+    assert core._current_decode_accept_length() == 2.5
+
+    core._observe_traffic(
+        TrafficObservation(
+            duration_s=60, num_req=1, isl=1000, osl=150, accept_length=None
+        )
+    )
+    assert core._current_decode_accept_length() == 2.5
 
 
 def _train_prefill_regression(core: PlannerStateMachine) -> None:
@@ -764,8 +817,8 @@ class TestKvHitRatePlumbing:
         assert core._num_req_predictor.data_buffer == []
         assert core._isl_predictor.data_buffer == []
         assert core._osl_predictor.data_buffer == []
-        # kv predictor also untouched in load-only mode (no prediction needed)
-        assert core._kv_hit_rate_predictor.data_buffer == []
+        assert not hasattr(core, "_kv_hit_rate_predictor")
+        assert core._last_kv_hit_rate == 0.4
 
     def test_load_only_none_kv_hit_rate_leaves_last_value_unchanged(self):
         core = _make_core(enable_throughput_scaling=False)
@@ -796,10 +849,9 @@ class TestKvHitRatePlumbing:
         )
         assert core._last_kv_hit_rate == 0.5
 
-    def test_mixed_mode_observe_traffic_feeds_predictor_only(self):
-        """In mixed mode the raw observation feeds the predictor; the sticky
-        ``_last_kv_hit_rate`` is *not* updated until ``_advance_throughput``
-        promotes the predicted value to it."""
+    def test_mixed_mode_observe_traffic_updates_last_kv_hit_rate(self):
+        """KV hit rate uses last-value semantics even when traffic shape uses
+        configured predictors."""
         core = _make_core()  # both load + throughput scaling enabled
         assert core._last_kv_hit_rate is None
         core._observe_traffic(
@@ -807,21 +859,25 @@ class TestKvHitRatePlumbing:
                 duration_s=60, num_req=100, isl=1000, osl=150, kv_hit_rate=0.3
             )
         )
-        # Predictor saw the observation
-        assert len(core._kv_hit_rate_predictor.data_buffer) == 1
-        # Sticky value is *not* set from the raw observation in mixed mode
-        assert core._last_kv_hit_rate is None
+        assert not hasattr(core, "_kv_hit_rate_predictor")
+        assert core._last_kv_hit_rate == 0.3
 
-    def test_mixed_mode_advance_throughput_promotes_predicted_value(self):
-        """After a throughput tick fires, ``_last_kv_hit_rate`` should hold
-        the predicted value (used by all subsequent load ticks until the
-        next throughput tick)."""
+    def test_kv_hit_rate_ignores_configured_load_predictor(self):
+        core = _make_core(load_predictor="arima")
+        core._observe_traffic(
+            TrafficObservation(
+                duration_s=60, num_req=100, isl=1000, osl=150, kv_hit_rate=0.35
+            )
+        )
+        assert not hasattr(core, "_kv_hit_rate_predictor")
+        assert core._last_kv_hit_rate == 0.35
+
+    def test_mixed_mode_advance_throughput_uses_last_kv_hit_rate(self):
+        """Throughput scaling uses the most recent observed hit rate directly."""
         core = _make_core(
             mode="prefill", enable_load_scaling=True, enable_throughput_scaling=True
         )
         _train_prefill_regression(core)
-        # ConstantPredictor returns the last observed value once min_data_points=1.
-        # Feed a known value and run a throughput tick.
         traffic = TrafficObservation(
             duration_s=60, num_req=100, isl=1000, osl=150, kv_hit_rate=0.6
         )
@@ -831,7 +887,6 @@ class TestKvHitRatePlumbing:
             worker_counts=WorkerCounts(ready_num_prefill=1),
         )
         core.on_tick(_tick_for(tick_input), tick_input)
-        # Constant predictor returns 0.6, which is then promoted to sticky
         assert core._last_kv_hit_rate == pytest.approx(0.6)
 
     def test_load_only_scheduler_sets_need_traffic_on_load_tick(self):
@@ -881,8 +936,7 @@ class TestKvHitRatePlumbing:
         assert core._last_kv_hit_rate == 0.7
 
     def test_warm_load_predictors_skips_kv_hit_rate(self):
-        """kv_hit_rate has no good offline-trace proxy, so it must not
-        receive warmup data (only live observations feed it)."""
+        """kv_hit_rate is runtime metadata, so warmup traces must not set it."""
         core = _make_core()
         observations = [
             TrafficObservation(
@@ -895,8 +949,8 @@ class TestKvHitRatePlumbing:
         assert len(core._num_req_predictor.data_buffer) == 3
         assert len(core._isl_predictor.data_buffer) == 3
         assert len(core._osl_predictor.data_buffer) == 3
-        # kv_hit_rate predictor stayed cold
-        assert core._kv_hit_rate_predictor.data_buffer == []
+        assert not hasattr(core, "_kv_hit_rate_predictor")
+        assert core._last_kv_hit_rate is None
 
     def test_throughput_diagnostics_include_predicted_kv_hit_rate(self):
         core = _make_core(
@@ -916,23 +970,44 @@ class TestKvHitRatePlumbing:
             worker_counts=WorkerCounts(ready_num_prefill=1),
         )
         effects = core.on_tick(_tick_for(tick), tick)
-        # ConstantPredictor predicts the last value it saw
+        # The API field is named "predicted" for compatibility; kv_hit_rate uses
+        # last-value semantics.
         assert effects.diagnostics.predicted_kv_hit_rate == 0.4
 
-    def test_high_predicted_hit_rate_reduces_prefill_replicas(self):
-        """With the same demand + regression, a high predicted hit rate
+    def test_high_last_observed_hit_rate_reduces_prefill_replicas(self, monkeypatch):
+        """With the same demand + regression, a high last-observed hit rate
         should yield fewer (or at worst equal) prefill replicas than no
         reuse."""
         core_base = _make_core(
             mode="prefill", enable_load_scaling=False, enable_throughput_scaling=True
         )
-        _train_prefill_regression(core_base)
         core_hit = _make_core(
             mode="prefill", enable_load_scaling=False, enable_throughput_scaling=True
         )
-        _train_prefill_regression(core_hit)
+        base_hit_rates: list[float | None] = []
+        cached_hit_rates: list[float | None] = []
 
-        # Feed several observations so the (constant) predictor locks in.
+        def _capacity_for(hit_rates: list[float | None]):
+            def _capacity(**kwargs) -> PlannerEngineCapacity:
+                hit_rate = kwargs.get("kv_hit_rate")
+                hit_rates.append(hit_rate)
+                rps = 5.0 if (hit_rate or 0.0) >= 0.8 else 1.0
+                return PlannerEngineCapacity(rps=rps, ttft_ms=100.0)
+
+            return _capacity
+
+        monkeypatch.setattr(
+            core_base._prefill_regression,
+            "find_engine_capacity_rps",
+            _capacity_for(base_hit_rates),
+        )
+        monkeypatch.setattr(
+            core_hit._prefill_regression,
+            "find_engine_capacity_rps",
+            _capacity_for(cached_hit_rates),
+        )
+
+        # Feed observations so last-value runtime metadata is available.
         traffic_base = TrafficObservation(
             duration_s=60, num_req=500, isl=4000, osl=150, kv_hit_rate=0.0
         )
@@ -956,6 +1031,8 @@ class TestKvHitRatePlumbing:
         effects_hit = core_hit.on_tick(_tick_for(tick_hit), tick_hit)
         assert effects_base.scale_to is not None
         assert effects_hit.scale_to is not None
+        assert base_hit_rates == [0.0]
+        assert cached_hit_rates == [0.8]
         assert effects_hit.scale_to.num_prefill <= effects_base.scale_to.num_prefill
 
 

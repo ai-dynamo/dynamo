@@ -26,8 +26,8 @@ Cell markers (per peer, vllm + sglang):
   V/S   peer is a concrete inline block AND has `reason:` (intentional)
   V?/S? peer is a concrete inline block AND has no `reason:` yet
         (research-needed; we observed it but haven't classified it)
-  V!/S! peer has `error: <substring>` (expected to crash)
-  VS, V?S, VS!, etc. — combinations
+  V✗/S✗ peer has `error: <substring>` (Python parser raised)
+  VS, V?S, VS✗, etc. — combinations
   ·     Dynamo-only fixture; both peer blocks are `unavailable`
   n/a   family/case doesn't apply
   —     no fixture entry exists for this family/case yet
@@ -81,6 +81,20 @@ PYPROJECT_TOML = REPO_ROOT / "pyproject.toml"
 TEMPLATE_DIR = REPO_ROOT / "tests/parity"
 
 RUST_TOOL_CALLING_DIR = REPO_ROOT / "lib/parsers/src/tool_calling"
+
+# Row-label / visibility overrides keyed by tool calling family; ‡ is explained
+# by the legend note in parity_table.html.j2.
+_TOOL_CALLING_LABEL_OVERRIDES = {
+    "qwen3_coder": "Qwen 3 Coder / Nemotron V3‡",
+}
+# nemotron_nano: an alias for qwen3_coder, hide to avoid duplicate row
+# nemotron_deci: for older v2 nemotron models, hide to avoid confusion with nemotron v3 models
+_HIDDEN_TOOL_CALLING_FAMILIES = {"nemotron_deci", "nemotron_nano"}
+
+
+def _model_label_html(model: str) -> str:
+    """Escape a model label, styling any ‡ marker like the †/§ suffixes."""
+    return html_lib.escape(model).replace("‡", '<span class="parser-suffix">‡</span>')
 
 
 def _make_jinja_env() -> Environment:
@@ -548,10 +562,12 @@ def _build_display_groups(
     Others: every YAML-discovered family not in TOP_N, sorted by label.
     Missing labels fall back to the family ID.
     """
-    families = {fam for fam, _ in cases.keys()}
+    families = {
+        fam for fam, _ in cases.keys() if fam not in _HIDDEN_TOOL_CALLING_FAMILIES
+    }
 
     def label_of(fam: str) -> str:
-        return labels.get(fam, fam)
+        return _TOOL_CALLING_LABEL_OVERRIDES.get(fam, labels.get(fam, fam))
 
     top_n = [(label_of(f), f) for f in TOP_N_FAMILIES if f in families]
     other_fams = sorted(
@@ -702,7 +718,7 @@ def _parser_marker(case: dict | None, impl: str) -> str:
     if not isinstance(block, dict) or "unavailable" in block:
         return "n/a"
     if "error" in block:
-        return "!"
+        return "✗"
     if _block_tool_call_leaks(block):
         return "↯"
     if impl == "dynamo":
@@ -737,11 +753,11 @@ def cell_for(case: dict | None) -> str:
     if v_kind == "div":
         parts.append("V?" if v_unknown else "V")
     elif v_kind == "err":
-        parts.append("V!")
+        parts.append("V✗")
     if s_kind == "div":
         parts.append("S?" if s_unknown else "S")
     elif s_kind == "err":
-        parts.append("S!")
+        parts.append("S✗")
 
     # `reason:` on the `expected.dynamo` block flags Dynamo's own output as
     # leaking tool call markup only when Dynamo also leaves residual
@@ -783,11 +799,15 @@ _LEGEND_MD = (
     "`?` research-needed suffix (e.g. V?, S? — diverges with no `reason:` yet) · "
     "`↯` Dynamo leaks tool call markup into `normal_text` "
     "(`expected.dynamo.reason:` carries the explanation) · "
-    "`!` expected-error suffix (e.g. V!, S! — engine crashes by design) · "
+    "`✗` parser exception (e.g. V✗, S✗ — Python parser raised) · "
     "`n/a` not applicable · "
     "`—` missing fixture coverage · "
     "`†` (tool calling parser column) = no vLLM peer parser for this family · "
     "`§` (tool calling parser column) = no SGLang peer parser for this family."
+    "\n\n"
+    "`‡` Nemotron V3 (Ultra) reuses the qwen3_coder tool calling parser; "
+    "Nemotron V1 / V2 (DeciLM) is removed from the chart for being an older "
+    "generation, but the nemotron_deci parser is still supported."
 )
 
 
@@ -929,7 +949,7 @@ def _tooltip_for(case: dict, dyn: dict) -> str:
     Each non-matching, non-unavailable peer contributes one line:
       vllm: <reason>                        # `reason:` field present
       vllm: UNKNOWN — divergent ...         # divergent, no reason
-      vllm: expected error matching '...'   # `error:` field present
+      vllm: parser exception matching '...' # `error:` field present
     """
     parts: list[str] = []
     n_dyn = {
@@ -944,7 +964,7 @@ def _tooltip_for(case: dict, dyn: dict) -> str:
             continue
         name = _IMPL_DISPLAY.get(impl, impl)
         if "error" in block:
-            parts.append(f"{name}: expected error matching {block['error']!r}")
+            parts.append(f"{name}: parser exception matching {block['error']!r}")
             continue
         # Don't rely on PyYAML preserving anchor identity (the `block is dyn`
         # check above is the fast path; value equality is the safety net).
@@ -1242,7 +1262,7 @@ def render_row_html(
     inheritance: dict[str, dict],
 ) -> str:
     cells = [
-        f'<tr><td class="model" data-col-hide-group="model">{html_lib.escape(model)}</td>',
+        f'<tr><td class="model" data-col-hide-group="model">{_model_label_html(model)}</td>',
         _column_placeholder_html("model"),
         _parser_cell_html(family, refs, no_vllm, no_sglang, inheritance),
         _column_placeholder_html("parser"),
@@ -1460,7 +1480,7 @@ def _compute_stats(
                 s["parity"] += 1
             elif text in {"D", "·"}:
                 s["dynamo_only"] += 1
-            elif "!" in text:
+            elif "!" in text or "✗" in text:
                 s["errors"] += 1
             elif "↯" in text:
                 s["documented"] += 1

@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use dynamo_kv_router::PrefillLoadEstimator;
 use dynamo_mocker::common::perf_model::AicCallback;
@@ -156,28 +157,27 @@ pub(super) fn estimate_aic_num_gpu_blocks(
     max_num_batched_tokens: usize,
     gpu_memory_utilization: f64,
     mem_fraction_static: Option<f64>,
+    free_gpu_memory_fraction: Option<f64>,
     backend_version: Option<&str>,
     moe_tp_size: Option<usize>,
     moe_ep_size: Option<usize>,
     attention_dp_size: Option<usize>,
 ) -> PyResult<usize> {
     let module = py.import("dynamo._internal.aic")?;
-    let blocks = module.call_method1(
-        "estimate_num_gpu_blocks",
-        (
-            backend_name,
-            system,
-            model_path,
-            tp_size,
-            block_size,
-            max_num_batched_tokens,
-            gpu_memory_utilization,
-            mem_fraction_static,
-            backend_version,
-            moe_tp_size,
-            moe_ep_size,
-            attention_dp_size,
-        ),
-    )?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("backend_name", backend_name)?;
+    kwargs.set_item("system", system)?;
+    kwargs.set_item("model_path", model_path)?;
+    kwargs.set_item("tp_size", tp_size)?;
+    kwargs.set_item("block_size", block_size)?;
+    kwargs.set_item("max_num_batched_tokens", max_num_batched_tokens)?;
+    kwargs.set_item("gpu_memory_utilization", gpu_memory_utilization)?;
+    kwargs.set_item("mem_fraction_static", mem_fraction_static)?;
+    kwargs.set_item("free_gpu_memory_fraction", free_gpu_memory_fraction)?;
+    kwargs.set_item("backend_version", backend_version)?;
+    kwargs.set_item("moe_tp_size", moe_tp_size)?;
+    kwargs.set_item("moe_ep_size", moe_ep_size)?;
+    kwargs.set_item("attention_dp_size", attention_dp_size)?;
+    let blocks = module.call_method("estimate_num_gpu_blocks", (), Some(&kwargs))?;
     blocks.extract()
 }

@@ -20,6 +20,7 @@ use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_type::{ModelInput, ModelType};
+use crate::protocols::tensor::TensorModelConfig;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_runtime::{slug::Slug, storage::kv};
@@ -223,13 +224,20 @@ fn mdc_blobs_dir() -> anyhow::Result<PathBuf> {
     Ok(dir)
 }
 
-fn mdc_slug_dir(slug: &Slug, mdcsum: &str) -> anyhow::Result<PathBuf> {
-    let dir = mdc_cache_root()
+/// Per-MDC cache directory: `<root>/by-slug/<slug>/<mdcsum>/`.
+/// Pure path computation; use [`mdc_local_dir`] when you need the
+/// directory created.
+fn mdc_local_path(slug: &Slug, mdcsum: &str) -> PathBuf {
+    mdc_cache_root()
         .join("by-slug")
         .join(slug.to_string())
-        .join(mdcsum);
+        .join(mdcsum)
+}
+
+fn mdc_local_dir(slug: &Slug, mdcsum: &str) -> anyhow::Result<PathBuf> {
+    let dir = mdc_local_path(slug, mdcsum);
     std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating MDC slug dir {}", dir.display()))?;
+        .with_context(|| format!("creating MDC local dir {}", dir.display()))?;
     Ok(dir)
 }
 
@@ -349,9 +357,9 @@ fn file_uri_parent(uri: &str) -> Option<PathBuf> {
     parent.is_dir().then(|| parent.to_path_buf())
 }
 
-/// Symlink non-weight files from `snapshot_dir` into `slug_dir`. Picks up
+/// Symlink non-weight files from `snapshot_dir` into `local_dir`. Picks up
 /// `preprocessor_config.json` and other sibling files that
-/// `from_pretrained(slug_dir)` consumers need.
+/// `from_pretrained(local_dir)` consumers need.
 ///
 /// Names in `typed_filenames` are owned by the resolve loop's typed-slot
 /// pass — never overwritten. Every other harvested sibling is re-linked
@@ -360,7 +368,7 @@ fn file_uri_parent(uri: &str) -> Option<PathBuf> {
 /// cover harvested files).
 fn harvest_siblings(
     snapshot_dir: &Path,
-    slug_dir: &Path,
+    local_dir: &Path,
     typed_filenames: &std::collections::HashSet<String>,
 ) -> anyhow::Result<()> {
     let entries = match std::fs::read_dir(snapshot_dir) {
@@ -387,7 +395,7 @@ fn harvest_siblings(
         if typed_filenames.contains(&name) {
             continue;
         }
-        let dst = slug_dir.join(&name);
+        let dst = local_dir.join(&name);
         // Resolve through the canonical target so a downstream
         // `canonicalize` lands on a stable blob path rather than
         // chasing snapshot-dir symlinks. `symlink_force` is idempotent
@@ -398,7 +406,7 @@ fn harvest_siblings(
         tracing::debug!(
             file = %name,
             target = %target.display(),
-            "harvested sibling into slug_dir",
+            "harvested sibling into local_dir",
         );
     }
     Ok(())
@@ -671,8 +679,10 @@ pub struct ModelDeploymentCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_context: Option<Vec<PromptContextMixin>>,
 
-    /// Max context (in number of tokens) this model can handle
-    pub context_length: u32,
+    /// Architectural context maximum derived from model or tokenizer metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub architectural_max_context_length: Option<u32>,
 
     /// Size of a KV cache block.
     /// Passed to the engine, KV router, and trace replay hash path.
@@ -693,12 +703,13 @@ pub struct ModelDeploymentCard {
     /// Processing stage this worker handles (Prefill, Decode, Encode, Aggregated).
     /// Orthogonal to `model_type` (which describes endpoints exposed).
     ///
-    /// Every worker is expected to set this explicitly; `None` means the
-    /// worker has not declared a role and is treated as misconfiguration
-    /// (workers not ready). A temporary shim in `Model::ws_role_and_needs`
-    /// softens this while backends are being migrated — see
-    /// `docs/proposals/health-disagg-readiness.md`. `#[serde(default)]` is
-    /// kept so pre-field cards still deserialize.
+    /// Every worker must set this explicitly. `None` means the worker has
+    /// not declared a role and is treated as misconfiguration:
+    /// `Model::ws_role_and_needs` returns `None`, the serving-readiness
+    /// gate refuses to vouch for the namespace, and `register_model`
+    /// rejects such cards outright. The `Option<>` type and
+    /// `#[serde(default)]` are kept so older cards still deserialize, but
+    /// downstream readers treat them as not-ready.
     #[serde(default)]
     pub worker_type: Option<crate::worker_type::WorkerType>,
 
@@ -723,6 +734,11 @@ pub struct ModelDeploymentCard {
 
     #[serde(default)]
     pub runtime_config: ModelRuntimeConfig,
+
+    /// Tensor model configuration for tensor-serving protocols.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub tensor_model_config: Option<TensorModelConfig>,
 
     /// Media decoding configuration
     #[serde(default)]
@@ -815,9 +831,25 @@ impl ModelDeploymentCard {
         &self.slug
     }
 
+    /// Effective serving context: runtime engine limit, then architectural maximum.
+    pub fn effective_context_length(&self) -> u32 {
+        self.runtime_config
+            .context_length
+            .or(self.architectural_max_context_length)
+            .unwrap_or(0)
+    }
+
     /// Serialize the model deployment card to a JSON string
     pub fn to_json(&self) -> Result<String, anyhow::Error> {
         Ok(serde_json::to_string(self)?)
+    }
+
+    /// Per-MDC resolve directory. After `download_config` runs, every
+    /// typed slot + harvested sibling is symlinked here for
+    /// `from_pretrained(local_dir)` consumers. Pure path — does not
+    /// create the directory; the resolve pipeline owns that.
+    pub fn local_dir(&self) -> PathBuf {
+        mdc_local_path(&self.slug, self.mdcsum())
     }
 
     pub fn mdcsum(&self) -> &str {
@@ -853,7 +885,7 @@ impl ModelDeploymentCard {
                 // (a) workers with identical siblings produce the same
                 // mdcsum regardless of `read_dir` order, and (b) the same
                 // bytes under different filenames don't collide — otherwise
-                // the frontend cache could serve a slug_dir missing siblings.
+                // the frontend cache could serve a local_dir missing siblings.
                 let mut extras: Vec<(&str, &str)> = self
                     .extra_files
                     .iter()
@@ -871,7 +903,7 @@ impl ModelDeploymentCard {
                     // fine. If the debug representation changes that only happens in a new release.
                     bytes_to_hash.extend(format!("{prompt_context_vec:?}").as_bytes());
                 }
-                bytes_to_hash.extend(self.context_length.to_be_bytes());
+                bytes_to_hash.extend(self.effective_context_length().to_be_bytes());
                 bytes_to_hash.extend(self.kv_cache_block_size.to_be_bytes());
 
                 // Topology fields participate in the checksum so that a rolling
@@ -936,6 +968,11 @@ impl ModelDeploymentCard {
     ///   tokenizations at special-token boundaries (massive speed-up for shared chat
     ///   prefixes; default off, zero cost when unset)
     /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — L1 cache byte budget (default 50 MB)
+    /// - `DYN_TOKENIZER_CACHE_EXTEND=0` — disable partial-hit extension. By default
+    ///   (when the cache is enabled) a partial hit also caches the new suffix so each
+    ///   turn of a growing multi-turn conversation hits deeper than the last, keeping
+    ///   per-turn tokenization cost flat instead of growing with history. Set to `0` to
+    ///   fall back to the original hit-without-insert behavior.
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
         let use_fast = match std::env::var("DYN_TOKENIZER") {
             Ok(v) if v == "fastokens" => true,
@@ -958,6 +995,11 @@ impl ModelDeploymentCard {
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(50 * 1024 * 1024);
+        // Partial-hit extension is on by default; disable with DYN_TOKENIZER_CACHE_EXTEND=0.
+        let cache_extend = !matches!(
+            std::env::var("DYN_TOKENIZER_CACHE_EXTEND").ok().as_deref(),
+            Some("0")
+        );
 
         let inner: Arc<dyn crate::tokenizers::traits::Tokenizer> = match &self.tokenizer {
             Some(TokenizerKind::HfTokenizerJson(checked_file)) => {
@@ -1030,11 +1072,13 @@ impl ModelDeploymentCard {
                 if cache_enabled {
                     tracing::info!(
                         cache_bytes,
+                        cache_extend,
                         specials = specials.len(),
                         "wrapping tokenizer in L1 prefix cache",
                     );
                     Arc::new(
                         crate::tokenizers::CachedTokenizer::new(raw, specials, cache_bytes)
+                            .with_extend(cache_extend)
                             .with_observer(
                                 Arc::new(|| {
                                     dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL
@@ -1072,6 +1116,7 @@ impl ModelDeploymentCard {
                     );
                     Arc::new(
                         crate::tokenizers::CachedTokenizer::new(raw, Vec::new(), cache_bytes)
+                            .with_extend(cache_extend)
                             .with_observer(
                                 Arc::new(|| {
                                     dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL
@@ -1199,7 +1244,7 @@ impl ModelDeploymentCard {
         let source = self.source_path().to_string();
         let mdcsum = self.mdcsum().to_string();
         let blobs = mdc_blobs_dir()?;
-        let slug_dir = mdc_slug_dir(&self.slug, &mdcsum)?;
+        let local_dir = mdc_local_dir(&self.slug, &mdcsum)?;
 
         let entries: Vec<(String, CheckedFile)> = self
             .iter_metadata_files()
@@ -1241,7 +1286,7 @@ impl ModelDeploymentCard {
             let blob = blobs.join(blake3_hex);
             tracing::debug!(filename = %filename, uri = %uri, blake3 = %blake3_hex, "resolving");
             resolve_uri(&client, uri, expected, &blob, &hf_snapshots).await?;
-            symlink_force(&blob, &slug_dir.join(&filename))?;
+            symlink_force(&blob, &local_dir.join(&filename))?;
         }
         tracing::debug!(
             display_name = %self.display_name,
@@ -1265,13 +1310,13 @@ impl ModelDeploymentCard {
             }
         }
         for snap in &snapshot_dirs {
-            harvest_siblings(snap, &slug_dir, &typed_filenames)?;
+            harvest_siblings(snap, &local_dir, &typed_filenames)?;
         }
 
         // Pass 3: rewrite cf.path to the cache symlink so downstream
         // tokenizer/config loaders read from a verified location.
         for (cf, _) in self.iter_metadata_files_mut() {
-            cf.update_dir(&slug_dir);
+            cf.update_dir(&local_dir);
         }
         Ok(())
     }
@@ -1394,7 +1439,7 @@ impl ModelDeploymentCard {
         let local_path = local_path.as_ref();
 
         // This is usually the right choice
-        let context_length =
+        let architectural_max_context_length =
             crate::file_json_field(&local_path.join("config.json"), "max_position_embeddings")
                 // But sometimes this is
                 .or_else(|_| {
@@ -1403,8 +1448,8 @@ impl ModelDeploymentCard {
                         "model_max_length",
                     )
                 })
-                // If neither of those are present let the engine default it
-                .unwrap_or(0);
+                .ok()
+                .filter(|context_length| *context_length > 0);
 
         let is_mistral_model = is_exclusively_mistral_model(local_path);
 
@@ -1459,7 +1504,7 @@ impl ModelDeploymentCard {
             prompt_formatter,
             chat_template_file,
             prompt_context: None, // TODO - auto-detect prompt context
-            context_length,
+            architectural_max_context_length,
             kv_cache_block_size: 0, // set later
             migration_limit: 0,
             model_type: Default::default(),  // set later
@@ -1469,6 +1514,7 @@ impl ModelDeploymentCard {
             lora: None,
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
+            tensor_model_config: None,
             media_decoder: None,
             media_fetcher: None,
             router_config: None,
@@ -1918,7 +1964,7 @@ fn check_valid_local_repo_path(path: impl AsRef<Path>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::HFConfig;
+    use super::{HFConfig, ModelDeploymentCard};
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
 
@@ -2121,7 +2167,7 @@ mod tests {
 
             // Sibling harvest: TinyLlama_v1.1 fixture ships
             // `special_tokens_map.json` and `tokenizer.model` outside the
-            // typed slots — both must land in slug_dir for
+            // typed slots — both must land in local_dir for
             // `from_pretrained()` to see a complete model dir.
             assert!(snap.join("special_tokens_map.json").exists());
             assert!(snap.join("tokenizer.model").exists());
@@ -2149,7 +2195,7 @@ mod tests {
 
     /// Two MDCs with `extra_files` that share bytes but differ in basename
     /// must produce distinct mdcsums — otherwise the frontend cache would
-    /// alias them and a slug_dir built from one worker's harvest would be
+    /// alias them and a local_dir built from one worker's harvest would be
     /// reused for another worker that needs a differently-named sibling.
     #[test]
     fn mdcsum_extras_distinguish_basename_at_equal_checksum() {
@@ -2202,6 +2248,18 @@ mod tests {
         assert_eq!(
             got,
             url::Url::from_file_path(&local_cfg).unwrap().to_string()
+        );
+    }
+
+    #[test]
+    fn local_dir_computes_expected_path() {
+        // Sentinel for cache-layout drift: the public `local_dir()` must
+        // stay in lockstep with `mdc_local_path`. Resolve-pipeline
+        // integration is covered by the vllm/sglang serve tests.
+        let card = ModelDeploymentCard::with_name_only("Qwen/Qwen3-0.6B");
+        assert_eq!(
+            card.local_dir(),
+            super::mdc_local_path(card.slug(), card.mdcsum())
         );
     }
 
@@ -2265,7 +2323,7 @@ mod tests {
         assert!(!dest.exists(), "dest must not exist after cancel");
     }
 
-    /// Brings in the sibling that `lightseek-mm` needs.
+    /// Brings in the sibling that `mm-routing` needs.
     #[test]
     fn harvest_brings_in_non_weight_siblings() -> anyhow::Result<()> {
         let snap = tempfile::tempdir()?;
@@ -2317,7 +2375,7 @@ mod tests {
         let snap = tempfile::tempdir()?;
         let slug = tempfile::tempdir()?;
 
-        // Typed slot: blob in the dynamo cache; slug_dir links to it.
+        // Typed slot: blob in the dynamo cache; local_dir links to it.
         let typed_blob = blob_dir.path().join("config-blob");
         std::fs::write(&typed_blob, b"typed-slot-content")?;
         super::symlink_force(&typed_blob, &slug.path().join("config.json"))?;
@@ -2339,6 +2397,48 @@ mod tests {
         );
         assert!(slug.path().join("special_tokens_map.json").exists());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    #[test]
+    fn effective_context_prefers_runtime_then_architecture_then_unknown() {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        assert_eq!(card.effective_context_length(), 0);
+
+        card.architectural_max_context_length = Some(32_768);
+        assert_eq!(card.effective_context_length(), 32_768);
+
+        card.runtime_config.context_length = Some(8_192);
+        assert_eq!(card.effective_context_length(), 8_192);
+
+        card.runtime_config.context_length = Some(0);
+        assert_eq!(card.effective_context_length(), 0);
+    }
+
+    #[test]
+    fn tensor_config_serializes_at_card_top_level() {
+        let mut card = ModelDeploymentCard::with_name_only("tensor");
+        card.tensor_model_config = Some(TensorModelConfig {
+            name: "tensor".to_string(),
+            ..Default::default()
+        });
+
+        let value = serde_json::to_value(&card).unwrap();
+        assert_eq!(value["tensor_model_config"]["name"], "tensor");
+        assert!(value["runtime_config"].get("tensor_model_config").is_none());
+
+        let parsed: ModelDeploymentCard = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            parsed
+                .tensor_model_config
+                .as_ref()
+                .map(|config| config.name.as_str()),
+            Some("tensor")
+        );
     }
 }
 

@@ -6,6 +6,7 @@
 #
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -15,6 +16,7 @@ from typing import Any
 
 from msgspec.structs import replace as msgspec_replace
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
+from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import GENERATION_TASKS
@@ -34,7 +36,7 @@ from dynamo.common.multimodal.mm_kwargs_transfer import (
 from dynamo.common.multimodal.routing_utils import build_mm_routing_info_from_features
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.frontend.frontend_args import FrontendConfig
-from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine, fetch_model
+from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .utils import (
@@ -42,6 +44,7 @@ from .utils import (
     handle_engine_error,
     make_internal_error,
     random_uuid,
+    resolve_chat_template,
 )
 
 logger = logging.getLogger(__name__)
@@ -191,7 +194,6 @@ class VllmProcessor:
             mm_routing_info = build_mm_routing_info_from_features(
                 vllm_preproc.mm_features,
                 prompt_token_ids=list(vllm_preproc.prompt_token_ids),
-                block_size=self.block_size,
             )
             # Forward mm_hashes to backend for hash consistency — the backend
             # will use these directly instead of recomputing.
@@ -582,6 +584,10 @@ class VllmProcessor:
                 output_request_ids[output_idx] = child_request_id
                 registered_request_ids.append(child_request_id)
 
+        # llm_metrics totals; Rust postprocessor is bypassed on this path.
+        input_tokens = len(tokens)
+        cumulative_output_tokens = 0
+
         try:
             _inject_routing_metadata(dynamo_preproc, dynamo_preproc, mm_routing_info)
             with _nvtx.annotate("mm_frontend:routed_engine_generate", color="red"):
@@ -616,6 +622,11 @@ class VllmProcessor:
                 if "token_ids" not in engine_response:
                     yield handle_engine_error(engine_response, request_id, logger)
                     break
+
+                # Count before any choice gate — tool/reasoning parsers may
+                # consume tokens without emitting a visible delta.
+                chunk_tokens = len(engine_response.get("token_ids") or [])
+                cumulative_output_tokens += chunk_tokens
 
                 output_idx = engine_response.get("index", 0) or 0
                 output_request_id = output_request_ids.get(output_idx)
@@ -660,25 +671,32 @@ class VllmProcessor:
                     pass
 
                 choices = []
-                if not vllm_out.request_outputs:
-                    continue
-                for output in vllm_out.request_outputs[0].outputs:
-                    post = post_processors.get(output.index)
-                    if post is None:
-                        yield {
-                            "error": {
-                                "message": (
-                                    f"Invalid postprocessor choice index {output.index} "
-                                    f"for request {request_id}"
-                                ),
-                                "type": "internal_error",
+                postprocess_error = False
+                if vllm_out.request_outputs:
+                    for output in vllm_out.request_outputs[0].outputs:
+                        post = post_processors.get(output.index)
+                        if post is None:
+                            yield {
+                                "error": {
+                                    "message": (
+                                        f"Invalid postprocessor choice index {output.index} "
+                                        f"for request {request_id}"
+                                    ),
+                                    "type": "internal_error",
+                                }
                             }
-                        }
-                        break
-                    choice = post.process_output(output)
-                    if choice:
-                        choices.append(choice)
+                            postprocess_error = True
+                            break
+                        choice = post.process_output(output)
+                        if choice:
+                            choices.append(choice)
 
+                if postprocess_error:
+                    continue
+
+                # One envelope per iteration carries both data and metrics so
+                # client cancellation can't drop the annotation between yields.
+                envelope: dict[str, Any] = {"_dynamo_annotated": True}
                 if choices:
                     dynamo_out = {
                         "id": request_id,
@@ -689,8 +707,17 @@ class VllmProcessor:
                     }
                     if usage := engine_response.get("completion_usage"):
                         dynamo_out["usage"] = usage
+                    envelope["data"] = dynamo_out
 
-                    yield dynamo_out
+                metrics = {
+                    "input_tokens": input_tokens,
+                    "output_tokens": cumulative_output_tokens,
+                    "chunk_tokens": chunk_tokens,
+                }
+                envelope["event"] = "llm_metrics"
+                envelope["comment"] = [json.dumps(metrics)]
+
+                yield envelope
             _nvtx.end_range(rng_stream)
         except Exception as e:
             logger.exception("Error generating response for request %s", request_id)
@@ -744,12 +771,12 @@ class EngineFactory:
             )
         loop = asyncio.get_running_loop()
 
-        # TODO(gh-8749): consume mdc.model_info.path()'s parent (slug_dir)
-        # instead of re-running fetch_model. The MDC cache already has
-        # blake3-verified copies; this path duplicates the download.
-        source_path = mdc.source_path()
-        if not os.path.exists(source_path):
-            await fetch_model(source_path, ignore_weights=True)
+        local_dir = mdc.local_dir()
+        if not os.path.isdir(local_dir):
+            raise RuntimeError(
+                f"MDC local_dir {local_dir!r} not populated for model {mdc.name()!r}; "
+                f"download_config must run before the engine factory."
+            )
 
         tokenizer_mode = getattr(self.flags, "tokenizer_mode", None) or "auto"
         config_format = getattr(self.flags, "config_format", None) or "auto"
@@ -758,7 +785,7 @@ class EngineFactory:
         enable_auto_tool_choice = getattr(self.flags, "enable_auto_tool_choice", False)
 
         model_config = ModelConfig(
-            model=source_path,
+            model=local_dir,
             tokenizer_mode=tokenizer_mode,
             config_format=config_format,
             trust_remote_code=trust_remote_code,
@@ -789,6 +816,17 @@ class EngineFactory:
 
         input_processor = InputProcessor(vllm_config)
         tokenizer = input_processor.get_tokenizer()
+
+        # vLLM's renderer skips its AutoProcessor fallback when tools are present,
+        # so tool calls crash unless tokenizer.chat_template is set; load from disk.
+        if tokenizer.chat_template is None:
+            tokenizer.chat_template = resolve_chat_template(local_dir)
+
+        # --chat-template overrides; load_chat_template accepts either a file path
+        # or an inline Jinja template string.
+        chat_template_flag = getattr(self.flags, "chat_template", None)
+        if chat_template_flag:
+            tokenizer.chat_template = load_chat_template(chat_template_flag)
 
         # Resolve stream_interval: env var override > backend config > default (20)
         stream_interval = self.stream_interval

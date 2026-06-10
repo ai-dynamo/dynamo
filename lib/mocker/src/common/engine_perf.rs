@@ -24,6 +24,10 @@ use crate::common::protocols::{ForwardPassSnapshot, MockEngineArgs, WorkerType};
 
 const DEFAULT_AIC_SYSTEM: &str = "h200_sxm";
 const MAX_CAPACITY_SEARCH_CANDIDATES: u32 = 128;
+const MAX_KV_HIT_RATE_DISCOUNT: f64 = 0.95;
+const AIC_NEXTN_KEY: &str = "nextn";
+const AIC_NEXTN_ACCEPT_RATES_KEY: &str = "nextn_accept_rates";
+const RAW_AIC_NEXTN_ACCEPT_RATES: &str = "0,0,0,0,0";
 
 /// Engine limits needed by planner/router-level queries.
 ///
@@ -96,6 +100,18 @@ impl AicEngineConfig {
     }
 }
 
+fn aic_config_for_raw_iteration_time(mut config: EngineConfig) -> EngineConfig {
+    config.extra.insert(
+        AIC_NEXTN_ACCEPT_RATES_KEY.to_string(),
+        RAW_AIC_NEXTN_ACCEPT_RATES.to_string(),
+    );
+    config
+}
+
+fn aic_engine_config_for_raw_iteration_time(config: AicEngineConfig) -> Result<EngineConfig> {
+    Ok(aic_config_for_raw_iteration_time(config.into_aic_config()?))
+}
+
 impl EnginePerfLimits {
     pub fn new(max_num_batched_tokens: u32, max_num_seqs: u32, max_kv_tokens: u32) -> Result<Self> {
         let limits = Self {
@@ -147,6 +163,18 @@ pub struct EngineCapacityRequest {
     pub ttft_sla: Option<Duration>,
     pub itl_sla: Option<Duration>,
     pub e2e_latency_sla: Option<Duration>,
+    /// Average accepted tokens per decode forward, including the base token.
+    ///
+    /// Values below one or non-finite values are treated as one so existing raw
+    /// decode capacity requests keep their historical behavior.
+    #[serde(default = "default_accept_length")]
+    pub accept_length: f64,
+    /// Prefix-cache hit rate used to discount prefill compute only.
+    ///
+    /// Decode context/KV residency still uses the raw `isl`, because prefix
+    /// reuse reduces prefill work but does not shrink the KV footprint for
+    /// generated-token decode.
+    pub kv_hit_rate: Option<f64>,
     pub optimization_target: OptimizationTarget,
 }
 
@@ -326,7 +354,7 @@ impl EnginePerfModel {
         let options = resolve_options(inputs.options, &limits);
         let load_averages = AggLoadAverages::new(options.max_observations);
         let aic_config = match inputs.aic_config {
-            Some(config) => Some(config.into_aic_config()?),
+            Some(config) => Some(aic_engine_config_for_raw_iteration_time(config)?),
             None => inputs
                 .engine_args
                 .as_ref()
@@ -380,7 +408,7 @@ impl EnginePerfModel {
         limits: EnginePerfLimits,
         options: Option<ForwardPassPerfOptions>,
     ) -> Result<Self> {
-        let aic_config = aic_config.into_aic_config()?;
+        let aic_config = aic_engine_config_for_raw_iteration_time(aic_config)?;
         let attention_dp_size = aic_config.attention_dp_size.unwrap_or(1).max(1) as usize;
         limits.validate().context("invalid engine perf limits")?;
         let resolved_options = resolve_options(options, &limits);
@@ -625,14 +653,15 @@ impl EnginePerfModel {
         &self,
         request: &EngineCapacityRequest,
     ) -> Result<Option<EngineCapacity>> {
-        let max_batch = self.prefill_max_batch(request.isl);
+        let prefill_isl = effective_prefill_isl(request)?;
+        let max_batch = self.prefill_max_batch(prefill_isl);
         if max_batch == 0 {
             return Ok(None);
         }
 
         let mut best = None;
         for batch_size in capacity_batch_sizes(max_batch) {
-            let tokens = request.isl.saturating_mul(batch_size);
+            let tokens = prefill_isl.saturating_mul(batch_size);
             let Some(ttft) = self.prefill_time_for_tokens(tokens)? else {
                 return Ok(None);
             };
@@ -661,6 +690,7 @@ impl EnginePerfModel {
         if request.osl == 0 {
             return Ok(None);
         }
+        let accept_length = normalized_accept_length(request.accept_length);
         let context_length = decode_context_length(request);
         let max_batch = self.decode_max_batch(context_length);
         if max_batch == 0 {
@@ -668,9 +698,14 @@ impl EnginePerfModel {
         }
         let mut best = None;
         for batch_size in capacity_batch_sizes(max_batch) {
-            let Some(itl) = self.decode_time_for_batch(batch_size, context_length)? else {
+            let Some(forward_wall_time) = self.decode_time_for_batch(batch_size, context_length)?
+            else {
                 return Ok(None);
             };
+            if forward_wall_time.is_zero() {
+                continue;
+            }
+            let itl = div_duration_by_f64(forward_wall_time, accept_length, "decode ITL")?;
             if itl.is_zero() {
                 continue;
             }
@@ -694,6 +729,8 @@ impl EnginePerfModel {
             return Ok(None);
         }
 
+        let prefill_isl = effective_prefill_isl(request)?;
+        let accept_length = normalized_accept_length(request.accept_length);
         let context_length = decode_context_length(request);
         let kv_cap = self.decode_max_batch(context_length);
         let hard_cap = cmp::min(
@@ -707,27 +744,34 @@ impl EnginePerfModel {
         let mut best = None;
         for batch_size in capacity_batch_sizes(hard_cap) {
             if !prefill_decode_balanced(
-                request.isl,
+                prefill_isl,
                 request.osl,
                 batch_size,
                 self.limits.max_num_batched_tokens,
-            ) {
+                accept_length,
+            )? {
                 continue;
             }
 
             let decode_kv = batch_size.saturating_mul(context_length);
             let prefill_per_iter = cmp::min(
                 self.limits.max_num_batched_tokens,
-                ceil_div_u32(batch_size.saturating_mul(request.isl), request.osl.max(1)),
+                aggregate_prefill_per_iter(prefill_isl, request.osl, batch_size, accept_length)?,
             );
-            let Some(itl) = self.mixed_time(prefill_per_iter, batch_size, decode_kv)? else {
+            let Some(forward_wall_time) =
+                self.mixed_time(prefill_per_iter, batch_size, decode_kv)?
+            else {
                 return Ok(None);
             };
+            if forward_wall_time.is_zero() {
+                continue;
+            }
+            let itl = div_duration_by_f64(forward_wall_time, accept_length, "aggregate ITL")?;
             if itl.is_zero() {
                 continue;
             }
 
-            let ttft_prefill_tokens = prefill_per_iter.saturating_add(request.isl);
+            let ttft_prefill_tokens = prefill_per_iter.saturating_add(prefill_isl);
             let Some(ttft) = self.agg_ttft(ttft_prefill_tokens, batch_size, decode_kv)? else {
                 return Ok(None);
             };
@@ -981,7 +1025,15 @@ pub fn aic_config_from_mock_engine_args(args: &MockEngineArgs) -> Result<Option<
     let Some(model_name) = args.aic_model_path.clone() else {
         bail!("aic_model_path is required when aic_backend is set");
     };
-    Ok(Some(EngineConfig {
+    let mut extra = BTreeMap::new();
+    if let Some(nextn) = args.aic_nextn {
+        extra.insert(AIC_NEXTN_KEY.to_string(), nextn.to_string());
+    }
+    extra.insert(
+        AIC_NEXTN_ACCEPT_RATES_KEY.to_string(),
+        RAW_AIC_NEXTN_ACCEPT_RATES.to_string(),
+    );
+    Ok(Some(aic_config_for_raw_iteration_time(EngineConfig {
         schema_version: ENGINE_CONFIG_SCHEMA_VERSION,
         model_name,
         model_arch: None,
@@ -1010,8 +1062,8 @@ pub fn aic_config_from_mock_engine_args(args: &MockEngineArgs) -> Result<Option<
         activation_dtype: None,
         kv_cache_dtype: None,
         kv_block_size: Some(to_u32(args.block_size, "block_size")?),
-        extra: BTreeMap::new(),
-    }))
+        extra,
+    })))
 }
 
 fn resolve_worker_type(
@@ -1160,14 +1212,62 @@ fn decode_context_length(request: &EngineCapacityRequest) -> u32 {
     request.isl.saturating_add(request.osl / 2).max(1)
 }
 
+fn effective_prefill_isl(request: &EngineCapacityRequest) -> Result<u32> {
+    let scale = 1.0 - clamp_kv_hit_rate(request.kv_hit_rate);
+    let tokens = ceil_positive_f64_to_u32(
+        f64::from(request.isl) * scale,
+        "effective prefill ISL after kv_hit_rate discount",
+    )?;
+    Ok(tokens.max(1))
+}
+
+fn default_accept_length() -> f64 {
+    1.0
+}
+
+fn normalized_accept_length(value: f64) -> f64 {
+    if value.is_finite() && value > 1.0 {
+        value
+    } else {
+        1.0
+    }
+}
+
+fn clamp_kv_hit_rate(kv_hit_rate: Option<f64>) -> f64 {
+    let Some(value) = kv_hit_rate else {
+        return 0.0;
+    };
+    if !value.is_finite() {
+        return 0.0;
+    }
+    value.clamp(0.0, MAX_KV_HIT_RATE_DISCOUNT)
+}
+
 fn prefill_decode_balanced(
     isl: u32,
     osl: u32,
     batch_size: u32,
     max_num_batched_tokens: u32,
-) -> bool {
+    accept_length: f64,
+) -> Result<bool> {
     let prefill_budget = max_num_batched_tokens.saturating_sub(batch_size);
-    prefill_budget > 0 && isl <= osl.saturating_mul(prefill_budget)
+    if prefill_budget == 0 {
+        return Ok(false);
+    }
+    Ok(aggregate_prefill_per_iter(isl, osl, batch_size, accept_length)? <= prefill_budget)
+}
+
+fn aggregate_prefill_per_iter(
+    isl: u32,
+    osl: u32,
+    batch_size: u32,
+    accept_length: f64,
+) -> Result<u32> {
+    ceil_positive_f64_to_u32(
+        f64::from(batch_size) * normalized_accept_length(accept_length) * f64::from(isl)
+            / f64::from(osl.max(1)),
+        "aggregate prefill per iteration",
+    )
 }
 
 fn capacity_batch_sizes(max_batch: u32) -> Vec<u32> {
@@ -1183,13 +1283,6 @@ fn capacity_batch_sizes(max_batch: u32) -> Vec<u32> {
     (0..MAX_CAPACITY_SEARCH_CANDIDATES)
         .map(|index| 1 + ((u64::from(index) * span) / denominator) as u32)
         .collect()
-}
-
-fn ceil_div_u32(numerator: u32, denominator: u32) -> u32 {
-    if denominator == 0 {
-        return 0;
-    }
-    numerator / denominator + u32::from(numerator % denominator != 0)
 }
 
 fn sla_ok(value: Option<Duration>, sla: Option<Duration>) -> bool {
@@ -1243,6 +1336,15 @@ fn select_capacity(
 fn checked_add_duration(lhs: Duration, rhs: Duration, context: &str) -> Result<Duration> {
     lhs.checked_add(rhs)
         .ok_or_else(|| anyhow!("{context} overflow"))
+}
+
+fn div_duration_by_f64(duration: Duration, divisor: f64, context: &str) -> Result<Duration> {
+    ensure!(
+        divisor.is_finite() && divisor > 0.0,
+        "{context} divisor must be a positive finite value, got {divisor}"
+    );
+    Duration::try_from_secs_f64(duration.as_secs_f64() / divisor)
+        .with_context(|| format!("{context} overflow dividing {duration:?} by {divisor}"))
 }
 
 fn mul_duration(duration: Duration, factor: u64) -> Result<Duration> {
@@ -1417,6 +1519,63 @@ mod tests {
             extra: extra.clone(),
         };
         assert_eq!(config.into_aic_config().unwrap().extra, extra);
+    }
+
+    #[test]
+    fn raw_iteration_time_aic_config_forces_zero_accept_rates() {
+        let mut extra = BTreeMap::new();
+        extra.insert(AIC_NEXTN_KEY.to_string(), "3".to_string());
+        extra.insert(
+            AIC_NEXTN_ACCEPT_RATES_KEY.to_string(),
+            "0.85,0.3,0,0,0".to_string(),
+        );
+        let config = AicEngineConfig {
+            model_name: "model".to_string(),
+            model_arch: Some("arch".to_string()),
+            system_name: "h200_sxm".to_string(),
+            backend: "vllm".to_string(),
+            backend_version: None,
+            tp_size: 1,
+            pp_size: 1,
+            moe_tp_size: None,
+            moe_ep_size: None,
+            attention_dp_size: Some(1),
+            weight_dtype: None,
+            moe_dtype: None,
+            activation_dtype: None,
+            kv_cache_dtype: None,
+            kv_block_size: None,
+            extra,
+        };
+
+        let config = aic_engine_config_for_raw_iteration_time(config).unwrap();
+
+        assert_eq!(config.extra.get(AIC_NEXTN_KEY), Some(&"3".to_string()));
+        assert_eq!(
+            config.extra.get(AIC_NEXTN_ACCEPT_RATES_KEY),
+            Some(&RAW_AIC_NEXTN_ACCEPT_RATES.to_string())
+        );
+    }
+
+    #[test]
+    fn mock_engine_args_aic_config_forces_zero_accept_rates() {
+        let args = MockEngineArgs::builder()
+            .aic_backend(Some("vllm".to_string()))
+            .aic_model_path(Some("model".to_string()))
+            .aic_nextn(Some(2))
+            .aic_nextn_accept_rates(Some("0.85,0.3,0,0,0".to_string()))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+
+        let config = aic_config_from_mock_engine_args(&args).unwrap().unwrap();
+
+        assert_eq!(config.extra.get(AIC_NEXTN_KEY), Some(&"2".to_string()));
+        assert_eq!(
+            config.extra.get(AIC_NEXTN_ACCEPT_RATES_KEY),
+            Some(&RAW_AIC_NEXTN_ACCEPT_RATES.to_string())
+        );
     }
 
     #[test]
@@ -1792,11 +1951,99 @@ mod tests {
                 ttft_sla: None,
                 itl_sla: None,
                 e2e_latency_sla: None,
+                accept_length: 1.0,
+                kv_hit_rate: None,
                 optimization_target: OptimizationTarget::Latency,
             })
             .unwrap()
             .unwrap();
         assert!(capacity.ttft.unwrap().as_secs_f64() > 0.08);
+    }
+
+    #[test]
+    fn decode_capacity_accept_length_discounts_itl_and_rps() {
+        let mut model =
+            EnginePerfModel::from_regression(WorkerType::Decode, limits(), Some(fast_options()))
+                .unwrap();
+        model
+            .tune_with_fpms(&vec![
+                vec![decode_observation(1, 100, 0.010)],
+                vec![decode_observation(2, 200, 0.020)],
+            ])
+            .unwrap();
+
+        let base = model
+            .find_engine_capacity_rps(EngineCapacityRequest {
+                isl: 100,
+                osl: 10,
+                ttft_sla: None,
+                itl_sla: None,
+                e2e_latency_sla: None,
+                accept_length: 1.0,
+                kv_hit_rate: None,
+                optimization_target: OptimizationTarget::Throughput,
+            })
+            .unwrap()
+            .unwrap();
+        let spec = model
+            .find_engine_capacity_rps(EngineCapacityRequest {
+                isl: 100,
+                osl: 10,
+                ttft_sla: None,
+                itl_sla: None,
+                e2e_latency_sla: None,
+                accept_length: 2.0,
+                kv_hit_rate: None,
+                optimization_target: OptimizationTarget::Throughput,
+            })
+            .unwrap()
+            .unwrap();
+
+        assert!(spec.rps > base.rps);
+        assert!(spec.itl.unwrap() < base.itl.unwrap());
+    }
+
+    #[test]
+    fn aggregated_capacity_accept_length_tightens_prefill_balance() {
+        assert!(prefill_decode_balanced(100, 100, 33, 100, 2.0).unwrap());
+        assert!(!prefill_decode_balanced(100, 100, 34, 100, 2.0).unwrap());
+        assert_eq!(aggregate_prefill_per_iter(100, 100, 33, 2.0).unwrap(), 66);
+
+        let small_limits = EnginePerfLimits {
+            max_num_batched_tokens: 100,
+            max_num_seqs: 100,
+            max_kv_tokens: 1_000_000,
+        };
+        let mut model = EnginePerfModel::from_regression(
+            WorkerType::Aggregated,
+            small_limits,
+            Some(fast_options()),
+        )
+        .unwrap();
+        model
+            .tune_with_fpms(&vec![
+                vec![mixed_observation(10, 1, 150, 0.010)],
+                vec![mixed_observation(50, 1, 150, 0.050)],
+                vec![mixed_observation(100, 1, 150, 0.100)],
+            ])
+            .unwrap();
+
+        let capacity = model
+            .find_engine_capacity_rps(EngineCapacityRequest {
+                isl: 100,
+                osl: 100,
+                ttft_sla: None,
+                itl_sla: None,
+                e2e_latency_sla: None,
+                accept_length: 2.0,
+                kv_hit_rate: None,
+                optimization_target: OptimizationTarget::Throughput,
+            })
+            .unwrap()
+            .unwrap();
+
+        let inferred_batch = capacity.rps * 100.0 * capacity.itl.unwrap().as_secs_f64();
+        assert!(inferred_batch <= 34.0);
     }
 
     #[test]
@@ -1826,6 +2073,8 @@ mod tests {
                 ttft_sla: None,
                 itl_sla: None,
                 e2e_latency_sla: None,
+                accept_length: 1.0,
+                kv_hit_rate: None,
                 optimization_target: OptimizationTarget::Throughput,
             })
             .unwrap_err();
@@ -1860,6 +2109,8 @@ mod tests {
                 ttft_sla: None,
                 itl_sla: None,
                 e2e_latency_sla: None,
+                accept_length: 1.0,
+                kv_hit_rate: None,
                 optimization_target: OptimizationTarget::Throughput,
             })
             .unwrap()
@@ -1869,6 +2120,108 @@ mod tests {
         assert!(capacity.ttft.is_some());
         assert_eq!(capacity.e2e_latency, capacity.ttft);
         assert!(capacity.itl.is_none());
+    }
+
+    #[test]
+    fn prefill_capacity_kv_hit_rate_discounts_prefill_compute() {
+        let single_seq_limits = EnginePerfLimits {
+            max_num_batched_tokens: 8192,
+            max_num_seqs: 1,
+            max_kv_tokens: 1_000_000,
+        };
+        let mut model = EnginePerfModel::from_regression(
+            WorkerType::Prefill,
+            single_seq_limits,
+            Some(fast_options()),
+        )
+        .unwrap();
+        model
+            .tune_with_fpms(&vec![
+                vec![prefill_observation(100, 0.020)],
+                vec![prefill_observation(400, 0.080)],
+            ])
+            .unwrap();
+
+        let base = model
+            .find_engine_capacity_rps(EngineCapacityRequest {
+                isl: 400,
+                osl: 10,
+                ttft_sla: None,
+                itl_sla: None,
+                e2e_latency_sla: None,
+                accept_length: 1.0,
+                kv_hit_rate: Some(0.0),
+                optimization_target: OptimizationTarget::Throughput,
+            })
+            .unwrap()
+            .unwrap();
+        let hit = model
+            .find_engine_capacity_rps(EngineCapacityRequest {
+                isl: 400,
+                osl: 10,
+                ttft_sla: None,
+                itl_sla: None,
+                e2e_latency_sla: None,
+                accept_length: 1.0,
+                kv_hit_rate: Some(0.5),
+                optimization_target: OptimizationTarget::Throughput,
+            })
+            .unwrap()
+            .unwrap();
+
+        assert!(hit.rps > base.rps);
+        assert!(hit.ttft.unwrap() < base.ttft.unwrap());
+    }
+
+    #[test]
+    fn aggregated_capacity_kv_hit_rate_keeps_raw_context_for_kv_cap() {
+        let raw_context_limited = EnginePerfLimits {
+            max_num_batched_tokens: 8192,
+            max_num_seqs: 1,
+            max_kv_tokens: 1_100,
+        };
+        let many_seq_same_kv = EnginePerfLimits {
+            max_num_batched_tokens: 8192,
+            max_num_seqs: 100,
+            max_kv_tokens: 1_100,
+        };
+        let mut one_seq = EnginePerfModel::from_regression(
+            WorkerType::Aggregated,
+            raw_context_limited,
+            Some(fast_options()),
+        )
+        .unwrap();
+        let mut many_seq = EnginePerfModel::from_regression(
+            WorkerType::Aggregated,
+            many_seq_same_kv,
+            Some(fast_options()),
+        )
+        .unwrap();
+        let training = vec![
+            vec![mixed_observation(10, 1, 1_050, 0.011)],
+            vec![mixed_observation(20, 1, 1_050, 0.021)],
+            vec![mixed_observation(40, 1, 1_050, 0.041)],
+        ];
+        one_seq.tune_with_fpms(&training).unwrap();
+        many_seq.tune_with_fpms(&training).unwrap();
+
+        let request = EngineCapacityRequest {
+            isl: 1_000,
+            osl: 100,
+            ttft_sla: None,
+            itl_sla: None,
+            e2e_latency_sla: None,
+            accept_length: 1.0,
+            kv_hit_rate: Some(0.9),
+            optimization_target: OptimizationTarget::Throughput,
+        };
+        let one_seq_capacity = one_seq
+            .find_engine_capacity_rps(request.clone())
+            .unwrap()
+            .unwrap();
+        let many_seq_capacity = many_seq.find_engine_capacity_rps(request).unwrap().unwrap();
+
+        assert!((one_seq_capacity.rps - many_seq_capacity.rps).abs() < 1e-9);
     }
 
     #[test]
@@ -1898,6 +2251,8 @@ mod tests {
                 ttft_sla: None,
                 itl_sla: None,
                 e2e_latency_sla: None,
+                accept_length: 1.0,
+                kv_hit_rate: None,
                 optimization_target: OptimizationTarget::Throughput,
             })
             .unwrap();
@@ -1923,6 +2278,8 @@ mod tests {
                 ttft_sla: None,
                 itl_sla: Some(Duration::from_secs(1)),
                 e2e_latency_sla: None,
+                accept_length: 1.0,
+                kv_hit_rate: None,
                 optimization_target: OptimizationTarget::Throughput,
             })
             .unwrap()
@@ -1945,6 +2302,8 @@ mod tests {
                 ttft_sla: Some(Duration::from_secs(1)),
                 itl_sla: None,
                 e2e_latency_sla: None,
+                accept_length: 1.0,
+                kv_hit_rate: None,
                 optimization_target: OptimizationTarget::Throughput,
             })
             .unwrap()
@@ -1970,6 +2329,8 @@ mod tests {
                 ttft_sla: None,
                 itl_sla: Some(Duration::from_secs_f64(1.0)),
                 e2e_latency_sla: None,
+                accept_length: 1.0,
+                kv_hit_rate: None,
                 optimization_target: OptimizationTarget::Throughput,
             })
             .unwrap()

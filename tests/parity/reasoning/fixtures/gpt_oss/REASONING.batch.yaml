@@ -77,19 +77,22 @@ cases:
         reasoning_text: ''
         normal_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"SF"}<|call|>
   REASONING.batch.3.e:
-    description: Directed Harmony analysis tool call stays in reasoning text
+    description: Directed Harmony analysis tool call is handed off to the tool-call parser
     ref: *upstream_ref
     model_text: <|channel|>analysis to=functions.search <|constrain|>json<|message|>{"q":"x"}<|call|>
     expected:
-      dynamo: &d_12
+      dynamo:
+        reasoning_text: ''
+        normal_text: <|channel|>analysis to=functions.search <|constrain|>json<|message|>{"q":"x"}<|call|>
+        reason: A directed Harmony call (to=functions.*) is a tool call regardless of the channel label — the recipient is the real signal. The gpt-oss engine emits a large fraction of real tool calls on the analysis channel (with a bare `code` constraint), so Dynamo now hands a directed analysis-channel call to the Harmony tool parser (like SGLang) instead of keeping its payload in reasoning_text. Keeping it in reasoning dropped/leaked those tool calls. Supersedes the prior contract from #10111.
+      vllm:
         reasoning_text: '{"q":"x"}'
         normal_text: ''
-        reason: Unlike SGLang, Dynamo only passes GPT-OSS/Harmony function calls from commentary to=functions.* to the tool-call parser. This analysis to=functions.search block is reasoning-channel text, so Dynamo keeps its payload in reasoning_text.
-      vllm: *d_12
+        reason: "vLLM's reasoning layer kept the directed analysis-channel payload in reasoning_text (prior contract). FLAG: this row was previously aliased to Dynamo and has NOT been re-verified against current vLLM after Dynamo's behavior change — confirm before relying on it."
       sglang:
         reasoning_text: ''
         normal_text: <|channel|>analysis to=functions.search <|constrain|>json<|message|>{"q":"x"}<|call|>
-        reason: SGLang classifies a directed Harmony analysis channel ending in <|call|> as a tool_call handoff and emits the raw envelope in normal_text; Dynamo/vLLM keep analysis-channel payload hidden in reasoning_text for this parser-level contract.
+        reason: SGLang classifies a directed Harmony analysis channel ending in <|call|> as a tool_call handoff and emits the raw envelope in normal_text. Dynamo now matches this.
   REASONING.batch.3.f:
     description: Harmony analysis, directed commentary tool call, then final answer
     ref: *upstream_ref
@@ -195,3 +198,15 @@ cases:
     description: Open analysis channel interrupted by downstream tool-call text is not configured for Harmony
     ref: *upstream_ref
     reason: Harmony tool calls require a commentary channel envelope; the closed analysis to commentary handoff is covered by REASONING.batch.3.a.
+  REASONING.batch.6.b:
+    description: Stray end marker after a complete reasoning span(unbalanced-tag)
+    ref: dynamo
+    spec_ref: tests/parity/README.md
+    model_text: ''
+    expected:
+      dynamo:
+        unavailable: 'Pattern not applicable: gpt_oss does not use paired open/close markers, so the 1-open + 2-close unbalanced-tag shape has no direct analog.'
+      vllm:
+        unavailable: 'Pattern not applicable: gpt_oss does not use paired open/close markers, so the 1-open + 2-close unbalanced-tag shape has no direct analog.'
+      sglang:
+        unavailable: 'Pattern not applicable: gpt_oss does not use paired open/close markers, so the 1-open + 2-close unbalanced-tag shape has no direct analog.'

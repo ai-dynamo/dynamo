@@ -72,7 +72,7 @@ CASE_GROUPS = [
         ("stream.1.a", "stream.1.b"),
     ),
     ("Reasoning extraction", ("stream.2.a",)),
-    ("Multi-span", ("stream.2.b",)),
+    ("Multi-span", ("stream.2.b", "stream.2.c")),
     ("Chunk boundaries", ("stream.3.a", "stream.3.b", "stream.3.c")),
 ]
 _CASE_GROUP_BY_CASE = {
@@ -110,6 +110,19 @@ PARSER_TO_REASONING_FAMILY = {
     "qwen3_coder": "qwen3",
 }
 
+# Row label / placement overrides keyed by tool calling family; ‡ is explained
+# by the legend note (see `_legend_html`).
+_REASONING_LABEL_OVERRIDES = {"nemotron_nano": "Nemotron V3‡"}
+_REASONING_TOP_N_APPEND = ["nemotron_nano"]
+# nemotron_deci: for older nemotron v2 models, hide to avoid confusion with nemotron v3 models
+_REASONING_HIDDEN_TOOL_FAMILIES = {"nemotron_deci"}
+
+
+def _model_label_html(model: str) -> str:
+    """Escape a model label, styling any ‡ marker like the †/§ suffixes."""
+    return html_lib.escape(model).replace("‡", '<span class="parser-suffix">‡</span>')
+
+
 _FAMILY_METADATA = {
     "basic": {
         "models": ["Generic CoT models"],
@@ -132,9 +145,9 @@ _FAMILY_METADATA = {
     },
     "nemotron_deci": {
         "models": [
-            "Nemotron-Super / -Ultra / -Deci",
+            "Nemotron-Super-v1 / Nemotron-Ultra-v1 / Nemotron-Deci-v1",
             "Llama-Nemotron",
-            "GLM-4.5 / GLM-4.7 via glm45 alias",
+            "GLM-4.5 / GLM-4.6 via glm45 alias",
         ],
         "rust_enum": "ReasoningParserType::NemotronDeci",
         "implementation": "BasicReasoningParser `<think>` / `</think>`",
@@ -452,10 +465,16 @@ def _reasoning_markup_re(family: str | None) -> re.Pattern[str]:
 
 
 def _is_gpt_oss_tool_handoff(family: str | None, field: str, value: str) -> bool:
+    # Both `commentary to=functions.X` and `analysis to=functions.X` are
+    # tool-call handoffs after PR #10366: the recipient is the signal, not
+    # the channel label. Either lands in normal_text as the jail's input.
     return (
         family == "gpt_oss"
         and field == "normal_text"
-        and "<|channel|>commentary to=functions." in value
+        and (
+            "<|channel|>commentary to=functions." in value
+            or "<|channel|>analysis to=functions." in value
+        )
         and "<|call|>" in value
     )
 
@@ -495,8 +514,10 @@ def _has_dynamo_leak(case: dict[str, Any], family: str | None) -> bool:
 
 
 def _overview_status(case: dict[str, Any] | None, family: str | None, impl: str) -> str:
-    if case is None or "expected" not in case:
+    if case is None:
         return "na"
+    if "expected" not in case:
+        return "problem" if impl in _python_exception_impls(case, family) else "na"
     block = case.get("expected", {}).get(impl)
     if not isinstance(block, dict) or "unavailable" in block:
         return "na"
@@ -574,13 +595,15 @@ def _parser_marker(case: dict[str, Any] | None, family: str | None, impl: str) -
     if case is None:
         return "—"
     if "expected" not in case:
+        if impl in _python_exception_impls(case, family):
+            return "✗"
         return "n/a"
     expected = case.get("expected", {})
     block = expected.get(impl)
     if not isinstance(block, dict) or "unavailable" in block:
         return "n/a"
     if "error" in block:
-        return "!"
+        return "✗"
     if _block_leak_reason(block, family):
         return "↯"
     if impl == "dynamo":
@@ -640,7 +663,9 @@ def _build_display_groups(
 
     def make_row(tool_family: str) -> dict[str, str | None]:
         return {
-            "model_label": parser_labels.get(tool_family, tool_family),
+            "model_label": _REASONING_LABEL_OVERRIDES.get(
+                tool_family, parser_labels.get(tool_family, tool_family)
+            ),
             "tool_family": tool_family,
             "reasoning_family": PARSER_TO_REASONING_FAMILY.get(tool_family),
         }
@@ -649,15 +674,32 @@ def _build_display_groups(
         reasoning_family = PARSER_TO_REASONING_FAMILY.get(tool_family)
         return reasoning_family in rows
 
-    top_n = [
-        make_row(tool_family)
-        for tool_family in TOP_N_FAMILIES
-        if tool_family in parser_families and has_reasoning_fixture(tool_family)
+    def displayable(tool_family: str) -> bool:
+        return (
+            tool_family in parser_families
+            and has_reasoning_fixture(tool_family)
+            and tool_family not in _REASONING_HIDDEN_TOOL_FAMILIES
+        )
+
+    top_n_families = [
+        tool_family for tool_family in TOP_N_FAMILIES if displayable(tool_family)
     ]
+    top_n_families += [
+        tool_family
+        for tool_family in _REASONING_TOP_N_APPEND
+        if displayable(tool_family) and tool_family not in top_n_families
+    ]
+    top_n = [make_row(tool_family) for tool_family in top_n_families]
+
+    excluded = (
+        set(TOP_N_FAMILIES)
+        | set(_REASONING_TOP_N_APPEND)
+        | _REASONING_HIDDEN_TOOL_FAMILIES
+    )
     other_tool_families = sorted(
         (
             tool_family
-            for tool_family in parser_families - set(TOP_N_FAMILIES)
+            for tool_family in parser_families - excluded
             if has_reasoning_fixture(tool_family)
         ),
         key=lambda family: parser_labels.get(family, family).lower(),
@@ -733,11 +775,69 @@ def _is_na_stub(case: dict[str, Any]) -> bool:
     )
 
 
+def _case_has_parser_input(case: dict[str, Any]) -> bool:
+    return "model_text" in case or "chunks" in case
+
+
+def _python_peer_has_parser(family: str | None, impl: str) -> bool:
+    if family is None:
+        return False
+    if impl == "vllm":
+        return family in _FAMILY_TO_VLLM_REASONING
+    if impl == "sglang":
+        return family in _FAMILY_TO_SGLANG_REASONING
+    return False
+
+
+def _python_exception_impls(
+    case: dict[str, Any] | None,
+    family: str | None,
+) -> tuple[str, ...]:
+    """Impls whose Python parser would raise on this input-less n/a stub.
+
+    A no-`expected` n/a stub carries no `model_text`/`chunks`, so feeding it to
+    the vLLM/SGLang Python parser raises ``KeyError: 'model_text'``. Surface that
+    as a parser exception for any family that has a Python peer parser.
+    """
+    if not case or "expected" in case or not _is_na_stub(case):
+        return ()
+    if _case_has_parser_input(case):
+        return ()
+    return tuple(
+        impl for impl in ("vllm", "sglang") if _python_peer_has_parser(family, impl)
+    )
+
+
+def _python_exception_marker(
+    case: dict[str, Any] | None,
+    family: str | None,
+) -> str:
+    letters = {"vllm": "V", "sglang": "S"}
+    return "".join(
+        f"{letters[impl]}✗" for impl in _python_exception_impls(case, family)
+    )
+
+
+def _python_exception_tooltip_lines(
+    case: dict[str, Any] | None,
+    family: str | None,
+) -> list[str]:
+    names = {"vllm": "vLLM Python", "sglang": "SGLang Python"}
+    return [
+        f"{names[impl]}: parser exception — KeyError: 'model_text'"
+        for impl in _python_exception_impls(case, family)
+    ]
+
+
 def _cell(case: dict[str, Any] | None, family: str | None = None) -> tuple[str, str]:
     if case is None:
         return "—", "missing fixture coverage"
     if "expected" not in case:
         if _is_na_stub(case):
+            marker = _python_exception_marker(case, family)
+            if marker:
+                parts = [case["reason"], *_python_exception_tooltip_lines(case, family)]
+                return marker, "\n".join(parts)
             return "n/a", case["reason"]
         return "?", "fixture has no expected block"
 
@@ -756,8 +856,8 @@ def _cell(case: dict[str, Any] | None, family: str | None = None) -> tuple[str, 
             tooltip_parts.append(f"{impl}: unavailable — {spec['unavailable']}")
             continue
         if "error" in spec:
-            markers.append(f"{letter}!")
-            tooltip_parts.append(f"{impl}: expected error — {spec['error']}")
+            markers.append(f"{letter}✗")
+            tooltip_parts.append(f"{impl}: parser exception — {spec['error']}")
             continue
         if _canonical(spec) == _canonical(dynamo):
             tooltip_parts.append(f"{impl}: matches Dynamo")
@@ -1491,7 +1591,7 @@ def _tooltip_for(
             continue
         name = _IMPL_DISPLAY.get(impl, impl)
         if "error" in block:
-            parts.append(f"{name}: expected error matching {block['error']!r}")
+            parts.append(f"{name}: parser exception matching {block['error']!r}")
             continue
         if _canonical(block) == _canonical(dyn):
             continue
@@ -1545,10 +1645,19 @@ def _tooltip_html(
         )
     if "expected" not in case:
         reason = case.get("reason", "fixture has no expected block")
+        extra_sections = [("Why not applicable", linkify_text_html(str(reason)))]
+        parser_exceptions = _python_exception_tooltip_lines(case, family)
+        if parser_exceptions:
+            extra_sections.append(
+                (
+                    "Python parser exceptions",
+                    html_lib.escape("\n".join(parser_exceptions)),
+                )
+            )
         return build_parity_tooltip_html(
             head=head,
             description=str(description) if description else None,
-            extra_sections=[("Why not applicable", linkify_text_html(str(reason)))],
+            extra_sections=extra_sections,
             refs=[("Ref", case.get("ref")), ("Spec ref", case.get("spec_ref"))],
         )
 
@@ -1951,7 +2060,7 @@ def _render_row_html(
     reasoning_family = row["reasoning_family"]
     cells = [
         f'<tr><td class="model" data-col-hide-group="model">'
-        f"{html_lib.escape(str(row['model_label']))}</td>",
+        f"{_model_label_html(str(row['model_label']))}</td>",
         _column_placeholder_html("model"),
         _parser_cell_html(tool_family, reasoning_family, no_vllm, no_sglang),
         _column_placeholder_html("parser"),
@@ -2015,7 +2124,7 @@ def _compute_stats(
                     stats["parity"] += 1
                 elif marker in {"D", "·"}:
                     stats["dynamo_only"] += 1
-                elif "!" in marker:
+                elif "!" in marker or "✗" in marker:
                     stats["errors"] += 1
                 elif "?" in marker:
                     stats["research"] += 1
@@ -2076,8 +2185,8 @@ def _legend_html(rows: dict[str, dict[str, Any]], columns: list[str]) -> str:
         "(e.g. V?, S? — diverges with no <code>reason:</code> yet) · "
         '<span style="color:#b00">↯</span> Dynamo leaks reasoning markup '
         "or final-answer text · "
-        '<span style="color:#b00">!</span> expected-error suffix '
-        "(e.g. V!, S! — engine crashes by design) · "
+        '<span style="color:#b00">✗</span> parser exception '
+        "(e.g. V✗, S✗ — Python parser raised) · "
         '<span style="color:#aaa">n/a</span> not applicable'
         f"{missing_text}."
         "<br>"
@@ -2085,6 +2194,11 @@ def _legend_html(rows: dict[str, dict[str, Any]], columns: list[str]) -> str:
         "for this family · "
         '<span class="parser-suffix">§</span> = no SGLang peer reasoning parser '
         "for this family."
+        "<br>"
+        '<span class="parser-suffix">‡</span> Nemotron V3 (Ultra) reuses the '
+        "qwen3_coder tool calling parser; Nemotron V1 / V2 (DeciLM) is removed "
+        "from the chart for being an older generation, but the nemotron_deci "
+        "parser is still supported."
         "<br><br>"
         "<strong>Tooltip fields:</strong> "
         "<code>input_text</code>=raw model output or stream chunks fed into "

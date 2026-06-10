@@ -11,6 +11,7 @@ All tests are no-GPU (gpu_0) and pre_merge.
 """
 
 import asyncio
+import logging
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -201,14 +202,16 @@ class TestRapidUnsupported:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    def test_planner_throughput_scaling_raises(self, tmp_path):
-        """Case 5b: planner with throughput scaling on unsupported combo should fail."""
+    def test_planner_throughput_scaling_fallback(self, tmp_path, caplog):
+        """Case 5b: planner throughput on unsupported combo uses fallback."""
         dgdr = _load_dgdr(
             CONFIGS_DIR / "5b_rapid_unsupported_planner_throughput_error.yaml"
         )
         ops = _make_ops(tmp_path)
-        with pytest.raises(ValueError, match="AIC does not support"):
+        with caplog.at_level(logging.WARNING):
             asyncio.run(run_profile(dgdr, ops))
+        assert "AIC does not support" in caplog.text
+        assert "Rust perf shim fallback" in caplog.text
 
 
 class TestThoroughDryRun:
