@@ -572,7 +572,12 @@ def capture(
     # explicit invalidation is needed.
     short = _short_name(baseline_image)
     baseline_digest_hex = baseline_digest.removeprefix("sha256:")
-    sbom_filename = f"{short}@{baseline_digest_hex[:8]}.cdx.json"
+    # Arch suffix: baseline_digest is the multi-arch INDEX digest (same for
+    # every platform), so the per-platform SBOMs must be disambiguated by arch
+    # or they'd collide. The runtime licenses stage selects the matching file
+    # via ${BASELINE_SBOM_STEM}-${TARGETARCH}.cdx.json.
+    arch = platform.rsplit("/", 1)[-1]
+    sbom_filename = f"{short}@{baseline_digest_hex[:8]}-{arch}.cdx.json"
     sbom_path = corpus_dir / sbom_filename
     from_digest_hex = from_digest.removeprefix("sha256:")
     from_cache_filename = f"{from_digest_hex}-{platform.replace('/', '_')}.cdx.json"
@@ -715,8 +720,9 @@ def capture(
 
     # Pretty-print with sorted object keys (matching manifest.json) so the
     # committed baselines produce readable, line-oriented diffs when a base
-    # is refreshed. Component array order is left as syft emits it. The slim
-    # filter keeps these comfortably under the size cap even indented.
+    # is refreshed. slim_cyclonedx also sorts the component array so the order
+    # is ours (stable across syft upgrades). The slim filter keeps these
+    # comfortably under the size cap even indented.
     payload = json.dumps(slim, indent=2, sort_keys=True) + "\n"
     payload_bytes = payload.encode("utf-8")
     size = len(payload_bytes)

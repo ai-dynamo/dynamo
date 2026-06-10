@@ -77,13 +77,16 @@ COPY --from=epp_sbom /sbom-go.cdx.json /tmp/sbom-go-epp.cdx.json
 COPY --from=epp_sbom /sbom-go-licenses /tmp/go-licenses
 {% endif %}
 
-# BASELINE_SBOM_FILE: the slim CycloneDX SBOM under
-# /opt/compliance/base_sboms/ to subtract before writing NOTICES.
-# Rendered from context.yaml by container/render.py:_render_context().
-# Empty when no baseline has been captured for this target -- the
-# generators then emit NOTICES for the full final image (correct but
+# BASELINE_SBOM_FILE: the per-arch baseline SBOM *stem* (e.g.
+# "cuda-dl-base@8315e245") under /opt/compliance/base_sboms/. We append
+# "-${TARGETARCH}.cdx.json" so each platform of a multi-arch build subtracts
+# its OWN-arch floor — the amd64 baseline would otherwise under-attribute a
+# package present in the amd64 base but not the arm64 base that we install on
+# arm64. Rendered from context.yaml's baseline_sbom by render.py; empty when no
+# baseline is captured (NOTICES then cover the full image — correct but
 # unfiltered).
 ARG BASELINE_SBOM_FILE="{{ compliance_baseline_sbom }}"
+ARG TARGETARCH
 RUN python3 -m compliance.generators \
     --ecosystem python,rust,dpkg{% if target == "frontend" %},go{% endif %}{% if make_efa %},native{% endif %} \
 {% if framework == "sglang" %}    --site-packages "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
@@ -94,7 +97,7 @@ RUN python3 -m compliance.generators \
     --output-dir /legal \
 {% if make_efa %}    --native-yaml /opt/compliance/native_packages.yaml \
     --native-image {{ framework }}-runtime-efa \
-{% endif %}    ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}} \
+{% endif %}    ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
     -v
 RUN find /legal -name '*-deps.csv' -print0 | \
     xargs -0 -n1 -I {} python3 -m compliance.policy.validate \
@@ -140,6 +143,7 @@ COPY --from=wheel_builder /tmp/dynamo-vendor-full/ /opt/dynamo-vendor-full/
 
 ARG ENABLE_SOURCE_ARCHIVAL=false
 ARG BASELINE_SBOM_FILE="{{ compliance_baseline_sbom }}"
+ARG TARGETARCH
 RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
         python3 -m compliance.collect_sources \
             --ecosystem dpkg --ecosystem rust --ecosystem native \
@@ -149,7 +153,7 @@ RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
 {% if framework == "sglang" %}            --rust-site-packages "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
 {% else %}            --rust-venv ${VIRTUAL_ENV} \
 {% endif %}            --rust-vendor-full /opt/dynamo-vendor-full \
-            ${BASELINE_SBOM_FILE:+--baseline-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}} \
+            ${BASELINE_SBOM_FILE:+--baseline-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
             -v ; \
     else \
         : > /sources.zip ; \

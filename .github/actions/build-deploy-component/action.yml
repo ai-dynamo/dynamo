@@ -123,15 +123,15 @@ runs:
           TARGET_FLAG="--target ${TARGET}"
         fi
 
-        # Baseline SBOM file used by each component's licenses stage to
-        # subtract upstream-owned components from generated NOTICES.
-        # Mirrors container/context.yaml's per-template baseline_sbom
-        # field for the rendered runtime templates.
+        # Baseline SBOM *stem* used by each component's licenses stage to
+        # subtract upstream-owned components from generated NOTICES. The stage
+        # appends -${TARGETARCH}.cdx.json so each arch subtracts its own floor
+        # (mirrors container/context.yaml's per-template baseline_sbom stems).
         BASELINE_SBOM_FILE=""
         if [[ "${{ inputs.component }}" == "operator" ]]; then
-          BASELINE_SBOM_FILE="go@e86c88d0.cdx.json"
+          BASELINE_SBOM_FILE="go@e86c88d0"
         elif [[ "${{ inputs.component }}" == "snapshot" ]]; then
-          BASELINE_SBOM_FILE="cuda-dl-base@8315e245.cdx.json"
+          BASELINE_SBOM_FILE="cuda-dl-base@8315e245"
         fi
 
         # Source archival is opt-in per top-level caller (see the

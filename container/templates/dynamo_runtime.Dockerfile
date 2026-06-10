@@ -7,7 +7,7 @@
 ########## Runtime image ##############
 #######################################
 
-FROM dynamo_base AS pre_runtime
+FROM dynamo_base AS runtime
 
 ARG PYTHON_VERSION
 
@@ -170,14 +170,9 @@ ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
 
 
-{% include "templates/compliance.Dockerfile" %}
-
-
-#######################################
-########## Final runtime image ########
-#######################################
-
-FROM pre_runtime AS runtime
-COPY --from=licenses /legal /legal
-ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
-CMD []
+# Compliance stages are intentionally NOT included here: dynamo-runtime is an
+# UNPUBLISHED wheel-builder image (release.yml ships vllm/sglang/trtllm-runtime,
+# frontend, operator, planner, snapshot-agent — not this), so it carries no
+# shipped-NOTICES obligation. The Rust-crate attribution that matters lives in
+# the published wheels themselves (maturin SBOM + bundled THIRD-PARTY-RUST-
+# LICENSES, see wheel_builder) and in the published framework images' /legal.

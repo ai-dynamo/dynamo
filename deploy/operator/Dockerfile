@@ -129,15 +129,17 @@ COPY --from=builder /sbom-go-licenses /tmp/go-licenses
 # its own. Base-image components (ca-certificates etc.) are NGC's responsibility
 # and tracked separately via the base-SBOM corpus.
 #
-# BASELINE_SBOM_FILE (optional, empty default): the slim CycloneDX SBOM
-# under /opt/compliance/base_sboms/ to subtract before writing NOTICES.
+# BASELINE_SBOM_FILE (optional, empty default): the per-arch baseline SBOM
+# *stem* under /opt/compliance/base_sboms/. We append -${TARGETARCH}.cdx.json so
+# each platform of this multi-arch image subtracts its own-arch floor.
 ARG BASELINE_SBOM_FILE=""
+ARG TARGETARCH
 RUN python3 -m compliance.generators \
     --ecosystem go \
     --go-sbom /tmp/sbom-go.cdx.json \
     --go-licenses-dir /tmp/go-licenses \
     --output-dir /legal \
-    ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}} \
+    ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
     -v
 RUN find /legal -name '*-deps.csv' -print0 | \
     xargs -0 -n1 -I {} python3 -m compliance.policy.validate \

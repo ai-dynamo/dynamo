@@ -256,9 +256,11 @@ COPY --from=builder /sbom-go-licenses /tmp/go-licenses
 # manual `COPY /tmp/criu/COPYING /legal/CRIU/COPYING` lines in
 # agent_pre, which we keep so the native generator can read the
 # license text via license_text_path and inline it in NOTICES.
-# BASELINE_SBOM_FILE (optional, empty default): the slim CycloneDX SBOM
-# under /opt/compliance/base_sboms/ to subtract before writing NOTICES.
+# BASELINE_SBOM_FILE (optional, empty default): the per-arch baseline SBOM
+# *stem* under /opt/compliance/base_sboms/. We append -${TARGETARCH}.cdx.json
+# so the matching-arch floor is subtracted (snapshot ships amd64-only today).
 ARG BASELINE_SBOM_FILE=""
+ARG TARGETARCH
 RUN python3 -m compliance.generators \
     --ecosystem go,dpkg,native \
     --go-sbom /tmp/sbom-go.cdx.json \
@@ -266,7 +268,7 @@ RUN python3 -m compliance.generators \
     --native-yaml /opt/compliance/native_packages.yaml \
     --native-image snapshot-agent \
     --output-dir /legal \
-    ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}} \
+    ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
     -v
 RUN find /legal -name '*-deps.csv' -print0 | \
     xargs -0 -n1 -I {} python3 -m compliance.policy.validate \
