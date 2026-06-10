@@ -304,7 +304,7 @@ before (a large pool plus a large overflow queue, no rejection).
 | Flag | Env var | Meaning |
 | --- | --- | --- |
 | `--engine-request-limit N` | `DYN_ENGINE_REQUEST_LIMIT` | Max requests handled **concurrently by the engine** (the worker-pool semaphore size). Setting this enables worker-side rejection. |
-| `--dynamo-request-queue-limit Q` | `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` | Max requests **waiting in Dynamo** (not yet in the engine) — the overflow queue size. Only takes effect when the engine limit is set; defaults to **16**. |
+| `--dynamo-request-queue-limit Q` | `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` | Max requests **waiting in Dynamo** (not yet in the engine) — the overflow queue size. Only takes effect when the engine limit is set; defaults to **16**. Must be **≥ 2**. |
 
 When `--engine-request-limit` is set, the worker accepts a request directly into
 the engine while a slot is free; once all `N` engine slots are busy, further
@@ -314,7 +314,10 @@ the queue are both full the worker rejects the request with
 `ResourceExhausted` → **HTTP 503**, and temporarily marks the worker overloaded
 so it is skipped on the next routing decision (cleared automatically on the next
 metric recompute). The effective hard cap is **N + Q** in-flight requests per
-worker.
+worker. The overflow channel is sized to `Q-1` because the single dispatcher
+holds one request in transit between the queue and the engine; this makes the
+cap exact for **Q ≥ 2** (at `Q = 1` the channel floors at 1, so the queued
+peak is 2 — hence the `Q ≥ 2` requirement).
 
 ### Metrics
 

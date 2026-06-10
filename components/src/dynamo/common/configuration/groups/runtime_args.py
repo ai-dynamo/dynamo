@@ -56,12 +56,19 @@ class DynamoRuntimeConfig(ConfigBase):
         self.enable_local_indexer = not self.durable_kv_events
         self._validate_output_modalities()
 
-        for name in ("engine_request_limit", "dynamo_request_queue_limit"):
-            value = getattr(self, name)
-            if value is not None and value <= 0:
-                raise ValueError(
-                    f"--{name.replace('_', '-')} must be a positive integer, got {value}"
-                )
+        if self.engine_request_limit is not None and self.engine_request_limit <= 0:
+            raise ValueError(
+                f"--engine-request-limit must be a positive integer, got {self.engine_request_limit}"
+            )
+        # The overflow channel is sized to limit-1 (the single dispatcher holds one
+        # request in transit to the engine), so the cap is exact only for limit >= 2.
+        if (
+            self.dynamo_request_queue_limit is not None
+            and self.dynamo_request_queue_limit < 2
+        ):
+            raise ValueError(
+                f"--dynamo-request-queue-limit must be >= 2 for an exact cap, got {self.dynamo_request_queue_limit}"
+            )
 
     def _validate_output_modalities(self) -> None:
         """Validate --output-modalities values."""
@@ -298,5 +305,6 @@ class DynamoRuntimeArgGroup(ArgGroup):
             arg_type=int,
             help="Max requests waiting in Dynamo (not yet in the engine) before "
             "rejection — the overflow queue size. Only takes effect when "
-            "--engine-request-limit is set; defaults to 16 in that case.",
+            "--engine-request-limit is set; defaults to 16 in that case. "
+            "Must be >= 2 (the cap is exact only for >= 2; see docs).",
         )
