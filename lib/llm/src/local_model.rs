@@ -566,7 +566,8 @@ impl LocalModel {
         let model_slug = self.card.slug().to_string();
         let suffix = model_suffix.unwrap_or(dynamo_runtime::metadata_registry::BASE_SUFFIX);
         let registry = drt.metadata_artifacts();
-        let owner = (drt.connection_id(), model_suffix.map(str::to_string));
+        let instance_id = drt.connection_id();
+        let owner = (instance_id, model_suffix.map(str::to_string));
 
         // Advertise non-typed siblings (preprocessor_config.json,
         // special_tokens_map.json, …) so external preprocessors that load
@@ -618,7 +619,7 @@ impl LocalModel {
             let url = url::Url::parse(&format!(
                 "{base_url}/v1/metadata/{model_slug}/{suffix}/{filename}"
             ))?;
-            registry.register(owner.clone(), &model_slug, suffix, &filename, absolute);
+            registry.register(&owner, &model_slug, suffix, &filename, absolute);
             cf.move_to_url(url);
             rewritten += 1;
         }
@@ -645,13 +646,8 @@ impl LocalModel {
         let instance_id = drt.connection_id();
         let endpoint_id = endpoint.id();
 
-        // Compute model_suffix from lora_name if present
         let model_suffix = lora_name.map(|name| Slug::slugify(name).to_string());
 
-        // Drop any self-host metadata-registry entries this attach owned.
-        // No-op when self-host wasn't enabled or when DYN_SYSTEM_PORT was
-        // unset; matches `move_to_self_host`'s `(connection_id, lora_slug)`
-        // owner key.
         drt.metadata_artifacts()
             .unregister_for_owner(&(instance_id, model_suffix.clone()));
 
