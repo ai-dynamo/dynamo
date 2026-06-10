@@ -138,6 +138,45 @@ def _make_engine_response(request_id: str = "req-1", finished: bool = True):
     return resp
 
 
+@pytest.mark.asyncio
+async def test_clear_kv_blocks_resets_vllm_external_cache():
+    handler = _make_handler()
+    handler.engine_client = SimpleNamespace(reset_prefix_cache=AsyncMock())
+
+    chunks = [chunk async for chunk in handler.clear_kv_blocks()]
+
+    if chunks != [{"status": "success", "message": "KV cache cleared"}]:
+        raise AssertionError(f"Unexpected clear_kv_blocks chunks: {chunks!r}")
+    handler.engine_client.reset_prefix_cache.assert_awaited_once_with(
+        reset_connector=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_clear_kv_blocks_falls_back_for_legacy_vllm_reset():
+    handler = _make_handler()
+    handler.engine_client = SimpleNamespace(
+        reset_prefix_cache=AsyncMock(
+            side_effect=[
+                TypeError("got an unexpected keyword argument 'reset_connector'"),
+                None,
+            ]
+        )
+    )
+
+    chunks = [chunk async for chunk in handler.clear_kv_blocks()]
+
+    if chunks != [{"status": "success", "message": "KV cache cleared"}]:
+        raise AssertionError(f"Unexpected clear_kv_blocks chunks: {chunks!r}")
+    calls = handler.engine_client.reset_prefix_cache.await_args_list
+    if len(calls) != 2:
+        raise AssertionError(f"Expected two reset attempts, got {calls!r}")
+    if calls[0].kwargs != {"reset_connector": True}:
+        raise AssertionError(f"Unexpected first reset call: {calls[0]!r}")
+    if calls[1].args or calls[1].kwargs:
+        raise AssertionError(f"Unexpected fallback reset call: {calls[1]!r}")
+
+
 class TestReasoningParserForwarding:
     def test_request_reasoning_metadata_reads_extra_args(self):
         request = {

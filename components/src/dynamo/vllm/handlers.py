@@ -1805,7 +1805,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     async def clear_kv_blocks(self, request=None):
         try:
-            await self.engine_client.reset_prefix_cache()
+            try:
+                await self.engine_client.reset_prefix_cache(reset_connector=True)
+            except TypeError as e:
+                if "reset_connector" not in str(e) or "unexpected keyword" not in str(
+                    e
+                ):
+                    raise
+                await self.engine_client.reset_prefix_cache()
             yield {"status": "success", "message": "KV cache cleared"}
         except Exception as e:
             yield {"status": "error", "message": str(e)}
