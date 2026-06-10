@@ -165,14 +165,18 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
         if [ -n "$GMS_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$GMS_WHEEL"; fi; \
     fi
 
-# vLLM-Omni's audio helpers shell out to SoX, and the launch script examples use
-# jq for readable curl output just like the upstream omni image does.
+# Launch-script examples use jq for readable curl output like the upstream omni
+# image. SoX is intentionally NOT installed: vLLM-Omni replaced its sox audio path
+# with a pure-numpy peak_normalize() (vllm_omni/utils/audio.py), pysox isn't
+# installed, and nothing shells out to the sox binary — so `sox`/`libsox-fmt-all`
+# were dead weight that only dragged in a GPL-2.0+ codec cluster (sox, libsox*,
+# libao*, libmad0, libid3tag0, libltdl7) we'd then be redistributing. SoX is
+# inherently GPL (no LGPL replacement), so the compliant fix is to not ship it.
+# (sglang_runtime.Dockerfile is the reference codec-compliance pattern.)
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        jq \
-        sox \
-        libsox-fmt-all; \
+        jq; \
     rm -rf /var/lib/apt/lists/*
 
 # Layer the released vLLM-Omni package matching the pinned upstream ref while
