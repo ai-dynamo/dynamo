@@ -194,14 +194,12 @@ fn choose_better_candidate_score(
     if incremental_blocks == 0 {
         return;
     }
-    let score_incremental_blocks = remote_g2_incremental_blocks(
-        start_block_index,
-        planned_blocks,
-        input.best_local_prefix_blocks,
-    );
-    // The transfer must help the target, but its scheduler credit is only the
-    // prefix it adds beyond the best local-only worker. This matches L3-style
-    // prefetch scoring: local cache remains the baseline.
+    let score_incremental_blocks = incremental_blocks;
+    // Direct G2 is a target-local reduction, like Mooncake L3 hits: the
+    // candidate lowers this target's effective prefill cost, and the scheduler
+    // still compares that cost against other workers' local cache and load.
+    // `best_local_prefix_blocks` is reserved for the optional max-local-gap
+    // admission guard, not for subtracting the global best local worker here.
     let (cost_blocks, score_blocks) =
         remote_g2_score_for_candidate(input.cost_model, score_incremental_blocks, planned_blocks);
     let candidate = RemoteG2CandidateScore {
@@ -976,7 +974,7 @@ mod tests {
     }
 
     #[test]
-    fn select_candidate_scores_remote_g2_against_best_local_prefix() {
+    fn select_candidate_scores_remote_g2_against_target_local_prefix() {
         let hashes = block_hashes(8);
         let target = WorkerWithDpRank::new(9, 0);
         let source = WorkerWithDpRank::new(7, 0);
@@ -1000,14 +998,14 @@ mod tests {
             RemoteG2CandidateDecision::Candidate { candidate, .. } => {
                 assert_eq!(candidate.planned_blocks, 8);
                 assert_eq!(candidate.incremental_blocks, 7);
-                assert_eq!(candidate.score_blocks, 2.0);
+                assert_eq!(candidate.score_blocks, 7.0);
             }
             other => panic!("expected candidate, got {other:?}"),
         }
     }
 
     #[test]
-    fn select_candidate_rejects_when_best_local_already_covers_remote_prefix() {
+    fn select_candidate_can_top_up_target_even_if_best_local_covers_remote_prefix() {
         let hashes = block_hashes(8);
         let target = WorkerWithDpRank::new(9, 0);
         let source = WorkerWithDpRank::new(7, 0);
@@ -1028,10 +1026,12 @@ mod tests {
         let decision = select_remote_g2_candidate(input);
 
         match decision {
-            RemoteG2CandidateDecision::NoCandidate { reason, .. } => {
-                assert_eq!(reason, RemoteKvReuseNoPlanReason::BelowRemoteG2Cost);
+            RemoteG2CandidateDecision::Candidate { candidate, .. } => {
+                assert_eq!(candidate.planned_blocks, 8);
+                assert_eq!(candidate.incremental_blocks, 7);
+                assert_eq!(candidate.score_blocks, 7.0);
             }
-            other => panic!("expected no candidate, got {other:?}"),
+            other => panic!("expected candidate, got {other:?}"),
         }
     }
 

@@ -742,8 +742,8 @@ where
         let best_local_prefix_blocks = {
             let workers = self.workers_with_configs.borrow();
             if let Some(pinned_worker) = pinned_worker {
-                // Exact pins make the global best-local worker infeasible, so
-                // score Direct G2 against the selected target's local prefix.
+                // Exact pins make the global best-local worker infeasible for
+                // optional local-gap admission.
                 remote_g2_target_local_prefix_blocks(pinned_worker, &tiered_matches)
             } else {
                 remote_g2_best_local_prefix_blocks(
