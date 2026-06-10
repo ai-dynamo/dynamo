@@ -69,6 +69,12 @@ fn boundaries_with(text: &str, matcher: &AhoCorasick) -> Vec<usize> {
     boundaries
 }
 
+fn hash_prefix(input: &str, boundary: usize) -> Blake3Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&input.as_bytes()[..boundary]);
+    *hasher.finalize().as_bytes()
+}
+
 /// Test-only reference: build a one-off automaton and find boundaries. Production goes
 /// through [`L1Cache::boundaries`], which reuses a process-once automaton.
 #[cfg(test)]
@@ -154,6 +160,18 @@ impl L1Cache {
     /// `deepest_boundary` is the deepest special-token boundary in `input` (end-exclusive),
     /// handed back so [`extend_after_match`] need not rescan the input for it.
     pub fn longest_prefix_match(&self, input: &str) -> Option<(Arc<[TokenIdType]>, usize, usize)> {
+        self.longest_prefix_match_with_deepest_hash(input).map(
+            |(tokens, boundary_pos, deepest_boundary, _)| (tokens, boundary_pos, deepest_boundary),
+        )
+    }
+
+    /// Like [`Self::longest_prefix_match`], but also returns the BLAKE3 digest for
+    /// `input[..deepest_boundary]`. The hit-extension path inserts that deepest
+    /// entry, so reusing the digest avoids hashing the same full prefix twice.
+    pub(super) fn longest_prefix_match_with_deepest_hash(
+        &self,
+        input: &str,
+    ) -> Option<(Arc<[TokenIdType]>, usize, usize, Blake3Hash)> {
         let boundaries = self.boundaries(input);
 
         if boundaries.is_empty() {
@@ -179,6 +197,10 @@ impl L1Cache {
             prefix_hashes.push((boundary_pos, *hasher.finalize().as_bytes()));
             last_pos = boundary_pos;
         }
+        let deepest_hash = prefix_hashes
+            .last()
+            .map(|(_, hash_bytes)| *hash_bytes)
+            .expect("prefix_hashes is non-empty when boundaries is non-empty");
 
         // Search from the longest boundary down — return first hit. moka updates recency
         // and frequency on `get`, so no manual timestamp bookkeeping is needed.
@@ -191,7 +213,7 @@ impl L1Cache {
                 // Return the shared `Arc` directly — the caller decides whether to
                 // materialize a `Vec` (and reserves exact capacity when it does),
                 // avoiding a clone of the (large) cached prefix on every hit.
-                return Some((tokens, boundary_pos, deepest_boundary));
+                return Some((tokens, boundary_pos, deepest_boundary, deepest_hash));
             }
         }
 
@@ -312,6 +334,30 @@ impl L1Cache {
         deepest_boundary: usize,
         tokenizer: &E,
     ) -> anyhow::Result<Vec<TokenIdType>> {
+        let deepest_hash = if deepest_boundary > prefix_len {
+            hash_prefix(input, deepest_boundary)
+        } else {
+            Blake3Hash::default()
+        };
+        self.extend_after_match_with_deepest_hash(
+            input,
+            prefix_tokens,
+            prefix_len,
+            deepest_boundary,
+            deepest_hash,
+            tokenizer,
+        )
+    }
+
+    pub(super) fn extend_after_match_with_deepest_hash<E: Encoder + ?Sized>(
+        &self,
+        input: &str,
+        prefix_tokens: Arc<[TokenIdType]>,
+        prefix_len: usize,
+        deepest_boundary: usize,
+        deepest_hash: Blake3Hash,
+        tokenizer: &E,
+    ) -> anyhow::Result<Vec<TokenIdType>> {
         // `deepest_boundary` (from `longest_prefix_match`) is the deepest special-token
         // boundary in `input`; split there only if it lies strictly past the matched
         // prefix. Strict `>` avoids re-inserting the entry we just matched. Boundaries
@@ -344,17 +390,10 @@ impl L1Cache {
         cumulative.extend_from_slice(&prefix_tokens);
         cumulative.extend_from_slice(seg_a.token_ids());
 
-        // Key is blake3 of input[0..deepest]. Built with the same streaming idiom as
-        // `longest_prefix_match`/`insert_at_boundaries` so the digest is byte-for-byte
-        // identical to the incremental one a future lookup computes for this prefix.
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&input.as_bytes()[..deepest]);
-        let hash_bytes: Blake3Hash = *hasher.finalize().as_bytes();
-
         // Snapshot prefix+seg_a (`as_slice().into()` copies only the populated len, not the
         // reserved capacity) and cache it.
         let tokens: Arc<[TokenIdType]> = cumulative.as_slice().into();
-        self.cache.insert(hash_bytes, tokens);
+        self.cache.insert(deepest_hash, tokens);
 
         // Append the trailing segment for the returned result — no realloc, capacity was
         // reserved above.

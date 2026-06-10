@@ -144,8 +144,8 @@ impl Encoder for CachedTokenizer {
             return self.inner.encode(input);
         }
 
-        if let Some((prefix_tokens, prefix_len, deepest_boundary)) =
-            self.l1.longest_prefix_match(input)
+        if let Some((prefix_tokens, prefix_len, deepest_boundary, deepest_hash)) =
+            self.l1.longest_prefix_match_with_deepest_hash(input)
         {
             let suffix = &input[prefix_len..];
             if suffix.is_empty() {
@@ -155,11 +155,12 @@ impl Encoder for CachedTokenizer {
                 // Cache the new suffix at its deepest boundary so the next turn hits
                 // deeper, then return the full merged tokens. The deepest boundary was
                 // already found by `longest_prefix_match`, so no rescan is needed here.
-                return Ok(Encoding::Sp(self.l1.extend_after_match(
+                return Ok(Encoding::Sp(self.l1.extend_after_match_with_deepest_hash(
                     input,
                     prefix_tokens,
                     prefix_len,
                     deepest_boundary,
+                    deepest_hash,
                     self.inner.as_ref(),
                 )?));
             }
