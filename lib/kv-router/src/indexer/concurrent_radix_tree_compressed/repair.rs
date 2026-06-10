@@ -10,12 +10,16 @@ impl ConcurrentRadixTreeCompressed {
         start: &SharedNode,
         hash: ExternalSequenceBlockHash,
     ) -> Option<SharedNode> {
-        let mut queue = VecDeque::from(start.children_snapshot());
+        // Reuse one BFS queue. `push_children_into` preserves the same per-node
+        // snapshot semantics as `children_snapshot`, but avoids allocating a
+        // fresh child Vec for each scanned node during lookup repair.
+        let mut queue = VecDeque::new();
+        start.push_children_into(&mut queue);
         while let Some(node) = queue.pop_front() {
             if node.contains_edge_hash(hash) {
                 return Some(node);
             }
-            queue.extend(node.children_snapshot());
+            node.push_children_into(&mut queue);
         }
         None
     }

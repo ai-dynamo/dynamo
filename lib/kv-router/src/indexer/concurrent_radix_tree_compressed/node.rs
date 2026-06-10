@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
@@ -183,12 +184,18 @@ impl Node {
         children
     }
 
+    #[cfg(test)]
     pub(super) fn children_snapshot(&self) -> Vec<SharedNode> {
         let _gate = self.shape_gate.read();
         self.children
             .iter()
             .map(|entry| entry.value().clone())
             .collect()
+    }
+
+    pub(super) fn push_children_into(&self, queue: &mut VecDeque<SharedNode>) {
+        let _gate = self.shape_gate.read();
+        queue.extend(self.children.iter().map(|entry| entry.value().clone()));
     }
 
     pub(super) fn child_edges_snapshot(&self) -> Vec<(LocalBlockHash, SharedNode)> {
