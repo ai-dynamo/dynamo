@@ -23,7 +23,7 @@ ARG NIXL_REF
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
 {% endif %}
-ARG MODELEXPRESS_REF
+ARG MODELEXPRESS_VERSION
 
 WORKDIR /workspace
 
@@ -195,13 +195,13 @@ RUN uv pip uninstall triton && \
 {% endif %}
 
 {% if context.vllm.enable_modelexpress == "true" %}
-# Install from the pinned ModelExpress ref until the required client changes are
-# available in a PyPI release.
+# Install only the ModelExpress client package. --no-deps preserves the upstream
+# vLLM runtime dependency stack.
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
     uv pip install --system --no-deps \
-        "https://github.com/ai-dynamo/modelexpress/archive/${MODELEXPRESS_REF}.tar.gz#subdirectory=modelexpress_client/python"
+        "modelexpress==${MODELEXPRESS_VERSION}"
 
 # vLLM discovers out-of-tree load formats through VLLM_PLUGINS. Set the image
 # default so --load-format=modelexpress works out of the box. A deployment that

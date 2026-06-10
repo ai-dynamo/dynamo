@@ -114,12 +114,12 @@ ARG AWS_SDK_CPP_VERSION={{ context.vllm.aws_sdk_cpp_version }}
 {% endif %}
 
 # ModelExpress Python client for model loading (optional)
-ARG MODELEXPRESS_REF={{ context.vllm.modelexpress_ref }}
+ARG MODELEXPRESS_VERSION={{ context.vllm.modelexpress_version }}
 {%- endif -%}
 
 {% if framework == "sglang" -%}
 # ModelExpress Python client for model loading (optional)
-ARG MODELEXPRESS_REF={{ context.sglang.modelexpress_ref }}
+ARG MODELEXPRESS_VERSION={{ context.sglang.modelexpress_version }}
 {%- endif -%}
 
 {% if framework == "sglang" and device == "xpu" -%}

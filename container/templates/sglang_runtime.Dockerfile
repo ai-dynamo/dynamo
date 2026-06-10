@@ -13,7 +13,7 @@ FROM framework AS runtime
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 {% endif %}
 
-ARG MODELEXPRESS_REF
+ARG MODELEXPRESS_VERSION
 
 WORKDIR /workspace
 
@@ -125,13 +125,13 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     fi
 
 {% if context.sglang.enable_modelexpress == "true" %}
-# Install from the pinned ModelExpress ref until the required client changes are
-# available in a PyPI release.
+# Install only the ModelExpress client package. --no-deps preserves the upstream
+# SGLang runtime dependency stack.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     set -eux; \
     export PIP_CACHE_DIR=/root/.cache/pip; \
     pip install --break-system-packages --no-deps \
-        "https://github.com/ai-dynamo/modelexpress/archive/${MODELEXPRESS_REF}.tar.gz#subdirectory=modelexpress_client/python"
+        "modelexpress==${MODELEXPRESS_VERSION}"
 {% endif %}
 {% endif %}
 {% endif %}
