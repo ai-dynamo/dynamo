@@ -188,6 +188,23 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
     true
 
 # =============================================================================
+# Stage 2b: SBOM export (compliance)
+# =============================================================================
+# A scratch stage carrying ONLY the Go compliance SBOM + harvested license texts.
+# The frontend build's licenses stage consumes these from the build CONTEXT
+# (extracted to the workspace by the CI EPP-build step via `make sbom-export`),
+# NOT by COPYing from the pushed EPP image. The pushed image can lose these files
+# when the BuildKit cache is refreshed between the build and the compliance-extract
+# step (the runtime layer gets served from a stale local cache); exporting to the
+# host right after the EPP build, while the cache is warm, is reliable.
+#
+# Kept BEFORE the runtime stage so the default (no --target) build still produces
+# the runtime EPP image; `make sbom-export` targets this stage explicitly.
+FROM scratch AS sbom-export
+COPY --from=go-builder /sbom-go.cdx.json /sbom-go.cdx.json
+COPY --from=go-builder /sbom-go-licenses /sbom-go-licenses
+
+# =============================================================================
 # Stage 3: Runtime
 # =============================================================================
 FROM ${BASE_IMAGE}
@@ -201,9 +218,11 @@ WORKDIR /
 
 COPY --from=go-builder /workspace/epp .
 
-# EPP is not shipped to customers, but the frontend image's licenses stage
-# consumes this CycloneDX SBOM via COPY --from=epp /sbom-go.cdx.json, plus the
-# harvested module LICENSE files for full-text NOTICES.
+# EPP is not shipped to customers. These compliance artifacts are retained in the
+# image for self-description, but the frontend build no longer COPYs them from
+# here (that was fragile — a refreshed BuildKit cache could push a runtime layer
+# missing them). The frontend reads them from the build context, populated by the
+# `sbom-export` stage above via `make sbom-export` in the CI EPP-build step.
 COPY --from=go-builder /sbom-go.cdx.json /sbom-go.cdx.json
 COPY --from=go-builder /sbom-go-licenses /sbom-go-licenses
 

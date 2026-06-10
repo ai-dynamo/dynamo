@@ -357,6 +357,26 @@ jobs:
             DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/" \
             ${SCCACHE_MAKE_ARGS} \
             EXTRA_BUILD_ARGS="${CACHE_ARGS}"
+
+          # Decouple EPP's Go compliance SBOM from the pushed image. Export it to
+          # the workspace NOW, while this builder's cache is warm, so the frontend
+          # build + compliance-extract read /sbom-go.cdx.json + /sbom-go-licenses
+          # from the build context (.epp-sbom/) rather than COPY --from the EPP
+          # image. The image-COPY path was fragile: the "Refresh BuildKit builder"
+          # step below prunes the cache, forcing a re-pull of the pushed EPP image
+          # whose runtime layer could be served from stale cache and miss these
+          # files. Build args mirror image-multiarch-push so the go-builder stage
+          # cache-hits (no rust/go rebuild).
+          rm -rf "${GITHUB_WORKSPACE}/.epp-sbom"
+          make -C deploy/inference-gateway/epp sbom-export \
+            GIT_TAG="${EPP_IMAGE_TAG}" \
+            DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/" \
+            ${SCCACHE_MAKE_ARGS} \
+            EXTRA_BUILD_ARGS="${CACHE_ARGS}" \
+            SBOM_DEST="${GITHUB_WORKSPACE}/.epp-sbom"
+          echo "EPP SBOM export contents:"
+          ls -la "${GITHUB_WORKSPACE}/.epp-sbom" \
+            "${GITHUB_WORKSPACE}/.epp-sbom/sbom-go-licenses" 2>/dev/null | head -40
       - name: Refresh BuildKit builder (For Frontend Only)
         if: ${{ inputs.target == 'frontend' }}
         uses: ./.github/actions/builder-refresher
