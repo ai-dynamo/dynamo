@@ -37,6 +37,10 @@ pub fn decode_event_batch(payload: &[u8]) -> Result<KvEventBatch, rmps::decode::
 #[derive(Debug, Clone)]
 pub struct ZmqEventNormalizer {
     kv_block_size: u32,
+    /// Model's image placeholder token id, when MM-aware routing is active.
+    /// Lets `convert_event` normalize vLLM BlockStored events to the canonical
+    /// pad_value scheme. `None` for text-only models / non-MM deployments.
+    image_token_id: Option<u32>,
     warning_count: Arc<AtomicU32>,
     group_metadata: FxHashMap<(DpRank, u32), KvCacheGroupMetadata>,
 }
@@ -72,6 +76,7 @@ impl ZmqEventNormalizer {
     pub fn new(kv_block_size: u32) -> Self {
         Self {
             kv_block_size,
+            image_token_id: None,
             warning_count: Arc::new(AtomicU32::new(0)),
             group_metadata: FxHashMap::default(),
         }
@@ -80,9 +85,18 @@ impl ZmqEventNormalizer {
     pub fn with_warning_count(kv_block_size: u32, warning_count: Arc<AtomicU32>) -> Self {
         Self {
             kv_block_size,
+            image_token_id: None,
             warning_count,
             group_metadata: FxHashMap::default(),
         }
+    }
+
+    /// Set the model's image placeholder token id so vLLM BlockStored events
+    /// get normalized to the canonical pad_value scheme. No-op for text-only
+    /// models (leave unset).
+    pub fn with_image_token_id(mut self, image_token_id: Option<u32>) -> Self {
+        self.image_token_id = image_token_id;
+        self
     }
 
     pub fn preprocess(&mut self, raw: RawKvEvent, worker: WorkerWithDpRank) -> Option<RawKvEvent> {
@@ -120,6 +134,7 @@ impl ZmqEventNormalizer {
             self.kv_block_size,
             worker,
             &self.warning_count,
+            self.image_token_id,
         )
     }
 

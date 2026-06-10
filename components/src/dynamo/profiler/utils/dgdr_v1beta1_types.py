@@ -64,6 +64,7 @@ class DeviceType(str, Enum):
 
 class GPUSKUType(str, Enum):
     GB200SXM = "gb200_sxm"
+    GB10 = "gb10"
     B200SXM = "b200_sxm"
     H200SXM = "h200_sxm"
     H100SXM = "h100_sxm"
@@ -291,7 +292,7 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
     )
     image: Optional[str] = Field(
         default=None,
-        description='Image is the container image reference for the profiling job (frontend image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1".',
+        description='Image is the container image reference for the profiling job (planner image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.0". For Dynamo < 1.1.0, use dynamo-frontend.',
     )
     modelCache: Optional[ModelCacheSpec] = Field(
         default=None,

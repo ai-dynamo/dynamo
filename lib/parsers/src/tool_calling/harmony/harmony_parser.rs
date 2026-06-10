@@ -4,7 +4,7 @@
 use super::super::ToolDefinition;
 use super::config::JsonParserConfig;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
-use openai_harmony::chat::{Content::Text, Role};
+use openai_harmony::chat::{Content, Role};
 use openai_harmony::{HarmonyEncoding, HarmonyEncodingName, load_harmony_encoding};
 use regex::{Captures, Regex};
 use serde_json::Value;
@@ -14,20 +14,27 @@ static COMMENTARY_BLOCK_REGEX: OnceLock<Regex> = OnceLock::new();
 static COMMENTARY_BLOCK_CLEANUP_REGEX: OnceLock<Regex> = OnceLock::new();
 static COMMENTARY_HEADER_CLEANUP_REGEX: OnceLock<Regex> = OnceLock::new();
 static ANALYSIS_BLOCK_CLEANUP_REGEX: OnceLock<Regex> = OnceLock::new();
+static FINAL_BLOCK_CLEANUP_REGEX: OnceLock<Regex> = OnceLock::new();
 static MESSAGE_CALL_CLEANUP_REGEX: OnceLock<Regex> = OnceLock::new();
 static SPECIAL_TOKEN_REGEX: OnceLock<Regex> = OnceLock::new();
 
 /// Regex fallback used only when `openai_harmony`'s tokenizer rejects the
 /// input — alternative on this path is silent-drop. Worst case is missing
 /// a call, never fabricating one: Harmony tool calls must end with `<|call|>`.
+///
+/// Matches tool calls on either `commentary` or `analysis` channel: the model
+/// emits ~47% of tool calls on the `analysis` channel with a bare `code`
+/// constraint marker instead of `<|constrain|>json`. The `.*?` non-greedy span
+/// between the recipient and `<|message|>` already tolerates any constraint
+/// marker form (`code`, `<|constrain|>json`, or nothing).
 fn commentary_block_regex() -> &'static Regex {
     COMMENTARY_BLOCK_REGEX.get_or_init(|| {
         // Name is `[\w.\-]+` (alphanumeric / dot / hyphen / underscore).
         // Between name and `<|message|>` we tolerate optional
-        // `<|constrain|>json` and whitespace by using non-greedy `.*?`.
+        // `<|constrain|>json`, bare `code`, or nothing (non-greedy `.*?`).
         // Args must end at `<|call|>`, the required Harmony tool-call stop token.
         Regex::new(
-            r"(?s)(?:<\|start\|>assistant)?<\|channel\|>commentary to=functions\.(?P<name>[\w.\-]+).*?<\|message\|>(?P<args>.*?)<\|call\|>",
+            r"(?s)(?:<\|start\|>assistant)?<\|channel\|>(?:commentary|analysis) to=functions\.(?P<name>[\w.\-]+).*?<\|message\|>(?P<args>.*?)<\|call\|>",
         )
         .expect("commentary block regex")
     })
@@ -53,8 +60,23 @@ fn commentary_header_cleanup_regex() -> &'static Regex {
 
 fn analysis_block_cleanup_regex() -> &'static Regex {
     ANALYSIS_BLOCK_CLEANUP_REGEX.get_or_init(|| {
-        Regex::new(r"(?s)(?:<\|start\|>assistant)?<\|channel\|>analysis<\|message\|>(?P<body>.*?)(?:<\|end\|>|\z)")
-            .expect("analysis block cleanup regex")
+        // Accepts both the spec-compliant reasoning form
+        //   `<|channel|>analysis<|message|>...<|end|>`
+        // and the gpt-oss model-bug directed-tool-call form (recovered by PR #10366)
+        //   `<|channel|>analysis to=functions.X[ <|constrain|>json]<|message|>{args}<|call|>`
+        // The `name` capture distinguishes the two in the strip log so analysis
+        // stays semantically "thinking" while the bug-shape is logged as a tool call.
+        Regex::new(
+            r"(?s)(?:<\|start\|>assistant)?<\|channel\|>analysis(?:\s+to=functions\.(?P<name>[\w.\-]+))?.*?<\|message\|>(?P<body>.*?)(?:<\|call\|>|<\|end\|>|\z)",
+        )
+        .expect("analysis block cleanup regex")
+    })
+}
+
+fn final_block_cleanup_regex() -> &'static Regex {
+    FINAL_BLOCK_CLEANUP_REGEX.get_or_init(|| {
+        Regex::new(r"(?s)(?:<\|start\|>assistant)?<\|channel\|>final<\|message\|>(?P<body>.*?)(?:<\|return\|>|<\|end\|>|\z)")
+            .expect("final block cleanup regex")
     })
 }
 
@@ -113,8 +135,23 @@ fn strip_harmony_protocol_from_normal_text(text: &str, reason: &'static str) -> 
     let cleaned = analysis_block_cleanup_regex()
         .replace_all(&cleaned, |caps: &Captures<'_>| {
             record_special_tokens(&caps[0], &mut stripped);
-            push_unique(&mut stripped, "analysis_envelope".to_string());
+            let item = match caps.name("name").map(|m| m.as_str()) {
+                Some(name) => format!("analysis_tool_call:functions.{name}"),
+                None => "analysis_envelope".to_string(),
+            };
+            push_unique(&mut stripped, item);
             ""
+        })
+        .into_owned();
+
+    let cleaned = final_block_cleanup_regex()
+        .replace_all(&cleaned, |caps: &Captures<'_>| {
+            record_special_tokens(&caps[0], &mut stripped);
+            push_unique(&mut stripped, "final_envelope".to_string());
+            caps.name("body")
+                .map(|m| m.as_str())
+                .unwrap_or_default()
+                .to_string()
         })
         .into_owned();
 
@@ -172,6 +209,65 @@ fn serialize_harmony_arguments(raw_args: &str) -> String {
         Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| trimmed.to_string()),
         Err(_) => trimmed.to_string(),
     }
+}
+
+fn push_harmony_text(out: &mut String, content: &[Content]) {
+    for item in content {
+        if let Content::Text(text) = item {
+            out.push_str(&text.text);
+        }
+    }
+}
+
+fn content_looks_like_json(content: &[Content]) -> bool {
+    content.iter().any(|item| match item {
+        Content::Text(text) => {
+            matches!(text.text.trim_start().as_bytes().first(), Some(b'{' | b'['))
+        }
+        _ => false,
+    })
+}
+
+fn contains_recipientless_commentary_call(text: &str) -> bool {
+    let channel_marker = "<|channel|>commentary";
+    let message_marker = "<|message|>";
+    let call_marker = "<|call|>";
+    let boundaries = ["<|end|>", "<|return|>", "<|start|>", "<|channel|>"];
+
+    let mut remaining = text;
+    while let Some(channel_start) = remaining.find(channel_marker) {
+        let after_channel = &remaining[channel_start + channel_marker.len()..];
+        let Some(message_start) = after_channel.find(message_marker) else {
+            return false;
+        };
+
+        let header = &after_channel[..message_start];
+        let after_message = &after_channel[message_start + message_marker.len()..];
+        remaining = after_message;
+
+        if header
+            .split_whitespace()
+            .any(|part| part.starts_with("to="))
+        {
+            continue;
+        }
+
+        let Some(call_start) = after_message.find(call_marker) else {
+            continue;
+        };
+
+        let next_boundary = boundaries
+            .iter()
+            .filter_map(|boundary| after_message.find(boundary))
+            .min();
+
+        match next_boundary {
+            Some(boundary) if call_start >= boundary => {}
+            _ => return true,
+        };
+    }
+
+    false
 }
 
 /// Extract calls via regex when harmony's strict tokenizer rejects the input
@@ -286,9 +382,9 @@ pub async fn parse_tool_calls_harmony_complete(
 
     let mut res = Vec::with_capacity(messages.len());
     let mut call_idx = 0; // Index of the tool call
-    let mut final_text: Option<String> = None;
-    let mut commentary_text: Option<String> = None;
+    let mut normal_text = String::new();
     let has_tool_call_stop = text.contains("<|call|>");
+    let has_recipientless_commentary_call = contains_recipientless_commentary_call(text);
 
     for message in messages.iter() {
         if message.author.role != Role::Assistant {
@@ -298,8 +394,11 @@ pub async fn parse_tool_calls_harmony_complete(
         let channel = message.channel.as_deref();
         let recipient = message.recipient.as_deref().unwrap_or_default();
 
-        // Handle commentary channel
-        if channel == Some("commentary") && recipient.starts_with("functions.") {
+        // A `to=functions.NAME` recipient is the definitive signal of a tool
+        // call, regardless of channel label. The model emits tool calls on both
+        // `commentary` (canonical) and `analysis` (malformed-but-common) channels.
+        let is_tool_channel = channel == Some("commentary") || channel == Some("analysis");
+        if is_tool_channel && recipient.starts_with("functions.") {
             if !has_tool_call_stop {
                 continue;
             }
@@ -315,7 +414,7 @@ pub async fn parse_tool_calls_harmony_complete(
             };
 
             let Some(args_json) = message.content.first().and_then(|content| match content {
-                Text(text) => Some(serialize_harmony_arguments(&text.text)),
+                Content::Text(text) => Some(serialize_harmony_arguments(&text.text)),
                 _ => None,
             }) else {
                 continue;
@@ -330,21 +429,18 @@ pub async fn parse_tool_calls_harmony_complete(
                     arguments: args_json,
                 },
             });
-        } else if channel == Some("final") {
-            if let Some(Text(text)) = message.content.first() {
-                final_text = Some(text.text.clone());
-            }
-        } else if channel == Some("commentary")
-            && recipient.is_empty()
-            && let Some(Text(text)) = message.content.first()
+        } else if channel == Some("final")
+            || (channel == Some("commentary")
+                && recipient.is_empty()
+                && !(has_recipientless_commentary_call
+                    && (message.content_type.as_deref() == Some("<|constrain|>json")
+                        || content_looks_like_json(&message.content))))
         {
-            commentary_text = Some(text.text.clone());
+            // Final-channel answer text, or recipientless commentary that isn't a
+            // tool-call payload, both surface as assistant content.
+            push_harmony_text(&mut normal_text, &message.content);
         }
     }
-    let normal_text = final_text
-        .filter(|text| !text.is_empty())
-        .or_else(|| commentary_text.filter(|text| !text.is_empty()))
-        .unwrap_or_default();
     Ok((res, Some(normal_text)))
 }
 
@@ -356,6 +452,14 @@ pub fn detect_tool_call_start_harmony(
     let trimmed = chunk.trim();
     if trimmed.is_empty() {
         return false;
+    }
+
+    let has_complete_end_token = config
+        .tool_call_end_tokens
+        .iter()
+        .any(|token| !token.is_empty() && trimmed.contains(token));
+    if has_complete_end_token {
+        return true;
     }
 
     if strict {
@@ -429,8 +533,8 @@ mod tests {
         (call.function.name, args)
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.1 in tests/parity/parser/fixtures/harmony/PARSER.batch.yaml.
-    #[tokio::test] // PARSER.batch.1, PARSER.harmony.2
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.1 in tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.yaml.
+    #[tokio::test] // TOOLCALLING.batch.1, TOOLCALLING.harmony.2
     async fn test_parse_tool_calls_harmony_complete_basic() {
         let text = r#"<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"format":"celsius","location":"San Francisco"}<|call|>"#;
         let (tool_calls, normal_content) =
@@ -444,8 +548,8 @@ mod tests {
         assert_eq!(args["format"], "celsius");
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.d in tests/parity/parser/fixtures/harmony/PARSER.batch.4.yaml.
-    #[tokio::test] // PARSER.batch.4, PARSER.harmony.2
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.d in tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.4.yaml.
+    #[tokio::test] // TOOLCALLING.batch.4, TOOLCALLING.harmony.2
     async fn test_parse_tools_harmony_without_start_token() {
         let text = r#"<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|message|>{"location":"San Francisco"}<|call|>"#;
         let (tool_calls, normal_content) =
@@ -456,8 +560,8 @@ mod tests {
         assert_eq!(tool_calls.len(), 0);
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.d, PARSER.batch.8.a in tests/parity/parser/fixtures/harmony/PARSER.batch.7.yaml, tests/parity/parser/fixtures/harmony/PARSER.batch.8.yaml.
-    #[tokio::test] // PARSER.batch.7, PARSER.batch.8, PARSER.harmony.2
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.7.d, TOOLCALLING.batch.8.a in tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.7.yaml, tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.8.yaml.
+    #[tokio::test] // TOOLCALLING.batch.7, TOOLCALLING.batch.8, TOOLCALLING.harmony.2
     async fn test_parse_tool_calls_harmony_with_multi_args() {
         let text = r#"<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco", "unit":"fahrenheit"}<|call|>"#;
         let (tool_calls, normal_content) =
@@ -472,8 +576,8 @@ mod tests {
         assert_eq!(args["unit"], "fahrenheit");
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.8.a in tests/parity/parser/fixtures/harmony/PARSER.batch.8.yaml.
-    #[tokio::test] // PARSER.batch.8, PARSER.batch.8, PARSER.harmony.2
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.8.a in tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.8.yaml.
+    #[tokio::test] // TOOLCALLING.batch.8, TOOLCALLING.batch.8, TOOLCALLING.harmony.2
     async fn test_parse_tool_calls_harmony_with_normal_text() {
         let text = r#"<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco"}<|call|>"#;
         let (tool_calls, normal_content) =
@@ -487,7 +591,7 @@ mod tests {
         assert_eq!(args["location"], "San Francisco");
     }
 
-    #[tokio::test] // PARSER.batch.3 — gpt-oss
+    #[tokio::test] // TOOLCALLING.batch.3 — gpt-oss
     async fn test_parse_harmony_bare_text_without_final_message_is_dropped() {
         let text = "Hello, how can I help you today?";
         let (tool_calls, normal_content) =
@@ -498,7 +602,7 @@ mod tests {
         assert_eq!(normal_content, Some("".to_string()));
     }
 
-    #[tokio::test] // PARSER.batch.3 — gpt-oss
+    #[tokio::test] // TOOLCALLING.batch.3 — gpt-oss
     async fn test_parse_harmony_final_message_returns_normal_text() {
         let text = r#"<|channel|>final<|message|>Hello, how can I help you today?<|return|>"#;
         let (tool_calls, normal_content) =
@@ -512,11 +616,56 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_parse_harmony_tool_only_keeps_final_as_normal_text() {
+        let text = r#"<|channel|>analysis<|message|>Need to check weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>final<|message|>I checked the weather.<|return|>"#;
+        let (tool_calls, normal_content) =
+            parse_tool_calls_harmony_complete(text, &Default::default(), None)
+                .await
+                .unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(normal_content, Some("I checked the weather.".to_string()));
+        let (name, args) = extract_name_and_args(tool_calls[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "NYC");
+    }
+
+    #[tokio::test]
+    async fn test_parse_harmony_drops_directed_non_function_commentary() {
+        let text = r#"<|start|>assistant<|channel|>commentary to=browser.search <|constrain|>json<|message|>{"query":"secret weather"}<|call|><|start|>assistant<|channel|>final<|message|>Done.<|return|>"#;
+        let (tool_calls, normal_content) =
+            parse_tool_calls_harmony_complete(text, &Default::default(), None)
+                .await
+                .unwrap();
+
+        assert!(tool_calls.is_empty());
+        let normal = normal_content.unwrap_or_default();
+        assert_eq!(normal, "Done.");
+        assert!(!normal.contains("secret weather"));
+        assert!(!normal.contains("browser.search"));
+        assert!(!normal.contains("<|channel|>"));
+    }
+
+    #[tokio::test]
+    async fn test_parse_harmony_drops_recipientless_tool_call_payload() {
+        let text = r#"<|start|>assistant<|channel|>commentary <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>final<|message|>Done.<|return|>"#;
+        let (tool_calls, normal_content) =
+            parse_tool_calls_harmony_complete(text, &Default::default(), None)
+                .await
+                .unwrap();
+
+        assert!(tool_calls.is_empty());
+        let normal = normal_content.unwrap_or_default();
+        assert_eq!(normal, "Done.");
+        assert!(!normal.contains("NYC"));
+        assert!(!normal.contains("<|channel|>"));
+    }
+
     // Harmony's strict tokenizer rejects two back-to-back commentary
     // blocks, so EOF recovery falls back to regex extraction and pins that
     // both calls are surfaced without leaking the raw envelopes.
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.b in tests/parity/parser/fixtures/harmony/PARSER.batch.2.yaml.
-    #[tokio::test] // PARSER.batch.2 — gpt-oss
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.2.b in tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.2.yaml.
+    #[tokio::test] // TOOLCALLING.batch.2 — gpt-oss
     async fn test_parse_harmony_multiple_calls_recovers() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.a <|constrain|>json<|message|>{"x":1}<|call|><|start|>assistant<|channel|>commentary to=functions.b <|constrain|>json<|message|>{"y":2}<|call|>"#;
         let (tool_calls, _normal) =
@@ -532,8 +681,8 @@ mod tests {
         assert_eq!(a1["y"], 2);
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.a in tests/parity/parser/fixtures/harmony/PARSER.batch.4.yaml.
-    #[tokio::test] // PARSER.batch.4 — gpt-oss
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.a in tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.4.yaml.
+    #[tokio::test] // TOOLCALLING.batch.4 — gpt-oss
     async fn test_parse_harmony_malformed_json_preserves_raw_arguments() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>not json at all<|call|>"#;
         let (tool_calls, _normal) =
@@ -545,8 +694,8 @@ mod tests {
         assert_eq!(tool_calls[0].function.arguments, "not json at all");
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.b in tests/parity/parser/fixtures/harmony/PARSER.batch.4.yaml.
-    #[tokio::test] // PARSER.batch.4 — gpt-oss
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.4.b in tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.4.yaml.
+    #[tokio::test] // TOOLCALLING.batch.4 — gpt-oss
     async fn test_parse_harmony_unterminated_json_preserves_raw_arguments() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC<|call|>"#;
         let (tool_calls, _normal) = parse_tool_calls_harmony_complete(
@@ -564,11 +713,11 @@ mod tests {
         assert_eq!(tool_calls[0].function.arguments, r#"{"location":"NYC"#);
     }
 
-    // Bare-envelope PARSER.batch.5: no preceding `analysis` block, no `<|call|>`
+    // Bare-envelope TOOLCALLING.batch.5: no preceding `analysis` block, no `<|call|>`
     // at the end. Harmony requires the explicit call stop token, so fallback
     // must not accept EOS as a synthetic close.
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.5.a in tests/parity/parser/fixtures/harmony/PARSER.batch.5.yaml.
-    #[tokio::test] // PARSER.batch.5 — gpt-oss
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.5.a in tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.5.yaml.
+    #[tokio::test] // TOOLCALLING.batch.5 — gpt-oss
     async fn test_parse_harmony_bare_envelope_no_call_token_drops() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}"#;
         let (tool_calls, normal) = parse_tool_calls_harmony_complete(
@@ -585,11 +734,11 @@ mod tests {
         assert_eq!(normal, Some("".to_string()));
     }
 
-    // The regex fallback must preserve any non-tool spans (prose before
-    // the call, suffix after `<|call|>`) as `normal_text`, not zero them.
+    // The regex fallback must preserve user-visible non-tool spans (prose before
+    // the call and suffix after `<|call|>`) as `normal_text`, not zero them.
     #[tokio::test]
     async fn test_parse_harmony_regex_fallback_preserves_residual_text() {
-        let text = r#"PREFIX <|start|>assistant<|channel|>commentary to=functions.a <|constrain|>json<|message|>{"x":1}<|call|> SUFFIX"#;
+        let text = r#"PREFIX <|channel|>analysis<|message|>Need a tool.<|end|><|start|>assistant<|channel|>commentary to=functions.a <|constrain|>json<|message|>{"x":1}<|call|> SUFFIX"#;
         let (tool_calls, normal) = parse_tool_calls_harmony_complete(
             text,
             &JsonParserConfig {
@@ -609,6 +758,10 @@ mod tests {
         assert!(
             normal.contains("SUFFIX"),
             "normal must keep suffix: {normal:?}"
+        );
+        assert!(
+            !normal.contains("Need a tool."),
+            "normal must not expose Harmony analysis text: {normal:?}"
         );
         assert!(
             !normal.contains("<|start|>"),
@@ -648,8 +801,28 @@ mod tests {
         );
     }
 
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.5.a, PARSER.batch.8.a in tests/parity/parser/fixtures/harmony/PARSER.batch.5.yaml, tests/parity/parser/fixtures/harmony/PARSER.batch.8.yaml.
-    #[tokio::test] // PARSER.batch.4, PARSER.batch.5, PARSER.harmony.2
+    #[tokio::test]
+    async fn test_parse_harmony_parse_failure_strips_analysis_body() {
+        let text = r#"Before <|channel|>analysis<|message|>Need to call get_weather.<|end|><|start|>assistant<|channel|>commentary <|constrain|>json<|message|>{"location":"NYC"<|call|> After"#;
+        let (tool_calls, normal) =
+            parse_tool_calls_harmony_complete(text, &Default::default(), None)
+                .await
+                .unwrap();
+        assert!(tool_calls.is_empty());
+        let normal = normal.unwrap_or_default();
+        assert_eq!(normal, "Before  After");
+        assert!(
+            !normal.contains("<|channel|>"),
+            "normal_text must not leak Harmony protocol tokens: {normal:?}"
+        );
+        assert!(
+            !normal.contains("Need to call get_weather."),
+            "normal_text must not expose Harmony analysis text: {normal:?}"
+        );
+    }
+
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.5.a, TOOLCALLING.batch.8.a in tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.5.yaml, tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.8.yaml.
+    #[tokio::test] // TOOLCALLING.batch.4, TOOLCALLING.batch.5, TOOLCALLING.harmony.2
     async fn test_parse_tool_calls_harmony_without_call_token() {
         let text = r#"<|channel|>analysis<|message|>We need to call get_weather function. The user asks "What's the weather like in San Francisco in Celsius?" So location: "San Francisco, CA" unit: "celsius". Let's call function.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"San Francisco, CA","unit":"celsius"}"#;
         let (tool_calls, normal_content) =
@@ -675,10 +848,10 @@ mod tests {
         assert_eq!(tool_calls.len(), 1);
     }
 
-    /// PARSER.batch.6 — empty args. A no-arg harmony call (`{}`) must still surface
+    /// TOOLCALLING.batch.6 — empty args. A no-arg harmony call (`{}`) must still surface
     /// the function name.
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.6.a in tests/parity/parser/fixtures/harmony/PARSER.batch.6.yaml.
-    #[tokio::test] // PARSER.batch.6 — gpt-oss
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.6.a in tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.6.yaml.
+    #[tokio::test] // TOOLCALLING.batch.6 — gpt-oss
     async fn test_parse_harmony_empty_args() {
         let text = r#"<|channel|>commentary to=functions.current_time <|constrain|>json<|message|>{}<|call|>"#;
         let (tool_calls, _) = parse_tool_calls_harmony_complete(text, &Default::default(), None)
@@ -690,13 +863,13 @@ mod tests {
         assert_eq!(args, serde_json::json!({}));
     }
 
-    /// PARSER.batch.9 — empty / null content variants. Truly-empty (zero bytes)
+    /// TOOLCALLING.batch.9 — empty / null content variants. Truly-empty (zero bytes)
     /// and whitespace-only inputs must yield no tool calls. Unlike the
     /// XML/JSON parsers (which trim whitespace down to `Some("")`), the
     /// harmony parser passes the input verbatim through to normal_text —
     /// pin that distinction here.
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.9 in tests/parity/parser/fixtures/harmony/PARSER.batch.yaml.
-    #[tokio::test] // PARSER.batch.9 — gpt-oss
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.9 in tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.yaml.
+    #[tokio::test] // TOOLCALLING.batch.9 — gpt-oss
     async fn test_parse_harmony_empty_and_whitespace_inputs() {
         for input in &["", " ", "\n", "\t\n  \t"] {
             let (tool_calls, normal) =
@@ -717,12 +890,12 @@ mod tests {
         }
     }
 
-    /// PARSER.batch.10 — duplicate calls (same function name twice). Two
+    /// TOOLCALLING.batch.10 — duplicate calls (same function name twice). Two
     /// back-to-back commentary blocks for the same function. Pin
     /// parser-level behavior — both calls returned with distinct ids
     /// and distinct args.
-    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.10 in tests/parity/parser/fixtures/harmony/PARSER.batch.yaml.
-    #[tokio::test] // PARSER.batch.10 — gpt-oss
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: TOOLCALLING.batch.10 in tests/parity/toolcalling/fixtures/harmony/TOOLCALLING.batch.yaml.
+    #[tokio::test] // TOOLCALLING.batch.10 — gpt-oss
     async fn test_parse_harmony_duplicate_calls_same_name() {
         let text = r#"<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"NYC"}<|call|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"LA"}<|call|>"#;
         let (tool_calls, _) = parse_tool_calls_harmony_complete(text, &Default::default(), None)
@@ -776,7 +949,25 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test] // helper, PARSER.stream.3
+    #[tokio::test]
+    async fn test_parse_harmony_orphan_call_marker_does_not_leak() {
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<|start|>assistant<|channel|>commentary".to_string()],
+            tool_call_end_tokens: vec!["<|call|>".to_string()],
+            ..Default::default()
+        };
+
+        assert!(detect_tool_call_start_harmony("<|call|>", &config, false));
+        assert!(detect_tool_call_start_harmony("<|call|>", &config, true));
+
+        let (tool_calls, normal) = parse_tool_calls_harmony_complete("<|call|>", &config, None)
+            .await
+            .unwrap();
+        assert!(tool_calls.is_empty());
+        assert_eq!(normal, Some("".to_string()));
+    }
+
+    #[test] // helper, TOOLCALLING.stream.3
     fn test_detect_tool_call_start_harmony_partial_tokens() {
         // Test partial token detection for streaming scenarios
         let config = JsonParserConfig {
@@ -812,5 +1003,96 @@ mod detect_parser_tests {
             !detect_tool_call_start_harmony("xyz", &config, true),
             "'xyz' should not be detected in strict mode"
         );
+    }
+
+    // --- analysis-channel tool-call recovery (the gpt-oss-120b malformed form) ---
+
+    #[tokio::test]
+    async fn test_parse_harmony_analysis_code_tool_call_recovered() {
+        // Exact form emitted by the gpt-oss-120b worker: channel=analysis, constraint=code.
+        let text =
+            r#"<|channel|>analysis to=functions.grep code<|message|>{"pattern":"foo"}<|call|>"#;
+        let (calls, normal) =
+            parse_tool_calls_harmony_complete(text, &JsonParserConfig::default(), None)
+                .await
+                .expect("parser should not error");
+        assert_eq!(calls.len(), 1, "analysis/code tool call must be recovered");
+        assert_eq!(calls[0].function.name, "grep");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["pattern"], "foo");
+        assert_eq!(
+            normal,
+            Some("".to_string()),
+            "no markup should leak into normal_text"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_parse_harmony_analysis_no_constraint_tool_call_recovered() {
+        // analysis channel with no constraint marker at all.
+        let text = r#"<|channel|>analysis to=functions.bash<|message|>{"command":"ls"}<|call|>"#;
+        let (calls, _normal) =
+            parse_tool_calls_harmony_complete(text, &JsonParserConfig::default(), None)
+                .await
+                .expect("parser should not error");
+        assert_eq!(
+            calls.len(),
+            1,
+            "analysis tool call without constraint must be recovered"
+        );
+        assert_eq!(calls[0].function.name, "bash");
+    }
+
+    #[tokio::test]
+    async fn test_parse_harmony_recipientless_analysis_is_not_tool_call() {
+        // Recipientless analysis is pure reasoning — must never become a tool call
+        // and must not leak markup into normal_text.
+        let text = r#"<|channel|>analysis<|message|>Let me think about grep.<|end|><|channel|>final<|message|>Done.<|return|>"#;
+        let (calls, normal) =
+            parse_tool_calls_harmony_complete(text, &JsonParserConfig::default(), None)
+                .await
+                .expect("parser should not error");
+        assert!(
+            calls.is_empty(),
+            "recipientless analysis must not produce a tool call"
+        );
+        assert_eq!(
+            normal,
+            Some("Done.".to_string()),
+            "only the final-channel text should appear in normal_text"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_parse_harmony_analysis_tool_call_without_stop_drops() {
+        // Analysis tool call missing the required <|call|> terminator must be dropped.
+        let text = r#"<|channel|>analysis to=functions.grep code<|message|>{"pattern":"foo"}"#;
+        let (calls, _normal) =
+            parse_tool_calls_harmony_complete(text, &JsonParserConfig::default(), None)
+                .await
+                .expect("parser should not error");
+        assert!(
+            calls.is_empty(),
+            "analysis tool call without <|call|> terminator must be dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_parse_harmony_analysis_tool_call_then_final() {
+        // Reasoning block + analysis tool call + final answer: one tool call recovered,
+        // normal_text = only the final-channel content.
+        let text = concat!(
+            "<|channel|>analysis<|message|>think<|end|>",
+            "<|start|>assistant<|channel|>analysis to=functions.get_weather code<|message|>",
+            r#"{"location":"NYC"}<|call|>"#,
+            "<|start|>assistant<|channel|>final<|message|>Checked.<|return|>",
+        );
+        let (calls, normal) =
+            parse_tool_calls_harmony_complete(text, &JsonParserConfig::default(), None)
+                .await
+                .expect("parser should not error");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(normal, Some("Checked.".to_string()));
     }
 }

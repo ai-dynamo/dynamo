@@ -4,10 +4,12 @@
 [workspace]
 members = [
     "lib/llm",
+    "lib/rl",
     "lib/runtime",
-    "lib/config",
     "lib/tokenizers",
+    "lib/renderer",
     "lib/tokens",
+    "lib/data-gen",
     "lib/kv-hashing",
     "lib/mocker",
     "lib/kv-router",
@@ -26,11 +28,12 @@ members = [
     "lib/backend-common/examples/mocker",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
+    "deploy/inference-gateway/ext-proc",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "1.2.0"
+version = "1.3.0"
 edition = "2024"
 description = "Dynamo Inference Framework"
 authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
@@ -41,34 +44,37 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
 # Local crates
-dynamo-runtime = { path = "lib/runtime", version = "1.2.0" }
-dynamo-llm = { path = "lib/llm", version = "1.2.0" }
-dynamo-config = { path = "lib/config", version = "1.2.0" }
-dynamo-tokenizers = { path = "lib/tokenizers", version = "1.2.0" }
-dynamo-tokens = { path = "lib/tokens", version = "1.2.0" }
-dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.2.0" }
-dynamo-memory = { path = "lib/memory", version = "1.2.0" }
-dynamo-mocker = { path = "lib/mocker", version = "1.2.0" }
-dynamo-kv-router = { path = "lib/kv-router", version = "1.2.0", features = ["metrics", "runtime-protocols"] }
-dynamo-protocols = { path = "lib/protocols", version = "1.2.0" }
-dynamo-parsers = { path = "lib/parsers", version = "1.2.0" }
-dynamo-backend-common = { path = "lib/backend-common", version = "1.2.0" }
-fastokens = { version = "0.1.0" }
+dynamo-runtime = { path = "lib/runtime", version = "1.3.0" }
+dynamo-llm = { path = "lib/llm", version = "1.3.0" }
+dynamo-rl = { path = "lib/rl", version = "1.3.0" }
+dynamo-tokenizers = { path = "lib/tokenizers", version = "1.3.0" }
+dynamo-renderer = { path = "lib/renderer", version = "1.3.0" }
+dynamo-tokens = { path = "lib/tokens", version = "1.3.0" }
+dynamo-data-gen = { path = "lib/data-gen", version = "1.3.0" }
+dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.3.0" }
+dynamo-memory = { path = "lib/memory", version = "1.3.0" }
+dynamo-mocker = { path = "lib/mocker", version = "1.3.0" }
+dynamo-kv-router = { path = "lib/kv-router", version = "1.3.0", features = ["metrics", "runtime-protocols"] }
+dynamo-protocols = { path = "lib/protocols", version = "1.3.0" }
+dynamo-parsers = { path = "lib/parsers", version = "1.3.0" }
+dynamo-backend-common = { path = "lib/backend-common", version = "1.3.0" }
+fastokens = { version = "0.2.0" }
 
 
 # kvbm
-kvbm-common = { path = "lib/kvbm-common", version = "1.2.0" }
-kvbm-config = { path = "lib/kvbm-config", version = "1.2.0" }
-kvbm-consolidator = { path = "lib/kvbm-consolidator", version = "1.2.0" }
-kvbm-engine = { path = "lib/kvbm-engine", version = "1.2.0" }
-kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.2.0" }
-kvbm-logical = { path = "lib/kvbm-logical", version = "1.2.0" }
-kvbm-physical = { path = "lib/kvbm-physical", version = "1.2.0" }
+kvbm-common = { path = "lib/kvbm-common", version = "1.3.0" }
+kvbm-config = { path = "lib/kvbm-config", version = "1.3.0" }
+kvbm-consolidator = { path = "lib/kvbm-consolidator", version = "1.3.0" }
+kvbm-engine = { path = "lib/kvbm-engine", version = "1.3.0" }
+kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.3.0" }
+kvbm-logical = { path = "lib/kvbm-logical", version = "1.3.0" }
+kvbm-physical = { path = "lib/kvbm-physical", version = "1.3.0" }
 
 # velo
 velo = { version = "0.1.0" }
 
 # External dependencies
+aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "69b3cff352303b95e5196a28966ae1ee4a3a3955", package = "aiconfigurator-core" }
 anyhow = { version = "1" }
 lru = { version = "0.12" }
 async-nats = { version = "0.45.0", features = ["service"] }
@@ -151,6 +157,19 @@ validator = { version = "0.20.0", features = ["derive"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
 url = { version = "2.5", features = ["serde"] }
 xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
+
+# ext-proc / Envoy gRPC
+prost = { version = "0.13.5" }
+prost-types = { version = "0.13.5" }
+tonic = { version = "0.13.1" }
+tonic-health = { version = "0.13.1" }
+tonic-build = { version = "0.13.1" }
+kube = { version = "2.0.1", default-features = false, features = ["client", "rustls-tls", "aws-lc-rs", "runtime"] }
+k8s-openapi = { version = "0.26.0", features = ["v1_32"] }
+rcgen = { version = "0.13" }
+tokio-rustls = { version = "0.26" }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = { version = "2" }
 
 [profile.dev.package]
 insta.opt-level = 3

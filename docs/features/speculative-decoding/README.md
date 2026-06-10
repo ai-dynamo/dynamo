@@ -33,7 +33,7 @@ This guide walks through deploying **Meta-Llama-3.1-8B-Instruct** with **Eagle3*
 1. Start infrastructure services:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 ```
 
 2. Build and run the vLLM container:

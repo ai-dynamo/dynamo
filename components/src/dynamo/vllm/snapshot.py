@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dynamo.common.utils.snapshot import CheckpointConfig, EngineSnapshotController
 
 from .args import Config
-from .handlers import VllmEngineQuiesceController
+from .handlers import VllmEnginePauseController
 from .worker_factory import EngineSetupResult
 
 logger = logging.getLogger(__name__)
@@ -36,9 +36,9 @@ async def prepare_snapshot_engine(
     gc.collect()
     snapshot_controller = EngineSnapshotController(
         engine=engine,
-        quiesce_controller=VllmEngineQuiesceController(engine[0]),
+        pause_controller=VllmEnginePauseController(engine[0]),
         checkpoint_config=checkpoint_config,
-        quiesce_args=(None,),
+        pause_args=(None,),
     )
     if not await snapshot_controller.wait_for_restore():
         raise SystemExit(0)

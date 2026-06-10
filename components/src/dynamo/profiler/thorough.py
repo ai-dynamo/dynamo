@@ -51,6 +51,7 @@ from dynamo.profiler.utils.profile_common import (
     get_profiling_job_tolerations,
     inject_tolerations_into_dgd,
     pick_decode_component,
+    resolve_model_path,
 )
 from dynamo.profiler.utils.profile_decode import get_num_request_range
 from dynamo.profiler.utils.profiler_status import ProfilerStatus, write_profiler_status
@@ -391,8 +392,9 @@ async def run_thorough(
 
     # --- Stage 1: Enumeration ---
     model_cache = dgdr.modelCache or ModelCacheSpec()
+    local_or_hf_model = resolve_model_path(dgdr)
     enumerated = enumerate_profiling_configs(
-        model_path=model,
+        model_path=local_or_hf_model,
         system=system,
         backend=backend,
         image=derive_backend_image(dgdr.image, backend),
@@ -540,7 +542,7 @@ async def run_thorough(
     # --- Stage 4: DGD generation ---
     task = TaskConfig(
         serving_mode="disagg",
-        model_path=model,
+        model_path=local_or_hf_model,
         system_name=system,
         backend_name=backend,
         total_gpus=total_gpus,

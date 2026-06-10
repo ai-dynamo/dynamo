@@ -32,12 +32,14 @@ pub mod preprocessor;
 pub mod protocols;
 pub mod recorder;
 pub mod request_template;
+pub mod request_trace;
 pub mod telemetry;
 pub use dynamo_tokenizers as tokenizers;
 pub use dynamo_tokenizers::{file_json_field, log_json_err};
 pub mod tokens;
 pub mod types;
 pub mod utils;
+pub mod worker_type;
 
 #[cfg(feature = "block-manager")]
 pub mod block_manager;

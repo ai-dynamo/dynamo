@@ -107,15 +107,15 @@ Reasoning parsers:
    grammar truly diverges (append-think, Harmony channels). Most new models
    use plain `<think>...</think>` and can share.
 
-4. **Write tests.** Minimum viable set is in [`PARSER_CASES.md`](./PARSER_CASES.md) (`PARSER.*`
-   taxonomy). At minimum: `PARSER.1`/`PARSER.2`/`PARSER.3` for correctness,
-   `PARSER.5` for truncation behavior, `PARSER.8`/`PARSER.9` for streaming
-   with reasoning, and `PARSER.13` for interleaved text. `N/A` categories
+4. **Write tests.** Minimum viable set is in [`TOOLCALLING_CASES.md`](./TOOLCALLING_CASES.md) (`TOOLCALLING.*`
+   taxonomy). At minimum: `TOOLCALLING.1`/`TOOLCALLING.2`/`TOOLCALLING.3` for correctness,
+   `TOOLCALLING.5` for truncation behavior, `TOOLCALLING.8`/`TOOLCALLING.9` for streaming
+   with reasoning, and `TOOLCALLING.13` for interleaved text. `N/A` categories
    should be explicitly called out in a comment rather than silently skipped.
 
 ## Related docs
 
-- [`PARSER_CASES.md`](./PARSER_CASES.md) — corner-case taxonomy. What every
+- [`TOOLCALLING_CASES.md`](./TOOLCALLING_CASES.md) — corner-case taxonomy. What every
   parser should be tested against, what's N/A per family, what's a universal
   gap today.
 - `lib/llm/tests/data/` — captured streaming fixtures per (engine × model)

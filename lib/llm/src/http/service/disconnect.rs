@@ -34,6 +34,7 @@ use futures::{Stream, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::http::service::error::SanitizedError;
 use crate::http::service::metrics::{CancellationLabels, ErrorType, InflightGuard, Metrics};
 
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS as BACKEND_STREAM_TIMEOUT_ENV;
@@ -226,13 +227,17 @@ pub fn monitor_for_disconnects(
                             // doesn't later record this as ClosedUnexpectedly (which
                             // would mis-attribute the fault as a client disconnect).
                             stream_handle.disarm();
-                            // DIS-1768: emit structured OpenAI-style error frame + `data: [DONE]`
-                            // so naive `data:`-line parsers see both the error and a stream terminator.
+                            tracing::error!("Streaming error: {err}");
+                            // Emit a structured OpenAI-style error frame + `data: [DONE]`
+                            // so naive `data:`-line parsers see both the error and a
+                            // stream terminator. Body derived from SanitizedError so
+                            // the sanitized message + status live in one place.
+                            let sanitized = SanitizedError::Internal;
                             let err_json = serde_json::json!({
                                 "error": {
-                                    "message": err.to_string(),
-                                    "type": "internal_server_error",
-                                    "code": 500,
+                                    "message": sanitized.to_string(),
+                                    "type": sanitized.openai_type_slug(),
+                                    "code": sanitized.status().as_u16(),
                                 }
                             });
                             yield Event::default().data(err_json.to_string());
@@ -508,7 +513,7 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
-    // DIS-1768: mid-stream fault SSE contract
+    // mid-stream fault SSE contract
     //
     // When the upstream stream yields `Err(_)` mid-stream — e.g. an upstream
     // worker dies and the mpsc channel reports
@@ -550,9 +555,11 @@ mod tests {
         String::from_utf8(body.to_vec()).expect("utf8 body")
     }
 
-    /// Assert the post-fix SSE fault contract: parsed structured error frame with exact
-    /// message/type/code, positioned before `[DONE]`, and no bare `event: error` trailer.
-    fn assert_fault_contract(case: &str, text: &str, expected_message: &str) {
+    /// Assert the post-fix SSE fault contract: a parsed structured error frame
+    /// carrying the sanitized static message/type/code, positioned before
+    /// `[DONE]`, with no bare `event: error` trailer, and crucially with no trace
+    /// of `leaked_detail` (the raw backend error) anywhere in the body.
+    fn assert_fault_contract(case: &str, text: &str, leaked_detail: &str) {
         let done_pos = text.find("data: [DONE]").unwrap_or_else(|| {
             panic!("[{case}] body does not terminate with `data: [DONE]`. Body:\n{text}")
         });
@@ -582,24 +589,31 @@ mod tests {
             .get("error")
             .and_then(|v| v.as_object())
             .unwrap_or_else(|| panic!("[{case}] `error` field is not an object. Body:\n{text}"));
+        let expected = SanitizedError::Internal;
+        let expected_message = expected.to_string();
         assert_eq!(
             error.get("message").and_then(|v| v.as_str()),
-            Some(expected_message),
-            "[{case}] structured error `message` mismatch. Body:\n{text}"
+            Some(expected_message.as_str()),
+            "[{case}] structured error `message` must be the sanitized static string. Body:\n{text}"
         );
         assert_eq!(
             error.get("type").and_then(|v| v.as_str()),
-            Some("internal_server_error"),
+            Some(expected.openai_type_slug()),
             "[{case}] structured error `type` mismatch. Body:\n{text}"
         );
         assert_eq!(
             error.get("code").and_then(|v| v.as_i64()),
-            Some(500),
+            Some(i64::from(expected.status().as_u16())),
             "[{case}] structured error `code` mismatch. Body:\n{text}"
         );
         assert!(
             !text.contains("event: error\n: "),
             "[{case}] body contains bare `event: error\\n: <comment>` trailer (pre-fix bug). Body:\n{text}"
+        );
+        assert!(
+            !text.contains(leaked_detail),
+            "[{case}] SSE body leaked raw backend error detail to the client. \
+             Expected `{leaked_detail}` to be absent. Body:\n{text}"
         );
     }
 
@@ -609,12 +623,12 @@ mod tests {
     #[serial]
     async fn test_simulate_worker_kill_emits_structured_error_and_done() {
         let (_metrics, guard, ctx, handle) = setup_test("worker-kill-model", "req-wk", "0");
-        let expected_message = "Disconnected: Stream ended before generation completed";
-        let stream = simulate_mid_stream_error(3, expected_message);
+        let backend_detail = "Disconnected: Stream ended before generation completed";
+        let stream = simulate_mid_stream_error(3, backend_detail);
         let monitored = monitor_for_disconnects(stream, ctx, guard, handle);
         let body = collect_sse_body(monitored).await;
         cleanup_env();
-        assert_fault_contract("worker_kill", &body, expected_message);
+        assert_fault_contract("worker_kill", &body, backend_detail);
     }
 
     /// Python chat-processor raises mid-stream → Rust→Python `tx.send()` fails with
@@ -623,11 +637,30 @@ mod tests {
     #[serial]
     async fn test_simulate_python_consumer_drop_emits_structured_error_and_done() {
         let (_metrics, guard, ctx, handle) = setup_test("py-drop-model", "req-py", "0");
-        let expected_message = "Failed to send response: SendError { .. }";
-        let stream = simulate_mid_stream_error(3, expected_message);
+        let backend_detail = "Failed to send response: SendError { .. }";
+        let stream = simulate_mid_stream_error(3, backend_detail);
         let monitored = monitor_for_disconnects(stream, ctx, guard, handle);
         let body = collect_sse_body(monitored).await;
         cleanup_env();
-        assert_fault_contract("python_consumer_drop", &body, expected_message);
+        assert_fault_contract("python_consumer_drop", &body, backend_detail);
+    }
+
+    /// A backend error carrying sensitive internals (file paths, panic text,
+    /// Python exception details) MUST NOT reach the streaming client. The client
+    /// receives only the sanitized static frame; the detail stays server-side.
+    #[tokio::test]
+    #[serial]
+    async fn test_mid_stream_error_does_not_leak_internal_details() {
+        let (_metrics, guard, ctx, handle) = setup_test("leak-model", "req-leak", "0");
+        let backend_detail = "panicked at '/opt/dynamo/lib/python3.12/site-packages/engine/worker.py:512: ValueError: secret tensor shape mismatch'";
+        let stream = simulate_mid_stream_error(2, backend_detail);
+        let monitored = monitor_for_disconnects(stream, ctx, guard, handle);
+        let body = collect_sse_body(monitored).await;
+        cleanup_env();
+        assert_fault_contract("internal_detail_leak", &body, backend_detail);
+        // Spot-check the most damaging fragments explicitly.
+        assert!(!body.contains("site-packages"), "leaked a filesystem path");
+        assert!(!body.contains("panicked at"), "leaked panic text");
+        assert!(!body.contains("ValueError"), "leaked exception type");
     }
 }

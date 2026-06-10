@@ -5,6 +5,8 @@
 issues/
 plans/
 *rendered.Dockerfile
+rendered.*.Dockerfile
+.metrics_parity_*/
 [Bb]inlog/
 [Bb][Uu][Ii][Ll][Dd]/
 [Oo][Bb][Jj]/
@@ -35,7 +37,13 @@ CMakeCache.txt
 *.vcxproj
 *.vcxproj.filters
 *_pb2.py
+*_pb2_grpc.py
 *_pb2.pyi
+# Planner plugin framework: stubs are checked in so test/build environments
+# don't need grpcio-tools or a protoc step just to import the module.
+!components/src/dynamo/planner/plugins/proto/v1/plugin_pb2.py
+!components/src/dynamo/planner/plugins/proto/v1/plugin_pb2_grpc.py
+!components/src/dynamo/planner/plugins/proto/v1/plugin_pb2.pyi
 *.svg
 !docs/assets/**/*.svg
 
@@ -65,6 +73,7 @@ server/
 # Replay/Snapshot test artifacts
 *.new
 lib/llm/tests/data/sample-models/models--meta-llama--Llama-3.1-70B-Instruct/
+lib/llm/tests/data/sample-models/models--openai--gpt-oss-120b/
 
 **/*backups*
 
@@ -118,7 +127,7 @@ core.*
 /.claude/*
 !/.claude/skills
 /.agents/*
-!/.agents/skills/
+!/.agents/skills
 /CLAUDE.md
 /CLAUDE.md.bak
 
@@ -142,3 +151,6 @@ package-lock.json
 # macOS
 .DS_Store
 **/.DS_Store
+
+# HuggingFace hub cache downloaded by tests (never commit; committed fixtures use plain dir names)
+lib/llm/tests/data/sample-models/models--*/

@@ -49,7 +49,7 @@ type DynamoGraphDeploymentHandler struct {
 // NewDynamoGraphDeploymentHandler creates a new handler for DynamoGraphDeployment Webhook.
 // operatorPrincipal is the full Kubernetes SA username of the operator, used to authorize
 // replica changes on scaling-adapter-enabled services (#7656).
-// groveEnabled reflects the operator's runtime config (global.grove.enabled).
+// groveEnabled reflects the operator's runtime Grove configuration.
 func NewDynamoGraphDeploymentHandler(mgr manager.Manager, operatorPrincipal string, groveEnabled bool) *DynamoGraphDeploymentHandler {
 	return &DynamoGraphDeploymentHandler{
 		mgr:               mgr,

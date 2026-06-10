@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: gemma4
+model_label: Gemma 4
+mode: stream
+cases:
+  TOOLCALLING.stream.1.a:
+    description: Complete tool-call payload delivered in one content chunk
+    ref: derived from TOOLCALLING.batch.1
+    chunks:
+    - delta_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}<tool_call|>
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools: &id002
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang: *id001
+      vllm:
+        calls: []
+        normal_text: ''
+        reason: vLLM's Gemma4 streaming parser misses a complete one-chunk tool call when start and end markers arrive in the same delta; Dynamo and SGLang parse the complete call.
+  TOOLCALLING.stream.1.b:
+    description: Complete tool call split across parser-significant boundaries
+    ref: derived from TOOLCALLING.batch.1
+    chunks:
+    - delta_text: <|tool_call>
+    - delta_text: 'call:'
+    - delta_text: get_weather
+    - delta_text: '{location:'
+    - delta_text: <|"|>
+    - delta_text: NYC
+    - delta_text: <|"|>}
+    - delta_text: <tool_call|>
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools: *id002
+    expected:
+      dynamo: &id003
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang: *id003
+      vllm: *id003

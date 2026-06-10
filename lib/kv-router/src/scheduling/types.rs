@@ -2,16 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use super::config::RouterConfigOverride;
+use super::filter::RoutingEligibility;
 use crate::protocols::{
-    DpRank, RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    DpRank, RouterBackpressureReason, RoutingConstraints, SharedCacheHits, WorkerConfigLike,
+    WorkerId, WorkerWithDpRank,
 };
 use crate::sequences::PrefillTokenDeltas;
+
+pub type OverloadedWorkerProvider =
+    Arc<dyn Fn() -> Option<HashSet<WorkerId>> + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TierOverlapBlocks {
@@ -36,14 +42,43 @@ pub enum KvSchedulerError {
     #[error("no endpoints available to route work")]
     NoEndpoints,
 
+    #[error(
+        "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
+    )]
+    Backpressure {
+        reason: RouterBackpressureReason,
+        queued_isl_tokens: usize,
+        max_queued_isl_tokens: Option<usize>,
+    },
+
+    #[error("all eligible workers are overloaded")]
+    AllEligibleWorkersOverloaded,
+
+    #[error("pinned worker {worker_id} is overloaded")]
+    PinnedWorkerOverloaded { worker_id: WorkerId },
+
     #[error("pinned worker {worker_id} is not in allowed worker set")]
     PinnedWorkerNotAllowed { worker_id: WorkerId },
 
     #[error("endpoint subscriber shutdown")]
     SubscriberShutdown,
 
+    #[error("failed to book scheduler state: {0}")]
+    BookingFailed(String),
+
     #[error("failed to initialize event publisher: {0}")]
     InitFailed(String),
+}
+
+impl KvSchedulerError {
+    pub fn is_overload(&self) -> bool {
+        matches!(
+            self,
+            Self::Backpressure { .. }
+                | Self::AllEligibleWorkersOverloaded
+                | Self::PinnedWorkerOverloaded { .. }
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -82,90 +117,6 @@ pub struct SchedulingRequest {
     // Scheduling side effects and lifecycle controls.
     pub update_states: bool,
     pub resp_tx: Option<tokio::sync::oneshot::Sender<Result<SchedulingResponse, KvSchedulerError>>>,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct RoutingEligibility<'a> {
-    allowed_worker_ids: Option<&'a HashSet<WorkerId>>,
-    pinned_worker: Option<WorkerWithDpRank>,
-    routing_constraints: &'a RoutingConstraints,
-}
-
-impl<'a> RoutingEligibility<'a> {
-    #[inline]
-    pub(crate) fn new(
-        allowed_worker_ids: Option<&'a HashSet<WorkerId>>,
-        pinned_worker: Option<WorkerWithDpRank>,
-        routing_constraints: &'a RoutingConstraints,
-    ) -> Self {
-        Self {
-            allowed_worker_ids,
-            pinned_worker,
-            routing_constraints,
-        }
-    }
-
-    #[inline]
-    pub(crate) fn pinned_worker(&self) -> Option<WorkerWithDpRank> {
-        self.pinned_worker
-    }
-
-    #[inline]
-    pub(crate) fn allows_worker_id(&self, worker_id: WorkerId) -> bool {
-        self.allowed_worker_ids
-            .is_none_or(|worker_ids| worker_ids.contains(&worker_id))
-    }
-
-    #[inline]
-    pub(crate) fn allows_worker<C: WorkerConfigLike>(
-        &self,
-        worker_id: WorkerId,
-        config: &C,
-    ) -> bool {
-        self.allows_worker_id(worker_id)
-            && self
-                .routing_constraints
-                .is_compatible_with_worker_taints(config.taints())
-    }
-
-    #[inline]
-    pub(crate) fn has_eligible_worker<'w, C, I>(&self, workers: I) -> bool
-    where
-        C: WorkerConfigLike + 'w,
-        I: IntoIterator<Item = (WorkerId, &'w C)>,
-    {
-        for (worker_id, config) in workers {
-            if !self.allows_worker_id(worker_id) {
-                continue;
-            }
-
-            if self.allows_worker(worker_id, config) {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    #[inline]
-    pub(crate) fn validate_pinned_worker(&self) -> Result<(), KvSchedulerError> {
-        let Some(pinned_worker) = self.pinned_worker else {
-            return Ok(());
-        };
-
-        if self.allows_worker_id(pinned_worker.worker_id) {
-            return Ok(());
-        }
-
-        Err(KvSchedulerError::PinnedWorkerNotAllowed {
-            worker_id: pinned_worker.worker_id,
-        })
-    }
-
-    #[inline]
-    pub(crate) fn bypasses_capacity_check(&self) -> bool {
-        self.pinned_worker.is_none() && self.allowed_worker_ids.is_some()
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -211,9 +162,18 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
 
 impl SchedulingRequest {
     #[inline]
-    pub(crate) fn eligibility(&self) -> RoutingEligibility<'_> {
+    pub fn eligibility(&self) -> RoutingEligibility<'_> {
+        self.eligibility_with_overloaded(None)
+    }
+
+    #[inline]
+    pub fn eligibility_with_overloaded<'a>(
+        &'a self,
+        overloaded_worker_ids: Option<&'a HashSet<WorkerId>>,
+    ) -> RoutingEligibility<'a> {
         RoutingEligibility::new(
             self.allowed_worker_ids.as_ref(),
+            overloaded_worker_ids,
             self.pinned_worker,
             &self.routing_constraints,
         )
@@ -291,29 +251,19 @@ impl SchedulingRequest {
         self.isl_tokens.div_ceil(block_size as usize) as u64
     }
 
-    pub fn respond(&mut self, result: Result<SchedulingResponse, KvSchedulerError>) {
+    pub(crate) fn response_is_closed(&self) -> bool {
+        self.resp_tx.as_ref().is_none_or(|tx| tx.is_closed())
+    }
+
+    pub fn respond(&mut self, result: Result<SchedulingResponse, KvSchedulerError>) -> bool {
         let Some(tx) = self.resp_tx.take() else {
             tracing::error!("respond called multiple times on same request");
-            return;
+            return false;
         };
         if tx.send(result).is_err() {
-            tracing::error!("failed to send response to requestor");
+            tracing::debug!("requestor dropped scheduling response");
+            return false;
         }
+        true
     }
-}
-
-pub fn pinned_worker_config<C: WorkerConfigLike>(
-    workers: &HashMap<WorkerId, C>,
-    worker: WorkerWithDpRank,
-) -> Result<&C, KvSchedulerError> {
-    let Some(config) = workers.get(&worker.worker_id) else {
-        return Err(KvSchedulerError::NoEndpoints);
-    };
-    let dp_start_rank = config.data_parallel_start_rank();
-    let dp_end_rank = dp_start_rank + config.data_parallel_size();
-    if !(dp_start_rank..dp_end_rank).contains(&worker.dp_rank) {
-        return Err(KvSchedulerError::NoEndpoints);
-    }
-
-    Ok(config)
 }

@@ -25,6 +25,7 @@ use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
+use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::discovery::Discovery;
@@ -70,6 +71,7 @@ struct StateFlags {
     images_endpoints_enabled: AtomicBool,
     videos_endpoints_enabled: AtomicBool,
     audios_endpoints_enabled: AtomicBool,
+    realtime_endpoints_enabled: AtomicBool,
     responses_endpoints_enabled: AtomicBool,
     anthropic_endpoints_enabled: AtomicBool,
 }
@@ -83,6 +85,7 @@ impl StateFlags {
             EndpointType::Images => self.images_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Videos => self.videos_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Audios => self.audios_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Realtime => self.realtime_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Responses => self.responses_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::AnthropicMessages => {
                 self.anthropic_endpoints_enabled.load(Ordering::Relaxed)
@@ -109,6 +112,9 @@ impl StateFlags {
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Audios => self
                 .audios_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Realtime => self
+                .realtime_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Responses => self
                 .responses_endpoints_enabled
@@ -137,6 +143,7 @@ impl State {
                 images_endpoints_enabled: AtomicBool::new(false),
                 videos_endpoints_enabled: AtomicBool::new(false),
                 audios_endpoints_enabled: AtomicBool::new(false),
+                realtime_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
                 anthropic_endpoints_enabled: AtomicBool::new(false),
             },
@@ -209,6 +216,9 @@ pub struct HttpService {
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     route_docs: Vec<RouteDoc>,
+    /// RL worker discovery router, served on a dedicated port when enabled.
+    rl_router: Option<axum::Router>,
+    rl_port: u16,
 }
 
 #[derive(Clone, Builder)]
@@ -264,6 +274,25 @@ pub struct HttpServiceConfig {
     /// are registered using discovery.instance_id() and exposed on /metrics.
     #[builder(default = "None")]
     drt_discovery: Option<Arc<dyn Discovery>>,
+
+    /// When true, serve the RL worker discovery API on `rl_port`.
+    #[builder(default = "false")]
+    enable_rl: bool,
+
+    /// Port for the RL worker discovery listener. Defaults to `DYN_RL_PORT` or 8001.
+    #[builder(default = "default_rl_port()")]
+    rl_port: u16,
+
+    /// Distributed runtime used by the RL worker discovery API.
+    #[builder(default = "None")]
+    runtime: Option<Arc<DistributedRuntime>>,
+}
+
+fn default_rl_port() -> u16 {
+    std::env::var("DYN_RL_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8001)
 }
 
 impl HttpService {
@@ -372,6 +401,8 @@ impl HttpService {
                 .handle(handle.clone())
                 .serve(router.into_make_service());
 
+            self.spawn_rl_listener_if_configured(&cancel_token).await?;
+
             // Spawn canary after all fallible startup so it won't leak on early errors
             tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
 
@@ -420,6 +451,8 @@ impl HttpService {
                 }
             };
 
+            self.spawn_rl_listener_if_configured(&cancel_token).await?;
+
             // Spawn canary after all fallible startup so it won't leak on early errors
             tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
 
@@ -438,6 +471,43 @@ impl HttpService {
             cancel_token.cancel();
         }
 
+        Ok(())
+    }
+
+    async fn spawn_rl_listener_if_configured(
+        &self,
+        cancel_token: &CancellationToken,
+    ) -> Result<()> {
+        let Some(rl_router) = self.rl_router.clone() else {
+            return Ok(());
+        };
+        let rl_addr = format!("{}:{}", self.host, self.rl_port);
+        // Bind eagerly and fail fast: when RL discovery is enabled, a bind failure
+        // should abort service startup rather than silently leave RL discovery
+        // unavailable while the main HTTP service keeps running.
+        let listener = tokio::net::TcpListener::bind(&rl_addr).await.map_err(|e| {
+            tracing::error!(
+                address = %rl_addr,
+                error = %e,
+                "Failed to bind RL worker discovery listener"
+            );
+            anyhow::anyhow!("Failed to bind RL worker discovery listener on {rl_addr}: {e}")
+        })?;
+        tracing::info!(
+            address = %rl_addr,
+            "RL worker discovery listener started"
+        );
+        let rl_cancel = cancel_token.child_token();
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, rl_router)
+                .with_graceful_shutdown(async move {
+                    rl_cancel.cancelled_owned().await;
+                })
+                .await
+            {
+                tracing::error!("RL worker discovery listener error: {e}");
+            }
+        });
         Ok(())
     }
 
@@ -602,13 +672,6 @@ impl HttpServiceConfigBuilder {
             inference_router = inference_router.merge(route);
             all_docs.extend(route_docs);
         }
-        // Experimental WebSocket endpoint (`/v1/realtime`) — see #9173 ("Streaming Request Support").
-        // Registered unconditionally; the underlying engine is opt-in via
-        // `crate::http::service::realtime::install_engine`. If no engine is installed when
-        // a connection arrives, the handler closes with an error frame.
-        let (realtime_docs, realtime_route) = super::realtime::realtime_router(state.clone(), None);
-        inference_router = inference_router.merge(realtime_route);
-        all_docs.extend(realtime_docs);
         inference_router = inference_router.layer(
             TraceLayer::new_for_http()
                 .make_span_with(make_inference_request_span)
@@ -632,6 +695,30 @@ impl HttpServiceConfigBuilder {
         // Echo x-request-id from request to response headers for client correlation
         let router = router.layer(axum::middleware::from_fn(echo_request_id_header));
 
+        let enable_rl_router = config.enable_rl || env_is_truthy("DYN_ENABLE_RL");
+        let rl_router = if enable_rl_router {
+            let Some(drt) = config.runtime.as_ref() else {
+                return Err(anyhow::anyhow!(
+                    "RL worker discovery was requested (DYN_ENABLE_RL=true \
+                     or enable_rl) but HttpServiceConfig.runtime is not set."
+                ));
+            };
+            let router = super::openai::rl_router(drt.clone())?;
+            tracing::info!(
+                rl_port = config.rl_port,
+                "RL worker discovery enabled at /v1/rl/workers"
+            );
+            Some(
+                router.layer(
+                    TraceLayer::new_for_http()
+                        .make_span_with(make_system_request_span)
+                        .on_response(on_response),
+                ),
+            )
+        } else {
+            None
+        };
+
         Ok(HttpService {
             state,
             router,
@@ -641,6 +728,8 @@ impl HttpServiceConfigBuilder {
             tls_cert_path: config.tls_cert_path,
             tls_key_path: config.tls_key_path,
             route_docs: all_docs,
+            rl_router,
+            rl_port: config.rl_port,
         })
     }
 
@@ -667,6 +756,7 @@ impl HttpServiceConfigBuilder {
         let (images_docs, images_route) = super::openai::images_router(state.clone(), None);
         let (videos_docs, videos_route) = super::openai::videos_router(state.clone(), None);
         let (audios_docs, audios_route) = super::openai::audios_router(state.clone(), None);
+        let (realtime_docs, realtime_route) = super::realtime::realtime_router(state.clone(), None);
         let (responses_docs, responses_route) = super::openai::responses_router(
             state.clone(),
             request_template.clone(),
@@ -679,6 +769,7 @@ impl HttpServiceConfigBuilder {
         endpoint_routes.insert(EndpointType::Images, (images_docs, images_route));
         endpoint_routes.insert(EndpointType::Videos, (videos_docs, videos_route));
         endpoint_routes.insert(EndpointType::Audios, (audios_docs, audios_route));
+        endpoint_routes.insert(EndpointType::Realtime, (realtime_docs, realtime_route));
         endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
 
         if env_is_truthy(env_llm::DYN_ENABLE_ANTHROPIC_API) {

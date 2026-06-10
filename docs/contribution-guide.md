@@ -1,11 +1,14 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Contribution Guide
 subtitle: How to contribute to Dynamo
 max-toc-depth: 3
 ---
 
-# Contribution Guide
+<p align="left">
+  <a href="./contribution-guide.zh-CN.md" hreflang="zh-CN"><img src="./assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
+</p>
 
 Dynamo is an open-source distributed inference platform, built by a growing community of contributors. The project is licensed under [Apache 2.0](https://github.com/ai-dynamo/dynamo/blob/main/LICENSE) and welcomes contributions of all sizes -- from typo fixes to major features. Community contributions have shaped core areas of Dynamo including backend integrations, documentation, deployment tooling, and performance improvements.
 
@@ -383,7 +386,7 @@ Dynamo requires all contributions to be signed off with the [Developer Certifica
 Each commit must include a sign-off line:
 
 ```text
-Signed-off-by: Jane Smith &lt;jane.smith@email.com&gt;
+Signed-off-by: Jane Smith <jane.smith@email.com>
 ```
 
 Add this automatically with the `-s` flag:

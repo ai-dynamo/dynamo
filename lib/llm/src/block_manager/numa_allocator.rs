@@ -24,7 +24,14 @@ pub fn is_numa_enabled() -> bool {
     if dynamo_memory::numa::is_numa_disabled() {
         return false;
     }
-    dynamo_config::env_is_truthy("DYN_KVBM_ENABLE_NUMA")
+    env_is_truthy("DYN_KVBM_ENABLE_NUMA")
+}
+
+fn env_is_truthy(env: &str) -> bool {
+    match std::env::var(env) {
+        Ok(val) => matches!(val.to_lowercase().as_str(), "1" | "true" | "on" | "yes"),
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]

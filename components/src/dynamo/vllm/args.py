@@ -120,6 +120,22 @@ def parse_args(argv: list[str] | None = None) -> Config:
     return dynamo_config
 
 
+def configure_rl_logprobs_mode(config: Config) -> None:
+    if not config.enable_rl:
+        return
+
+    if config.engine_args.logprobs_mode == "raw_logprobs":
+        config.engine_args.logprobs_mode = "processed_logprobs"
+        logger.info("Defaulting logprobs_mode=processed_logprobs (--enable-rl active).")
+        return
+
+    if config.engine_args.logprobs_mode != "processed_logprobs":
+        raise ValueError(
+            "--enable-rl requires logprobs_mode=processed_logprobs; "
+            f"got {config.engine_args.logprobs_mode!r}."
+        )
+
+
 def cross_validate_config(
     dynamo_config: Config, engine_config: AsyncEngineArgs
 ) -> None:
@@ -237,9 +253,7 @@ def update_engine_config_with_dynamo(
     if _uses_nixl_connector(engine_config):
         ensure_side_channel_host()
 
-    defaults = {
-        # vLLM 0.13+ renamed 'task' to 'runner'
-        "runner": "generate",
+    defaults: Dict[str, Any] = {
         # As of vLLM >=0.10.0 the engine unconditionally calls
         # `sampling_params.update_from_tokenizer(...)`, so we can no longer
         # skip tokenizer initialisation.  Setting this to **False** avoids
@@ -248,6 +262,9 @@ def update_engine_config_with_dynamo(
         "enable_log_requests": False,
         "disable_log_stats": False,
     }
+
+    if hasattr(engine_config, "runner"):
+        logger.debug(f"Using runner={engine_config.runner} from engine args")
 
     kv_cfg = create_kv_events_config(dynamo_config, engine_config)
     defaults["kv_events_config"] = kv_cfg
