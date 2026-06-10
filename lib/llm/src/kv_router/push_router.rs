@@ -778,6 +778,21 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let route_outcome = self.sticky.on_routed(&request, worker, &context_id).await?;
         let deferred_close = route_outcome.deferred_close;
 
+        // exp-H (gap #4): confirm the conversation_id (seeded by the preprocessor from
+        // session_control) is on the routing we dispatch to the worker. PERF-SAFE: the FIRST
+        // routed request logs at INFO/WARN (one-shot) so propagation is confirmable WITHOUT
+        // enabling debug at benchmark time; subsequent requests are debug-only. grep "exp-H convid".
+        {
+            static FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            let first = !FIRST.swap(true, std::sync::atomic::Ordering::Relaxed);
+            match request.routing.as_ref().and_then(|r| r.conversation_id.as_deref()) {
+                Some(cid) if first => tracing::info!(request_id = %context_id, conversation_id = %cid, dp_rank, "exp-H convid forwarded to worker (first; rest at debug)"),
+                Some(cid) => tracing::debug!(request_id = %context_id, conversation_id = %cid, dp_rank, "exp-H convid forwarded to worker"),
+                None if first => tracing::warn!(request_id = %context_id, dp_rank, "exp-H convid ABSENT on first routed request — conv-affinity will NOT engage (session_control missing?)"),
+                None => tracing::debug!(request_id = %context_id, dp_rank, "exp-H convid ABSENT"),
+            }
+        }
+
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(dp_rank);
         let updated_request = context.map(|_| backend_input);

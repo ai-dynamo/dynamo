@@ -26,6 +26,17 @@ def forced_dp_rank(request: GenerateRequest) -> Optional[int]:
     return None if rank is None else int(rank)
 
 
+def conversation_id_from_request(request: GenerateRequest) -> Optional[str]:
+    """Pull the conversation/session id the frontend KV router forwards in
+    ``request.routing.conversation_id`` (exp H / gap #4). Populates
+    ``disaggregated_params.conversation_id`` so the engine's conversation-affinity
+    ADP router can pin a conversation to a DP rank. Returns ``None`` when absent
+    or empty."""
+    routing = cast("dict[str, Any]", request.get("routing") or {})
+    conv_id = routing.get("conversation_id")
+    return conv_id if conv_id else None
+
+
 def validate_global_dp_rank(
     dp_rank: Optional[int],
     dp_start: int,

@@ -35,7 +35,11 @@ from torch.cuda import device_count
 from dynamo._core import Context
 from dynamo.common.backend import telemetry
 from dynamo.common.backend.disagg import require_prefill_result
-from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
+from dynamo.common.backend.dp_rank import (
+    conversation_id_from_request,
+    forced_dp_rank,
+    validate_global_dp_rank,
+)
 from dynamo.common.backend.engine import (
     TEST_LOGITS_PROCESSOR_ENV,
     EngineConfig,
@@ -368,6 +372,16 @@ class TrtllmLLMEngine(LLMEngine):
         ) or getattr(self._trtllm_metrics_collector, "log_metrics_dict", None)
 
         self._attention_dp_size = self._engine.get_attention_dp_size()
+        # exp-H (gap #4): engine conversation-affinity mode. When ON, the worker does NOT
+        # force attention_dp_rank — it sets disaggregated_params.conversation_id and lets the
+        # engine's ConversationAwareADPRouter pick the rank (round-robin balanced + sticky).
+        self._engine_conv_affinity = os.environ.get("DYN_ENGINE_CONV_AFFINITY") == "1"
+        logger.info(
+            "exp-H: engine conversation-affinity mode = %s (DYN_ENGINE_CONV_AFFINITY); attention_dp_size=%d",
+            "ON" if self._engine_conv_affinity else "OFF",
+            self._attention_dp_size,
+        )
+        self._convid_first_logged = False
         # Always start the metrics-poll thread: it pushes the latest
         # ComponentSnapshot into the framework's SnapshotPublisher and
         # forwards each snap to `_log_iteration_stats` for `trtllm_kv_cache_*`.
@@ -789,6 +803,31 @@ class TrtllmLLMEngine(LLMEngine):
             )
             disaggregated_params = self._decode_prefill_handoff(prefill_result)
 
+        # exp H (gap #4): forward the conversation/session id (set by the frontend KV
+        # router into RoutingHints.conversation_id) onto disaggregated_params so the
+        # engine's conversation-affinity ADP router can pin conv -> DP rank.
+        conv_id = conversation_id_from_request(request)
+        if disaggregated_params is not None and conv_id is not None:
+            disaggregated_params.conversation_id = conv_id
+        # exp-H (gap #4): confirm propagation at run time. PERF-SAFE: log the FIRST request at
+        # INFO (one-shot) so it's confirmable WITHOUT enabling debug at benchmark time; rest debug.
+        _set_on_disagg = disaggregated_params is not None and conv_id is not None
+        if not self._convid_first_logged:
+            self._convid_first_logged = True
+            logger.info(
+                "exp-H convid FIRST: conv_id=%s set_on_disagg=%s engine_conv_affinity=%s (rest at debug)",
+                conv_id,
+                _set_on_disagg,
+                self._engine_conv_affinity,
+            )
+        else:
+            logger.debug(
+                "exp-H convid: conv_id=%s set_on_disagg=%s engine_conv_affinity=%s",
+                conv_id,
+                _set_on_disagg,
+                self._engine_conv_affinity,
+            )
+
         stop_conditions = request.get("stop_conditions", {})
         if is_prefill:
             # Prefill only needs to populate KV — one token is enough.
@@ -804,16 +843,22 @@ class TrtllmLLMEngine(LLMEngine):
         if ignore_eos:
             sampling_params.ignore_eos = ignore_eos
 
-        # Honour the router's DP rank decision; without it TRT-LLM picks
-        # its own rank and KV events land on the wrong publisher.
-        rank = validate_global_dp_rank(
-            forced_dp_rank(request), 0, self._attention_dp_size, "TRT-LLM"
-        )
-        scheduling_params = (
-            SchedulingParams(attention_dp_rank=rank, attention_dp_relax=False)
-            if rank is not None
-            else None
-        )
+        # exp H (gap #4): in engine conversation-affinity mode (DYN_ENGINE_CONV_AFFINITY=1)
+        # do NOT force the rank — let the engine's ConversationAwareADPRouter pick it from
+        # disaggregated_params.conversation_id (round-robin balanced + sticky), matching
+        # native trtllm-serve. Otherwise honour the frontend KV router's DP rank decision
+        # (without it TRT-LLM picks its own rank and KV events land on the wrong publisher).
+        if self._engine_conv_affinity:
+            scheduling_params = None
+        else:
+            rank = validate_global_dp_rank(
+                forced_dp_rank(request), 0, self._attention_dp_size, "TRT-LLM"
+            )
+            scheduling_params = (
+                SchedulingParams(attention_dp_rank=rank, attention_dp_relax=False)
+                if rank is not None
+                else None
+            )
 
         entries = logits_processors_for_request(
             self._logits_processor_spec,

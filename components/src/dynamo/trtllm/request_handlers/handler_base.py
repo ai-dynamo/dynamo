@@ -34,6 +34,7 @@ from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Client, Context
+from dynamo.common.backend.dp_rank import conversation_id_from_request
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.llm.exceptions import EngineShutdown
@@ -61,6 +62,11 @@ if TYPE_CHECKING:
 configure_dynamo_logging()
 
 logger = logging.getLogger(__name__)
+
+
+# exp-H (gap #4): one-shot runtime-verification flag (perf-safe — logs once at INFO so the
+# conversation_id plumbing can be confirmed without enabling debug at benchmark time).
+_EXPH_FIRST_LOGGED = False
 
 
 class TRTLLMEnginePauseController:
@@ -793,6 +799,13 @@ class HandlerBase(BaseGenerativeHandler):
             # For full EPD flow, make decoded params available to multimodal processor
             ep_disaggregated_params = disaggregated_params
 
+        # exp-H (gap #4): plumb conversation_id (frontend seeded routing.conversation_id from
+        # nvext.session_control) onto disaggregated_params so the engine's ConversationAwareADPRouter
+        # can pin conv -> DP rank. Covers PREFILL (context_only) / AGGREGATED / DECODE (generation_only).
+        _conv_id = conversation_id_from_request(request)
+        if disaggregated_params is not None and _conv_id is not None:
+            disaggregated_params.conversation_id = _conv_id
+
         return disaggregated_params, ep_disaggregated_params, epd_metadata
 
     async def _prepare_input_for_generation(
@@ -1139,14 +1152,36 @@ class HandlerBase(BaseGenerativeHandler):
         # Extract dp_rank from request's routing hints for attention DP routing
         routing = request.get("routing", {})
         dp_rank = routing.get("dp_rank") if routing else None
+        # exp-H (gap #4): when DYN_ENGINE_CONV_AFFINITY=1, do NOT force attention_dp_rank — the
+        # engine's ConversationAwareADPRouter must pick the rank from disaggregated_params.conversation_id.
+        # An explicit attention_dp_rank is honored BEFORE conv-affinity in the engine and would bypass it.
+        engine_conv_affinity = os.environ.get("DYN_ENGINE_CONV_AFFINITY") == "1"
         scheduling_params = None
-        if dp_rank is not None:
+        if dp_rank is not None and not engine_conv_affinity:
             scheduling_params = SchedulingParams(
                 attention_dp_rank=dp_rank,
                 attention_dp_relax=False,  # Strict routing - use the rank dynamo router selected
             )
             logging.debug(
                 f"Using dynamo router dp_rank={dp_rank} for TRTLLM attention DP scheduling"
+            )
+        # exp-H one-shot runtime verification (perf-safe; visible with debug OFF). Confirms the two
+        # invariants the engine conv-affinity router needs: conversation_id set + rank NOT forced.
+        global _EXPH_FIRST_LOGGED
+        if not _EXPH_FIRST_LOGGED:
+            _EXPH_FIRST_LOGGED = True
+            _cid = (
+                disaggregated_params.conversation_id
+                if disaggregated_params is not None
+                else None
+            )
+            logging.info(
+                "exp-H FIRST req: conversation_id=%s attention_dp_rank_forced=%s "
+                "engine_conv_affinity=%s disagg_mode=%s (subsequent requests silent)",
+                _cid,
+                scheduling_params is not None,
+                engine_conv_affinity,
+                self.disaggregation_mode,
             )
 
         # Priority is a float in [0.0, 1.0]; health checks use 1.0. Default is 0.5.

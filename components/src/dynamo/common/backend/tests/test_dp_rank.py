@@ -7,7 +7,11 @@ from __future__ import annotations
 
 import pytest
 
-from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
+from dynamo.common.backend.dp_rank import (
+    conversation_id_from_request,
+    forced_dp_rank,
+    validate_global_dp_rank,
+)
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
@@ -21,6 +25,20 @@ def test_forced_dp_rank_coerces_to_int():
     # Router payloads come in JSON, so numeric-ish strings can appear.
     assert forced_dp_rank({"token_ids": [], "routing": {"dp_rank": "2"}}) == 2
     assert forced_dp_rank({"token_ids": [], "routing": {"dp_rank": 3}}) == 3
+
+
+def test_conversation_id_from_request():
+    # exp H (gap #4): the frontend KV router forwards the session id as
+    # routing.conversation_id; the worker reads it to drive engine conv-affinity.
+    assert conversation_id_from_request({"token_ids": [1]}) is None
+    assert conversation_id_from_request({"token_ids": [1], "routing": {}}) is None
+    assert conversation_id_from_request({"routing": {"conversation_id": ""}}) is None
+    assert (
+        conversation_id_from_request(
+            {"token_ids": [], "routing": {"conversation_id": "conv-a:abc123", "dp_rank": 2}}
+        )
+        == "conv-a:abc123"
+    )
 
 
 def test_validate_global_dp_rank_passes_in_range():

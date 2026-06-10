@@ -55,6 +55,12 @@ pub struct RoutingHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dp_rank: Option<u32>,
 
+    /// Conversation/session id forwarded to the worker so the engine's
+    /// conversation-affinity ADP router can pin conv -> DP rank (exp H / gap #4).
+    /// Sourced from `session_control.session_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+
     /// Data parallel rank for the prefill worker in disaggregated serving
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill_dp_rank: Option<u32>,
