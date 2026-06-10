@@ -16,6 +16,14 @@ slow-timeout = { period = "60s", terminate-after = 2 }
 [profile.ci.junit]
 path = "junit.xml"
 
+# test_span_events spawns a `cargo test` subprocess (it needs a fresh process with
+# specific logging env vars, since logging init is process-global via a `Once`), which
+# is legitimately slow under nextest — not a hang. Give it headroom above the default
+# hang-detection cap so it isn't terminated, while everything else keeps the tight cap.
+[[profile.ci.overrides]]
+filter = "test(test_span_events)"
+slow-timeout = { period = "120s", terminate-after = 3 }
+
 # Secondary profile for jobs that run nextest twice (e.g. a follow-up suite in the
 # same job). nextest writes one report per profile with no append, so a second run
 # under "ci" would clobber the first; "ci-aux" keeps it at
