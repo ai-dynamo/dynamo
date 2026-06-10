@@ -248,6 +248,23 @@ impl ModelManager {
             .collect()
     }
 
+    /// Display names filtered to models that can actually serve a request right
+    /// now — displayable AND with a complete worker set in at least one
+    /// namespace ([`Model::has_ready_workers`]). This is the gate the HTTP
+    /// listing/default-model paths should apply so a registered-but-incomplete
+    /// deployment (e.g. decode-only with no prefill peer) is neither advertised
+    /// nor chosen as an implicit default.
+    pub fn serving_ready_display_names(&self) -> HashSet<String> {
+        self.models
+            .iter()
+            .filter(|entry| {
+                let model = entry.value();
+                model.is_displayable() && model.has_ready_workers()
+            })
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
     pub fn list_chat_completions_models(&self) -> Vec<String> {
         self.models
             .iter()
