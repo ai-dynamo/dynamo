@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -253,22 +254,21 @@ func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.
 	checkpointPIDs := append([]int(nil), cudaPIDs...)
 	slices.Reverse(checkpointPIDs)
 	log.V(1).Info("Locking CUDA process tree", "pids", checkpointPIDs)
-	for _, pid := range checkpointPIDs {
-		if state, ok := getCheckpointState(ctx, pid, log); ok {
+	if err := runPIDPhase(ctx, checkpointPIDs, "lock", func(phaseCtx context.Context, pid int) error {
+		if state, ok := getCheckpointState(phaseCtx, pid, log); ok {
 			if state == "checkpointed" {
 				log.V(1).Info("CUDA process already checkpointed", "pid", pid)
-				continue
+				return nil
 			}
 			if state == "locked" {
 				log.V(1).Info("CUDA process already locked", "pid", pid)
-			} else if err := lock(ctx, pid, log); err != nil {
-				timings.TotalDuration = time.Since(start)
-				return timings, err
+				return nil
 			}
-		} else if err := lock(ctx, pid, log); err != nil {
-			timings.TotalDuration = time.Since(start)
-			return timings, err
 		}
+		return lock(phaseCtx, pid, log)
+	}); err != nil {
+		timings.TotalDuration = time.Since(start)
+		return timings, err
 	}
 
 	log.V(1).Info("Checkpointing locked CUDA process tree", "pids", checkpointPIDs)
@@ -287,16 +287,59 @@ func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.
 	return timings, nil
 }
 
+func runPIDPhase(ctx context.Context, pids []int, phase string, fn func(context.Context, int) error) error {
+	if len(pids) == 0 {
+		return nil
+	}
+
+	phaseCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, len(pids))
+	var wg sync.WaitGroup
+	for _, pid := range pids {
+		pid := pid
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := fn(phaseCtx, pid); err != nil {
+				errCh <- fmt.Errorf("%s pid %d: %w", phase, pid, err)
+				cancel()
+			}
+		}()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-phaseCtx.Done():
+		<-done
+	}
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
 // RestoreAndUnlockProcessTree restores and unlocks CUDA state for the given PIDs.
 func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap string, log logr.Logger) (RestorePhaseTimings, error) {
 	var timings RestorePhaseTimings
 
 	start := time.Now()
-	for _, pid := range cudaPIDs {
-		if err := restoreProcess(ctx, pid, deviceMap, log); err != nil {
-			timings.TotalDuration = time.Since(start)
-			return timings, err
-		}
+	if err := runPIDPhase(ctx, cudaPIDs, "restore", func(phaseCtx context.Context, pid int) error {
+		return restoreProcess(phaseCtx, pid, deviceMap, log)
+	}); err != nil {
+		timings.TotalDuration = time.Since(start)
+		return timings, err
 	}
 
 	for _, pid := range cudaPIDs {

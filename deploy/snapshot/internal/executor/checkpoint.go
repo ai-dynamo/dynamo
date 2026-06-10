@@ -18,7 +18,6 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/criu"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/nccl"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
@@ -257,17 +256,6 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 
 	// CUDA lock+checkpoint must happen before CRIU dump
 	if len(state.CUDAHostPIDs) > 0 {
-		ncclTimings, ran, err := nccl.PrepareConfiguredProcessTree(ctx, state.CUDAHostPIDs, log)
-		if err != nil {
-			return nil, fmt.Errorf("NCCL checkpoint prepare failed: %w", err)
-		}
-		if ran {
-			log.Info("NCCL checkpoint prepare completed",
-				"duration", ncclTimings.TotalDuration.String(),
-				"pids", state.CUDAHostPIDs,
-			)
-		}
-
 		cudaTimings, err := cuda.LockAndCheckpointProcessTree(ctx, state.CUDAHostPIDs, log)
 		if err != nil {
 			return nil, fmt.Errorf("CUDA checkpoint failed: %w", err)

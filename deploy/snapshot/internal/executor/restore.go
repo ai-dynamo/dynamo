@@ -41,7 +41,6 @@ type RestoreRequest struct {
 // RestoreResult is the host-side result of an external restore.
 type RestoreResult struct {
 	PlaceholderHostPID int
-	RestoredCUDAPIDs   []int
 }
 
 // Restore performs external restore for the given request.
@@ -122,7 +121,6 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 
 	return &RestoreResult{
 		PlaceholderHostPID: snap.PlaceholderPID,
-		RestoredCUDAPIDs:   result.RestoredCUDAPIDs,
 	}, nil
 }
 

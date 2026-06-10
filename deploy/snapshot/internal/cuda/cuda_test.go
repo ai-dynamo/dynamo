@@ -130,15 +130,30 @@ printf '%s:%s\n' "$action" "$pid" >> "$HELPER_ACTIONS_PATH"
 	}
 	got := strings.Split(strings.TrimSpace(string(data)), "\n")
 	want := []string{
-		"lock:103",
-		"lock:102",
-		"lock:101",
 		"checkpoint:103",
 		"checkpoint:102",
 		"checkpoint:101",
 	}
-	if strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("helper actions = %q, want %q", got, want)
+	if len(got) != 6 {
+		t.Fatalf("helper actions = %q, want 6 actions", got)
+	}
+	seenLocks := map[string]bool{}
+	for i, action := range got {
+		if i < 3 {
+			if !strings.HasPrefix(action, "lock:") {
+				t.Fatalf("action %d = %q, want lock before any checkpoint; all actions %q", i, action, got)
+			}
+			seenLocks[strings.TrimPrefix(action, "lock:")] = true
+			continue
+		}
+		if action != want[i-3] {
+			t.Fatalf("action %d = %q, want %q; all actions %q", i, action, want[i-3], got)
+		}
+	}
+	for _, pid := range []string{"101", "102", "103"} {
+		if !seenLocks[pid] {
+			t.Fatalf("missing lock for pid %s in actions %q", pid, got)
+		}
 	}
 }
 

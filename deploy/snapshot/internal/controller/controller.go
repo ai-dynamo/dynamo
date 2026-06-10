@@ -29,7 +29,6 @@ import (
 	"k8s.io/client-go/util/retry"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/executor"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/nccl"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
@@ -778,38 +777,10 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		return fmt.Errorf("failed to annotate pod with restore in_progress: %w", err)
 	}
 
-	// Run the restore orchestrator (inspect + nsrestore).
-	req := executor.RestoreRequest{
-		CheckpointID:                checkpointID,
-		CheckpointLocation:          checkpointLocation.HostPath,
-		ContainerCheckpointLocation: checkpointLocation.ContainerPath,
-		ContainerID:                 containerID,
-		StartedAt:                   startedAt,
-		NSRestorePath:               w.config.Restore.NSRestorePath,
-		PodName:                     pod.Name,
-		PodNamespace:                pod.Namespace,
-		PodUID:                      string(pod.UID),
-		ContainerName:               containerName,
-		Clientset:                   w.clientset,
-	}
-	restoreResult, err := executor.Restore(restoreCtx, w.runtime, log, req)
+	placeholderHostPID, _, err := w.runtime.ResolveContainer(restoreCtx, containerID)
 	if err != nil {
-		log.Error(err, "External restore failed")
-		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
-		if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
-			return statusErr
-		}
-		// Re-resolve: executor.Restore may have failed before resolving the placeholder.
-		placeholderHostPID, _, pidErr := w.runtime.ResolveContainer(ctx, containerID)
-		if pidErr != nil {
-			return fmt.Errorf("restore failed and placeholder PID could not be resolved: %w", pidErr)
-		}
-		if killErr := snapshotruntime.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "restore failed"); killErr != nil {
-			return fmt.Errorf("restore failed and placeholder could not be killed: %w", killErr)
-		}
-		return nil
+		return fmt.Errorf("failed to resolve placeholder container for restore metadata: %w", err)
 	}
-	placeholderHostPID := restoreResult.PlaceholderHostPID
 
 	rendezvousHost, err := restoreRendezvousHost(pod, containerName)
 	if err != nil {
@@ -841,6 +812,34 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		}
 		return fmt.Errorf("failed to write NCCL checkpoint KVS file: %w", err)
 	}
+
+	// Run the restore orchestrator (inspect + nsrestore).
+	req := executor.RestoreRequest{
+		CheckpointID:                checkpointID,
+		CheckpointLocation:          checkpointLocation.HostPath,
+		ContainerCheckpointLocation: checkpointLocation.ContainerPath,
+		ContainerID:                 containerID,
+		StartedAt:                   startedAt,
+		NSRestorePath:               w.config.Restore.NSRestorePath,
+		PodName:                     pod.Name,
+		PodNamespace:                pod.Namespace,
+		PodUID:                      string(pod.UID),
+		ContainerName:               containerName,
+		Clientset:                   w.clientset,
+	}
+	restoreResult, err := executor.Restore(restoreCtx, w.runtime, log, req)
+	if err != nil {
+		log.Error(err, "External restore failed")
+		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
+		if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
+			return statusErr
+		}
+		if killErr := snapshotruntime.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "restore failed"); killErr != nil {
+			return fmt.Errorf("restore failed and placeholder could not be killed: %w", killErr)
+		}
+		return nil
+	}
+	placeholderHostPID = restoreResult.PlaceholderHostPID
 
 	rendezvousPort, err := restoreRendezvousPort(pod, containerName)
 	if err != nil {
@@ -881,33 +880,6 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 			log.Error(killErr, "Failed to kill placeholder after FileStore reset failure")
 		}
 		return fmt.Errorf("failed to remove vLLM checkpoint FileStore rendezvous file: %w", err)
-	}
-
-	if len(restoreResult.RestoredCUDAPIDs) > 0 {
-		restoreProcRoot := filepath.Join(snapshotruntime.HostProcPath, strconv.Itoa(placeholderHostPID), "root", "proc")
-		ncclTimings, ran, err := nccl.RestoreConfiguredProcessTree(
-			restoreCtx,
-			restoreResult.RestoredCUDAPIDs,
-			restoreProcRoot,
-			log,
-		)
-		if err != nil {
-			log.Error(err, "NCCL checkpoint restore failed")
-			emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
-			if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
-				return statusErr
-			}
-			if killErr := snapshotruntime.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "NCCL checkpoint restore failed"); killErr != nil {
-				log.Error(killErr, "Failed to kill placeholder after NCCL checkpoint restore failure")
-			}
-			return fmt.Errorf("NCCL checkpoint restore failed: %w", err)
-		}
-		if ran {
-			log.Info("NCCL checkpoint restore completed",
-				"duration", ncclTimings.TotalDuration.String(),
-				"pids", restoreResult.RestoredCUDAPIDs,
-			)
-		}
 	}
 
 	// Any PID inside the container mount namespace reaches the control

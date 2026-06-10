@@ -86,7 +86,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /workspace
 
 COPY cmd/cuda-checkpoint-helper/main.c ./cmd/cuda-checkpoint-helper/main.c
-COPY cmd/snapshot-hook/main.c ./cmd/snapshot-hook/main.c
 
 RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
     ./cmd/cuda-checkpoint-helper/main.c \
@@ -94,11 +93,6 @@ RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
     -L/usr/local/cuda/lib64/stubs \
     -lcuda \
     -ldl
-
-RUN gcc -O2 -Wall -Wextra -shared -fPIC -o /dynamo-snapshot-hook.so \
-    ./cmd/snapshot-hook/main.c \
-    -ldl \
-    -pthread
 
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
@@ -182,9 +176,7 @@ RUN criu --version
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
 COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
-COPY --from=cuda-helper-builder /dynamo-snapshot-hook.so /usr/local/lib/dynamo-snapshot-hook.so
-RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper \
-    && chmod 755 /usr/local/lib/dynamo-snapshot-hook.so
+RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper
 
 # Copy the built binaries
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
@@ -245,9 +237,7 @@ RUN criu --version && echo "CRIU installed successfully"
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
 COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
-COPY --from=cuda-helper-builder /dynamo-snapshot-hook.so /usr/local/lib/dynamo-snapshot-hook.so
-RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper \
-    && chmod 755 /usr/local/lib/dynamo-snapshot-hook.so
+RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper
 
 # Copy nsrestore binary (invoked by DaemonSet via nsenter)
 COPY --from=builder /nsrestore /usr/local/bin/nsrestore
