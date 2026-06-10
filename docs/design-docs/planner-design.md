@@ -10,6 +10,38 @@ title: Planner Design
 
 The Planner is Dynamo's autoscaling controller. It supports two scaling modes: **throughput-based** (using profiling data and traffic prediction) and **load-based** (using real-time engine metrics and online regression). This document covers the internal architecture, algorithms, and design trade-offs for both modes.
 
+## Runtime Pipeline
+
+The runtime planner is driven by `OrchestratorEngineAdapter`, which wraps the
+local scaling algorithms as builtin plugins and runs the same plugin pipeline
+used by external gRPC plugins.
+
+1. **OBSERVE**: `NativePlannerBase` and the engine adapter collect worker
+   counts, traffic metrics, and forward-pass metrics. Observations are exposed
+   through `PipelineContext.observations`.
+2. **PREDICT**: `builtin_load_predict` runs on the throughput interval. It
+   consumes traffic observations and emits predicted request count, ISL, OSL,
+   KV hit rate, and speculative accept length for this tick.
+3. **PROPOSE**: `builtin_throughput_propose` consumes same-tick predictions and
+   updates the throughput lower bound. `builtin_load_propose` consumes FPM and
+   worker observations and applies the load-based +/-1 scaling algorithm.
+4. **RECONCILE / CONSTRAIN**: The generic pipeline merges proposals from
+   builtin and external plugins. After CONSTRAIN, the engine adapter applies
+   the local planner's final `min_endpoint` and GPU-budget invariants before
+   returning any scaling effect.
+5. **EXECUTE**: The adapter returns `PlannerEffects.scale_to`; `NativePlannerBase`
+   applies those targets through the configured connector.
+
+For compatibility with existing configs and DGDR-generated planner payloads,
+`load_adjustment_interval_seconds` and `throughput_adjustment_interval_seconds`
+still define the builtin plugin fire intervals. The base
+`scheduling.scale_interval_seconds` defaults to the greatest common divisor of
+those enabled intervals, so old load and throughput fire times are preserved.
+The legacy `scheduling.use_orchestrator` field is accepted but normalized to
+`true`; there is no alternate runtime path.
+
+![Planner plugin pipeline showing shared builtin state and OBSERVE, PREDICT, PROPOSE, RECONCILE, CONSTRAIN, and EXEC stages](../assets/img/planner-plugin-pipeline.png)
+
 ## Throughput-Based Scaling
 
 ![Planner architecture showing Metric Collector, Load Predictor, and Performance Interpolator feeding into the Scaling Algorithm and Connector Layer](../assets/img/planner-architecture.svg)
@@ -231,18 +263,16 @@ In aggregated mode (`--mode agg`), engines handle both prefill and decode via ch
 ## File Map
 
 
-| File                         | Purpose                                               |
-| ---------------------------- | ----------------------------------------------------- |
-| `planner_core.py`            | Base planner, shared scaling loop, algorithm core     |
-| `disagg_planner.py`          | Disaggregated mode orchestrator (prefill + decode)    |
-| `agg_planner.py`             | Aggregated mode orchestrator (load-based only)        |
-| `prefill_planner.py`         | Prefill-specific scaling logic                        |
-| `decode_planner.py`          | Decode-specific scaling logic                         |
-| `load_based_regression.py`   | Sliding-window linear regression for load-based scaling |
-| `prometheus.py`              | Prometheus/router metrics clients, data classes       |
-| `perf_interpolation.py`      | NPZ data loading and throughput/latency interpolation |
-| `load_predictor.py`          | ARIMA, Prophet, Kalman, Constant predictors           |
-| `pre_swept_results_utils.py` | Pre-computed H100/H200 profiling data loader          |
+| File / package | Purpose |
+| --------------- | ------- |
+| `components/src/dynamo/planner/core/base.py` | Runtime I/O loop: gathers observations and applies scaling effects. |
+| `components/src/dynamo/planner/core/state_machine.py` | Shared builtin scaling state used by local planner plugins. |
+| `components/src/dynamo/planner/core/load_scaling.py` | FPM-driven load scaling algorithm. |
+| `components/src/dynamo/planner/core/throughput_scaling.py` | Prediction-driven throughput scaling algorithm. |
+| `components/src/dynamo/planner/plugins/builtins/` | Builtin plugins that expose the local planner algorithms to the pipeline. |
+| `components/src/dynamo/planner/plugins/orchestrator/` | PREDICT -> PROPOSE -> RECONCILE -> CONSTRAIN pipeline driver and engine adapter. |
+| `components/src/dynamo/planner/plugins/proto/v1/` | Public gRPC/proto plugin API. |
+| `components/src/dynamo/planner/monitoring/` | Prometheus, diagnostics reports, live dashboard, and worker metadata. |
 | `kubernetes_connector.py`    | K8s API integration for DGD scaling                   |
 | `kube.py`                    | Low-level K8s client wrapper                          |
 | `exceptions.py`              | Custom exception hierarchy                            |

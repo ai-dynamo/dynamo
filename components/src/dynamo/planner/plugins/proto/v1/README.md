@@ -101,14 +101,16 @@ proto must be added to the Pydantic mirror in `plugins/types.py`, otherwise
 These are not mere conventions — they are required by downstream PR
 algorithms; violating them silently breaks the architecture.
 
-### `PredictionData` fields MUST be `optional float`
+### `PredictionData` numeric fields MUST be `optional double`
 
 ```proto
 message PredictionData {
-  optional float predicted_num_req = 1;  // unset → preserve prev in chain-augment
-  optional float predicted_isl     = 2;
-  optional float predicted_osl     = 3;
-  string source                    = 4;
+  optional double predicted_num_req        = 1;  // unset -> preserve prev
+  optional double predicted_isl            = 2;
+  optional double predicted_osl            = 3;
+  string source                            = 4;
+  optional double predicted_kv_hit_rate    = 5;
+  optional double predicted_accept_length  = 6;
 }
 ```
 
@@ -190,9 +192,10 @@ for this signal is deferred to a follow-up observability PR.
 ### `final=true` does NOT skip CONSTRAIN
 
 Even when a `PROPOSE` / `RECONCILE` plugin sets `final=true`, the CONSTRAIN
-stage runs normally. `builtin-budget-constrain` always provides
-`AT_LEAST(min_endpoint)` + `AT_MOST(max_gpu_budget)` as the safety net; no
-`final` can bypass it.
+stage runs normally. After CONSTRAIN, the planner adapter also applies the
+local planner's final `min_endpoint` / GPU-budget invariants before any
+scaling target reaches the connector, so no `final` proposal can bypass those
+planner safety checks.
 
 ### REJECT > final priority
 
@@ -227,8 +230,10 @@ cross-language plugins decode with any msgpack library (Go's
 vmihailenco/msgpack, Rust's rmp-serde, JS @msgpack/msgpack, etc.) plus
 knowledge of the `ForwardPassMetrics` struct layout.
 
-The orchestrator currently does not populate this field; FPM wiring into
-`PipelineContext.observations.fpm` lands in a follow-up PR.
+The planner populates this field on ticks that collect FPM observations.
+Plugins that declare `needs=["observations.fpm"]` receive the per-engine
+maps when available; absence of the field means no FPM data was collected
+for that tick.
 
 ## References
 

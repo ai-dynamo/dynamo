@@ -87,6 +87,7 @@ _PREDICTION_FIELDS = (
     "predicted_isl",
     "predicted_osl",
     "predicted_kv_hit_rate",
+    "predicted_accept_length",
 )
 
 
