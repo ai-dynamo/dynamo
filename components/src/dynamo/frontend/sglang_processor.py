@@ -623,8 +623,12 @@ class SglangEngineFactory:
             )
         loop = asyncio.get_running_loop()
 
-        # download_config already populated mdc.local_dir(); no refetch.
         local_dir = mdc.local_dir()
+        if not os.path.isdir(local_dir):
+            raise RuntimeError(
+                f"MDC local_dir {local_dir!r} not populated for model {mdc.name()!r}; "
+                f"download_config must run before the engine factory."
+            )
 
         logger.info("Loading SGLang tokenizer from %s", local_dir)
         tokenizer = _load_tokenizer(local_dir, self.trust_remote_code)
