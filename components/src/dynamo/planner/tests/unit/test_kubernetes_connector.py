@@ -25,6 +25,7 @@ from dynamo.planner.errors import (
     DeploymentValidationError,
     DuplicateSubComponentError,
     DynamoGraphDeploymentNotFoundError,
+    DynamoGraphDeploymentNotReadyError,
     EmptyTargetReplicasError,
     ModelNameNotFoundError,
     SubComponentNotFoundError,
@@ -556,9 +557,10 @@ async def test_set_component_replicas_empty_target_replicas(
 
 
 @pytest.mark.asyncio
-async def test_set_component_replicas_deployment_not_ready(
+async def test_set_component_replicas_deployment_not_ready_skips_by_default(
     kubernetes_connector, mock_kube_api
 ):
+    """Keep local Kubernetes planners on the legacy skip-tick path."""
     # Arrange
     target_replicas = [
         TargetReplica(sub_component_type=SubComponentType.PREFILL, desired_replicas=3),
@@ -571,8 +573,41 @@ async def test_set_component_replicas_deployment_not_ready(
     mock_kube_api.get_graph_deployment.return_value = mock_deployment
     mock_kube_api.is_deployment_ready.return_value = False
 
-    # Act & Assert
+    # Act
     await kubernetes_connector.set_component_replicas(target_replicas)
+
+    # Assert
+    mock_kube_api.get_graph_deployment.assert_called_once()
+    mock_kube_api.is_deployment_ready.assert_called_once_with(mock_deployment)
+    mock_kube_api.update_graph_replicas.assert_not_called()
+    mock_kube_api.wait_for_graph_deployment_ready.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_set_component_replicas_deployment_not_ready_can_raise_for_global_planner(
+    mock_kube_api_class, mock_kube_api, monkeypatch
+):
+    """Let GlobalPlanner opt in to retryable not-ready rejection."""
+    # Arrange
+    monkeypatch.setattr(
+        "dynamo.planner.connectors.kubernetes.KubernetesAPI", mock_kube_api_class
+    )
+    with patch.dict(os.environ, {"DYN_PARENT_DGD_K8S_NAME": "test-graph"}):
+        connector = KubernetesConnector("test-dynamo-namespace", raise_not_ready=True)
+    target_replicas = [
+        TargetReplica(sub_component_type=SubComponentType.PREFILL, desired_replicas=3),
+        TargetReplica(sub_component_type=SubComponentType.DECODE, desired_replicas=2),
+    ]
+    mock_deployment = _deployment(
+        _component("component1", "prefill", replicas=1),
+        _component("component2", "decode", replicas=2),
+    )
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    mock_kube_api.is_deployment_ready.return_value = False
+
+    # Act & Assert
+    with pytest.raises(DynamoGraphDeploymentNotReadyError):
+        await connector.set_component_replicas(target_replicas)
 
     mock_kube_api.get_graph_deployment.assert_called_once()
     mock_kube_api.is_deployment_ready.assert_called_once_with(mock_deployment)

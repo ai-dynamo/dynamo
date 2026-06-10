@@ -25,6 +25,7 @@ from typing import List
 __all__ = [
     "PlannerError",
     "DynamoGraphDeploymentNotFoundError",
+    "DynamoGraphDeploymentNotReadyError",
     "ComponentError",
     "ModelNameNotFoundError",
     "DeploymentModelNameMismatchError",
@@ -66,6 +67,30 @@ class DynamoGraphDeploymentNotFoundError(PlannerError):
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(deployment_name={self.deployment_name!r}, namespace={self.namespace!r})"
+
+
+class DynamoGraphDeploymentNotReadyError(PlannerError):
+    """Raised when a DynamoGraphDeployment is not ready for scaling."""
+
+    def __init__(self, deployment_name: str, namespace: str | None = None):
+        self.deployment_name = deployment_name
+        self.namespace = namespace
+
+        if namespace:
+            message = (
+                "DynamoGraphDeployment is not ready "
+                f"(name: '{deployment_name}' in namespace '{namespace}')"
+            )
+        else:
+            message = f"DynamoGraphDeployment is not ready (name: '{deployment_name}')"
+
+        super().__init__(message)
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}("
+            f"deployment_name={self.deployment_name!r}, namespace={self.namespace!r})"
+        )
 
 
 class ComponentError(PlannerError):

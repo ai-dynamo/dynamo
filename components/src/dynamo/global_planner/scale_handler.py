@@ -15,6 +15,7 @@ from dynamo.planner import KubernetesConnector, SubComponentType, TargetReplica
 from dynamo.planner.connectors.kubernetes_api import KubernetesAPI
 from dynamo.planner.connectors.protocol import ScaleRequest, ScaleResponse, ScaleStatus
 from dynamo.planner.core import budget
+from dynamo.planner.errors import DynamoGraphDeploymentNotReadyError
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint
 
 logger = logging.getLogger(__name__)
@@ -207,6 +208,7 @@ class ScaleRequestHandler:
                         dynamo_namespace="discovered",
                         k8s_namespace=self.k8s_namespace,
                         parent_dgd_name=name,
+                        raise_not_ready=True,
                     )
                     self.connectors[connector_key] = connector
                 discovered.append(name)
@@ -778,6 +780,7 @@ class ScaleRequestHandler:
                     dynamo_namespace=request.caller_namespace,
                     k8s_namespace=request.k8s_namespace,
                     parent_dgd_name=request.graph_deployment_name,
+                    raise_not_ready=True,
                 )
                 self.connectors[connector_key] = connector
                 logger.debug(f"Created new connector for {connector_key}")
@@ -986,6 +989,17 @@ class ScaleRequestHandler:
                             targets, blocking=request.blocking
                         )
                         applied_dgds.append(dgd_key_iter)
+                    except DynamoGraphDeploymentNotReadyError as patch_err:
+                        if i == 0:
+                            raise
+                        logger.warning(
+                            "Multi-partner transfer: patch on %s was skipped "
+                            "after applying %s because the DGD is not ready: %s; "
+                            "will self-correct on next tick",
+                            dgd_key_iter,
+                            applied_dgds,
+                            patch_err,
+                        )
                     except Exception as patch_err:
                         if i == 0:
                             # First patch failure: nothing applied, propagate
@@ -1016,6 +1030,13 @@ class ScaleRequestHandler:
                 "current_replicas": current_replicas,
             }
 
+        except DynamoGraphDeploymentNotReadyError as e:
+            logger.warning("Rejected scale request: %s", e)
+            yield {
+                "status": ScaleStatus.REJECTED.value,
+                "message": str(e),
+                "current_replicas": {},
+            }
         except Exception as e:
             logger.exception(f"Error processing scale request: {e}")
             yield {
