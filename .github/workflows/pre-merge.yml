@@ -199,6 +199,12 @@ jobs:
       # --profile ci-aux so this second run's JUnit doesn't overwrite the unit-test
       # report (nextest writes one report per profile, no append).
       run: cargo nextest run --locked --profile ci-aux --config-file ${{ github.workspace }}/.config/nextest.toml --no-tests=pass -p dynamo-bench --test mooncake_trace --features mocker-kvbm-offload
+    - name: Run benches and examples
+      working-directory: ${{ matrix.dir }}
+      # nextest runs tests but not benches/examples; execute them under cargo test so
+      # coverage matches the previous `cargo test --all-targets` (their compilation is
+      # additionally checked by the rust-clippy --all-targets job).
+      run: cargo test --locked --benches --examples
     - name: Install datadog-ci
       if: always()
       continue-on-error: true

@@ -513,6 +513,9 @@ jobs:
         NEXTEST_PROFILE: ci
       run: |
         cargo llvm-cov --no-report --locked nextest --no-tests=pass --config-file ${{ github.workspace }}/.config/nextest.toml
+        # nextest doesn't run benches/examples; collect their coverage too (accumulates
+        # into the same --no-report data) so coverage matches the previous --all-targets.
+        cargo llvm-cov --no-report --locked --benches --examples
         cargo llvm-cov report --output-path coverage-rust.txt
         cargo llvm-cov report --lcov --output-path coverage-rust.lcov
         echo "Coverage summary:"
