@@ -918,6 +918,18 @@ impl KvRouterConfig {
     pub fn should_subscribe_to_kv_events(&self) -> bool {
         self.use_kv_events && self.overlap_score_credit > 0.0
     }
+
+    /// Whether the router scores prefix overlap, and therefore needs
+    /// content-based routing hashes (including per-image `mm_hash`).
+    ///
+    /// True whenever overlap scoring is active, **independent of KV-event
+    /// subscription**: approximate KV mode (`--no-router-kv-events`,
+    /// `use_kv_events=false`) still predicts cache state from routing decisions
+    /// and scores prefix overlap. Only `overlap_score_credit == 0` (e.g.
+    /// `--load-aware`, pure load balancing) disables overlap entirely.
+    pub fn uses_prefix_overlap(&self) -> bool {
+        self.overlap_score_credit > 0.0
+    }
 }
 
 #[cfg(test)]
@@ -1062,37 +1074,44 @@ mod tests {
     }
 
     #[test]
-    fn should_subscribe_to_kv_events_gates_overlap_routing() {
-        // Gates whether the router does prefix-overlap routing — the same
-        // signal the frontend uses to decide if MM-aware routing (per-image
-        // mm_hash) is worth computing. Pinned here so the gate can't silently
-        // drift from the load-aware preset.
+    fn uses_prefix_overlap_gates_mm_routing() {
+        // Gates whether the router scores prefix overlap — the signal the
+        // frontend uses to decide if MM-aware routing (per-image mm_hash) is
+        // worth computing. Keyed only on overlap_score_credit, NOT on
+        // use_kv_events: approximate KV mode (--no-router-kv-events) does
+        // overlap routing without event subscription.
 
-        // Default = overlap routing on (use_kv_events=true, overlap_credit=1.0).
-        assert!(KvRouterConfig::default().should_subscribe_to_kv_events());
+        // Default = overlap on.
+        assert!(KvRouterConfig::default().uses_prefix_overlap());
 
-        // `--load-aware` preset → load-balancing only → no overlap.
-        let load_aware = KvRouterConfig {
-            overlap_score_credit: 0.0,
-            use_kv_events: false,
-            ..Default::default()
-        };
-        assert!(!load_aware.should_subscribe_to_kv_events());
+        // Approximate KV mode (--no-router-kv-events): events off, overlap on
+        // → MM routing must STAY enabled.
+        assert!(
+            KvRouterConfig {
+                use_kv_events: false,
+                overlap_score_credit: 1.0,
+                ..Default::default()
+            }
+            .uses_prefix_overlap()
+        );
 
-        // Either knob alone disables overlap.
+        // --load-aware preset (overlap_score_credit=0) → load-balancing only
+        // → no overlap → MM routing skipped.
+        assert!(
+            !KvRouterConfig {
+                overlap_score_credit: 0.0,
+                use_kv_events: false,
+                ..Default::default()
+            }
+            .uses_prefix_overlap()
+        );
+        // overlap_score_credit=0 alone disables it even with events on.
         assert!(
             !KvRouterConfig {
                 overlap_score_credit: 0.0,
                 ..Default::default()
             }
-            .should_subscribe_to_kv_events()
-        );
-        assert!(
-            !KvRouterConfig {
-                use_kv_events: false,
-                ..Default::default()
-            }
-            .should_subscribe_to_kv_events()
+            .uses_prefix_overlap()
         );
     }
 

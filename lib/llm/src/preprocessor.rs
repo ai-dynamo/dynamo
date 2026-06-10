@@ -284,12 +284,11 @@ pub struct OpenAIPreprocessor {
     /// doesn't round-trip to a single id.
     #[cfg(feature = "mm-routing")]
     routing_prepend_bos: Option<crate::protocols::TokenIdType>,
-    /// Whether the KV router actually uses prefix-overlap routing (i.e. it
-    /// needs the per-image `mm_hash`). False when the router is load-balancing
-    /// only (`--load-aware`, `overlap_score_credit=0`, or `use_kv_events=false`)
-    /// or not in KV mode — in which case computing `mm_hash` (and the per-image
-    /// dim fetches that feed it) is wasted work, so it is skipped. Media
-    /// transfer (frontend decode) is unaffected.
+    /// Whether the KV router scores prefix overlap (and so needs the per-image
+    /// `mm_hash`). False under `--load-aware` / `overlap_score_credit=0` or a
+    /// non-KV mode — there `mm_hash` and its per-image dim fetches are skipped
+    /// as wasted work. Independent of KV-event subscription (approximate KV mode
+    /// still scores overlap). Media transfer (frontend decode) is unaffected.
     #[cfg(feature = "mm-routing")]
     mm_routing_enabled: bool,
 }

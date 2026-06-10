@@ -875,14 +875,13 @@ class EngineFactory:
 
         block_size = self.config.kv_cache_block_size or 16
 
-        # MM-aware routing only helps when the KV router uses prefix overlap.
-        # Mirrors KvRouterConfig::should_subscribe_to_kv_events() on the Rust
-        # side: KV mode + use_kv_events + overlap_score_credit > 0. False under
-        # --load-aware (which sets overlap_score_credit=0, use_kv_events=False)
-        # or any non-KV mode → skip the wasted mm_routing_info build.
+        # Mirrors KvRouterConfig::uses_prefix_overlap() on the Rust side: MM
+        # routing only helps when the router scores prefix overlap (KV mode +
+        # overlap_score_credit > 0), independent of use_kv_events (approximate
+        # KV mode still scores overlap). --load-aware (overlap_score_credit=0)
+        # or a non-KV mode skips the wasted mm_routing_info build.
         mm_routing_enabled = bool(
             getattr(self.config, "router_mode", None) == "kv"
-            and getattr(self.config, "use_kv_events", False)
             and getattr(self.config, "overlap_score_credit", 0.0) > 0.0
         )
 

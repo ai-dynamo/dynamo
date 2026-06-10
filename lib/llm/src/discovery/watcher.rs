@@ -758,16 +758,14 @@ impl ModelWatcher {
         // otherwise fall back to the frontend-level global config.
         let router_config = card.router_config.as_ref().unwrap_or(&self.router_config);
 
-        // MM-aware routing only helps when the KV router actually uses
-        // prefix-overlap (so the per-image `mm_hash` affects the routing
-        // decision). When the router is load-balancing only (`--load-aware`,
-        // `overlap_score_credit=0`, `use_kv_events=false`) or not in KV mode,
-        // computing `mm_hash` + the per-image dim fetches is wasted work, so we
-        // tell the preprocessor to skip it. Media transfer is unaffected.
+        // MM-aware routing only helps when the KV router scores prefix overlap
+        // (so the per-image `mm_hash` affects routing). Gate on overlap scoring,
+        // independent of KV-event subscription — approximate KV mode
+        // (`--no-router-kv-events`) still scores overlap. Load-balancing only
+        // (`--load-aware` / `overlap_score_credit=0`) or non-KV mode skips the
+        // wasted `mm_hash` + dim-fetch work; media transfer is unaffected.
         let mm_routing_enabled = router_config.router_mode == RouterMode::KV
-            && router_config
-                .kv_router_config
-                .should_subscribe_to_kv_events();
+            && router_config.kv_router_config.uses_prefix_overlap();
 
         let component = self
             .drt
