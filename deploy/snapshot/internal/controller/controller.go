@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -28,6 +29,7 @@ import (
 	"k8s.io/client-go/util/retry"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/executor"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/nccl"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
@@ -790,7 +792,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		ContainerName:               containerName,
 		Clientset:                   w.clientset,
 	}
-	placeholderHostPID, err := executor.Restore(restoreCtx, w.runtime, log, req)
+	restoreResult, err := executor.Restore(restoreCtx, w.runtime, log, req)
 	if err != nil {
 		log.Error(err, "External restore failed")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
@@ -807,6 +809,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		}
 		return nil
 	}
+	placeholderHostPID := restoreResult.PlaceholderHostPID
 
 	rendezvousHost, err := restoreRendezvousHost(pod, containerName)
 	if err != nil {
@@ -839,6 +842,35 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		return fmt.Errorf("failed to write NCCL checkpoint KVS file: %w", err)
 	}
 
+	rendezvousPort, err := restoreRendezvousPort(pod, containerName)
+	if err != nil {
+		log.Error(err, "Failed to build c10d rendezvous metadata")
+		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
+		if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
+			return statusErr
+		}
+		if killErr := snapshotruntime.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "restore c10d rendezvous failed"); killErr != nil {
+			log.Error(killErr, "Failed to kill placeholder after c10d rendezvous failure")
+		}
+		return fmt.Errorf("failed to build c10d rendezvous metadata: %w", err)
+	}
+	if err := snapshotruntime.WriteC10DRendezvousFile(
+		placeholderHostPID,
+		rendezvousHost,
+		rendezvousPort,
+		restoreRendezvousID(pod, checkpointID, containerName),
+	); err != nil {
+		log.Error(err, "Failed to write c10d rendezvous file", "host", rendezvousHost, "port", rendezvousPort)
+		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
+		if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
+			return statusErr
+		}
+		if killErr := snapshotruntime.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "restore c10d rendezvous failed"); killErr != nil {
+			log.Error(killErr, "Failed to kill placeholder after c10d rendezvous failure")
+		}
+		return fmt.Errorf("failed to write c10d rendezvous file: %w", err)
+	}
+
 	if err := snapshotruntime.RemoveFileIfExists(vllmCheckpointRestoreFileStoreHostPath(checkpointLocation, containerName)); err != nil {
 		log.Error(err, "Failed to remove vLLM checkpoint FileStore rendezvous file")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
@@ -849,6 +881,33 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 			log.Error(killErr, "Failed to kill placeholder after FileStore reset failure")
 		}
 		return fmt.Errorf("failed to remove vLLM checkpoint FileStore rendezvous file: %w", err)
+	}
+
+	if len(restoreResult.RestoredCUDAPIDs) > 0 {
+		restoreProcRoot := filepath.Join(snapshotruntime.HostProcPath, strconv.Itoa(placeholderHostPID), "root", "proc")
+		ncclTimings, ran, err := nccl.RestoreConfiguredProcessTree(
+			restoreCtx,
+			restoreResult.RestoredCUDAPIDs,
+			restoreProcRoot,
+			log,
+		)
+		if err != nil {
+			log.Error(err, "NCCL checkpoint restore failed")
+			emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
+			if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
+				return statusErr
+			}
+			if killErr := snapshotruntime.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "NCCL checkpoint restore failed"); killErr != nil {
+				log.Error(killErr, "Failed to kill placeholder after NCCL checkpoint restore failure")
+			}
+			return fmt.Errorf("NCCL checkpoint restore failed: %w", err)
+		}
+		if ran {
+			log.Info("NCCL checkpoint restore completed",
+				"duration", ncclTimings.TotalDuration.String(),
+				"pids", restoreResult.RestoredCUDAPIDs,
+			)
+		}
 	}
 
 	// Any PID inside the container mount namespace reaches the control
@@ -905,6 +964,40 @@ func restoreRendezvousHost(pod *corev1.Pod, containerName string) (string, error
 		return "", fmt.Errorf("rendezvous host %q still contains unresolved env references", host)
 	}
 	return host, nil
+}
+
+func restoreRendezvousPort(pod *corev1.Pod, containerName string) (int, error) {
+	port := "29500"
+	for i := range pod.Spec.Containers {
+		container := &pod.Spec.Containers[i]
+		if container.Name != containerName {
+			continue
+		}
+		if parsedPort := flagValue(containerCommandAndArgs(container), "--master-port"); parsedPort != "" {
+			port = parsedPort
+		}
+		break
+	}
+	if annotatedPort := strings.TrimSpace(pod.Annotations[snapshotprotocol.RendezvousPortAnnotation]); annotatedPort != "" {
+		port = annotatedPort
+	}
+	parsedPort, err := strconv.Atoi(port)
+	if err != nil || parsedPort <= 0 || parsedPort > 65535 {
+		return 0, fmt.Errorf("invalid restore rendezvous port %q", port)
+	}
+	return parsedPort, nil
+}
+
+func restoreRendezvousID(pod *corev1.Pod, checkpointID string, containerName string) string {
+	parts := []string{checkpointID, containerName}
+	if pod != nil {
+		if pod.UID != "" {
+			parts = append(parts, string(pod.UID))
+		} else if pod.Name != "" {
+			parts = append(parts, pod.Name)
+		}
+	}
+	return safePathComponent(strings.Join(parts, "_"))
 }
 
 func restoreNCCLCheckpointKVSEndpoint(host string, pod *corev1.Pod, checkpointID string, containerName string) string {

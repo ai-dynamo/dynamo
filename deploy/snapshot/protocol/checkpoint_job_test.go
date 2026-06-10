@@ -83,6 +83,7 @@ func TestNewCheckpointJob(t *testing.T) {
 		t.Fatalf("expected control mount subPath=main, got %#v", main.VolumeMounts[0])
 	}
 	assertEnv(t, main.Env, NCCLCheckpointKVSPathEnv, SnapshotControlMountPath+"/"+NCCLCheckpointKVSFile)
+	assertEnv(t, main.Env, C10DRendezvousFileEnv, SnapshotControlMountPath+"/"+C10DRendezvousFile)
 	assertEnv(t, main.Env, VLLMCheckpointRestoreEnabledEnv, "1")
 	assertEnv(t, main.Env, VLLMDistributedUseSplitGroupEnv, "0")
 	assertEnv(t, main.Env, VLLMCheckpointRestoreFileStorePathEnv, "/checkpoints/hash/vllm-filestore/2/main/torch_pg")

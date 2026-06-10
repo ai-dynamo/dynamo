@@ -4,6 +4,7 @@
 package runtime
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -97,5 +98,45 @@ func TestWriteNCCLCheckpointKVSFileInRootRejectsInvalidEndpoint(t *testing.T) {
 	}
 	if err := writeNCCLCheckpointKVSFileInRoot(t.TempDir(), "leader:46379/prefix\nother"); err == nil {
 		t.Fatal("expected multiline endpoint to be rejected")
+	}
+}
+
+func TestWriteC10DRendezvousFileInRoot(t *testing.T) {
+	root := t.TempDir()
+	controlDir := filepath.Join(root, "snapshot-control")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatalf("failed to create control dir: %v", err)
+	}
+
+	if err := writeC10DRendezvousFileInRoot(root, "leader.default.svc", 29500, "restore-1"); err != nil {
+		t.Fatalf("writeC10DRendezvousFileInRoot failed: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(controlDir, snapshotprotocol.C10DRendezvousFile))
+	if err != nil {
+		t.Fatalf("expected c10d rendezvous file: %v", err)
+	}
+	var parsed struct {
+		RestoreID string `json:"restore_id"`
+		Store     struct {
+			Host       string `json:"host"`
+			Port       int    `json:"port"`
+			MasterRank int    `json:"master_rank"`
+		} `json:"store"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("invalid c10d rendezvous JSON: %v", err)
+	}
+	if parsed.RestoreID != "restore-1" || parsed.Store.Host != "leader.default.svc" || parsed.Store.Port != 29500 || parsed.Store.MasterRank != 0 {
+		t.Fatalf("unexpected c10d rendezvous payload: %#v", parsed)
+	}
+}
+
+func TestWriteC10DRendezvousFileInRootRejectsInvalidEndpoint(t *testing.T) {
+	if err := writeC10DRendezvousFileInRoot(t.TempDir(), "", 29500, "restore-1"); err == nil {
+		t.Fatal("expected empty host to be rejected")
+	}
+	if err := writeC10DRendezvousFileInRoot(t.TempDir(), "leader", 0, "restore-1"); err == nil {
+		t.Fatal("expected invalid port to be rejected")
 	}
 }

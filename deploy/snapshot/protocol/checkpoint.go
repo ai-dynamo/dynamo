@@ -83,7 +83,7 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 	// Snapshot contract: control volume + ready-file readiness probe. The
 	// agent reads the pod's Ready condition before starting CRIU dump, so
 	// the workload signals "model loaded, safe to checkpoint" by writing
-	// $DYN_SNAPSHOT_CONTROL_DIR/ready-for-snapshot. Any per-container
+	// $DYN_SNAPSHOT_CONTROL_DIR/ready-for-checkpoint. Any per-container
 	// liveness/startup probes are cleared — a checkpoint job runs to a
 	// quiesce-and-sit state, not a long-lived serving state.
 	EnsureControlVolume(&podTemplate.Spec, targetContainer)

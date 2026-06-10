@@ -120,6 +120,7 @@ func TestNewRestorePod(t *testing.T) {
 	}
 	foundEnv := false
 	foundNCCLKvsEnv := false
+	foundC10DRendezvousEnv := false
 	foundVLLMCheckpointRestoreEnv := false
 	foundVLLMFileStoreEnv := false
 	foundPlaceholderEnv := false
@@ -129,6 +130,9 @@ func TestNewRestorePod(t *testing.T) {
 		}
 		if e.Name == NCCLCheckpointKVSPathEnv {
 			foundNCCLKvsEnv = true
+		}
+		if e.Name == C10DRendezvousFileEnv {
+			foundC10DRendezvousEnv = true
 		}
 		if e.Name == VLLMCheckpointRestoreEnabledEnv {
 			foundVLLMCheckpointRestoreEnv = true
@@ -148,6 +152,9 @@ func TestNewRestorePod(t *testing.T) {
 	}
 	if !foundNCCLKvsEnv {
 		t.Fatalf("expected %s env, got %#v", NCCLCheckpointKVSPathEnv, main.Env)
+	}
+	if !foundC10DRendezvousEnv {
+		t.Fatalf("expected %s env, got %#v", C10DRendezvousFileEnv, main.Env)
 	}
 	if !foundVLLMCheckpointRestoreEnv {
 		t.Fatalf("expected %s env, got %#v", VLLMCheckpointRestoreEnabledEnv, main.Env)
@@ -397,12 +404,16 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 		t.Fatalf("expected single %s mount after repeated calls, got %#v", SnapshotControlVolumeName, container.VolumeMounts)
 	}
 	envCount := 0
+	c10dRendezvousEnvCount := 0
 	vllmCheckpointRestoreEnvCount := 0
 	vllmFileStoreEnvCount := 0
 	placeholderEnvCount := 0
 	for _, e := range container.Env {
 		if e.Name == SnapshotControlDirEnv {
 			envCount++
+		}
+		if e.Name == C10DRendezvousFileEnv {
+			c10dRendezvousEnvCount++
 		}
 		if e.Name == VLLMCheckpointRestoreEnabledEnv {
 			vllmCheckpointRestoreEnvCount++
@@ -419,6 +430,9 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 	}
 	if envCount != 1 {
 		t.Fatalf("expected single %s env after repeated calls, got %#v", SnapshotControlDirEnv, container.Env)
+	}
+	if c10dRendezvousEnvCount != 1 {
+		t.Fatalf("expected single %s env after repeated calls, got %#v", C10DRendezvousFileEnv, container.Env)
 	}
 	if vllmCheckpointRestoreEnvCount != 1 {
 		t.Fatalf("expected single %s env after repeated calls, got %#v", VLLMCheckpointRestoreEnabledEnv, container.Env)
@@ -678,6 +692,7 @@ func validRestoreSpecFixture(profile string, targets ...string) (*corev1.PodSpec
 			Env: []corev1.EnvVar{
 				{Name: SnapshotControlDirEnv, Value: SnapshotControlMountPath},
 				{Name: NCCLCheckpointKVSPathEnv, Value: SnapshotControlMountPath + "/" + NCCLCheckpointKVSFile},
+				{Name: C10DRendezvousFileEnv, Value: SnapshotControlMountPath + "/" + C10DRendezvousFile},
 				{Name: VLLMCheckpointRestoreEnabledEnv, Value: "1"},
 				{Name: VLLMCheckpointRestoreFileStorePathEnv, Value: "/checkpoints/hash/vllm-filestore/1/main/torch_pg"},
 			},
@@ -764,6 +779,16 @@ func TestValidateRestorePodSpec(t *testing.T) {
 		{Name: SnapshotControlDirEnv, Value: SnapshotControlMountPath},
 		{Name: NCCLCheckpointKVSPathEnv, Value: SnapshotControlMountPath + "/" + NCCLCheckpointKVSFile},
 	}
+	if err := ValidateRestorePodSpec(badSpec, annotations, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != fmt.Sprintf(`missing %s env var on container "main"`, C10DRendezvousFileEnv) {
+		t.Fatalf("expected missing c10d rendezvous env error, got %v", err)
+	}
+
+	badSpec = podSpec.DeepCopy()
+	badSpec.Containers[0].Env = []corev1.EnvVar{
+		{Name: SnapshotControlDirEnv, Value: SnapshotControlMountPath},
+		{Name: NCCLCheckpointKVSPathEnv, Value: SnapshotControlMountPath + "/" + NCCLCheckpointKVSFile},
+		{Name: C10DRendezvousFileEnv, Value: SnapshotControlMountPath + "/" + C10DRendezvousFile},
+	}
 	if err := ValidateRestorePodSpec(badSpec, annotations, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != fmt.Sprintf(`missing %s env var on container "main"`, VLLMCheckpointRestoreEnabledEnv) {
 		t.Fatalf("expected missing vLLM checkpoint env error, got %v", err)
 	}
@@ -772,6 +797,7 @@ func TestValidateRestorePodSpec(t *testing.T) {
 	badSpec.Containers[0].Env = []corev1.EnvVar{
 		{Name: SnapshotControlDirEnv, Value: SnapshotControlMountPath},
 		{Name: NCCLCheckpointKVSPathEnv, Value: SnapshotControlMountPath + "/" + NCCLCheckpointKVSFile},
+		{Name: C10DRendezvousFileEnv, Value: SnapshotControlMountPath + "/" + C10DRendezvousFile},
 		{Name: VLLMCheckpointRestoreEnabledEnv, Value: "1"},
 	}
 	if err := ValidateRestorePodSpec(badSpec, annotations, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != fmt.Sprintf(`missing %s env var on container "main"`, VLLMCheckpointRestoreFileStorePathEnv) {

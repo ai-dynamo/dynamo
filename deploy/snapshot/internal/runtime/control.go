@@ -4,6 +4,7 @@
 package runtime
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -39,6 +40,39 @@ func WriteNCCLCheckpointKVSFile(hostPID int, endpoint string) error {
 	}
 	root := filepath.Join(HostProcPath, strconv.Itoa(hostPID), "root")
 	return writeNCCLCheckpointKVSFileInRoot(root, endpoint)
+}
+
+func WriteC10DRendezvousFile(hostPID int, host string, port int, restoreID string) error {
+	if hostPID <= 0 {
+		return fmt.Errorf("invalid host PID %d for c10d rendezvous file", hostPID)
+	}
+	root := filepath.Join(HostProcPath, strconv.Itoa(hostPID), "root")
+	return writeC10DRendezvousFileInRoot(root, host, port, restoreID)
+}
+
+func writeC10DRendezvousFileInRoot(root string, host string, port int, restoreID string) error {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return fmt.Errorf("c10d rendezvous host is empty")
+	}
+	if port <= 0 || port > 65535 {
+		return fmt.Errorf("invalid c10d rendezvous port %d", port)
+	}
+	payload := map[string]any{
+		"restore_id": strings.TrimSpace(restoreID),
+		"store": map[string]any{
+			"host":        host,
+			"port":        port,
+			"master_rank": 0,
+		},
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal c10d rendezvous file: %w", err)
+	}
+	data = append(data, '\n')
+	controlDir := filepath.Join(root, snapshotprotocol.SnapshotControlMountPath)
+	return writeFileInDir(controlDir, snapshotprotocol.C10DRendezvousFile, data)
 }
 
 func writeNCCLCheckpointKVSFileInRoot(root string, endpoint string) error {

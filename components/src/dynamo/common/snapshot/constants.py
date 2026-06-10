@@ -22,7 +22,7 @@ SNAPSHOT_RESTORE_PLACEHOLDER_ENV = "DYN_SNAPSHOT_RESTORE_PLACEHOLDER"
 # ReadyForSnapshotFile}.
 SNAPSHOT_COMPLETE_FILE = "snapshot-complete"
 RESTORE_COMPLETE_FILE = "restore-complete"
-READY_FOR_SNAPSHOT_FILE = "ready-for-snapshot"
+READY_FOR_SNAPSHOT_FILE = "ready-for-checkpoint"
 
 RESTORE_RUNTIME_ENV_NAMES = {
     # Parsed Python runtime config that must also refresh the in-memory config

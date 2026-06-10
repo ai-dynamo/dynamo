@@ -38,15 +38,20 @@ type RestoreRequest struct {
 	Clientset                   kubernetes.Interface
 }
 
+// RestoreResult is the host-side result of an external restore.
+type RestoreResult struct {
+	PlaceholderHostPID int
+	RestoredCUDAPIDs   []int
+}
+
 // Restore performs external restore for the given request.
-// Returns the namespace-relative PID of the restored process.
 // The DaemonSet side inspects the placeholder and launches nsrestore,
 // which handles rootfs application, CRIU restore, and CUDA restore inside the namespace.
 //
 // Returns the placeholder container's host PID so callers can reach into the
 // container's mount namespace (e.g. to write sentinels under /snapshot-control)
 // without re-resolving via the runtime.
-func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest) (int, error) {
+func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest) (*RestoreResult, error) {
 	restoreStart := time.Now()
 	log.Info("=== Starting external restore ===",
 		"checkpoint_id", req.CheckpointID,
@@ -59,13 +64,13 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	hostInspectStart := time.Now()
 	snap, err := inspectRestore(ctx, rt, log, req)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	hostInspectDuration := time.Since(hostInspectStart)
 
 	m, err := types.ReadManifest(snap.CheckpointPath)
 	if err != nil {
-		return 0, fmt.Errorf("failed to read checkpoint manifest for restore preflight: %w", err)
+		return nil, fmt.Errorf("failed to read checkpoint manifest for restore preflight: %w", err)
 	}
 	if err := prepareKubeletMountpointsForRestore(
 		log,
@@ -73,13 +78,13 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		m,
 		filepath.Join(snapshotruntime.HostProcPath, "1", "root"),
 	); err != nil {
-		return 0, err
+		return nil, err
 	}
 
 	// Phase 2: Execute — nsrestore handles rootfs, CRIU restore, and CUDA restore inside namespace
 	result, err := execNSRestore(ctx, log, req, snap)
 	if err != nil {
-		return 0, fmt.Errorf("nsrestore failed: %w", err)
+		return nil, fmt.Errorf("nsrestore failed: %w", err)
 	}
 	restoreDuration := hostInspectDuration + result.NSRestoreSetupDuration + result.CRIURestoreDuration + result.CUDADuration
 	log.Info("Restore timing summary",
@@ -105,7 +110,7 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if err := snapshotruntime.ValidateProcessState(procRoot, result.RestoredPID); err != nil {
 		restoreLogPath := filepath.Join(snap.TargetRoot, "var", "criu-work", criu.RestoreLogFilename)
 		logging.LogProcessDiagnostics(procRoot, result.RestoredPID, restoreLogPath, log)
-		return 0, fmt.Errorf("restored process failed post-restore validation: %w", err)
+		return nil, fmt.Errorf("restored process failed post-restore validation: %w", err)
 	}
 
 	log.Info("=== External restore completed ===",
@@ -115,7 +120,10 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 		"total_duration", time.Since(restoreStart),
 	)
 
-	return snap.PlaceholderPID, nil
+	return &RestoreResult{
+		PlaceholderHostPID: snap.PlaceholderPID,
+		RestoredCUDAPIDs:   result.RestoredCUDAPIDs,
+	}, nil
 }
 
 func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest) (*types.RestoreContainerSnapshot, error) {

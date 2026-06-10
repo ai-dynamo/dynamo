@@ -382,14 +382,20 @@ func ValidateRestorePodSpec(
 			return fmt.Errorf("missing %s env var on container %q", SnapshotControlDirEnv, name)
 		}
 		hasNCCLKvsEnv := false
+		hasC10DRendezvousEnv := false
 		for _, env := range container.Env {
 			if env.Name == NCCLCheckpointKVSPathEnv {
 				hasNCCLKvsEnv = true
-				break
+			}
+			if env.Name == C10DRendezvousFileEnv {
+				hasC10DRendezvousEnv = true
 			}
 		}
 		if !hasNCCLKvsEnv {
 			return fmt.Errorf("missing %s env var on container %q", NCCLCheckpointKVSPathEnv, name)
+		}
+		if !hasC10DRendezvousEnv {
+			return fmt.Errorf("missing %s env var on container %q", C10DRendezvousFileEnv, name)
 		}
 		hasVLLMCheckpointRestoreEnv := false
 		hasVLLMFileStoreEnv := false

@@ -38,6 +38,15 @@ const (
 	// the Redis endpoint and prefix to use for this restore attempt.
 	NCCLCheckpointKVSFile = "nccl-kvs.txt"
 
+	// C10DRendezvousFileEnv points PyTorch's checkpoint-aware c10d store at
+	// restore-time TCPStore metadata that the snapshot agent rewrites before
+	// restore-complete.
+	C10DRendezvousFileEnv = "TORCH_C10D_RENDEZVOUS_FILE"
+
+	// C10DRendezvousFile is captured in restored process env and contains the
+	// fresh TCPStore host/port to use after CRIU restore.
+	C10DRendezvousFile = "rendezvous.json"
+
 	// NCCLCheckpointKVSGroupAnnotation optionally overrides the Redis key
 	// prefix used by NCCL checkpoint restore. This is useful for multi-pod
 	// restores where each pod has a distinct checkpoint artifact ID, but all
@@ -88,7 +97,7 @@ const (
 	// volume when the model is loaded and the workload is ready for a
 	// checkpoint. Observed by the checkpoint job's kubelet readiness probe
 	// on the worker container.
-	ReadyForSnapshotFile = "ready-for-snapshot"
+	ReadyForSnapshotFile = "ready-for-checkpoint"
 )
 
 // EnsureControlVolume adds the snapshot-control emptyDir to the pod spec,
@@ -142,12 +151,16 @@ func EnsureControlVolume(podSpec *corev1.PodSpec, container *corev1.Container) {
 
 	hasControlEnv := false
 	hasNCCLKvsEnv := false
+	hasC10DRendezvousEnv := false
 	for _, e := range container.Env {
 		if e.Name == SnapshotControlDirEnv {
 			hasControlEnv = true
 		}
 		if e.Name == NCCLCheckpointKVSPathEnv {
 			hasNCCLKvsEnv = true
+		}
+		if e.Name == C10DRendezvousFileEnv {
+			hasC10DRendezvousEnv = true
 		}
 	}
 	if !hasControlEnv {
@@ -160,6 +173,12 @@ func EnsureControlVolume(podSpec *corev1.PodSpec, container *corev1.Container) {
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  NCCLCheckpointKVSPathEnv,
 			Value: SnapshotControlMountPath + "/" + NCCLCheckpointKVSFile,
+		})
+	}
+	if !hasC10DRendezvousEnv {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  C10DRendezvousFileEnv,
+			Value: SnapshotControlMountPath + "/" + C10DRendezvousFile,
 		})
 	}
 }
