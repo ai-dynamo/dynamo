@@ -717,6 +717,7 @@ class ModelRuntimeConfig:
     A model runtime configuration is a collection of runtime information
     """
 
+    context_length: int | None
     total_kv_blocks: int | None
     max_num_seqs: int | None
     max_num_batched_tokens: int | None
@@ -734,7 +735,6 @@ class ModelRuntimeConfig:
     kv_transfer_domain: str | None
     kv_transfer_enforcement: str | None
     kv_transfer_preferred_weight: float | None
-    tensor_model_config: Any | None
     bootstrap_host: str | None
     bootstrap_port: int | None
 
@@ -766,14 +766,6 @@ class ModelRuntimeConfig:
             bootstrap_port: int | None = None,
         ) -> None:
         """Set the disaggregated endpoint for the model"""
-        ...
-
-    def set_tensor_model_config(self, tensor_model_config: Dict[str, Any]) -> None:
-        """Set the tensor model configuration from a dictionary."""
-        ...
-
-    def get_tensor_model_config(self) -> Any | None:
-        """Get the tensor model configuration."""
         ...
 
 class RoutingConstraints:
@@ -1375,7 +1367,9 @@ class KserveGrpcService:
         model: str,
         checksum: str,
         engine: PythonAsyncEngine,
-        runtime_config: Optional[ModelRuntimeConfig],
+        *,
+        runtime_config: Optional[ModelRuntimeConfig] = None,
+        tensor_model_config: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Register a tensor-based model with the service.
@@ -1384,6 +1378,8 @@ class KserveGrpcService:
             model: The model name
             checksum: The model checksum
             engine: The async engine to handle requests
+            runtime_config: Optional runtime-resolved worker metadata
+            tensor_model_config: Optional tensor protocol model metadata
         """
         ...
 
@@ -2120,10 +2116,10 @@ async def register_model(
     model_name: Optional[str] = None,
     *,
     worker_type: WorkerType,
-    context_length: Optional[int] = None,
     kv_cache_block_size: Optional[int] = None,
     router_mode: Optional[RouterMode] = None,
     runtime_config: Optional[ModelRuntimeConfig] = None,
+    tensor_model_config: Optional[Dict[str, Any]] = None,
     user_data: Optional[Dict[str, Any]] = None,
     custom_template_path: Optional[str] = None,
     media_decoder: Optional[MediaDecoder] = None,
@@ -2142,7 +2138,7 @@ async def register_model(
 
     For TensorBased models (using ModelInput.Tensor), HuggingFace downloads are skipped
     and a minimal model card is registered directly. Use model_path as the display name
-    for these models.
+    for these models. Pass tensor protocol metadata through `tensor_model_config`.
 
     Model serving readiness:
         `worker_type` and `needs` describe the worker's processing stage and
@@ -2778,7 +2774,6 @@ class EntrypointArgs:
         model_path: Optional[str] = None,
         model_name: Optional[str] = None,
         endpoint_id: Optional[str] = None,
-        context_length: Optional[int] = None,
         template_file: Optional[str] = None,
         router_config: Optional[RouterConfig] = None,
         kv_cache_block_size: Optional[int] = None,
@@ -2806,7 +2801,6 @@ class EntrypointArgs:
             model_path: Path to the model directory on disk
             model_name: Model name or dynamo endpoint (e.g. 'dyn://namespace.component.endpoint')
             endpoint_id: Optional endpoint ID
-            context_length: Optional context length override
             template_file: Optional path to a prompt template file
             router_config: Optional router configuration
             kv_cache_block_size: Optional KV cache block size

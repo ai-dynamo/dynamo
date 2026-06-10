@@ -40,7 +40,7 @@ use dynamo_llm::{self as llm_rs};
 
 use crate::llm::entrypoint::RouterConfig as PyRouterConfig;
 
-use crate::llm::local_model::{ModelRuntimeConfig, RoutingConstraints};
+use crate::llm::local_model::{ModelRuntimeConfig, RoutingConstraints, parse_tensor_model_config};
 use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 
 #[pyclass(eq, eq_int)]
@@ -332,7 +332,7 @@ fn resolve_routing_image_token_id(model_id: &str, model_dir: &str) -> Option<u32
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_model<'p>(
     py: Python<'p>,
@@ -341,7 +341,6 @@ fn register_model<'p>(
     endpoint: Endpoint,
     model_path: &str,
     model_name: Option<&str>,
-    context_length: Option<u32>,
     kv_cache_block_size: Option<u32>,
     router_config: Option<PyRouterConfig>,
     runtime_config: Option<ModelRuntimeConfig>,
@@ -354,6 +353,7 @@ fn register_model<'p>(
     worker_type: Option<WorkerType>,
     needs: Option<Vec<Vec<WorkerType>>>,
     self_host_metadata: Option<bool>,
+    tensor_model_config: Option<&Bound<'p, PyDict>>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Every worker registers with an explicit `worker_type`. Reject `None`
     // outright — a missing role would produce a card whose readiness math
@@ -415,6 +415,12 @@ fn register_model<'p>(
     let is_realtime = model_type.inner.supports_realtime();
 
     let model_type_obj = model_type.inner;
+    let tensor_model_config = parse_tensor_model_config(tensor_model_config)?;
+    if tensor_model_config.is_some() && !is_tensor_based {
+        return Err(PyValueError::new_err(
+            "tensor_model_config is only valid for TensorBased models",
+        ));
+    }
 
     // Model-serving-readiness fields on the MDC. `worker_type` is required
     // (see the check above). Non-Aggregated workers must declare their peers
@@ -497,6 +503,8 @@ fn register_model<'p>(
     }
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let runtime_config = runtime_config.unwrap_or_default();
+
         // For TensorBased, Images, Videos, and Realtime models, skip
         // HuggingFace downloads and register directly. These model types
         // handle model loading internally; no tokenizer extraction is
@@ -510,9 +518,8 @@ fn register_model<'p>(
             card.needs = needs_value.clone();
             card.user_data = user_data_json;
 
-            if let Some(cfg) = runtime_config {
-                card.runtime_config = cfg.inner;
-            }
+            card.runtime_config = runtime_config.inner;
+            card.tensor_model_config = tensor_model_config;
             card.router_config = explicit_router_config.clone();
 
             // Register the Model Deployment Card via discovery interface
@@ -553,10 +560,9 @@ fn register_model<'p>(
             .source_path(source_path.clone().into())
             // --served_model_name
             .model_name(model_name.clone())
-            .context_length(context_length)
             .kv_cache_block_size(kv_cache_block_size)
             .router_config(explicit_router_config.clone())
-            .runtime_config(runtime_config.unwrap_or_default().inner)
+            .runtime_config(runtime_config.inner)
             .user_data(user_data_json)
             .custom_template_path(custom_template_path_owned)
             .media_decoder(media_decoder.map(|m| m.inner))

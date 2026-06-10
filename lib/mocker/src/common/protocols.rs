@@ -224,8 +224,8 @@ pub struct PrefillCost {
     /// Number of tokens already cached (prefix hit).
     /// isl = cached_tokens + new_tokens
     pub cached_tokens: usize,
-    /// Subset of `cached_tokens` backed by active blocks; TRT-LLM no-evict
-    /// capacity reservation discounts only these (inactive reuse is re-consumed).
+    /// Subset of `cached_tokens` backed by active blocks. Physical-capacity
+    /// admission discounts only these because inactive reuse is re-consumed.
     pub active_cached_tokens: usize,
 }
 
@@ -317,7 +317,8 @@ impl FromStr for EngineType {
 /// single discriminant instead of re-deriving engine behavior per pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SchedulingPolicy {
-    /// vLLM semantics: optimistic admission, preempt under KV pressure.
+    /// vLLM semantics: require the current known sequence to fit at waiting
+    /// admission, then permit preemption under later KV pressure.
     #[default]
     Vllm,
     /// TRT-LLM `GUARANTEED_NO_EVICT`: reserve `prompt + max_output` per

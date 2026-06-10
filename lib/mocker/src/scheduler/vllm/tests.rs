@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use dynamo_kv_router::indexer::{METRIC_EVENT_REMOVED, METRIC_EVENT_STORED};
+use dynamo_kv_router::indexer::METRIC_EVENT_STORED;
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, WorkerId};
 use rstest::rstest;
 use tokio::sync::mpsc;
@@ -305,8 +305,8 @@ mod core_behavior {
         let args = MockEngineArgs::builder()
             .block_size(4)
             .num_gpu_blocks(6)
-            .max_num_batched_tokens(Some(12))
-            .max_num_seqs(Some(3))
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(2))
             .enable_chunked_prefill(true)
             .enable_prefix_caching(false)
             .preemption_mode(PreemptionMode::Lifo)
@@ -316,11 +316,10 @@ mod core_behavior {
         let mut core = VllmCore::new(args);
         let r1 = Uuid::from_u128(1);
         let r2 = Uuid::from_u128(2);
-        let r3 = Uuid::from_u128(3);
-        for (uuid, range) in [(r1, 0u32..8u32), (r2, 100u32..108u32), (r3, 200u32..212u32)] {
+        for (uuid, range) in [(r1, 0u32..8u32), (r2, 100u32..108u32)] {
             core.receive(DirectRequest {
                 tokens: range.collect(),
-                max_output_tokens: 2,
+                max_output_tokens: 8,
                 uuid: Some(uuid),
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
@@ -328,16 +327,148 @@ mod core_behavior {
         }
 
         let mut collector = crate::replay::TraceCollector::default();
-        let pass1 = core.execute_pass(&mut collector, 0.0);
-        let pass2 = core.execute_pass(&mut collector, 1.0);
+        let mut now_ms = 0.0;
+        let mut preemptions_before = 0;
+        for _ in 0..16 {
+            let pass = core.execute_pass(&mut collector, now_ms);
+            now_ms = pass.end_ms.max(now_ms + 1.0);
+            preemptions_before = pass.mocker_metrics.vllm_preemptions_total;
+            if preemptions_before > 0 {
+                break;
+            }
+        }
         let request = core.state.requests.get(&r2).unwrap();
         assert_eq!(request.status, RequestStatus::Preempted);
         assert_eq!(request.num_computed_tokens, 0);
         assert_eq!(request.num_preemptions, 1);
         assert_eq!(core.state.waiting.front().copied(), Some(r2));
+        assert_eq!(preemptions_before, 1);
+    }
+
+    #[test]
+    fn test_waiting_full_isl_gate_blocks_without_preemption_then_admits() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(6)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(3))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .preemption_mode(PreemptionMode::Lifo)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let holder = Uuid::from_u128(1);
+        let blocked = Uuid::from_u128(2);
+        let follower = Uuid::from_u128(3);
+        core.receive(DirectRequest {
+            tokens: (0..16).collect(),
+            max_output_tokens: 1,
+            uuid: Some(holder),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+        core.receive(DirectRequest {
+            tokens: (100..112).collect(),
+            max_output_tokens: 1,
+            uuid: Some(blocked),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+        core.receive(DirectRequest {
+            tokens: (200..204).collect(),
+            max_output_tokens: 1,
+            uuid: Some(follower),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass1 = core.execute_pass(&mut collector, 0.0);
+
+        assert!(core.state.waiting.contains(&blocked));
+        assert!(core.state.waiting.contains(&follower));
+        assert_eq!(core.state.waiting.front().copied(), Some(blocked));
+        assert!(
+            !pass1
+                .admissions
+                .iter()
+                .any(|admission| admission.uuid == blocked)
+        );
+        assert!(
+            !pass1
+                .admissions
+                .iter()
+                .any(|admission| admission.uuid == follower),
+            "a smaller follower must not skip a blocked FIFO head"
+        );
+        assert!(
+            pass1
+                .output_signals
+                .iter()
+                .any(|signal| signal.uuid == holder && signal.completed)
+        );
+        assert_eq!(
+            core.state
+                .requests
+                .get(&blocked)
+                .unwrap()
+                .num_computed_tokens,
+            0
+        );
         assert_eq!(pass1.mocker_metrics.vllm_preemptions_total, 0);
-        assert_eq!(pass2.mocker_metrics.vllm_preemptions_total, 1);
-        assert_eq!(pass2.mocker_metrics.waiting_requests, 1);
+
+        let pass2 = core.execute_pass(&mut collector, pass1.end_ms.max(1.0));
+        assert!(
+            pass2
+                .admissions
+                .iter()
+                .any(|admission| admission.uuid == blocked),
+            "blocked request should be admitted after the holder completes"
+        );
+        assert_eq!(pass2.mocker_metrics.vllm_preemptions_total, 0);
+    }
+
+    #[test]
+    fn test_fresh_request_larger_than_pool_is_rejected_and_follower_runs() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(4)
+            .max_num_batched_tokens(Some(32))
+            .max_num_seqs(Some(2))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let oversized = Uuid::from_u128(1);
+        let follower = Uuid::from_u128(2);
+        for (uuid, range) in [(oversized, 0u32..20u32), (follower, 100u32..104u32)] {
+            core.receive(DirectRequest {
+                tokens: range.collect(),
+                max_output_tokens: 1,
+                uuid: Some(uuid),
+                dp_rank: 0,
+                arrival_timestamp_ms: None,
+            });
+        }
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass = core.execute_pass(&mut collector, 0.0);
+
+        assert!(
+            pass.output_signals
+                .iter()
+                .any(|signal| { signal.uuid == oversized && signal.completed && signal.rejected })
+        );
+        assert!(
+            pass.admissions
+                .iter()
+                .any(|admission| admission.uuid == follower)
+        );
+        assert_eq!(pass.mocker_metrics.vllm_preemptions_total, 0);
     }
 
     #[test]
@@ -585,8 +716,8 @@ mod router_events {
         let args = MockEngineArgs::builder()
             .block_size(4)
             .num_gpu_blocks(6)
-            .max_num_batched_tokens(Some(12))
-            .max_num_seqs(Some(3))
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(2))
             .enable_chunked_prefill(true)
             .enable_prefix_caching(true)
             .preemption_mode(PreemptionMode::Lifo)
@@ -596,11 +727,10 @@ mod router_events {
         let mut core = VllmCore::new_with_kv_capture(args, ROUTER_TEST_WORKER_ID);
         let r1 = Uuid::from_u128(51);
         let r2 = Uuid::from_u128(52);
-        let r3 = Uuid::from_u128(53);
-        for (uuid, range) in [(r1, 0u32..8u32), (r2, 100u32..108u32), (r3, 200u32..212u32)] {
+        for (uuid, range) in [(r1, 0u32..8u32), (r2, 100u32..108u32)] {
             core.receive(DirectRequest {
                 tokens: range.collect(),
-                max_output_tokens: 2,
+                max_output_tokens: 8,
                 uuid: Some(uuid),
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
@@ -609,21 +739,44 @@ mod router_events {
 
         let mut collector = crate::replay::TraceCollector::default();
         let mut now_ms = 0.0;
-        let mut saw_remove = false;
-        for _ in 0..2 {
+        let mut saw_preemption = false;
+        for _ in 0..16 {
             let pass = core.execute_pass(&mut collector, now_ms);
-            saw_remove |= removed_event_count(&pass.kv_events) > 0;
-            now_ms = pass.end_ms;
+            now_ms = pass.end_ms.max(now_ms + 1.0);
             harness.apply_events(pass.kv_events).await;
+            if core
+                .state
+                .requests
+                .get(&r2)
+                .is_some_and(|request| request.status == RequestStatus::Preempted)
+            {
+                saw_preemption = true;
+                break;
+            }
         }
 
+        assert!(saw_preemption);
         let request = core.state.requests.get(&r2).unwrap();
         assert_eq!(request.status, RequestStatus::Preempted);
         assert_eq!(request.num_computed_tokens, 0);
         assert_eq!(request.num_preemptions, 1);
         assert_eq!(core.state.waiting.front().copied(), Some(r2));
-        assert!(saw_remove);
-        assert!(harness.ok_count(METRIC_EVENT_REMOVED) > 0);
+
+        let mut readmitted = false;
+        for _ in 0..32 {
+            let pass = core.execute_pass(&mut collector, now_ms);
+            now_ms = pass.end_ms.max(now_ms + 1.0);
+            readmitted |= pass.admissions.iter().any(|admission| admission.uuid == r2);
+            harness.apply_events(pass.kv_events).await;
+            if readmitted {
+                break;
+            }
+        }
+
+        assert!(
+            readmitted,
+            "preempted request should be admitted for recompute"
+        );
         harness.assert_no_event_warnings();
         harness.shutdown();
     }

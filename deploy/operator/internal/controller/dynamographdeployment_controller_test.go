@@ -695,7 +695,8 @@ func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_Does
 					Experimental: &v1beta1.ExperimentalSpec{
 						GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{},
 						Checkpoint: &v1beta1.ComponentCheckpointConfig{
-							Mode: v1beta1.CheckpointModeAuto,
+							Enabled: true,
+							Mode:    v1beta1.CheckpointModeAuto,
 							Identity: &v1beta1.DynamoCheckpointIdentity{
 								Model:            identity.Model,
 								BackendFramework: identity.BackendFramework,
@@ -953,7 +954,8 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRDoesNotAdoptLegacyIde
 		ComponentType: v1beta1.ComponentTypeWorker,
 		Experimental: &v1beta1.ExperimentalSpec{
 			Checkpoint: &v1beta1.ComponentCheckpointConfig{
-				Mode: v1beta1.CheckpointModeAuto,
+				Enabled: true,
+				Mode:    v1beta1.CheckpointModeAuto,
 				Identity: &v1beta1.DynamoCheckpointIdentity{
 					Model:            identity.Model,
 					BackendFramework: identity.BackendFramework,
@@ -1142,7 +1144,8 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRAppliesDGDDefaults(t 
 		},
 		Experimental: &v1beta1.ExperimentalSpec{
 			Checkpoint: &v1beta1.ComponentCheckpointConfig{
-				Mode: v1beta1.CheckpointModeAuto,
+				Enabled: true,
+				Mode:    v1beta1.CheckpointModeAuto,
 				Identity: &v1beta1.DynamoCheckpointIdentity{
 					Model:                identity.Model,
 					BackendFramework:     identity.BackendFramework,
@@ -1203,6 +1206,7 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRUsesTargetContainer(t
 				Mode: v1beta1.GMSModeIntraPod,
 			},
 			Checkpoint: &v1beta1.ComponentCheckpointConfig{
+				Enabled:             true,
 				Mode:                v1beta1.CheckpointModeAuto,
 				TargetContainerName: "snapshot-me",
 				Identity:            &checkpointIdentity,
@@ -1259,6 +1263,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpointsAutoUsesTargetConta
 				},
 				Experimental: &v1beta1.ExperimentalSpec{
 					Checkpoint: &v1beta1.ComponentCheckpointConfig{
+						Enabled:             true,
 						Mode:                v1beta1.CheckpointModeAuto,
 						TargetContainerName: "snapshot-me",
 					},
@@ -1318,7 +1323,8 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpointsAutoPreservesPodTem
 				},
 				Experimental: &v1beta1.ExperimentalSpec{
 					Checkpoint: &v1beta1.ComponentCheckpointConfig{
-						Mode: v1beta1.CheckpointModeAuto,
+						Enabled: true,
+						Mode:    v1beta1.CheckpointModeAuto,
 					},
 				},
 			}},
@@ -1368,6 +1374,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpointsSyncsExistingAutoLi
 				},
 				Experimental: &v1beta1.ExperimentalSpec{
 					Checkpoint: &v1beta1.ComponentCheckpointConfig{
+						Enabled:        true,
 						Mode:           v1beta1.CheckpointModeAuto,
 						DeletionPolicy: v1beta1.CheckpointDeletionPolicyRetain,
 					},
