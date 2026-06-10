@@ -63,15 +63,9 @@ impl RoutingOccupancyState {
         Some(id)
     }
 
-    /// Read-only mirror of [`select_exact_min_and_increment`] used by routing
-    /// modes (e.g. least-loaded) that want to *peek* a candidate without
-    /// committing the load increment — for example, the disagg-bootstrap path
-    /// in `prefill_router` which needs a worker_id to resolve `bootstrap_info`
-    /// before the actual prefill request is dispatched (and dispatching via
-    /// `direct(preselected_worker)` then performs the real load accounting).
-    ///
-    /// Tie-break policy matches [`select_exact_min_and_increment`] so peek and
-    /// select observe the same selection distribution, modulo concurrent races.
+    /// Least-loaded selection without the increment. Same tie-break policy as
+    /// [`Self::select_exact_min_and_increment`] so peek and select share a
+    /// distribution.
     pub(crate) fn peek_min(&self, instance_ids: &[u64]) -> Option<u64> {
         let mut min_load = u64::MAX;
         let mut selected = None;

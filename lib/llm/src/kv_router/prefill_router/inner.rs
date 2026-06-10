@@ -114,15 +114,9 @@ impl InnerPrefillRouter {
         }
     }
 
-    /// Commit load tracking for a worker chosen via [`Self::generate_to_worker`]'s
-    /// disagg-bootstrap path. Returns `Some(permit)` only for `SimpleRouter` modes
-    /// whose underlying `PushRouter` maintains an occupancy counter
-    /// (LeastLoaded / PowerOfTwoChoices / DeviceAwareWeighted). Drop the permit
-    /// when the dispatched request finishes — typically by moving it into the
-    /// spawned prefill task so it lives for the prefill stream's lifetime.
-    ///
-    /// `KvRouter` routes via `KvPushRouter::select_worker`, which has its own
-    /// state-keeping via worker-pushed kv_metrics events, so this returns `None`.
+    /// Commit occupancy load for a bootstrap-dispatched worker. `Some` only for
+    /// `SimpleRouter` occupancy modes; `KvRouter` tracks load via worker-pushed
+    /// kv_metrics events instead.
     pub(super) fn track_dispatch(&self, instance_id: u64) -> Option<OccupancyPermit> {
         match self {
             InnerPrefillRouter::SimpleRouter(router) => router.track_dispatch(instance_id),
