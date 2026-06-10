@@ -190,7 +190,7 @@ fn p2c_select_from(occupancy_state: &RoutingOccupancyState, instance_ids: &[u64]
             worker_id,
             candidate_count = count,
             load = occupancy_state.load(worker_id),
-            "Selected worker: power-of-two-choices (single candidate)"
+            "Selected worker"
         );
         return worker_id;
     }
@@ -211,7 +211,7 @@ fn p2c_select_from(occupancy_state: &RoutingOccupancyState, instance_ids: &[u64]
         candidate_a_load = load1,
         candidate_b = id2,
         candidate_b_load = load2,
-        "Selected worker: power-of-two-choices"
+        "Selected worker"
     );
     selected
 }
@@ -530,7 +530,7 @@ where
             router_mode = "round-robin",
             worker_id = instance_id,
             candidate_count,
-            "Selected worker: round-robin"
+            "Selected worker"
         );
 
         self.generate_with_fault_detection(instance_id, request)
@@ -552,7 +552,7 @@ where
             router_mode = "random",
             worker_id = instance_id,
             candidate_count,
-            "Selected worker: random"
+            "Selected worker"
         );
 
         self.generate_with_fault_detection(instance_id, request)
@@ -610,7 +610,7 @@ where
         tracing::info!(
             router_mode = "direct",
             worker_id = instance_id,
-            "Selected worker: direct"
+            "Selected worker"
         );
 
         self.generate_with_fault_detection(instance_id, request)
@@ -674,7 +674,7 @@ where
             load = state.load(instance_id),
             endpoint = %endpoint_id,
             is_cpu,
-            "Selected worker: device-aware-weighted"
+            "Selected worker"
         );
 
         match self
@@ -701,7 +701,7 @@ where
             worker_id = instance_id,
             candidate_count = instance_ids.len(),
             load = state.load(instance_id),
-            "Selected worker: least-loaded"
+            "Selected worker"
         );
 
         match self

@@ -420,7 +420,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 logit = best_logit,
                 host_pinned_blocks = best_host_pinned_overlap_blocks,
                 disk_blocks = best_disk_overlap_blocks,
-                "Selected worker: kv"
+                "Selected worker"
             );
             let effective_overlap_blocks = request.effective_overlap_blocks_for(best_worker);
             let cached_tokens = request.effective_cached_tokens_for(best_worker);
@@ -450,7 +450,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             host_pinned_blocks = best_host_pinned_overlap_blocks,
             disk_blocks = best_disk_overlap_blocks,
             total_kv_blocks = ?total_kv_blocks,
-            "Selected worker: kv"
+            "Selected worker"
         );
 
         Ok(WorkerSelectionResult {
