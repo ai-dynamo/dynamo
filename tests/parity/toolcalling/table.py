@@ -26,8 +26,8 @@ Cell markers (per peer, vllm + sglang):
   V/S   peer is a concrete inline block AND has `reason:` (intentional)
   V?/S? peer is a concrete inline block AND has no `reason:` yet
         (research-needed; we observed it but haven't classified it)
-  V!/S! peer has `error: <substring>` (expected to crash)
-  VS, V?S, VS!, etc. — combinations
+  V✗/S✗ peer has `error: <substring>` (Python parser raised)
+  VS, V?S, VS✗, etc. — combinations
   ·     Dynamo-only fixture; both peer blocks are `unavailable`
   n/a   family/case doesn't apply
   —     no fixture entry exists for this family/case yet
@@ -718,7 +718,7 @@ def _parser_marker(case: dict | None, impl: str) -> str:
     if not isinstance(block, dict) or "unavailable" in block:
         return "n/a"
     if "error" in block:
-        return "!"
+        return "✗"
     if _block_tool_call_leaks(block):
         return "↯"
     if impl == "dynamo":
@@ -753,11 +753,11 @@ def cell_for(case: dict | None) -> str:
     if v_kind == "div":
         parts.append("V?" if v_unknown else "V")
     elif v_kind == "err":
-        parts.append("V!")
+        parts.append("V✗")
     if s_kind == "div":
         parts.append("S?" if s_unknown else "S")
     elif s_kind == "err":
-        parts.append("S!")
+        parts.append("S✗")
 
     # `reason:` on the `expected.dynamo` block flags Dynamo's own output as
     # leaking tool call markup only when Dynamo also leaves residual
@@ -799,7 +799,7 @@ _LEGEND_MD = (
     "`?` research-needed suffix (e.g. V?, S? — diverges with no `reason:` yet) · "
     "`↯` Dynamo leaks tool call markup into `normal_text` "
     "(`expected.dynamo.reason:` carries the explanation) · "
-    "`!` expected-error suffix (e.g. V!, S! — engine crashes by design) · "
+    "`✗` parser exception (e.g. V✗, S✗ — Python parser raised) · "
     "`n/a` not applicable · "
     "`—` missing fixture coverage · "
     "`†` (tool calling parser column) = no vLLM peer parser for this family · "
@@ -949,7 +949,7 @@ def _tooltip_for(case: dict, dyn: dict) -> str:
     Each non-matching, non-unavailable peer contributes one line:
       vllm: <reason>                        # `reason:` field present
       vllm: UNKNOWN — divergent ...         # divergent, no reason
-      vllm: expected error matching '...'   # `error:` field present
+      vllm: parser exception matching '...' # `error:` field present
     """
     parts: list[str] = []
     n_dyn = {
@@ -964,7 +964,7 @@ def _tooltip_for(case: dict, dyn: dict) -> str:
             continue
         name = _IMPL_DISPLAY.get(impl, impl)
         if "error" in block:
-            parts.append(f"{name}: expected error matching {block['error']!r}")
+            parts.append(f"{name}: parser exception matching {block['error']!r}")
             continue
         # Don't rely on PyYAML preserving anchor identity (the `block is dyn`
         # check above is the fast path; value equality is the safety net).
@@ -1480,7 +1480,7 @@ def _compute_stats(
                 s["parity"] += 1
             elif text in {"D", "·"}:
                 s["dynamo_only"] += 1
-            elif "!" in text:
+            elif "!" in text or "✗" in text:
                 s["errors"] += 1
             elif "↯" in text:
                 s["documented"] += 1

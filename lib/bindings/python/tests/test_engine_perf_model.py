@@ -108,6 +108,11 @@ def test_capacity_request_rejects_non_finite_sla() -> None:
         EngineCapacityRequest(isl=100, osl=10, ttft_sla_ms=float("nan"))
 
 
+def test_capacity_request_rejects_non_finite_accept_length() -> None:
+    with pytest.raises(ValueError, match="accept_length must be finite"):
+        EngineCapacityRequest(isl=100, osl=10, accept_length=float("nan"))
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [

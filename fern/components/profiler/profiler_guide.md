@@ -61,7 +61,7 @@ Each DGDR requires a container image for profiling and deployment:
 
 ```yaml
 spec:
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.0"
 ```
 
 #### Quick Start: Deploy with DGDR
@@ -78,7 +78,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.0"
 
   workload:
     isl: 3000
@@ -224,7 +224,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.0"
 
   workload: { ... }
   sla: { ... }

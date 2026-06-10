@@ -836,6 +836,7 @@ class OrchestratorEngineAdapter:
                 isl=ti.traffic.isl,
                 osl=ti.traffic.osl,
                 kv_hit_rate=ti.traffic.kv_hit_rate,
+                accept_length=ti.traffic.accept_length,
             )
         workers = None
         if ti.worker_counts is not None:

@@ -173,6 +173,12 @@ pub struct RequestTracker {
     /// reports it even though the local `record_*` timestamps were never set in this
     /// process. First-write-wins.
     external_timing: OnceLock<TimingInfo>,
+
+    /// Tokenized prompt forwarded from a standalone router's query-only response
+    /// (GAIE Stage 1), so the frontend can surface it in `nvext.token_ids` without
+    /// re-tokenizing. Lives here rather than on `routing_data` because the preprocessor
+    /// drains `routing_data` before the delta generator runs. First-write-wins.
+    external_query_token_ids: OnceLock<Vec<u32>>,
 }
 
 /// Data a standalone router (running the `PushRouter` bindings in its own process)
@@ -184,6 +190,16 @@ pub struct RoutingData {
     /// Per-request timing measured by the router (prefill/ttft/kv_hit/queue/total).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timing: Option<TimingInfo>,
+
+    /// Worker attribution measured by the router (prefill/decode worker IDs + DP ranks),
+    /// read back by the prefill router for disaggregated routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<WorkerIdInfo>,
+
+    /// Tokenized prompt returned by a query-only (GAIE Stage 1) response so it can be
+    /// reused without re-tokenizing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_ids: Option<Vec<u32>>,
 }
 
 impl RequestTracker {
@@ -221,6 +237,7 @@ impl RequestTracker {
             router_queue_depth: OnceLock::new(),
             prefill_complete_time: OnceLock::new(),
             external_timing: OnceLock::new(),
+            external_query_token_ids: OnceLock::new(),
         }
     }
 
@@ -609,6 +626,37 @@ impl RequestTracker {
         let _ = self.external_timing.set(timing);
     }
 
+    /// Stash the tokenized prompt forwarded by a standalone router's query-only response
+    /// (GAIE Stage 1) so `build_response_nvext` can surface it in `nvext.token_ids`.
+    /// First-write-wins.
+    pub fn set_external_query_token_ids(&self, token_ids: Vec<u32>) {
+        let _ = self.external_query_token_ids.set(token_ids);
+    }
+
+    /// Overlay worker attribution forwarded by a standalone router (on the first chunk's
+    /// `routing_data.worker_id`) onto this tracker so `get_worker_info`, the metrics
+    /// annotation, and `build_response_nvext` surface it on the split-router path.
+    /// First-write-wins per field: this process's own recordings take precedence.
+    pub fn set_external_worker_info(&self, info: WorkerIdInfo) {
+        if let Some(id) = info.prefill_worker_id {
+            Self::record_once_u64(&self.prefill_worker_id, id, "prefill_worker_id");
+        }
+        if let Some(rank) = info.prefill_dp_rank {
+            Self::record_once_u32(&self.prefill_dp_rank, rank, "prefill_dp_rank");
+        }
+        if let Some(id) = info.decode_worker_id {
+            Self::record_once_u64(&self.decode_worker_id, id, "decode_worker_id");
+        }
+        if let Some(rank) = info.decode_dp_rank {
+            Self::record_once_u32(&self.decode_dp_rank, rank, "decode_dp_rank");
+        }
+    }
+
+    /// The query-only tokenized prompt forwarded from a standalone router, if any.
+    pub fn query_token_ids(&self) -> Option<&[u32]> {
+        self.external_query_token_ids.get().map(Vec::as_slice)
+    }
+
     /// Per-request timing. Starts from this process's own measurements; in the split-router
     /// topology, router-injected fields (`prefill_*`/`ttft_ms`/`kv_hit_rate`/`router_queue_depth`/
     /// `kv_transfer_estimated_latency_ms`) fill the gaps the frontend can't measure. This
@@ -828,6 +876,64 @@ mod tests {
         // Frontend keeps its own end-to-end total, not the router's shorter one.
         assert_eq!(info.total_time_ms, Some(local_total));
         assert_ne!(info.total_time_ms, Some(999.0));
+    }
+
+    #[test]
+    fn test_external_query_token_ids_round_trip() {
+        let tracker = RequestTracker::new();
+        assert!(tracker.query_token_ids().is_none());
+
+        // Forwarded from a standalone router's query-only response (GAIE Stage 1).
+        tracker.set_external_query_token_ids(vec![11, 22, 33]);
+        assert_eq!(tracker.query_token_ids(), Some(&[11u32, 22, 33][..]));
+
+        // First-write-wins: a later forward does not clobber.
+        tracker.set_external_query_token_ids(vec![44, 55]);
+        assert_eq!(tracker.query_token_ids(), Some(&[11u32, 22, 33][..]));
+    }
+
+    #[test]
+    fn test_set_external_worker_info_round_trip() {
+        let tracker = RequestTracker::new();
+        assert!(tracker.get_worker_info().is_none());
+
+        // Forwarded from a standalone router on routing_data.worker_id (split-router path).
+        tracker.set_external_worker_info(WorkerIdInfo {
+            prefill_worker_id: Some(7),
+            prefill_dp_rank: Some(1),
+            decode_worker_id: Some(9),
+            decode_dp_rank: Some(2),
+        });
+        assert_eq!(
+            tracker.get_worker_info(),
+            Some(WorkerIdInfo {
+                prefill_worker_id: Some(7),
+                prefill_dp_rank: Some(1),
+                decode_worker_id: Some(9),
+                decode_dp_rank: Some(2),
+            })
+        );
+    }
+
+    #[test]
+    fn test_local_worker_recording_wins_over_forwarded() {
+        let tracker = RequestTracker::new();
+        // Default phase is Aggregated, so this records both prefill and decode locally.
+        tracker.record_worker(42, Some(0), WORKER_TYPE_PREFILL);
+
+        // A later forward from a standalone router must not clobber local attribution
+        // (OnceLock first-write-wins).
+        tracker.set_external_worker_info(WorkerIdInfo {
+            prefill_worker_id: Some(7),
+            prefill_dp_rank: Some(1),
+            decode_worker_id: Some(9),
+            decode_dp_rank: Some(2),
+        });
+
+        assert_eq!(tracker.prefill_worker_id(), Some(42));
+        assert_eq!(tracker.prefill_dp_rank(), Some(0));
+        assert_eq!(tracker.decode_worker_id(), Some(42));
+        assert_eq!(tracker.decode_dp_rank(), Some(0));
     }
 
     #[test]

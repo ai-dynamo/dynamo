@@ -19,6 +19,8 @@ pub(super) struct WorkerCompletionPayload {
     pub completed_requests: usize,
     pub output_signals: Vec<OutputSignal>,
     pub kv_events: Vec<RouterEvent>,
+    pub accept_length_output_tokens: usize,
+    pub accept_length_decode_forwards: usize,
 }
 
 pub(super) fn next_timestamp(
@@ -77,6 +79,8 @@ pub(super) fn push_worker_completion(
             completed_requests: payload.completed_requests,
             output_signals: payload.output_signals,
             kv_events: payload.kv_events,
+            accept_length_output_tokens: payload.accept_length_output_tokens,
+            accept_length_decode_forwards: payload.accept_length_decode_forwards,
         },
     });
     *next_event_seq += 1;
@@ -94,19 +98,31 @@ pub(super) fn pop_ready_worker_completion(
         return None;
     };
     let event = events.pop().expect("event must exist after peek");
-    let (stage, worker_idx, completed_requests, output_signals, kv_events) = match event.kind {
+    let (
+        stage,
+        worker_idx,
+        completed_requests,
+        output_signals,
+        kv_events,
+        accept_length_output_tokens,
+        accept_length_decode_forwards,
+    ) = match event.kind {
         SimulationEventKind::WorkerCompletion {
             stage,
             worker_idx,
             completed_requests,
             output_signals,
             kv_events,
+            accept_length_output_tokens,
+            accept_length_decode_forwards,
         } => (
             stage,
             worker_idx,
             completed_requests,
             output_signals,
             kv_events,
+            accept_length_output_tokens,
+            accept_length_decode_forwards,
         ),
         SimulationEventKind::DecodeHandoff { .. } | SimulationEventKind::WorkerReady { .. } => {
             unreachable!("peeked worker completion event must match popped event")
@@ -118,6 +134,8 @@ pub(super) fn pop_ready_worker_completion(
         completed_requests,
         output_signals,
         kv_events,
+        accept_length_output_tokens,
+        accept_length_decode_forwards,
     })
 }
 
@@ -263,6 +281,8 @@ mod tests {
                     handoff_delay_ms: None,
                 }],
                 kv_events: Vec::new(),
+                accept_length_output_tokens: 1,
+                accept_length_decode_forwards: 1,
             },
         );
         push_worker_completion(
@@ -280,6 +300,8 @@ mod tests {
                     handoff_delay_ms: None,
                 }],
                 kv_events: Vec::new(),
+                accept_length_output_tokens: 1,
+                accept_length_decode_forwards: 1,
             },
         );
 
@@ -354,6 +376,8 @@ mod tests {
                 completed_requests: 1,
                 output_signals: Vec::new(),
                 kv_events: Vec::new(),
+                accept_length_output_tokens: 0,
+                accept_length_decode_forwards: 0,
             },
         );
         push_worker_ready(
