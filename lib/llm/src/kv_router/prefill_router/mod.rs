@@ -193,6 +193,16 @@ impl
                 // from generic resource exhaustion (operator-facing 429 vs
                 // 503) instead of stringifying through ResourceExhausted.
                 drop(prefill_phase_barrier);
+                // Capacity rejection, not a genuine failure: log at warn so it
+                // does not pollute error-rate dashboards. This is the reachable
+                // ResourceExhausted source (the Err(e) arm below stays as
+                // defense-in-depth for any future error-returning resolve path).
+                tracing::warn!(
+                    ?reason,
+                    queued_isl_tokens,
+                    ?max_queued_isl_tokens,
+                    "request rejected: prefill router backpressure (at capacity)"
+                );
                 return Err(dynamo_runtime::error::DynamoError::builder()
                     .error_type(dynamo_runtime::error::ErrorType::ResourceExhausted)
                     .message(format!(
