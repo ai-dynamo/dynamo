@@ -1051,7 +1051,7 @@ mod tests {
         assert_eq!(
             results.len(),
             6,
-            "Should emit exactly 5 chunks as documented above"
+            "Should emit exactly 6 chunks as documented above (includes synthesized finish chunk)"
         );
 
         // === Verify individual chunks ===
@@ -1434,7 +1434,7 @@ mod tests {
         assert_eq!(
             results.len(),
             4,
-            "Should emit exactly 3 chunks as documented above"
+            "Should emit exactly 4 chunks as documented above (includes synthesized finish chunk)"
         );
 
         // === Verify individual chunks ===
@@ -1849,7 +1849,7 @@ mod tests {
         assert_eq!(
             results.len(),
             3,
-            "Should emit exactly 2 chunks: [0] 'text' content, [1] tool call"
+            "Should emit exactly 3 chunks: content, tool call, and synthesized finish chunk"
         );
 
         // === Verify individual chunks ===
@@ -2230,7 +2230,11 @@ mod tests {
 
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        assert_eq!(results.len(), 4, "Should have 3 chunks");
+        assert_eq!(
+            results.len(),
+            4,
+            "Should have 4 chunks (includes synthesized finish chunk)"
+        );
 
         test_utils::assert_content(&results[0], "Let me search for that. ");
         test_utils::assert_tool_call(
@@ -4432,6 +4436,124 @@ mod tool_call_terminal_finish_reason_tests {
         });
         assert!(
             finish_pos.unwrap() < usage_pos.unwrap(),
+            "finish_reason chunk must precede the usage chunk"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_tool_calls_array_does_not_trigger_synthesis() {
+        // Upstream backends can emit `tool_calls: []`; that is not a tool call
+        // (matching aggregator semantics) and must not produce a synthesized
+        // finish_reason: "tool_calls" terminal chunk.
+        let mut chunk = test_utils::create_mock_response_chunk("hello".to_string(), 0);
+        if let Some(ref mut data) = chunk.data {
+            data.inner.choices[0].delta.tool_calls = Some(vec![]);
+        }
+        let chunks = vec![chunk, usage_only_chunk()];
+
+        let results = run_qwen3_coder_jail(chunks).await;
+
+        assert!(
+            emitted_tool_call_names(&results).is_empty(),
+            "no tool calls should be emitted"
+        );
+        assert!(
+            collected_finish_reasons(&results).is_empty(),
+            "must not synthesize finish_reason for an empty tool_calls array"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_synthesis_after_error_frame() {
+        // A stream that errors after emitting a tool call must not be capped
+        // with a clean `tool_calls` terminal state.
+        let mut chunks = trinity_tool_call_chunks();
+        chunks.push(Annotated {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: Some(vec!["engine exploded".to_string()]),
+            error: None,
+        });
+
+        let results = run_qwen3_coder_jail(chunks).await;
+
+        assert_eq!(
+            emitted_tool_call_names(&results),
+            vec!["write_file".to_string()],
+            "tool call emitted before the error is preserved"
+        );
+        assert!(
+            collected_finish_reasons(&results).is_empty(),
+            "must not synthesize a clean finish_reason over an errored stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn eof_recovered_tool_call_and_synthesized_finish_precede_usage() {
+        // The tool call is never terminated by its end marker, so it is only
+        // recovered by the jail's EOF finalize path — which runs after the
+        // usage-only chunk has already been seen. Output ordering must still
+        // be: tool_calls delta, finish_reason, usage.
+        let mut chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = [
+            "<tool_call>",
+            "<function=write_file>",
+            "<parameter=path>\nok.txt\n</parameter>",
+            "</function>",
+        ]
+        .iter()
+        .map(|s| test_utils::create_mock_response_chunk(s.to_string(), 0))
+        .collect();
+        chunks.push(usage_only_chunk());
+
+        let results = run_qwen3_coder_jail(chunks).await;
+
+        assert_eq!(
+            emitted_tool_call_names(&results),
+            vec!["write_file".to_string()],
+            "tool call must be recovered at EOF"
+        );
+        assert_eq!(
+            collected_finish_reasons(&results),
+            vec![FinishReason::ToolCalls],
+            "stream must carry exactly one finish_reason and it must be tool_calls"
+        );
+        let tool_pos = results
+            .iter()
+            .position(|r| {
+                r.data.as_ref().is_some_and(|d| {
+                    d.inner
+                        .choices
+                        .iter()
+                        .any(|c| c.delta.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty()))
+                })
+            })
+            .unwrap();
+        let finish_pos = results
+            .iter()
+            .position(|r| {
+                r.data.as_ref().is_some_and(|d| {
+                    d.inner
+                        .choices
+                        .iter()
+                        .any(|c| c.finish_reason == Some(FinishReason::ToolCalls))
+                })
+            })
+            .unwrap();
+        let usage_pos = results
+            .iter()
+            .position(|r| {
+                r.data
+                    .as_ref()
+                    .is_some_and(|d| d.inner.choices.is_empty() && d.inner.usage.is_some())
+            })
+            .unwrap();
+        assert!(
+            tool_pos <= finish_pos,
+            "tool_calls delta must not come after the finish_reason chunk"
+        );
+        assert!(
+            finish_pos < usage_pos,
             "finish_reason chunk must precede the usage chunk"
         );
     }

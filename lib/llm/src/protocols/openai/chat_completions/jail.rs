@@ -1422,19 +1422,35 @@ impl JailedStream {
             // produced tool calls (observed with speculative decoding, where the
             // stream ends with a usage-only chunk and no terminal finish chunk).
             let mut finish_reason_seen: HashSet<u32> = HashSet::new();
+            // Usage-only chunks are deferred to end-of-stream so that tool calls
+            // recovered by the jail's EOF finalize path — and any synthesized
+            // finish_reason chunk — precede usage, matching OpenAI stream ordering.
+            let mut deferred_usage_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = Vec::new();
+            // Once an error frame is observed, do not synthesize a clean
+            // `tool_calls` terminal state over an errored stream.
+            let mut error_seen = false;
             // Stream metadata so synthesized terminal chunks carry real values
             let mut last_id = String::new();
             let mut last_model = String::new();
             let mut last_created: u32 = 0;
 
             while let Some(mut response) = input_stream.next().await {
-                // Track if any choice emitted tool calls
+                if response.is_error() {
+                    error_seen = true;
+                }
+                // Track if any choice emitted tool calls (an empty tool_calls
+                // array counts as no tool calls, matching aggregator semantics)
                 if let Some(ref data) = response.data {
                     last_id.clone_from(&data.inner.id);
                     last_model.clone_from(&data.inner.model);
                     last_created = data.inner.created;
                     for choice in &data.inner.choices {
-                        if choice.delta.tool_calls.is_some() {
+                        if choice
+                            .delta
+                            .tool_calls
+                            .as_ref()
+                            .is_some_and(|tc| !tc.is_empty())
+                        {
                             has_tool_calls_per_choice.insert(choice.index, true);
                         }
                     }
@@ -1472,39 +1488,36 @@ impl JailedStream {
                     }
                 }
 
-                // A usage-only chunk (empty choices, usage set) is the engine's
-                // terminal chunk. If a tool-call choice still has no finish_reason
-                // by now, the engine dropped it: synthesize the terminal chunk
-                // first so clients see finish_reason before usage, matching
-                // OpenAI stream ordering.
-                let is_terminal_usage_chunk = response.data.as_ref().is_some_and(|d| {
+                // Defer usage-only chunks (empty choices, usage set) so they are
+                // emitted last, after any EOF-finalized tool calls and synthesized
+                // finish_reason chunks.
+                let is_usage_only_chunk = response.data.as_ref().is_some_and(|d| {
                     d.inner.choices.is_empty() && d.inner.usage.is_some()
                 });
-                if is_terminal_usage_chunk {
-                    for chunk in Self::synthesize_missing_tool_calls_finish(
-                        &has_tool_calls_per_choice,
-                        &mut finish_reason_seen,
-                        &last_id,
-                        &last_model,
-                        last_created,
-                    ) {
-                        yield chunk;
-                    }
+                if is_usage_only_chunk {
+                    deferred_usage_chunks.push(response);
+                    continue;
                 }
 
                 yield response;
             }
 
-            // Stream ended without a usage chunk: synthesize for any tool-call
-            // choice that never got a finish_reason.
-            for chunk in Self::synthesize_missing_tool_calls_finish(
-                &has_tool_calls_per_choice,
-                &mut finish_reason_seen,
-                &last_id,
-                &last_model,
-                last_created,
-            ) {
-                yield chunk;
+            // Stream ended: synthesize finish_reason for any tool-call choice that
+            // never got one (skipped if the stream errored — an error frame must
+            // not be followed by a clean terminal state), then flush usage chunks.
+            if !error_seen {
+                for chunk in Self::synthesize_missing_tool_calls_finish(
+                    &has_tool_calls_per_choice,
+                    &mut finish_reason_seen,
+                    &last_id,
+                    &last_model,
+                    last_created,
+                ) {
+                    yield chunk;
+                }
+            }
+            for usage_chunk in deferred_usage_chunks {
+                yield usage_chunk;
             }
         }
     }
