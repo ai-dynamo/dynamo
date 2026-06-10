@@ -59,6 +59,7 @@ class Metrics:
     p_load: Optional[float] = None
     d_load: Optional[float] = None
     kv_hit_rate: Optional[float] = None
+    accept_length: Optional[float] = None
 
     def is_valid(self) -> bool:
         """Check if all required metrics are valid (not None and not NaN)."""
@@ -384,6 +385,89 @@ class PrometheusAPIClient:
         except Exception as e:
             logger.warning(f"Error getting avg kv hit rate: {e}")
             return None
+
+    @staticmethod
+    def _quote_label_value(value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"')
+
+    def _engine_metric_filter(
+        self,
+        component_name: Optional[str],
+        model_name: Optional[str],
+        namespace: Optional[str] = None,
+        endpoint_name: Optional[str] = None,
+    ) -> str:
+        metric_namespace = namespace or self.dynamo_namespace
+        metric_endpoint = endpoint_name or "generate"
+        filters = [
+            f'{prometheus_names.labels.NAMESPACE}="{self._quote_label_value(metric_namespace)}"',
+            f'{prometheus_names.labels.ENDPOINT}="{self._quote_label_value(metric_endpoint)}"',
+        ]
+        if component_name:
+            filters.append(
+                f'{prometheus_names.labels.COMPONENT}="{self._quote_label_value(component_name)}"'
+            )
+        if model_name:
+            filters.append(
+                f'{prometheus_names.labels.MODEL}="{self._quote_label_value(model_name)}"'
+            )
+        return ",".join(filters)
+
+    def _query_single_value(self, query: str, operation_name: str) -> Optional[float]:
+        try:
+            result = self.prom.custom_query(query=query)
+            if not result:
+                logger.info(f"No prometheus data for {operation_name}")
+                return None
+            value = float(result[0]["value"][1])
+            return value if math.isfinite(value) else None
+        except Exception as e:
+            logger.warning(f"Error getting {operation_name}: {e}")
+            return None
+
+    def get_avg_spec_decode_accept_length(
+        self,
+        interval: str,
+        backend: str,
+        component_name: Optional[str],
+        model_name: Optional[str],
+        namespace: Optional[str] = None,
+        endpoint_name: Optional[str] = None,
+    ) -> Optional[float]:
+        """Average spec-decode accept length from worker engine metrics.
+
+        Returns tokens produced per decode forward, including the base token.
+        Missing data returns ``None`` so callers can fall back to no discount.
+        """
+        selector = self._engine_metric_filter(
+            component_name, model_name, namespace, endpoint_name
+        )
+        if backend == "vllm":
+            accepted = (
+                f"sum(rate(vllm:spec_decode_num_accepted_tokens_total"
+                f"{{{selector}}}[{interval}]))"
+            )
+            drafts = (
+                f"sum(rate(vllm:spec_decode_num_drafts_total"
+                f"{{{selector}}}[{interval}]))"
+            )
+            return self._query_single_value(
+                f"1 + ({accepted}) / ({drafts})",
+                "vLLM spec decode accept length",
+            )
+        if backend == "sglang":
+            return self._query_single_value(
+                f"avg(avg_over_time(sglang:spec_accept_length"
+                f"{{{selector}}}[{interval}]))",
+                "SGLang spec decode accept length",
+            )
+        if backend == "trtllm":
+            return self._query_single_value(
+                f"avg(avg_over_time(trtllm_spec_decode_acceptance_length"
+                f"{{{selector}}}[{interval}]))",
+                "TRT-LLM spec decode accept length",
+            )
+        return None
 
     def warn_if_router_not_scraped(self) -> None:
         """Warn if Prometheus is not scraping any dynamo_component_router_* series.

@@ -40,12 +40,12 @@ issues:
     - linters:
         - staticcheck
       text: "SA1019:.*deprecated.*namespace"
-    # Intentional compatibility usage of deprecated checkpoint identity fields.
-    # Standalone/manual checkpoint flows and conversion code still need to read
-    # and write these fields until the v1alpha1 API can remove them.
+    # Intentional compatibility usage of deprecated checkpoint fields.
+    # Compatibility flows and conversion code still need to read/write these
+    # fields until a future API version can remove them.
     - linters:
         - staticcheck
-      text: "SA1019:.*[Ii]dentity is ignored by DGD-managed automatic checkpoints"
+      text: "SA1019:.*(CheckpointMode|omit mode|DynamoCheckpointIdentity|required by v1alpha1|omit for DGD-managed checkpoints|legacy spec.identity|checkpoint launch uses)"
 linters:
   disable-all: true
   enable:
