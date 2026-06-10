@@ -223,6 +223,22 @@ pub struct TcpRequestMessage {
     pub payload: Bytes,
 }
 
+/// TCP request frame split into a small protocol header and the payload body.
+///
+/// Keeping the payload as a separate [`Bytes`] chunk lets the TCP client write
+/// request bodies without copying them into a flattened frame first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TcpRequestFrame {
+    pub header: Bytes,
+    pub payload: Bytes,
+}
+
+impl TcpRequestFrame {
+    pub fn encoded_len(&self) -> usize {
+        self.header.len() + self.payload.len()
+    }
+}
+
 impl TcpRequestMessage {
     pub fn new(endpoint_path: String, payload: Bytes) -> Self {
         Self {
@@ -244,7 +260,7 @@ impl TcpRequestMessage {
         }
     }
 
-    /// Encode message to bytes
+    /// Encode message to bytes.
     pub fn encode(&self) -> Result<Bytes, std::io::Error> {
         let endpoint_bytes = self.endpoint_path.as_bytes();
         let endpoint_len = endpoint_bytes.len();
@@ -284,6 +300,37 @@ impl TcpRequestMessage {
 
         // Zero-copy conversion to Bytes
         Ok(buf.freeze())
+    }
+
+    /// Encode only the TCP protocol header and keep the payload as a separate
+    /// Bytes chunk. This preserves the same wire format as [`Self::encode`]
+    /// while avoiding a full payload copy on the client send path.
+    pub fn into_frame(self) -> Result<TcpRequestFrame, std::io::Error> {
+        let endpoint_bytes = self.endpoint_path.as_bytes();
+        let endpoint_len = endpoint_bytes.len();
+
+        let headers_json = serde_json::to_vec(&self.headers).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Failed to encode headers: {}", e),
+            )
+        })?;
+        let headers_len = headers_json.len();
+        let payload_len = self.payload.len();
+
+        let parsed = validate_tcp_request_encode_lengths(endpoint_len, headers_len, payload_len)?;
+        let mut header = BytesMut::with_capacity(parsed.header_size);
+
+        header.put_u16(endpoint_len as u16);
+        header.put_slice(endpoint_bytes);
+        header.put_u16(headers_len as u16);
+        header.put_slice(&headers_json);
+        header.put_u32(payload_len as u32);
+
+        Ok(TcpRequestFrame {
+            header: header.freeze(),
+            payload: self.payload,
+        })
     }
 
     /// Decode message from bytes (for backward compatibility, zero-copy when possible)
@@ -512,6 +559,26 @@ mod tests {
         let decoded = TcpRequestMessage::decode(&encoded).unwrap();
 
         assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn test_tcp_request_into_frame_matches_encode() {
+        let payload = Bytes::from_static(b"payload-body");
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("request-id".to_string(), "abc-123".to_string());
+        let msg =
+            TcpRequestMessage::with_headers("test.endpoint".to_string(), headers, payload.clone());
+
+        let encoded = msg.clone().encode().unwrap();
+        let frame = msg.into_frame().unwrap();
+
+        assert_eq!(frame.encoded_len(), encoded.len());
+        assert_eq!(frame.payload.as_ptr(), payload.as_ptr());
+
+        let mut combined = BytesMut::with_capacity(frame.encoded_len());
+        combined.put_slice(&frame.header);
+        combined.put_slice(&frame.payload);
+        assert_eq!(combined.freeze(), encoded);
     }
 
     #[test]
