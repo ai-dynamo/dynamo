@@ -525,8 +525,6 @@ impl ResponseStreamConverter {
                 });
             events.push(self.make_sse_event(&item_done));
         }
-
-        events
     }
 
     pub fn emit_completed_event(
