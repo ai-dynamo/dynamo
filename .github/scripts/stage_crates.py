@@ -8,9 +8,11 @@ dependency order from `cargo metadata` instead of a hardcoded list, so it stays
 correct as the workspace graph changes. Crates are published leaves-first so each
 crate's intra-workspace deps are indexed before its dependents.
 
-The raw Artifactory reference token is read from ARTIFACTORY_CARGO_TOKEN and sent
-as a Bearer header (both for the cargo registry and the idempotency HEAD check).
-Idempotent: crates already present on the registry are skipped.
+The Artifactory reference token (ARTIFACTORY_TOKEN, the same one the wheel upload
+uses) is sent as a Bearer header for both the cargo registry and the idempotency
+HEAD check. The registry location is read from ARTIFACTORY_CARGO_INDEX (a secret,
+e.g. sparse+https://<host>/artifactory/api/cargo/<repo>/index/) so it is not
+hardcoded in the workflow. Idempotent: crates already present are skipped.
 
 Non-publishable members (the python/c bindings, example binaries) are excluded by
 manifest-path; anything with `publish = false` is excluded too.
@@ -147,21 +149,24 @@ def publish(manifest: str, alias: str, env: dict) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--registry", required=True, help="cargo registry alias, e.g. artifactory")
-    ap.add_argument("--host", required=True, help="e.g. artifactory.nvidia.com")
-    ap.add_argument("--repo", required=True, help="cargo repo, e.g. sw-dl-dynamo-cargo-local")
+    ap.add_argument("--registry", default="artifactory", help="cargo registry alias")
     ap.add_argument("--root", default=".", help="repo root")
     args = ap.parse_args()
 
-    token = os.environ.get("ARTIFACTORY_CARGO_TOKEN", "")
-    if not token:
-        print("::error::ARTIFACTORY_CARGO_TOKEN is not set", file=sys.stderr)
+    # Reuse the wheel-upload token; keep the registry location out of the workflow
+    # via the ARTIFACTORY_CARGO_INDEX secret.
+    token = os.environ.get("ARTIFACTORY_TOKEN", "")
+    index = os.environ.get("ARTIFACTORY_CARGO_INDEX", "")
+    if not token or not index:
+        print("::error::ARTIFACTORY_TOKEN and ARTIFACTORY_CARGO_INDEX must be set", file=sys.stderr)
         return 1
+    m = re.match(r"sparse\+(https://.+?)/api/cargo/([^/]+)/index/?$", index)
+    if not m:
+        print("::error::ARTIFACTORY_CARGO_INDEX must be 'sparse+https://<host>/.../api/cargo/<repo>/index/'", file=sys.stderr)
+        return 1
+    raw_base = f"{m.group(1)}/{m.group(2)}/crates"
 
     root = Path(args.root).resolve()
-    index = f"sparse+https://{args.host}/artifactory/api/cargo/{args.repo}/index/"
-    raw_base = f"https://{args.host}/artifactory/{args.repo}/crates"
-
     pkgs = publishable(cargo_metadata(root))
     order = topo_order(pkgs)
     print("Publish order:", " ".join(order))
@@ -180,7 +185,7 @@ def main() -> int:
         manifest, version = p["manifest_path"], p["version"]
         print(f"=== {name} {version} ===")
         if crate_exists(raw_base, name, version, token):
-            print(f"  -> {name} {version} already on {args.host} (skip)")
+            print(f"  -> {name} {version} already on the registry (skip)")
             skipped += 1
             continue
         if subprocess.run(["cargo", "check", "--manifest-path", manifest], cwd=root, env=env).returncode != 0:
