@@ -70,7 +70,10 @@ class BasePredictor(ABC):
 
     def add_data_point(self, value: float) -> None:
         """Add new data point to the buffer"""
-        if math.isnan(value):
+        # Treat any non-finite reading (NaN or +/-inf) as zero load: a single
+        # inf would otherwise be stored and propagate into the forecast
+        # (ConstantPredictor returns inf; ARIMA/Prophet fitting breaks).
+        if not math.isfinite(value):
             value = 0
 
         if value == 0 and not self._seen_nonzero_since_idle_reset:
@@ -263,7 +266,8 @@ class ProphetPredictor(BasePredictor):
         """Add new data point to the buffer"""
         # Use proper datetime for Prophet
         timestamp = self.start_date + timedelta(seconds=self.curr_step * self.step_size)
-        value = 0 if math.isnan(value) else value
+        # Treat any non-finite reading (NaN or +/-inf) as zero load (see BasePredictor).
+        value = 0 if not math.isfinite(value) else value
 
         if value == 0 and not self._seen_nonzero_since_idle_reset:
             # skip the beginning idle period (leading zeros), even if pre-warmed

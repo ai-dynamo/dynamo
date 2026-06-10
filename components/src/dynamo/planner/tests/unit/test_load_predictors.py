@@ -105,6 +105,25 @@ class TestConstantPredictor:
         predictor.add_data_point(float("nan"))
         assert predictor.predict_next() == 0
 
+    @pytest.mark.parametrize("bad", [float("inf"), float("-inf")])
+    def test_inf_treated_as_zero(self, bad):
+        """+/-inf readings are coerced to 0 so they never propagate into the
+        forecast (an un-sanitized inf would make predict_next() return inf)."""
+        predictor = ConstantPredictor(_make_config())
+        predictor.add_data_point(10.0)
+        predictor.add_data_point(bad)
+        result = predictor.predict_next()
+        assert result == 0
+        assert math.isfinite(result)
+
+    def test_leading_inf_skipped_as_idle(self):
+        """A leading non-finite reading is sanitized to 0 and skipped as idle,
+        exactly like a leading zero — it must not seed the buffer."""
+        predictor = ConstantPredictor(_make_config())
+        predictor.add_data_point(float("inf"))
+        assert predictor.predict_next() == 0
+        assert len(predictor.data_buffer) == 0
+
 
 # ---------------------------------------------------------------------------
 # ProphetPredictor timestamp bug regression tests
