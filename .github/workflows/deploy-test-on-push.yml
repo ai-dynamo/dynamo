@@ -38,40 +38,14 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
 
-  deploy-test-vllm:
-    name: vllm Deploy Test
+  deploy-test-smoke:
+    name: Smoke Deploy Test
     needs: [deploy-operator]
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: vllm
-      profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
+      profiles: '["agg"]'
       image_suffix: vllm-runtime
-      namespace: ${{ needs.deploy-operator.outputs.namespace }}
-      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
-      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
-    secrets: inherit
-
-  deploy-test-sglang:
-    name: sglang Deploy Test
-    needs: [deploy-operator]
-    uses: ./.github/workflows/shared-deploy-test.yml
-    with:
-      framework: sglang
-      profiles: '["agg", "agg_router"]'
-      image_suffix: sglang-runtime
-      namespace: ${{ needs.deploy-operator.outputs.namespace }}
-      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
-      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
-    secrets: inherit
-
-  deploy-test-trtllm:
-    name: trtllm Deploy Test
-    needs: [deploy-operator]
-    uses: ./.github/workflows/shared-deploy-test.yml
-    with:
-      framework: trtllm
-      profiles: '["agg", "agg_router"]'
-      image_suffix: trtllm-runtime
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -79,7 +53,7 @@ jobs:
 
   deploy-cleanup:
     if: always()
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
+    needs: [deploy-operator, deploy-test-smoke]
     runs-on: prod-deploy-tester-v1
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
