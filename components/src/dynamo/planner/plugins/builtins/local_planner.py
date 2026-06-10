@@ -75,12 +75,13 @@ def _decode_fpm_map(raw: dict[str, bytes]) -> dict[tuple[str, int], ForwardPassM
             log.warning("Skipping FPM payload with invalid key %r", key)
             continue
         try:
-            decoded = decode_fpm(payload)
-            if decoded is not None:
-                out[(worker_id, int(dp_rank))] = decoded
-        except Exception as exc:  # noqa: BLE001
-            # Malformed plugin input should not crash tick.
-            log.warning("Skipping FPM payload %r: %s", key, exc)
+            rank = int(dp_rank)
+        except ValueError:
+            log.warning("Skipping FPM payload with invalid dp_rank %r", key)
+            continue
+        decoded = decode_fpm(payload)
+        if decoded is not None:
+            out[(worker_id, rank)] = decoded
     return out
 
 
@@ -156,7 +157,13 @@ class BuiltinLoadPredict:
                 osl,
             )
             return nr, isl, osl
-        except Exception as exc:  # noqa: BLE001 - predictor failures skip this tick
+        except (
+            ArithmeticError,
+            IndexError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
             log.error("Failed to predict load: %s", exc)
             return None, None, None
 

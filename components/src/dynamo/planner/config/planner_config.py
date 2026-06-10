@@ -51,7 +51,7 @@ def _prometheus_ssl_verify_default() -> bool:
 
 def _gcd_seconds(values: list[float]) -> float:
     """Return a millisecond-resolution gcd for second-based intervals."""
-    millis = [int(round(v * 1000.0)) for v in values]
+    millis = [round(v * 1000.0) for v in values]
     gcd_ms = millis[0]
     for value in millis[1:]:
         gcd_ms = math.gcd(gcd_ms, value)
@@ -690,6 +690,8 @@ class PlannerConfig(BaseModel):
                 SLAPlannerDefaults.load_adjustment_interval_seconds,
             ),
         )
+        if load_interval is None:
+            return data
         raw_throughput_enabled = data.get(
             "enable_throughput_scaling",
             SLAPlannerDefaults.enable_throughput_scaling,
@@ -717,6 +719,8 @@ class PlannerConfig(BaseModel):
                     SLAPlannerDefaults.throughput_adjustment_interval_seconds,
                 ),
             )
+            if throughput_interval is None:
+                return data
             try:
                 intervals.append(float(throughput_interval))
             except (TypeError, ValueError):

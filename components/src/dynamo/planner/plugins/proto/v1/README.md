@@ -59,11 +59,11 @@ python -m grpc_tools.protoc \
     --python_out=. --grpc_python_out=. --pyi_out=. --proto_path=. \
     dynamo/planner/plugins/proto/v1/plugin.proto
 
-# protoc strips the SPDX header — re-prepend on the two .py files so
-# copyright-checks pass. (.pyi is exempt by file-type already.)
+# protoc strips the SPDX header — re-prepend it on generated Python stubs.
 SPDX=$'# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n# SPDX-License-Identifier: Apache-2.0\n'
 for f in dynamo/planner/plugins/proto/v1/plugin_pb2.py \
-         dynamo/planner/plugins/proto/v1/plugin_pb2_grpc.py; do
+         dynamo/planner/plugins/proto/v1/plugin_pb2_grpc.py \
+         dynamo/planner/plugins/proto/v1/plugin_pb2.pyi; do
   printf '%s%s' "$SPDX" "$(cat "$f")" > "$f"
 done
 ```

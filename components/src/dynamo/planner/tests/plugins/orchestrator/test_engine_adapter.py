@@ -363,6 +363,27 @@ def test_project_scale_to_applies_final_gpu_budget_to_external_proposal():
     assert dec.num_prefill + dec.num_decode <= 4
 
 
+def test_project_scale_to_budget_preserves_single_component_target_mask():
+    cfg = PlannerConfig(
+        mode="disagg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+        max_gpu_budget=4,
+        min_gpu_budget=-1,
+    )
+    adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
+    wc = WorkerCounts(ready_num_prefill=6, ready_num_decode=1)
+    outcome = _apply_outcome([ComponentTarget(sub_component_type="decode", replicas=4)])
+
+    dec = adapter._project_scale_to(outcome, wc)
+
+    assert dec is not None
+    assert dec.num_prefill is None
+    assert dec.num_decode == 2
+
+
 def test_project_scale_to_does_not_apply_budget_on_baseline_only_noop():
     cfg = PlannerConfig(
         mode="disagg",
@@ -661,11 +682,8 @@ def test_load_only_sla_uses_kv_hit_rate_traffic_scrape():
     )
     vc = VirtualClock()
     adapter = OrchestratorEngineAdapter(cfg, _caps(), clock=vc)
-    adapter.initial_tick(start_s=0.0)
-    adapter._last_tick_s = 6.0
-    adapter._last_tick_monotonic = 6.0
 
-    tick = adapter._compute_next_scheduled_tick()
+    tick = adapter.initial_tick(start_s=0.0)
 
     assert tick.at_s == pytest.approx(7.0)
     assert tick.run_load_scaling

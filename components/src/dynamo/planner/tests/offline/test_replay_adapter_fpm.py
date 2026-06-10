@@ -32,6 +32,7 @@ from dynamo.planner.offline.replay_adapter import (
     _build_fpm_from_dict,
 )
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
+from dynamo.replay.main import _engine_caps
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -281,8 +282,6 @@ def test_planner_bridge_drains_mtp_accept_length(tmp_path):
 
 
 def test_replay_engine_caps_exposes_aic_nextn():
-    from dynamo.replay.main import _engine_caps
-
     caps = _engine_caps(MockEngineArgs(aic_nextn=2))
 
     assert caps.speculative_nextn == 2

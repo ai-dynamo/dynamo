@@ -1071,8 +1071,10 @@ class OrchestratorEngineAdapter:
         if mode != "disagg":
             return num_p, num_d
 
-        base_p = num_p if num_p is not None else worker_counts.ready_num_prefill
-        base_d = num_d if num_d is not None else worker_counts.ready_num_decode
+        proposed_p = num_p is not None
+        proposed_d = num_d is not None
+        base_p = num_p if proposed_p else worker_counts.ready_num_prefill
+        base_d = num_d if proposed_d else worker_counts.ready_num_decode
         if base_p is None or base_d is None:
             return clamp_single("prefill", num_p), clamp_single("decode", num_d)
 
@@ -1081,7 +1083,10 @@ class OrchestratorEngineAdapter:
         p_gpu = p_caps.num_gpu if p_caps else None
         d_gpu = d_caps.num_gpu if d_caps else None
         if p_gpu is None or d_gpu is None:
-            return max(base_p, min_endpoint), max(base_d, min_endpoint)
+            return (
+                max(base_p, min_endpoint) if proposed_p else None,
+                max(base_d, min_endpoint) if proposed_d else None,
+            )
 
         clamped_p, clamped_d = proportional_clamp_pair(
             max(base_p, min_endpoint),
@@ -1092,7 +1097,7 @@ class OrchestratorEngineAdapter:
             max_gpus,
             min_endpoint,
         )
-        return clamped_p, clamped_d
+        return clamped_p if proposed_p else None, clamped_d if proposed_d else None
 
 
 __all__ = ["OrchestratorEngineAdapter"]
