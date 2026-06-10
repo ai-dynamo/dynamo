@@ -373,15 +373,17 @@ git -C dynamo checkout release/1.2.0  # or the release line you target
 | Script | Purpose | Arguments |
 |---|---|---|
 | `scripts/scaffold-skill.sh` | Create a new skill directory under `.agents/skills/dynamo-<name>/` by copying from a sibling skill with frontmatter reset and placeholders inserted. | `-n <new-name>`, `-s <sibling>`, `-v <version>` (default `1.2.0`), `-d <skills-root>` (default `.agents/skills`) |
-| `scripts/validate-skill.sh` | Run shellcheck, YAML parse, cross-link audit, and length budget against an authored skill directory. Exits non-zero on any failure. | `-d <skill-dir>` |
+| `scripts/validate-skill.sh` | Run shellcheck, YAML parse, cross-link audit, length budget, the publication-leak guard, and (with `-r`) citation resolution against an authored skill directory. Exits non-zero on any failure. | `-d <skill-dir>`, `-r <dynamo-checkout>` (optional; enables citation resolution) |
 | `scripts/check-frontmatter.py` | Strict frontmatter validator. Verifies required fields, valid `version`, no XML tags in `description`, valid `tags` set. | `<path-to-SKILL.md>` |
+| `scripts/check-citations.py` | Citation-resolution linter. The skills are distillations of the Dynamo documentation and source, so this resolves every cited Dynamo doc or source path against a real checkout and fails on a broken (`MISSING`) or internal-only (`INTERNAL`) citation. | `--repo <dynamo-checkout>`, `<skill-dir>` |
 
 Invocation via the agentskills.io `run_script` protocol:
 
 ```python
 run_script("scripts/scaffold-skill.sh", args=["-n", "dynamo-install", "-s", "dynamo-deploy"])
-run_script("scripts/validate-skill.sh", args=["-d", ".agents/skills/dynamo-install"])
+run_script("scripts/validate-skill.sh", args=["-d", ".agents/skills/dynamo-install", "-r", "."])
 run_script("scripts/check-frontmatter.py", args=[".agents/skills/dynamo-install/SKILL.md"])
+run_script("scripts/check-citations.py", args=["--repo", ".", ".agents/skills/dynamo-install"])
 ```
 
 Equivalent direct invocation:
@@ -391,10 +393,13 @@ bash .agents/skills/dynamo-skill-author/scripts/scaffold-skill.sh \
     -n dynamo-install -s dynamo-deploy
 
 bash .agents/skills/dynamo-skill-author/scripts/validate-skill.sh \
-    -d .agents/skills/dynamo-install
+    -d .agents/skills/dynamo-install -r .
 
 python3 .agents/skills/dynamo-skill-author/scripts/check-frontmatter.py \
     .agents/skills/dynamo-install/SKILL.md
+
+python3 .agents/skills/dynamo-skill-author/scripts/check-citations.py \
+    --repo . .agents/skills/dynamo-install
 ```
 
 ---
@@ -429,5 +434,6 @@ proceed if:
 - [references/body-shape.md](references/body-shape.md) — section structure, command-safety tier rubric, decision-point and refusal-condition conventions, script patterns (`pass / fail / warn`, `check()`), known-issue 6-element shape, references file conventions.
 - [references/known-issues.md](references/known-issues.md) — authoring pitfalls observed during the first seven skills (XML-tag pitfall, non-existent feature claim, premature meta-skill expansion, NV-ACES sub-90 lift).
 - [scripts/scaffold-skill.sh](scripts/scaffold-skill.sh) — scaffold a new skill directory from a sibling.
-- [scripts/validate-skill.sh](scripts/validate-skill.sh) — run all four local validators against an authored skill.
+- [scripts/validate-skill.sh](scripts/validate-skill.sh) — run all local validators (shellcheck, frontmatter, cross-link, length, publication-leak guard, citation resolution) against an authored skill.
 - [scripts/check-frontmatter.py](scripts/check-frontmatter.py) — strict frontmatter validator.
+- [scripts/check-citations.py](scripts/check-citations.py) — citation-resolution linter: every cited Dynamo doc/source path resolves in a real checkout; no claim cited to an internal-only artifact.
