@@ -359,7 +359,12 @@ impl
                 Err(anyhow::anyhow!(PrefillError::NotActivated))
             }
             Err(e) => {
-                tracing::error!(error = %e, "Remote prefill failed, failing request");
+                use dynamo_runtime::error::{ErrorType, match_error_chain};
+                if match_error_chain(&e, &[ErrorType::ResourceExhausted], &[]) {
+                    tracing::warn!(error = %e, "request rejected by prefill worker (at capacity)");
+                } else {
+                    tracing::error!(error = %e, "Remote prefill failed, failing request");
+                }
                 Err(anyhow::anyhow!(e))
             }
         }
