@@ -302,21 +302,10 @@ class SchedulingConfig(BaseModel):
     """Planner-level scheduling config.
 
     Controls plugin-pipeline scheduling and how long each tick may run.
-    ``use_orchestrator`` is retained only for old DGDR/YAML payloads; the
-    builtin plugin pipeline is now the only runtime path.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    use_orchestrator: bool = Field(
-        default=True,
-        description=(
-            "Deprecated compatibility field. The planner always drives "
-            "ticks through ``LocalPlannerOrchestrator`` + builtin plugins. "
-            "A configured false value is accepted for old manifests but is "
-            "normalized to true."
-        ),
-    )
     tick_max_duration_seconds: float = Field(
         default=30.0,
         gt=0,
@@ -354,16 +343,6 @@ class SchedulingConfig(BaseModel):
             "align to tick boundaries."
         ),
     )
-
-    @model_validator(mode="after")
-    def _normalize_deprecated_use_orchestrator(self) -> "SchedulingConfig":
-        if not self.use_orchestrator:
-            logger.warning(
-                "scheduling.use_orchestrator=false is deprecated and ignored; "
-                "the builtin plugin orchestrator is now the only planner engine."
-            )
-            self.use_orchestrator = True
-        return self
 
 
 class PlannerConfig(BaseModel):

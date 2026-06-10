@@ -37,8 +37,6 @@ For compatibility with existing configs and DGDR-generated planner payloads,
 still define the builtin plugin fire intervals. The base
 `scheduling.scale_interval_seconds` defaults to the greatest common divisor of
 those enabled intervals, so old load and throughput fire times are preserved.
-The legacy `scheduling.use_orchestrator` field is accepted but normalized to
-`true`; there is no alternate runtime path.
 
 ![Planner plugin pipeline showing shared builtin state and OBSERVE, PREDICT, PROPOSE, RECONCILE, CONSTRAIN, and EXEC stages](../assets/img/planner-plugin-pipeline.png)
 

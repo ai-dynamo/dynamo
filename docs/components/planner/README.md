@@ -183,7 +183,6 @@ DGDR planner features and generated ConfigMaps are materialized into these
 | **Plugin pipeline** | | |
 | `scheduling.scale_interval_seconds` | gcd of enabled legacy intervals | Base pipeline cadence. Plugins fire according to their own execution intervals. |
 | `scheduling.tick_max_duration_seconds` | `30.0` | Deadline for one full plugin pipeline tick. |
-| `scheduling.use_orchestrator` | `true` | Deprecated compatibility field; `false` is accepted and normalized to `true`. |
 | `plugin_registration.transport.request_timeout_seconds` | `5.0` | Per-plugin RPC timeout. |
 
 ### Environment Variables

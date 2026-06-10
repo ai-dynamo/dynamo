@@ -81,9 +81,7 @@ def _snap(worker_id: str, wall_time: float) -> dict:
 
 
 def _orch_agg_config_sla() -> PlannerConfig:
-    cfg = _agg_config_sla()
-    cfg.scheduling.use_orchestrator = True
-    return cfg
+    return _agg_config_sla()
 
 
 def test_install_benchmark_fpms_installs_regression_on_orchestrator_path():

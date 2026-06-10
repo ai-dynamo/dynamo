@@ -194,10 +194,8 @@ class NativePlannerBase:
         # Live dashboard runner (started in _async_init)
         self._dashboard_runner: Optional[aiohttp.web.AppRunner] = None
 
-        # Tick engine: the main-loop dispatch target. It wraps
-        # ``OrchestratorEngineAdapter``; ``scheduling.use_orchestrator`` is a
-        # deprecated compatibility field and no longer selects another runtime
-        # path.
+        # Tick engine: the main-loop dispatch target. It wraps the builtin
+        # plugin pipeline via ``OrchestratorEngineAdapter``.
         self._engine: Optional[EngineProtocol] = None
 
         # Cached worker counts from the most recent tick's input — lets
