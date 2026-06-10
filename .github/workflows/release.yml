@@ -824,13 +824,25 @@ jobs:
         with:
           ref: ${{ needs.prepare-release.outputs.commit_sha }}
 
+      # TEMPORARY(test): stage_crates.py isn't on main yet, so the release commit
+      # (branched from main) doesn't have it — fetch it from the dev branch.
+      # REVERT before merge: once it's on main the release tree has it (run
+      # .github/scripts/stage_crates.py directly), or use ${{ github.sha }}.
+      - name: Fetch crate-staging script from the dev branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: pvijayakrish/on-demand-release
+          path: .ondemand-tools
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+
       - name: Publish crates to Artifactory cargo registry
         env:
           ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
           ARTIFACTORY_CARGO_INDEX: ${{ secrets.ARTIFACTORY_CARGO_INDEX }}
         run: |
           set -euo pipefail
-          python3 .github/scripts/stage_crates.py --registry artifactory
+          python3 .ondemand-tools/.github/scripts/stage_crates.py --registry artifactory
 
   # Combined NGC + Artifactory staging reply on the nightly thread.
   notify-slack-staging:
