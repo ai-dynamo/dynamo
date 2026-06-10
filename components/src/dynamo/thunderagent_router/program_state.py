@@ -79,3 +79,12 @@ class ProgramTable:
         program.status = ProgramStatus.ACTING
         program.acting_since = time.monotonic()
         return program
+
+    def release(self, program_id: str) -> Optional[Program]:
+        """Remove a finished program from the table (and the paused set).
+
+        Mirrors upstream TA's ``release_program`` deletion. Returns the removed
+        Program (or None if it was already gone).
+        """
+        self.paused.pop(program_id, None)
+        return self.programs.pop(program_id, None)

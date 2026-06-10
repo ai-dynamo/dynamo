@@ -32,6 +32,8 @@ navigation:
         path: getting-started/kubernetes-deployment.md
       - page: Contribution Guide
         path: contribution-guide.md
+      - page: Documentation Style Guide
+        path: documentation-style-guide.md
 
   # ==================== Resources ====================
   - section: Resources
@@ -253,6 +255,8 @@ navigation:
             path: agents/agent-hints.md
           - page: Use Pi-Mono with Dynamo
             path: agents/pi-mono.md
+          - page: ThunderAgent Program Scheduler
+            path: agents/thunderagent-router.md
       - page: LoRA Adapters
         path: features/lora/README.md
       - section: Multimodal
@@ -290,6 +294,8 @@ navigation:
             path: backends/sglang/sglang-diffusion.md
           - page: Frontend Processor Fallback
             path: backends/sglang/sglang-chat-processor.md
+          - page: Logits Processing
+            path: backends/sglang/sglang-logits-processing.md
           - page: Observability
             path: backends/sglang/sglang-observability.md
           - page: Agentic Workloads
@@ -314,6 +320,8 @@ navigation:
             path: backends/vllm/vllm-reference-guide.md
           - page: Frontend Processor Fallback
             path: backends/vllm/vllm-chat-processor.md
+          - page: Logits Processing
+            path: backends/vllm/vllm-logits-processing.md
           - page: Examples
             path: backends/vllm/vllm-examples.md
           - page: KV Cache Offloading

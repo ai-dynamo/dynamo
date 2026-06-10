@@ -40,7 +40,7 @@ use pythonize::{depythonize, pythonize};
 
 use crate::ModelInput;
 use crate::context::Context as PyContext;
-use crate::errors::py_exception_to_backend_error;
+use crate::errors::{extract_http_like_error, py_exception_to_backend_error};
 use crate::llm::kv::KvEventPublisher as PyKvEventPublisher;
 use crate::to_pyerr;
 
@@ -1192,6 +1192,17 @@ fn py_err_to_dynamo(err: PyErr) -> DynamoError {
     let (backend, message) = Python::with_gil(|py| {
         if let Some(mapped) = py_exception_to_backend_error(py, &err) {
             return mapped;
+        }
+        // See engine.rs::process_item — emit JSON-shaped message so the OpenAI
+        // frontend can read the status code instead of defaulting to 500.
+        if let Some((code, message)) = extract_http_like_error(py, &err) {
+            let backend = if (400..500).contains(&code) {
+                BackendError::InvalidArgument
+            } else {
+                BackendError::Unknown
+            };
+            let json_msg = serde_json::json!({ "message": message, "code": code }).to_string();
+            return (backend, json_msg);
         }
         let backend = if err.is_instance_of::<pyo3::exceptions::PyValueError>(py)
             || err.is_instance_of::<pyo3::exceptions::PyTypeError>(py)
