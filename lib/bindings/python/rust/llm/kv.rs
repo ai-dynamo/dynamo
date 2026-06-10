@@ -33,6 +33,33 @@ use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use super::aic_callback::create_aic_prefill_load_estimator;
 use super::entrypoint::AicPerfConfig;
 
+mod demand_driven;
+
+const MAX_RESPONSE_BUFFER_SIZE: usize = tokio::sync::Semaphore::MAX_PERMITS;
+
+#[derive(Clone, Copy)]
+enum ResponseBufferMode {
+    Rendezvous,
+    Buffered(usize),
+}
+
+fn validate_response_buffer_size(response_buffer_size: isize) -> PyResult<ResponseBufferMode> {
+    let capacity = usize::try_from(response_buffer_size)
+        .map_err(|_| PyValueError::new_err("response_buffer_size must be non-negative"))?;
+
+    if capacity == 0 {
+        return Ok(ResponseBufferMode::Rendezvous);
+    }
+
+    if capacity > MAX_RESPONSE_BUFFER_SIZE {
+        return Err(PyValueError::new_err(format!(
+            "response_buffer_size must not exceed {MAX_RESPONSE_BUFFER_SIZE}"
+        )));
+    }
+
+    Ok(ResponseBufferMode::Buffered(capacity))
+}
+
 fn depythonize_block_mm_infos(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Option<BlockExtraInfo>>> {
     depythonize(obj).map_err(to_pyerr)
 }
@@ -888,11 +915,13 @@ impl KvRouter {
         inner: Arc<RsKvPushRouter>,
         request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
         tracker: Option<Arc<RequestTracker>>,
+        response_buffer_size: usize,
     ) -> PyResult<Bound<'p, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let single_in = SingleIn::new(request);
             let stream = inner.generate(single_in).await.map_err(to_pyerr)?;
-            let (tx, rx) = tokio::sync::mpsc::channel::<RsAnnotated<PyObject>>(100);
+            let (tx, rx) =
+                tokio::sync::mpsc::channel::<RsAnnotated<PyObject>>(response_buffer_size);
 
             tokio::spawn(async move {
                 let mut stream = stream;
@@ -955,6 +984,23 @@ impl KvRouter {
 
             Ok(crate::AsyncResponseStream::new(rx, false))
         })
+    }
+
+    fn dispatch_request_to_stream<'p>(
+        py: Python<'p>,
+        inner: Arc<RsKvPushRouter>,
+        request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
+        tracker: Option<Arc<RequestTracker>>,
+        response_buffer_mode: ResponseBufferMode,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        match response_buffer_mode {
+            ResponseBufferMode::Rendezvous => {
+                demand_driven::process_request_to_stream(py, inner, request, tracker)
+            }
+            ResponseBufferMode::Buffered(capacity) => {
+                Self::process_request_to_stream(py, inner, request, tracker, capacity)
+            }
+        }
     }
 }
 
@@ -1033,7 +1079,7 @@ impl KvRouter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None, worker_id=None, dp_rank=None, extra_args=None, block_mm_infos=None, multi_modal_data=None, mm_routing_info=None, routing_constraints=None))]
+    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None, worker_id=None, dp_rank=None, extra_args=None, block_mm_infos=None, multi_modal_data=None, mm_routing_info=None, routing_constraints=None, response_buffer_size=100))]
     fn generate<'p>(
         &self,
         py: Python<'p>,
@@ -1050,7 +1096,9 @@ impl KvRouter {
         multi_modal_data: Option<PyObject>,
         mm_routing_info: Option<PyObject>,
         routing_constraints: Option<RoutingConstraints>,
+        response_buffer_size: isize,
     ) -> PyResult<Bound<'p, PyAny>> {
+        let response_buffer_size = validate_response_buffer_size(response_buffer_size)?;
         // Depythonize the options with defaults
         let stop_conditions: StopConditions = if let Some(obj) = stop_conditions {
             depythonize(obj.bind(py)).map_err(to_pyerr)?
@@ -1138,14 +1186,23 @@ impl KvRouter {
         let request = request_builder.build().map_err(to_pyerr)?;
 
         // Use the helper method to process the request
-        Self::process_request_to_stream(py, self.inner.clone(), request, Some(tracker))
+        Self::dispatch_request_to_stream(
+            py,
+            self.inner.clone(),
+            request,
+            Some(tracker),
+            response_buffer_size,
+        )
     }
 
+    #[pyo3(signature = (request, response_buffer_size=100))]
     fn generate_from_request<'p>(
         &self,
         py: Python<'p>,
         request: PyObject,
+        response_buffer_size: isize,
     ) -> PyResult<Bound<'p, PyAny>> {
+        let response_buffer_size = validate_response_buffer_size(response_buffer_size)?;
         // Depythonize the request directly into PreprocessedRequest
         let mut request: llm_rs::protocols::common::preprocessor::PreprocessedRequest =
             depythonize(request.bind(py)).map_err(to_pyerr)?;
@@ -1161,7 +1218,13 @@ impl KvRouter {
         };
 
         // Use the helper method to process the request
-        Self::process_request_to_stream(py, self.inner.clone(), request, Some(tracker))
+        Self::dispatch_request_to_stream(
+            py,
+            self.inner.clone(),
+            request,
+            Some(tracker),
+            response_buffer_size,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
