@@ -387,10 +387,7 @@ impl AggRuntime {
     /// Pick the next logical timestamp from either arrivals or scheduled worker completions.
     fn next_timestamp(&mut self) -> Option<f64> {
         let next_event_ms = self.events.peek().map(|event| event.at_ms);
-        let next = choose_next_timestamp(
-            self.admission.next_ready_time_ms(self.cluster_in_flight()),
-            next_event_ms,
-        );
+        let next = choose_next_timestamp(self.admission.next_ready_time_ms(), next_event_ms);
         #[cfg(feature = "kvbm-offload")]
         {
             return choose_next_timestamp(next, self.engine.earliest_offload_deadline());
@@ -1122,7 +1119,7 @@ mod tests {
     }
 
     #[test]
-    fn test_concurrency_workload_delayed_follow_up_does_not_bypass_other_ready_sessions() {
+    fn test_concurrency_workload_holds_session_slot_depth_first() {
         let args = fast_router_args();
         let (collector, stats) = run_concurrency_workload_multi_collect_with_stats(
             &args,
@@ -1138,7 +1135,7 @@ mod tests {
             .iter()
             .map(|uuid| collector.snapshot(*uuid).unwrap().input_length)
             .collect::<Vec<_>>();
-        assert_eq!(dispatch_input_lengths, vec![64, 128, 192]);
+        assert_eq!(dispatch_input_lengths, vec![64, 192, 128]);
     }
 
     #[test]
