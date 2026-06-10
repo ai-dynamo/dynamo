@@ -373,11 +373,20 @@ def _resolve_cap_for_gpu(
 ) -> int:
     """Determine the NVML cap to apply for a GPU given the pod annotations on it.
 
-    Policy:
+    Policy (``None`` annotations are filtered out before conflict resolution):
       - 1 pod with annotation  → use that value.
       - 2+ pods, all agree      → use agreed value, WARNING (multi-pod is misconfig).
       - 2+ pods, conflict       → use safe_default_watts, ERROR.
       - No parseable annotation → use safe_default_watts, ERROR.
+
+    Mixed ``None`` + valid (e.g. ``[None, "480"]``) is intentionally lenient:
+    the ``None`` pod is dropped and the single remaining value (480) is
+    applied (this still fires the "all agree" multi-pod WARNING because
+    ``len(pod_annotations) > 1``). We apply the only constraint available
+    rather than fail-closed to safe_default — we do not penalise an annotated
+    pod for a co-located unannotated one. Multi-pod-per-GPU remains an
+    unsupported topology regardless. Per PR #9682 @sttts review.
+
     Returns the cap in watts.
     """
     values = [v for _, v in pod_annotations if v is not None]
@@ -542,7 +551,16 @@ class PowerAgent:
         handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
         procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
         if not procs:
-            return  # no K8s workload on this GPU
+            # No K8s workload on this GPU this cycle. We deliberately DO NOT
+            # restore the cap to default TDP here — caps are persistent by
+            # design. A managed worker may exit briefly (OOM, reschedule) and
+            # return to the same GPU; restoring during that gap would violate
+            # the planner's power budget, and the planner owns cap lifecycle
+            # via annotation removal/update. The cap is only restored to
+            # default by ``_handle_sigterm`` (agent shutdown) and
+            # ``_restore_orphaned_gpus_on_startup`` (previously-managed +
+            # now-idle GPUs at agent start). Per PR #9682 @sttts review.
+            return
 
         # Deduplicate by pod UID before building ``pod_annotations``. A
         # single pod commonly runs multiple GPU processes (one per rank

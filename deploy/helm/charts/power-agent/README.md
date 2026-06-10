@@ -168,6 +168,27 @@ The trade-off is more concurrent enforcement gaps during the rollout
 window; safe when the planner's reconcile interval (15 s) is much
 shorter than the rollout duration.
 
+## Cap lifecycle
+
+Power caps are **persistent by design**. Once the agent applies a cap to a
+GPU it stays at that value until one of the following happens — the agent
+does **not** restore the default TDP when a workload simply exits:
+
+- A new pod with a different `dynamo.nvidia.com/gpu-power-limit` lands on
+  the GPU (the next reconcile applies the new value).
+- The planner removes/updates the annotation (the planner owns cap
+  lifecycle as workloads scale down).
+- The agent receives SIGTERM (shutdown restores all managed GPUs to
+  default TDP).
+- The agent restarts and finds a previously-managed GPU now idle
+  (cold-start orphan recovery restores it to default).
+
+Rationale: in disaggregated serving a worker may exit briefly (OOM,
+reschedule) and return to the same GPU; restoring to default during that
+gap could violate the planner's power budget. If a GPU is idle and you
+need its cap cleared immediately, restart the agent pod on that node (or
+delete `managed_gpus.json` — see Uninstall) to trigger orphan recovery.
+
 ## Uninstall
 
 ```bash
