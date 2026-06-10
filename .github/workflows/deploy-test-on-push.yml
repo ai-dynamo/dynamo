@@ -46,6 +46,7 @@ jobs:
       framework: vllm
       profiles: '["agg"]'
       image_suffix: vllm-runtime
+      image_tag: main
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}

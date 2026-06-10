@@ -30,6 +30,11 @@ on:
         description: 'Operator image tag'
         type: string
         required: true
+      image_tag:
+        description: 'Image tag prefix (e.g. "main" for main-vllm-runtime, or a commit SHA). Defaults to github.sha.'
+        type: string
+        required: false
+        default: ''
 
 jobs:
   deploy-test:
@@ -80,6 +85,6 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           framework: ${{ inputs.framework }}
           profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.image_suffix }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ inputs.image_tag || github.sha }}-${{ inputs.image_suffix }}
           platform_arch: amd64
           extra_pytest_args: -m framework_only
