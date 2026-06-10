@@ -10,7 +10,7 @@ import asyncio
 
 import uvloop
 
-from dynamo.llm import ModelInput, ModelType, register_model
+from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 from tests.frontend.test_http_status_propagation import (
     ENDPOINT_PATH,
@@ -45,6 +45,7 @@ async def main():
         endpoint,
         QWEN,
         model_name=MODEL_NAME,
+        worker_type=WorkerType.Aggregated,
     )
     await endpoint.serve_endpoint(generate)
 

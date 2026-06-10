@@ -168,7 +168,10 @@ func GetCheckpoint(component *v1beta1.DynamoComponentDeploymentSharedSpec) *v1be
 	if component == nil || component.Experimental == nil {
 		return nil
 	}
-	return component.Experimental.Checkpoint
+	if checkpoint := component.Experimental.Checkpoint; checkpoint != nil && checkpoint.Enabled {
+		return checkpoint
+	}
+	return nil
 }
 
 // ToAlphaCheckpointConfig converts a v1beta1 checkpoint config into the

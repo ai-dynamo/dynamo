@@ -16,6 +16,7 @@ from typing import Any
 
 from msgspec.structs import replace as msgspec_replace
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
+from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import GENERATION_TASKS
@@ -43,6 +44,7 @@ from .utils import (
     handle_engine_error,
     make_internal_error,
     random_uuid,
+    resolve_chat_template,
 )
 
 logger = logging.getLogger(__name__)
@@ -774,7 +776,7 @@ class EngineFactory:
         # blake3-verified copies; this path duplicates the download.
         source_path = mdc.source_path()
         if not os.path.exists(source_path):
-            await fetch_model(source_path, ignore_weights=True)
+            source_path = await fetch_model(source_path, ignore_weights=True)
 
         tokenizer_mode = getattr(self.flags, "tokenizer_mode", None) or "auto"
         config_format = getattr(self.flags, "config_format", None) or "auto"
@@ -814,6 +816,17 @@ class EngineFactory:
 
         input_processor = InputProcessor(vllm_config)
         tokenizer = input_processor.get_tokenizer()
+
+        # vLLM's renderer skips its AutoProcessor fallback when tools are present,
+        # so tool calls crash unless tokenizer.chat_template is set; load from disk.
+        if tokenizer.chat_template is None:
+            tokenizer.chat_template = resolve_chat_template(source_path)
+
+        # --chat-template overrides; load_chat_template accepts either a file path
+        # or an inline Jinja template string.
+        chat_template_flag = getattr(self.flags, "chat_template", None)
+        if chat_template_flag:
+            tokenizer.chat_template = load_chat_template(chat_template_flag)
 
         # Resolve stream_interval: env var override > backend config > default (20)
         stream_interval = self.stream_interval

@@ -84,6 +84,7 @@ def test_build_runtime_config_uses_normalized_sglang_page_size_alias():
     block_size, runtime_config = CONFIG.build_runtime_config(engine_args)
 
     assert block_size == 16
+    assert runtime_config.context_length == 0
     assert runtime_config.total_kv_blocks == 16384
     assert runtime_config.max_num_seqs == 256
     assert runtime_config.max_num_batched_tokens == 8192

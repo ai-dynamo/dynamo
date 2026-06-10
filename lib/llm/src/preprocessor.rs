@@ -162,12 +162,30 @@ impl LLMMetricAnnotation {
     }
 }
 
-/// Take a standalone router's timing out of `routing_data` (see
-/// `inject_timing_from_tracker`). Removing it keeps the field off the client wire.
-fn take_router_timing(
+/// Drain a standalone router's forwarded `routing_data` onto this request's tracker so the
+/// frontend's timing/worker/token surfaces populate, then drop the field to keep it off the
+/// client wire. Worker attribution is drained so `build_response_nvext` can surface it on the
+/// split-router query-only (`query_instance_id`) path; it is first-write-wins, so the
+/// frontend's own recordings (when present) take precedence over the forwarded values.
+fn drain_router_routing_data(
     data: &mut Option<BackendOutput>,
-) -> Option<crate::protocols::common::timing::TimingInfo> {
-    data.as_mut()?.routing_data.take()?.timing
+    tracker: Option<&std::sync::Arc<crate::protocols::common::timing::RequestTracker>>,
+) {
+    let Some(routing_data) = data.as_mut().and_then(|d| d.routing_data.take()) else {
+        return;
+    };
+    let Some(tracker) = tracker else {
+        return;
+    };
+    if let Some(timing) = routing_data.timing {
+        tracker.set_external_timing(timing);
+    }
+    if let Some(worker_id) = routing_data.worker_id {
+        tracker.set_external_worker_info(worker_id);
+    }
+    if let Some(token_ids) = routing_data.token_ids {
+        tracker.set_external_query_token_ids(token_ids);
+    }
 }
 
 // Reasoning State for reasoning parsing transformation step
@@ -253,22 +271,15 @@ pub struct OpenAIPreprocessor {
     /// otherwise falls back to the `ModelProcessorSpec` registry value. This
     /// is the id the backend's HF processor emits in the expanded sequence
     /// (per-patch token for Qwen-VL families, the single placeholder for
-    /// LLaVA/Phi-3), so block hashes align bit-for-bit with the worker.
+    /// LLaVA), so block hashes align bit-for-bit with the worker.
     ///
     /// `None` disables MM-aware routing for this model and the router falls
     /// back to text-prefix routing.
     #[cfg(feature = "mm-routing")]
     routing_image_token_id: Option<crate::protocols::TokenIdType>,
-    /// Per-family flatten-time image placeholder template (e.g.
-    /// `"<|image_{n}|>"` for Phi-3, `"<image>"` for LLaVA-1.5). Threaded
-    /// through from the formatter so the routing path can reverse the
-    /// BPE-encoded numbered form (Phi-3) back into single placeholder
-    /// tokens when the chat template uses numbered markers.
-    #[cfg(feature = "mm-routing")]
-    image_placeholder_template: Option<&'static str>,
     /// BOS token id to prepend to the routing-side sequence so per-block
     /// hashes match the backend's HF processor output on models with
-    /// `add_bos_token: true` (Phi-3-vision and other `LlamaTokenizer`
+    /// `add_bos_token: true` (LLaVA-1.5 and other `LlamaTokenizer`
     /// families). `None` when the model doesn't need it or `bos_token`
     /// doesn't round-trip to a single id.
     #[cfg(feature = "mm-routing")]
@@ -427,12 +438,12 @@ impl OpenAIPreprocessor {
             }
         };
 
+        let context_length = mdc.effective_context_length();
+
         let media_loader = match mdc.media_decoder {
             Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
             None => None,
         };
-
-        let context_length = mdc.context_length;
 
         #[cfg(feature = "mm-routing")]
         let (image_token_counter, routing_image_token_id, bos_token_string) =
@@ -510,9 +521,6 @@ impl OpenAIPreprocessor {
                 }
             };
 
-        #[cfg(feature = "mm-routing")]
-        let image_placeholder_template = formatter.image_placeholder_template();
-
         // Force the dim-fetch HTTP client to build at startup for any
         // MM-routable preprocessor, so TLS / env-var / reqwest-init
         // failures fail the deployment instead of crashing the first
@@ -580,8 +588,6 @@ impl OpenAIPreprocessor {
             image_token_counter,
             #[cfg(feature = "mm-routing")]
             routing_image_token_id,
-            #[cfg(feature = "mm-routing")]
-            image_placeholder_template,
             #[cfg(feature = "mm-routing")]
             routing_prepend_bos,
         }))
@@ -660,7 +666,12 @@ impl OpenAIPreprocessor {
         TOKENIZE_SECONDS.observe(tokenize_start.elapsed().as_secs_f64());
 
         let _mm_image_entries = self
-            .gather_multi_modal_data(request, &mut builder, formatted_prompt.as_deref())
+            .gather_multi_modal_data(
+                request,
+                &mut builder,
+                formatted_prompt.as_deref(),
+                &token_ids,
+            )
             .await
             .with_context(|| "Failed to gather multimodal data")?;
 
@@ -668,13 +679,8 @@ impl OpenAIPreprocessor {
         // mm_hashes) for the KV router. No-op when no images are present or
         // the model has no resolved image-placeholder.
         #[cfg(feature = "mm-routing")]
-        self.gather_mm_exact_routing_info(
-            &mut builder,
-            &_mm_image_entries,
-            &token_ids,
-            formatted_prompt.as_deref(),
-        )
-        .with_context(|| "Failed to build MM routing info")?;
+        self.gather_mm_exact_routing_info(&mut builder, &_mm_image_entries, &token_ids)
+            .with_context(|| "Failed to build MM routing info")?;
 
         // Install tokens on the builder. Done after MM routing built its
         // view so the routing-side borrow stays cheap and builder ownership
@@ -993,7 +999,15 @@ impl OpenAIPreprocessor {
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
         formatted_prompt: Option<&str>,
+        // Worker-bound token ids; used (mm-routing only) to gate `mm_hashes`
+        // forwarding on the same placeholder-count precondition as
+        // `gather_mm_exact_routing_info`, so the two never diverge.
+        token_ids: &[crate::protocols::TokenIdType],
     ) -> Result<Vec<MmImageEntry>> {
+        // `token_ids` is only consumed by the mm-routing `mm_hashes` gate below.
+        #[cfg(not(feature = "mm-routing"))]
+        let _ = token_ids;
+
         let mut media_map: MultimodalDataMap = HashMap::new();
         let mut fetch_tasks: Vec<(String, &ChatCompletionRequestUserMessageContentPart)> =
             Vec::new();
@@ -1247,10 +1261,21 @@ impl OpenAIPreprocessor {
             // a shorter `mm_hashes` list would misalign with the image
             // positions the backend derives from `multi_modal_data`, and
             // the wrong UUIDs would get injected onto the wrong images.
+            //
+            // Also gate on the single-token placeholder count matching the
+            // image count — the same precondition `gather_mm_exact_routing_info`
+            // uses to build routing info. Forwarding `mm_hashes` makes the
+            // worker pad_value-key its KV blocks; if the router then falls back
+            // to plain `token_ids` (e.g. numbered-placeholder models like Phi-3,
+            // where the count won't match), the keys diverge and overlap is
+            // lost. Keeping both gated together leaves that fallback as clean
+            // text-prefix routing.
             #[cfg(feature = "mm-routing")]
-            if self.routing_image_token_id.is_some()
+            if let Some(find_token_id) = self.routing_image_token_id
                 && !mm_image_entries.is_empty()
                 && mm_image_entries.len() == total_image_count
+                && token_ids.iter().filter(|&&t| t == find_token_id).count()
+                    == mm_image_entries.len()
             {
                 let hexes: Vec<serde_json::Value> = mm_image_entries
                     .iter()
@@ -1262,7 +1287,7 @@ impl OpenAIPreprocessor {
                     target: "mm_routing",
                     resolved = mm_image_entries.len(),
                     expected = total_image_count,
-                    "mm-routing: not all images resolved an MM-routing entry; skipping mm_hashes forwarding"
+                    "mm-routing: exact MM routing info not built (dim resolution or placeholder-count mismatch); skipping mm_hashes forwarding"
                 );
             }
 
@@ -1277,8 +1302,7 @@ impl OpenAIPreprocessor {
 
     /// Build `MmRoutingInfo` for exact MM-aware KV routing. The worker-bound
     /// `token_ids` are unchanged — only the routing-side view is expanded.
-    /// `formatted_prompt` is only consumed for Phi-3-style numbered placeholder
-    /// templates; single-special-token families (Qwen-VL, LLaVA) ignore it.
+    /// Supports single-special-token placeholder families (Qwen-VL, LLaVA).
     /// Returns `Ok(())` with no work performed on any precondition miss
     /// (caller falls back to text-prefix routing).
     #[cfg(feature = "mm-routing")]
@@ -1287,7 +1311,6 @@ impl OpenAIPreprocessor {
         builder: &mut PreprocessedRequestBuilder,
         mm_image_entries: &[MmImageEntry],
         token_ids: &[crate::protocols::TokenIdType],
-        formatted_prompt: Option<&str>,
     ) -> Result<()> {
         use crate::protocols::common::preprocessor::MmRoutingInfo;
 
@@ -1318,49 +1341,23 @@ impl OpenAIPreprocessor {
         }
 
         // Single-special-token placeholders (Qwen-VL `<|image_pad|>`, LLaVA
-        // `<image>`) emit one `find_token_id` per image in the tokenized
-        // prompt and hit the fast path below. Numbered-text placeholders
-        // (Phi-3 `<|image_N|>`) BPE-shatter and need the splice helper to
-        // mirror what the worker hashes on.
+        // `<image>`) emit exactly one `find_token_id` per image in the
+        // tokenized prompt. Any other shape (e.g. numbered-text placeholders
+        // that BPE-shatter) can't be aligned to images here, so we skip MM
+        // routing and let the caller fall back to text-prefix routing.
         let placeholder_count = token_ids.iter().filter(|&&t| t == find_token_id).count();
-        let normalized_token_ids: std::borrow::Cow<'_, [crate::protocols::TokenIdType]> =
-            if placeholder_count == mm_image_entries.len() {
-                std::borrow::Cow::Borrowed(token_ids)
-            } else if let Some(tpl) = self.image_placeholder_template
-                && tpl.contains("{n}")
-                && let Some(prompt) = formatted_prompt
-            {
-                match self.splice_phi3_numbered_placeholders_at_token_level(
-                    prompt,
-                    tpl,
-                    find_token_id,
-                    mm_image_entries.len(),
-                ) {
-                    Some(spliced) => std::borrow::Cow::Owned(spliced),
-                    None => {
-                        tracing::warn!(
-                            target: "mm_routing",
-                            placeholder_count,
-                            image_count = mm_image_entries.len(),
-                            routing_image_token_id = find_token_id,
-                            placeholder_template = tpl,
-                            "splice failed for numbered placeholder; \
-                             skipping MM routing info (text-prefix routing only)"
-                        );
-                        return Ok(());
-                    }
-                }
-            } else {
-                tracing::warn!(
-                    target: "mm_routing",
-                    placeholder_count,
-                    image_count = mm_image_entries.len(),
-                    routing_image_token_id = find_token_id,
-                    "placeholder token count in tokenized prompt does not match image count; \
-                     skipping MM routing info (text-prefix routing only)"
-                );
-                return Ok(());
-            };
+        if placeholder_count != mm_image_entries.len() {
+            tracing::warn!(
+                target: "mm_routing",
+                placeholder_count,
+                image_count = mm_image_entries.len(),
+                routing_image_token_id = find_token_id,
+                "placeholder token count in tokenized prompt does not match image count; \
+                 skipping MM routing info (text-prefix routing only)"
+            );
+            return Ok(());
+        }
+        let normalized_token_ids = token_ids;
 
         // Compute per-image N via the registry + run the expansion.
         let n_tokens: Vec<usize> = mm_image_entries
@@ -1375,17 +1372,13 @@ impl OpenAIPreprocessor {
         // backend-agnostic. pad_value formula pinned by
         // `pad_value_matches_sglang_protocol` in dynamo_kv_router.
         //
-        // BOS ownership: when the Phi-3 splice helper produced
-        // `normalized_token_ids` (Cow::Owned), it has already emitted the
-        // leading BOS as part of its complete sequence. Only the non-splice
-        // path (Cow::Borrowed = raw tokenized prompt) needs the caller to
-        // prepend BOS here. Avoids the prior split-brain where the leading
-        // push was here and the mid-segment pushes lived inside the helper.
-        let splice_owns_bos = matches!(normalized_token_ids, std::borrow::Cow::Owned(_));
-        let bos_extra = (!splice_owns_bos && self.routing_prepend_bos.is_some()) as usize;
+        // Prepend the routing-side BOS for `add_bos_token: true` models
+        // (LlamaTokenizer family, e.g. LLaVA-1.5) so per-block hashes match
+        // the backend's HF processor output.
+        let bos_extra = self.routing_prepend_bos.is_some() as usize;
         let mut expanded: Vec<crate::protocols::TokenIdType> =
             Vec::with_capacity(normalized_token_ids.len() + n_total + bos_extra);
-        if !splice_owns_bos && let Some(bos) = self.routing_prepend_bos {
+        if let Some(bos) = self.routing_prepend_bos {
             expanded.push(bos);
         }
         let mut i = 0usize;
@@ -1428,91 +1421,6 @@ impl OpenAIPreprocessor {
             block_mm_infos: Vec::new(),
         }));
         Ok(())
-    }
-
-    /// Build routing-side tokens for Phi-3-vision's `<|image_N|>` numbered
-    /// placeholder template so the router's per-block hashes match the
-    /// worker's BlockStored events byte-for-byte.
-    ///
-    /// **Family contract — Phi-3-only.** The encode-decode roundtrip +
-    /// per-segment BOS pattern here is specific to Phi-3's HF processor
-    /// (and any future `LlamaTokenizer`-family with `<|image_{n}|>`
-    /// placeholders): the processor splits the prompt at `<|image_N|>` and
-    /// tokenizes each segment with `add_special_tokens=true`, prefixing
-    /// every segment (including the first) with a fresh BOS, and decodes-
-    /// then-re-encodes across special-token boundaries, which inserts
-    /// whitespace after each special token and bumps the SentencePiece
-    /// prefix token (e.g. 29871 `▁` -> 259 `▁▁` for `<|user|>\n`). Both
-    /// effects are reproduced here.
-    ///
-    /// Caller is `gather_mm_exact_routing_info`, which gates on
-    /// `placeholder_tpl.contains("{n}")`. The `routing_prepend_bos`
-    /// requirement below acts as the family guard: a future model with a
-    /// `{n}`-style placeholder but no BOS prepend (i.e. not a
-    /// LlamaTokenizer-family) would not benefit from this roundtrip and
-    /// could silently produce wrong block hashes, so we bail and let the
-    /// caller fall back to text-prefix routing.
-    ///
-    /// Returns one `find_token_id` per image; the caller's expansion loop
-    /// multiplies them to the per-image patch count. Leading BOS is
-    /// emitted here as the first element of the returned vector — the
-    /// caller does NOT prepend its own BOS when this helper succeeds.
-    /// Returns `None` (caller falls back to text-prefix routing) when the
-    /// family guard trips or on any tokenize/decode failure.
-    #[cfg(feature = "mm-routing")]
-    fn splice_phi3_numbered_placeholders_at_token_level(
-        &self,
-        prompt: &str,
-        placeholder_tpl: &str,
-        find_token_id: crate::protocols::TokenIdType,
-        expected_count: usize,
-    ) -> Option<Vec<crate::protocols::TokenIdType>> {
-        // Family guard: the encode-decode roundtrip + per-segment BOS
-        // semantics are LlamaTokenizer-family-specific. `routing_prepend_bos`
-        // is set iff the model declares `add_bos_token: true` in
-        // tokenizer_config.json, which is the marker for that family.
-        let bos = self.routing_prepend_bos?;
-
-        // Encode-decode roundtrip mirrors vLLM's text-substitute fallback,
-        // which is what the Phi-3 worker actually hashes on.
-        let prompt_owned: String = self
-            .tokenizer
-            .encode(prompt)
-            .ok()
-            .and_then(|enc| self.tokenizer.decode(enc.token_ids(), false).ok())
-            .map(Into::into)?;
-        let prompt: &str = &prompt_owned;
-
-        let mut byte_ranges: Vec<(usize, usize)> = Vec::with_capacity(expected_count);
-        let mut search_from = 0usize;
-        for idx in 1..=expected_count {
-            let pattern = placeholder_tpl.replace("{n}", &idx.to_string());
-            let rel = prompt[search_from..].find(&pattern)?;
-            let start = search_from + rel;
-            let end = start + pattern.len();
-            byte_ranges.push((start, end));
-            search_from = end;
-        }
-
-        // Leading BOS is emitted here so the caller's general-purpose
-        // BOS-prepend path can skip when this helper produced the
-        // normalized tokens (avoids the prior split-brain where leading
-        // BOS was pushed by the caller and mid/suffix BOS pushed here).
-        let mut result: Vec<crate::protocols::TokenIdType> = vec![bos];
-        let mut prev_end = 0usize;
-        for &(ph_start, ph_end) in byte_ranges.iter() {
-            let seg = &prompt[prev_end..ph_start];
-            let seg_enc = self.tokenizer.encode(seg).ok()?;
-            result.extend_from_slice(seg_enc.token_ids());
-            result.push(find_token_id);
-            // Mid-prompt segments get a fresh BOS — Phi-3's HF processor
-            // tokenizes each segment with add_special_tokens=true.
-            result.push(bos);
-            prev_end = ph_end;
-        }
-        let suffix_enc = self.tokenizer.encode(&prompt[prev_end..]).ok()?;
-        result.extend_from_slice(suffix_enc.token_ids());
-        Some(result)
     }
 
     /// xxh3-64 of the raw URL bytes. Used as the routing `mm_hash` in the
@@ -2093,13 +2001,13 @@ impl OpenAIPreprocessor {
                 }
 
                 if let Some(mut response) = inner.response_stream.next().await {
-                    // Split topology: overlay a standalone router's forwarded timing onto
-                    // this request's tracker so the frontend's timing surfaces populate.
-                    if let Some(timing) = take_router_timing(&mut response.data)
-                        && let Some(tracker) = inner.response_generator.tracker()
-                    {
-                        tracker.set_external_timing(timing);
-                    }
+                    // Split topology: overlay a standalone router's forwarded routing_data
+                    // (timing, query-only token_ids) onto this request's tracker so the
+                    // frontend's nvext/timing surfaces populate.
+                    drain_router_routing_data(
+                        &mut response.data,
+                        inner.response_generator.tracker().as_ref(),
+                    );
 
                     if inner.cancelled {
                         tracing::debug!(
@@ -3115,7 +3023,7 @@ impl
         // Returned MM entries are unused on the embeddings path; routing info is
         // not built here.
         let _ = self
-            .gather_multi_modal_data(&request, &mut builder, None)
+            .gather_multi_modal_data(&request, &mut builder, None, &[])
             .await?;
 
         let mut common_request = builder.build()?;
