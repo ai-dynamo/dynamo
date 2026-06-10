@@ -20,6 +20,8 @@ use tokio_util::sync::CancellationToken;
 use crate::protocols::{ExternalSequenceBlockHash, WorkerId, WorkerWithDpRank};
 
 const WORKER_EXPIRY_HEAP_REBUILD_THRESHOLD: usize = 10;
+/// Approximate TTL expirations are rounded up to this interval. A non-zero TTL
+/// can remain routable for up to one extra bucket interval.
 const EXPIRY_BUCKET: Duration = Duration::from_millis(100);
 
 /// Block entry tracked by [`PruneManager`] until its TTL bucket expires.
@@ -122,7 +124,11 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
 
     /// Inserts timers using a caller-provided timestamp.
     pub fn insert_at(&mut self, keys: Vec<K>, now: Instant) {
-        let expiry_time = self.bucket_expiry(now + self.ttl);
+        let expiry_time = if self.ttl.is_zero() {
+            now
+        } else {
+            self.bucket_expiry(now + self.ttl)
+        };
 
         self.timers.reserve(keys.len());
         for key in keys {
@@ -674,6 +680,21 @@ mod tests {
         assert_eq!(pm.expirations.len(), 1);
         assert!(pm.remove(&2));
         assert!(pm.expirations.is_empty());
+    }
+
+    #[test]
+    fn test_prune_manager_zero_ttl_expires_immediately() {
+        let prune_config = PruneConfig {
+            ttl: Duration::ZERO,
+        };
+        let mut pm: PruneManager<u32> = PruneManager::new(prune_config);
+
+        let now = pm.bucket_origin + Duration::from_millis(1);
+        pm.insert_at(vec![7], now);
+
+        assert_eq!(pm.get_expiry(&7), Some(&now));
+        assert_eq!(pm.pop_expired(now), vec![7]);
+        assert!(pm.is_empty());
     }
 
     /// Validate that reinserting an existing key extends its TTL and prevents premature expiry.
