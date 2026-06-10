@@ -551,7 +551,6 @@ async fn handler_completions(
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.inner.model)?;
 
-    // nvext master switch — see State::nvext_enabled.
     request.nvext = if state.nvext_enabled() {
         apply_header_routing_overrides(request.nvext.take(), &headers)
     } else {
@@ -1147,7 +1146,6 @@ async fn handler_chat_completions(
         check_model_serving_ready(&state, resolved_model)?;
     }
 
-    // nvext master switch — see State::nvext_enabled.
     request.nvext = if state.nvext_enabled() {
         apply_header_routing_overrides(request.nvext.take(), &headers)
     } else {
@@ -1901,7 +1899,6 @@ async fn handler_responses(
         check_model_serving_ready(&state, resolved_model)?;
     }
 
-    // nvext master switch — see State::nvext_enabled.
     request.nvext = if state.nvext_enabled() {
         apply_header_routing_overrides(request.nvext.take(), &headers)
     } else {
