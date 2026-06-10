@@ -79,9 +79,9 @@ For the complete CRD spec, see the [API Reference](api-reference.md).
 
 > [!NOTE]
 > DGDR does not currently expose a `features.kvRouter` field. To configure
-> router mode or KV-aware routing details, use a direct DGD, a tuned recipe, or
-> `overrides.dgd` when you still want DGDR to generate the non-EPP base
-> deployment.
+> router mode or KV-aware routing details, see [Routing](#routing). Use a
+> direct DGD or tuned recipe when you need full router control or EPP/Gateway
+> routing.
 
 ### Generated DGD Overrides
 
@@ -139,6 +139,10 @@ frontend runs Dynamo's embedded router and defaults to `round-robin` routing.
 Because DGDR does not yet expose a first-class router feature, configure the
 generated frontend with `spec.overrides.dgd`.
 
+For the full router mode and environment variable reference, see
+[Router Guide](../components/router/router-guide.md) and
+[Router Configuration](../components/router/router-configuration.md).
+
 For example, enable KV-aware routing on the generated frontend:
 
 ```yaml
@@ -169,8 +173,10 @@ deployments, use `kv` when you want prefix-cache-aware routing and
 `direct` only when an external router supplies explicit worker IDs in the
 request routing hints.
 
-KV-aware routing is most precise when workers publish KV cache events. If the
-workers do not publish events, run the frontend in approximate KV mode:
+KV-aware routing has two independent pieces: the frontend must run in `kv`
+mode, and workers must publish KV cache events for event-driven prefix-cache
+state. If worker event publication is not configured, keep
+`DYN_ROUTER_MODE=kv` but run the frontend in approximate KV mode:
 
 ```yaml
 spec:
@@ -188,10 +194,10 @@ spec:
                 value: "false"
 ```
 
-If you also need to change backend worker arguments for event publication,
-override the generated worker service by name. Service names depend on the
-selected backend and topology, so inspect the generated DGD first, especially
-when `autoApply: false`.
+When you do want event-driven prefix-cache state, configure the generated
+worker service with backend-specific event publishing flags. Service names
+depend on the selected backend and topology, so inspect the generated DGD
+first, especially when `autoApply: false`.
 
 For example, a generated vLLM disaggregated deployment may contain a
 `VllmPrefillWorker` service. This override appends the vLLM KV-event publishing
@@ -217,23 +223,20 @@ spec:
                   - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
 ```
 
-Worker KV-event flags are backend-specific. The usual patterns are:
+Worker KV-event flags are backend-specific. For cross-backend behavior, see
+[Router Operations](../components/router/router-operations.md#additional-notes).
 
-| Backend | Worker-side event publishing |
-|---|---|
-| vLLM | `--kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'` |
-| SGLang | `--kv-events-config` with the SGLang event endpoint |
-| TRT-LLM | `--publish-events-and-metrics` |
+| Backend | Detailed docs | Worker-side event publishing |
+|---|---|---|
+| vLLM | [vLLM Reference Guide](../backends/vllm/vllm-reference-guide.md#argument-reference), [vLLM Examples](../backends/vllm/vllm-examples.md#aggregated-serving-with-kv-routing) | `--kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'` |
+| SGLang | [SGLang KV Events](../backends/sglang/sglang-reference-guide.md#kv-events), [SGLang Examples](../backends/sglang/sglang-examples.md#aggregated-serving-with-kv-routing) | `--kv-events-config` with the SGLang event endpoint |
+| TRT-LLM | [TRT-LLM DP Rank Routing](../backends/trtllm/trtllm-dp-rank-routing.md#enabling-dp-rank-routing), [TRT-LLM Observability](../backends/trtllm/trtllm-observability.md) | `--publish-events-and-metrics` |
 
 In Kubernetes deployments the Dynamo runtime normally uses Kubernetes
 discovery and the NATS event plane. Some backends, such as vLLM and SGLang,
 emit raw KV events over ZMQ; the Dynamo worker consumes those backend events
-and republishes router events through the Dynamo event plane.
-
-For more detail on router modes, environment variables, and backend KV-event
-flags, see [Router Guide](../components/router/router-guide.md), [Router
-Configuration](../components/router/router-configuration.md), and [Router
-Operations](../components/router/router-operations.md).
+and republishes router events through the Dynamo event plane. For the event
+plane model, see [Event Plane](../design-docs/event-plane.md).
 
 ### EPP and Gateway Routing
 
@@ -254,95 +257,11 @@ DGDR does not currently generate EPP components or frontend sidecars. Also,
 `overrides.dgd` only patches services that already exist in the generated DGD,
 so it cannot be used to add a missing `Epp` service to a DGDR-generated
 deployment. Use a direct DGD manifest or a GAIE recipe for EPP deployments.
-The [Gateway API Inference Extension](inference-gateway.md) guide covers the
-standard EPP path and the optional [Rust EPP
-implementation](../../deploy/inference-gateway/ext-proc/), which is currently
-documented as experimental.
-
-A current v1beta1 DGD EPP deployment has this shape:
-
-```yaml
-apiVersion: nvidia.com/v1beta1
-kind: DynamoGraphDeployment
-metadata:
-  name: qwen-gaie
-spec:
-  backendFramework: vllm
-  components:
-    - name: Epp
-      type: epp
-      eppConfig:
-        config:
-          plugins:
-            - type: disagg-profile-handler
-            - name: decode-filter
-              type: label-filter
-              parameters:
-                label: nvidia.com/dynamo-component-type
-                validValues:
-                  - decode
-                allowsNoLabel: true
-            - name: picker
-              type: max-score-picker
-            - name: dyn-decode
-              type: dyn-decode-scorer
-          schedulingProfiles:
-            - name: decode
-              plugins:
-                - pluginRef: decode-filter
-                  weight: 1
-                - pluginRef: dyn-decode
-                  weight: 1
-                - pluginRef: picker
-                  weight: 1
-      podTemplate:
-        spec:
-          containers:
-            - name: main
-              image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
-              env:
-                - name: DYN_MODEL_NAME
-                  value: Qwen/Qwen3-0.6B
-                - name: DYN_KV_CACHE_BLOCK_SIZE
-                  value: "128"
-                - name: DYN_ENFORCE_DISAGG
-                  value: "false"
-    - name: VllmDecodeWorker
-      type: decode
-      frontendSidecar: sidecar-frontend
-      podTemplate:
-        spec:
-          containers:
-            - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-              command:
-                - /bin/sh
-                - -c
-              args:
-                - python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME
-                  --enable-prefix-caching --block-size 128 --kv-events-config '{"enable_kv_cache_events":true}'
-              env:
-                - name: MODEL_PATH
-                  value: Qwen/Qwen3-0.6B
-                - name: SERVED_MODEL_NAME
-                  value: Qwen/Qwen3-0.6B
-            - name: sidecar-frontend
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-              args:
-                - -m
-                - dynamo.frontend
-                - --router-mode
-                - direct
-```
-
-EPP uses its own router configuration variables. For example,
-`DYN_USE_KV_EVENTS=false` disables KV-event consumption in the EPP and falls
-back to approximate routing. This is distinct from
-`DYN_ROUTER_USE_KV_EVENTS`, which configures the standalone Python frontend
-router used in non-EPP DGDR deployments.
-
-For full Gateway setup and route manifests, see
-[Gateway API Inference Extension](inference-gateway.md).
+For manifests, `frontendSidecar` configuration, direct routing, EPP routing
+variables such as `DYN_USE_KV_EVENTS`, and route setup, see
+[Gateway API Inference Extension](inference-gateway.md). The same guide also
+documents the optional [Rust EPP](inference-gateway.md#4b-build-rust-epp-image-optional--experimental),
+which is currently experimental.
 
 ### SKU Format
 
