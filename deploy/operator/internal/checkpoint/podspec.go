@@ -272,7 +272,6 @@ func injectCheckpointIntoPodSpec(
 		return err
 	}
 
-	EnsurePodInfoVolume(podSpec)
 	targetContainers := make([]*corev1.Container, 0, len(targets))
 	for _, name := range targets {
 		var container *corev1.Container
@@ -285,7 +284,6 @@ func injectCheckpointIntoPodSpec(
 		if container == nil {
 			return fmt.Errorf("checkpoint restore target %q does not exist in pod spec", name)
 		}
-		EnsurePodInfoMount(container)
 		targetContainers = append(targetContainers, container)
 	}
 	if info.Ready && info.GPUMemoryService != nil && info.GPUMemoryService.Enabled {

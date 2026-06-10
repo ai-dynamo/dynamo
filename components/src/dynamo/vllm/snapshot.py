@@ -5,7 +5,7 @@ import gc
 import logging
 from collections.abc import Callable
 
-from dynamo.common.utils.snapshot import CheckpointConfig, EngineSnapshotController
+from dynamo.common.snapshot import CheckpointConfig, EngineSnapshotController
 
 from .args import Config
 from .handlers import VllmEnginePauseController

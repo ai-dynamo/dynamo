@@ -338,8 +338,12 @@ class TestReasoningParserForwarding:
             chunks.append(chunk)
 
         assert [chunk["token_ids"] for chunk in chunks] == [[11], [12]]
-        assert "disaggregated_params" not in chunks[0]
-        routed = chunks[1]["disaggregated_params"]["routed_experts"]
+        # routed_experts must ride engine_data (where the Rust postprocessor's
+        # build_response_nvext reads it from), not disaggregated_params. It is
+        # only emitted on the final chunk.
+        assert "engine_data" not in chunks[0]
+        assert "disaggregated_params" not in chunks[1]
+        routed = chunks[1]["engine_data"]["routed_experts"]
         assert routed["shape"] == [2, 1, 1]
         assert routed["dtype"] == "int32"
         decoded = np.frombuffer(

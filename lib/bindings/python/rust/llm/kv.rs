@@ -29,7 +29,6 @@ use llm_rs::kv_router::KvPushRouter as RsKvPushRouter;
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
-use serde_json::json;
 
 use super::aic_callback::create_aic_prefill_load_estimator;
 use super::entrypoint::AicPerfConfig;
@@ -855,9 +854,8 @@ pub(crate) struct KvRouter {
     inner: Arc<RsKvPushRouter>,
 }
 
-/// Inject worker_id info from tracker into response's disaggregated_params.
-/// This is needed for Python bindings to expose worker routing info since
-/// the raw LLMEngineOutput doesn't go through DeltaGenerator (which adds nvext).
+/// Attach worker_id info from the tracker to `routing_data` so it survives the
+/// Rust->Python->Rust router path to the frontend (data survives, annotations don't).
 fn inject_worker_id_from_tracker(
     data: &mut llm_rs::protocols::common::llm_backend::LLMEngineOutput,
     tracker: &RequestTracker,
@@ -866,18 +864,9 @@ fn inject_worker_id_from_tracker(
         return;
     };
 
-    let worker_id_json =
-        serde_json::to_value(&worker_info).expect("WorkerIdInfo serialization should not fail");
-
-    if let Some(obj) = data
-        .disaggregated_params
-        .as_mut()
-        .and_then(|p| p.as_object_mut())
-    {
-        obj.insert("worker_id".to_string(), worker_id_json);
-    } else {
-        data.disaggregated_params = Some(json!({"worker_id": worker_id_json}));
-    }
+    data.routing_data
+        .get_or_insert_with(Default::default)
+        .worker_id = Some(worker_info);
 }
 
 /// Attach the request's timing to `routing_data` so it survives the

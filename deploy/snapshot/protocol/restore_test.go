@@ -74,11 +74,11 @@ func TestNewRestorePod(t *testing.T) {
 		t.Fatalf("expected restartPolicy Never, got %#v", restorePod.Spec.RestartPolicy)
 	}
 	main := &restorePod.Spec.Containers[0]
-	if len(main.Command) != 2 || main.Command[0] != "sleep" || main.Command[1] != "infinity" {
-		t.Fatalf("expected placeholder command, got %#v", main.Command)
+	if got, want := main.Command, []string{"python3", "-m", "dynamo.vllm"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("expected command %#v, got %#v", want, got)
 	}
-	if main.Args != nil {
-		t.Fatalf("expected restore args to be cleared: %#v", main.Args)
+	if got, want := main.Args, []string{"--model", "Qwen"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("expected args %#v, got %#v", want, got)
 	}
 	if main.ReadinessProbe == nil {
 		t.Fatalf("expected readiness probe to be preserved")
@@ -122,6 +122,7 @@ func TestNewRestorePod(t *testing.T) {
 	foundNCCLKvsEnv := false
 	foundVLLMCheckpointRestoreEnv := false
 	foundVLLMFileStoreEnv := false
+	foundPlaceholderEnv := false
 	for _, e := range main.Env {
 		if e.Name == SnapshotControlDirEnv {
 			foundEnv = true
@@ -135,6 +136,12 @@ func TestNewRestorePod(t *testing.T) {
 		if e.Name == VLLMCheckpointRestoreFileStorePathEnv {
 			foundVLLMFileStoreEnv = true
 		}
+		if e.Name == RestorePlaceholderModeEnv {
+			foundPlaceholderEnv = true
+			if e.Value != "1" {
+				t.Fatalf("expected %s=1, got %#v", RestorePlaceholderModeEnv, e)
+			}
+		}
 	}
 	if !foundEnv {
 		t.Fatalf("expected %s env, got %#v", SnapshotControlDirEnv, main.Env)
@@ -147,6 +154,9 @@ func TestNewRestorePod(t *testing.T) {
 	}
 	if !foundVLLMFileStoreEnv {
 		t.Fatalf("expected %s env, got %#v", VLLMCheckpointRestoreFileStorePathEnv, main.Env)
+	}
+	if !foundPlaceholderEnv {
+		t.Fatalf("expected %s env, got %#v", RestorePlaceholderModeEnv, main.Env)
 	}
 	redis := findRestoreContainer(t, restorePod.Spec.Containers, NCCLCheckpointRedisContainerName)
 	if redis.Image != NCCLCheckpointRedisImage {
@@ -179,7 +189,13 @@ func TestNewRestorePodPreservesRendezvousMetadata(t *testing.T) {
 		Namespace:       "test-ns",
 		CheckpointID:    "hash",
 		ArtifactVersion: "2",
-		SeccompProfile:  DefaultSeccompLocalhostProfile,
+		Storage: Storage{
+			Type:     StorageTypePVC,
+			Location: "/checkpoints/hash/versions/2",
+			PVCName:  "snapshot-pvc",
+			BasePath: "/checkpoints",
+		},
+		SeccompProfile: DefaultSeccompLocalhostProfile,
 	})
 	if err != nil {
 		t.Fatalf("NewRestorePod returned error: %v", err)
@@ -192,8 +208,17 @@ func TestNewRestorePodPreservesRendezvousMetadata(t *testing.T) {
 		t.Fatalf("expected rendezvous port annotation, got %#v", restorePod.Annotations)
 	}
 	main := restorePod.Spec.Containers[0]
-	if len(main.Command) != 2 || main.Command[0] != "sleep" || main.Command[1] != "infinity" {
-		t.Fatalf("expected placeholder command, got %#v", main.Command)
+	if got, want := main.Command, []string{"python3", "-m", "dynamo.vllm"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("expected command %#v, got %#v", want, got)
+	}
+	if got, want := main.Args, []string{"--model", "Qwen", "--master-addr=$(LWS_LEADER_ADDRESS)", "--master-port", "29517"}; len(got) != len(want) {
+		t.Fatalf("expected args %#v, got %#v", want, got)
+	} else {
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("expected args %#v, got %#v", want, got)
+			}
+		}
 	}
 }
 
@@ -227,13 +252,25 @@ func TestNewRestorePodShapesMultipleTargets(t *testing.T) {
 
 	for _, name := range []string{"engine-0", "engine-1"} {
 		c := findRestoreContainer(t, restorePod.Spec.Containers, name)
-		if len(c.Command) != 2 || c.Command[0] != "sleep" || c.Command[1] != "infinity" {
-			t.Fatalf("expected placeholder command on %s, got %#v", name, c.Command)
+		if len(c.Command) != 1 || c.Command[0] != "python3" {
+			t.Fatalf("expected command to be preserved on %s, got %#v", name, c.Command)
 		}
-		if c.Args != nil {
-			t.Fatalf("expected args cleared on %s, got %#v", name, c.Args)
+		if len(c.Args) != 1 || c.Args[0] != "--serve" {
+			t.Fatalf("expected args to be preserved on %s, got %#v", name, c.Args)
 		}
 		assertRestoreStartupGate(t, c.StartupProbe)
+		foundPlaceholderEnv := false
+		for _, e := range c.Env {
+			if e.Name == RestorePlaceholderModeEnv {
+				foundPlaceholderEnv = true
+				if e.Value != "1" {
+					t.Fatalf("expected %s=1 on %s, got %#v", RestorePlaceholderModeEnv, name, e)
+				}
+			}
+		}
+		if !foundPlaceholderEnv {
+			t.Fatalf("expected %s env on %s, got %#v", RestorePlaceholderModeEnv, name, c.Env)
+		}
 		found := false
 		for _, m := range c.VolumeMounts {
 			if m.Name == SnapshotControlVolumeName {
@@ -258,8 +295,8 @@ func TestNewRestorePodShapesMultipleTargets(t *testing.T) {
 		}
 	}
 	for _, e := range sidecar.Env {
-		if e.Name == SnapshotControlDirEnv {
-			t.Fatalf("sidecar must not get a control env: %#v", sidecar.Env)
+		if e.Name == SnapshotControlDirEnv || e.Name == RestorePlaceholderModeEnv {
+			t.Fatalf("sidecar must not get a restore env: %#v", sidecar.Env)
 		}
 	}
 }
@@ -362,6 +399,7 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 	envCount := 0
 	vllmCheckpointRestoreEnvCount := 0
 	vllmFileStoreEnvCount := 0
+	placeholderEnvCount := 0
 	for _, e := range container.Env {
 		if e.Name == SnapshotControlDirEnv {
 			envCount++
@@ -371,6 +409,12 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 		}
 		if e.Name == VLLMCheckpointRestoreFileStorePathEnv {
 			vllmFileStoreEnvCount++
+		}
+		if e.Name == RestorePlaceholderModeEnv {
+			placeholderEnvCount++
+			if e.Value != "1" {
+				t.Fatalf("expected %s=1, got %#v", RestorePlaceholderModeEnv, e)
+			}
 		}
 	}
 	if envCount != 1 {
@@ -382,12 +426,16 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 	if vllmFileStoreEnvCount != 1 {
 		t.Fatalf("expected single %s env after repeated calls, got %#v", VLLMCheckpointRestoreFileStorePathEnv, container.Env)
 	}
-	if len(container.Command) != 2 || container.Command[0] != "sleep" || container.Command[1] != "infinity" {
-		t.Fatalf("expected placeholder command, got %#v", container.Command)
+	if placeholderEnvCount != 1 {
+		t.Fatalf("expected single %s env after repeated calls, got %#v", RestorePlaceholderModeEnv, container.Env)
 	}
-	if container.Args != nil {
-		t.Fatalf("expected restore args to be cleared: %#v", container.Args)
+	if got, want := container.Command, []string{"python3", "-m", "dynamo.vllm"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("expected command %#v, got %#v", want, got)
 	}
+	if got, want := container.Args, []string{"--model", "Qwen"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("expected args %#v, got %#v", want, got)
+	}
+
 	if container.ReadinessProbe == nil {
 		t.Fatalf("expected readiness probe to be preserved")
 	}
