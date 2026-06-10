@@ -135,8 +135,12 @@ impl SharedTcpServer {
             work_queue_size as u64,
         ));
 
-        // Create bounded channel for work items
-        let (work_tx, work_rx) = tokio::sync::mpsc::channel(work_queue_size);
+        // The single dispatcher holds one request between `recv()` and acquiring
+        // an engine permit, so size the channel to queue-1: channel + the
+        // dispatcher-held request cap "queued, not in engine" at exactly
+        // DYN_TCP_WORK_QUEUE_SIZE.
+        let channel_size = work_queue_size.saturating_sub(1).max(1);
+        let (work_tx, work_rx) = tokio::sync::mpsc::channel(channel_size);
 
         // Shared with read_loop, which front-acquires permits for direct dispatch.
         let engine_sem = Arc::new(Semaphore::new(worker_pool_size));
@@ -153,7 +157,7 @@ impl SharedTcpServer {
             cancellation_token,
             work_tx,
             engine_sem,
-            queue_capacity: work_queue_size,
+            queue_capacity: channel_size,
         })
     }
 
