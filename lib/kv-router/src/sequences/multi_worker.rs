@@ -660,7 +660,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     pub fn active_request_counts(&self) -> HashMap<WorkerWithDpRank, usize> {
-        self.request_index.active_request_counts()
+        self.prompt_registry.active_request_counts()
     }
 
     /// Force expire stale requests across all workers (one-shot).
@@ -1081,6 +1081,17 @@ mod tests {
             .into_iter()
             .map(|load| (load.worker, load.modeled_remaining_prefill_time_ms))
             .collect()
+    }
+
+    fn active_request_count(
+        sequences: &ActiveSequencesMultiWorker<NoopSequencePublisher>,
+        worker: WorkerWithDpRank,
+    ) -> usize {
+        sequences
+            .active_request_counts()
+            .get(&worker)
+            .copied()
+            .unwrap_or(0)
     }
 
     struct VecSubscriber {
@@ -1651,6 +1662,57 @@ mod tests {
         sequences.assert_completely_drained(decay_now);
     }
 
+    #[test]
+    fn active_request_counts_follow_local_lifecycle_snapshot() {
+        let sequences = make_sequences();
+        let worker = WorkerWithDpRank::new(1, 0);
+        let now = Instant::now();
+        let request_id = "req-1".to_string();
+
+        assert_eq!(active_request_count(&sequences, worker), 0);
+
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: request_id.clone(),
+                    token_sequence: Some(vec![1, 2, 3]),
+                    track_prefill_tokens: true,
+                    expected_output_tokens: None,
+                    prefill_load_hint: tracking_hint(12),
+                    worker,
+                    lora_name: None,
+                },
+                now,
+            )
+            .unwrap();
+        assert_eq!(active_request_count(&sequences, worker), 1);
+
+        sequences.mark_prefill_completed(&request_id, now).unwrap();
+        assert_eq!(active_request_count(&sequences, worker), 1);
+
+        sequences.free(&request_id, now).unwrap();
+        assert_eq!(active_request_count(&sequences, worker), 0);
+
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: "req-2".to_string(),
+                    token_sequence: Some(vec![4, 5, 6]),
+                    track_prefill_tokens: true,
+                    expected_output_tokens: None,
+                    prefill_load_hint: tracking_hint(12),
+                    worker,
+                    lora_name: None,
+                },
+                now,
+            )
+            .unwrap();
+        assert_eq!(active_request_count(&sequences, worker), 1);
+
+        sequences.unregister_worker(worker.worker_id).unwrap();
+        assert!(!sequences.active_request_counts().contains_key(&worker));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn force_expiry_clears_block_membership_index() {
         let sequences = make_multi_sequences();
@@ -1677,6 +1739,7 @@ mod tests {
         assert!(sequences.request_index.is_empty());
         assert!(sequences.prompt_registry.is_block_index_empty());
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
+        assert_eq!(active_request_count(&sequences, worker), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1768,6 +1831,10 @@ mod tests {
         assert_eq!(
             sequences.request_index.worker_for(&"req-1".to_string()),
             None
+        );
+        assert_eq!(
+            sequences.active_request_counts().get(&worker).copied(),
+            Some(1)
         );
     }
 
@@ -1992,6 +2059,7 @@ mod tests {
         assert!(sequences.request_index.is_empty());
         assert!(sequences.prompt_registry.is_block_index_empty());
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
+        assert_eq!(active_request_count(&sequences, worker), 0);
     }
 
     #[tokio::test(start_paused = true)]

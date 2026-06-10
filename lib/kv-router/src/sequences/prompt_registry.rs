@@ -22,6 +22,7 @@ use crate::protocols::WorkerWithDpRank;
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WorkerLoadSnapshot {
     pub(super) active_blocks: usize,
+    pub(super) active_requests: usize,
     pub(super) prefill: PrefillLoadSnapshot,
 }
 
@@ -187,6 +188,13 @@ impl PromptRegistry {
             .collect()
     }
 
+    pub(super) fn active_request_counts(&self) -> HashMap<WorkerWithDpRank, usize> {
+        self.loads
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().active_requests))
+            .collect()
+    }
+
     pub(super) fn active_tokens(&self, decay_now: Instant) -> HashMap<WorkerWithDpRank, usize> {
         self.loads
             .iter()
@@ -280,6 +288,7 @@ mod tests {
     fn worker_load_snapshot(active_blocks: usize) -> WorkerLoadSnapshot {
         WorkerLoadSnapshot {
             active_blocks,
+            active_requests: 0,
             prefill: PrefillLoadSnapshot::default(),
         }
     }
@@ -293,6 +302,7 @@ mod tests {
     ) -> WorkerLoadSnapshot {
         WorkerLoadSnapshot {
             active_blocks,
+            active_requests: 0,
             prefill: PrefillLoadSnapshot {
                 prefill_full_tokens_sum,
                 anchored_prefill: Some(AnchoredPrefillSnapshot {

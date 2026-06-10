@@ -91,14 +91,6 @@ impl RequestIndex {
         counts
     }
 
-    pub(super) fn active_request_counts(&self) -> HashMap<WorkerWithDpRank, usize> {
-        let mut counts = HashMap::new();
-        for entry in self.request_to_worker.iter() {
-            *counts.entry(*entry.value()).or_insert(0) += 1;
-        }
-        counts
-    }
-
     #[cfg(any(test, feature = "bench"))]
     pub(super) fn is_empty(&self) -> bool {
         self.request_to_worker.is_empty() && self.request_to_lora.is_empty()
@@ -180,22 +172,6 @@ mod tests {
         assert_eq!(
             index.active_lora_counts(),
             HashMap::from([("adapter-b".to_string(), 1)])
-        );
-    }
-
-    #[test]
-    fn active_request_counts_group_by_worker_and_dp_rank() {
-        let index = RequestIndex::default();
-        let worker_a = WorkerWithDpRank::new(1, 0);
-        let worker_b = WorkerWithDpRank::new(1, 1);
-
-        index.set_request("req-a".to_string(), worker_a, None);
-        index.set_request("req-b".to_string(), worker_a, None);
-        index.set_request("req-c".to_string(), worker_b, None);
-
-        assert_eq!(
-            index.active_request_counts(),
-            HashMap::from([(worker_a, 2), (worker_b, 1)])
         );
     }
 }
