@@ -399,16 +399,13 @@ def test_flat_mm_metadata_fallback_is_image_only():
         "mm_placeholders": [(4, 8)],
     }
 
-    assert (
-        _get_modality_extra_values(
-            extra_args,
-            "mm_hashes_by_modality",
-            "mm_hashes",
-            "image",
-            "image",
-        )
-        == ["image_hash"]
-    )
+    assert _get_modality_extra_values(
+        extra_args,
+        "mm_hashes_by_modality",
+        "mm_hashes",
+        "image",
+        "image",
+    ) == ["image_hash"]
     assert (
         _get_modality_extra_values(
             extra_args,
