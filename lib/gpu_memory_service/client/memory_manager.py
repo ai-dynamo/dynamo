@@ -78,23 +78,23 @@ class StaleMemoryLayoutError(Exception):
 
 @dataclass
 class _ScratchMapping:
-    """Per-VA tracking for one scratch-aliased KV allocation.
+    """Per-VA tracking for one scratch-aliased allocation.
 
-    n_chunks granules of VA all alias the same physical chunk (scratch_handle).
-    One physical page, many virtual mappings. torch.zeros into the range
-    succeeds; cudagraphs capture VAs so they survive the eventual swap to real.
+    VA chunks all alias the same physical chunk (scratch_handle). One physical
+    allocation, many virtual mappings. torch.zeros into the range succeeds;
+    cudagraphs capture VAs so they survive the eventual swap to real.
 
     Lifecycle: install via create_scratch_mapping; tear down via
     unmap_all_vas (drops physical) and prepare_scratch_for_reallocation
-    (migrates the entry into _mappings as a preserved-VA LocalMapping so the
-    standard reallocate_all_handles + remap_all_vas flow produces real backing).
+    (moves the scratch bookkeeping into _mappings as preserved-VA metadata so
+    reallocate_all_handles + remap_all_vas can install fresh server backing).
     """
 
-    base_va: int
-    aligned_size: int
-    n_chunks: int
+    size: int
+    aligned_size: int  # CUDA-granularity server allocation size
+    va_reserved_size: int  # scratch-rounded local VA reservation
     tag: str
-    scratch_handle: int = 0  # 0 after unmap_all_vas drops the physical
+    scratch_handle: int  # 0 after unmap_all_vas drops the physical
 
 
 @dataclass(frozen=True)
@@ -106,6 +106,7 @@ class LocalMapping:
       - va: Local virtual address
       - size: Original requested size
       - aligned_size: Size aligned to VMM granularity
+      - va_reserved_size: Size of the local VA reservation
       - handle: CUDA memory handle (0 if unmapped but VA reserved)
       - tag: Allocation tag for server tracking
     """
@@ -117,6 +118,11 @@ class LocalMapping:
     handle: int  # 0 if unmapped but VA reserved
     tag: str
     layout_slot: int
+    va_reserved_size: int = 0
+
+    def __post_init__(self) -> None:
+        if self.va_reserved_size == 0:
+            object.__setattr__(self, "va_reserved_size", self.aligned_size)
 
     def with_handle(self, handle: int) -> "LocalMapping":
         return LocalMapping(
@@ -127,6 +133,7 @@ class LocalMapping:
             handle,
             self.tag,
             self.layout_slot,
+            self.va_reserved_size,
         )
 
     def with_server_identity(
@@ -142,6 +149,7 @@ class LocalMapping:
             self.handle,
             self.tag,
             layout_slot,
+            self.va_reserved_size,
         )
 
 
@@ -157,18 +165,20 @@ class GMSClientMemoryManager:
         *,
         device: int = 0,
         tag: Optional[str] = None,
+        scratch_size: int = 512 * 1024 * 1024,
     ) -> None:
         self.socket_path = socket_path
         self.device = device
         self.tag = tag
+        self.scratch_size = scratch_size
 
         self._client: Optional[_GMSClientSession] = None
 
         # Two disjoint VA registries keyed by base VA:
         #   _mappings           — server-backed allocations (VA <-> LocalMapping).
         #   _scratch_mappings   — client-local scratch-aliased VAs awaiting
-        #                         migration into _mappings via
-        #                         prepare_scratch_for_reallocation.
+        #                         preserved-VA bookkeeping via
+        #                         prepare_scratch_for_reallocation().
         self._mappings: Dict[int, LocalMapping] = {}
         self._inverse_mapping: Dict[str, int] = {}
         self._scratch_mappings: Dict[int, _ScratchMapping] = {}
@@ -425,7 +435,7 @@ class GMSClientMemoryManager:
             mapping = self._mappings.get(va)
             if mapping is None:
                 return
-        cumem_address_free(va, mapping.aligned_size)
+        cumem_address_free(va, mapping.va_reserved_size)
         self._mappings.pop(va, None)
         self._inverse_mapping.pop(mapping.allocation_id, None)
 
@@ -494,7 +504,7 @@ class GMSClientMemoryManager:
         self.free_va(va)
 
     def unmap_all_vas(self) -> None:
-        """Synchronize + unmap all VAs (real mappings AND deferred-KV scratch).
+        """Synchronize + unmap all VAs (real mappings AND scratch mappings).
         Preserves VA reservations for remap.
         """
         cuda_synchronize()
@@ -508,16 +518,16 @@ class GMSClientMemoryManager:
             unmapped_count += 1
             total_bytes += mapping.aligned_size
 
-        # Scratch is 1 handle aliased N times across [base_va, +aligned_size).
+        # Scratch is 1 handle aliased N times across [base_va, +va_reserved_size).
         # cuMemUnmap over the whole range covers all aliases in one call.
-        for scratch in self._scratch_mappings.values():
+        for base_va, scratch in self._scratch_mappings.items():
             if scratch.scratch_handle == 0:
                 continue
-            cumem_unmap(scratch.base_va, scratch.aligned_size)
+            cumem_unmap(base_va, scratch.va_reserved_size)
             cumem_release(scratch.scratch_handle)
             scratch.scratch_handle = 0
             unmapped_count += 1
-            total_bytes += scratch.aligned_size
+            total_bytes += scratch.va_reserved_size
 
         self._va_preserved = True
         self._unmapped = True
@@ -634,7 +644,7 @@ class GMSClientMemoryManager:
             if mapping.handle != 0:
                 continue
 
-            response = self._client_rpc.allocate_info(mapping.aligned_size, tag)
+            response = self._client_rpc.allocate_info(mapping.size, tag)
             if int(response.aligned_size) != mapping.aligned_size:
                 raise RuntimeError(
                     "GMS reallocation alignment mismatch: "
@@ -666,46 +676,63 @@ class GMSClientMemoryManager:
         Used by the shadow engine at init so torch.zeros on the full kv_cache
         size succeeds without paying the real memory cost. The shadow then
         sleeps (unmap_all_vas drops scratch physical, preserves VAs) and
-        wakes by promoting the entries into _mappings via
-        prepare_scratch_for_reallocation; the standard reallocate_all_handles
-        + remap_all_vas flow produces real per-tensor backing at the same VAs.
+        wakes by moving scratch bookkeeping into _mappings via
+        prepare_scratch_for_reallocation; reallocate_all_handles + remap_all_vas
+        then install fresh server backing at the same VAs.
 
         Cudagraphs capture VAs, not physical, so the swap is invisible to
         replay.
         """
+        # Coarse scratch aliases keep CUDA VMM map/access metadata bounded.
+        # Committed GMS allocations still use CUDA's reported granularity.
+        if self.scratch_size < self.granularity:
+            raise ValueError(
+                "Scratch size must be at least CUDA's allocation granularity: "
+                f"{self.scratch_size} < {self.granularity}"
+            )
+        if self.scratch_size % self.granularity != 0:
+            raise ValueError(
+                "Scratch size must be a multiple of CUDA's allocation granularity: "
+                f"{self.scratch_size} is not divisible by {self.granularity}"
+            )
+        if self.scratch_size & (self.scratch_size - 1):
+            raise ValueError(
+                "Scratch size must be a power of two because it is used as a "
+                f"VA reservation alignment, got {self.scratch_size}"
+            )
         aligned_size = align_to_granularity(size, self.granularity)
-        n_chunks = aligned_size // self.granularity
+        va_reserved_size = align_to_granularity(size, self.scratch_size)
 
-        ok, scratch_handle = cumem_create_tolerate_oom(self.granularity, self.device)
+        ok, scratch_handle = cumem_create_tolerate_oom(self.scratch_size, self.device)
         if not ok:
             raise RuntimeError(
-                "cuMemCreate failed to allocate the deferred-KV scratch chunk "
-                f"({self.granularity // (1 << 20)} MiB) on device {self.device}"
+                "cuMemCreate failed to allocate the scratch chunk "
+                f"({self.scratch_size // (1 << 20)} MiB) on device {self.device}"
             )
 
-        va = cumem_address_reserve(aligned_size, self.granularity)
-        for offset in range(0, aligned_size, self.granularity):
-            cumem_map(va + offset, self.granularity, scratch_handle)
-        cumem_set_access(va, aligned_size, self.device, GrantedLockType.RW)
+        va = cumem_address_reserve(va_reserved_size, self.scratch_size)
+        for offset in range(0, va_reserved_size, self.scratch_size):
+            cumem_map(va + offset, self.scratch_size, scratch_handle)
+        cumem_set_access(va, va_reserved_size, self.device, GrantedLockType.RW)
 
         self._scratch_mappings[va] = _ScratchMapping(
-            base_va=va,
+            size=size,
             aligned_size=aligned_size,
-            n_chunks=n_chunks,
+            va_reserved_size=va_reserved_size,
             tag=tag,
             scratch_handle=scratch_handle,
         )
         logger.info(
-            "[GMS] Reserved %d MiB VA at 0x%x, aliased 1x %d MiB scratch across %d granules",
-            aligned_size // (1 << 20),
+            "[GMS] Reserved %d MiB VA at 0x%x, aliased 1x %d MiB scratch across %d chunks",
+            va_reserved_size // (1 << 20),
             va,
-            self.granularity // (1 << 20),
-            n_chunks,
+            self.scratch_size // (1 << 20),
+            va_reserved_size // self.scratch_size,
         )
         return va
 
     def prepare_scratch_for_reallocation(self) -> None:
-        """Migrate deferred-KV entries into _mappings as preserved-VA records.
+        """Move scratch bookkeeping into _mappings as preserved-VA records.
 
         Pre-condition: scratch was already torn down by unmap_all_vas during
         sleep, so every entry's scratch_handle == 0. Each entry becomes a
@@ -713,35 +740,58 @@ class GMSClientMemoryManager:
         reallocate_all_handles + remap_all_vas pipeline produces real backing
         at the preserved VA.
 
-        Pure bookkeeping — no CUDA driver calls, no server RPCs. Does not
-        write to _inverse_mapping; reallocate_all_handles populates it when
-        it assigns the real allocation_id.
+        No CUDA driver calls and no server RPCs. Does not write to
+        _inverse_mapping; reallocate_all_handles populates it when it assigns
+        the real allocation_id. If this manager is registered with the torch
+        allocator, also flips future allocations for the tag to server-backed
+        routing.
         """
+        for base_va, scratch in self._scratch_mappings.items():
+            if scratch.scratch_handle != 0:
+                raise RuntimeError(
+                    "prepare_scratch_for_reallocation requires scratch to be "
+                    "unmapped first: "
+                    f"base_va=0x{base_va:x} scratch_handle={scratch.scratch_handle}"
+                )
+
         for base_va, scratch in list(self._scratch_mappings.items()):
             self._mappings[base_va] = LocalMapping(
                 allocation_id="",
                 va=base_va,
-                size=scratch.aligned_size,
+                size=scratch.size,
                 aligned_size=scratch.aligned_size,
                 handle=0,
                 tag=scratch.tag,
                 layout_slot=0,
+                va_reserved_size=scratch.va_reserved_size,
             )
-        migrated = len(self._scratch_mappings)
+        moved = len(self._scratch_mappings)
         self._scratch_mappings.clear()
-        if migrated:
+        if moved:
             logger.info(
-                "[GMS] Promoted %d scratch VAs into _mappings for reallocation",
-                migrated,
+                "[GMS] Moved %d scratch VA records into _mappings for reallocation",
+                moved,
             )
+        if self.tag is not None:
+            from gpu_memory_service.client.torch.allocator import _tag_states
+
+            state = _tag_states.get(self.tag)
+            if state is not None and state.manager is self:
+                if self.granted_lock_type != GrantedLockType.RW:
+                    raise RuntimeError(
+                        "prepare_scratch_for_reallocation requires RW grant "
+                        "before disabling scratch routing: "
+                        f"tag={self.tag!r} "
+                        f"granted_lock_type={self.granted_lock_type}"
+                    )
+                state.is_scratch = False
 
     def destroy_scratch_mapping(self, base_va: int) -> bool:
-        """Tear down a deferred-KV scratch entry.
+        """Tear down a scratch entry.
 
         Called from _gms_free when freeing a VA tracked in _scratch_mappings.
-        Returns True if the VA was a deferred-KV entry and was destroyed,
-        False if the VA was not tracked (caller falls through to
-        destroy_mapping).
+        Returns True if the VA was a scratch entry and was destroyed, False if
+        the VA was not tracked (caller falls through to destroy_mapping).
         """
         scratch = self._scratch_mappings.pop(base_va, None)
         if scratch is None:
@@ -749,9 +799,9 @@ class GMSClientMemoryManager:
 
         cuda_synchronize()
         if scratch.scratch_handle:
-            cumem_unmap(base_va, scratch.aligned_size)
+            cumem_unmap(base_va, scratch.va_reserved_size)
             cumem_release(scratch.scratch_handle)
-        cumem_address_free(base_va, scratch.aligned_size)
+        cumem_address_free(base_va, scratch.va_reserved_size)
         return True
 
     # ==================== Lifecycle ====================

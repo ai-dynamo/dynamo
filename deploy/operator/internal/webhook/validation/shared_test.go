@@ -354,40 +354,7 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 			errMsg:              "spec.services[worker].checkpoint.job cannot be set when checkpointRef is specified",
 		},
 		{
-			name: "checkpoint job with Manual mode is rejected",
-			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeWorker,
-				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
-					Enabled: true,
-					Mode:    nvidiacomv1alpha1.CheckpointModeManual,
-					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
-						Model:            "model",
-						BackendFramework: "vllm",
-					},
-					Job: &nvidiacomv1alpha1.ServiceCheckpointJobConfig{},
-				},
-			},
-			fieldPath:           "spec.services[worker]",
-			calculatedNamespace: "default-my-dgd",
-			wantErr:             true,
-			errMsg:              "spec.services[worker].checkpoint.job can only be set in Auto mode",
-		},
-		{
-			name: "checkpoint Manual mode without checkpointRef or identity is rejected",
-			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeWorker,
-				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
-					Enabled: true,
-					Mode:    nvidiacomv1alpha1.CheckpointModeManual,
-				},
-			},
-			fieldPath:           "spec.services[worker]",
-			calculatedNamespace: "default-my-dgd",
-			wantErr:             true,
-			errMsg:              "spec.services[worker].checkpoint: Manual mode requires checkpointRef or identity to be set",
-		},
-		{
-			name: "checkpoint Manual mode with checkpointRef is valid",
+			name: "deprecated checkpoint mode with checkpointRef is valid",
 			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeWorker,
 				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{

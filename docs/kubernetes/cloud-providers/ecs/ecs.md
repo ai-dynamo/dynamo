@@ -4,7 +4,6 @@
 title: Amazon Elastic Container Service (ECS)
 ---
 
-# Dynamo Deployment of vLLM Example on AWS ECS
 ## 1. EC2 Cluster Setup (for vLLM workloads)
 1. Go to AWS ECS console, **Clusters** tab and click on **Create cluster** with name `dynamo-GPU`
 2. Input the cluster name and choose **AWS EC2 instances** as the infrastructure. This option will create a cluster with EC2 instances to deploy containers.

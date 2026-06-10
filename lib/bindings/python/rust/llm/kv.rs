@@ -18,9 +18,9 @@ use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
 #[cfg(feature = "kv-indexer")]
-use dynamo_kv_router::standalone_indexer::{self, IndexerConfig};
+use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "slot-tracker")]
-use dynamo_kv_router::standalone_slot_tracker::{self, SlotTrackerConfig};
+use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
@@ -29,10 +29,36 @@ use llm_rs::kv_router::KvPushRouter as RsKvPushRouter;
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
-use serde_json::json;
 
 use super::aic_callback::create_aic_prefill_load_estimator;
 use super::entrypoint::AicPerfConfig;
+
+mod demand_driven;
+
+const MAX_RESPONSE_BUFFER_SIZE: usize = tokio::sync::Semaphore::MAX_PERMITS;
+
+#[derive(Clone, Copy)]
+enum ResponseBufferMode {
+    Rendezvous,
+    Buffered(usize),
+}
+
+fn validate_response_buffer_size(response_buffer_size: isize) -> PyResult<ResponseBufferMode> {
+    let capacity = usize::try_from(response_buffer_size)
+        .map_err(|_| PyValueError::new_err("response_buffer_size must be non-negative"))?;
+
+    if capacity == 0 {
+        return Ok(ResponseBufferMode::Rendezvous);
+    }
+
+    if capacity > MAX_RESPONSE_BUFFER_SIZE {
+        return Err(PyValueError::new_err(format!(
+            "response_buffer_size must not exceed {MAX_RESPONSE_BUFFER_SIZE}"
+        )));
+    }
+
+    Ok(ResponseBufferMode::Buffered(capacity))
+}
 
 fn depythonize_block_mm_infos(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Option<BlockExtraInfo>>> {
     depythonize(obj).map_err(to_pyerr)
@@ -89,7 +115,7 @@ where
         init_standalone_logging();
 
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(standalone_indexer::run_server(IndexerConfig {
+        rt.block_on(indexer::run_server(IndexerConfig {
             block_size: cli.block_size,
             port: cli.port,
             threads: cli.threads,
@@ -119,6 +145,18 @@ struct SlotTrackerCli {
     /// HTTP server port
     #[arg(long, default_value_t = 8091)]
     port: u16,
+
+    /// ZMQ PUB endpoint for replica-sync events
+    #[arg(long)]
+    replica_sync_bind: Option<String>,
+
+    /// Externally reachable local replica-sync endpoint
+    #[arg(long)]
+    replica_sync_advertise: Option<String>,
+
+    /// Comma-separated ZMQ PUB endpoints for peer slot trackers
+    #[arg(long, value_delimiter = ',')]
+    replica_sync_peers: Vec<String>,
 }
 
 pub fn run_slot_tracker_cli<I, T>(args: I) -> anyhow::Result<()>
@@ -136,8 +174,11 @@ where
         init_standalone_logging();
 
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(standalone_slot_tracker::run_server(SlotTrackerConfig {
+        rt.block_on(slot_tracker::run_server(SlotTrackerConfig {
             port: cli.port,
+            replica_sync_bind: cli.replica_sync_bind,
+            replica_sync_advertise: cli.replica_sync_advertise,
+            replica_sync_peers: cli.replica_sync_peers,
         }))
     }
 
@@ -297,7 +338,7 @@ impl KvEventPublisher {
     ///         ``0`` is treated as ``None`` (also disables batching).
     ///         Maximum allowed is 15_000 (15 seconds); larger values are capped.
     #[new]
-    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS))]
+    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
@@ -308,10 +349,12 @@ impl KvEventPublisher {
         zmq_endpoint: Option<String>,
         zmq_topic: Option<String>,
         batching_timeout_ms: Option<u64>,
+        image_token_id: Option<u32>,
     ) -> PyResult<Self> {
         let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
             endpoint: ep,
             topic: zmq_topic.unwrap_or_default(),
+            image_token_id,
         });
 
         if kv_block_size == 0 {
@@ -382,6 +425,7 @@ impl KvEventPublisher {
                         &warning_count,
                         mm_infos.as_deref(),
                         is_eagle,
+                        None, // image_token_id: publish path keeps caller-supplied mm_infos
                     ),
                 }),
                 dp_rank,
@@ -837,9 +881,8 @@ pub(crate) struct KvRouter {
     inner: Arc<RsKvPushRouter>,
 }
 
-/// Inject worker_id info from tracker into response's disaggregated_params.
-/// This is needed for Python bindings to expose worker routing info since
-/// the raw LLMEngineOutput doesn't go through DeltaGenerator (which adds nvext).
+/// Attach worker_id info from the tracker to `routing_data` so it survives the
+/// Rust->Python->Rust router path to the frontend (data survives, annotations don't).
 fn inject_worker_id_from_tracker(
     data: &mut llm_rs::protocols::common::llm_backend::LLMEngineOutput,
     tracker: &RequestTracker,
@@ -848,18 +891,9 @@ fn inject_worker_id_from_tracker(
         return;
     };
 
-    let worker_id_json =
-        serde_json::to_value(&worker_info).expect("WorkerIdInfo serialization should not fail");
-
-    if let Some(obj) = data
-        .disaggregated_params
-        .as_mut()
-        .and_then(|p| p.as_object_mut())
-    {
-        obj.insert("worker_id".to_string(), worker_id_json);
-    } else {
-        data.disaggregated_params = Some(json!({"worker_id": worker_id_json}));
-    }
+    data.routing_data
+        .get_or_insert_with(Default::default)
+        .worker_id = Some(worker_info);
 }
 
 /// Attach the request's timing to `routing_data` so it survives the
@@ -881,11 +915,13 @@ impl KvRouter {
         inner: Arc<RsKvPushRouter>,
         request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
         tracker: Option<Arc<RequestTracker>>,
+        response_buffer_size: usize,
     ) -> PyResult<Bound<'p, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let single_in = SingleIn::new(request);
             let stream = inner.generate(single_in).await.map_err(to_pyerr)?;
-            let (tx, rx) = tokio::sync::mpsc::channel::<RsAnnotated<PyObject>>(100);
+            let (tx, rx) =
+                tokio::sync::mpsc::channel::<RsAnnotated<PyObject>>(response_buffer_size);
 
             tokio::spawn(async move {
                 let mut stream = stream;
@@ -948,6 +984,23 @@ impl KvRouter {
 
             Ok(crate::AsyncResponseStream::new(rx, false))
         })
+    }
+
+    fn dispatch_request_to_stream<'p>(
+        py: Python<'p>,
+        inner: Arc<RsKvPushRouter>,
+        request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
+        tracker: Option<Arc<RequestTracker>>,
+        response_buffer_mode: ResponseBufferMode,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        match response_buffer_mode {
+            ResponseBufferMode::Rendezvous => {
+                demand_driven::process_request_to_stream(py, inner, request, tracker)
+            }
+            ResponseBufferMode::Buffered(capacity) => {
+                Self::process_request_to_stream(py, inner, request, tracker, capacity)
+            }
+        }
     }
 }
 
@@ -1026,7 +1079,7 @@ impl KvRouter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None, worker_id=None, dp_rank=None, extra_args=None, block_mm_infos=None, multi_modal_data=None, mm_routing_info=None, routing_constraints=None))]
+    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None, worker_id=None, dp_rank=None, extra_args=None, block_mm_infos=None, multi_modal_data=None, mm_routing_info=None, routing_constraints=None, response_buffer_size=100))]
     fn generate<'p>(
         &self,
         py: Python<'p>,
@@ -1043,7 +1096,9 @@ impl KvRouter {
         multi_modal_data: Option<PyObject>,
         mm_routing_info: Option<PyObject>,
         routing_constraints: Option<RoutingConstraints>,
+        response_buffer_size: isize,
     ) -> PyResult<Bound<'p, PyAny>> {
+        let response_buffer_size = validate_response_buffer_size(response_buffer_size)?;
         // Depythonize the options with defaults
         let stop_conditions: StopConditions = if let Some(obj) = stop_conditions {
             depythonize(obj.bind(py)).map_err(to_pyerr)?
@@ -1131,14 +1186,23 @@ impl KvRouter {
         let request = request_builder.build().map_err(to_pyerr)?;
 
         // Use the helper method to process the request
-        Self::process_request_to_stream(py, self.inner.clone(), request, Some(tracker))
+        Self::dispatch_request_to_stream(
+            py,
+            self.inner.clone(),
+            request,
+            Some(tracker),
+            response_buffer_size,
+        )
     }
 
+    #[pyo3(signature = (request, response_buffer_size=100))]
     fn generate_from_request<'p>(
         &self,
         py: Python<'p>,
         request: PyObject,
+        response_buffer_size: isize,
     ) -> PyResult<Bound<'p, PyAny>> {
+        let response_buffer_size = validate_response_buffer_size(response_buffer_size)?;
         // Depythonize the request directly into PreprocessedRequest
         let mut request: llm_rs::protocols::common::preprocessor::PreprocessedRequest =
             depythonize(request.bind(py)).map_err(to_pyerr)?;
@@ -1154,7 +1218,13 @@ impl KvRouter {
         };
 
         // Use the helper method to process the request
-        Self::process_request_to_stream(py, self.inner.clone(), request, Some(tracker))
+        Self::dispatch_request_to_stream(
+            py,
+            self.inner.clone(),
+            request,
+            Some(tracker),
+            response_buffer_size,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]

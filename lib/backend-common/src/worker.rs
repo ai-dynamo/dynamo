@@ -5,8 +5,8 @@
 //!
 //! Creates the `DistributedRuntime`, starts the engine, registers the
 //! model, serves the endpoint, and runs cleanup on shutdown. Non-generic
-//! over the engine type so a PyO3-wrapped engine (phase 2) can feed in
-//! through the same `Arc<dyn LLMEngine>` path.
+//! over the engine type so a PyO3-wrapped engine can feed in through the
+//! same `Arc<dyn LLMEngine>` path.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -137,10 +137,12 @@ pub struct WorkerConfig {
     /// Disaggregation role for this worker.
     ///
     /// `Aggregated` (default) registers the model with the parsed
-    /// `endpoint_types`. `Prefill` registers with `ModelType::Prefill` so the
-    /// frontend's prefill router targets it. `Decode` keeps `endpoint_types`
-    /// but force-disables the local KV indexer because decode workers do not
-    /// host the indexer endpoint.
+    /// `endpoint_types`. `Prefill` registers with the legacy `ModelType::Prefill`
+    /// marker bit (no OpenAI surface — dual-emitted for cross-version compat)
+    /// and `WorkerType::Prefill`, so the frontend's prefill router targets it
+    /// via `worker_type`. `Decode` keeps `endpoint_types` but force-disables the
+    /// local KV indexer because decode workers do not host the indexer
+    /// endpoint.
     pub disaggregation_mode: DisaggregationMode,
     /// Operator override. `Worker` resolves precedence: this field >
     /// `DYN_HEALTH_CHECK_PAYLOAD` env > `engine.health_check_payload()`.
@@ -1066,9 +1068,12 @@ fn resolve_served_name(config: &WorkerConfig, engine_config: &EngineConfig) -> O
 }
 
 /// Pick the `ModelType` to register with based on the worker's disaggregation
-/// role. `DisaggregationMode::Prefill` short-circuits to `ModelType::Prefill`
-/// regardless of `endpoint_types`; everything else falls back to the parsed
-/// `endpoint_types` so existing callers see no change.
+/// role. The prefill role is carried by `worker_type`; prefill workers expose
+/// no OpenAI surface. They register the legacy `ModelType::Prefill` *marker*
+/// bit (not a surface) so an OLD frontend, which detects prefill via that bit,
+/// still routes disaggregated traffic during the cross-version rollout. A new
+/// frontend ignores it and dispatches off `worker_type`. Everything else falls
+/// back to the parsed `endpoint_types`.
 fn resolve_model_type(config: &WorkerConfig) -> Result<ModelType, DynamoError> {
     if config.disaggregation_mode.is_prefill() {
         return Ok(ModelType::Prefill);
@@ -1076,9 +1081,9 @@ fn resolve_model_type(config: &WorkerConfig) -> Result<ModelType, DynamoError> {
     parse_endpoint_types(&config.endpoint_types)
 }
 
-/// Derive the topology-readiness fields (`worker_type`, `needs`) for the
-/// worker's disaggregation role. Prefill workers need a Decode peer, Decode
-/// workers need a Prefill peer, and Aggregated workers stand alone.
+/// Derive the model-serving-readiness fields (`worker_type`, `needs`) for
+/// the worker's disaggregation role. Prefill workers need a Decode peer,
+/// Decode workers need a Prefill peer, and Aggregated workers stand alone.
 fn resolve_worker_type_and_needs(config: &WorkerConfig) -> (WorkerType, Vec<Vec<WorkerType>>) {
     match config.disaggregation_mode {
         DisaggregationMode::Prefill => (WorkerType::Prefill, vec![vec![WorkerType::Decode]]),
@@ -1100,7 +1105,9 @@ fn parse_endpoint_types(s: &str) -> Result<ModelType, DynamoError> {
             "completions" => ModelType::Completions,
             "embedding" | "embeddings" => ModelType::Embedding,
             "tensor" => ModelType::TensorBased,
-            "prefill" => ModelType::Prefill,
+            // The prefill role is declared via `worker_type` (driven by the
+            // disaggregation mode), not as an endpoint type. Reject
+            // "prefill" here — it never made sense as one.
             other => {
                 return Err(err(
                     ErrorType::Backend(BackendError::InvalidArgument),
@@ -1171,6 +1178,7 @@ async fn build_local_model(
     };
 
     let rt_cfg = ModelRuntimeConfig {
+        context_length: engine_config.context_length,
         total_kv_blocks: engine_config.total_kv_blocks,
         max_num_seqs: engine_config.max_num_seqs,
         max_num_batched_tokens: engine_config.max_num_batched_tokens,
@@ -1191,7 +1199,6 @@ async fn build_local_model(
     let mut builder = LocalModelBuilder::default();
     builder
         .model_name(served_name)
-        .context_length(engine_config.context_length)
         .kv_cache_block_size(engine_config.kv_cache_block_size)
         .custom_template_path(config.custom_jinja_template.clone())
         .runtime_config(rt_cfg);
@@ -1385,6 +1392,7 @@ mod tests {
         };
         let engine_config = EngineConfig {
             model: "nvidia/Kimi-K2.5-NVFP4".to_string(),
+            context_length: Some(32_768),
             total_kv_blocks: Some(100),
             max_num_seqs: Some(16),
             max_num_batched_tokens: Some(8192),
@@ -1399,6 +1407,7 @@ mod tests {
         let local_model = build_local_model(&config, &engine_config).await.unwrap();
         let runtime_config = local_model.runtime_config();
 
+        assert_eq!(runtime_config.context_length, Some(32_768));
         assert_eq!(runtime_config.total_kv_blocks, Some(100));
         assert_eq!(runtime_config.max_num_seqs, Some(16));
         assert_eq!(runtime_config.max_num_batched_tokens, Some(8192));
@@ -1431,7 +1440,8 @@ mod tests {
     #[test]
     fn resolve_model_type_decode_uses_endpoint_types() {
         // Decode workers register with the chat/completions surface; only
-        // prefill workers short-circuit to ModelType::Prefill.
+        // prefill workers short-circuit to an empty ModelType (their role
+        // is carried by WorkerType::Prefill instead).
         let config = WorkerConfig {
             endpoint_types: "chat".to_string(),
             disaggregation_mode: DisaggregationMode::Decode,
@@ -1441,16 +1451,23 @@ mod tests {
     }
 
     #[test]
-    fn resolve_model_type_prefill_overrides_endpoint_types() {
+    fn resolve_model_type_prefill_uses_prefill_marker() {
         // The operator may have left endpoint_types at the default
         // "chat,completions"; --disaggregation-mode prefill forces the
-        // registration to ModelType::Prefill regardless.
+        // ModelType to the legacy Prefill marker bit (no OpenAI surface) — the
+        // prefill role is declared on `worker_type`, and the marker is
+        // dual-emitted so an old frontend still detects it. It must expose no
+        // OpenAI surface.
         let config = WorkerConfig {
             endpoint_types: "chat,completions".to_string(),
             disaggregation_mode: DisaggregationMode::Prefill,
             ..WorkerConfig::default()
         };
-        assert_eq!(resolve_model_type(&config).unwrap(), ModelType::Prefill);
+        let mt = resolve_model_type(&config).unwrap();
+        assert_eq!(mt, ModelType::Prefill);
+        assert!(mt.supports_prefill());
+        assert!(!mt.supports_chat());
+        assert!(!mt.supports_completions());
     }
 
     #[tokio::test]

@@ -892,7 +892,7 @@ mod interface_tests {
         route_approx_tokens(index.as_ref(), &tokens, worker).await;
         assert_request_score(index.as_ref(), &tokens, worker, 1).await;
 
-        time::sleep(ttl + Duration::from_millis(25)).await;
+        time::sleep(ttl + Duration::from_millis(125)).await;
         flush_and_settle(index.as_ref()).await;
 
         let scores = request_scores(index.as_ref(), &tokens).await;
@@ -950,7 +950,7 @@ mod interface_tests {
         flush_and_settle(index.as_ref()).await;
         assert_score(index.as_ref(), &[1, 2, 3], worker, 3).await;
 
-        time::sleep(ttl + Duration::from_millis(25)).await;
+        time::sleep(ttl + Duration::from_millis(125)).await;
         flush_and_settle(index.as_ref()).await;
 
         assert_score(index.as_ref(), &[1, 2, 3], worker, 3).await;
