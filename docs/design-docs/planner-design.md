@@ -4,6 +4,10 @@
 title: Planner Design
 ---
 
+<p align="left">
+  <a href="./planner-design.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
+</p>
+
 > **Tier 3 design documentation** for contributors and architects. For user-facing docs, see [docs/components/planner/](../components/planner/README.md).
 
 ## Overview
@@ -39,6 +43,39 @@ still define the builtin plugin fire intervals. The base
 those enabled intervals, so existing load and throughput fire times are preserved.
 
 ![Planner plugin pipeline showing shared builtin state and OBSERVE, PREDICT, PROPOSE, RECONCILE, CONSTRAIN, and EXEC stages](../assets/img/planner-plugin-pipeline.png)
+
+### Builtin Shared State
+
+The pipeline context is a per-tick data plane: observations, predictions, and
+proposals are produced for the current tick and passed through the public plugin
+API. The builtin local planner also needs cross-tick state to preserve existing
+planner behavior. That state is kept in `PlannerScalingState`, which is private
+to the builtin plugins and the engine adapter rather than exposed as a public
+gRPC plugin contract.
+
+`PlannerScalingState` stores:
+
+- **Worker inventory**: current ready prefill/decode counts, expected counts, and
+  whether a prefill or decode scale operation is still in progress.
+- **Perf models**: prefill, decode, or aggregated `PlannerEnginePerfModel`
+  instances, including pre-deployment benchmark FPMs and online FPM updates.
+- **Throughput lower bounds**: the current prefill/decode floor produced by
+  throughput-based scaling. Load-based scaling can scale above this floor but
+  cannot scale below it.
+- **Runtime metadata**: last observed KV hit rate and speculative accept length.
+  These use last-value semantics and are input features for capacity estimation.
+- **Per-tick diagnostics scratch**: estimated TTFT/ITL, predicted traffic shape,
+  engine RPS, decision reasons, lower bounds, and execution/audit metadata used
+  by metrics and HTML reports.
+- **Worker capabilities and budget inputs**: component GPU counts and runtime
+  capabilities used to clamp final targets to `min_endpoint` and GPU budgets.
+
+Predictor history is intentionally not stored in `PlannerScalingState`.
+`builtin_load_predict` owns the request-count, ISL, and OSL predictor state and
+passes same-tick output through `PredictionData`. This keeps PREDICT -> PROPOSE
+dependencies explicit while allowing the builtin proposer plugins to share the
+state that is inherently cross-tick, such as perf-model fitting and throughput
+floors.
 
 ## Throughput-Based Scaling
 
