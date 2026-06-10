@@ -2018,6 +2018,17 @@ mod tests {
             "incomplete model must be excluded from serving_ready_display_names"
         );
 
+        // Point 3: the audio-speech implicit default-model fallback resolves to
+        // `serving_ready_display_names().into_iter().next()`. With an incomplete
+        // model present, that set excludes it, so the default can only ever
+        // resolve to the complete/ready model — never the incomplete one.
+        let audio_default = mm.serving_ready_display_names().into_iter().next();
+        assert_eq!(
+            audio_default.as_deref(),
+            Some("ready"),
+            "audio default-model fallback must pick the ready model, not the incomplete one"
+        );
+
         // KServe readiness agrees.
         assert!(mm.is_model_ready_to_serve("ready"));
         assert!(!mm.is_model_ready_to_serve("broken"));
