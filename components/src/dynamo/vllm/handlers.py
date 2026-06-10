@@ -3043,14 +3043,21 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             _attach_prompt_logprobs_engine_data(
                                 out, prompt_logprobs_payload
                             )
+                        # Emit the EFFECTIVE trim offset: clamp the requested
+                        # routed_experts_prompt_start to the prompt length. vLLM
+                        # clamps the returned routing rows the same way, so an
+                        # out-of-range request (e.g. start=999 on a 100-token
+                        # prompt) would otherwise publish a `start` the consumer
+                        # cannot align to the (clamped) tensor.
+                        raw_start = int(
+                            getattr(sampling_params, "routed_experts_prompt_start", 0)
+                            or 0
+                        )
+                        prompt_len = len(getattr(res, "prompt_token_ids", None) or [])
+                        effective_start = min(raw_start, prompt_len) if prompt_len else raw_start
                         routed_experts = _serialize_routed_experts(
                             raw_routed_experts_by_output.get(output_idx),
-                            start=int(
-                                getattr(
-                                    sampling_params, "routed_experts_prompt_start", 0
-                                )
-                                or 0
-                            ),
+                            start=effective_start,
                         )
                         if routed_experts is not None:
                             _attach_routed_experts_engine_data(out, routed_experts)
