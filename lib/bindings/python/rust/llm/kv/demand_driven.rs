@@ -102,6 +102,8 @@ impl KvDemandStream {
             Ok(response) => Some(response),
             Err(error) => {
                 tracing::error!("Failed to pythonize response: {}", error);
+                self.finished = true;
+                self.stream.take();
                 self.finish_guard.observe();
                 None
             }
