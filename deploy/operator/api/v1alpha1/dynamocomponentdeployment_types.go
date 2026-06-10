@@ -48,6 +48,8 @@ type DynamoComponentDeploymentSpec struct {
 	DynamoComponentDeploymentSharedSpec `json:",inline"`
 }
 
+// +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || self.minAvailable > 0",message="minAvailable must be greater than 0"
+// +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas"
 type DynamoComponentDeploymentSharedSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
@@ -119,6 +121,17 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// DynamoGraphDeploymentScalingAdapter and should not be modified directly.
 	// +kubebuilder:validation:Minimum=0
 	Replicas *int32 `json:"replicas,omitempty"`
+
+	// MinAvailable is this component's contribution to a coherent minimal
+	// viable update/serving unit. For Grove-backed DynamoGraphDeployments it
+	// maps to generated Grove PodClique or PodCliqueScalingGroup
+	// spec.minAvailable and therefore affects gang scheduling, readiness, and
+	// gang termination behavior in addition to coherent rollout shape.
+	// Deployment-backed DGD support is not implemented yet; admission rejects
+	// this field outside the Grove pathway.
+	// +optional
+	MinAvailable *int32 `json:"minAvailable,omitempty"`
+
 	// Multinode is the configuration for multinode components.
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
 	// ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.

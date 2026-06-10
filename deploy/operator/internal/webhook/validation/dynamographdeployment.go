@@ -338,6 +338,9 @@ func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, se
 			"spec.services[%s]: gpuMemoryService.mode=%q",
 			serviceName, nvidiacomv1alpha1.GMSModeInterPod))
 	}
+	if service.MinAvailable != nil && !v.isGrovePathway() {
+		return nil, v.grovePathwayRequiredError(fmt.Sprintf("spec.services[%s].minAvailable", serviceName))
+	}
 
 	// The inter-pod GMS layout is currently implemented only for vLLM (the
 	// engine relies on vLLM-specific runtime hooks like --load-format gms; the

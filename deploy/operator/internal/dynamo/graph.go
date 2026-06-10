@@ -2123,6 +2123,9 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	if p.isMultinode && !p.isInterPodFailover {
 		minAvailable = p.r.Replicas
 	}
+	if !p.usesPCSG && p.component.MinAvailable != nil {
+		minAvailable = *p.component.MinAvailable
+	}
 	replicas := p.r.Replicas
 	if p.r.Role != RoleGMS &&
 		p.checkpointInfo != nil &&
@@ -2394,6 +2397,9 @@ func GenerateGrovePodCliqueSet(
 		if usesPCSG {
 			replicas := component.Replicas
 			minAvailable := ptr.To(int32(1))
+			if component.MinAvailable != nil {
+				minAvailable = ptr.To(*component.MinAvailable)
+			}
 			if checkpointInfo != nil &&
 				checkpointInfo.Enabled &&
 				checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&

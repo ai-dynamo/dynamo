@@ -11409,6 +11409,17 @@ spec:
                             format: int32
                             type: integer
                         type: object
+                      minAvailable:
+                        description: |-
+                          MinAvailable is this component's contribution to a coherent minimal
+                          viable update/serving unit. For Grove-backed DynamoGraphDeployments it
+                          maps to generated Grove PodClique or PodCliqueScalingGroup
+                          spec.minAvailable and therefore affects gang scheduling, readiness, and
+                          gang termination behavior in addition to coherent rollout shape.
+                          Deployment-backed DGD support is not implemented yet; admission rejects
+                          this field outside the Grove pathway.
+                        format: int32
+                        type: integer
                       modelRef:
                         description: |-
                           ModelRef references a model that this component serves
@@ -11750,6 +11761,11 @@ spec:
                           type: object
                         type: array
                     type: object
+                    x-kubernetes-validations:
+                      - message: minAvailable must be greater than 0
+                        rule: '!has(self.minAvailable) || self.minAvailable > 0'
+                      - message: minAvailable must be less than or equal to replicas
+                        rule: '!has(self.minAvailable) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                   description: Services are the services to deploy as part of this deployment.
                   maxProperties: 25
                   type: object
@@ -12531,6 +12547,17 @@ spec:
                           namespace rather than the per-deployment namespace derived from the
                           DGD name.
                         type: boolean
+                      minAvailable:
+                        description: |-
+                          minAvailable is this component's contribution to a coherent minimal
+                          viable update/serving unit. For Grove-backed DynamoGraphDeployments it
+                          maps to generated Grove PodClique or PodCliqueScalingGroup
+                          `spec.minAvailable` and therefore affects gang scheduling, readiness,
+                          and gang termination behavior in addition to coherent rollout shape.
+                          Deployment-backed DGD support is not implemented yet; admission rejects
+                          this field outside the Grove pathway.
+                        format: int32
+                        type: integer
                       modelRef:
                         description: |-
                           modelRef references a model served by this component. When specified,
@@ -20708,6 +20735,10 @@ spec:
                     x-kubernetes-validations:
                       - message: eppConfig may only be set when type is epp
                         rule: '!has(self.eppConfig) || (has(self.type) && self.type == ''epp'')'
+                      - message: minAvailable must be greater than 0
+                        rule: '!has(self.minAvailable) || self.minAvailable > 0'
+                      - message: minAvailable must be less than or equal to replicas
+                        rule: '!has(self.minAvailable) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                   maxItems: 25
                   type: array
                   x-kubernetes-list-map-keys:

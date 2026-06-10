@@ -8218,6 +8218,79 @@ func TestGenerateGrovePodCliqueSet_WaitForCheckpointGatesPodCliqueScalingGroup(t
 	}
 }
 
+func TestGenerateGrovePodCliqueSet_ComponentMinAvailable(t *testing.T) {
+	tests := []struct {
+		name             string
+		service          *v1alpha1.DynamoComponentDeploymentSharedSpec
+		wantClique       bool
+		wantScalingGroup bool
+		wantMinAvailable int32
+	}{
+		{
+			name: "standalone pod clique",
+			service: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				Replicas:      ptr.To(int32(4)),
+				MinAvailable:  ptr.To(int32(2)),
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{GPU: "1"},
+				},
+			},
+			wantClique:       true,
+			wantMinAvailable: int32(2),
+		},
+		{
+			name: "pod clique scaling group",
+			service: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				Replicas:      ptr.To(int32(4)),
+				MinAvailable:  ptr.To(int32(2)),
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{GPU: "1"},
+				},
+				Multinode: &v1alpha1.MultinodeSpec{NodeCount: 2},
+			},
+			wantScalingGroup: true,
+			wantMinAvailable: int32(2),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "test-ns"},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": tt.service,
+					},
+				},
+			}
+
+			got, err := GenerateGrovePodCliqueSet(
+				context.Background(),
+				betaDGD(t, dgd),
+				&configv1alpha1.OperatorConfiguration{},
+				&controller_common.RuntimeConfig{},
+				nil, nil, nil, nil, nil,
+			)
+			require.NoError(t, err)
+			require.NotNil(t, got)
+
+			if tt.wantClique {
+				require.Len(t, got.Spec.Template.Cliques, 1)
+				require.NotNil(t, got.Spec.Template.Cliques[0].Spec.MinAvailable)
+				assert.EqualValues(t, tt.wantMinAvailable, *got.Spec.Template.Cliques[0].Spec.MinAvailable)
+			}
+			if tt.wantScalingGroup {
+				require.Len(t, got.Spec.Template.PodCliqueScalingGroupConfigs, 1)
+				require.NotNil(t, got.Spec.Template.PodCliqueScalingGroupConfigs[0].MinAvailable)
+				assert.EqualValues(t, tt.wantMinAvailable, *got.Spec.Template.PodCliqueScalingGroupConfigs[0].MinAvailable)
+			}
+		})
+	}
+}
+
 // TestGenerateGrovePodCliqueSet_MinAvailable_FailoverShadowsAreRedundant pins
 // the contract that per-rank engine cliques in an inter-pod failover cohort
 // use MinAvailable=1 even when multinode (numberOfNodes > 1). Replicas here

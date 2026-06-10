@@ -69,6 +69,8 @@ type DynamoComponentDeploymentSpec struct {
 // semantics. Users can add sidecars, init containers, and pod-level configuration
 // directly in `podTemplate` without any `extraPodSpec`-style escape hatch.
 // +kubebuilder:validation:XValidation:rule="!has(self.eppConfig) || (has(self.type) && self.type == 'epp')",message="eppConfig may only be set when type is epp"
+// +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || self.minAvailable > 0",message="minAvailable must be greater than 0"
+// +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas"
 type DynamoComponentDeploymentSharedSpec struct {
 	// name is the stable logical identifier for this component within its
 	// DynamoGraphDeployment. It must be unique within the parent's
@@ -122,6 +124,16 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
+
+	// minAvailable is this component's contribution to a coherent minimal
+	// viable update/serving unit. For Grove-backed DynamoGraphDeployments it
+	// maps to generated Grove PodClique or PodCliqueScalingGroup
+	// `spec.minAvailable` and therefore affects gang scheduling, readiness,
+	// and gang termination behavior in addition to coherent rollout shape.
+	// Deployment-backed DGD support is not implemented yet; admission rejects
+	// this field outside the Grove pathway.
+	// +optional
+	MinAvailable *int32 `json:"minAvailable,omitempty"`
 
 	// multinode configures multinode components.
 	// +optional
