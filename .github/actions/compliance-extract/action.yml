@@ -108,7 +108,12 @@ runs:
           echo "::notice::no baseline_sbom configured for ${{ inputs.framework }}/${{ inputs.target }}/${{ inputs.cuda_version }}; skipping SBOM-diff verification."
           exit 0
         fi
-        BASE_SBOM_PATH="container/compliance/base_sboms/${BASE_SBOM}"
+        # BASELINE_SBOM_FILE is a per-arch STEM (e.g. "vllm-openai@525c7fb8"); the
+        # runtime licenses stage appends -${TARGETARCH}.cdx.json. The SBOM-diff is a
+        # coarse "did the generators miss anything shipped" completeness check, so
+        # verify against the amd64 baseline — present for every captured stem
+        # (snapshot is amd64-only; all others also have an -amd64 variant).
+        BASE_SBOM_PATH="container/compliance/base_sboms/${BASE_SBOM}-amd64.cdx.json"
         if [ ! -f "${BASE_SBOM_PATH}" ]; then
           echo "::error::baseline SBOM file referenced by rendered Dockerfile not found: ${BASE_SBOM_PATH}"
           exit 1

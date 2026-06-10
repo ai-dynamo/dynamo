@@ -59,8 +59,14 @@ vllm:
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
     runtime_image_tag: v0.22.1-ubuntu2404
-    # Per-arch baseline stem (re-captured against vllm/vllm-openai, both arches).
-    baseline_sbom: vllm-openai@525c7fb8
+    # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
+    # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
+    # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
+    # adds over the clean NVIDIA CUDA floor (uv/rust stack, framework, codecs)
+    # rather than hiding it. Per-arch stem; the licenses stage appends
+    # -${TARGETARCH}.cdx.json. (GPL media codecs from vllm-openai are purged in
+    # the runtime image — see the codec-purge follow-up.)
+    baseline_sbom: cuda@2ab6381d
   xpu:
     base_image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo
     runtime_image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo

@@ -42,13 +42,15 @@
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:525c7fb8b20102c501bf9d066a4671c94468e58db9b072972d743a327e8ab909",
-      "baseline_image": "vllm/vllm-openai",
-      "baseline_sbom": "vllm-openai@525c7fb8-amd64.cdx.json",
-      "baseline_tag": "v0.22.1-ubuntu2404",
+      "baseline_digest": "sha256:2ab6381d970b211fb93853796dc6707eb8a72575a375c422b17cf4d8b2641701",
+      "baseline_image": "nvidia/cuda",
+      "baseline_sbom": "cuda@2ab6381d-amd64.cdx.json",
+      "baseline_tag": "13.0.2-base-ubuntu24.04",
+      "capture_note": "ubuntu rootfs drift only (CUDA layers identical); delta-validation skipped, validated at runtime in CI",
       "from_digest": "sha256:525c7fb8b20102c501bf9d066a4671c94468e58db9b072972d743a327e8ab909",
       "from_image": "vllm/vllm-openai",
       "from_tag": "v0.22.1-ubuntu2404",
+      "layer_prefix_check_skipped": true,
       "platform": "linux/amd64"
     },
     {
@@ -102,13 +104,15 @@
       "platform": "linux/arm64"
     },
     {
-      "baseline_digest": "sha256:525c7fb8b20102c501bf9d066a4671c94468e58db9b072972d743a327e8ab909",
-      "baseline_image": "vllm/vllm-openai",
-      "baseline_sbom": "vllm-openai@525c7fb8-arm64.cdx.json",
-      "baseline_tag": "v0.22.1-ubuntu2404",
+      "baseline_digest": "sha256:2ab6381d970b211fb93853796dc6707eb8a72575a375c422b17cf4d8b2641701",
+      "baseline_image": "nvidia/cuda",
+      "baseline_sbom": "cuda@2ab6381d-arm64.cdx.json",
+      "baseline_tag": "13.0.2-base-ubuntu24.04",
+      "capture_note": "ubuntu rootfs drift only (CUDA layers identical); delta-validation skipped, validated at runtime in CI",
       "from_digest": "sha256:525c7fb8b20102c501bf9d066a4671c94468e58db9b072972d743a327e8ab909",
       "from_image": "vllm/vllm-openai",
       "from_tag": "v0.22.1-ubuntu2404",
+      "layer_prefix_check_skipped": true,
       "platform": "linux/arm64"
     },
     {
@@ -144,6 +148,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 4 MB per file.",
-  "generated_at": "2026-06-10T12:58:11+00:00",
+  "generated_at": "2026-06-10T21:22:30+00:00",
   "schema_version": 2
 }
