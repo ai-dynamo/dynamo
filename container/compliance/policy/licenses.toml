@@ -754,7 +754,7 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "build-essential"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -772,7 +772,7 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "cpp-13"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -808,7 +808,7 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "g++-13"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -820,7 +820,7 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "gcc-13"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -832,13 +832,13 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "gcc-13-base"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
 type = "dpkg"
 name = "gcc-14-base"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -850,13 +850,13 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "libasan8"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
 type = "dpkg"
 name = "libatomic1"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -868,7 +868,7 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "libcc1-0"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -904,19 +904,19 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "libgcc-13-dev"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
 type = "dpkg"
 name = "libgcc-s1"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
 type = "dpkg"
 name = "libgomp1"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -934,7 +934,7 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "libitm1"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -946,7 +946,7 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "liblsan0"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -1006,13 +1006,13 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "libstdc++-13-dev"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
 type = "dpkg"
 name = "libstdc++6"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -1024,13 +1024,13 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "libtsan2"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
 type = "dpkg"
 name = "libubsan1"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -1488,7 +1488,7 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "libquadmath0"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
 reason = "GCC runtime library with GCC-Runtime-Library-Exception (mere aggregation)"
 
 [[exceptions]]
@@ -1532,7 +1532,7 @@ reason = "Mere aggregation; build toolchain"
 [[exceptions]]
 type = "dpkg"
 name = "cpp-13-x86-64-linux-gnu"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
 reason = "Mere aggregation; build toolchain (GCC runtime exception applies)"
 
 [[exceptions]]
@@ -1544,7 +1544,7 @@ reason = "Mere aggregation; build toolchain"
 [[exceptions]]
 type = "dpkg"
 name = "g++-13-x86-64-linux-gnu"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
 reason = "Mere aggregation; build toolchain (GCC runtime exception applies)"
 
 [[exceptions]]
@@ -1556,7 +1556,7 @@ reason = "Mere aggregation; build toolchain"
 [[exceptions]]
 type = "dpkg"
 name = "gcc-13-x86-64-linux-gnu"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
 reason = "Mere aggregation; build toolchain (GCC runtime exception applies)"
 
 [[exceptions]]
@@ -2564,3 +2564,8 @@ name = "CRIU"
 allow = ["GPL-2.0-only"]
 reason = "CRIU runs as a separate process invoked by snapshot-agent; not linked into our binaries. Mere aggregation."
 
+[[exceptions]]
+type = "dpkg"
+name = "libgfortran5"
+allow = ["GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "GNU toolchain - GPL with the GCC Runtime Library Exception (GCC-exception-3.1): runtime libs leave compiled output unencumbered, compilers are mere aggregation (not linked into our Apache-2.0 work); Ubuntu source available via OSRB archive. Required for torch.compile/inductor runtime JIT."
