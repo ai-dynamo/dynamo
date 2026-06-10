@@ -46,7 +46,7 @@ The correction factors are applied as multipliers to the next scaling decision. 
 
 ### Step 3: Load Prediction
 
-The planner forecasts three values for the next interval:
+The planner forecasts three traffic-shape values for the next interval:
 
 - `next_num_req`: Number of requests
 - `next_isl`: Average input sequence length
@@ -64,6 +64,12 @@ Four predictor implementations are available:
 
 
 All predictors support warm-starting from trace files (`--load-predictor-warmup-trace`).
+
+Runtime metadata that describes engine/router behavior is not forecast with
+these predictors. KV hit rate and speculative decode accept length use
+last-value semantics: the planner stores the latest valid Prometheus
+observation and reuses it until a newer valid value arrives. Cold start falls
+back to no KV hit-rate discount and accept length `1.0`.
 
 ### Step 4: Replica Calculation
 
@@ -242,4 +248,3 @@ In aggregated mode (`--mode agg`), engines handle both prefill and decode via ch
 | `exceptions.py`              | Custom exception hierarchy                            |
 | `defaults.py`                | Default configs, backend name mappings                |
 | `planner_argparse.py`        | CLI argument definitions                              |
-
