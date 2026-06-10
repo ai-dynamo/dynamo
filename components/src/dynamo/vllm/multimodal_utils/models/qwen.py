@@ -7,8 +7,6 @@ from typing import Any, Dict
 
 import torch
 from PIL import Image
-from transformers import AutoConfig, AutoImageProcessor
-from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +32,8 @@ def load_qwen_grid_params(model_name: str) -> QwenGridParams | None:
     Returns None if loading fails (e.g. model not cached locally).
     """
     try:
+        from transformers import AutoConfig, AutoImageProcessor
+
         processor = AutoImageProcessor.from_pretrained(
             model_name, trust_remote_code=True
         )
@@ -72,7 +72,7 @@ def load_qwen_grid_params(model_name: str) -> QwenGridParams | None:
             max_pixels=max_pixels,
             vision_hidden_dim=vision_hidden_dim,
         )
-    except (OSError, ValueError) as exc:
+    except (ImportError, OSError, ValueError) as exc:
         logger.warning(
             "Failed to load Qwen VL image processor for %s: %s. "
             "P/D disaggregation without encode worker will not "
@@ -111,6 +111,18 @@ def _compute_qwen_grid_thw(
         return None, None
 
     if not images:
+        return None, None
+
+    try:
+        from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
+    except ImportError as exc:
+        logger.warning(
+            "Failed to import Qwen VL smart_resize: %s. "
+            "P/D disaggregation without encode worker will not "
+            "produce embedding_params for decode.",
+            exc,
+            exc_info=True,
+        )
         return None, None
 
     grid_thw: list[list[int]] = []
