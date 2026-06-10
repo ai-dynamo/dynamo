@@ -61,7 +61,7 @@ class Config:
             return DisaggregationMode.AGGREGATED
 
 
-def uses_modelexpress_remote_instance(args: Any) -> bool:
+def use_modelexpress_remote_instance(args: Any) -> bool:
     return (
         getattr(args, "load_format", None) == "remote_instance"
         and getattr(args, "remote_instance_weight_loader_backend", None)
@@ -72,7 +72,7 @@ def uses_modelexpress_remote_instance(args: Any) -> bool:
 def should_fetch_model(args: Any, model_path: str) -> bool:
     if os.path.exists(model_path):
         return False
-    return not uses_modelexpress_remote_instance(args)
+    return not use_modelexpress_remote_instance(args)
 
 
 # Register SGLang-specific encoders with the shared system

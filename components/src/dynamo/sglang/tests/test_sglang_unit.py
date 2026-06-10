@@ -20,7 +20,7 @@ from dynamo.sglang._compat import (
 from dynamo.sglang.args import (
     parse_args,
     should_fetch_model,
-    uses_modelexpress_remote_instance,
+    use_modelexpress_remote_instance,
 )
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
@@ -473,13 +473,13 @@ def test_prefill_health_check_payload_is_disagg_compatible_alias():
     assert payload["stop_conditions"]["max_tokens"] == 1
 
 
-def test_uses_modelexpress_remote_instance_for_sglang_remote_instance():
+def test_use_modelexpress_remote_instance_for_sglang_remote_instance():
     args = SimpleNamespace(
         load_format="remote_instance",
         remote_instance_weight_loader_backend="modelexpress",
     )
 
-    assert uses_modelexpress_remote_instance(args) is True
+    assert use_modelexpress_remote_instance(args) is True
 
 
 @pytest.mark.parametrize(
@@ -490,7 +490,7 @@ def test_uses_modelexpress_remote_instance_for_sglang_remote_instance():
         ("remote_instance", None),
     ],
 )
-def test_uses_modelexpress_remote_instance_rejects_other_load_paths(
+def test_use_modelexpress_remote_instance_rejects_other_load_paths(
     load_format, backend
 ):
     args = SimpleNamespace(
@@ -498,7 +498,7 @@ def test_uses_modelexpress_remote_instance_rejects_other_load_paths(
         remote_instance_weight_loader_backend=backend,
     )
 
-    assert uses_modelexpress_remote_instance(args) is False
+    assert use_modelexpress_remote_instance(args) is False
 
 
 def test_should_fetch_model_skips_sglang_modelexpress_remote_instance():
