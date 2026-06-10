@@ -366,7 +366,7 @@ class TestReasoningParserForwarding:
         sampling_params = SamplingParams(max_tokens=1)
         try:
             sampling_params.routed_experts_prompt_start = 5
-        except Exception:
+        except (AttributeError, TypeError):
             pytest.skip("installed vLLM has no routed_experts_prompt_start support")
 
         handler = _make_handler()
