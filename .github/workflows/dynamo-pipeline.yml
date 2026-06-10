@@ -171,7 +171,13 @@ jobs:
           DD_SERVICE: dynamo-rust
           DD_ENV: ci
           DD_TAGS: language:rust,suite:rust-gpu
-        run: datadog-ci junit upload --auto-discovery "${CARGO_TARGET_DIR:-target}/nextest"
+        # nextest's store dir can land under CARGO_TARGET_DIR or the workspace target
+        # depending on how the target dir resolves; find the reports under both rather
+        # than guessing a single path.
+        run: |
+          reports=$(find "${CARGO_TARGET_DIR:-target}/nextest" "$GITHUB_WORKSPACE/target/nextest" -name junit.xml 2>/dev/null | sort -u)
+          echo "JUnit reports found: ${reports:-<none>}"
+          [ -n "$reports" ] && datadog-ci junit upload $reports || echo "No JUnit reports to upload."
 
   mypy:
     needs: image

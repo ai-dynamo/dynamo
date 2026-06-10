@@ -6,6 +6,13 @@
 
 # CI profile: emit a JUnit report so CI can upload Rust test results to Datadog
 # Test Optimization. nextest writes it to <target-dir>/nextest/ci/junit.xml.
+[profile.ci]
+# nextest runs each test in its own process. A unit/integration test that hangs
+# (e.g. one that assumed in-process shared state or serial execution under
+# `cargo test`) would otherwise block the job until GitHub's 6h timeout. Warn at
+# 60s and terminate after 120s so a stuck test fails fast and is named in the log.
+slow-timeout = { period = "60s", terminate-after = 2 }
+
 [profile.ci.junit]
 path = "junit.xml"
 
@@ -13,5 +20,8 @@ path = "junit.xml"
 # same job). nextest writes one report per profile with no append, so a second run
 # under "ci" would clobber the first; "ci-aux" keeps it at
 # <target-dir>/nextest/ci-aux/junit.xml instead.
+[profile.ci-aux]
+slow-timeout = { period = "60s", terminate-after = 2 }
+
 [profile.ci-aux.junit]
 path = "junit.xml"
