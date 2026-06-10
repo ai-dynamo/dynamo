@@ -438,12 +438,16 @@ impl AggRuntime {
             let removed_state = self.requests.remove(&signal.uuid).ok_or_else(|| {
                 anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
             })?;
-            let latencies = self.collector.request_latencies(signal.uuid);
-            self.traffic.on_request(
-                removed_state.input_tokens,
-                removed_state.output_tokens,
-                latencies,
-            );
+            // Rejected requests never ran: keep them out of the planner-facing
+            // traffic deltas (they still free their slot and advance below).
+            if !signal.rejected {
+                let latencies = self.collector.request_latencies(signal.uuid);
+                self.traffic.on_request(
+                    removed_state.input_tokens,
+                    removed_state.output_tokens,
+                    latencies,
+                );
+            }
             self.admission
                 .on_request_completed(signal.uuid, self.now_ms)?;
             self.progress.inc_completed();
@@ -505,8 +509,12 @@ impl AggRuntime {
         _completed_requests: usize,
         output_signals: Vec<OutputSignal>,
         kv_events: Vec<RouterEvent>,
+        accept_length_output_tokens: usize,
+        accept_length_decode_forwards: usize,
     ) -> anyhow::Result<()> {
         self.apply_router_events(kv_events)?;
+        self.traffic
+            .on_accept_length_sample(accept_length_output_tokens, accept_length_decode_forwards);
         for signal in output_signals {
             self.process_output_signal(signal)?;
         }
@@ -524,6 +532,8 @@ impl AggRuntime {
                 payload.completed_requests,
                 payload.output_signals,
                 payload.kv_events,
+                payload.accept_length_output_tokens,
+                payload.accept_length_decode_forwards,
             )?;
             changed = true;
         }
@@ -581,6 +591,8 @@ impl AggRuntime {
                 payload.completed_requests,
                 payload.output_signals,
                 payload.kv_events,
+                payload.accept_length_output_tokens,
+                payload.accept_length_decode_forwards,
             )?;
         }
         for ScheduledWorkerCompletion { at_ms, payload } in effects.scheduled_completions {
@@ -651,6 +663,9 @@ impl AggRuntime {
             };
 
             if next_timestamp_ms > until_ms {
+                if until_ms > self.now_ms {
+                    self.now_ms = until_ms;
+                }
                 break;
             }
 
@@ -961,6 +976,63 @@ mod tests {
             }))
             .build()
             .unwrap()
+    }
+
+    fn trtllm_reject_args() -> MockEngineArgs {
+        // 4 GPU blocks * block_size 4 = 16-token to-completion budget per request.
+        MockEngineArgs::builder()
+            .engine_type(EngineType::Trtllm)
+            .block_size(4)
+            .num_gpu_blocks(4)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(4))
+            .enable_prefix_caching(false)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1000.0)
+            .build()
+            .unwrap()
+    }
+
+    fn reject_request(uuid: u128, prompt_tokens: u32, max_output: usize) -> DirectRequest {
+        let base = uuid as u32 * 100_000;
+        DirectRequest {
+            tokens: (base..base + prompt_tokens).collect(),
+            max_output_tokens: max_output,
+            uuid: Some(Uuid::from_u128(uuid)),
+            dp_rank: 0,
+            arrival_timestamp_ms: Some(0.0),
+        }
+    }
+
+    /// Aggregated-runtime regression for terminal-rejection propagation. An
+    /// oversized request (footprint exceeds the whole KV pool) at the FIFO head
+    /// must be terminally rejected so it neither hangs the `max_in_flight = 1`
+    /// slot (no terminal signal = dead-ended `in_flight`) nor is counted as a
+    /// completion; the valid follower behind it runs to completion.
+    #[test]
+    fn trtllm_oversized_request_rejected_unblocks_follower_agg() {
+        let oversized = reject_request(1, 20, 8); // 20-token prompt = 5 blocks > 4-block pool
+        let valid = reject_request(2, 4, 4); // 2 blocks, fits
+        let (collector, _stats) = run_concurrency_multi_collect_with_stats(
+            &trtllm_reject_args(),
+            vec![oversized, valid],
+            1, // max_in_flight = 1: rejection must free the slot or the run hangs
+            1,
+            ReplayRouterMode::RoundRobin,
+        );
+        let report = collector.finish();
+        assert_eq!(
+            report.request_counts.num_requests, 2,
+            "both requests arrived"
+        );
+        assert_eq!(
+            report.request_counts.completed_requests, 1,
+            "only the valid request completes; the rejected one is excluded"
+        );
+        assert_eq!(
+            report.request_counts.total_output_tokens, 4,
+            "rejected request contributes no output tokens to the report"
+        );
     }
 
     fn multiturn_trace() -> Trace {
@@ -2095,6 +2167,34 @@ mod tests {
         rt.advance_to(expected_ready_ms).unwrap();
         assert_eq!(rt.active_worker_count(), 2); // now active
         assert_eq!(rt.total_worker_count(), 2);
+    }
+
+    #[test]
+    fn test_advance_to_moves_clock_across_idle_gap() {
+        let args = fast_router_args();
+        let requests = VecDeque::from([DirectRequest {
+            tokens: vec![1; 64],
+            max_output_tokens: 2,
+            uuid: Some(Uuid::from_u128(1)),
+            dp_rank: 0,
+            arrival_timestamp_ms: Some(1000.0),
+        }]);
+        let mut rt = AggRuntime::new(
+            &args,
+            None,
+            None,
+            requests,
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        rt.advance_to(500.0).unwrap();
+
+        assert_eq!(rt.now_ms(), 500.0);
+        let stats = rt.drain_traffic();
+        assert!((stats.duration_s - 0.5).abs() < 1e-9);
     }
 
     #[test]

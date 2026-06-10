@@ -25,14 +25,20 @@ from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 from dynamo._core import Context
+from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend import telemetry
 from dynamo.common.backend.disagg import require_prefill_result
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
+    DYN_ENABLE_TEST_LOGITS_PROCESSOR,
     EngineConfig,
     GenerateChunk,
     GenerateRequest,
     LLMEngine,
+    LogitsProcessorSpec,
+    is_generation_stage,
+    logits_processors_for_request,
+    resolve_test_logits_processor_spec,
 )
 from dynamo.common.backend.health_check import (
     bos_token_id_or,
@@ -46,7 +52,7 @@ from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, Zm
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import ModelInput
-from dynamo.vllm.args import parse_args
+from dynamo.vllm.args import configure_rl_logprobs_mode, parse_args
 from dynamo.vllm.cache_info import (
     configure_kv_event_block_size,
     get_configured_kv_event_block_size,
@@ -54,9 +60,13 @@ from dynamo.vllm.cache_info import (
 from dynamo.vllm.capacity import per_rank_kv_blocks
 
 from .handlers import (
-    VllmEngineQuiesceController,
+    VllmEnginePauseController,
     build_sampling_params,
     get_dp_range_for_worker,
+)
+from .logits_processing import (
+    activate_logits_processors,
+    register_dynamo_logits_processor,
 )
 
 if TYPE_CHECKING:
@@ -134,17 +144,23 @@ class _UnifiedStatLoggerFactory:
 
 
 class VllmLLMEngine(LLMEngine):
+    # Class-level default so ``__new__``-built instances (tests skipping
+    # ``__init__``) still expose what ``generate()`` reads; ``start()`` sets it.
+    _logits_processor_spec: "LogitsProcessorSpec | None" = None
+
     def __init__(
         self,
         engine_args,
         disaggregation_mode: DisaggregationMode,
         served_model_name: str,
         component: str,
+        enable_rl: bool = False,
     ):
         self.engine_args = engine_args
         self.disaggregation_mode = disaggregation_mode
         self._served_model_name = served_model_name
         self._component = component
+        self.enable_rl = enable_rl
         self.engine_client: AsyncLLM | None = None
         self._vllm_config: Any = None
         self._default_sampling_params: Any = None
@@ -155,8 +171,9 @@ class VllmLLMEngine(LLMEngine):
         # factory call sees a valid object. `num_gpu_blocks` is patched
         # after KV profiling finishes.
         self._stat_logger_factory: Optional[_UnifiedStatLoggerFactory] = None
-        self._quiesce_controller: VllmEngineQuiesceController | None = None
-        self._quiesce_lock = asyncio.Lock()
+        self._logits_processor_spec: LogitsProcessorSpec | None = None
+        self._pause_controller: VllmEnginePauseController | None = None
+        self._pause_lock = asyncio.Lock()
         self._scale_ep_lock = asyncio.Lock()
         self._scale_ep_in_progress = False
 
@@ -177,6 +194,8 @@ class VllmLLMEngine(LLMEngine):
                 config.engine_args.served_model_name
             ) = config.model
 
+        configure_rl_logprobs_mode(config)
+
         # _resolve_disaggregation_mode() in DynamoVllmConfig has already
         # promoted the field to a DisaggregationMode enum; the field type
         # is still the input union, so narrow it here for mypy (cast
@@ -187,6 +206,7 @@ class VllmLLMEngine(LLMEngine):
             mode,
             served_model_name=config.served_model_name or config.model,
             component=config.component,
+            enable_rl=config.enable_rl,
         )
         worker_config = WorkerConfig.from_runtime_config(
             config,
@@ -200,6 +220,14 @@ class VllmLLMEngine(LLMEngine):
         del worker_id  # vLLM's NixlConnector handles its own per-worker IDs
         os.environ.setdefault("VLLM_NO_USAGE_STATS", "1")
         os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
+        # Register the engine-loaded adapter before the engine config is built
+        # so vLLM instantiates it. vLLM defaults to tokenizer init, so there is
+        # no skip_tokenizer_init flag to flip here (unlike TRT-LLM/SGLang).
+        if os.getenv(DYN_ENABLE_TEST_LOGITS_PROCESSOR) == "1" and is_generation_stage(
+            self.disaggregation_mode
+        ):
+            register_dynamo_logits_processor(self.engine_args)
 
         self._prometheus_temp_dir = ensure_prometheus_multiproc_dir("vllm_prometheus_")
 
@@ -220,7 +248,9 @@ class VllmLLMEngine(LLMEngine):
             usage_context=UsageContext.OPENAI_API_SERVER,
             stat_loggers=[self._stat_logger_factory],
         )
-        self._quiesce_controller = VllmEngineQuiesceController(self.engine_client)
+        # Resolve once the tokenizer is available (see logits_processor_spec()).
+        self._logits_processor_spec = await self.logits_processor_spec()
+        self._pause_controller = VllmEnginePauseController(self.engine_client)
         num_gpu_blocks = self.engine_client.vllm_config.cache_config.num_gpu_blocks or 0
         per_rank_num_gpu_blocks = per_rank_kv_blocks(num_gpu_blocks, self._dp_range[1])
         if per_rank_num_gpu_blocks is None:
@@ -266,7 +296,10 @@ class VllmLLMEngine(LLMEngine):
 
         # TODO: remove dict() once build_sampling_params accepts GenerateRequest
         sampling_params = build_sampling_params(
-            dict(request), self._default_sampling_params, self._model_max_len
+            dict(request),
+            self._default_sampling_params,
+            self._model_max_len,
+            enable_rl=self.enable_rl,
         )
 
         # vLLM's KV transfer is internal to NixlConnector
@@ -294,9 +327,13 @@ class VllmLLMEngine(LLMEngine):
             sampling_params.min_tokens = 1
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
             prefill_result = require_prefill_result(request, self.disaggregation_mode)
-            kv_params = prefill_result.get("disaggregated_params", {}).get(
-                "kv_transfer_params"
-            )
+            # `disaggregated_params` may be present-but-None (prefill error path
+            # / _build_disaggregated_params returning None), so use `or {}` — a
+            # .get default only applies when the key is absent. A None value then
+            # falls through to the kv_params ValueError below instead of raising
+            # AttributeError on None.get(...).
+            disaggregated_params = prefill_result.get("disaggregated_params") or {}
+            kv_params = disaggregated_params.get("kv_transfer_params")
             if kv_params is None:
                 raise ValueError(
                     "decode worker received prefill_result without "
@@ -306,6 +343,14 @@ class VllmLLMEngine(LLMEngine):
             if sampling_params.extra_args is None:
                 sampling_params.extra_args = {}
             sampling_params.extra_args["kv_transfer_params"] = kv_params
+
+        # Shared gating returns [] for PREFILL / hook-off, so this is a no-op
+        # unless the hook is on and this is a generation worker.
+        entries = logits_processors_for_request(
+            self._logits_processor_spec,
+            disaggregation_mode=self.disaggregation_mode,
+        )
+        activate_logits_processors(sampling_params, entries)
 
         # Honour the router's DP rank decision; without it vLLM picks
         # its own rank and KV events land on the wrong publisher. vLLM
@@ -327,6 +372,15 @@ class VllmLLMEngine(LLMEngine):
         )
 
         is_prefill = self.disaggregation_mode == DisaggregationMode.PREFILL
+        tokenizer = getattr(self.engine_client, "tokenizer", None)
+        # vLLM emits a selected-token logprob dict even at `logprobs=0`,
+        # so the top-k suppression happens below, not at the engine.
+        (
+            requested_logprobs_count,
+            requested_prompt_logprobs_count,
+        ) = _shared_logprobs.parse_logprob_options(
+            request.get("output_options", {}) or {}
+        )
 
         total_output_tokens_by_index: dict[int, int] = {}
         async for res in gen:
@@ -348,16 +402,46 @@ class VllmLLMEngine(LLMEngine):
                 finish_reason = getattr(output, "finish_reason", None)
                 if not token_ids and not finish_reason:
                     continue
-                prepared_outputs.append((output_idx, token_ids, finish_reason))
+                prepared_outputs.append((output, output_idx, token_ids, finish_reason))
 
-            for output_idx, token_ids, finish_reason in prepared_outputs:
+            for output, output_idx, token_ids, finish_reason in prepared_outputs:
                 out: GenerateChunk = {
                     "index": output_idx,
                     "token_ids": token_ids,
                 }
 
+                # `build_sampling_params` forces DELTA output → offset 0.
+                # `fallback_to_first_on_missing=True` matches legacy
+                # vLLM handler: always emit when vLLM returned a dict.
+                (
+                    log_probs,
+                    top_logprobs,
+                ) = _shared_logprobs.extract_from_completion_output(
+                    output,
+                    0,
+                    tokenizer=tokenizer,
+                    fallback_to_first_on_missing=True,
+                    include_bytes=True,
+                )
+                if log_probs is not None:
+                    out["log_probs"] = log_probs
+                if (
+                    top_logprobs is not None
+                    and requested_logprobs_count is not None
+                    and requested_logprobs_count > 0
+                ):
+                    out["top_logprobs"] = top_logprobs
+
                 if finish_reason:
                     out["finish_reason"] = str(finish_reason)
+                    # vLLM hangs prompt_logprobs off `RequestOutput`, not
+                    # `CompletionOutput` — read from `res`.
+                    if requested_prompt_logprobs_count is not None:
+                        prompt_payload = _shared_logprobs.extract_prompt_logprobs_from_completion_output(
+                            res, tokenizer=tokenizer
+                        )
+                        if prompt_payload is not None:
+                            out["engine_data"] = {"prompt_logprobs": prompt_payload}
                     prompt_tokens = (
                         len(res.prompt_token_ids) if res.prompt_token_ids else 0
                     )
@@ -377,6 +461,30 @@ class VllmLLMEngine(LLMEngine):
                             }
 
                 yield out
+
+    def _logits_tokenizer(self) -> Any:
+        """Tokenizer the smoke hook tokenizes ``"Hello world!"`` with.
+
+        Accessed lazily (only when the env hook is on, inside the resolver).
+        vLLM's ``AsyncLLM`` exposes the HF tokenizer as ``.tokenizer``; if a
+        future version moves it, this is the one place to adjust.
+        """
+        if self.engine_client is None:
+            raise RuntimeError("Engine not initialized")
+        tokenizer = getattr(self.engine_client, "tokenizer", None)
+        if tokenizer is None:
+            raise RuntimeError(
+                "vLLM engine exposes no tokenizer; "
+                f"{DYN_ENABLE_TEST_LOGITS_PROCESSOR} requires tokenizer init"
+            )
+        return tokenizer
+
+    async def logits_processor_spec(self) -> LogitsProcessorSpec | None:
+        # Only generation roles ever attach (PREFILL gates out per request),
+        # so skip spec resolution — and the tokenizer it needs — otherwise.
+        if not is_generation_stage(self.disaggregation_mode):
+            return None
+        return resolve_test_logits_processor_spec(self._logits_tokenizer)
 
     def _kv_routing_enabled(self) -> bool:
         # Matches the legacy `setup_kv_event_publisher` gate.
@@ -465,12 +573,12 @@ class VllmLLMEngine(LLMEngine):
     async def sleep(self, body: dict) -> dict:
         body = body or {}
         level = body.get("level", 1)
-        controller = self._quiesce_controller
+        controller = self._pause_controller
         if controller is None:
             return {"status": "error", "message": "engine is not initialized"}
 
-        async with self._quiesce_lock:
-            if controller.is_quiesced:
+        async with self._pause_lock:
+            if controller.is_paused:
                 return {"status": "ok", "message": "Engine already sleeping"}
             if controller.needs_resume_recovery:
                 return {
@@ -478,7 +586,7 @@ class VllmLLMEngine(LLMEngine):
                     "message": "wake_up required before retrying sleep",
                 }
             try:
-                if not await controller.quiesce(level):
+                if not await controller.pause(level):
                     return {"status": "ok", "message": "Engine already sleeping"}
                 return {"status": "ok", "message": f"Engine slept (level={level})"}
             except Exception as e:
@@ -488,13 +596,13 @@ class VllmLLMEngine(LLMEngine):
     async def wake_up(self, body: dict) -> dict:
         body = body or {}
         tags = body.get("tags")
-        controller = self._quiesce_controller
+        controller = self._pause_controller
         if controller is None:
             return {"status": "error", "message": "engine is not initialized"}
 
-        async with self._quiesce_lock:
+        async with self._pause_lock:
             needs_recovery = controller.needs_resume_recovery
-            if not controller.is_quiesced and not needs_recovery:
+            if not controller.is_paused and not needs_recovery:
                 return {"status": "ok", "message": "Engine already awake"}
             try:
                 await controller.resume(tags)
@@ -614,7 +722,7 @@ class VllmLLMEngine(LLMEngine):
                 self.engine_client.shutdown()
         finally:
             self.engine_client = None
-            self._quiesce_controller = None
+            self._pause_controller = None
             if self._prometheus_temp_dir is not None:
                 if (
                     os.environ.get("PROMETHEUS_MULTIPROC_DIR")

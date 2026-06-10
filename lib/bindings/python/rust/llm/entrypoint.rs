@@ -437,7 +437,6 @@ pub(crate) struct EntrypointArgs {
     model_path: Option<PathBuf>,
     model_name: Option<String>,
     endpoint_id: Option<EndpointId>,
-    context_length: Option<u32>,
     template_file: Option<PathBuf>,
     router_config: Option<RouterConfig>,
     kv_cache_block_size: Option<u32>,
@@ -452,6 +451,7 @@ pub(crate) struct EntrypointArgs {
     namespace: Option<String>,
     namespace_prefix: Option<String>,
     is_prefill: bool,
+    is_decode: bool,
     migration_limit: u32,
     migration_max_seq_len: Option<u32>,
     chat_engine_factory: Option<PyEngineFactory>,
@@ -462,14 +462,13 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
         model_path: Option<PathBuf>,
         model_name: Option<String>, // e.g. "dyn://namespace.component.endpoint"
         endpoint_id: Option<String>,
-        context_length: Option<u32>,
         template_file: Option<PathBuf>,
         router_config: Option<RouterConfig>,
         kv_cache_block_size: Option<u32>,
@@ -484,6 +483,7 @@ impl EntrypointArgs {
         namespace: Option<String>,
         namespace_prefix: Option<String>,
         is_prefill: bool,
+        is_decode: bool,
         migration_limit: u32,
         migration_max_seq_len: Option<u32>,
         chat_engine_factory: Option<PyObject>,
@@ -522,7 +522,6 @@ impl EntrypointArgs {
             model_path,
             model_name,
             endpoint_id: endpoint_id_obj,
-            context_length,
             template_file,
             router_config,
             kv_cache_block_size,
@@ -537,6 +536,7 @@ impl EntrypointArgs {
             namespace,
             namespace_prefix,
             is_prefill,
+            is_decode,
             migration_limit,
             migration_max_seq_len,
             chat_engine_factory,
@@ -568,7 +568,6 @@ pub fn make_engine<'p>(
                 .or_else(|| args.model_path.clone().map(|p| p.display().to_string())),
         )
         .endpoint_id(args.endpoint_id.clone())
-        .context_length(args.context_length)
         .request_template(args.template_file.clone())
         .kv_cache_block_size(args.kv_cache_block_size)
         .router_config(args.router_config.clone().map(|rc| rc.into()))
@@ -747,7 +746,7 @@ async fn select_engine(
                 let moe_ep_size = mocker_args.aic_moe_ep_size;
                 let attention_dp_size = mocker_args.aic_attention_dp_size;
                 let nextn = mocker_args.aic_nextn;
-                let nextn_accept_rates = mocker_args.aic_nextn_accept_rates.as_deref();
+                let undiscounted_accept_rates = mocker_args.undiscounted_aic_accept_rates();
                 match Python::with_gil(|py| {
                     create_aic_callback(
                         py,
@@ -760,7 +759,7 @@ async fn select_engine(
                         moe_ep_size,
                         attention_dp_size,
                         nextn,
-                        nextn_accept_rates,
+                        undiscounted_accept_rates.as_deref(),
                     )
                 }) {
                     Ok(callback) => {
@@ -791,6 +790,7 @@ async fn select_engine(
                 engine,
                 model: Box::new(local_model),
                 is_prefill: args.is_prefill,
+                is_decode: args.is_decode,
             }
         }
     };

@@ -1,62 +1,46 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Tool Call Parsing (Engine Fallback)
-subtitle: Use upstream vLLM or SGLang tool-call parsers when Dynamo does not ship one
+title: Parser Engine Fallback
+subtitle: Use upstream vLLM or SGLang tool-call and reasoning parsers when Dynamo does not ship one
 ---
 
-When Dynamo's registry does not list a tool-call parser for your model, fall
-back to the upstream engine's parser via a **chat-processor swap**, which
-keeps frontend tokenization and KV routing.
+When Dynamo's registry does not list a tool-call or reasoning parser for your model, fall back to the upstream engine's parser via a **chat-processor swap**, which keeps frontend tokenization and KV routing.
 
-For Dynamo-native parsers, see [Tool Call Parsing (Dynamo)](dynamo.md). For
-the equivalent reasoning fallback, see
-[Reasoning Parsing (Engine Fallback)](../reasoning/engine-fallback.md).
+For the Dynamo-native default path, see [Tool Call Parsing (Dynamo)](README.md) and [Reasoning Parsing (Dynamo)](../reasoning/README.md).
 
-> [!WARNING]
-> **Known Issue:** Engine-fallback tool call parsing does not currently work
-> with [disaggregated serving](../features/disaggregated-serving/README.md)
-> (support coming soon). Use the [Dynamo-native tool call parser](dynamo.md)
-> for disaggregated deployments today.
+> [!IMPORTANT]
+> How `--dyn-chat-processor` combines with the parser flags — and which combinations are invalid (engine fallback supports disaggregated serving on vLLM and SGLang; TRT-LLM engine fallback is a work in progress) — is documented once in [Parser Configuration](parser-configuration.md). Read that first; this page covers only the engine-fallback specifics.
 
-## Configurations
+## Configuration
 
-| | Frontend flags | Worker flags | KV routing | Notes |
-|---|---|---|---|---|
-| **vLLM chat processor** | `--dyn-chat-processor vllm --tool-call-parser <name>` | *(none)* | Yes | Parsing runs in vLLM's Python preprocessor. See [vLLM Chat Processor](../backends/vllm/vllm-chat-processor.md). |
-| **SGLang chat processor** | `--dyn-chat-processor sglang --tool-call-parser <name>` | *(none)* | Yes | Parsing runs in SGLang's Python preprocessor. See [SGLang Chat Processor](../backends/sglang/sglang-chat-processor.md). |
-| **TRTLLM chat processor** | *(work in progress)* | *(work in progress)* | -- | Engine-fallback support for TRTLLM is in progress. Use the [Dynamo-native tool call parser](dynamo.md) for TRTLLM today. |
+Engine fallback runs parsing in the engine's own Python frontend. Select it with `--dyn-chat-processor vllm` or `sglang`, then name the parser with the engine's **frontend** flags:
 
-> [!NOTE]
-> `--dyn-tool-call-parser` selects the **Dynamo-native** parser path, while
-> `--tool-call-parser` selects the **engine fallback** (vLLM or SGLang)
-> parser path. The accepted values for each flag come from a different
-> registry and may differ slightly based on the definitions from each
-> framework (e.g., SGLang's `deepseekv3` vs Dynamo's `deepseek_v3`).
+- `--tool-call-parser <name>` — the engine's tool-call parser
+- `--reasoning-parser <name>` — the engine's reasoning parser
+
+These are distinct from the Dynamo-native `--dyn-tool-call-parser` / `--dyn-reasoning-parser` (which go on the worker). The accepted names come from the engine's registry and may differ from Dynamo's — e.g. vLLM `nemotron_v3` vs Dynamo `nemotron3`, SGLang `deepseekv3` vs Dynamo `deepseek_v3`.
 
 ## Examples
 
 ```bash
-# vLLM chat processor
-python -m dynamo.vllm ...
-python -m dynamo.frontend --dyn-chat-processor vllm --tool-call-parser hermes
+# vLLM chat processor — frontend carries the parser flags, then launch the worker:
+python -m dynamo.frontend --dyn-chat-processor vllm   --tool-call-parser hermes --reasoning-parser qwen3
+python -m dynamo.vllm   --model Qwen/Qwen3-0.6B
 
 # SGLang chat processor
-python -m dynamo.sglang ...
-python -m dynamo.frontend --dyn-chat-processor sglang --tool-call-parser kimi_k2
+python -m dynamo.frontend --dyn-chat-processor sglang --tool-call-parser qwen25 --reasoning-parser qwen3
+python -m dynamo.sglang --model Qwen/Qwen3-0.6B
 ```
 
 > [!TIP]
-> If a tool call comes back wrong, add `"logprobs": true` to a single repro
-> request and share the response. See
-> [Troubleshooting Tool Calls](troubleshooting.md) for what to capture and
-> include when reporting an issue.
+> If a tool call or reasoning split comes back wrong, add `"logprobs": true` to a single repro request and share the response. See [Troubleshooting Tool Calls](troubleshooting.md) for what to capture.
 
 ## See Also
 
-- [Troubleshooting Tool Calls](troubleshooting.md) -- capture raw model output with `logprobs` so tool-call issues can be localized
-- [Tool Call Parsing (Dynamo)](dynamo.md) -- Dynamo-native parsers and request examples
-- [Reasoning Parsing (Engine Fallback)](../reasoning/engine-fallback.md) -- Equivalent fallback for reasoning
+- [Parser Configuration](parser-configuration.md) -- how the chat-processor and parser flags combine, and which combinations are invalid (start here)
+- [Tool Call Parsing (Dynamo)](README.md) -- Dynamo-native tool-call parser names
+- [Reasoning Parsing (Dynamo)](../reasoning/README.md) -- Dynamo-native reasoning parser names
 - [vLLM Chat Processor](../backends/vllm/vllm-chat-processor.md) -- vLLM chat-processor details
 - [SGLang Chat Processor](../backends/sglang/sglang-chat-processor.md) -- SGLang chat-processor details
 - [Frontend Configuration Reference](../components/frontend/configuration.md) -- Full CLI flag reference

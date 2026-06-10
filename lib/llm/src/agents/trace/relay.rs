@@ -175,6 +175,7 @@ mod tests {
                 session_id: "run-1".to_string(),
                 trajectory_id: "run-1:agent".to_string(),
                 parent_trajectory_id: None,
+                trajectory_final: None,
             },
             request: None,
             tool: Some(AgentToolEvent {

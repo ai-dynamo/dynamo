@@ -8,6 +8,8 @@ use rustc_hash::FxHashSet;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use std::collections::HashMap;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::time::Instant;
 
 use super::PrefillTokenDeltas;
@@ -45,6 +47,8 @@ pub(super) struct PromptRegistry {
     // never existed atomically and make a suboptimal routing choice.
     membership: PromptMembershipTrie,
     loads: DashMap<WorkerWithDpRank, WorkerLoadSnapshot, FxBuildHasher>,
+    #[cfg(test)]
+    cleanup_attempts: AtomicUsize,
 }
 
 impl Default for PromptRegistry {
@@ -52,6 +56,8 @@ impl Default for PromptRegistry {
         Self {
             membership: PromptMembershipTrie::new(),
             loads: DashMap::with_hasher(FxBuildHasher),
+            #[cfg(test)]
+            cleanup_attempts: AtomicUsize::new(0),
         }
     }
 }
@@ -80,6 +86,17 @@ impl PromptRegistry {
         delta: PromptMembershipDelta,
         load: WorkerLoadSnapshot,
     ) {
+        self.apply_membership_delta_and_load_without_cleanup(worker, lookup, delta, load);
+        self.maybe_cleanup();
+    }
+
+    pub(super) fn apply_membership_delta_and_load_without_cleanup(
+        &self,
+        worker: WorkerWithDpRank,
+        lookup: &Arc<parking_lot::RwLock<WorkerLookup>>,
+        delta: PromptMembershipDelta,
+        load: WorkerLoadSnapshot,
+    ) {
         for remove in delta.removes {
             self.membership.remove_chain(worker, lookup, &remove.hashes);
         }
@@ -88,7 +105,17 @@ impl PromptRegistry {
                 .store_chain(worker, lookup, store.parent, &store.hashes);
         }
         self.loads.insert(worker, load);
+    }
+
+    pub(super) fn maybe_cleanup(&self) {
+        #[cfg(test)]
+        self.cleanup_attempts.fetch_add(1, Ordering::Relaxed);
         self.membership.maybe_cleanup();
+    }
+
+    #[cfg(test)]
+    pub(super) fn cleanup_attempts(&self) -> usize {
+        self.cleanup_attempts.load(Ordering::Relaxed)
     }
 
     pub(super) fn apply_topology_change(&self, change: WorkerTopologyChange) {

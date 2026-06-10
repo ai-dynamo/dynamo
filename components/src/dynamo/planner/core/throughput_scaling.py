@@ -32,7 +32,7 @@ class ThroughputScalingMixin:
     _diag_throughput_reason: Optional[str]
     _diag_throughput_reason_prefill: Optional[str]
     _diag_throughput_reason_decode: Optional[str]
-    # Sticky value consumed by the load-scaling path between throughput ticks.
+    # Last-value runtime metadata consumed by throughput/load scaling.
     _last_kv_hit_rate: Optional[float]
 
     def _advance_throughput(
@@ -53,12 +53,6 @@ class ThroughputScalingMixin:
         demand_rps = next_num_req / traffic.duration_s
 
         predicted_hit_rate = self._predict_kv_hit_rate()
-        # Promote the predicted value to the sticky field so subsequent
-        # load-scaling ticks (between throughput ticks) discount prefill work
-        # using the smoothed forecast rather than the raw last-window
-        # observation.
-        if predicted_hit_rate is not None and not math.isnan(predicted_hit_rate):
-            self._last_kv_hit_rate = predicted_hit_rate
         mode = self._config.mode
 
         if mode == "agg":
@@ -91,21 +85,17 @@ class ThroughputScalingMixin:
             return None, None, None
 
     def _predict_kv_hit_rate(self) -> Optional[float]:
-        """Predict next-interval KV hit rate.
+        """Return the latest observed KV hit rate.
 
-        Returns ``None`` if the predictor isn't ready (cold start: no live
-        observations yet, no trace-based warmup) -- the caller treats that
-        as a 0.0 discount, preserving pre-change throughput-scaling behavior.
+        KV hit rate is engine/router runtime metadata, not traffic shape. Keep
+        it as a last-value signal instead of running it through the configured
+        traffic predictor.
         """
-        try:
-            predicted = self._kv_hit_rate_predictor.predict_next()
-        except Exception as e:
-            logger.warning(f"Failed to predict kv_hit_rate: {e}")
-            self._diag_predicted_kv_hit_rate = None
-            return None
-        self._diag_predicted_kv_hit_rate = predicted
-        logger.info(f"Predicted kv_hit_rate={predicted:.3f}")
-        return predicted
+        value = self._last_kv_hit_rate
+        self._diag_predicted_kv_hit_rate = value
+        if value is not None:
+            logger.info(f"Using last observed kv_hit_rate={value:.3f}")
+        return value
 
     def _throughput_single(
         self,
@@ -200,6 +190,7 @@ class ThroughputScalingMixin:
             ttft_sla_ms=self._config.ttft_ms,
             itl_sla_ms=self._config.itl_ms,
             kv_hit_rate=kv_hit_rate,
+            accept_length=self._current_decode_accept_length(),
         )
         engine_rps = capacity.rps if capacity is not None else 0.0
         if engine_rps <= 0:
@@ -277,10 +268,12 @@ class ThroughputScalingMixin:
     def _compute_decode_replicas(
         self, demand_rps: float, isl: float, osl: float
     ) -> Optional[int]:
+        accept_length = self._current_decode_accept_length()
         capacity = self._decode_regression.find_engine_capacity_rps(
             isl=isl,
             osl=osl,
             itl_sla_ms=self._config.itl_ms,
+            accept_length=accept_length,
         )
         engine_rps = capacity.rps if capacity is not None else 0.0
         if engine_rps <= 0:
@@ -297,6 +290,7 @@ class ThroughputScalingMixin:
 
         result = max(math.ceil(demand_rps / engine_rps), self._config.min_endpoint)
         logger.info(
-            f"Decode: {demand_rps:.2f} rps / {engine_rps:.2f} = {result}, est_itl={itl_ms:.1f}ms"
+            f"Decode: {demand_rps:.2f} rps / {engine_rps:.2f} = {result}, "
+            f"est_itl={itl_ms:.1f}ms, accept_length={accept_length:.2f}"
         )
         return result
