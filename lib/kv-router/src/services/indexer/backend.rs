@@ -481,9 +481,8 @@ pub fn create_indexer(block_size: u32, num_threads: usize) -> Indexer {
         }
     } else {
         Indexer::Single {
-            primary: KvIndexer::new_with_frequency(
+            primary: KvIndexer::new_with_pruning(
                 CancellationToken::new(),
-                None,
                 block_size,
                 Arc::new(KvIndexerMetrics::new_unregistered()),
                 None,

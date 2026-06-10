@@ -4,7 +4,7 @@
 #[cfg(feature = "bench")]
 use std::time::Instant;
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
@@ -192,15 +192,13 @@ impl KvIndexer {
     /// ### Arguments
     ///
     /// * `token` - A `CancellationToken` for managing shutdown.
-    /// * `expiration_duration` - The amount of time that block usage should be buffered.
     /// * `prune_config` - Optional TTL configuration for approximate-mode routing decisions.
     ///
     /// ### Returns
     ///
     /// A new `KvIndexer`.
-    pub fn new_with_frequency(
+    pub fn new_with_pruning(
         token: CancellationToken,
-        expiration_duration: Option<Duration>,
         kv_block_size: u32,
         metrics: Arc<KvIndexerMetrics>,
         prune_config: Option<PruneConfig>,
@@ -237,7 +235,7 @@ impl KvIndexer {
                     let mut get_workers_rx = get_workers_rx;
                     let mut dump_rx = dump_rx;
                     let mut flush_rx = flush_rx;
-                    let mut trie = RadixTree::new_with_frequency(expiration_duration);
+                    let mut trie = RadixTree::new();
 
                     let prune_manager = prune_config.map(WorkerPruneManager::new);
                     let mut prune_ready_rx = prune_manager.as_ref().map(|pm| pm.subscribe_ready());
@@ -410,7 +408,7 @@ impl KvIndexer {
         kv_block_size: u32,
         metrics: Arc<KvIndexerMetrics>,
     ) -> Self {
-        Self::new_with_frequency(token, None, kv_block_size, metrics, None)
+        Self::new_with_pruning(token, kv_block_size, metrics, None)
     }
 
     /// Get a sender for `RouterEvent`s.

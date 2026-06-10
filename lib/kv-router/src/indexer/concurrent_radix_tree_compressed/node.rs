@@ -9,16 +9,10 @@ use parking_lot::RwLock;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 use super::types::*;
+use crate::indexer::compressed_radix::{NodeState, RemoveOutcome};
 use crate::protocols::*;
 
-#[path = "node_state.rs"]
-mod node_state;
-use node_state::NodeState;
-
 type NodeChildren = DashMap<LocalBlockHash, SharedNode, FxBuildHasher>;
-pub(super) struct RemoveOutcome {
-    pub(super) stale_hashes: Vec<ExternalSequenceBlockHash>,
-}
 
 fn record_last_matched_hash(
     last_matched_hashes: &mut Option<&mut FxHashMap<WorkerWithDpRank, ExternalSequenceBlockHash>>,
