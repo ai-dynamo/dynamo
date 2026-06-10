@@ -196,3 +196,9 @@ strip = false
 [patch.crates-io]
 llm-multimodal = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }
 llm-tokenizer = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }
+# Interim fix for minijinja stack overflow on repeated `seq = seq + [x]`
+# concatenation (chat-template accumulators over many turns).
+# Upstream PR: https://github.com/mitsuhiko/minijinja/pull/907
+# TODO: drop this patch and bump the minijinja dependency to the next published
+# release containing PR #907 once it is merged and released.
+minijinja = { git = "https://github.com/rmccorm4/minijinja", branch = "fix-seq-add-stack-overflow" }

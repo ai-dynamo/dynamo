@@ -5254,8 +5254,7 @@ dependencies = [
 [[package]]
 name = "minijinja"
 version = "2.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2929e494b2280e1e18959bb2e121da03347ae896896fdfaceaab43c88a02803f"
+source = "git+https://github.com/rmccorm4/minijinja?branch=fix-seq-add-stack-overflow#9773332e964486b540efaca489ea218463c33170"
 dependencies = [
  "memo-map",
  "serde",
