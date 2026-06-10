@@ -75,6 +75,7 @@ spec:
       sourceLabels:
       - __meta_kubernetes_pod_label_nvidia_com_dynamo_component_type
       targetLabel: dynamo_component_type
+{{- if .Values.dynamo.metrics.podMonitors.nixlTelemetry }}
   - interval: 5s
     path: /metrics
     port: nixl
@@ -83,6 +84,7 @@ spec:
       sourceLabels:
       - __meta_kubernetes_pod_label_nvidia_com_dynamo_component_type
       targetLabel: dynamo_component_type
+{{- end }}
   selector:
     matchExpressions:
       - key: nvidia.com/dynamo-component-type
