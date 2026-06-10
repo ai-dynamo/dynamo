@@ -753,6 +753,19 @@ def build_sampling_params(
         if value is not None and hasattr(sampling_params, key):
             setattr(sampling_params, key, value)
 
+    # routed_experts_prompt_start (RL capture offset) must be a non-negative
+    # int; reject bad client values so the worker emits a sane `start` instead
+    # of a bogus offset the consumer cannot align (vLLM clamps the upper bound).
+    reps = getattr(sampling_params, "routed_experts_prompt_start", None)
+    if reps is not None and (
+        isinstance(reps, bool) or not isinstance(reps, int) or reps < 0
+    ):
+        logger.warning(
+            "Ignoring invalid routed_experts_prompt_start=%r (want non-negative int)",
+            reps,
+        )
+        sampling_params.routed_experts_prompt_start = 0
+
     # Apply stop_conditions
     for key, value in request.get("stop_conditions", {}).items():
         if value is not None and hasattr(sampling_params, key):
@@ -3000,7 +3013,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         "token_ids": token_ids,
                     }
                     # Capture the raw routed_experts cheaply here; serialize it
-                    # only once on the final chunk (base85-encoding a tensor on
+                    # only once on the final chunk (base64-encoding a tensor on
                     # every streamed chunk would be wasted work, since only the
                     # final value is emitted).
                     raw_routed_experts = getattr(output, "routed_experts", None)

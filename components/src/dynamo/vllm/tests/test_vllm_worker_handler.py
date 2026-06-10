@@ -293,7 +293,7 @@ class TestReasoningParserForwarding:
         handler = _make_handler()
         handler._extract_logprobs = MagicMock(return_value=(None, None))
 
-        routed_experts = np.array([[[1]], [[2]]], dtype=np.int32)
+        routed_experts = np.array([[[1]], [[2]]], dtype=np.int16)
 
         async def fake_generate(*args, **kwargs):
             yield SimpleNamespace(
@@ -345,7 +345,7 @@ class TestReasoningParserForwarding:
         assert "disaggregated_params" not in chunks[1]
         routed = chunks[1]["engine_data"]["routed_experts"]
         assert routed["shape"] == [2, 1, 1]
-        assert routed["dtype"] == "int32"
+        assert routed["dtype"] == "int16"
         # start defaults to 0 when routed_experts_prompt_start is unset.
         assert routed["start"] == 0
         decoded = np.frombuffer(
@@ -370,7 +370,7 @@ class TestReasoningParserForwarding:
 
         handler = _make_handler()
         handler._extract_logprobs = MagicMock(return_value=(None, None))
-        routed_experts = np.array([[[3]], [[4]]], dtype=np.int32)
+        routed_experts = np.array([[[3]], [[4]]], dtype=np.int16)
 
         async def fake_generate(*args, **kwargs):
             yield SimpleNamespace(
