@@ -22,7 +22,10 @@ cases:
             type: string
     expected:
       dynamo:
-        calls: []
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
         normal_text: ''
       vllm:
         calls: []
@@ -31,7 +34,7 @@ cases:
           <｜DSML｜invoke name="get_weather">
           <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
           </｜DSML｜invoke>
-        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
+        reason: "vLLM leaks the DSML envelope into normal_text on missing end-marker recovery; Dynamo recovers the complete <｜DSML｜invoke> call and strips the unterminated outer tag."
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
   TOOLCALLING.batch.5.b:
@@ -99,7 +102,13 @@ cases:
     - *id001
     expected:
       dynamo:
-        calls: []
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        - name: get_weather
+          arguments:
+            location: New York
         normal_text: |
           I'll start by fetching the weather for both Boston and New York at the same time!
       sglang:
@@ -115,7 +124,7 @@ cases:
           <｜DSML｜invoke name="get_weather">
           <｜DSML｜parameter name="location" string="true">New York</｜DSML｜parameter>
           </｜DSML｜invoke>
-        reason: "vLLM leaks the unterminated DSML block into normal_text on the recovery path"
+        reason: "vLLM leaks the unterminated DSML block into normal_text on the recovery path; Dynamo recovers both complete <｜DSML｜invoke> calls (bodies fully closed) and keeps the prefix prose as normal_text."
   TOOLCALLING.batch.5.e:
     description: Multi-call, last call truncated mid-arg-value
     ref: dynamo
@@ -131,7 +140,10 @@ cases:
     - *id001
     expected:
       dynamo:
-        calls: []
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
         normal_text: |
           I'll start by fetching the weather for both Boston and New York at the same time!
       sglang:
@@ -146,7 +158,7 @@ cases:
           </｜DSML｜invoke>
           <｜DSML｜invoke name="get_weather">
           <｜DSML｜parameter name="location" string="true">New York
-        reason: "vLLM leaks the unterminated DSML block into normal_text on the recovery path"
+        reason: "vLLM leaks the unterminated DSML block into normal_text on the recovery path; Dynamo recovers only the complete Boston call and drops the New York call whose <｜DSML｜invoke> was never closed, keeping the prefix prose as normal_text."
   TOOLCALLING.batch.5.f:
     description: Bare valid invoke before a complete wrapped call
     ref: dynamo
