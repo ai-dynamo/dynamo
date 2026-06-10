@@ -1,10 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: How to Build and Publish Dynamo Docs
 sidebar-title: Dynamo Docs Guide
 ---
-
-# How to Build and Publish Dynamo Docs
 
 This document describes the architecture, workflows, and maintenance procedures for the
 NVIDIA Dynamo documentation website powered by [Fern](https://buildwithfern.com).
@@ -54,7 +53,7 @@ the navigation in `docs/index.yml`, and running `fern check` to validate.
 
 | Skill | Description |
 |-------|-------------|
-| [dynamo-docs](https://github.com/ai-dynamo/dynamo/blob/main/.claude/skills/dynamo-docs/SKILL.md) | Add, update, move, or remove a docs page |
+| [dynamo-docs](https://github.com/ai-dynamo/dynamo/blob/main/.agents/contributor-skills/dynamo-docs/SKILL.md) | Add, update, move, or remove a docs page |
 
 ---
 
@@ -100,7 +99,7 @@ docs/                             # Documentation content
 ├── reference/
 ├── ...
 ├── assets/                       # Images, fonts, SVGs, logos
-├── blogs/                        # Blog posts
+├── digest/                       # Digest posts
 └── diagrams/                     # D2 diagram source files
 ```
 
@@ -123,7 +122,7 @@ fern/
 ├── components/                   # React components
 ├── main.css                      # Custom CSS
 ├── convert_callouts.py           # Callout converter
-├── blogs/                        # Blog posts (synced from main)
+├── digest/                       # Digest posts (synced from main)
 └── assets/                       # Images, fonts, SVGs
 ```
 
@@ -182,7 +181,7 @@ navigation:
   - section: Getting Started
     contents:
       - page: Quickstart
-        path: getting-started/quickstart.md
+        path: getting-started/quickstart.mdxx
       - page: Support Matrix
         path: reference/support-matrix.md
 ```
@@ -226,7 +225,7 @@ publishing. It runs three jobs depending on the trigger:
 2. Copies content from `main`'s `docs/` → `docs-website`'s `fern/pages/`
 3. Copies `docs/index.yml` → `fern/versions/dev.yml` and transforms paths
    for the docs-website layout using `yq`
-4. Syncs assets from `docs/assets/` and blogs from `docs/blogs/`
+4. Syncs assets from `docs/assets/` and Digest posts from `docs/digest/`
 5. Copies Fern config files from `fern/` → docs-website's `fern/`
    (`fern.config.json`, `components/`, `main.css`, `convert_callouts.py`)
 6. Runs `convert_callouts.py` to transform GitHub-style callouts to Fern format

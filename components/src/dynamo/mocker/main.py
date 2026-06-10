@@ -154,6 +154,7 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
         args.bootstrap_ports_list
         or args.zmq_kv_events_ports_list
         or args.zmq_replay_ports_list
+        or base_engine_args.aic_nextn is not None
     )
 
     for worker_id in range(args.num_workers):
@@ -165,7 +166,6 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
             args.discovery_backend,
             args.request_plane,
             args.event_plane,
-            True,  # statically set to True, just determines to enable_nats if event_plane is nats
         )
         runtimes.append(runtime)
 
@@ -187,6 +187,11 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
                     if args.zmq_replay_ports_list
                     else None
                 ),
+                aic_mtp_seed=(
+                    (base_engine_args.aic_mtp_seed + worker_id) % (1 << 64)
+                    if base_engine_args.aic_nextn is not None
+                    else None
+                ),
             )
         else:
             worker_engine_args = base_engine_args
@@ -199,12 +204,12 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
             model_path=args.model_path,
             model_name=args.model_name,
             endpoint_id=args.endpoint,
-            context_length=0,
             extra_engine_args=None,
             mocker_engine_args=worker_engine_args,
             runtime_config=runtime_config,
             kv_cache_block_size=kv_cache_block_size,
             is_prefill=args.is_prefill_worker,
+            is_decode=args.is_decode_worker,
         )
 
         # Create the engine with this worker's isolated runtime

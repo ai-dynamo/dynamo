@@ -26,7 +26,7 @@ This directory contains practical examples demonstrating how to deploy and use D
 
 Learn fundamental Dynamo concepts through these introductory examples:
 
-- **[Quickstart](/docs/getting-started/quickstart.md)** - Simple local Dynamo setup across supported backends
+- **[Quickstart](https://docs.nvidia.com/dynamo/getting-started/quickstart)** - Simple local Dynamo setup across supported backends
 - **[Disaggregated Serving](/docs/features/disaggregated-serving/README.md)** - Prefill/decode separation for enhanced performance and scalability
 - **[Multi-node TensorRT-LLM](/docs/backends/trtllm/multinode/trtllm-multinode-examples.md)** - Distributed inference across multiple nodes and GPUs
 
@@ -41,12 +41,12 @@ If you want to see advanced, framework-specific deployment patterns and best pra
 
 ## Deployment Examples
 
-Platform-specific deployment guides for production environments:
+Platform-specific manifests and templates for production environments. Deployment guides live under `docs/kubernetes/cloud-providers/`; each examples folder links to its guide.
 
-- **[Amazon EKS](/examples/deployments/EKS/)** - Deploy Dynamo on Amazon Elastic Kubernetes Service
-- **[Azure AKS](/examples/deployments/AKS/)** - Deploy Dynamo on Azure Kubernetes Service
-- **[Amazon ECS](/examples/deployments/ECS/)** - Deploy Dynamo on Amazon Elastic Container Service
-- **[Google GKE](/examples/deployments/GKE/)** - Deploy Dynamo on Google Kubernetes Engine
+- **[Amazon EKS](/examples/deployments/EKS/)** - Manifests and templates ([deployment guide](/docs/kubernetes/cloud-providers/eks/eks.md))
+- **[Azure AKS](/examples/deployments/AKS/)** - Helm values ([deployment guide](/docs/kubernetes/cloud-providers/aks/aks.md))
+- **[Amazon ECS](/examples/deployments/ECS/)** - Task definitions ([deployment guide](/docs/kubernetes/cloud-providers/ecs/ecs.md))
+- **[Google GKE](/examples/deployments/GKE/)** - DGD manifests ([deployment guide](/docs/kubernetes/cloud-providers/gke/gke.md))
 
 ## Runtime Examples
 
@@ -56,11 +56,11 @@ Low-level runtime examples for developers using Python<>Rust bindings:
 
 ## Getting Started
 
-1. **Choose your deployment pattern**: Start with the [Quickstart](/docs/getting-started/quickstart.md) for a simple local deployment, or explore [Disaggregated Serving](/docs/features/disaggregated-serving/README.md) for advanced architectures.
+1. **Choose your deployment pattern**: Start with the [Quickstart](https://docs.nvidia.com/dynamo/getting-started/quickstart) for a simple local deployment, or explore [Disaggregated Serving](/docs/features/disaggregated-serving/README.md) for advanced architectures.
 
 2. **Set up prerequisites**: Most examples require etcd and NATS services. You can start them using:
    ```bash
-   docker compose -f deploy/docker-compose.yml up -d
+   docker compose -f dev/docker-compose.yml up -d
    ```
 
 3. **Follow the example**: Each directory contains detailed setup instructions and configuration files specific to that deployment pattern.

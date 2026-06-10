@@ -7,9 +7,9 @@
 Prints the resolved image URI to stdout so it can be captured in shell scripts.
 
 Usage:
-    python resolve_base_image.py --framework vllm --cuda-version 12.9
+    python resolve_base_image.py --framework vllm --cuda-version 13.0
     python resolve_base_image.py --framework dynamo --target frontend
-    python resolve_base_image.py --framework sglang --cuda-version 13.0
+    python resolve_base_image.py --framework sglang --cuda-version 12.9
 """
 
 import argparse
@@ -32,7 +32,7 @@ def main() -> None:
     parser.add_argument(
         "--target",
         default="runtime",
-        choices=["runtime", "frontend"],
+        choices=["runtime", "frontend", "planner"],
         help="Build target (default: runtime)",
     )
     parser.add_argument(
@@ -72,6 +72,25 @@ def main() -> None:
             )
             sys.exit(1)
         print(image)
+        return
+
+    if args.target == "planner":
+        if args.framework != "dynamo":
+            print(
+                "ERROR: --target planner is only supported for --framework dynamo",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        planner_cfg = ctx.get("dynamo", {})
+        runtime_image = planner_cfg.get("planner_runtime_image")
+        runtime_image_tag = planner_cfg.get("planner_runtime_image_tag")
+        if not runtime_image or not runtime_image_tag:
+            print(
+                "ERROR: planner_runtime_image/planner_runtime_image_tag not found in context.yaml dynamo section",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(f"{runtime_image}:{runtime_image_tag}")
         return
 
     # Runtime target

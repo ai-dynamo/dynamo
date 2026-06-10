@@ -7,11 +7,13 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::common::protocols::{DirectRequest, KvEventPublishers, MockEngineArgs, OutputSignal};
+use crate::common::protocols::{
+    DirectRequest, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
+};
 use crate::common::utils::sleep_until_precise;
 use crate::scheduler::{
-    AdmissionEvent, RouterEventVisibility, SchedulerHandle, capture_deferred_kv_publish_sink,
-    publish_deferred_kv_events,
+    AdmissionEvent, DeferredFpmBuffer, RouterEventVisibility, SchedulerHandle,
+    capture_deferred_kv_publish_sink, publish_deferred_fpm, publish_deferred_kv_events,
 };
 
 use super::core::VllmCore;
@@ -22,6 +24,11 @@ pub struct MockerMetrics {
     pub active_decode_blocks: u64,
     pub total_blocks: u64,
     pub gpu_cache_usage_perc: f64,
+    pub running_requests: u64,
+    pub waiting_requests: u64,
+    pub vllm_preemptions_total: u64,
+    pub sglang_cache_hit_tokens: u64,
+    pub sglang_cache_total_tokens: u64,
 }
 
 impl MockerMetrics {
@@ -29,6 +36,20 @@ impl MockerMetrics {
         dp_rank: dynamo_kv_router::protocols::DpRank,
         active_decode_blocks: u64,
         total_blocks: u64,
+    ) -> Self {
+        Self::from_parts(dp_rank, active_decode_blocks, total_blocks, 0, 0, 0, 0, 0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts(
+        dp_rank: dynamo_kv_router::protocols::DpRank,
+        active_decode_blocks: u64,
+        total_blocks: u64,
+        running_requests: u64,
+        waiting_requests: u64,
+        vllm_preemptions_total: u64,
+        sglang_cache_hit_tokens: u64,
+        sglang_cache_total_tokens: u64,
     ) -> Self {
         let gpu_cache_usage_perc = if total_blocks == 0 {
             0.0
@@ -40,6 +61,11 @@ impl MockerMetrics {
             active_decode_blocks,
             total_blocks,
             gpu_cache_usage_perc,
+            running_requests,
+            waiting_requests,
+            vllm_preemptions_total,
+            sglang_cache_hit_tokens,
+            sglang_cache_total_tokens,
         }
     }
 }
@@ -66,6 +92,7 @@ impl Scheduler {
         output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
+        fpm_publisher: FpmPublisher,
     ) -> Self {
         Self::new_internal(
             args,
@@ -74,6 +101,7 @@ impl Scheduler {
             kv_event_publishers,
             cancellation_token,
             None,
+            fpm_publisher,
         )
     }
 
@@ -84,6 +112,7 @@ impl Scheduler {
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
+        fpm_publisher: FpmPublisher,
     ) -> Self {
         Self::new_internal(
             args,
@@ -92,6 +121,7 @@ impl Scheduler {
             kv_event_publishers,
             cancellation_token,
             admission_tx,
+            fpm_publisher,
         )
     }
 
@@ -102,6 +132,7 @@ impl Scheduler {
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
+        fpm_publisher: FpmPublisher,
     ) -> Self {
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<DirectRequest>();
         let total_blocks = args.num_gpu_blocks as u64;
@@ -115,7 +146,16 @@ impl Scheduler {
         tokio::spawn(async move {
             let (deferred_kv_events, buffering_publishers) =
                 capture_deferred_kv_publish_sink(kv_event_publishers.raw_enabled());
+            let deferred_fpm = DeferredFpmBuffer::default();
             let mut core = VllmCore::new_with_sink(args, dp_rank, buffering_publishers);
+            #[cfg(feature = "kvbm-offload")]
+            if let Err(e) = core.init_offload_live().await {
+                tracing::error!("kvbm-offload live init failed: {e}");
+            }
+            // Wall-clock origin for this scheduler's simulated time. Drives
+            // `engine.tick(now_ms)` so the PS bandwidth models advance
+            // in real time across passes.
+            let scheduler_start = Instant::now();
 
             loop {
                 if receive_requests(&mut core, &mut request_rx, &cancel_token_clone)
@@ -126,24 +166,28 @@ impl Scheduler {
                 }
 
                 let iteration_start = Instant::now();
-                let pass = core.execute_pass_internal(None, 0.0, admission_tx.as_ref());
-                let total_time = std::time::Duration::from_secs_f64(pass.end_ms / 1000.0);
+                let now_ms = scheduler_start.elapsed().as_secs_f64() * 1000.0;
+                let pass = core.execute_pass_internal(None, now_ms, admission_tx.as_ref());
+                let total_time =
+                    std::time::Duration::from_secs_f64((pass.end_ms - now_ms).max(0.0) / 1000.0);
+                if let Some(fpm) = pass.fpm {
+                    deferred_fpm.push(fpm);
+                }
                 if pass.router_event_visibility == RouterEventVisibility::PassStart {
                     publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
+                    publish_deferred_fpm(&fpm_publisher, deferred_fpm.drain());
                 }
                 if total_time > std::time::Duration::ZERO {
                     sleep_until_precise(iteration_start + total_time).await;
                 }
                 if pass.router_event_visibility == RouterEventVisibility::PassEnd {
                     publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
+                    publish_deferred_fpm(&fpm_publisher, deferred_fpm.drain());
                 }
                 flush_output_signals(&mut core, &output_tx, pass.output_signals);
                 publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
-                let _ = metrics_tx.send(MockerMetrics::new(
-                    dp_rank,
-                    core.kv_manager.num_active_blocks() as u64,
-                    total_blocks,
-                ));
+                publish_deferred_fpm(&fpm_publisher, deferred_fpm.drain());
+                let _ = metrics_tx.send(core.mocker_metrics());
             }
         });
 

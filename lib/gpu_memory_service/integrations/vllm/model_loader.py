@@ -11,32 +11,99 @@ processes import from GMS metadata (RO).
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
+import os
 from typing import TYPE_CHECKING
 
 import torch
-from gpu_memory_service import get_or_create_gms_client_memory_manager
+from gpu_memory_service.client.torch.allocator import (
+    get_or_create_gms_client_memory_manager,
+    gms_use_mem_pool,
+)
 from gpu_memory_service.client.torch.module import materialize_module_from_gms
-from gpu_memory_service.common.types import GrantedLockType
+from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.integrations.common.utils import (
     finalize_gms_write,
     get_gms_lock_mode,
     setup_meta_tensor_workaround,
+    strip_gms_model_loader_config,
 )
+
+if os.environ.get("MX_ENABLED", "0") == "1":
+    try:
+        from modelexpress.engines.vllm.adapter import build_vllm_load_context
+        from modelexpress.load_strategy import (
+            LoadStrategyChain,
+            publish_metadata,
+            register_tensors,
+        )
+    except ImportError as e:
+        raise ImportError(
+            "MX_ENABLED=1 but modelexpress is not installed. "
+            "Install with: pip install modelexpress"
+        ) from e
 
 if TYPE_CHECKING:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 
 logger = logging.getLogger(__name__)
 
-# Track imported weights for memory accounting
+# Track imported weights plus the vLLM-local model_memory_usage adjustment.
 _last_imported_weights_bytes: int = 0
+_last_model_memory_usage_offset_bytes: int = 0
 
 
 def get_imported_weights_bytes() -> int:
     """Return bytes of weights imported in the last load_model call."""
     return _last_imported_weights_bytes
+
+
+def get_model_memory_usage_offset_bytes() -> int:
+    """Return the offset to add to imported bytes for vLLM model_memory_usage."""
+    return _last_model_memory_usage_offset_bytes
+
+
+# =============================================================================
+# MX (ModelExpress) Integration — Optional P2P weight transfer
+#
+# Write mode: delegates to LoadStrategyChain which handles weight loading
+#   (RDMA P2P -> ModelStreamer -> GDS -> disk), post-processing, NIXL
+#   registration, and metadata publishing.
+# Read mode: uses register_tensors + publish_metadata directly to make
+#   GMS-imported tensors available as a P2P source.
+# =============================================================================
+
+_mx_ctx = None  # type: LoadContext | None
+
+
+def get_mx_load_context(
+    vllm_config=None,
+    model_config=None,
+):
+    """Get or create the process-global MX LoadContext singleton.
+
+    With no arguments, returns the existing instance (or None).
+    When both arguments are provided, creates the singleton on first call.
+    Checks MX_ENABLED env var, modelexpress installation, and NIXL
+    availability.
+    """
+    global _mx_ctx
+    if _mx_ctx is not None:
+        return _mx_ctx
+
+    if vllm_config is None or model_config is None:
+        return None
+
+    if os.environ.get("MX_ENABLED", "0") != "1":
+        return None
+
+    _mx_ctx = build_vllm_load_context(vllm_config, model_config)
+    logger.info(
+        "[GMS-MX] Created MX context (rank=%d, device=%d)",
+        _mx_ctx.global_rank,
+        _mx_ctx.device_id,
+    )
+    return _mx_ctx
 
 
 def register_gms_loader(load_format: str = "gms") -> None:
@@ -49,23 +116,14 @@ def register_gms_loader(load_format: str = "gms") -> None:
     class GMSModelLoader(BaseModelLoader):
         """vLLM model loader that loads weights via GPU Memory Service."""
 
-        # Keys in model_loader_extra_config that are GMS-specific and should
-        # not be passed to the fallback DefaultModelLoader.
-        _GMS_EXTRA_KEYS = frozenset({"gms_read_only"})
-
         def __init__(self, load_config):
             super().__init__(load_config)
             # Strip GMS-specific keys before creating the fallback loader,
             # otherwise DefaultModelLoader rejects unknown extra config.
-            extra = getattr(load_config, "model_loader_extra_config", None) or {}
-            clean_extra = {
-                k: v for k, v in extra.items() if k not in self._GMS_EXTRA_KEYS
-            }
             self.default_loader = DefaultModelLoader(
-                replace(
+                strip_gms_model_loader_config(
                     load_config,
                     load_format="auto",
-                    model_loader_extra_config=clean_extra,
                 )
             )
 
@@ -79,8 +137,8 @@ def register_gms_loader(load_format: str = "gms") -> None:
             device = torch.cuda.current_device()
             extra = getattr(self.load_config, "model_loader_extra_config", {}) or {}
             mode = get_gms_lock_mode(extra)
-            gms_client, pool = get_or_create_gms_client_memory_manager(
-                get_socket_path(device),
+            gms_client = get_or_create_gms_client_memory_manager(
+                get_socket_path(device, "weights"),
                 device,
                 mode=mode,
                 tag="weights",
@@ -91,7 +149,6 @@ def register_gms_loader(load_format: str = "gms") -> None:
             else:
                 return _load_write_mode(
                     gms_client,
-                    pool,
                     vllm_config,
                     model_config,
                     self.default_loader,
@@ -110,14 +167,25 @@ def _load_read_mode(
     model_config,
     device_index: int,
 ) -> torch.nn.Module:
-    """Load model by importing weights from GMS (RO mode)."""
-    global _last_imported_weights_bytes
+    """Load model by importing weights from GMS (RO mode).
+
+    When MX is active, registers materialized tensors with NIXL so this
+    node is discoverable as a P2P source (e.g. for shadow engine failover).
+    """
+    global _last_imported_weights_bytes, _last_model_memory_usage_offset_bytes
 
     try:
         model = _create_meta_model(vllm_config, model_config)
         materialize_module_from_gms(gms_client, model, device_index=device_index)
 
+        # MX: register materialized tensors (available for P2P transfer)
+        mx_ctx = get_mx_load_context(vllm_config, model_config)
+        if mx_ctx is not None:
+            register_tensors(model, mx_ctx)
+            publish_metadata(mx_ctx)
+
         _last_imported_weights_bytes = gms_client.total_bytes
+        _last_model_memory_usage_offset_bytes = 0
         logger.info(
             "[GMS] Read mode: imported %.2f GiB",
             _last_imported_weights_bytes / (1 << 30),
@@ -130,7 +198,6 @@ def _load_read_mode(
 
 def _load_write_mode(
     gms_client: "GMSClientMemoryManager",
-    pool,
     vllm_config,
     model_config,
     default_loader,
@@ -140,35 +207,46 @@ def _load_write_mode(
 
     Initializes model using GMS memory pool, loads weights from disk,
     registers tensors with GMS, and commits for cross-process sharing.
-    """
-    global _last_imported_weights_bytes
 
-    from torch.cuda.memory import use_mem_pool
+    When MX is active, uses LoadStrategyChain for automatic weight source
+    detection (RDMA P2P -> ModelStreamer -> GDS -> disk) with fallback.
+    The chain also handles NIXL registration and metadata publishing.
+    """
+    global _last_imported_weights_bytes, _last_model_memory_usage_offset_bytes
+
     from vllm.model_executor.model_loader.utils import (
         initialize_model,
         process_weights_after_loading,
     )
     from vllm.utils.torch_utils import set_default_torch_dtype
 
-    gms_client.clear_all_handles()
+    mx_ctx = get_mx_load_context(vllm_config, model_config)
 
     # Allocate model tensors using GMS memory pool
     with set_default_torch_dtype(model_config.dtype):
-        with use_mem_pool(pool, device=target_device):
+        with gms_use_mem_pool("weights", target_device):
             with target_device:
                 model = initialize_model(
                     vllm_config=vllm_config, model_config=model_config
                 )
 
-            default_loader.load_weights(model, model_config)
-            process_weights_after_loading(model, model_config, target_device)
+            if mx_ctx is not None:
+                # Full MX load strategy chain: RDMA -> ModelStreamer -> GDS -> Default
+                LoadStrategyChain.run(model, mx_ctx)
+            else:
+                default_loader.load_weights(model, model_config)
+                process_weights_after_loading(model, model_config, target_device)
+
             torch.cuda.empty_cache()
 
-    _last_imported_weights_bytes = finalize_gms_write(gms_client, model)
+    finalize_result = finalize_gms_write(gms_client, model)
+    _last_imported_weights_bytes = finalize_result.committed_bytes
+    _last_model_memory_usage_offset_bytes = finalize_result.pruned_bytes
 
     logger.info(
-        "[GMS] Write mode: published %.2f GiB",
+        "[GMS] Write mode: published %.2f GiB " "(vLLM memory offset %.2f GiB)",
         _last_imported_weights_bytes / (1 << 30),
+        _last_model_memory_usage_offset_bytes / (1 << 30),
     )
     return model.eval()
 

@@ -7,8 +7,10 @@
 //! chat completions, processed by the existing engine, and responses/streams
 //! are converted back to Anthropic format.
 
+use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
     Json, Router,
@@ -20,11 +22,11 @@ use axum::{
         IntoResponse, Response,
         sse::{KeepAlive, Sse},
     },
-    routing::post,
+    routing::{get, post},
 };
 use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
-use futures::{StreamExt, stream};
+use futures::StreamExt;
 use tracing::Instrument;
 
 use super::{
@@ -40,13 +42,16 @@ use crate::protocols::anthropic::types::{
     chat_completion_to_anthropic_response,
 };
 use crate::protocols::openai::chat_completions::{
-    NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
-    NvCreateChatCompletionStreamResponse, aggregator::ChatCompletionAggregator,
+    NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse,
+    aggregator::ChatCompletionAggregator,
 };
-use crate::request_template::RequestTemplate;
+use crate::protocols::unified::UnifiedRequest;
+use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
 
 // Re-use helpers from the openai module (sibling under service/)
+use super::error::SanitizedError;
+use super::metadata::extract_metadata_from_http;
 use super::openai::{get_body_limit, get_or_create_request_id};
 
 // ---------------------------------------------------------------------------
@@ -70,6 +75,27 @@ pub fn anthropic_messages_router(
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state((state, template));
     (vec![doc, count_doc], router)
+}
+
+/// Creates the router for model listing and retrieval.
+///
+/// When the `anthropic-version` header is present, returns the Anthropic model
+/// format (with `context_window`, `display_name`, etc.). Otherwise returns the
+/// standard OpenAI format. This keeps Anthropic-specific content negotiation
+/// out of the OpenAI handler.
+pub fn anthropic_models_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let models_path = path.unwrap_or("/v1/models".to_string());
+    let retrieve_path = format!("{}/{{*model_id}}", models_path);
+    let list_doc = RouteDoc::new(axum::http::Method::GET, &models_path);
+    let retrieve_doc = RouteDoc::new(axum::http::Method::GET, &retrieve_path);
+    let router = Router::new()
+        .route(&models_path, get(list_models))
+        .route(&retrieve_path, get(get_model))
+        .with_state(state);
+    (vec![list_doc, retrieve_doc], router)
 }
 
 // ---------------------------------------------------------------------------
@@ -123,14 +149,22 @@ async fn handler_anthropic_messages(
     }
 
     // Create request context
-    let request_id = get_or_create_request_id(None, &headers);
+    let request_id = get_or_create_request_id(&headers);
     let streaming = request.stream;
+    let resolved_model = resolve_request_model(&request.model, template.as_ref());
     let cancellation_labels = CancellationLabels {
-        model: request.model.clone(),
+        model: state.manager().metric_model_for(resolved_model).to_string(),
         endpoint: Endpoint::AnthropicMessages.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = Context::with_id(request, request_id);
+    let metadata = extract_metadata_from_http(&headers).map_err(|err| {
+        anthropic_error(
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+            "invalid_request_error",
+            &err.to_string(),
+        )
+    })?;
+    let request = Context::with_id_and_metadata(request, request_id, metadata);
     let context = request.context();
 
     // Create connection handles
@@ -145,10 +179,9 @@ async fn handler_anthropic_messages(
         tokio::spawn(anthropic_messages(state, template, request, stream_handle).in_current_span())
             .await
             .map_err(|e| {
-                anthropic_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "api_error",
-                    &format!("Failed to await messages task: {:?}", e),
+                anthropic_sanitized_error_with_details(
+                    SanitizedError::Internal,
+                    format!("Failed to await Anthropic messages task: {e:?}"),
                 )
             })?;
 
@@ -187,7 +220,8 @@ async fn anthropic_messages(
     }
 
     let model = request.model.clone();
-    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+    let metric_model = state.manager().metric_model_for(&model).to_string();
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
     tracing::trace!("Received Anthropic messages request: {:?}", &*request);
 
@@ -213,20 +247,33 @@ async fn anthropic_messages(
         .as_ref()
         .is_some_and(|t| t.thinking_type == "disabled");
 
-    // Convert Anthropic request -> Chat Completion request
-    let mut chat_request: NvCreateChatCompletionRequest =
-        orig_request.try_into().map_err(|e: anyhow::Error| {
-            tracing::error!(
-                request_id,
-                error = %e,
-                "Failed to convert AnthropicCreateMessageRequest to NvCreateChatCompletionRequest",
-            );
-            anthropic_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                &format!("Failed to convert request: {}", e),
-            )
-        })?;
+    // Estimate input tokens before consuming the request via try_into().
+    // Only used in the streaming path to populate message_start.
+    let estimated_input_tokens = if streaming {
+        estimate_input_tokens(&orig_request)
+    } else {
+        0
+    };
+
+    // Convert Anthropic request -> UnifiedRequest -> Chat Completion request
+    let unified_request: UnifiedRequest = orig_request.try_into().map_err(|e: anyhow::Error| {
+        tracing::error!(
+            request_id,
+            error = %e,
+            "Failed to convert AnthropicCreateMessageRequest to UnifiedRequest",
+        );
+        anthropic_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            &format!("Failed to convert request: {}", e),
+        )
+    })?;
+
+    // Extract the API context before consuming the UnifiedRequest — this
+    // carries Anthropic-specific fields (thinking config, cache breakpoints,
+    // etc.) that the stream converter needs for faithful response reconstruction.
+    let anthropic_ctx = unified_request.anthropic_context().cloned();
+    let mut chat_request = unified_request.into_inner();
 
     // When a reasoning parser is configured and the client hasn't explicitly
     // disabled thinking, assume the model's chat template will inject `<think>`.
@@ -267,13 +314,34 @@ async fn anthropic_messages(
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
+    // Create inflight_guard early to ensure all errors are counted
+    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
+        &model,
+        Endpoint::AnthropicMessages,
+        streaming,
+        request.id(),
+    );
+
     tracing::trace!("Issuing generate call for Anthropic messages");
 
     let engine_stream = engine.generate(request).await.map_err(|e| {
-        anthropic_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "api_error",
-            &format!("Failed to generate completions: {}", e),
+        if super::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model, super::metrics::Endpoint::AnthropicMessages);
+        }
+        // Check for cancelled request (client disconnected before response was sent)
+        if super::metrics::request_was_cancelled(e.as_ref()) {
+            inflight_guard.mark_error(super::metrics::ErrorType::Cancelled);
+            return anthropic_sanitized_error_with_details(
+                SanitizedError::Cancelled,
+                format!("{e:#}"),
+            );
+        }
+        inflight_guard.mark_error(super::metrics::ErrorType::Internal);
+        anthropic_sanitized_error_with_details(
+            SanitizedError::Internal,
+            format!("Failed to generate Anthropic completions: {e}"),
         )
     })?;
 
@@ -299,68 +367,57 @@ async fn anthropic_messages(
         Box<dyn futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
     > = Box::pin(engine_stream);
 
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::AnthropicMessages, streaming);
-
     if streaming {
         stream_handle.arm();
 
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let mut converter = AnthropicStreamConverter::new(model_for_resp);
-        let start_events = converter.emit_start_events();
-
-        let converter = std::sync::Arc::new(std::sync::Mutex::new(converter));
-        let converter_end = converter.clone();
-
-        let saw_error = std::sync::Arc::new(AtomicBool::new(false));
-        let saw_error_end = saw_error.clone();
+        let mut converter = match anthropic_ctx {
+            Some(ctx) => {
+                AnthropicStreamConverter::with_context(model_for_resp, estimated_input_tokens, ctx)
+            }
+            None => AnthropicStreamConverter::new(model_for_resp, estimated_input_tokens),
+        };
 
         let mut http_queue_guard = Some(http_queue_guard);
+        let mut engine_stream = engine_stream;
 
-        let event_stream = engine_stream
-            .inspect(move |response| {
+        let full_stream = async_stream::stream! {
+            let mut events = Vec::with_capacity(4);
+            converter.append_start_events(&mut events);
+            for event in events.drain(..) {
+                yield event.map_err(axum::Error::new);
+            }
+
+            let mut saw_error = false;
+
+            while let Some(annotated_chunk) = engine_stream.next().await {
                 process_response_and_observe_metrics(
-                    response,
+                    &annotated_chunk,
                     &mut response_collector,
                     &mut http_queue_guard,
                 );
-            })
-            .filter_map(move |annotated_chunk| {
-                let converter = converter.clone();
-                let saw_error = saw_error.clone();
-                async move {
-                    if annotated_chunk.data.is_none() {
-                        if annotated_chunk.event.as_deref() == Some("error") {
-                            saw_error.store(true, Ordering::Release);
-                        }
-                        return None;
+
+                let Some(stream_resp) = annotated_chunk.data else {
+                    if annotated_chunk.event.as_deref() == Some("error") {
+                        saw_error = true;
                     }
-                    let stream_resp = annotated_chunk.data?;
-                    let mut conv = converter.lock().expect("converter lock poisoned");
-                    let events = conv.process_chunk(&stream_resp);
-                    Some(stream::iter(events))
+                    continue;
+                };
+
+                converter.append_chunk_events(&stream_resp, &mut events);
+                for event in events.drain(..) {
+                    yield event.map_err(axum::Error::new);
                 }
-            })
-            .flatten();
+            }
 
-        let start_stream = stream::iter(start_events);
-
-        let done_stream = stream::once(async move {
-            let mut conv = converter_end.lock().expect("converter lock poisoned");
-            let end_events = if saw_error_end.load(Ordering::Acquire) {
-                conv.emit_error_events()
+            if saw_error {
+                converter.append_error_events(&mut events);
             } else {
-                conv.emit_end_events()
-            };
-            stream::iter(end_events)
-        })
-        .flatten();
-
-        let full_stream = start_stream.chain(event_stream).chain(done_stream);
-        let full_stream = full_stream.map(|result| result.map_err(axum::Error::new));
+                converter.append_end_events(&mut events);
+            }
+            for event in events.drain(..) {
+                yield event.map_err(axum::Error::new);
+            }
+        };
 
         let stream = monitor_for_disconnects(full_stream, ctx, inflight_guard, stream_handle);
 
@@ -376,13 +433,30 @@ async fn anthropic_messages(
         // Check first event for backend errors using the openai helper
         let stream_with_check = super::openai::check_for_backend_error(engine_stream)
             .await
-            .map_err(|(status, json_err)| {
-                tracing::error!(request_id, %status, ?json_err, "Backend error detected");
-                anthropic_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "api_error",
-                    "Backend error during generation",
-                )
+            .map_err(|(status, _json_err)| {
+                // check_for_backend_error has already sanitized the body and
+                // logged the backend detail; preserve its status when
+                // re-wrapping in Anthropic format. Status classification is
+                // delegated to SanitizedError::for_backend_status so the
+                // openai and anthropic surfaces stay aligned.
+                let details = format!("backend error event (status {})", status.as_u16());
+                match SanitizedError::for_backend_status(status) {
+                    Some(variant) => anthropic_sanitized_error_with_details(variant, details),
+                    // 4xx (non-499): preserve the client-error status; the
+                    // message is the canonical reason so we don't smuggle
+                    // backend text through. The "invalid_request_error"
+                    // argument is a fallback — anthropic_error remaps
+                    // 401/403/404/429 to their spec-correct types from the
+                    // status code itself.
+                    None => {
+                        tracing::error!(%status, "Anthropic backend error event");
+                        anthropic_error(
+                            status,
+                            "invalid_request_error",
+                            status.canonical_reason().unwrap_or("Client error"),
+                        )
+                    }
+                }
             })?;
 
         let mut http_queue_guard = Some(http_queue_guard);
@@ -398,15 +472,17 @@ async fn anthropic_messages(
             NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
                 .await
                 .map_err(|e| {
-                    tracing::error!(request_id, "Failed to fold messages stream: {:?}", e);
-                    anthropic_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "api_error",
-                        &format!("Failed to fold messages stream: {}", e),
+                    anthropic_sanitized_error_with_details(
+                        SanitizedError::Internal,
+                        format!("Failed to fold messages stream: {e:?}"),
                     )
                 })?;
 
-        let response = chat_completion_to_anthropic_response(chat_response, &model_for_resp);
+        let response = chat_completion_to_anthropic_response(
+            chat_response,
+            &model_for_resp,
+            anthropic_ctx.as_ref(),
+        );
 
         inflight_guard.mark_ok();
 
@@ -435,6 +511,195 @@ async fn handler_count_tokens(
 }
 
 // ---------------------------------------------------------------------------
+// Model listing / retrieval (content-negotiating)
+// ---------------------------------------------------------------------------
+
+/// Build a lookup of model display_name -> context_length from model cards.
+fn build_model_context_map(state: &service_v2::State) -> std::collections::HashMap<String, u32> {
+    state
+        .manager()
+        .get_model_cards()
+        .iter()
+        .map(|c| (c.display_name.clone(), c.effective_context_length()))
+        .collect()
+}
+
+/// Read optional env var overrides for context window and max output tokens.
+fn model_env_overrides() -> (Option<u64>, Option<u64>) {
+    let context_window = match std::env::var("DYN_CONTEXT_WINDOW") {
+        Ok(v) => match v.parse::<u64>() {
+            Ok(val) => Some(val),
+            Err(_) => {
+                tracing::warn!("Invalid DYN_CONTEXT_WINDOW value '{}', ignoring", v);
+                None
+            }
+        },
+        Err(_) => None,
+    };
+    let max_output_tokens = match std::env::var("DYN_MAX_OUTPUT_TOKENS") {
+        Ok(v) => match v.parse::<u64>() {
+            Ok(val) => Some(val),
+            Err(_) => {
+                tracing::warn!("Invalid DYN_MAX_OUTPUT_TOKENS value '{}', ignoring", v);
+                None
+            }
+        },
+        Err(_) => None,
+    };
+    (context_window, max_output_tokens)
+}
+
+/// Resolve context_window for a model: env override takes precedence over MDC.
+fn resolve_context_window(
+    model_name: &str,
+    card_map: &std::collections::HashMap<String, u32>,
+    env_override: Option<u64>,
+) -> Option<u64> {
+    env_override.or_else(|| card_map.get(model_name).map(|&cl| cl as u64))
+}
+
+/// List all models. Returns Anthropic format when `anthropic-version` header
+/// is present, otherwise OpenAI format.
+async fn list_models(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+) -> Result<Response, super::openai::ErrorResponse> {
+    super::openai::check_ready(&state)?;
+
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let models: HashSet<String> = state.manager().model_display_names();
+    let card_map = build_model_context_map(&state);
+    let (cw_override, mot_override) = model_env_overrides();
+
+    if headers.contains_key("anthropic-version") {
+        let created_at = chrono::DateTime::from_timestamp(created as i64, 0)
+            .unwrap_or_default()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let data: Vec<serde_json::Value> = models
+            .iter()
+            .map(|name| {
+                let mut obj = serde_json::json!({
+                    "id": name,
+                    "display_name": name,
+                    "type": "model",
+                    "created_at": created_at,
+                });
+                if let Some(cw) = resolve_context_window(name, &card_map, cw_override) {
+                    obj["max_input_tokens"] = serde_json::json!(cw);
+                }
+                if let Some(mot) = mot_override {
+                    obj["max_tokens"] = serde_json::json!(mot);
+                }
+                obj
+            })
+            .collect();
+        let first_id = data
+            .first()
+            .and_then(|d| d["id"].as_str().map(String::from));
+        let last_id = data.last().and_then(|d| d["id"].as_str().map(String::from));
+        return Ok(Json(serde_json::json!({
+            "data": data,
+            "has_more": false,
+            "first_id": first_id,
+            "last_id": last_id,
+        }))
+        .into_response());
+    }
+
+    // OpenAI format fallback
+    let data: Vec<serde_json::Value> = models
+        .iter()
+        .map(|name| {
+            let mut obj = serde_json::json!({
+                "id": name,
+                "object": "model",
+                "created": created,
+                "owned_by": "nvidia",
+            });
+            if let Some(cw) = resolve_context_window(name, &card_map, cw_override) {
+                obj["context_window"] = serde_json::json!(cw);
+            }
+            if let Some(mot) = mot_override {
+                obj["max_output_tokens"] = serde_json::json!(mot);
+            }
+            obj
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "object": "list",
+        "data": data,
+    }))
+    .into_response())
+}
+
+/// Retrieve a single model by ID. Returns Anthropic format when
+/// `anthropic-version` header is present, otherwise OpenAI format.
+///
+/// The model ID may contain slashes (e.g. `Qwen/Qwen3.5-35B-A3B-FP8`),
+/// which is why this uses a wildcard `/{*model_id}` path parameter.
+async fn get_model(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    axum::extract::Path(model_id): axum::extract::Path<String>,
+) -> Result<Response, super::openai::ErrorResponse> {
+    super::openai::check_ready(&state)?;
+
+    // Strip leading slash from wildcard capture (axum `/{*key}` includes it).
+    let model_id = model_id.strip_prefix('/').unwrap_or(&model_id);
+
+    let models: HashSet<String> = state.manager().model_display_names();
+    if !models.contains(model_id) {
+        return Err(super::openai::ErrorMessage::model_not_found());
+    }
+
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let card_map = build_model_context_map(&state);
+    let (cw_override, mot_override) = model_env_overrides();
+    let context_window = resolve_context_window(model_id, &card_map, cw_override);
+
+    if headers.contains_key("anthropic-version") {
+        let created_at = chrono::DateTime::from_timestamp(created as i64, 0)
+            .unwrap_or_default()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let mut obj = serde_json::json!({
+            "id": model_id,
+            "display_name": model_id,
+            "type": "model",
+            "created_at": created_at,
+        });
+        if let Some(cw) = context_window {
+            obj["max_input_tokens"] = serde_json::json!(cw);
+        }
+        if let Some(mot) = mot_override {
+            obj["max_tokens"] = serde_json::json!(mot);
+        }
+        Ok(Json(obj).into_response())
+    } else {
+        let mut obj = serde_json::json!({
+            "id": model_id,
+            "object": "model",
+            "created": created,
+            "owned_by": "nvidia",
+        });
+        if let Some(cw) = context_window {
+            obj["context_window"] = serde_json::json!(cw);
+        }
+        if let Some(mot) = mot_override {
+            obj["max_output_tokens"] = serde_json::json!(mot);
+        }
+        Ok(Json(obj).into_response())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -452,6 +717,50 @@ fn strip_billing_preamble(system: &mut Option<SystemContent>) {
             content.text = trimmed[newline_pos + 1..].to_string();
         }
     }
+}
+
+/// Estimate input token count for an Anthropic request.
+///
+/// Uses the same heuristic as `AnthropicCountTokensRequest::estimate_tokens()`
+/// (sum character lengths / 3). This populates `input_tokens` in the streaming
+/// `message_start` event, since the engine only reports prompt token counts on
+/// the final chunk.
+fn estimate_input_tokens(req: &AnthropicCreateMessageRequest) -> u32 {
+    // Build a temporary count-tokens request to reuse the existing estimator.
+    let count_req = AnthropicCountTokensRequest {
+        model: req.model.clone(),
+        messages: req.messages.clone(),
+        system: req.system.clone(),
+        tools: req.tools.clone(),
+    };
+    count_req.estimate_tokens()
+}
+
+/// Build an Anthropic-formatted error response from a canonical
+/// [`SanitizedError`] variant. The status, public message, and Anthropic
+/// `error_type` all come from the variant; `details` are logged
+/// server-side but never reach the client.
+fn anthropic_sanitized_error_with_details(
+    err: SanitizedError,
+    details: impl std::fmt::Display,
+) -> Response {
+    let status = err.status();
+    if err.log_as_error() {
+        tracing::error!(status = %status, "Anthropic {err}: {details}");
+    } else {
+        tracing::debug!(status = %status, "Anthropic {err}: {details}");
+    }
+    (
+        status,
+        Json(AnthropicErrorResponse {
+            object_type: "error".to_string(),
+            error: AnthropicErrorBody {
+                error_type: err.anthropic_type().to_string(),
+                message: err.to_string(),
+            },
+        }),
+    )
+        .into_response()
 }
 
 /// Build an Anthropic-formatted error response.

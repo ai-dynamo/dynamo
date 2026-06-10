@@ -23,7 +23,7 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	corev1 "k8s.io/api/core/v1"
@@ -40,7 +40,7 @@ func ReconcileModelServicesForComponents(
 	ctx context.Context,
 	reconciler commonController.Reconciler,
 	owner client.Object,
-	components map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec,
+	components map[string]*v1beta1.DynamoComponentDeploymentSharedSpec,
 	namespace string,
 ) error {
 	logger := log.FromContext(ctx)
@@ -165,7 +165,7 @@ func GenerateServiceName(baseModelName string) string {
 
 // AddBaseModelLabel adds the base model hash label to a label map if modelRef is present
 // Uses a hash of the model name to avoid label length/character restrictions
-func AddBaseModelLabel(labels map[string]string, modelRef *v1alpha1.ModelReference) {
+func AddBaseModelLabel(labels map[string]string, modelRef *v1beta1.ModelReference) {
 	if labels == nil || modelRef == nil || modelRef.Name == "" {
 		return
 	}
@@ -173,7 +173,7 @@ func AddBaseModelLabel(labels map[string]string, modelRef *v1alpha1.ModelReferen
 }
 
 // AddBaseModelAnnotation adds the base model annotation to preserve the original model name
-func AddBaseModelAnnotation(annotations map[string]string, modelRef *v1alpha1.ModelReference) {
+func AddBaseModelAnnotation(annotations map[string]string, modelRef *v1beta1.ModelReference) {
 	if annotations == nil || modelRef == nil || modelRef.Name == "" {
 		return
 	}

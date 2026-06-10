@@ -12,7 +12,7 @@ use crate::protocols::openai::chat_completions::{
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 
-use dynamo_async_openai::types::{ChatChoiceStream, ChatCompletionStreamResponseDelta};
+use dynamo_protocols::types::{ChatChoiceStream, ChatCompletionStreamResponseDelta};
 use futures::StreamExt;
 
 type AuditStream =
@@ -90,7 +90,7 @@ where
                 tracing::warn!("audit: aggregation future canceled/failed");
                 // Return minimal response if aggregation failed
                 NvCreateChatCompletionResponse {
-                    inner: dynamo_async_openai::types::CreateChatCompletionResponse {
+                    inner: dynamo_protocols::types::CreateChatCompletionResponse {
                         id: String::new(),
                         created: 0,
                         usage: None,
@@ -127,7 +127,7 @@ where
             Err(e) => {
                 tracing::warn!("fold aggregation failed: {e}");
                 let fallback = NvCreateChatCompletionResponse {
-                    inner: dynamo_async_openai::types::CreateChatCompletionResponse {
+                    inner: dynamo_protocols::types::CreateChatCompletionResponse {
                         id: String::new(),
                         created: 0,
                         usage: None,
@@ -149,7 +149,7 @@ where
         rx.await.unwrap_or_else(|_| {
             tracing::warn!("fold aggregation future canceled");
             NvCreateChatCompletionResponse {
-                inner: dynamo_async_openai::types::CreateChatCompletionResponse {
+                inner: dynamo_protocols::types::CreateChatCompletionResponse {
                     id: String::new(),
                     created: 0,
                     usage: None,
@@ -182,7 +182,7 @@ pub fn final_response_to_one_chunk_stream(
         // Convert FunctionCall to FunctionCallStream if present
         #[allow(deprecated)]
         let function_call = ch.message.function_call.as_ref().map(|fc| {
-            dynamo_async_openai::types::FunctionCallStream {
+            dynamo_protocols::types::ChatCompletionStreamResponseDeltaFunctionCall {
                 name: Some(fc.name.clone()),
                 arguments: Some(fc.arguments.clone()),
             }
@@ -194,11 +194,11 @@ pub fn final_response_to_one_chunk_stream(
                 .iter()
                 .enumerate()
                 .map(
-                    |(i, call)| dynamo_async_openai::types::ChatCompletionMessageToolCallChunk {
+                    |(i, call)| dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
                         index: i as u32,
                         id: Some(call.id.clone()),
-                        r#type: Some(call.r#type.clone()),
-                        function: Some(dynamo_async_openai::types::FunctionCallStream {
+                        r#type: Some(dynamo_protocols::types::FunctionType::Function),
+                        function: Some(dynamo_protocols::types::FunctionCallStream {
                             name: Some(call.function.name.clone()),
                             arguments: Some(call.function.arguments.clone()),
                         }),
@@ -221,14 +221,13 @@ pub fn final_response_to_one_chunk_stream(
             index: idx as u32,
             delta,
             finish_reason: ch.finish_reason,
-            stop_reason: ch.stop_reason.clone(),
             logprobs: ch.logprobs.clone(),
         };
         choices.push(choice);
     }
 
     let chunk = NvCreateChatCompletionStreamResponse {
-        inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+        inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
             id: resp.inner.id.clone(),
             object: "chat.completion.chunk".to_string(),
             created: resp.inner.created,
@@ -254,7 +253,7 @@ pub fn final_response_to_one_chunk_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_async_openai::types::{
+    use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta,
         FinishReason, Role,
     };
@@ -278,12 +277,11 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: None,
         };
 
         let response = NvCreateChatCompletionStreamResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test-id".to_string(),
                 choices: vec![choice],
                 created: 1234567890,
@@ -319,12 +317,11 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: Some(FinishReason::Stop),
-            stop_reason: None,
             logprobs: None,
         };
 
         let response = NvCreateChatCompletionStreamResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test-id".to_string(),
                 choices: vec![choice],
                 created: 1234567890,
@@ -379,8 +376,9 @@ mod tests {
         ];
 
         let input_stream = stream::iter(chunks.clone());
-        let (passthrough, _future) = scan_aggregate_with_future(input_stream);
+        let (passthrough, future) = scan_aggregate_with_future(input_stream);
         let results: Vec<_> = passthrough.collect().await;
+        let final_resp = future.await;
 
         // Verify chunk count
         assert_eq!(results.len(), 3, "Should pass through all chunks unchanged");
@@ -392,6 +390,14 @@ mod tests {
 
         // Verify complete content reconstruction
         assert_eq!(reconstruct_content(&results), "Hello World");
+        assert_eq!(
+            final_resp.inner.choices[0]
+                .message
+                .content
+                .as_ref()
+                .unwrap(),
+            &ChatCompletionMessageContent::Text("Hello World".to_string())
+        );
     }
 
     #[tokio::test]
@@ -435,7 +441,7 @@ mod tests {
         // Test that metadata (id, event, comment) is preserved through passthrough
         let chunk_with_metadata = Annotated {
             data: Some(NvCreateChatCompletionStreamResponse {
-                inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                     id: "test-id".to_string(),
                     choices: vec![{
                         #[allow(deprecated)]
@@ -452,7 +458,6 @@ mod tests {
                                 reasoning_content: None,
                             },
                             finish_reason: None,
-                            stop_reason: None,
                             logprobs: None,
                         }
                     }],

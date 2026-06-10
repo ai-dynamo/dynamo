@@ -15,7 +15,7 @@ use std::sync::Arc;
 /// (e.g. Grace Hopper / Blackwell with NVLink-C2C). Must be accessed only after
 /// a CUDA context has been bound to the current thread.
 static USE_WRITE_COMBINED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
-    if dynamo_config::env_is_truthy("DYN_KVBM_DISABLE_WRITE_COMBINED") {
+    if crate::env_is_truthy("DYN_KVBM_DISABLE_WRITE_COMBINED") {
         tracing::debug!("DYN_KVBM_DISABLE_WRITE_COMBINED set; write-combined disabled");
         return false;
     }
@@ -127,7 +127,7 @@ impl PinnedStorage {
         // Try NUMA-aware allocation unless explicitly disabled
         #[cfg(target_os = "linux")]
         let numa_ptr = if let Some(gpu_id) = device_id {
-            if !super::numa::is_numa_disabled() {
+            if super::numa::is_numa_enabled() {
                 match super::numa::worker_pool::NumaWorkerPool::global()
                     .allocate_pinned_for_gpu(len, gpu_id)
                 {

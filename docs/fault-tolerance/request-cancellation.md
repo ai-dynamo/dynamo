@@ -6,6 +6,84 @@ title: Request Cancellation
 
 This document describes how Dynamo implements request cancellation to cancel in-flight requests between Dynamo workers. Request cancellation allows in-flight requests to terminate early, saving computational resources that would otherwise be spent on responses that are no longer needed.
 
+## How Cancellation Works
+
+### Frontend Cancellation Detection
+
+The frontend monitors each client connection for unexpected disconnects. When a client disconnects before the response is fully delivered, the frontend detects this and initiates cancellation. This covers two scenarios:
+
+1. **Connection closed unexpectedly** — The client disconnects during request processing before response streaming begins.
+2. **Stream closed unexpectedly** — The client disconnects while an active SSE stream is delivering response tokens.
+
+In both cases, the frontend cancels the request's `AsyncEngineContext`, which propagates cancellation to any linked child contexts on downstream workers.
+
+### Worker Cancellation Detection
+
+On the worker side, the runtime monitors the TCP connection from the frontend for cancellation signals. The worker detects cancellation in three scenarios:
+
+1. **Control message received** — The frontend explicitly sent a cancellation control message.
+2. **TCP connection dropped** — The frontend disconnected without sending a control message (e.g., frontend crash or network failure).
+
+When the worker receives a cancellation signal, it sets the corresponding state on the request's `AsyncEngineContext`. It is then up to the worker's engine implementation to observe the cancellation (e.g., by checking `is_stopped()`) and terminate processing accordingly. For details on implementing cancellation handling in a backend worker, see the [Backend Development Guide](../development/backend-guide.md#request-cancellation).
+
+### Cancellation Propagation
+
+Cancellation propagates through multi-tier request chains via linked `AsyncEngineContext` objects. When a parent context is cancelled, all linked child contexts are automatically cancelled as well. This ensures that when a client cancels a request at the frontend, all associated sub-requests on downstream workers are automatically cancelled, saving computational resources across the entire request pipeline.
+
+## Metrics
+
+Dynamo exposes Prometheus metrics to monitor request cancellations at both the frontend and runtime layers.
+
+### Frontend Metric
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `dynamo_frontend_model_cancellation_total` | Counter | Total number of request cancellations detected by the frontend |
+
+#### Labels
+
+| Label | Description | Example Values |
+|-------|-------------|----------------|
+| `model` | The model name from the request | `Qwen/Qwen3-0.6B` |
+| `endpoint` | The API endpoint that received the request | `completions`, `chat_completions`, `embeddings`, `images`, `videos`, `audios`, `responses`, `anthropic_messages`, `tensor` |
+| `request_type` | Whether the request was unary or streaming | `unary`, `stream` |
+
+**Endpoint:** Available on the frontend HTTP service at `/metrics`.
+
+### Runtime Metric
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `dynamo_component_cancellation_total` | Counter | Total number of requests cancelled by the work handler |
+
+This metric uses Dynamo's auto-injected component labels:
+
+| Label | Description | Example Values |
+|-------|-------------|----------------|
+| `dynamo_namespace` | The Dynamo namespace | `dynamo` |
+| `dynamo_component` | The component that handled the request | `backend`, `prefill`, `decode` |
+| `dynamo_endpoint` | The endpoint within the component | `generate` |
+
+The counter uses deduplication logic to ensure that each cancelled request is only counted once, even if both a control message and a socket close are detected for the same request.
+
+Note that this metric records cancellation signals received by the worker, not whether the request was actually aborted at the engine level. It is up to the worker's engine implementation to observe the cancellation (e.g., by checking `is_stopped()`) and terminate processing accordingly.
+
+**Endpoint:** Available on the worker system metrics port at `/metrics` (typically port 9100).
+
+### Example Metrics Output
+
+Frontend metrics (from `/metrics` on the frontend HTTP service):
+```text
+dynamo_frontend_model_cancellation_total{endpoint="chat_completions",model="Qwen/Qwen3-0.6B",request_type="stream"} 5
+dynamo_frontend_model_cancellation_total{endpoint="chat_completions",model="Qwen/Qwen3-0.6B",request_type="unary"} 1
+dynamo_frontend_model_cancellation_total{endpoint="completions",model="Qwen/Qwen3-0.6B",request_type="stream"} 2
+```
+
+Runtime metrics (from `/metrics` on the worker system port):
+```text
+dynamo_component_cancellation_total{dynamo_component="backend",dynamo_endpoint="generate",dynamo_namespace="dynamo"} 8
+```
+
 ## AsyncEngineContext Trait
 
 At the core of Dynamo's request cancellation system is the `AsyncEngineContext` trait. This trait is associated with every request stream and provides lifecycle management for async operations, including stream identification, graceful shutdown capabilities, and immediate termination capabilities.
@@ -88,5 +166,3 @@ async def generate(self, request, context):
     async for response in stream:
         yield response
 ```
-
-This design enables seamless cancellation propagation through multi-tier request chains, ensuring that when a client cancels a request, all associated sub-requests are automatically cancelled, saving computational resources across the entire request pipeline.

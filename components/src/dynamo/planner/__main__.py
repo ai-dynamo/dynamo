@@ -21,10 +21,12 @@ from typing import Union
 from pydantic import BaseModel
 
 from dynamo.planner.config.planner_config import PlannerConfig
-from dynamo.planner.core.agg import AggPlanner
-from dynamo.planner.core.decode import DecodePlanner
-from dynamo.planner.core.disagg import DisaggPlanner
-from dynamo.planner.core.prefill import PrefillPlanner
+from dynamo.planner.core.adapters import (
+    AggPlanner,
+    DecodePlanner,
+    DisaggPlanner,
+    PrefillPlanner,
+)
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 logger = logging.getLogger(__name__)

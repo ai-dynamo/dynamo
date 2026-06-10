@@ -9,7 +9,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_gpu_mem_args
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_sglang_gpu_mem_args
 source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 # Default values
@@ -82,18 +82,24 @@ else
     DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-2}
 fi
 
+# Per-worker CUDA_VISIBLE_DEVICES pinning. In single-gpu mode, inherit from parent
+# (the parallel test runner sets CUDA_VISIBLE_DEVICES); overriding would defeat GPU assignment.
+if [[ "$SINGLE_GPU" == "true" ]]; then
+    _ENCODE_CUDA_PIN=""
+    _PREFILL_CUDA_PIN=""
+    _DECODE_CUDA_PIN=""
+else
+    _ENCODE_CUDA_PIN="CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU"
+    _PREFILL_CUDA_PIN="CUDA_VISIBLE_DEVICES=$DYN_PREFILL_WORKER_GPU"
+    _DECODE_CUDA_PIN="CUDA_VISIBLE_DEVICES=$DYN_DECODE_WORKER_GPU"
+fi
+
 # GPU memory fractions for workers (used with --mem-fraction-static)
 DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.9}
 DYN_PREFILL_GPU_MEM=${DYN_PREFILL_GPU_MEM:-0.9}
 DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.9}
 
-# Profiler override: scale prefill/decode fractions proportionally.
-# Encode worker has no --mem-fraction-static in single-gpu mode, so it's unaffected.
-if [[ -n "${_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE:-}" && "$SINGLE_GPU" == "true" ]]; then
-    _TOTAL_FRAC=$(awk -v p="$DYN_PREFILL_GPU_MEM" -v d="$DYN_DECODE_GPU_MEM" 'BEGIN { printf "%.4f", p + d }')
-    DYN_PREFILL_GPU_MEM=$(awk -v o="$_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE" -v p="$DYN_PREFILL_GPU_MEM" -v t="$_TOTAL_FRAC" 'BEGIN { printf "%.2f", o * p / t }')
-    DYN_DECODE_GPU_MEM=$(awk -v o="$_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE" -v d="$DYN_DECODE_GPU_MEM" -v t="$_TOTAL_FRAC" 'BEGIN { printf "%.2f", o * d / t }')
-fi
+GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
 ENCODE_EXTRA_ARGS=""
 PREFILL_EXTRA_ARGS=""
@@ -104,13 +110,15 @@ if [[ "$SINGLE_GPU" == "true" ]]; then
     # functional-test size so the last worker can initialize without OOM.
     # --context-length keeps the per-request token pool allocation small.
     ENCODE_EXTRA_ARGS=""
-    PREFILL_EXTRA_ARGS="--mem-fraction-static ${DYN_PREFILL_GPU_MEM} --delete-ckpt-after-loading --max-running-requests 2 --context-length 2048 --max-total-tokens 1024"
-    DECODE_EXTRA_ARGS="--mem-fraction-static ${DYN_DECODE_GPU_MEM} --delete-ckpt-after-loading --max-running-requests 2 --context-length 2048 --max-total-tokens 1024"
+    PREFILL_EXTRA_ARGS="--mem-fraction-static ${DYN_PREFILL_GPU_MEM} --delete-ckpt-after-loading --max-running-requests 2 --context-length 2048 --max-total-tokens 1024 $GPU_MEM_ARGS"
+    DECODE_EXTRA_ARGS="--mem-fraction-static ${DYN_DECODE_GPU_MEM} --delete-ckpt-after-loading --max-running-requests 2 --context-length 2048 --max-total-tokens 1024 $GPU_MEM_ARGS"
 fi
 
 # Prevent port collisions: the test framework exports DYN_SYSTEM_PORT which all
 # child processes would inherit. Unset it so only workers that need it set their own.
 unset DYN_SYSTEM_PORT
+
+DISAGG_BOOTSTRAP_PORT="${DYN_DISAGG_BOOTSTRAP_PORT:-12345}"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner --multimodal "Launching Disaggregated Multimodal E/P/D" "$MODEL_NAME" "$HTTP_PORT"
@@ -122,7 +130,7 @@ python3 -m dynamo.frontend &
 # run SGLang multimodal encode worker (frontend-facing: encodes images, routes to worker)
 echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (GPU mem: $DYN_ENCODE_GPU_MEM)..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
-CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU python3 -m dynamo.sglang --multimodal-encode-worker --model-path "$MODEL_NAME" $SERVED_MODEL_ARG --chat-template "$CHAT_TEMPLATE" --skip-tokenizer-init $ENCODE_EXTRA_ARGS &
+env ${_ENCODE_CUDA_PIN:+"$_ENCODE_CUDA_PIN"} python3 -m dynamo.sglang --multimodal-encode-worker --model-path "$MODEL_NAME" $SERVED_MODEL_ARG --chat-template "$CHAT_TEMPLATE" --skip-tokenizer-init $ENCODE_EXTRA_ARGS &
 
 if [[ "$SINGLE_GPU" == "true" ]]; then
     # Wait for encode worker to initialize before starting prefill worker.
@@ -132,11 +140,14 @@ if [[ "$SINGLE_GPU" == "true" ]]; then
 fi
 
 # run SGLang multimodal prefill worker
+# NOTE: Each worker picks a random NCCL port (get_free_port) for torch.distributed.
+# This has a TOCTOU race — the port can be grabbed before init_process_group binds it,
+# causing sporadic EADDRINUSE.  Pass --nccl-port <unique_port> per worker to avoid this.
 # TODO: Remove disable-radix-cache once the issue is fixed.
 # See https://github.com/sgl-project/sglang/pull/11203.
 echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU (GPU mem: $DYN_PREFILL_GPU_MEM)..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
-CUDA_VISIBLE_DEVICES=$DYN_PREFILL_WORKER_GPU python3 -m dynamo.sglang \
+env ${_PREFILL_CUDA_PIN:+"$_PREFILL_CUDA_PIN"} python3 -m dynamo.sglang \
   --multimodal-worker \
   --model-path "$MODEL_NAME" \
   $SERVED_MODEL_ARG \
@@ -145,7 +156,7 @@ CUDA_VISIBLE_DEVICES=$DYN_PREFILL_WORKER_GPU python3 -m dynamo.sglang \
   --trust-remote-code \
   --skip-tokenizer-init \
   --disaggregation-mode prefill \
-  --disaggregation-bootstrap-port 12345 \
+  --disaggregation-bootstrap-port "$DISAGG_BOOTSTRAP_PORT" \
   --host 0.0.0.0 \
   --disable-radix-cache \
   --disaggregation-transfer-backend nixl \
@@ -159,7 +170,7 @@ fi
 
 # run SGLang multimodal decode worker
 echo "Starting decode worker on GPU $DYN_DECODE_WORKER_GPU (GPU mem: $DYN_DECODE_GPU_MEM)..."
-CUDA_VISIBLE_DEVICES=$DYN_DECODE_WORKER_GPU python3 -m dynamo.sglang \
+env ${_DECODE_CUDA_PIN:+"$_DECODE_CUDA_PIN"} python3 -m dynamo.sglang \
   --multimodal-worker \
   --model-path "$MODEL_NAME" \
   $SERVED_MODEL_ARG \
@@ -168,7 +179,7 @@ CUDA_VISIBLE_DEVICES=$DYN_DECODE_WORKER_GPU python3 -m dynamo.sglang \
   --trust-remote-code \
   --skip-tokenizer-init \
   --disaggregation-mode decode \
-  --disaggregation-bootstrap-port 12345 \
+  --disaggregation-bootstrap-port "$DISAGG_BOOTSTRAP_PORT" \
   --host 0.0.0.0 \
   --disaggregation-transfer-backend nixl \
   $DECODE_EXTRA_ARGS &

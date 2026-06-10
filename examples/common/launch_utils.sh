@@ -55,30 +55,54 @@ EXAMPLE_PROMPT_VISUAL="A golden retriever riding a skateboard through a neon-lit
 #   failures are detected immediately regardless of which process it was.
 #
 # Signal handling:
-#   SIGTERM/SIGINT are trapped to exit 0 (clean shutdown).  Without this,
-#   external cleanup (e.g. a test harness sending SIGTERM to the process
-#   group) interrupts wait -n, which returns 143 (128+15).  Combined with
-#   set -e, that non-zero code looks like a test failure.  Trapping TERM/INT
-#   makes external teardown exit cleanly while still propagating real errors
-#   (OOM, Python exceptions, etc.) from child processes.
-#
-# The EXIT trap (set at the top of each script) still fires when this function
-# calls exit, tearing down the remaining processes via kill 0.
+#   SIGTERM/SIGINT exit 0 (clean shutdown).  External cleanup (e.g. a test
+#   harness signalling the process group) otherwise interrupts wait -n and
+#   returns 143, which under set -e looks like a test failure.  Real errors
+#   from child processes (OOM, Python exceptions, etc.) still propagate.
 #
 # Usage:
 #   python -m dynamo.frontend &
 #   python -m dynamo.vllm --model "$MODEL" &
 #   wait_any_exit
+
+# Signals the pgid, reaps tracked jobs, then exits with the given code.
+# Without explicit reaping, children reparent as zombies under a non-reaping
+# subreaper (pytest in CI), and the harness's pgid liveness check
+# (_terminate_process_group in managed_process.py) burns 8s on them.
+dynamo_reap_and_exit() {
+    local _rc=${1:-0}
+    # Shield bash from its own pgid TERM/INT; otherwise the kill below
+    # boomerangs and re-enters this trap.
+    trap '' TERM INT
+    # Always signal the pgid, not just when `jobs -p` is non-empty. A
+    # direct child reaped by `wait -n` upstream leaves jobs -p empty,
+    # but its subprocesses may still be alive in our pgid.
+    kill -TERM 0 2>/dev/null || true
+    wait 2>/dev/null || true
+    exit "$_rc"
+}
+
+# EXIT-trap helper; captures $? before echo clobbers it.
+dynamo_exit_trap() {
+    local _rc=$?
+    echo "Cleaning up..."
+    dynamo_reap_and_exit "$_rc"
+}
+
 wait_any_exit() {
-    trap 'exit 0' TERM INT
+    trap 'dynamo_reap_and_exit 0' TERM INT
     if ! jobs -p | grep -q .; then
         echo "wait_any_exit: no background processes found (script bug: did you forget '&'?)" >&2
         exit 1
     fi
-    wait -n
-    local _rc=$?
+    # `|| _rc=$?` keeps set -e from swallowing the child's exit code.
+    local _rc=0
+    wait -n || _rc=$?
     echo "A background process exited with code $_rc"
-    exit "$_rc"
+    # Backstop signal trap; double quotes bake _rc in before it goes out of scope.
+    # shellcheck disable=SC2064  # intentional expand-at-set-time
+    trap "dynamo_reap_and_exit $_rc" TERM INT
+    dynamo_reap_and_exit "$_rc"
 }
 
 # print_launch_banner [flags] <title> <model> <port> [extra_info_lines...]
@@ -137,9 +161,9 @@ print_launch_banner() {
     echo "Frontend:    http://localhost:$_port"
 
     local _seq_len="${MAX_MODEL_LEN:-${CONTEXT_LENGTH:-${MAX_SEQ_LEN:-}}}"
-    local _frac="${GPU_MEM_FRACTION:-}"
+    local _mem_args="${GPU_MEM_ARGS:-}"
     [[ -n "$_seq_len" ]] && echo "Max seq len: $_seq_len"
-    [[ -n "$_frac" ]] && echo "GPU frac:    $_frac"
+    [[ -n "$_mem_args" ]] && echo "GPU mem:     $_mem_args"
 
     for _line in "$@"; do
         echo "$_line"
@@ -181,6 +205,69 @@ CURL_EOF
 
     echo ""
     echo "=========================================="
+}
+
+# wait_for_ready <url> [timeout_seconds]
+#
+# Polls an HTTP endpoint until it returns 200 or timeout is reached.
+# Useful for waiting for a worker to finish loading before starting the
+# next one (e.g. disaggregated same-GPU deployments where concurrent
+# model loading causes OOM).
+#
+# Args:
+#   url              HTTP URL to poll (e.g. http://localhost:8081/health)
+#   timeout_seconds  Max seconds to wait (default: 30)
+#
+# Returns 0 on success, 1 on timeout.
+wait_for_ready() {
+    local _url="$1"
+    local _timeout="${2:-30}"
+    local _start=$SECONDS
+    echo "Polling $_url (timeout: ${_timeout}s)..."
+    while (( SECONDS - _start < _timeout )); do
+        if curl -sf --max-time 2 "$_url" > /dev/null 2>&1; then
+            echo "Ready after $(( SECONDS - _start ))s"
+            return 0
+        fi
+        sleep 1
+    done
+    echo "WARNING: $_url not ready after ${_timeout}s" >&2
+    return 1
+}
+
+# pick_worker_module <legacy_module> <unified_module> "$@"
+#
+# Strips `--unified` from argv and selects the matching `python -m <module>`
+# target. Sets two globals:
+#
+#   WORKER_MODULE    The chosen module (legacy by default; unified if --unified seen).
+#   REMAINING_ARGS   Array of surviving argv. Caller does `set -- "${REMAINING_ARGS[@]}"`.
+#
+# Why this lives here:
+#   Every disagg launch script needs the same switch. Inlining it three times
+#   means three places to keep in sync; centralising here means the
+#   "consume --unified BEFORE installing the EXIT trap" discipline is enforced
+#   by construction. Other flags (--enable-otel, --model-name, ...) stay in
+#   the caller's own arg loop so engine-specific options keep working.
+#
+# Usage:
+#   pick_worker_module dynamo.vllm dynamo.vllm.unified_main "$@"
+#   set -- "${REMAINING_ARGS[@]}"
+#   trap 'echo Cleaning up...; kill 0' EXIT
+#   # ... caller's own argument parsing on the surviving $@ ...
+pick_worker_module() {
+    local _legacy="$1"
+    local _unified="$2"
+    shift 2
+    WORKER_MODULE="$_legacy"
+    REMAINING_ARGS=()
+    for _arg in "$@"; do
+        if [[ "$_arg" == "--unified" ]]; then
+            WORKER_MODULE="$_unified"
+        else
+            REMAINING_ARGS+=("$_arg")
+        fi
+    done
 }
 
 # print_curl_footer

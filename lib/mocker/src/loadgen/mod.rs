@@ -7,8 +7,9 @@ mod types;
 
 pub use driver::WorkloadDriver;
 pub use types::{
-    ArrivalSpec, DelaySpec, LengthSpec, ReadyTurn, ReplayRequestHashes, RouterSequence,
-    SequenceHashMode, SessionPartitionSpec, SessionTrace, SyntheticTraceSpec, Trace, TurnTrace,
+    AgenticTrace, AgenticTurnTrace, ArrivalSpec, DelaySpec, LengthSpec, ReadyTurn,
+    ReplayRequestHashes, RouterSequence, SequenceHashMode, SessionPartitionSpec, SessionTrace,
+    SyntheticTraceSpec, Trace, TraceFileFormat, TurnTrace,
 };
 
 #[cfg(test)]

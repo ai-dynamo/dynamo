@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: kimi_k2
+model_label: Kimi K2.6
+mode: stream
+cases:
+  TOOLCALLING.stream.1.a:
+    description: Complete tool-call payload delivered in one content chunk
+    ref: derived from TOOLCALLING.batch.1
+    chunks:
+    - delta_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *id001
+      sglang: *id001
+  TOOLCALLING.stream.1.b:
+    description: Complete tool call split across parser-significant boundaries
+    ref: derived from TOOLCALLING.batch.1
+    chunks:
+    - delta_text: <|tool_calls_section_begin|>
+    - delta_text: <|tool_call_begin|>functions.
+    - delta_text: get_weather:0
+    - delta_text: <|tool_call_argument_begin|>
+    - delta_text: '{"location":"'
+    - delta_text: NYC
+    - delta_text: '"}'
+    - delta_text: <|tool_call_end|>
+    - delta_text: <|tool_calls_section_end|>
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &id002
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *id002
+      sglang: *id002

@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-disagg
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - image: my-registry/sglang-runtime:my-tag
+          name: main
+    replicas: 1
+    type: frontend
+  - name: decode
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - |
+            export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
+            export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
+            /sbin/ldconfig
+            nvidia-smi
+            exec python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --served-model-name Qwen/Qwen3-0.6B --page-size 16 --tp 1 --trust-remote-code --skip-tokenizer-init --disaggregation-mode decode --disaggregation-transfer-backend nixl --disaggregation-bootstrap-port "12345" --host "0.0.0.0"
+          command:
+          - /bin/sh
+          - -c
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: my-registry/sglang-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          workingDir: /workspace/examples/backends/sglang
+    replicas: 1
+    type: decode
+  - name: prefill
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - |-
+            export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
+            export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
+            /sbin/ldconfig
+            nvidia-smi
+            exec python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --served-model-name Qwen/Qwen3-0.6B --page-size 16 --tp 1 --trust-remote-code --skip-tokenizer-init --disaggregation-mode prefill --disaggregation-transfer-backend nixl --disaggregation-bootstrap-port "12345" --host "0.0.0.0"
+          command:
+          - /bin/sh
+          - -c
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: my-registry/sglang-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          workingDir: /workspace/examples/backends/sglang
+    replicas: 1
+    type: prefill

@@ -11,7 +11,6 @@ use crate::http::service::Metrics;
 use crate::http::service::service_v2 as http_service;
 
 use crate::discovery::ModelManager;
-use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::protocols::tensor::TensorModelConfig;
 use crate::protocols::tensor::{NvCreateTensorRequest, NvCreateTensorResponse};
 use crate::request_template::RequestTemplate;
@@ -300,8 +299,10 @@ enum Config {
 }
 
 impl Config {
-    fn from_runtime_config(runtime_config: &ModelRuntimeConfig) -> Result<Config, anyhow::Error> {
-        if let Some(tensor_model_config) = runtime_config.tensor_model_config.as_ref() {
+    fn from_tensor_model_config(
+        tensor_model_config: Option<&TensorModelConfig>,
+    ) -> Result<Config, anyhow::Error> {
+        if let Some(tensor_model_config) = tensor_model_config {
             if let Some(triton_model_config) = tensor_model_config.triton_model_config.as_ref() {
                 let model_config = ModelConfig::decode(triton_model_config.as_slice())?;
                 Ok(Config::Triton(model_config))
@@ -320,8 +321,8 @@ impl GrpcInferenceService for KserveService {
         &self,
         request: Request<ModelInferRequest>,
     ) -> Result<Response<ModelInferResponse>, Status> {
-        let model = request.get_ref().model_name.clone();
-        let request = request.into_inner();
+        let (metadata, _extensions, request) = request.into_parts();
+        let model = request.model_name.clone();
         let request_id = request.id.clone();
 
         // [gluo TODO] refactor to reuse code, inference logic is largely the same
@@ -330,7 +331,9 @@ impl GrpcInferenceService for KserveService {
             let tensor_request: NvCreateTensorRequest = NvCreateTensorRequest::try_from(request)
                 .map_err(|e| Status::invalid_argument(format!("Failed to parse request: {}", e)))?;
 
-            let stream = tensor_response_stream(self.state_clone(), tensor_request, false).await?;
+            let stream =
+                tensor_response_stream(self.state_clone(), tensor_request, false, &metadata)
+                    .await?;
 
             let tensor_response = ExtendedNvCreateTensorResponse {
                 response: NvCreateTensorResponse::from_annotated_stream(stream)
@@ -378,7 +381,7 @@ impl GrpcInferenceService for KserveService {
         }
 
         let (stream, parsing_options) =
-            completion_response_stream(self.state_clone(), completion_request).await?;
+            completion_response_stream(self.state_clone(), completion_request, &metadata).await?;
 
         let completion_response =
             NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
@@ -403,7 +406,8 @@ impl GrpcInferenceService for KserveService {
         &self,
         request: Request<tonic::Streaming<ModelInferRequest>>,
     ) -> Result<Response<Self::ModelStreamInferStream>, Status> {
-        let mut request_stream = request.into_inner();
+        let (metadata, _extensions, request_stream) = request.into_parts();
+        let mut request_stream = request_stream;
         let state = self.state_clone();
         let template = self.request_template.clone();
         let output = async_stream::try_stream! {
@@ -437,7 +441,13 @@ impl GrpcInferenceService for KserveService {
                         Status::invalid_argument(format!("Failed to parse request: {}", e))
                     })?;
 
-                    let stream = tensor_response_stream(state.clone(), tensor_request, true).await?;
+                    let stream = tensor_response_stream(
+                        state.clone(),
+                        tensor_request,
+                        true,
+                        &metadata,
+                    )
+                    .await?;
 
                     pin_mut!(stream);
                     while let Some(delta) = stream.next().await {
@@ -494,7 +504,12 @@ impl GrpcInferenceService for KserveService {
 
                 let streaming = completion_request.inner.stream.unwrap_or(false);
 
-                let (stream, parsing_options) = completion_response_stream(state.clone(), completion_request).await?;
+                let (stream, parsing_options) = completion_response_stream(
+                    state.clone(),
+                    completion_request,
+                    &metadata,
+                )
+                .await?;
 
                 if streaming {
                     pin_mut!(stream);
@@ -562,12 +577,13 @@ impl GrpcInferenceService for KserveService {
             .find(|card| request_model_name == &card.display_name)
         {
             if card.model_type.supports_tensor() {
-                let config = Config::from_runtime_config(&card.runtime_config).map_err(|e| {
-                    Status::invalid_argument(format!(
-                        "Model '{}' has type Tensor but: {}",
-                        request_model_name, e
-                    ))
-                })?;
+                let config = Config::from_tensor_model_config(card.tensor_model_config.as_ref())
+                    .map_err(|e| {
+                        Status::invalid_argument(format!(
+                            "Model '{}' has type Tensor but: {}",
+                            request_model_name, e
+                        ))
+                    })?;
                 match config {
                     Config::Triton(model_config) => {
                         return Ok(Response::new(ModelMetadataResponse {
@@ -681,12 +697,13 @@ impl GrpcInferenceService for KserveService {
             .find(|card| request_model_name == &card.display_name)
         {
             if card.model_type.supports_tensor() {
-                let config = Config::from_runtime_config(&card.runtime_config).map_err(|e| {
-                    Status::invalid_argument(format!(
-                        "Model '{}' has type Tensor but: {}",
-                        request_model_name, e
-                    ))
-                })?;
+                let config = Config::from_tensor_model_config(card.tensor_model_config.as_ref())
+                    .map_err(|e| {
+                        Status::invalid_argument(format!(
+                            "Model '{}' has type Tensor but: {}",
+                            request_model_name, e
+                        ))
+                    })?;
                 match config {
                     Config::Triton(model_config) => {
                         return Ok(Response::new(ModelConfigResponse {
@@ -784,9 +801,11 @@ impl GrpcInferenceService for KserveService {
         &self,
         _request: Request<inference::ServerReadyRequest>,
     ) -> Result<Response<inference::ServerReadyResponse>, Status> {
-        let has_models = !self.state.manager().get_model_cards().is_empty();
+        // Only report ready when at least one model has a WorkerSet that can
+        // actually serve an inference request — a registered ModelDeploymentCard
+        // is not enough (the WorkerSet is wired up afterwards).
         Ok(Response::new(inference::ServerReadyResponse {
-            ready: has_models,
+            ready: self.state.manager().has_any_ready_model(),
         }))
     }
 
@@ -795,14 +814,11 @@ impl GrpcInferenceService for KserveService {
         request: Request<inference::ModelReadyRequest>,
     ) -> Result<Response<inference::ModelReadyResponse>, Status> {
         let request_model_name = &request.into_inner().name;
-        let is_ready = self
-            .state
-            .manager()
-            .get_model_cards()
-            .into_iter()
-            .any(|card| request_model_name == &card.display_name);
         Ok(Response::new(inference::ModelReadyResponse {
-            ready: is_ready,
+            ready: self
+                .state
+                .manager()
+                .is_model_ready_to_serve(request_model_name),
         }))
     }
 }

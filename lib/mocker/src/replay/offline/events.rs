@@ -21,9 +21,15 @@ pub(crate) enum SimulationEventKind {
         completed_requests: usize,
         output_signals: Vec<OutputSignal>,
         kv_events: Vec<dynamo_kv_router::protocols::RouterEvent>,
+        accept_length_output_tokens: usize,
+        accept_length_decode_forwards: usize,
     },
     DecodeHandoff {
         uuid: Uuid,
+    },
+    WorkerReady {
+        stage: SimulationWorkerStage,
+        worker_id: usize,
     },
 }
 

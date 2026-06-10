@@ -8,11 +8,19 @@ This module defines the default health check payload for vLLM backends.
 """
 
 import logging
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
-from dynamo.health_check import HealthCheckPayload
+from dynamo.health_check import HEALTH_CHECK_KEY, HealthCheckPayload
 
 logger = logging.getLogger(__name__)
+
+
+def _layer_probe_marker(payload: dict[str, Any]) -> dict[str, Any]:
+    """Layer HEALTH_CHECK_KEY onto a payload dict (reserved for future use)."""
+    payload = dict(payload)
+    payload[HEALTH_CHECK_KEY] = True
+    return payload
+
 
 if TYPE_CHECKING:
     from vllm.v1.engine.async_llm import AsyncLLM
@@ -101,6 +109,48 @@ class VllmHealthCheckPayload(HealthCheckPayload):
         self.default_payload = _make_default_payload(engine_client, use_text_input)
         super().__init__()
 
+    def to_dict(self) -> dict[str, Any]:
+        return _layer_probe_marker(super().to_dict())
+
+
+class VllmEmbeddingHealthCheckPayload(HealthCheckPayload):
+    """
+    vLLM-specific health check payload for pooling/embedding workers.
+
+    Embedding workers run an ``AsyncLLM`` in pooling mode and serve the
+    ``EmbeddingWorkerHandler.generate`` entry point, which expects the
+    OpenAI ``/v1/embeddings`` request shape -- ``{model, input}`` -- not
+    the token-id/sampling-options shape the chat health check uses.
+    Sending the chat payload through the embedding handler raises
+    "missing required 'input' field" and the canary stays unhealthy
+    forever, so the runtime's ``/health`` never flips to 200 and any
+    caller that waits on it (``health_check_workers=True`` in the test
+    harness, K8s readiness probes, etc.) races against worker startup.
+
+    The probe runs a real pooling forward pass with a short input, so
+    "healthy" actually means "the engine produced an embedding," not
+    just "the process is up." Cost is one small batch every probe
+    cycle.
+    """
+
+    def __init__(self, model_name: Optional[str] = None):
+        """
+        Args:
+            model_name: served model name to put on ``request["model"]``.
+                Optional -- ``EmbeddingWorkerHandler.generate`` falls
+                back to ``config.served_model_name`` when the field is
+                absent. Passing it keeps the probe self-describing in
+                worker logs; omit when the caller doesn't have a
+                specific name to advertise.
+        """
+        self.default_payload: dict[str, Any] = {"input": "probe"}
+        if model_name is not None:
+            self.default_payload["model"] = model_name
+        super().__init__()
+
+    def to_dict(self) -> dict[str, Any]:
+        return _layer_probe_marker(super().to_dict())
+
 
 class VllmPrefillHealthCheckPayload(HealthCheckPayload):
     """
@@ -119,6 +169,9 @@ class VllmPrefillHealthCheckPayload(HealthCheckPayload):
         """
         self.default_payload = _make_default_payload(engine_client, use_text_input)
         super().__init__()
+
+    def to_dict(self) -> dict[str, Any]:
+        return _layer_probe_marker(super().to_dict())
 
 
 async def get_bos_token_from_omni(async_omni: "AsyncOmni") -> int:
@@ -180,6 +233,9 @@ class VllmOmniHealthCheckPayload(HealthCheckPayload):
             },
         }
         super().__init__()
+
+    def to_dict(self) -> dict[str, Any]:
+        return _layer_probe_marker(super().to_dict())
 
     @classmethod
     async def create(cls, async_omni: "AsyncOmni") -> "VllmOmniHealthCheckPayload":

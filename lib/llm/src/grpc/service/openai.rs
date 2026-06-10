@@ -9,6 +9,7 @@ use dynamo_runtime::{
 use futures::{Stream, StreamExt, stream};
 use std::sync::Arc;
 
+use crate::http::service::metadata::extract_metadata_from_grpc;
 use crate::protocols::openai::ParsingOptions;
 use crate::protocols::openai::completions::{
     NvCreateCompletionRequest, NvCreateCompletionResponse,
@@ -23,9 +24,9 @@ use crate::http::service::{
     disconnect::{ConnectionHandle, create_connection_monitor},
     metrics::{CancellationLabels, Endpoint, InflightGuard, process_response_and_observe_metrics},
 };
-use dynamo_async_openai::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
+use dynamo_protocols::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
 
-use tonic::Status;
+use tonic::{Status, metadata::MetadataMap};
 
 /// Dynamo Annotation for the request ID
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
@@ -44,6 +45,7 @@ pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 pub async fn completion_response_stream(
     state: Arc<kserve::State>,
     request: NvCreateCompletionRequest,
+    metadata: &MetadataMap,
 ) -> Result<
     (
         impl Stream<Item = Annotated<NvCreateCompletionResponse>>,
@@ -55,12 +57,15 @@ pub async fn completion_response_stream(
     // [WIP] from request id.
     let request_id = get_or_create_request_id(request.inner.user.as_deref());
     let streaming = request.inner.stream.unwrap_or(false);
+    let model_name = request.inner.model.clone();
     let cancellation_labels = CancellationLabels {
-        model: request.inner.model.clone(),
+        model: model_name.clone(),
         endpoint: "grpc_completions".to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = Context::with_id(request, request_id.clone());
+    let metadata = extract_metadata_from_grpc(metadata)
+        .map_err(|err| Status::invalid_argument(err.to_string()))?;
+    let request = Context::with_id_and_metadata(request, request_id.clone(), metadata);
     let context = request.context();
 
     // create the connection handles
@@ -84,14 +89,21 @@ pub async fn completion_response_stream(
     let (engine, parsing_options) = state
         .manager()
         .get_completions_engine_with_parsing(model)
-        .map_err(|_| Status::not_found("model not found"))?;
+        .map_err(|e| match e {
+            crate::discovery::ModelManagerError::ModelUnavailable(_) => {
+                Status::unavailable("model temporarily unavailable")
+            }
+            _ => Status::not_found("model not found"),
+        })?;
 
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
 
-    let inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(model, Endpoint::Completions, streaming);
+    let inflight_guard = state.metrics_clone().create_inflight_guard(
+        model,
+        Endpoint::Completions,
+        streaming,
+        &request_id,
+    );
 
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 
@@ -99,10 +111,16 @@ pub async fn completion_response_stream(
     let annotations = request.annotations();
 
     // issue the generate call on the engine
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| Status::internal(format!("Failed to generate completions: {}", e)))?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        if crate::http::service::metrics::request_was_rejected(e.as_ref()) {
+            state.metrics_clone().inc_rejection(
+                &model_name,
+                crate::http::service::metrics::Endpoint::Completions,
+            );
+            return Status::resource_exhausted(e.to_string());
+        }
+        Status::internal(format!("Failed to generate completions: {}", e))
+    })?;
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -330,6 +348,7 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateCompletionRequest {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         })
     }

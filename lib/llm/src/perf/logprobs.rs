@@ -572,7 +572,7 @@ mod tests {
     use crate::protocols::codec::create_message_stream;
     use crate::protocols::convert_sse_stream;
     use approx::assert_abs_diff_eq;
-    use dynamo_async_openai::types::{
+    use dynamo_protocols::types::{
         ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionStreamResponseDelta,
         ChatCompletionTokenLogprob, FinishReason, Role, TopLogprobs,
     };
@@ -947,18 +947,15 @@ mod tests {
     fn create_mock_response_with_logprobs(
         token_logprobs: Vec<ChatCompletionTokenLogprob>,
     ) -> NvCreateChatCompletionStreamResponse {
-        #[expect(deprecated)]
         NvCreateChatCompletionStreamResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 choices: vec![ChatChoiceStream {
                     index: 0,
                     delta: ChatCompletionStreamResponseDelta {
-                        content: Some(
-                            dynamo_async_openai::types::ChatCompletionMessageContent::Text(
-                                "test".to_string(),
-                            ),
-                        ),
+                        content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                            "test".to_string(),
+                        )),
                         function_call: None,
                         tool_calls: None,
                         role: Some(Role::Assistant),
@@ -966,7 +963,6 @@ mod tests {
                         reasoning_content: None,
                     },
                     finish_reason: Some(FinishReason::Stop),
-                    stop_reason: None,
                     logprobs: Some(ChatChoiceLogprobs {
                         content: Some(token_logprobs),
                         refusal: None,
@@ -986,18 +982,15 @@ mod tests {
     fn create_mock_response_with_multiple_choices(
         choices_logprobs: Vec<Vec<ChatCompletionTokenLogprob>>,
     ) -> NvCreateChatCompletionStreamResponse {
-        #[expect(deprecated)]
         let choices = choices_logprobs
             .into_iter()
             .enumerate()
             .map(|(i, token_logprobs)| ChatChoiceStream {
                 index: i as u32,
                 delta: ChatCompletionStreamResponseDelta {
-                    content: Some(
-                        dynamo_async_openai::types::ChatCompletionMessageContent::Text(
-                            "test".to_string(),
-                        ),
-                    ),
+                    content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                        "test".to_string(),
+                    )),
                     function_call: None,
                     tool_calls: None,
                     role: Some(Role::Assistant),
@@ -1005,7 +998,6 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
-                stop_reason: None,
                 logprobs: Some(ChatChoiceLogprobs {
                     content: Some(token_logprobs),
                     refusal: None,
@@ -1014,7 +1006,7 @@ mod tests {
             .collect();
 
         NvCreateChatCompletionStreamResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 choices,
                 created: 1234567890,
@@ -1343,18 +1335,15 @@ mod tests {
     #[test]
     fn test_logprob_extractor_with_missing_data() {
         // Test with choice that has no logprobs
-        #[expect(deprecated)]
         let response = NvCreateChatCompletionStreamResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 choices: vec![ChatChoiceStream {
                     index: 0,
                     delta: ChatCompletionStreamResponseDelta {
-                        content: Some(
-                            dynamo_async_openai::types::ChatCompletionMessageContent::Text(
-                                "test".to_string(),
-                            ),
-                        ),
+                        content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                            "test".to_string(),
+                        )),
                         function_call: None,
                         tool_calls: None,
                         role: Some(Role::Assistant),
@@ -1362,7 +1351,6 @@ mod tests {
                         reasoning_content: None,
                     },
                     finish_reason: Some(FinishReason::Stop),
-                    stop_reason: None,
                     logprobs: None, // No logprobs
                 }],
                 created: 1234567890,
@@ -1579,7 +1567,7 @@ mod tests {
         // In practice, this would have real logprobs data
 
         NvCreateChatCompletionStreamResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 choices: vec![],
                 created: 1234567890,

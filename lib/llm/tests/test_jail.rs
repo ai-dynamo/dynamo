@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-use dynamo_async_openai::types::{
-    ChatChoiceStream, ChatCompletionStreamResponseDelta, CompletionUsage, FinishReason, Role,
-};
+use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use dynamo_llm::protocols::openai::chat_completions::jail::JailedStream;
+use dynamo_protocols::types::{
+    ChatChoiceStream, ChatCompletionStreamResponseDelta, ChatCompletionToolChoiceOption,
+    CompletionUsage, FinishReason, Role,
+};
 use dynamo_runtime::protocols::annotated::Annotated;
 
 #[cfg(test)]
@@ -16,7 +18,7 @@ mod tests {
     // Test utilities module - shared test infrastructure
     pub(crate) mod test_utils {
         use super::*;
-        use dynamo_async_openai::types::ChatCompletionMessageContent;
+        use dynamo_protocols::types::ChatCompletionMessageContent;
 
         /// Helper to extract text from ChatCompletionMessageContent
         pub fn extract_text(content: &ChatCompletionMessageContent) -> &str {
@@ -43,12 +45,11 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: None,
-                stop_reason: None,
                 logprobs: None,
             };
 
             let response = NvCreateChatCompletionStreamResponse {
-                inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                     id: "test-id".to_string(),
                     choices: vec![choice],
                     created: 1234567890,
@@ -86,12 +87,11 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
-                stop_reason: None,
                 logprobs: None,
             };
 
             let response = NvCreateChatCompletionStreamResponse {
-                inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                     id: "test-id".to_string(),
                     choices: vec![choice],
                     created: 1234567890,
@@ -133,12 +133,11 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: None,
-                stop_reason: None,
                 logprobs: None,
             };
 
             let response = NvCreateChatCompletionStreamResponse {
-                inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                     id: "test-id".to_string(),
                     choices: vec![choice],
                     created: 1234567890,
@@ -179,14 +178,13 @@ mod tests {
                             reasoning_content: None,
                         },
                         finish_reason: None,
-                        stop_reason: None,
                         logprobs: None,
                     }
                 })
                 .collect();
 
             let response = NvCreateChatCompletionStreamResponse {
-                inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                     id: "test-id".to_string(),
                     choices,
                     created: 1234567890,
@@ -227,14 +225,13 @@ mod tests {
                             reasoning_content: None,
                         },
                         finish_reason: Some(FinishReason::Stop),
-                        stop_reason: None,
                         logprobs: None,
                     }
                 })
                 .collect();
 
             let response = NvCreateChatCompletionStreamResponse {
-                inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                     id: "test-id".to_string(),
                     choices,
                     created: 1234567890,
@@ -328,7 +325,7 @@ mod tests {
                 assert!(
                     choice.delta.content.is_none()
                         || choice.delta.content.as_ref().is_none_or(|c| match c {
-                            dynamo_async_openai::types::ChatCompletionMessageContent::Text(t) =>
+                            dynamo_protocols::types::ChatCompletionMessageContent::Text(t) =>
                                 t.is_empty(),
                             _ => false,
                         }),
@@ -943,9 +940,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_jailed_stream_partial_tool_call() {
-        // Tests handling of incomplete tool call when stream ends abruptly
+        // Tests handling of incomplete tool call when stream ends abruptly.
+        // After PR #8888, finalize() runs `try_tool_call_parse_aggregate_finalize`
+        // which enables EOF recovery — the parser balances the unclosed braces
+        // and surfaces the call (with whatever args were captured) instead of
+        // dropping it as plain text. Streaming early-exit still requires the
+        // end-token to actually arrive, so this only fires at stream end.
+        //
         // Input: "Starting function call. " + "<TOOLCALL>[{\"name\": \"incomplete_func\", \"arguments\": {" (no end marker)
-        // Expected output: 2 chunks [Content(), Content(partial)] - partial accumulated content released on stream end
+        // Expected output: 2 chunks [Content(), ToolCall(incomplete_func, {})]
         let chunks = vec![
             create_mock_response_chunk("Starting function call. ".to_string(), 0),
             create_mock_response_chunk("<TOOLCALL>".to_string(), 0),
@@ -963,26 +966,14 @@ mod tests {
 
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        // Should handle partial tool call gracefully - releases accumulated content on stream end
         assert_eq!(
             results.len(),
             2,
-            "Should handle partial tool call and release content"
+            "Should emit prefix content + recovered tool call"
         );
 
-        // Verify exact output structure: [Content(), Content(accumulated partial)]
         test_utils::assert_content(&results[0], "Starting function call. ");
-        test_utils::assert_content(
-            &results[1],
-            "<TOOLCALL>[{\"name\": \"incomplete_func\", \"arguments\": {",
-        );
-
-        // Verify partial content is preserved as text since no valid tool call could be parsed
-        let reconstructed = test_utils::reconstruct_content(&results);
-        assert_eq!(
-            reconstructed,
-            "Starting function call. <TOOLCALL>[{\"name\": \"incomplete_func\", \"arguments\": {"
-        );
+        test_utils::assert_tool_call(&results[1], "incomplete_func", serde_json::json!({}));
     }
 
     #[tokio::test]
@@ -1883,7 +1874,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_jailed_stream_harmony_parser() {
-        // Harmony format with analysis text and a tool call encoded in special tags
+        // With only the Harmony tool parser configured, analysis is internal
+        // reasoning and must not be exposed as normal content.
         let chunks = vec![
             create_mock_response_chunk(
                 "<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|>"
@@ -1908,22 +1900,11 @@ mod tests {
         let jail = JailedStream::builder().tool_call_parser("harmony").build();
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        // Should have at least one output containing both analysis text and parsed tool call
+        // Should have at least one output containing the parsed tool call.
         assert!(!results.is_empty());
 
-        // Verify the analysis text appears as content in one of the outputs
-        let has_analysis_text = results.iter().any(|r| {
-            r.data
-                .as_ref()
-                .and_then(|d| d.inner.choices.first())
-                .and_then(|c| c.delta.content.as_ref())
-                .map(|content| {
-                    test_utils::extract_text(content)
-                        .contains("Need to use function get_current_weather.")
-                })
-                .unwrap_or(false)
-        });
-        assert!(has_analysis_text, "Should contain extracted analysis text");
+        let content = test_utils::reconstruct_content(&results);
+        assert_eq!(content, "");
 
         // Verify a tool call was parsed with expected name and args
         let tool_call_idx = results
@@ -1935,6 +1916,117 @@ mod tests {
             "get_current_weather",
             json!({"location": "San Francisco"}),
         );
+    }
+
+    #[tokio::test]
+    async fn test_jailed_stream_harmony_bare_commentary_marker_split() {
+        // TOOLCALLING.stream.3: gpt-oss may start a tool call directly at the
+        // commentary channel marker, and the marker can split across chunks.
+        let chunks = vec![
+            create_mock_response_chunk("<|".to_string(), 0),
+            create_mock_response_chunk("cha".to_string(), 0),
+            create_mock_response_chunk("nnel|".to_string(), 0),
+            create_mock_response_chunk(">commentary".to_string(), 0),
+            create_mock_response_chunk(" to=functions.get_w".to_string(), 0),
+            create_mock_response_chunk("ea".to_string(), 0),
+            create_mock_response_chunk("the".to_string(), 0),
+            create_mock_response_chunk("r <|c".to_string(), 0),
+            create_mock_response_chunk("onstrain|>j".to_string(), 0),
+            create_mock_response_chunk("son<|message|>{\"loc".to_string(), 0),
+            create_mock_response_chunk("at".to_string(), 0),
+            create_mock_response_chunk("ion".to_string(), 0),
+            create_mock_response_chunk("\":\"NY".to_string(), 0),
+            create_mock_response_chunk("C\"}<|call|>".to_string(), 0),
+        ];
+
+        let input_stream = stream::iter(chunks);
+        let jail = JailedStream::builder().tool_call_parser("harmony").build();
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        let content = test_utils::reconstruct_content(&results);
+        assert_eq!(content, "");
+        assert!(!content.contains("<|channel|>"));
+        let tool_call_idx = results
+            .iter()
+            .position(test_utils::has_tool_call)
+            .expect("Should have a tool call result");
+        test_utils::assert_tool_call(
+            &results[tool_call_idx],
+            "get_weather",
+            json!({"location": "NYC"}),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_jailed_stream_harmony_analysis_only_drops_content() {
+        let chunks = vec![create_mock_response_chunk(
+            "<|channel|>analysis<|message|>Need to inspect the request.<|end|>".to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(chunks);
+        let jail = JailedStream::builder().tool_call_parser("harmony").build();
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        let content = test_utils::reconstruct_content(&results);
+        assert_eq!(content, "");
+        assert!(!content.contains("<|channel|>"));
+        assert!(!results.iter().any(test_utils::has_tool_call));
+    }
+
+    #[tokio::test]
+    async fn test_jailed_stream_harmony_truncated_call_drops_analysis_without_marker_leak() {
+        let chunks = vec![create_mock_response_chunk(
+            r#"<|channel|>analysis<|message|>Need current weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"Hidden City"}"#.to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(chunks);
+        let jail = JailedStream::builder().tool_call_parser("harmony").build();
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        let content = test_utils::reconstruct_content(&results);
+        assert_eq!(content, "");
+        assert!(!content.contains("<|channel|>"));
+        assert!(!content.contains("Need current weather."));
+        assert!(!content.contains("Hidden City"));
+        assert!(!results.iter().any(test_utils::has_tool_call));
+    }
+
+    #[tokio::test]
+    async fn test_jailed_stream_harmony_drops_directed_non_function_commentary() {
+        let chunks = vec![create_mock_response_chunk(
+            r#"<|start|>assistant<|channel|>commentary to=browser.search <|constrain|>json<|message|>{"query":"secret weather"}<|call|>"#.to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(chunks);
+        let jail = JailedStream::builder().tool_call_parser("harmony").build();
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        let content = test_utils::reconstruct_content(&results);
+        assert_eq!(content, "");
+        assert!(!content.contains("secret weather"));
+        assert!(!content.contains("<|channel|>"));
+        assert!(!results.iter().any(test_utils::has_tool_call));
+    }
+
+    #[tokio::test]
+    async fn test_jailed_stream_harmony_drops_recipientless_tool_call_payload() {
+        let chunks = vec![create_mock_response_chunk(
+            r#"<|start|>assistant<|channel|>commentary <|constrain|>json<|message|>{"location":"NYC"}<|call|>"#.to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(chunks);
+        let jail = JailedStream::builder().tool_call_parser("harmony").build();
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        let content = test_utils::reconstruct_content(&results);
+        assert_eq!(content, "");
+        assert!(!content.contains("NYC"));
+        assert!(!content.contains("<|channel|>"));
+        assert!(!results.iter().any(test_utils::has_tool_call));
     }
 
     #[tokio::test]
@@ -2127,6 +2219,7 @@ mod tests {
                     "filter": {"type": "string"},
                 },
             })),
+            strict: None,
         }];
 
         let input_stream = stream::iter(chunks);
@@ -2384,7 +2477,7 @@ mod tests {
 mod parallel_jail_tests {
     use super::tests::test_utils;
     use super::*;
-    use dynamo_async_openai::types::ChatCompletionMessageContent;
+    use dynamo_protocols::types::ChatCompletionMessageContent;
     use futures::StreamExt;
     use futures::stream;
     use serde_json::json;
@@ -2409,14 +2502,13 @@ mod parallel_jail_tests {
                         reasoning_content: None,
                     },
                     finish_reason: None,
-                    stop_reason: None,
                     logprobs: None,
                 }
             })
             .collect();
 
         let response = NvCreateChatCompletionStreamResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test-id".to_string(),
                 choices,
                 created: 1234567890,
@@ -2491,7 +2583,7 @@ mod parallel_jail_tests {
 
             assert_eq!(
                 tool_call.r#type,
-                Some(dynamo_async_openai::types::ChatCompletionToolType::Function),
+                Some(dynamo_protocols::types::FunctionType::Function),
                 "Tool call {} should be of type 'function'",
                 i
             );
@@ -2586,6 +2678,143 @@ mod parallel_jail_tests {
         ];
 
         validate_parallel_streaming_tool_calls(&results, &expected_calls);
+    }
+
+    /// Regression test for issue #6822:
+    /// Hermes-style parallel tool calls in a single chunk must produce N tool call
+    /// results, not 1 call + trailing raw XML text.
+    #[tokio::test]
+    async fn test_parallel_tool_calls_single_chunk_hermes() {
+        let jail = JailedStream::builder().tool_call_parser("hermes").build();
+
+        // Two parallel calls arrive in one streaming chunk (hermes uses JSON inside tags).
+        let input_chunks = vec![test_utils::create_mock_response_chunk(
+            "<tool_call>\n\
+{\"name\": \"get_current_weather\", \"arguments\": {\"city\": \"Dallas\", \"state\": \"TX\"}}\n\
+</tool_call>\n\
+<tool_call>\n\
+{\"name\": \"get_current_weather\", \"arguments\": {\"city\": \"Orlando\", \"state\": \"FL\"}}\n\
+</tool_call>"
+                .to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(input_chunks);
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        assert!(!results.is_empty(), "Should have results");
+
+        let expected_calls = [
+            (
+                "get_current_weather",
+                json!({"city": "Dallas", "state": "TX"}),
+            ),
+            (
+                "get_current_weather",
+                json!({"city": "Orlando", "state": "FL"}),
+            ),
+        ];
+
+        validate_parallel_streaming_tool_calls(&results, &expected_calls);
+
+        // Verify that raw XML does not leak as text content (the original bug).
+        for result in &results {
+            if let Some(ref data) = result.data {
+                for choice in &data.inner.choices {
+                    if let Some(ref content) = choice.delta.content {
+                        let text = test_utils::extract_text(content);
+                        assert!(
+                            !text.contains("<tool_call>"),
+                            "Raw XML must not leak as text content, got: {text:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Regression test for issue #6822:
+    /// Qwen3Coder-style parallel tool calls in a single chunk must produce N tool
+    /// call results (identical format to hermes, different parser name).
+    #[tokio::test]
+    async fn test_parallel_tool_calls_single_chunk_qwen3_coder() {
+        let jail = JailedStream::builder()
+            .tool_call_parser("qwen3_coder")
+            .build();
+
+        let input_chunks = vec![test_utils::create_mock_response_chunk(
+            "<tool_call>\n\
+<function=search>\n\
+<parameter=query>Rust async</parameter>\n\
+</function>\n\
+</tool_call>\n\
+<tool_call>\n\
+<function=search>\n\
+<parameter=query>Python async</parameter>\n\
+</function>\n\
+</tool_call>"
+                .to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(input_chunks);
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        assert!(!results.is_empty(), "Should have results");
+
+        let expected_calls = [
+            ("search", json!({"query": "Rust async"})),
+            ("search", json!({"query": "Python async"})),
+        ];
+
+        validate_parallel_streaming_tool_calls(&results, &expected_calls);
+    }
+
+    /// GLM-4.7 parallel tool calls in a single chunk. GLM uses a distinct
+    /// `<tool_call>func<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>`
+    /// wire format with its own `find_tool_call_end_position_glm47`.
+    /// Regression test: the old single-find end-position function exited after the
+    /// first `</tool_call>`, leaking subsequent calls as raw XML into content.
+    #[tokio::test]
+    async fn test_parallel_tool_calls_single_chunk_glm47() {
+        let jail = JailedStream::builder().tool_call_parser("glm47").build();
+
+        let input_chunks = vec![test_utils::create_mock_response_chunk(
+            "<tool_call>get_weather\
+<arg_key>location</arg_key><arg_value>Boston</arg_value>\
+</tool_call>\
+<tool_call>get_weather\
+<arg_key>location</arg_key><arg_value>New York</arg_value>\
+</tool_call>"
+                .to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(input_chunks);
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        assert!(!results.is_empty(), "Should have results");
+
+        let expected_calls = [
+            ("get_weather", json!({"location": "Boston"})),
+            ("get_weather", json!({"location": "New York"})),
+        ];
+
+        validate_parallel_streaming_tool_calls(&results, &expected_calls);
+
+        for result in &results {
+            if let Some(ref data) = result.data {
+                for choice in &data.inner.choices {
+                    if let Some(ref content) = choice.delta.content {
+                        let text = test_utils::extract_text(content);
+                        assert!(
+                            !text.contains("<tool_call>"),
+                            "Raw XML must not leak as text content, got: {text:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // =============================================================================
@@ -3078,6 +3307,939 @@ mod parallel_jail_tests {
         assert_eq!(
             tool_call_count, 0,
             "Should have no tool calls for empty array"
+        );
+    }
+
+    /// Regression test for #6821: tool_choice=required with qwen3_coder parser.
+    ///
+    /// When tool_choice=required AND a tool_call_parser (e.g. qwen3_coder) is
+    /// configured, the jail must use marker-based mode so the parser handles the
+    /// XML output.  Previously this fell through to Immediate JSON mode which
+    /// could not parse qwen3_coder XML, causing raw XML to leak as content.
+    #[tokio::test]
+    async fn test_tool_choice_required_with_qwen3_coder_parser() {
+        // Simulate qwen3_coder XML output for a single tool call
+        let xml_output = r#"<tool_call>
+<function=get_weather>
+<parameter=city>
+San Francisco
+</parameter>
+<parameter=unit>
+fahrenheit
+</parameter>
+</function>
+</tool_call>"#;
+
+        let input_chunks = vec![test_utils::create_mock_response_chunk(
+            xml_output.to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(input_chunks);
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("qwen3_coder".to_string()),
+            Some(ChatCompletionToolChoiceOption::Required),
+            None,
+            false,
+            input_stream,
+        )
+        .collect()
+        .await;
+
+        // Should have parsed a tool call, not leaked raw XML as content
+        let tool_call_count: usize = results
+            .iter()
+            .map(|r| {
+                r.data.as_ref().map_or(0, |d| {
+                    d.inner
+                        .choices
+                        .iter()
+                        .map(|c: &ChatChoiceStream| {
+                            c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len())
+                        })
+                        .sum::<usize>()
+                })
+            })
+            .sum();
+
+        assert!(
+            tool_call_count >= 1,
+            "tool_choice=required with qwen3_coder should produce at least one tool call, got {}",
+            tool_call_count
+        );
+
+        // Verify the tool call was parsed correctly
+        for r in &results {
+            if let Some(data) = &r.data {
+                for choice in &data.inner.choices {
+                    if let Some(tool_calls) = &choice.delta.tool_calls {
+                        for tc in tool_calls {
+                            assert_eq!(
+                                tc.function.as_ref().unwrap().name.as_deref(),
+                                Some("get_weather"),
+                                "Tool call name should be 'get_weather'"
+                            );
+                        }
+                    }
+                    // Content should be empty, not raw XML
+                    if let Some(content) = &choice.delta.content {
+                        let text = test_utils::extract_text(content);
+                        assert!(
+                            !text.contains("<tool_call>"),
+                            "Raw XML should not leak as content, got: {}",
+                            text
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Test for tool_choice=named with qwen3_coder parser and named_tool_filter.
+    ///
+    /// When tool_choice=named is used with a specific tool_name, the
+    /// preprocessor decision logic should apply the named_tool_filter to ensure
+    /// only the requested tool is parsed, even if the model emits other tools.
+    #[tokio::test]
+    async fn test_tool_choice_named_with_qwen3_coder_parser() {
+        // Simulate qwen3_coder XML output for a single tool call
+        let xml_output = r#"<tool_call>
+<function=get_weather>
+<parameter=city>
+San Francisco
+</parameter>
+<parameter=unit>
+fahrenheit
+</parameter>
+</function>
+</tool_call>"#;
+
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(xml_output.to_string(), 0),
+            test_utils::create_final_response_chunk(0),
+        ];
+
+        let input_stream = stream::iter(input_chunks);
+
+        // Apply tool_choice=named for get_weather
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("qwen3_coder".to_string()),
+            Some(ChatCompletionToolChoiceOption::Named(
+                "get_weather".to_string().into(),
+            )),
+            None,
+            false,
+            input_stream,
+        )
+        .collect()
+        .await;
+
+        // Should have parsed the named tool call
+        let tool_call_count: usize = results
+            .iter()
+            .map(|r| {
+                r.data.as_ref().map_or(0, |d| {
+                    d.inner
+                        .choices
+                        .iter()
+                        .map(|c: &ChatChoiceStream| {
+                            c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len())
+                        })
+                        .sum::<usize>()
+                })
+            })
+            .sum();
+
+        assert!(
+            tool_call_count >= 1,
+            "tool_choice=named with qwen3_coder should produce at least one tool call, got {}",
+            tool_call_count
+        );
+
+        // Verify the tool call was parsed correctly and matches the named tool
+        for r in &results {
+            if let Some(data) = &r.data {
+                for choice in &data.inner.choices {
+                    if let Some(tool_calls) = &choice.delta.tool_calls {
+                        for tc in tool_calls {
+                            assert_eq!(
+                                tc.function.as_ref().unwrap().name.as_deref(),
+                                Some("get_weather"),
+                                "Tool call name should match the named tool choice"
+                            );
+                        }
+                    }
+                    // Content should be empty, not raw XML
+                    if let Some(content) = &choice.delta.content {
+                        let text = test_utils::extract_text(content);
+                        assert!(
+                            !text.contains("<tool_call>"),
+                            "Raw XML should not leak as content, got: {}",
+                            text
+                        );
+                    }
+                }
+            }
+        }
+
+        // OpenAI spec: whenever tool_calls are emitted, finish_reason must be
+        // ToolCalls — regardless of whether tool_choice was auto, required, or named.
+        let finish_reasons: Vec<_> = results
+            .iter()
+            .filter_map(|r| {
+                r.data
+                    .as_ref()
+                    .and_then(|d| d.inner.choices.first().and_then(|c| c.finish_reason))
+            })
+            .collect();
+
+        assert!(
+            finish_reasons.contains(&FinishReason::ToolCalls),
+            "tool_choice=named with emitted tool_calls should have ToolCalls finish reason, got {:?}",
+            finish_reasons
+        );
+    }
+
+    /// tool_choice=required + parser configured + backend applied guided
+    /// decoding → model emits a bare JSON array of tool calls.
+    ///
+    /// This is the minimax/SGLang-after-PR-#6620 regression: previously we
+    /// fell through to the marker-based parser (looking for `<minimax:
+    /// tool_call>` etc.) which cannot parse unmarked JSON, so tool_calls
+    /// were empty and the JSON leaked into content/reasoning_content.
+    /// The Immediate branch now routes through base_json_parser first.
+    #[tokio::test]
+    async fn test_tool_choice_required_with_parser_bare_json() {
+        let bare_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(bare_json.to_string(), 0),
+            test_utils::create_final_response_chunk(0),
+        ];
+
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("minimax_m2".to_string()),
+            Some(ChatCompletionToolChoiceOption::Required),
+            None,
+            false,
+            stream::iter(input_chunks),
+        )
+        .collect()
+        .await;
+
+        let tool_calls: Vec<_> = results
+            .iter()
+            .flat_map(|r| {
+                r.data
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|d| d.inner.choices.iter())
+                    .flat_map(|c| c.delta.tool_calls.iter().flatten())
+            })
+            .cloned()
+            .collect();
+
+        assert_eq!(
+            tool_calls.len(),
+            1,
+            "bare JSON array must be parsed by base_json_parser even when parser is set"
+        );
+        assert_eq!(
+            tool_calls[0].function.as_ref().unwrap().name.as_deref(),
+            Some("get_weather")
+        );
+
+        // finish_reason should be rewritten to ToolCalls (required path).
+        let finish_reasons: Vec<_> = results
+            .iter()
+            .filter_map(|r| {
+                r.data
+                    .as_ref()
+                    .and_then(|d| d.inner.choices.first().and_then(|c| c.finish_reason))
+            })
+            .collect();
+        assert!(
+            finish_reasons.contains(&FinishReason::ToolCalls),
+            "tool_choice=required with tool_calls emitted should have ToolCalls finish_reason"
+        );
+
+        // No raw JSON leaked as content.
+        for r in &results {
+            if let Some(data) = &r.data {
+                for choice in &data.inner.choices {
+                    if let Some(content) = &choice.delta.content {
+                        let text = test_utils::extract_text(content);
+                        assert!(
+                            !text.contains("get_weather"),
+                            "tool call JSON should not leak as content, got: {}",
+                            text
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// MiniMax recovers complete inner invokes even when the outer wrapper is
+    /// damaged. Incomplete paired XML fences still do not recover a call, and
+    /// the jail must not surface raw MiniMax protocol markers as content.
+    #[tokio::test]
+    async fn test_minimax_m2_stream_finalize_recovers_complete_inner_invokes() {
+        // These are jail/finalize regression checks for existing parser parity cases:
+        // the first and prefix-preservation rows cover TOOLCALLING.stream.4.a, and
+        // the mid-call body truncation row covers TOOLCALLING.stream.4.b.
+        let cases = [
+            (
+                "complete body without outer close",
+                "<minimax:tool_call>\n\
+                 <invoke name=\"get_weather\">\n\
+                 <parameter name=\"location\">NYC</parameter>\n\
+                 </invoke>",
+                "",
+                1,
+            ),
+            (
+                "mid-call body truncation",
+                "<minimax:tool_call>\n\
+                 <invoke name=\"get_weather\">\n\
+                 <parameter name=\"location\">NY",
+                "",
+                0,
+            ),
+            (
+                "pre-marker prose before truncated call",
+                "I will check that. <minimax:tool_call>\n\
+                 <invoke name=\"get_weather\">\n\
+                 <parameter name=\"location\">NYC</parameter>\n\
+                 </invoke>",
+                "I will check that. ",
+                1,
+            ),
+        ];
+
+        for (label, partial_tool_call, expected_content, expected_tool_call_count) in cases {
+            let input_chunks = vec![
+                test_utils::create_mock_response_chunk(partial_tool_call.to_string(), 0),
+                test_utils::create_final_response_chunk(0),
+            ];
+
+            let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+                Some("minimax_m2".to_string()),
+                None,
+                None,
+                false,
+                stream::iter(input_chunks),
+            )
+            .collect()
+            .await;
+
+            let tool_call_count: usize = results
+                .iter()
+                .map(|r| {
+                    r.data.as_ref().map_or(0, |d| {
+                        d.inner
+                            .choices
+                            .iter()
+                            .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
+                            .sum::<usize>()
+                    })
+                })
+                .sum();
+            assert_eq!(
+                tool_call_count, expected_tool_call_count,
+                "{label}: unexpected recovered MiniMax tool call count"
+            );
+
+            let content = test_utils::reconstruct_content(&results);
+            assert!(
+                !content.contains("<minimax:tool_call>") && !content.contains("<invoke"),
+                "{label}: MiniMax protocol markup leaked into content: {content:?}"
+            );
+            assert_eq!(
+                content, expected_content,
+                "{label}: unexpected residual content"
+            );
+        }
+    }
+
+    fn tool_call_names(results: &[Annotated<NvCreateChatCompletionStreamResponse>]) -> Vec<String> {
+        results
+            .iter()
+            .flat_map(|r| r.data.as_ref().into_iter())
+            .flat_map(|d| d.inner.choices.iter())
+            .flat_map(|c| c.delta.tool_calls.iter().flatten())
+            .filter_map(|tc| {
+                tc.function
+                    .as_ref()
+                    .and_then(|function| function.name.clone())
+            })
+            .collect()
+    }
+
+    fn assert_content_omits_markers(
+        label: &str,
+        results: &[Annotated<NvCreateChatCompletionStreamResponse>],
+        markers: &[&str],
+    ) {
+        let content = test_utils::reconstruct_content(results);
+        for marker in markers {
+            assert!(
+                !content.contains(marker),
+                "{label}: marker {marker:?} leaked into content: {content:?}"
+            );
+        }
+    }
+
+    /// Bare-body recovery must also work when the recovery marker itself is
+    /// split across stream chunks. Otherwise the jail emits protocol bytes as
+    /// normal content before the aggregate parser gets a chance to recover.
+    #[tokio::test]
+    async fn test_partial_marker_buffer_flushes_at_stream_end() {
+        for suffix in ["c", "ca", "cal", "call"] {
+            let expected = format!("I will {suffix}");
+            let input_chunks = vec![test_utils::create_mock_response_chunk(expected.clone(), 0)];
+            let jail = JailedStream::builder().tool_call_parser("gemma4").build();
+            let results: Vec<_> = jail
+                .apply_with_finish_reason(stream::iter(input_chunks))
+                .collect()
+                .await;
+
+            assert_eq!(test_utils::reconstruct_content(&results), expected);
+            assert!(tool_call_names(&results).is_empty());
+        }
+
+        let expected = "I will call";
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(expected.to_string(), 0),
+            test_utils::create_final_response_chunk(0),
+        ];
+        let jail = JailedStream::builder().tool_call_parser("gemma4").build();
+        let results: Vec<_> = jail
+            .apply_with_finish_reason(stream::iter(input_chunks))
+            .collect()
+            .await;
+
+        assert_eq!(test_utils::reconstruct_content(&results), expected);
+        let finish_chunks: Vec<_> = results
+            .iter()
+            .filter_map(|result| result.data.as_ref())
+            .flat_map(|data| data.inner.choices.iter())
+            .filter(|choice| choice.finish_reason.is_some())
+            .collect();
+        assert_eq!(finish_chunks.len(), 1);
+        let content = finish_chunks[0]
+            .delta
+            .content
+            .as_ref()
+            .expect("partial marker buffer should flush with the final finish chunk");
+        assert_eq!(test_utils::extract_text(content), "call");
+
+        let mut terminal_content_chunk =
+            test_utils::create_mock_response_chunk(expected.to_string(), 0);
+        terminal_content_chunk.data.as_mut().unwrap().inner.choices[0].finish_reason =
+            Some(FinishReason::Stop);
+        let jail = JailedStream::builder().tool_call_parser("gemma4").build();
+        let results: Vec<_> = jail
+            .apply_with_finish_reason(stream::iter(vec![terminal_content_chunk]))
+            .collect()
+            .await;
+        let content_chunks: Vec<_> = results
+            .iter()
+            .filter_map(|result| result.data.as_ref())
+            .flat_map(|data| data.inner.choices.iter())
+            .filter_map(|choice| {
+                choice
+                    .delta
+                    .content
+                    .as_ref()
+                    .map(|content| (test_utils::extract_text(content), choice.finish_reason))
+            })
+            .collect();
+        assert_eq!(
+            content_chunks,
+            vec![("I will ", None), ("call", Some(FinishReason::Stop))]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_gemma4_call_prefix_prose_passes_without_waiting_for_eof() {
+        let expected = "I will call: you tomorrow";
+        let cases = [
+            vec![expected],
+            vec!["I will ca", "ll: you tomorrow"],
+            vec!["I will call:", " you tomorrow"],
+        ];
+
+        for chunks in cases {
+            let input_chunks = chunks
+                .into_iter()
+                .map(|chunk| test_utils::create_mock_response_chunk(chunk.to_string(), 0))
+                .chain(std::iter::once(test_utils::create_final_response_chunk(0)));
+            let jail = JailedStream::builder().tool_call_parser("gemma4").build();
+            let results: Vec<_> = jail
+                .apply_with_finish_reason(stream::iter(input_chunks))
+                .collect()
+                .await;
+
+            assert_eq!(test_utils::reconstruct_content(&results), expected);
+            let content_before_finish: String = results
+                .iter()
+                .filter_map(|result| result.data.as_ref())
+                .flat_map(|data| data.inner.choices.iter())
+                .filter(|choice| choice.finish_reason.is_none())
+                .filter_map(|choice| choice.delta.content.as_ref())
+                .map(test_utils::extract_text)
+                .collect();
+            assert_eq!(content_before_finish, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_gemma4_trailing_partial_after_unjail_is_buffered() {
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(
+                "<|tool_call>call:get_weather{location:<|\"|>NYC<|\"|>}<tool_call|> ca".to_string(),
+                0,
+            ),
+            test_utils::create_mock_response_chunk(
+                "ll:get_weather{location:<|\"|>Boston<|\"|>}<tool_call|>".to_string(),
+                0,
+            ),
+        ];
+        let jail = JailedStream::builder().tool_call_parser("gemma4").build();
+        let results: Vec<_> = jail
+            .apply_with_finish_reason(stream::iter(input_chunks))
+            .collect()
+            .await;
+
+        assert_eq!(
+            tool_call_names(&results),
+            vec!["get_weather".to_string(), "get_weather".to_string()]
+        );
+        let content = test_utils::reconstruct_content(&results);
+        assert_eq!(content, " ");
+        assert_content_omits_markers(
+            "Gemma 4 trailing partial",
+            &results,
+            &["call:get_weather", "ca", "ll:get_weather", "<tool_call|>"],
+        );
+    }
+
+    #[tokio::test]
+    async fn test_split_bare_recovery_markers_are_jailed() {
+        let cases = [
+            (
+                "minimax_m2",
+                "MiniMax",
+                vec![
+                    "I will check that. <inv",
+                    "oke name=\"get_weather\">\n<parameter name=\"location\">NYC</parameter>\n</invoke>\n</minimax:tool_call>",
+                ],
+                &["<invoke", "</minimax:tool_call>"][..],
+            ),
+            (
+                "minimax_m2",
+                "MiniMax delayed outer close",
+                vec![
+                    "I will check that. <invoke name=\"get_weather\">\n<parameter name=\"location\">NYC</parameter>\n",
+                    "</invoke>",
+                    "\n</minimax:tool_call>",
+                ],
+                &["<invoke", "</minimax:tool_call>"][..],
+            ),
+            (
+                "qwen3_coder",
+                "Qwen3-Coder delayed outer close",
+                vec![
+                    "I will check that. <function=get_weather>\n<parameter=location>NYC</parameter>\n",
+                    "</function>",
+                    "\n</tool_call>",
+                ],
+                &["<function=", "</tool_call>"][..],
+            ),
+            (
+                "deepseek_v4",
+                "DeepSeek V4",
+                vec![
+                    "I will check that. <｜DSML｜inv",
+                    "oke name=\"get_weather\">\n<｜DSML｜parameter name=\"location\" string=\"true\">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
+                ],
+                &["<｜DSML｜invoke", "</｜DSML｜tool_calls>"][..],
+            ),
+            (
+                "deepseek_v4",
+                "DeepSeek V4 delayed outer close",
+                vec![
+                    "I will check that. <｜DSML｜invoke name=\"get_weather\">\n<｜DSML｜parameter name=\"location\" string=\"true\">NYC</｜DSML｜parameter>\n",
+                    "</｜DSML｜invoke>",
+                    "\n</｜DSML｜tool_calls>",
+                ],
+                &["<｜DSML｜invoke", "</｜DSML｜tool_calls>"][..],
+            ),
+            (
+                "kimi_k2",
+                "Kimi K2",
+                vec![
+                    "I will check that. <|tool_call_beg",
+                    "in|>functions.get_weather:0<|tool_call_argument_begin|>{\"location\":\"NYC\"}<|tool_call_end|><|tool_calls_section_end|>",
+                ],
+                &["<|tool_call_begin|>", "<|tool_calls_section_end|>"][..],
+            ),
+            (
+                "gemma4",
+                "Gemma 4",
+                vec![
+                    "I will check that. ca",
+                    "ll:get_weather{location:<|\"|>NYC<|\"|>}<tool_call|>",
+                ],
+                &["call:get_weather", "<tool_call|>"][..],
+            ),
+            (
+                "gemma4",
+                "Gemma 4 split after call prefix",
+                vec![
+                    "I will check that. call:",
+                    "get_weather{location:<|\"|>NYC<|\"|>}<tool_call|>",
+                ],
+                &["call:get_weather", "<tool_call|>"][..],
+            ),
+        ];
+
+        for (parser, label, chunks, markers) in cases {
+            let input_chunks = chunks
+                .into_iter()
+                .map(|chunk| test_utils::create_mock_response_chunk(chunk.to_string(), 0));
+            let jail = JailedStream::builder().tool_call_parser(parser).build();
+            let results: Vec<_> = jail
+                .apply_with_finish_reason(stream::iter(input_chunks))
+                .collect()
+                .await;
+
+            assert_eq!(
+                tool_call_names(&results),
+                vec!["get_weather".to_string()],
+                "{label}: expected recovered get_weather call"
+            );
+            assert_eq!(
+                test_utils::reconstruct_content(&results),
+                "I will check that. ",
+                "{label}: expected only prefix prose as content"
+            );
+            assert_content_omits_markers(label, &results, markers);
+        }
+    }
+
+    /// GLM-4.7's bare-call marker starts at `<arg_key>`, after the function
+    /// name. The stream jail therefore needs parser-aware tool-name patterns
+    /// so a split between the function name and `<arg_key>` does not leak the
+    /// function name as user-visible content.
+    #[tokio::test]
+    async fn test_glm47_split_bare_call_jails_function_name_suffix() {
+        use dynamo_parsers::tool_calling::ToolDefinition;
+
+        let tool_defs = vec![ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"},
+                },
+            })),
+            strict: None,
+        }];
+
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk("I will check that. get_weat".to_string(), 0),
+            test_utils::create_mock_response_chunk(
+                "her<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>".to_string(),
+                0,
+            ),
+        ];
+
+        let jail = JailedStream::builder()
+            .tool_call_parser("glm47")
+            .tool_definitions(tool_defs)
+            .build();
+        let results: Vec<_> = jail
+            .apply_with_finish_reason(stream::iter(input_chunks))
+            .collect()
+            .await;
+
+        assert_eq!(tool_call_names(&results), vec!["get_weather".to_string()]);
+        assert_eq!(
+            test_utils::reconstruct_content(&results),
+            "I will check that. "
+        );
+        assert_content_omits_markers(
+            "GLM-4.7",
+            &results,
+            &["get_weather<arg_key>", "<arg_value>", "</tool_call>"],
+        );
+    }
+
+    #[tokio::test]
+    async fn test_glm47_trailing_split_bare_call_stays_jailed() {
+        use dynamo_parsers::tool_calling::ToolDefinition;
+
+        let tool_defs = vec![ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"},
+                },
+            })),
+            strict: None,
+        }];
+
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(
+                "get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>get_weat"
+                    .to_string(),
+                0,
+            ),
+            test_utils::create_mock_response_chunk(
+                "her<arg_key>location</arg_key><arg_value>Boston</arg_value></tool_call>"
+                    .to_string(),
+                0,
+            ),
+        ];
+
+        let jail = JailedStream::builder()
+            .tool_call_parser("glm47")
+            .tool_definitions(tool_defs)
+            .build();
+        let results: Vec<_> = jail
+            .apply_with_finish_reason(stream::iter(input_chunks))
+            .collect()
+            .await;
+
+        assert_eq!(
+            tool_call_names(&results),
+            vec!["get_weather".to_string(), "get_weather".to_string()]
+        );
+        assert_eq!(test_utils::reconstruct_content(&results), "");
+        assert_content_omits_markers(
+            "GLM-4.7 trailing split",
+            &results,
+            &["get_weat", "her<arg_key>", "<arg_value>", "</tool_call>"],
+        );
+    }
+
+    /// tool_choice=required with the alternate `arguments` key (SGLang's
+    /// JsonArrayParser and some vLLM paths emit this variant).  The
+    /// base_json_parser accepts either `parameters` or `arguments`.
+    #[tokio::test]
+    async fn test_tool_choice_required_bare_json_with_arguments_key() {
+        let bare_json = r#"[{"name":"get_weather","arguments":{"location":"Paris"}}]"#;
+
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(bare_json.to_string(), 0),
+            test_utils::create_final_response_chunk(0),
+        ];
+
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("hermes".to_string()),
+            Some(ChatCompletionToolChoiceOption::Required),
+            None,
+            false,
+            stream::iter(input_chunks),
+        )
+        .collect()
+        .await;
+
+        let tool_calls: Vec<_> = results
+            .iter()
+            .flat_map(|r| {
+                r.data
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|d| d.inner.choices.iter())
+                    .flat_map(|c| c.delta.tool_calls.iter().flatten())
+            })
+            .cloned()
+            .collect();
+
+        assert_eq!(
+            tool_calls.len(),
+            1,
+            "base_json_parser must accept the `arguments` key variant"
+        );
+        let args = tool_calls[0]
+            .function
+            .as_ref()
+            .and_then(|f| f.arguments.as_deref())
+            .unwrap_or_default();
+        assert!(
+            args.contains("Paris"),
+            "arguments should carry the parameters payload, got: {}",
+            args
+        );
+    }
+
+    /// tool_choice=named + parser configured + bare JSON array from guided
+    /// decoding.  The call must be parsed (by base_json_parser) and the
+    /// named-tool filter must accept a matching name; finish_reason stays
+    /// Stop per OpenAI spec for named tool_choice.
+    #[tokio::test]
+    async fn test_tool_choice_named_with_parser_bare_json() {
+        let bare_json = r#"[{"name":"get_weather","parameters":{"location":"Tokyo"}}]"#;
+
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(bare_json.to_string(), 0),
+            test_utils::create_final_response_chunk(0),
+        ];
+
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("minimax_m2".to_string()),
+            Some(ChatCompletionToolChoiceOption::Named(
+                "get_weather".to_string().into(),
+            )),
+            None,
+            false,
+            stream::iter(input_chunks),
+        )
+        .collect()
+        .await;
+
+        let tool_calls: Vec<_> = results
+            .iter()
+            .flat_map(|r| {
+                r.data
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|d| d.inner.choices.iter())
+                    .flat_map(|c| c.delta.tool_calls.iter().flatten())
+            })
+            .cloned()
+            .collect();
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(
+            tool_calls[0].function.as_ref().unwrap().name.as_deref(),
+            Some("get_weather")
+        );
+
+        // OpenAI spec: whenever tool_calls are emitted, finish_reason must be
+        // ToolCalls — regardless of whether tool_choice was auto, required, or named.
+        let finish_reasons: Vec<_> = results
+            .iter()
+            .filter_map(|r| {
+                r.data
+                    .as_ref()
+                    .and_then(|d| d.inner.choices.first().and_then(|c| c.finish_reason))
+            })
+            .collect();
+        assert!(
+            finish_reasons.contains(&FinishReason::ToolCalls),
+            "tool_choice=named with emitted tool_calls should be rewritten to ToolCalls, got {:?}",
+            finish_reasons
+        );
+    }
+
+    /// tool_choice=named + parser + bare JSON where the model emits a
+    /// different tool than requested.  The named_tool_filter must drop
+    /// the mismatched call so nothing is emitted as a tool call.
+    #[tokio::test]
+    async fn test_tool_choice_named_bare_json_wrong_tool_filtered() {
+        let bare_json = r#"[{"name":"search","parameters":{"q":"foo"}}]"#;
+
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(bare_json.to_string(), 0),
+            test_utils::create_final_response_chunk(0),
+        ];
+
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("minimax_m2".to_string()),
+            Some(ChatCompletionToolChoiceOption::Named(
+                "get_weather".to_string().into(),
+            )),
+            None,
+            false,
+            stream::iter(input_chunks),
+        )
+        .collect()
+        .await;
+
+        let tool_call_count: usize = results
+            .iter()
+            .map(|r| {
+                r.data.as_ref().map_or(0, |d| {
+                    d.inner
+                        .choices
+                        .iter()
+                        .map(|c: &ChatChoiceStream| {
+                            c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len())
+                        })
+                        .sum::<usize>()
+                })
+            })
+            .sum();
+
+        assert_eq!(
+            tool_call_count, 0,
+            "named_tool_filter must drop tool calls whose name doesn't match the requested tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_choice_named_no_parser_bare_json_wrong_tool_filtered() {
+        // Regression: with tool_choice=Named and NO parser, the base-JSON
+        // parser (step 1 in create_tool_call_choice) can now parse arbitrary
+        // JSON arrays. The named filter must still apply or a mismatched
+        // tool name would leak to the client.
+        let bare_json = r#"[{"name":"search","parameters":{"q":"foo"}}]"#;
+
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(bare_json.to_string(), 0),
+            test_utils::create_final_response_chunk(0),
+        ];
+
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            None,
+            Some(ChatCompletionToolChoiceOption::Named(
+                "get_weather".to_string().into(),
+            )),
+            None,
+            false,
+            stream::iter(input_chunks),
+        )
+        .collect()
+        .await;
+
+        let tool_call_count: usize = results
+            .iter()
+            .map(|r| {
+                r.data.as_ref().map_or(0, |d| {
+                    d.inner
+                        .choices
+                        .iter()
+                        .map(|c: &ChatChoiceStream| {
+                            c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len())
+                        })
+                        .sum::<usize>()
+                })
+            })
+            .sum();
+
+        assert_eq!(
+            tool_call_count, 0,
+            "Named + no-parser: wrong-name tool call must be filtered"
+        );
+
+        // The filtered-out tool JSON must not leak as assistant content.
+        let emitted_text: String = results
+            .iter()
+            .flat_map(|r| r.data.as_ref().map(|d| &d.inner.choices).into_iter())
+            .flatten()
+            .filter_map(|c| match c.delta.content.as_ref()? {
+                ChatCompletionMessageContent::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !emitted_text.contains("search"),
+            "wrong-tool JSON leaked to content: {emitted_text:?}"
         );
     }
 }

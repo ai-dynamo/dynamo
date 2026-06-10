@@ -8,6 +8,9 @@ from typing import Optional, Union
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
+from dynamo.common.configuration.groups.frontend_decoding_args import (
+    add_frontend_decoding_arg,
+)
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 
 from . import __version__
@@ -99,6 +102,18 @@ class DynamoVllmArgGroup(ArgGroup):
             default=False,
             help="Enable multimodal processing. If not set, none of the multimodal components can be used.",
         )
+        # Select defaults used by RL-style token-in/token-out deployments.
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-rl",
+            env_var="DYN_ENABLE_RL",
+            default=False,
+            help=(
+                "Enable RL training support. Mirrors --enable-rl on the SGLang "
+                "backend and selects RL-friendly vLLM defaults for TITO and "
+                "per-token logprob parity."
+            ),
+        )
         add_argument(
             g,
             flag_name="--mm-prompt-template",
@@ -114,17 +129,7 @@ class DynamoVllmArgGroup(ArgGroup):
             ),
         )
 
-        add_negatable_bool_argument(
-            g,
-            flag_name="--frontend-decoding",
-            env_var="DYN_VLLM_FRONTEND_DECODING",
-            default=False,
-            help=(
-                "Enable frontend decoding of multimodal images. "
-                "When enabled, images are decoded in the Rust frontend and transferred to the backend via NIXL RDMA. "
-                "Without this flag, images are decoded in the Python backend (default behavior)."
-            ),
-        )
+        add_frontend_decoding_arg(g, env_prefix="VLLM")
 
         add_argument(
             g,
@@ -134,6 +139,16 @@ class DynamoVllmArgGroup(ArgGroup):
             help="Worker embedding transfer mode: 'local' (default, local file system), "
             "'nixl-write' (NIXL transfer with WRITE), or 'nixl-read' (NIXL transfer with READ).",
             choices=[m.value for m in EmbeddingTransferMode],
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--embedding-worker",
+            env_var="DYN_VLLM_EMBEDDING_WORKER",
+            default=False,
+            help="Run as a text-embedding worker. Engine must be started with "
+            "vLLM's --runner pooling. Skips KV-events, KV router registration, "
+            "and InstrumentedScheduler injection (none apply to pooling models).",
         )
 
         # Headless mode for multi-node TP/PP
@@ -165,9 +180,81 @@ class DynamoVllmArgGroup(ArgGroup):
             default=False,
             help=(
                 "Enable GMS shadow/standby mode. Shadow engines skip KV cache "
-                "allocation at startup, automatically sleep after initialization, "
-                "and wake on demand when the active engine dies. "
+                "allocation at startup, automatically pause after initialization, "
+                "and resume on demand when the active engine dies. "
                 "Requires --load-format=gms."
+            ),
+        )
+
+        # Benchmark / self-profiling
+        add_argument(
+            g,
+            flag_name="--benchmark-mode",
+            env_var="DYN_BENCHMARK_MODE",
+            default=None,
+            choices=["prefill", "decode", "agg"],
+            help=(
+                "Run self-benchmark on startup before accepting requests. "
+                "Sweeps prefill ISLs and/or decode (context_length x batch_size) "
+                "points, collecting ForwardPassMetrics at each operating point."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-prefill-granularity",
+            env_var="DYN_BENCHMARK_PREFILL_GRANULARITY",
+            default=16,
+            type=int,
+            help="Number of ISL sample points for prefill sweep (default: 16).",
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-decode-length-granularity",
+            env_var="DYN_BENCHMARK_DECODE_LENGTH_GRANULARITY",
+            default=6,
+            type=int,
+            help=(
+                "Number of context length sample points for decode sweep "
+                "(default: 6)."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-decode-batch-granularity",
+            env_var="DYN_BENCHMARK_DECODE_BATCH_GRANULARITY",
+            default=6,
+            type=int,
+            help=(
+                "Number of batch size sample points per context length " "(default: 6)."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-warmup-iterations",
+            env_var="DYN_BENCHMARK_WARMUP_ITERATIONS",
+            default=5,
+            type=int,
+            help="Warmup iterations before benchmark (default: 5).",
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-output-path",
+            env_var="DYN_BENCHMARK_OUTPUT_PATH",
+            default="/tmp/benchmark_results.json",
+            help=(
+                "Path to write benchmark results JSON "
+                "(default: /tmp/benchmark_results.json)."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-timeout",
+            env_var="DYN_BENCHMARK_TIMEOUT",
+            default=300,
+            type=int,
+            help=(
+                "Maximum seconds to wait for benchmark to complete "
+                "(default: 300). Worker startup fails if exceeded."
             ),
         )
 
@@ -189,11 +276,14 @@ class DynamoVllmConfig(ConfigBase):
     multimodal_worker: bool
     multimodal_decode_worker: bool
     enable_multimodal: bool
+    # Enables RL-style token-in/token-out defaults.
+    enable_rl: bool = False
     mm_prompt_template: str
     frontend_decoding: bool
     embedding_transfer_mode: Union[
         str, EmbeddingTransferMode
     ]  # resolved to enum in validate()
+    embedding_worker: bool = False
 
     # Headless mode for multi-node TP/PP
     headless: bool = False
@@ -204,12 +294,22 @@ class DynamoVllmConfig(ConfigBase):
     # GMS shadow mode
     gms_shadow_mode: bool = False
 
+    # Benchmark / self-profiling
+    benchmark_mode: Optional[str] = None
+    benchmark_prefill_granularity: int = 16
+    benchmark_decode_length_granularity: int = 6
+    benchmark_decode_batch_granularity: int = 6
+    benchmark_warmup_iterations: int = 5
+    benchmark_output_path: str = "/tmp/benchmark_results.json"
+    benchmark_timeout: int = 300
+
     def validate(self) -> None:
         """Validate vLLM wrapper configuration."""
         self._resolve_disaggregation_mode()
         self._resolve_embedding_transfer_mode()
         self._validate_multimodal_role_exclusivity()
         self._validate_multimodal_requires_flag()
+        self._validate_embedding_worker_exclusivity()
 
     def _resolve_embedding_transfer_mode(self) -> None:
         """Resolve embedding_transfer_mode from string to enum."""
@@ -366,4 +466,27 @@ class DynamoVllmConfig(ConfigBase):
         if self._count_multimodal_roles() == 1 and not self.enable_multimodal:
             raise ValueError(
                 "Use --enable-multimodal when enabling any multimodal component"
+            )
+
+    def _validate_embedding_worker_exclusivity(self) -> None:
+        """Embedding worker is aggregated-only and exclusive of multimodal roles."""
+        if not self.embedding_worker:
+            return
+        if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
+            raise ValueError(
+                "--embedding-worker is only valid with --disaggregation-mode=agg "
+                f"(got {self.disaggregation_mode.value if isinstance(self.disaggregation_mode, DisaggregationMode) else self.disaggregation_mode}). "
+                "Pooling models do not have prefill/decode phases."
+            )
+        if self._count_multimodal_roles() > 0 or self.enable_multimodal:
+            raise ValueError(
+                "--embedding-worker cannot be combined with multimodal flags."
+            )
+        if self.benchmark_mode is not None:
+            raise ValueError(
+                "--embedding-worker cannot be combined with --benchmark-mode. "
+                "Benchmark mode injects InstrumentedScheduler, which is a "
+                "generation scheduler and not compatible with pooling engines. "
+                "Embedding workers do not run generation, so prefill/decode "
+                "benchmark sweeps are not meaningful."
             )

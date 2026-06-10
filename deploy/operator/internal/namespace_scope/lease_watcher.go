@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+// Deprecated: Package namespace_scope implements the lease-based coordination mechanism for the
+// deprecated namespace-restricted operator mode. It will be removed in a future release.
 package namespace_scope
 
 import (
@@ -33,9 +35,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// LeaseWatcher watches for namespace scope marker leases and maintains
-// an exclusion list for the cluster-wide operator.
-// It implements the ExcludedNamespacesInterface from controller_common.
+// Deprecated: LeaseWatcher watches for namespace scope marker leases and maintains
+// an exclusion list for the cluster-wide operator. It is part of the deprecated
+// namespace-restricted operator mode.
 type LeaseWatcher struct {
 	excludedNamespaces sync.Map // map[string]*coordinationv1.Lease (namespace -> lease object)
 	informerFactory    informers.SharedInformerFactory

@@ -10,7 +10,7 @@
 **/__pycache__
 **/*.pyc
 **/*onnx*
-# Engine must be allowed because code contains dynamo_engine.py
+# Engine must be allowed because code contains llm_engine.py
 **/*tensorrtllm_engines*
 **/*tensorrtllm_models*
 **/*tensorrtllm_checkpoints*

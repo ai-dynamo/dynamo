@@ -6,36 +6,37 @@
 # GPUs: 2
 
 set -e
-trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_gpu_mem_args
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_sglang_gpu_mem_args
 source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
-# Parse command line arguments
+# Strip --unified via the shared helper, then parse the remaining flags.
+# All of this runs BEFORE installing the kill-process-group EXIT trap so
+# an early exit (--help / unknown option) doesn't tear down the caller.
+pick_worker_module dynamo.sglang dynamo.sglang.unified_main "$@"
+set -- "${REMAINING_ARGS[@]}"
+
 ENABLE_OTEL=false
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --enable-otel)
-            ENABLE_OTEL=true
-            shift
-            ;;
+        --enable-otel) ENABLE_OTEL=true; shift ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
             echo "  --enable-otel        Enable OpenTelemetry tracing"
+            echo "  --unified            Use the unified backend entry point"
+            echo "                       (python -m dynamo.sglang.unified_main)"
             echo "  -h, --help           Show this help message"
             echo ""
             echo "Note: System metrics are enabled by default on ports 8081 (prefill), 8082 (decode)"
             exit 0
             ;;
-        *)
-            echo "Unknown option: $1"
-            echo "Use --help for usage information"
-            exit 1
-            ;;
+        *) echo "Unknown option: $1"; echo "Use --help for usage information"; exit 1 ;;
     esac
 done
+
+trap 'echo Cleaning up...; kill 0' EXIT
 
 # Enable tracing if requested
 TRACE_ARGS=()
@@ -48,7 +49,9 @@ fi
 
 MODEL="Qwen/Qwen3-0.6B"
 
-GPU_MEM_FRACTION=$(build_gpu_mem_args sglang --model "$MODEL")
+GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
+
+DISAGG_BOOTSTRAP_PORT="${DYN_DISAGG_BOOTSTRAP_PORT:-12345}"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Disaggregated Serving (2 GPUs)" "$MODEL" "$HTTP_PORT"
@@ -61,38 +64,43 @@ python3 -m dynamo.frontend &
 #AssertionError: Prefill round robin balance is required when dp size > 1. Please make sure that the prefill instance is launched with `--load-balance-method round_robin` and `--prefill-round-robin-balance` is set for decode server.
 
 # run prefill worker
+# NOTE: Each worker picks a random NCCL port (get_free_port) for torch.distributed.
+# This has a TOCTOU race — the port can be grabbed before init_process_group binds it,
+# causing sporadic EADDRINUSE.  Pass --nccl-port <unique_port> per worker to avoid this.
 # Use DYN_SYSTEM_PORT1/2 instead of *_PREFILL/*_DECODE env names so test
 # harnesses can set one simple pair for disaggregated deployments.
 OTEL_SERVICE_NAME=dynamo-worker-prefill DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
-python3 -m dynamo.sglang \
+python3 -m "$WORKER_MODULE" \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \
   --disaggregation-mode prefill \
-  --disaggregation-bootstrap-port 12345 \
+  --disaggregation-bootstrap-port "$DISAGG_BOOTSTRAP_PORT" \
   --host 0.0.0.0 \
   --port 40000 \
   --disaggregation-transfer-backend nixl \
-  ${GPU_MEM_FRACTION:+--mem-fraction-static "$GPU_MEM_FRACTION"} \
   --enable-metrics \
+  --disable-piecewise-cuda-graph \
+  $GPU_MEM_ARGS \
   "${TRACE_ARGS[@]}" &
 
 # run decode worker
 OTEL_SERVICE_NAME=dynamo-worker-decode DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
-CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
+CUDA_VISIBLE_DEVICES=1 python3 -m "$WORKER_MODULE" \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \
   --disaggregation-mode decode \
-  --disaggregation-bootstrap-port 12345 \
+  --disaggregation-bootstrap-port "$DISAGG_BOOTSTRAP_PORT" \
   --host 0.0.0.0 \
   --disaggregation-transfer-backend nixl \
-  ${GPU_MEM_FRACTION:+--mem-fraction-static "$GPU_MEM_FRACTION"} \
   --enable-metrics \
+  --disable-piecewise-cuda-graph \
+  $GPU_MEM_ARGS \
   "${TRACE_ARGS[@]}" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest

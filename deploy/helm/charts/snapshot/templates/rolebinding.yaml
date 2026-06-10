@@ -10,7 +10,6 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "snapshot.labels" . | nindent 4 }}
-    app.kubernetes.io/component: checkpoint-agent
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -27,7 +26,6 @@ metadata:
   name: {{ include "snapshot.fullname" . }}-agent-resourceslices
   labels:
     {{- include "snapshot.labels" . | nindent 4 }}
-    app.kubernetes.io/component: checkpoint-agent
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -43,7 +41,6 @@ metadata:
   name: {{ include "snapshot.fullname" . }}-agent
   labels:
     {{- include "snapshot.labels" . | nindent 4 }}
-    app.kubernetes.io/component: checkpoint-agent
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole

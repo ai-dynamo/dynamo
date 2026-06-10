@@ -87,9 +87,10 @@ impl SglangRequest {
         self.materialized_tokens += 1;
     }
 
-    pub(super) fn debug_assert_invariants(&self, block_size: usize) {
+    pub(super) fn debug_assert_invariants(&self, _block_size: usize) {
         #[cfg(debug_assertions)]
         {
+            let block_size = _block_size;
             let sequence_len = self.current_sequence_len();
             debug_assert!(
                 self.cached_tokens <= self.materialized_tokens,
@@ -158,16 +159,18 @@ impl SglangRequest {
     }
 }
 
-pub(super) fn direct_to_sglang(req: DirectRequest) -> SglangRequest {
-    SglangRequest {
-        uuid: req.uuid.unwrap_or_else(Uuid::new_v4),
-        prompt_tokens: req.tokens.iter().map(|&t| t as u64).collect(),
-        max_output_tokens: req.max_output_tokens,
-        output_ids: Vec::new(),
-        last_node: None,
-        kv_indices: Vec::new(),
-        materialized_tokens: 0,
-        cached_tokens: 0,
-        allocated_tokens: 0,
+impl From<DirectRequest> for SglangRequest {
+    fn from(req: DirectRequest) -> Self {
+        Self {
+            uuid: req.uuid.unwrap_or_else(Uuid::new_v4),
+            prompt_tokens: req.tokens.iter().map(|&t| t as u64).collect(),
+            max_output_tokens: req.max_output_tokens,
+            output_ids: Vec::new(),
+            last_node: None,
+            kv_indices: Vec::new(),
+            materialized_tokens: 0,
+            cached_tokens: 0,
+            allocated_tokens: 0,
+        }
     }
 }

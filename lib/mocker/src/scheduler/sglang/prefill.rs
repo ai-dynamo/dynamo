@@ -8,12 +8,21 @@ use super::config::{SglangConfig, ceil_to_block};
 use super::request::SglangRequest;
 use crate::kv_manager::SglangKvManager;
 
+/// Per-request prefill data needed for FPM snapshot construction.
+pub(super) struct PrefillFpmItem {
+    pub(super) prompt_len: usize,
+    pub(super) tokens_computed: usize,
+    pub(super) prefix_tokens: usize,
+}
+
 pub(super) struct AdmitResult {
     pub(super) can_run: Vec<SglangRequest>,
     pub(super) admissions: Vec<AdmissionEvent>,
     pub(super) total_isl: usize,
     pub(super) total_prefix: usize,
     pub(super) oom: bool,
+    /// Per-request prefill info for building FPM snapshots.
+    pub(super) prefill_fpm: Vec<PrefillFpmItem>,
 }
 
 pub(super) fn get_new_batch_prefill(
@@ -50,6 +59,7 @@ pub(super) fn get_new_batch_prefill(
 
     let mut can_run = Vec::new();
     let mut admissions = Vec::new();
+    let mut prefill_fpm = Vec::new();
     let mut rejected = VecDeque::new();
     let mut oom = false;
     let mut total_isl = 0usize;
@@ -96,10 +106,12 @@ pub(super) fn get_new_batch_prefill(
         }
 
         let alloc = if req.materialized_tokens > 0 {
-            let Some(last_node) = prev_node else {
-                rejected.push_back(req);
-                break;
-            };
+            let last_node = prev_node.unwrap_or_else(|| {
+                panic!(
+                    "prefill: request {} has materialized_tokens={} but last_node is None",
+                    req.uuid, req.materialized_tokens
+                )
+            });
             kv_manager.allocate_after_prefix(
                 &alloc_tokens,
                 req.materialized_tokens,
@@ -139,6 +151,11 @@ pub(super) fn get_new_batch_prefill(
             uuid: req.uuid,
             reused_input_tokens: alloc.prefix_len,
         });
+        prefill_fpm.push(PrefillFpmItem {
+            prompt_len: req.prompt_len(),
+            tokens_computed: chunk_tokens,
+            prefix_tokens: alloc.prefix_len,
+        });
 
         total_isl += chunk_end;
         total_prefix += alloc.prefix_len;
@@ -162,5 +179,6 @@ pub(super) fn get_new_batch_prefill(
         total_isl,
         total_prefix,
         oom,
+        prefill_fpm,
     }
 }

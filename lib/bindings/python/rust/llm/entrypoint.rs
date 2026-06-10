@@ -7,15 +7,18 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use pyo3::{exceptions::PyException, prelude::*};
+use pyo3::{exceptions::PyException, exceptions::PyValueError, prelude::*};
 use pyo3_async_runtimes::TaskLocals;
 
-use dynamo_kv_router::config::KvRouterConfig as RsKvRouterConfig;
+use dynamo_kv_router::config::{
+    KvRouterConfig as RsKvRouterConfig, RouterPrefillLoadModel as RsRouterPrefillLoadModel,
+    apply_deprecated_overlap_score_weight_override,
+};
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
-use dynamo_llm::entrypoint::ChatEngineFactoryCallback;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
 use dynamo_llm::entrypoint::input::Input;
+use dynamo_llm::entrypoint::{ChatEngineFactoryCallback, PrefillRoutedEngine};
 use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::make_mocker_engine;
@@ -23,7 +26,7 @@ use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 use dynamo_mocker::common::perf_model::PerfModel;
 
-use super::aic_callback::create_aic_callback;
+use super::aic_callback::{create_aic_callback, create_aic_prefill_load_estimator};
 use super::replay::MockEngineArgs as PyMockEngineArgs;
 use dynamo_mocker::common::protocols::MockEngineArgs as RsMockEngineArgs;
 use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
@@ -33,6 +36,23 @@ use super::local_model::ModelRuntimeConfig;
 use super::model_card::ModelDeploymentCard;
 use crate::RouterMode;
 use crate::engine::PythonAsyncEngine;
+
+fn validate_kv_router_config(config: &RsKvRouterConfig) -> PyResult<()> {
+    config.validate_config().map_err(PyValueError::new_err)
+}
+
+fn warn_overlap_score_weight_deprecated() {
+    tracing::warn!("overlap_score_weight is deprecated; use prefill_load_scale");
+}
+
+fn apply_deprecated_overlap_score_weight(
+    value: f64,
+    overlap_score_credit: &mut f64,
+    prefill_load_scale: &mut f64,
+) {
+    warn_overlap_score_weight_deprecated();
+    apply_deprecated_overlap_score_weight_override(value, overlap_score_credit, prefill_load_scale);
+}
 
 #[pyclass(eq, eq_int)]
 #[derive(Clone, Debug, PartialEq)]
@@ -55,13 +75,134 @@ impl KvRouterConfig {
     }
 }
 
+#[pyclass]
+#[derive(Clone, Debug)]
+pub struct AicPerfConfig {
+    aic_backend: String,
+    aic_system: String,
+    aic_backend_version: Option<String>,
+    aic_tp_size: usize,
+    aic_model_path: String,
+    aic_moe_tp_size: Option<usize>,
+    aic_moe_ep_size: Option<usize>,
+    aic_attention_dp_size: Option<usize>,
+    aic_nextn: Option<usize>,
+    aic_nextn_accept_rates: Option<String>,
+}
+
+impl AicPerfConfig {
+    pub(crate) fn backend_name(&self) -> &str {
+        &self.aic_backend
+    }
+
+    pub(crate) fn system(&self) -> &str {
+        &self.aic_system
+    }
+
+    pub(crate) fn backend_version(&self) -> Option<&str> {
+        self.aic_backend_version.as_deref()
+    }
+
+    pub(crate) fn tp_size(&self) -> usize {
+        self.aic_tp_size
+    }
+
+    pub(crate) fn model_path(&self) -> &str {
+        &self.aic_model_path
+    }
+
+    pub(crate) fn moe_tp_size(&self) -> Option<usize> {
+        self.aic_moe_tp_size
+    }
+
+    pub(crate) fn moe_ep_size(&self) -> Option<usize> {
+        self.aic_moe_ep_size
+    }
+
+    pub(crate) fn attention_dp_size(&self) -> Option<usize> {
+        self.aic_attention_dp_size
+    }
+
+    pub(crate) fn nextn(&self) -> Option<usize> {
+        self.aic_nextn
+    }
+
+    pub(crate) fn nextn_accept_rates(&self) -> Option<&str> {
+        self.aic_nextn_accept_rates.as_deref()
+    }
+}
+
+#[pymethods]
+impl AicPerfConfig {
+    #[new]
+    #[pyo3(signature = (aic_backend, aic_system, aic_model_path, aic_tp_size=1, aic_backend_version=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        aic_backend: String,
+        aic_system: String,
+        aic_model_path: String,
+        aic_tp_size: usize,
+        aic_backend_version: Option<String>,
+        aic_moe_tp_size: Option<usize>,
+        aic_moe_ep_size: Option<usize>,
+        aic_attention_dp_size: Option<usize>,
+        aic_nextn: Option<usize>,
+        aic_nextn_accept_rates: Option<String>,
+    ) -> PyResult<Self> {
+        if aic_backend.is_empty() {
+            return Err(PyValueError::new_err("aic_backend must be non-empty"));
+        }
+        if aic_system.is_empty() {
+            return Err(PyValueError::new_err("aic_system must be non-empty"));
+        }
+        if aic_model_path.is_empty() {
+            return Err(PyValueError::new_err("aic_model_path must be non-empty"));
+        }
+        if aic_tp_size == 0 {
+            return Err(PyValueError::new_err("aic_tp_size must be >= 1"));
+        }
+        for (name, value) in [
+            ("aic_moe_tp_size", aic_moe_tp_size),
+            ("aic_moe_ep_size", aic_moe_ep_size),
+            ("aic_attention_dp_size", aic_attention_dp_size),
+        ] {
+            if matches!(value, Some(0)) {
+                return Err(PyValueError::new_err(format!("{name} must be >= 1")));
+            }
+        }
+        // AIC caps MTP draft tokens at 5; >5 would IndexError in calc_expectation.
+        if let Some(nextn) = aic_nextn
+            && !(1..=5).contains(&nextn)
+        {
+            return Err(PyValueError::new_err(
+                "aic_nextn must be 1..=5 when set (omit to disable spec dec)",
+            ));
+        }
+
+        Ok(Self {
+            aic_backend,
+            aic_system,
+            aic_backend_version,
+            aic_tp_size,
+            aic_model_path,
+            aic_moe_tp_size,
+            aic_moe_ep_size,
+            aic_attention_dp_size,
+            aic_nextn,
+            aic_nextn_accept_rates,
+        })
+    }
+}
+
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8, router_queue_threshold=Some(4.0), router_event_threads=4, router_enable_cache_control=false, router_queue_policy="fcfs", remote_indexer_component=None))]
+    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=Some(16.0), router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, *, overlap_score_credit=1.0, prefill_load_scale=1.0, router_queue_by_incoming_missing_isl=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
-        overlap_score_weight: f64,
+        overlap_score_weight: Option<f64>,
+        host_cache_hit_weight: f64,
+        disk_cache_hit_weight: f64,
         router_temperature: f64,
         use_kv_events: bool,
         durable_kv_events: bool,
@@ -70,50 +211,151 @@ impl KvRouterConfig {
         router_track_output_blocks: bool,
         router_assume_kv_reuse: bool,
         router_track_prefill_tokens: bool,
+        router_prefill_load_model: &str,
         router_snapshot_threshold: Option<u32>,
         router_reset_states: bool,
         router_ttl_secs: f64,
-        router_max_tree_size: usize,
-        router_prune_target_ratio: f64,
         router_queue_threshold: Option<f64>,
         router_event_threads: u32,
-        router_enable_cache_control: bool,
         router_queue_policy: &str,
-        remote_indexer_component: Option<String>,
-    ) -> Self {
-        KvRouterConfig {
-            inner: RsKvRouterConfig {
-                overlap_score_weight,
-                router_temperature,
-                use_kv_events,
-                durable_kv_events,
-                router_replica_sync,
-                router_track_active_blocks,
-                router_track_output_blocks,
-                router_assume_kv_reuse,
-                router_track_prefill_tokens,
-                router_snapshot_threshold,
-                router_reset_states,
-                router_ttl_secs,
-                router_max_tree_size,
-                router_prune_target_ratio,
-                router_queue_threshold,
-                router_event_threads,
-                router_enable_cache_control,
-                skip_initial_worker_wait: false,
-                router_queue_policy: router_queue_policy.parse().unwrap_or_else(|_| {
-                    panic!("invalid router_queue_policy: {router_queue_policy:?}")
-                }),
-                remote_indexer_component,
-            },
+        use_remote_indexer: bool,
+        serve_indexer: bool,
+        shared_cache_multiplier: f64,
+        shared_cache_type: &str,
+        router_predicted_ttl_secs: Option<f64>,
+        mut overlap_score_credit: f64,
+        mut prefill_load_scale: f64,
+        router_queue_by_incoming_missing_isl: Option<Vec<(usize, usize)>>,
+    ) -> PyResult<Self> {
+        if let Some(value) = overlap_score_weight {
+            apply_deprecated_overlap_score_weight(
+                value,
+                &mut overlap_score_credit,
+                &mut prefill_load_scale,
+            );
         }
+
+        let inner = RsKvRouterConfig {
+            overlap_score_credit,
+            prefill_load_scale,
+            host_cache_hit_weight,
+            disk_cache_hit_weight,
+            router_temperature,
+            use_kv_events,
+            durable_kv_events,
+            router_replica_sync,
+            router_track_active_blocks,
+            router_track_output_blocks,
+            router_assume_kv_reuse,
+            router_track_prefill_tokens,
+            router_prefill_load_model: router_prefill_load_model
+                .parse::<RsRouterPrefillLoadModel>()
+                .map_err(PyValueError::new_err)?,
+            router_snapshot_threshold,
+            router_reset_states,
+            router_ttl_secs,
+            router_queue_threshold,
+            router_queue_by_incoming_missing_isl: router_queue_by_incoming_missing_isl
+                .map(dynamo_kv_router::scheduling::config::RouterQueueDepthTiers::try_from)
+                .transpose()
+                .map_err(PyValueError::new_err)?
+                .unwrap_or_else(
+                    dynamo_kv_router::scheduling::config::RouterQueueDepthTiers::unbounded_cap,
+                ),
+            router_event_threads,
+            skip_initial_worker_wait: false,
+            router_queue_policy: router_queue_policy.parse().map_err(PyValueError::new_err)?,
+            use_remote_indexer,
+            serve_indexer,
+            shared_cache_multiplier,
+            shared_cache_type: shared_cache_type.parse().map_err(PyValueError::new_err)?,
+            router_predicted_ttl_secs,
+        };
+        validate_kv_router_config(&inner)?;
+        Ok(KvRouterConfig { inner })
     }
 
     #[staticmethod]
     fn from_json(config_json: &str) -> PyResult<Self> {
-        serde_json::from_str::<RsKvRouterConfig>(config_json)
-            .map(|inner| KvRouterConfig { inner })
-            .map_err(|e| PyException::new_err(format!("Failed to parse KvRouterConfig JSON: {e}")))
+        let inner = serde_json::from_str::<RsKvRouterConfig>(config_json).map_err(|e| {
+            PyException::new_err(format!("Failed to parse KvRouterConfig JSON: {e}"))
+        })?;
+        Ok(KvRouterConfig { inner })
+    }
+
+    fn copy(&self) -> Self {
+        self.clone()
+    }
+
+    #[getter]
+    fn overlap_score_credit(&self) -> f64 {
+        self.inner.overlap_score_credit
+    }
+
+    #[setter]
+    fn set_overlap_score_credit(&mut self, value: f64) -> PyResult<()> {
+        let mut inner = self.inner.clone();
+        inner.overlap_score_credit = value;
+        validate_kv_router_config(&inner)?;
+        self.inner = inner;
+        Ok(())
+    }
+
+    #[getter]
+    fn overlap_score_weight(&self) -> f64 {
+        self.inner.prefill_load_scale
+    }
+
+    #[setter]
+    fn set_overlap_score_weight(&mut self, value: f64) -> PyResult<()> {
+        let mut inner = self.inner.clone();
+        apply_deprecated_overlap_score_weight(
+            value,
+            &mut inner.overlap_score_credit,
+            &mut inner.prefill_load_scale,
+        );
+        validate_kv_router_config(&inner)?;
+        self.inner = inner;
+        Ok(())
+    }
+
+    #[getter]
+    fn prefill_load_scale(&self) -> f64 {
+        self.inner.prefill_load_scale
+    }
+
+    #[setter]
+    fn set_prefill_load_scale(&mut self, value: f64) -> PyResult<()> {
+        let mut inner = self.inner.clone();
+        inner.prefill_load_scale = value;
+        validate_kv_router_config(&inner)?;
+        self.inner = inner;
+        Ok(())
+    }
+
+    #[pyo3(signature = (overlap_score_weight=None, *, overlap_score_credit=None, prefill_load_scale=None))]
+    fn with_overrides(
+        &self,
+        overlap_score_weight: Option<f64>,
+        overlap_score_credit: Option<f64>,
+        prefill_load_scale: Option<f64>,
+    ) -> PyResult<Self> {
+        let mut inner = self.inner.clone();
+        if let Some(credit) = overlap_score_credit {
+            inner.overlap_score_credit = credit;
+        }
+        if let Some(scale) = prefill_load_scale {
+            inner.prefill_load_scale = scale;
+        }
+        if let Some(weight) = overlap_score_weight {
+            apply_deprecated_overlap_score_weight(
+                weight,
+                &mut inner.overlap_score_credit,
+                &mut inner.prefill_load_scale,
+            );
+        }
+        validate_kv_router_config(&inner)?;
+        Ok(Self { inner })
     }
 }
 
@@ -195,7 +437,6 @@ pub(crate) struct EntrypointArgs {
     model_path: Option<PathBuf>,
     model_name: Option<String>,
     endpoint_id: Option<EndpointId>,
-    context_length: Option<u32>,
     template_file: Option<PathBuf>,
     router_config: Option<RouterConfig>,
     kv_cache_block_size: Option<u32>,
@@ -210,22 +451,24 @@ pub(crate) struct EntrypointArgs {
     namespace: Option<String>,
     namespace_prefix: Option<String>,
     is_prefill: bool,
+    is_decode: bool,
     migration_limit: u32,
+    migration_max_seq_len: Option<u32>,
     chat_engine_factory: Option<PyEngineFactory>,
+    aic_perf_config: Option<AicPerfConfig>,
 }
 
 #[pymethods]
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, migration_limit=0, chat_engine_factory=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
         model_path: Option<PathBuf>,
         model_name: Option<String>, // e.g. "dyn://namespace.component.endpoint"
         endpoint_id: Option<String>,
-        context_length: Option<u32>,
         template_file: Option<PathBuf>,
         router_config: Option<RouterConfig>,
         kv_cache_block_size: Option<u32>,
@@ -240,10 +483,16 @@ impl EntrypointArgs {
         namespace: Option<String>,
         namespace_prefix: Option<String>,
         is_prefill: bool,
+        is_decode: bool,
         migration_limit: u32,
+        migration_max_seq_len: Option<u32>,
         chat_engine_factory: Option<PyObject>,
+        aic_perf_config: Option<AicPerfConfig>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
+        if let Some(runtime_config) = &runtime_config {
+            runtime_config.validate_config()?;
+        }
         if (tls_cert_path.is_some() && tls_key_path.is_none())
             || (tls_cert_path.is_none() && tls_key_path.is_some())
         {
@@ -273,7 +522,6 @@ impl EntrypointArgs {
             model_path,
             model_name,
             endpoint_id: endpoint_id_obj,
-            context_length,
             template_file,
             router_config,
             kv_cache_block_size,
@@ -288,8 +536,11 @@ impl EntrypointArgs {
             namespace,
             namespace_prefix,
             is_prefill,
+            is_decode,
             migration_limit,
+            migration_max_seq_len,
             chat_engine_factory,
+            aic_perf_config,
         })
     }
 }
@@ -317,11 +568,11 @@ pub fn make_engine<'p>(
                 .or_else(|| args.model_path.clone().map(|p| p.display().to_string())),
         )
         .endpoint_id(args.endpoint_id.clone())
-        .context_length(args.context_length)
         .request_template(args.template_file.clone())
         .kv_cache_block_size(args.kv_cache_block_size)
         .router_config(args.router_config.clone().map(|rc| rc.into()))
         .migration_limit(Some(args.migration_limit))
+        .migration_max_seq_len(args.migration_max_seq_len)
         .http_host(args.http_host.clone())
         .http_port(args.http_port)
         .http_metrics_port(args.http_metrics_port)
@@ -366,7 +617,8 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
 
     Arc::new(
         move |instance_id: RsModelCardInstanceId,
-              card: RsModelDeploymentCard|
+              card: RsModelDeploymentCard,
+              routed_engine: PrefillRoutedEngine|
               -> Pin<
             Box<dyn Future<Output = anyhow::Result<OpenAIChatCompletionsStreamingEngine>> + Send>,
         > {
@@ -384,10 +636,15 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
                     let py_card = ModelDeploymentCard { inner: card };
                     let py_card_obj = Py::new(py, py_card)
                         .map_err(|e| anyhow::anyhow!("Failed to create Python MDC: {e}"))?;
+                    let py_routed = Py::new(
+                        py,
+                        crate::llm::routed_engine::RoutedEngine::new(routed_engine),
+                    )
+                    .map_err(|e| anyhow::anyhow!("Failed to create Python RoutedEngine: {e}"))?;
 
                     // Call Python async function to get a coroutine
                     let coroutine = callback
-                        .call1(py, (py_instance_id, py_card_obj))
+                        .call1(py, (py_instance_id, py_card_obj, py_routed))
                         .map_err(|e| anyhow::anyhow!("Failed to call chat_engine_factory: {e}"))?;
 
                     // Use the TaskLocals captured at registration time
@@ -430,9 +687,31 @@ async fn select_engine(
         EngineType::Dynamic => {
             //  Convert Python chat engine factory to Rust callback
             let chat_engine_factory = args.chat_engine_factory.map(py_engine_factory_to_callback);
+            let prefill_load_estimator = args
+                .aic_perf_config
+                .as_ref()
+                .map(|config| {
+                    Python::with_gil(|py| {
+                        create_aic_prefill_load_estimator(
+                            py,
+                            config.backend_name(),
+                            config.system(),
+                            config.model_path(),
+                            config.tp_size(),
+                            config.backend_version(),
+                            config.moe_tp_size(),
+                            config.moe_ep_size(),
+                            config.attention_dp_size(),
+                            config.nextn(),
+                            config.nextn_accept_rates(),
+                        )
+                    })
+                })
+                .transpose()?;
             RsEngineConfig::Dynamic {
                 model: Box::new(local_model),
                 chat_engine_factory,
+                prefill_load_estimator,
             }
         }
         EngineType::Mocker => {
@@ -463,8 +742,25 @@ async fn select_engine(
                     .unwrap_or_else(|| local_model.card().source_path());
                 let backend_version = mocker_args.aic_backend_version.as_deref();
                 let tp_size = mocker_args.aic_tp_size.unwrap_or(1);
+                let moe_tp_size = mocker_args.aic_moe_tp_size;
+                let moe_ep_size = mocker_args.aic_moe_ep_size;
+                let attention_dp_size = mocker_args.aic_attention_dp_size;
+                let nextn = mocker_args.aic_nextn;
+                let undiscounted_accept_rates = mocker_args.undiscounted_aic_accept_rates();
                 match Python::with_gil(|py| {
-                    create_aic_callback(py, &backend, system, model_name, tp_size, backend_version)
+                    create_aic_callback(
+                        py,
+                        &backend,
+                        system,
+                        model_name,
+                        tp_size,
+                        backend_version,
+                        moe_tp_size,
+                        moe_ep_size,
+                        attention_dp_size,
+                        nextn,
+                        undiscounted_accept_rates.as_deref(),
+                    )
                 }) {
                     Ok(callback) => {
                         tracing::info!(
@@ -494,6 +790,7 @@ async fn select_engine(
                 engine,
                 model: Box::new(local_model),
                 is_prefill: args.is_prefill,
+                is_decode: args.is_decode,
             }
         }
     };

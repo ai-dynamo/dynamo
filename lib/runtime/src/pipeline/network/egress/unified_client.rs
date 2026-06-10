@@ -4,7 +4,7 @@
 //! Unified Request Plane Client Interface
 //!
 //! This module defines a transport-agnostic interface for sending requests
-//! in the request plane. All transport implementations (TCP, HTTP, NATS)
+//! in the request plane. All transport implementations (TCP, NATS)
 //! implement this trait to provide a consistent interface for the egress router.
 
 use anyhow::Result;
@@ -17,7 +17,7 @@ pub type Headers = HashMap<String, String>;
 
 /// Unified interface for request plane clients
 ///
-/// This trait abstracts over different transport mechanisms (TCP, HTTP, NATS)
+/// This trait abstracts over different transport mechanisms (TCP, NATS)
 /// providing a consistent interface for sending requests and receiving acknowledgments.
 ///
 /// # Design Principles
@@ -53,7 +53,6 @@ pub trait RequestPlaneClient: Send + Sync {
     /// # Arguments
     ///
     /// * `address` - Transport-specific address:
-    ///   - HTTP: `http://host:port/path`
     ///   - TCP: `host:port` or `tcp://host:port`
     ///   - NATS: `subject.name`
     /// * `payload` - Request payload (encoded as bytes)
@@ -86,7 +85,6 @@ pub trait RequestPlaneClient: Send + Sync {
     /// # Examples
     ///
     /// - `"tcp"` - Raw TCP transport
-    /// - `"http"` or `"http2"` - HTTP/2 transport
     /// - `"nats"` - NATS messaging
     fn transport_name(&self) -> &'static str;
 
@@ -107,6 +105,16 @@ pub trait RequestPlaneClient: Send + Sync {
     /// Default implementation returns empty statistics.
     fn stats(&self) -> ClientStats {
         ClientStats::default()
+    }
+
+    /// Start a background task that eagerly warms connections for newly-discovered backends.
+    /// Only TCP overrides this; NATS clients inherit the no-op.
+    fn start_warmup(
+        &self,
+        _instance_rx: tokio::sync::watch::Receiver<Vec<crate::component::Instance>>,
+        _cancel_token: tokio_util::sync::CancellationToken,
+    ) {
+        // No-op default
     }
 
     /// Close the client gracefully (optional)

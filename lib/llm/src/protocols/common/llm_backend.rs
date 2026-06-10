@@ -6,13 +6,27 @@ use serde::{Deserialize, Serialize};
 pub use super::FinishReason;
 pub use super::preprocessor::PreprocessedRequest;
 use crate::protocols::TokenIdType;
-use dynamo_async_openai::types::CompletionUsage;
-use dynamo_async_openai::types::StopReason;
+use dynamo_protocols::types::CompletionUsage;
+use dynamo_protocols::types::StopReason;
 use dynamo_runtime::error::DynamoError;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
 
 pub type TokenType = Option<String>;
 pub type LogProbs = Vec<f64>;
+
+/// Per-position prompt logprob entry reported by an engine adapter.
+#[derive(Serialize, Deserialize, utoipa::ToSchema, Debug, Clone, PartialEq)]
+pub struct PromptLogprobEntry {
+    pub logprob: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoded_token: Option<String>,
+}
+
+/// Per-token map of `token_id -> PromptLogprobEntry`. The first position
+/// is `None` (no logprob exists for BOS / the very first prompt token).
+pub type PromptLogprobs = Vec<Option<std::collections::HashMap<TokenIdType, PromptLogprobEntry>>>;
 
 /// Output type discriminator for different modalities
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -103,9 +117,31 @@ pub struct BackendOutput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_usage: Option<CompletionUsage>,
 
-    /// Disaggregated execution parameters (for prefill/decode separation)
+    /// Disaggregated execution parameters (for prefill/decode separation).
+    /// Engine-owned payload — backends pack their own KV-transfer format
+    /// here (vLLM `kv_transfer_params`, SGLang bootstrap triple, TRT-LLM
+    /// encoded `LlmDisaggregatedParams`). Dynamo does NOT inject framework
+    /// metadata into this field — use `worker_trace_link` instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disaggregated_params: Option<serde_json::Value>,
+
+    /// Framework-owned link to the prefill worker's span. Propagated
+    /// alongside the engine's `disaggregated_params` so the decode worker
+    /// can record an OTel `Link` on its `engine.generate` span. Engines
+    /// should NOT read or write this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_trace_link: Option<crate::protocols::common::preprocessor::TraceLink>,
+
+    /// Opaque engine data passed through from the backend worker to the response.
+    /// Dynamo does not inspect this field; it is serialized as-is into `nvext.engine_data`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_data: Option<serde_json::Value>,
+
+    /// Router-computed data handed back to the frontend (e.g. per-request timing from
+    /// a standalone router) so it joins this request's trace/metrics. Dynamo-internal,
+    /// consumed by the frontend and not surfaced to clients. See [`RoutingData`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_data: Option<crate::protocols::common::timing::RoutingData>,
 }
 
 /// The LLM engine and backnd with manage it's own state, specifically translating how a
@@ -160,6 +196,13 @@ pub struct LLMEngineOutput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disaggregated_params: Option<serde_json::Value>,
 
+    /// Framework-owned link to the prefill worker's span (cross-process
+    /// trace linking on disagg requests). Set by the framework on the
+    /// prefill terminal chunk; consumed by the decode adapter. Engines
+    /// should NOT read or write this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_trace_link: Option<crate::protocols::common::preprocessor::TraceLink>,
+
     /// Additional arguments for extensibility
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
@@ -167,6 +210,16 @@ pub struct LLMEngineOutput {
     // Token usage information
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_usage: Option<CompletionUsage>,
+
+    /// Opaque engine data passed through from the backend worker to the response.
+    /// Dynamo does not inspect this field; it is serialized as-is into `nvext.engine_data`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_data: Option<serde_json::Value>,
+
+    /// Router-computed data handed back to the frontend (e.g. standalone-router timing).
+    /// Dynamo-internal; consumed by the frontend. See [`RoutingData`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_data: Option<crate::protocols::common::timing::RoutingData>,
 }
 
 impl LLMEngineOutput {
@@ -184,8 +237,11 @@ impl LLMEngineOutput {
             stop_reason: None,
             index: None,
             disaggregated_params: None,
+            worker_trace_link: None,
             extra_args: None,
             completion_usage: None,
+            engine_data: None,
+            routing_data: None,
         }
     }
 
@@ -203,8 +259,11 @@ impl LLMEngineOutput {
             top_logprobs: None,
             index: None,
             disaggregated_params: None,
+            worker_trace_link: None,
             extra_args: None,
             completion_usage: None,
+            engine_data: None,
+            routing_data: None,
         }
     }
 
@@ -222,8 +281,11 @@ impl LLMEngineOutput {
             stop_reason: None,
             index: None,
             disaggregated_params: None,
+            worker_trace_link: None,
             extra_args: None,
             completion_usage: None,
+            engine_data: None,
+            routing_data: None,
         }
     }
 
@@ -241,10 +303,21 @@ impl LLMEngineOutput {
             stop_reason: None,
             index: None,
             disaggregated_params: None,
+            worker_trace_link: None,
             extra_args: None,
             completion_usage: None,
+            engine_data: None,
+            routing_data: None,
         }
     }
+}
+
+pub(crate) fn prompt_logprobs_from_engine_data(
+    engine_data: Option<&serde_json::Value>,
+) -> Option<PromptLogprobs> {
+    engine_data?
+        .get("prompt_logprobs")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
 }
 
 impl MaybeError for LLMEngineOutput {

@@ -13,7 +13,8 @@ use crate::kv_router::KV_METRICS_SUBJECT;
 #[derive(Debug, Clone, Default, PartialEq)]
 struct WorkerMetrics {
     dp_rank: DpRank,
-    active_decode_blocks: u64,
+    active_decode_blocks: Option<u64>,
+    kv_used_blocks: Option<u64>,
 }
 
 pub struct WorkerMetricsPublisher {
@@ -27,15 +28,26 @@ impl WorkerMetricsPublisher {
         Ok(Self { tx, rx })
     }
 
-    pub fn publish(&self, dp_rank: Option<DpRank>, active_decode_blocks: u64) -> Result<()> {
+    pub fn publish(
+        &self,
+        dp_rank: Option<DpRank>,
+        active_decode_blocks: Option<u64>,
+        kv_used_blocks: Option<u64>,
+    ) -> Result<()> {
+        if active_decode_blocks.is_none() && kv_used_blocks.is_none() {
+            anyhow::bail!("worker metrics publish requires at least one load metric");
+        }
+
         let metrics = WorkerMetrics {
             dp_rank: dp_rank.unwrap_or(0),
             active_decode_blocks,
+            kv_used_blocks,
         };
         tracing::trace!(
-            "Publish metrics: dp_rank={}, active_decode_blocks={}",
+            "Publish metrics: dp_rank={}, active_decode_blocks={:?}, kv_used_blocks={:?}",
             metrics.dp_rank,
-            metrics.active_decode_blocks
+            metrics.active_decode_blocks,
+            metrics.kv_used_blocks
         );
         self.tx
             .send(metrics)
@@ -64,9 +76,8 @@ impl WorkerMetricsPublisher {
             let mut rx = nats_rx;
             let mut last_metrics: Option<WorkerMetrics> = None;
             let mut pending_publish: Option<WorkerMetrics> = None;
-            let mut publish_timer =
-                Box::pin(tokio::time::sleep(tokio::time::Duration::from_secs(0)));
-            publish_timer.as_mut().reset(tokio::time::Instant::now());
+            let publish_timer = tokio::time::sleep(tokio::time::Duration::ZERO);
+            tokio::pin!(publish_timer);
 
             loop {
                 tokio::select! {
@@ -79,35 +90,31 @@ impl WorkerMetricsPublisher {
                         }
 
                         let metrics = rx.borrow_and_update().clone();
-                        let has_changed = last_metrics.as_ref() != Some(&metrics);
-
-                        if has_changed {
-                            pending_publish = Some(metrics.clone());
-                            last_metrics = Some(metrics);
-                            publish_timer.as_mut().reset(
-                                tokio::time::Instant::now()
-                                    + tokio::time::Duration::from_millis(1)
-                            );
+                        if last_metrics.as_ref() == Some(&metrics) {
+                            continue;
                         }
+
+                        pending_publish = Some(metrics.clone());
+                        last_metrics = Some(metrics);
+                        publish_timer.as_mut().reset(
+                            tokio::time::Instant::now()
+                                + tokio::time::Duration::from_millis(1)
+                        );
                     }
-                    _ = &mut publish_timer => {
+                    _ = &mut publish_timer, if pending_publish.is_some() => {
                         if let Some(metrics) = pending_publish.take() {
                             let active_load = ActiveLoad {
                                 worker_id,
                                 dp_rank: metrics.dp_rank,
-                                active_decode_blocks: Some(metrics.active_decode_blocks),
+                                active_decode_blocks: metrics.active_decode_blocks,
                                 active_prefill_tokens: None,
+                                kv_used_blocks: metrics.kv_used_blocks,
                             };
 
                             if let Err(e) = event_publisher.publish(&active_load).await {
                                 tracing::warn!("Failed to publish metrics: {}", e);
                             }
                         }
-
-                        publish_timer.as_mut().reset(
-                            tokio::time::Instant::now()
-                                + tokio::time::Duration::from_secs(3600)
-                        );
                     }
                 }
             }
