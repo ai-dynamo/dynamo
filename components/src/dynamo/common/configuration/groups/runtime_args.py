@@ -56,6 +56,13 @@ class DynamoRuntimeConfig(ConfigBase):
         self.enable_local_indexer = not self.durable_kv_events
         self._validate_output_modalities()
 
+        for name in ("engine_request_limit", "dynamo_request_queue_limit"):
+            value = getattr(self, name)
+            if value is not None and value <= 0:
+                raise ValueError(
+                    f"--{name.replace('_', '-')} must be a positive integer, got {value}"
+                )
+
     def _validate_output_modalities(self) -> None:
         """Validate --output-modalities values."""
         if not self.output_modalities:
