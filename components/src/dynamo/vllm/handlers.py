@@ -477,6 +477,18 @@ def _attach_prompt_logprobs_engine_data(
         engine_data["prompt_logprobs"] = prompt_logprobs
 
 
+def _attach_routed_experts_engine_data(
+    tok: Dict[str, Any], routed_experts: Dict[str, Any]
+) -> None:
+    # routed_experts rides the engine's opaque engine_data passthrough (surfaced
+    # by the Rust postprocessor as nvext.routed_experts); disaggregated_params
+    # stays KV-transfer only. Merge via setdefault so we don't clobber any
+    # prompt_logprobs already attached to engine_data on the final chunk.
+    engine_data = tok.setdefault("engine_data", {})
+    if isinstance(engine_data, dict):
+        engine_data["routed_experts"] = routed_experts
+
+
 def _iter_nvext_sources(request: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
     """Yield each nvext dict on the request, in priority order:
 
@@ -3015,12 +3027,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             raw_routed_experts_by_output.get(output_idx)
                         )
                         if routed_experts is not None:
-                            existing = out.get("disaggregated_params")
-                            disaggregated_params: Dict[str, Any] = (
-                                dict(existing) if isinstance(existing, dict) else {}
-                            )
-                            disaggregated_params["routed_experts"] = routed_experts
-                            out["disaggregated_params"] = disaggregated_params
+                            _attach_routed_experts_engine_data(out, routed_experts)
                         # Log completion with LoRA info (debug level to avoid log spam)
                         self._log_with_lora_context(
                             "Completed token generation for request {request_id}{lora_info}: "

@@ -169,6 +169,10 @@ class TrafficMetrics(_ProtoMirror):
     # throughput scaling consumes this; external throughput-propose
     # plugins replicating PSM behaviour read it here.
     kv_hit_rate: Optional[float] = None
+    # Speculative decode accept length over the window: visible output tokens
+    # per decode request-forward, including the base token. ``None`` = no
+    # datapoint; ``1.0`` = no speculative benefit observed.
+    accept_length: Optional[float] = None
 
 
 class FpmData(_ProtoMirror):

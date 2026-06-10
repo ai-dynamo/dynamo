@@ -344,10 +344,10 @@ func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, se
 	}
 
 	// The inter-pod GMS layout is currently implemented only for vLLM (the
-	// engine relies on vLLM-specific runtime hooks like --load-format gms and
-	// DYN_VLLM_GMS_SHADOW_MODE that activate the GMS client path). Fail fast
-	// at admission rather than producing a broken deployment when another or
-	// no backend is configured — an empty BackendFramework means the operator
+	// engine relies on vLLM-specific runtime hooks like --load-format gms; the
+	// failover variant additionally enables vLLM shadow mode). Fail fast at
+	// admission rather than producing a broken deployment when another or no
+	// backend is configured — an empty BackendFramework means the operator
 	// cannot confirm the engine speaks vLLM, which is a hard prerequisite for
 	// inter-pod GMS (both standalone and with failover).
 	if service.IsInterPodGMSEnabled() &&
