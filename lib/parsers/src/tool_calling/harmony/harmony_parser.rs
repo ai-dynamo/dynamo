@@ -21,14 +21,20 @@ static SPECIAL_TOKEN_REGEX: OnceLock<Regex> = OnceLock::new();
 /// Regex fallback used only when `openai_harmony`'s tokenizer rejects the
 /// input — alternative on this path is silent-drop. Worst case is missing
 /// a call, never fabricating one: Harmony tool calls must end with `<|call|>`.
+///
+/// Matches tool calls on either `commentary` or `analysis` channel: the model
+/// emits ~47% of tool calls on the `analysis` channel with a bare `code`
+/// constraint marker instead of `<|constrain|>json`. The `.*?` non-greedy span
+/// between the recipient and `<|message|>` already tolerates any constraint
+/// marker form (`code`, `<|constrain|>json`, or nothing).
 fn commentary_block_regex() -> &'static Regex {
     COMMENTARY_BLOCK_REGEX.get_or_init(|| {
         // Name is `[\w.\-]+` (alphanumeric / dot / hyphen / underscore).
         // Between name and `<|message|>` we tolerate optional
-        // `<|constrain|>json` and whitespace by using non-greedy `.*?`.
+        // `<|constrain|>json`, bare `code`, or nothing (non-greedy `.*?`).
         // Args must end at `<|call|>`, the required Harmony tool-call stop token.
         Regex::new(
-            r"(?s)(?:<\|start\|>assistant)?<\|channel\|>commentary to=functions\.(?P<name>[\w.\-]+).*?<\|message\|>(?P<args>.*?)<\|call\|>",
+            r"(?s)(?:<\|start\|>assistant)?<\|channel\|>(?:commentary|analysis) to=functions\.(?P<name>[\w.\-]+).*?<\|message\|>(?P<args>.*?)<\|call\|>",
         )
         .expect("commentary block regex")
     })
@@ -54,8 +60,16 @@ fn commentary_header_cleanup_regex() -> &'static Regex {
 
 fn analysis_block_cleanup_regex() -> &'static Regex {
     ANALYSIS_BLOCK_CLEANUP_REGEX.get_or_init(|| {
-        Regex::new(r"(?s)(?:<\|start\|>assistant)?<\|channel\|>analysis<\|message\|>(?P<body>.*?)(?:<\|end\|>|\z)")
-            .expect("analysis block cleanup regex")
+        // Accepts both the spec-compliant reasoning form
+        //   `<|channel|>analysis<|message|>...<|end|>`
+        // and the gpt-oss model-bug directed-tool-call form (recovered by PR #10366)
+        //   `<|channel|>analysis to=functions.X[ <|constrain|>json]<|message|>{args}<|call|>`
+        // The `name` capture distinguishes the two in the strip log so analysis
+        // stays semantically "thinking" while the bug-shape is logged as a tool call.
+        Regex::new(
+            r"(?s)(?:<\|start\|>assistant)?<\|channel\|>analysis(?:\s+to=functions\.(?P<name>[\w.\-]+))?.*?<\|message\|>(?P<body>.*?)(?:<\|call\|>|<\|end\|>|\z)",
+        )
+        .expect("analysis block cleanup regex")
     })
 }
 
@@ -121,7 +135,11 @@ fn strip_harmony_protocol_from_normal_text(text: &str, reason: &'static str) -> 
     let cleaned = analysis_block_cleanup_regex()
         .replace_all(&cleaned, |caps: &Captures<'_>| {
             record_special_tokens(&caps[0], &mut stripped);
-            push_unique(&mut stripped, "analysis_envelope".to_string());
+            let item = match caps.name("name").map(|m| m.as_str()) {
+                Some(name) => format!("analysis_tool_call:functions.{name}"),
+                None => "analysis_envelope".to_string(),
+            };
+            push_unique(&mut stripped, item);
             ""
         })
         .into_owned();
@@ -376,46 +394,50 @@ pub async fn parse_tool_calls_harmony_complete(
         let channel = message.channel.as_deref();
         let recipient = message.recipient.as_deref().unwrap_or_default();
 
-        if channel == Some("commentary") {
-            if recipient.starts_with("functions.") {
-                if !has_tool_call_stop {
-                    continue;
-                }
+        // A `to=functions.NAME` recipient is the definitive signal of a tool
+        // call, regardless of channel label. The model emits tool calls on both
+        // `commentary` (canonical) and `analysis` (malformed-but-common) channels.
+        let is_tool_channel = channel == Some("commentary") || channel == Some("analysis");
+        if is_tool_channel && recipient.starts_with("functions.") {
+            if !has_tool_call_stop {
+                continue;
+            }
 
-                let Some(fname) = message
-                    .recipient
-                    .as_ref()
-                    .and_then(|r| r.split('.').nth(1))
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string())
-                else {
-                    continue;
-                };
+            let Some(fname) = message
+                .recipient
+                .as_ref()
+                .and_then(|r| r.split('.').nth(1))
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+            else {
+                continue;
+            };
 
-                let Some(args_json) = message.content.first().and_then(|content| match content {
-                    Content::Text(text) => Some(serialize_harmony_arguments(&text.text)),
-                    _ => None,
-                }) else {
-                    continue;
-                };
+            let Some(args_json) = message.content.first().and_then(|content| match content {
+                Content::Text(text) => Some(serialize_harmony_arguments(&text.text)),
+                _ => None,
+            }) else {
+                continue;
+            };
 
-                call_idx += 1;
-                res.push(ToolCallResponse {
-                    id: format!("call-{}", call_idx),
-                    tp: ToolCallType::Function,
-                    function: CalledFunction {
-                        name: fname.to_string(),
-                        arguments: args_json,
-                    },
-                });
-            } else if recipient.is_empty()
+            call_idx += 1;
+            res.push(ToolCallResponse {
+                id: format!("call-{}", call_idx),
+                tp: ToolCallType::Function,
+                function: CalledFunction {
+                    name: fname.to_string(),
+                    arguments: args_json,
+                },
+            });
+        } else if channel == Some("final")
+            || (channel == Some("commentary")
+                && recipient.is_empty()
                 && !(has_recipientless_commentary_call
                     && (message.content_type.as_deref() == Some("<|constrain|>json")
-                        || content_looks_like_json(&message.content)))
-            {
-                push_harmony_text(&mut normal_text, &message.content);
-            }
-        } else if channel == Some("final") {
+                        || content_looks_like_json(&message.content))))
+        {
+            // Final-channel answer text, or recipientless commentary that isn't a
+            // tool-call payload, both surface as assistant content.
             push_harmony_text(&mut normal_text, &message.content);
         }
     }
@@ -981,5 +1003,96 @@ mod detect_parser_tests {
             !detect_tool_call_start_harmony("xyz", &config, true),
             "'xyz' should not be detected in strict mode"
         );
+    }
+
+    // --- analysis-channel tool-call recovery (the gpt-oss-120b malformed form) ---
+
+    #[tokio::test]
+    async fn test_parse_harmony_analysis_code_tool_call_recovered() {
+        // Exact form emitted by the gpt-oss-120b worker: channel=analysis, constraint=code.
+        let text =
+            r#"<|channel|>analysis to=functions.grep code<|message|>{"pattern":"foo"}<|call|>"#;
+        let (calls, normal) =
+            parse_tool_calls_harmony_complete(text, &JsonParserConfig::default(), None)
+                .await
+                .expect("parser should not error");
+        assert_eq!(calls.len(), 1, "analysis/code tool call must be recovered");
+        assert_eq!(calls[0].function.name, "grep");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["pattern"], "foo");
+        assert_eq!(
+            normal,
+            Some("".to_string()),
+            "no markup should leak into normal_text"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_parse_harmony_analysis_no_constraint_tool_call_recovered() {
+        // analysis channel with no constraint marker at all.
+        let text = r#"<|channel|>analysis to=functions.bash<|message|>{"command":"ls"}<|call|>"#;
+        let (calls, _normal) =
+            parse_tool_calls_harmony_complete(text, &JsonParserConfig::default(), None)
+                .await
+                .expect("parser should not error");
+        assert_eq!(
+            calls.len(),
+            1,
+            "analysis tool call without constraint must be recovered"
+        );
+        assert_eq!(calls[0].function.name, "bash");
+    }
+
+    #[tokio::test]
+    async fn test_parse_harmony_recipientless_analysis_is_not_tool_call() {
+        // Recipientless analysis is pure reasoning — must never become a tool call
+        // and must not leak markup into normal_text.
+        let text = r#"<|channel|>analysis<|message|>Let me think about grep.<|end|><|channel|>final<|message|>Done.<|return|>"#;
+        let (calls, normal) =
+            parse_tool_calls_harmony_complete(text, &JsonParserConfig::default(), None)
+                .await
+                .expect("parser should not error");
+        assert!(
+            calls.is_empty(),
+            "recipientless analysis must not produce a tool call"
+        );
+        assert_eq!(
+            normal,
+            Some("Done.".to_string()),
+            "only the final-channel text should appear in normal_text"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_parse_harmony_analysis_tool_call_without_stop_drops() {
+        // Analysis tool call missing the required <|call|> terminator must be dropped.
+        let text = r#"<|channel|>analysis to=functions.grep code<|message|>{"pattern":"foo"}"#;
+        let (calls, _normal) =
+            parse_tool_calls_harmony_complete(text, &JsonParserConfig::default(), None)
+                .await
+                .expect("parser should not error");
+        assert!(
+            calls.is_empty(),
+            "analysis tool call without <|call|> terminator must be dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_parse_harmony_analysis_tool_call_then_final() {
+        // Reasoning block + analysis tool call + final answer: one tool call recovered,
+        // normal_text = only the final-channel content.
+        let text = concat!(
+            "<|channel|>analysis<|message|>think<|end|>",
+            "<|start|>assistant<|channel|>analysis to=functions.get_weather code<|message|>",
+            r#"{"location":"NYC"}<|call|>"#,
+            "<|start|>assistant<|channel|>final<|message|>Checked.<|return|>",
+        );
+        let (calls, normal) =
+            parse_tool_calls_harmony_complete(text, &JsonParserConfig::default(), None)
+                .await
+                .expect("parser should not error");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(normal, Some("Checked.".to_string()));
     }
 }

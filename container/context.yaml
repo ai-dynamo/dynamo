@@ -76,6 +76,18 @@ sglang:
     runtime_image: lmsysorg/sglang
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
     runtime_image_tag: v0.5.12.post1-cu130-runtime
+  xpu:
+    base_image: intel/deep-learning-essentials
+    base_image_tag: 2025.3.2-0-devel-ubuntu24.04
+    runtime_image: intel/deep-learning-essentials
+    runtime_image_tag: 2025.3.2-0-devel-ubuntu24.04
+    sglang_ref: v0.5.11
+    sglang_git_url: https://github.com/sgl-project/sglang.git
+    sglang_kernel_ref: 3fbd4d33721ce3cf818b1cec3978043951406f10
+    sglang_kernel_git_url: https://github.com/sgl-project/sgl-kernel-xpu.git
+    # XPU SGLang requires a newer NIXL than the framework default; scoped here
+    # to avoid affecting sglang-cuda or other frameworks (e.g. dynamo KVBM link).
+    nixl_ref: v1.1.0
   # Builds the NIXL C++ SDK in wheel_builder so the dev stage can link nixl-sys
   # (see templates/dev.Dockerfile). Runtime stays on the upstream lmsysorg/sglang
   # NIXL Python stack — its wheel COPY is narrowed to ai_dynamo*.whl so the SDK

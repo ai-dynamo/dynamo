@@ -561,8 +561,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 routed_experts = res["meta_info"].get("routed_experts")
                 if routed_experts is not None:
-                    # sglang >= 0.5.11 base64-encodes routed_experts upstream.
-                    out["disaggregated_params"] = {"routed_experts": routed_experts}
+                    # sglang >= 0.5.11 base64-encodes routed_experts upstream. It rides
+                    # the engine's opaque engine_data passthrough (surfaced by the frontend
+                    # as nvext.routed_experts); disaggregated_params stays KV-transfer only.
+                    out["engine_data"] = {"routed_experts": routed_experts}
                 if finish_reason:
                     input_tokens = res["meta_info"]["prompt_tokens"]
                     completion_tokens = res["meta_info"]["completion_tokens"]

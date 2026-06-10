@@ -374,6 +374,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Corresponds to the 'dp' dimension in AIC CLI output.",
     )
     parser.add_argument(
+        "--aic-nextn",
+        type=int,
+        default=None,
+        help="[EXPERIMENTAL] Number of MTP draft tokens to sample (1-5).",
+    )
+    parser.add_argument(
+        "--aic-nextn-accept-rates",
+        type=str,
+        default=None,
+        help=(
+            "[EXPERIMENTAL] Comma-separated conditional MTP acceptance rates. "
+            "Entry i is P(draft i accepted | all earlier drafts were accepted)."
+        ),
+    )
+    parser.add_argument(
+        "--aic-mtp-seed",
+        type=int,
+        default=42,
+        help="[EXPERIMENTAL] Base RNG seed for mocker MTP burst sampling.",
+    )
+    parser.add_argument(
         "--num-workers",
         type=int,
         default=1,

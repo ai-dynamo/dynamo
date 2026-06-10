@@ -85,6 +85,7 @@ def _engine_caps(
         context_length=worker_info.context_length if worker_info else None,
         max_kv_tokens=worker_info.max_kv_tokens if worker_info else None,
         kv_cache_block_size=worker_info.kv_cache_block_size if worker_info else None,
+        speculative_nextn=worker_info.speculative_nextn if worker_info else None,
     )
 
 
@@ -505,6 +506,7 @@ class NativePlannerBase:
         "max_num_seqs",
         "max_num_batched_tokens",
         "context_length",
+        "speculative_nextn",
     )
 
     def _refresh_worker_info_from_connector(self) -> None:
@@ -675,11 +677,15 @@ class NativePlannerBase:
         m.kv_hit_rate = self.prometheus_traffic_client.get_avg_kv_hit_rate(
             interval_str, self.model_name
         )
+        m.accept_length = self._collect_accept_length(interval_str)
 
         hit_rate_str = f"{m.kv_hit_rate:.3f}" if m.kv_hit_rate is not None else "n/a"
+        accept_length_str = (
+            f"{m.accept_length:.3f}" if m.accept_length is not None else "n/a"
+        )
         logger.info(
             f"Observed num_req: {m.num_req:.2f} isl: {m.isl:.2f} osl: {m.osl:.2f} "
-            f"kv_hit_rate: {hit_rate_str}"
+            f"kv_hit_rate: {hit_rate_str} accept_length: {accept_length_str}"
         )
 
         if self.prometheus_port != 0:
@@ -703,6 +709,23 @@ class NativePlannerBase:
             isl=m.isl,
             osl=m.osl,
             kv_hit_rate=m.kv_hit_rate,
+            accept_length=m.accept_length,
+        )
+
+    def _collect_accept_length(self, interval_str: str) -> Optional[float]:
+        if self.config.mode not in ("disagg", "decode", "agg"):
+            return None
+        if not self.model_name:
+            return None
+        component_name = self.decode_worker_info.component_name
+        endpoint_name = self.decode_worker_info.endpoint
+        return self.prometheus_traffic_client.get_avg_spec_decode_accept_length(
+            interval_str,
+            self.config.backend,
+            component_name,
+            self.model_name,
+            namespace=self.runtime_namespace,
+            endpoint_name=endpoint_name,
         )
 
     async def _collect_kv_hit_rate_observation(
@@ -714,9 +737,9 @@ class NativePlannerBase:
         to discount prefill work, so we skip the five other (unused) traffic
         queries to keep the per-load-tick scrape cheap.
 
-        Returns ``None`` when the router metric is unavailable (e.g.
-        Prometheus source is "frontend"); the state machine treats that as
-        a no-discount fallback.
+        The observation is still returned when metrics are unavailable so the
+        state machine can retain last-value runtime metadata without skipping
+        the load tick.
         """
         assert self.model_name is not None
         if duration_s <= 0:
@@ -725,19 +748,26 @@ class NativePlannerBase:
         hit_rate = self.prometheus_traffic_client.get_avg_kv_hit_rate(
             interval_str, self.model_name
         )
+        accept_length = self._collect_accept_length(interval_str)
         # Mirror the observed value into Metrics so the diagnostics recorder
         # sees the up-to-date hit rate even on load-only ticks.
         self._last_metrics.kv_hit_rate = hit_rate
+        self._last_metrics.accept_length = accept_length
         hit_rate_str = f"{hit_rate:.3f}" if hit_rate is not None else "n/a"
-        logger.info(f"Observed kv_hit_rate over {interval_str}: {hit_rate_str}")
-        if hit_rate is None:
-            return None
+        accept_length_str = (
+            f"{accept_length:.3f}" if accept_length is not None else "n/a"
+        )
+        logger.info(
+            f"Observed kv_hit_rate over {interval_str}: {hit_rate_str}; "
+            f"accept_length: {accept_length_str}"
+        )
         return TrafficObservation(
             duration_s=duration_s,
             num_req=0.0,
             isl=0.0,
             osl=0.0,
             kv_hit_rate=hit_rate,
+            accept_length=accept_length,
         )
 
     def _collect_fpm(self) -> FpmObservations:

@@ -139,10 +139,12 @@ features:
 
 | 字段 | 类型 | 默认值 | 说明 |
 |-------|------|---------|-------------|
-| `load_predictor` | string | `arima` | 预测方法：`constant`、`arima`、`kalman` 或 `prophet`。 |
-| `load_predictor_log1p` | bool | `false` | 在预测前对负载数据应用 log1p 变换。 |
+| `load_predictor` | string | `arima` | 用于 request count、ISL 和 OSL 的预测方法：`constant`、`arima`、`kalman` 或 `prophet`。KV hit rate 和 speculative decode accept length 等运行时元数据会使用最新的有效观测值。 |
+| `load_predictor_log1p` | bool | `false` | 对被预测的 request count、ISL 和 OSL 数据应用 log1p 变换。 |
 | `prophet_window_size` | int | `50` | Prophet predictor 的窗口大小（秒）。 |
 | `load_predictor_warmup_trace` | string | `null` | 用于引导预测的 warmup trace 文件路径。 |
+
+KV hit rate 和 speculative decode accept length 是引擎/Router 运行时信号，不是流量形状。Planner 会保存每个信号最新的有效观测值，并在新的有效值到达前复用它。冷启动时，缺失的 KV hit rate 表示不做 prefix-cache discount，缺失的 accept length 表示 `1.0`。
 
 ### Kalman Filter 设置
 

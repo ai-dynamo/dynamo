@@ -11,7 +11,6 @@ use crate::http::service::Metrics;
 use crate::http::service::service_v2 as http_service;
 
 use crate::discovery::ModelManager;
-use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::protocols::tensor::TensorModelConfig;
 use crate::protocols::tensor::{NvCreateTensorRequest, NvCreateTensorResponse};
 use crate::request_template::RequestTemplate;
@@ -300,8 +299,10 @@ enum Config {
 }
 
 impl Config {
-    fn from_runtime_config(runtime_config: &ModelRuntimeConfig) -> Result<Config, anyhow::Error> {
-        if let Some(tensor_model_config) = runtime_config.tensor_model_config.as_ref() {
+    fn from_tensor_model_config(
+        tensor_model_config: Option<&TensorModelConfig>,
+    ) -> Result<Config, anyhow::Error> {
+        if let Some(tensor_model_config) = tensor_model_config {
             if let Some(triton_model_config) = tensor_model_config.triton_model_config.as_ref() {
                 let model_config = ModelConfig::decode(triton_model_config.as_slice())?;
                 Ok(Config::Triton(model_config))
@@ -576,12 +577,13 @@ impl GrpcInferenceService for KserveService {
             .find(|card| request_model_name == &card.display_name)
         {
             if card.model_type.supports_tensor() {
-                let config = Config::from_runtime_config(&card.runtime_config).map_err(|e| {
-                    Status::invalid_argument(format!(
-                        "Model '{}' has type Tensor but: {}",
-                        request_model_name, e
-                    ))
-                })?;
+                let config = Config::from_tensor_model_config(card.tensor_model_config.as_ref())
+                    .map_err(|e| {
+                        Status::invalid_argument(format!(
+                            "Model '{}' has type Tensor but: {}",
+                            request_model_name, e
+                        ))
+                    })?;
                 match config {
                     Config::Triton(model_config) => {
                         return Ok(Response::new(ModelMetadataResponse {
@@ -695,12 +697,13 @@ impl GrpcInferenceService for KserveService {
             .find(|card| request_model_name == &card.display_name)
         {
             if card.model_type.supports_tensor() {
-                let config = Config::from_runtime_config(&card.runtime_config).map_err(|e| {
-                    Status::invalid_argument(format!(
-                        "Model '{}' has type Tensor but: {}",
-                        request_model_name, e
-                    ))
-                })?;
+                let config = Config::from_tensor_model_config(card.tensor_model_config.as_ref())
+                    .map_err(|e| {
+                        Status::invalid_argument(format!(
+                            "Model '{}' has type Tensor but: {}",
+                            request_model_name, e
+                        ))
+                    })?;
                 match config {
                     Config::Triton(model_config) => {
                         return Ok(Response::new(ModelConfigResponse {
