@@ -5,6 +5,58 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 use crate::protocols::*;
 
+pub(crate) fn append_dump_events(
+    events: &mut Vec<RouterEvent>,
+    event_id: &mut u64,
+    parent_hash: Option<ExternalSequenceBlockHash>,
+    edge: &[(LocalBlockHash, ExternalSequenceBlockHash)],
+    full_workers: &[WorkerWithDpRank],
+    worker_cutoffs: &[(WorkerWithDpRank, usize)],
+) {
+    let blocks = edge
+        .iter()
+        .map(|&(tokens_hash, block_hash)| KvCacheStoredBlockData {
+            block_hash,
+            tokens_hash,
+            mm_extra_info: None,
+        })
+        .collect::<Vec<_>>();
+
+    for &worker in full_workers {
+        events.push(dump_event(worker, *event_id, parent_hash, blocks.clone()));
+        *event_id += 1;
+    }
+    for &(worker, cutoff) in worker_cutoffs {
+        events.push(dump_event(
+            worker,
+            *event_id,
+            parent_hash,
+            blocks[..cutoff].to_vec(),
+        ));
+        *event_id += 1;
+    }
+}
+
+fn dump_event(
+    worker: WorkerWithDpRank,
+    event_id: u64,
+    parent_hash: Option<ExternalSequenceBlockHash>,
+    blocks: Vec<KvCacheStoredBlockData>,
+) -> RouterEvent {
+    RouterEvent::new(
+        worker.worker_id,
+        KvCacheEvent {
+            event_id,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash,
+                start_position: None,
+                blocks,
+            }),
+            dp_rank: worker.dp_rank,
+        },
+    )
+}
+
 pub(crate) struct RemoveOutcome {
     pub(crate) stale_hashes: Vec<ExternalSequenceBlockHash>,
 }

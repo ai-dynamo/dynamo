@@ -7,7 +7,7 @@ use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
-use super::compressed_radix::NodeState;
+use super::compressed_radix::{NodeState, append_dump_events};
 use super::{EventWarningKind, MatchDetails, PreBoundEventCounters};
 use crate::protocols::*;
 
@@ -721,34 +721,16 @@ impl RadixTree {
                     break;
                 }
 
-                let blocks = merged_edge
-                    .iter()
-                    .map(|&(tokens_hash, block_hash)| KvCacheStoredBlockData {
-                        block_hash,
-                        tokens_hash,
-                        mm_extra_info: None,
-                    })
-                    .collect::<Vec<_>>();
                 let last_hash = merged_edge.last().unwrap().1;
 
-                for worker in full_workers {
-                    events.push(Self::dump_event(
-                        worker,
-                        event_id,
-                        parent_hash,
-                        blocks.clone(),
-                    ));
-                    event_id += 1;
-                }
-                for (worker, cutoff) in cutoffs {
-                    events.push(Self::dump_event(
-                        worker,
-                        event_id,
-                        parent_hash,
-                        blocks[..cutoff].to_vec(),
-                    ));
-                    event_id += 1;
-                }
+                append_dump_events(
+                    &mut events,
+                    &mut event_id,
+                    parent_hash,
+                    &merged_edge,
+                    &full_workers,
+                    &cutoffs,
+                );
                 for child in live_children {
                     queue.push_back((child, Some(last_hash)));
                 }
@@ -757,26 +739,6 @@ impl RadixTree {
         }
 
         events
-    }
-
-    fn dump_event(
-        worker: WorkerWithDpRank,
-        event_id: u64,
-        parent_hash: Option<ExternalSequenceBlockHash>,
-        blocks: Vec<KvCacheStoredBlockData>,
-    ) -> RouterEvent {
-        RouterEvent::new(
-            worker.worker_id,
-            KvCacheEvent {
-                event_id,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash,
-                    start_position: None,
-                    blocks,
-                }),
-                dp_rank: worker.dp_rank,
-            },
-        )
     }
 
     pub fn current_size(&self) -> usize {
@@ -899,18 +861,21 @@ mod tests {
         );
 
         let mut uncompressed_events = Vec::new();
+        let mut uncompressed_event_id = 0;
         for event in &events {
             let KvCacheEventData::Stored(store) = &event.event.data else {
                 unreachable!();
             };
             let mut parent_hash = store.parent_hash;
             for block in &store.blocks {
-                uncompressed_events.push(RadixTree::dump_event(
-                    WorkerWithDpRank::new(event.worker_id, event.event.dp_rank),
-                    uncompressed_events.len() as u64,
+                append_dump_events(
+                    &mut uncompressed_events,
+                    &mut uncompressed_event_id,
                     parent_hash,
-                    vec![block.clone()],
-                ));
+                    &[(block.tokens_hash, block.block_hash)],
+                    &[WorkerWithDpRank::new(event.worker_id, event.event.dp_rank)],
+                    &[],
+                );
                 parent_hash = Some(block.block_hash);
             }
         }
