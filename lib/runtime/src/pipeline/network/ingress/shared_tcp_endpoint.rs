@@ -77,13 +77,17 @@ fn resolve_sizing() -> SizingConfig {
         .and_then(|s| s.parse::<usize>().ok())
     {
         Some(engine_limit) => {
-            let queue_size = std::env::var("DYN_DYNAMO_REQUEST_QUEUE_LIMIT")
+            let queue_limit = std::env::var("DYN_DYNAMO_REQUEST_QUEUE_LIMIT")
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(DEFAULT_DYNAMO_REQUEST_QUEUE_LIMIT);
+            // The single dispatcher holds one request between `recv()` and
+            // acquiring an engine permit, so size the channel to limit-1:
+            // channel + the dispatcher-held request cap "queued, not in engine"
+            // at exactly `limit`.
             SizingConfig {
                 pool_size: engine_limit.max(1),
-                queue_size: queue_size.max(1),
+                queue_size: queue_limit.saturating_sub(1).max(1),
             }
         }
         None => SizingConfig {
