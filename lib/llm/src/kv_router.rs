@@ -986,6 +986,7 @@ where
                 block_mm_infos,
                 routing_constraints,
                 priority_jump,
+                lora_name,
             } => {
                 match self
                     .find_best_match_details(
@@ -995,7 +996,7 @@ where
                         None,
                         true,
                         false,
-                        None,
+                        lora_name,
                         priority_jump,
                         None,
                         None,
@@ -1028,9 +1029,15 @@ where
             RouterRequest::PotentialLoads {
                 tokens,
                 block_mm_infos,
+                lora_name,
             } => RouterResponse::PotentialLoads {
                 loads: self
-                    .get_potential_loads(&tokens, None, block_mm_infos.as_deref(), None)
+                    .get_potential_loads(
+                        &tokens,
+                        None,
+                        block_mm_infos.as_deref(),
+                        lora_name.as_deref(),
+                    )
                     .await?,
                 pending_count: self.pending_count(),
                 pending_isl_tokens: self.pending_isl_tokens(),

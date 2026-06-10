@@ -2678,6 +2678,7 @@ class KvRouter:
             block_mm_infos: Optional block-level multimodal metadata aligned to request
                            blocks. When provided, this is used in hash computation
                            for MM-aware potential-load estimation.
+            lora_name: Optional LoRA adapter name used in block hash computation.
 
         Returns:
             A list of dictionaries, each containing:

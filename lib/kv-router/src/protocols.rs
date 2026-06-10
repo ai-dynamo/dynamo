@@ -440,11 +440,15 @@ pub enum RouterRequest {
         routing_constraints: RoutingConstraints,
         #[serde(default)]
         priority_jump: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lora_name: Option<String>,
     },
     PotentialLoads {
         tokens: Vec<Token>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lora_name: Option<String>,
     },
     MarkPrefill {
         // once prefill completes, the frontend might not be allowed to send a
@@ -467,6 +471,7 @@ impl Default for RouterRequest {
             block_mm_infos: None,
             routing_constraints: RoutingConstraints::default(),
             priority_jump: 0.0,
+            lora_name: None,
         }
     }
 }
@@ -1660,6 +1665,7 @@ mod tests {
             block_mm_infos: None,
             routing_constraints: RoutingConstraints::default(),
             priority_jump: 5.0,
+            lora_name: None,
         };
 
         let serialized = serde_json::to_string(&request).unwrap();
@@ -1675,6 +1681,88 @@ mod tests {
                 priority_jump,
                 ..
             } if priority_jump == 5.0
+        ));
+    }
+
+    #[test]
+    fn test_router_request_new_serialization_with_lora_name() {
+        let request = RouterRequest::New {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            routing_constraints: RoutingConstraints::default(),
+            priority_jump: 0.0,
+            lora_name: Some("adapter-a".to_string()),
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            serialized,
+            r#"{"method":"new","tokens":[1,2,3],"priority_jump":0.0,"lora_name":"adapter-a"}"#
+        );
+        assert!(matches!(
+            deserialized,
+            RouterRequest::New {
+                tokens,
+                lora_name: Some(ref lora_name),
+                ..
+            } if tokens == vec![1, 2, 3] && lora_name == "adapter-a"
+        ));
+    }
+
+    #[test]
+    fn test_router_request_new_defaults_lora_name() {
+        let deserialized: RouterRequest =
+            serde_json::from_str(r#"{"method":"new","tokens":[1,2,3]}"#).unwrap();
+
+        assert!(matches!(
+            deserialized,
+            RouterRequest::New {
+                tokens,
+                lora_name: None,
+                ..
+            } if tokens == vec![1, 2, 3]
+        ));
+    }
+
+    #[test]
+    fn test_router_request_potential_loads_serialization_with_lora_name() {
+        let request = RouterRequest::PotentialLoads {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            lora_name: Some("adapter-a".to_string()),
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            serialized,
+            r#"{"method":"potential_loads","tokens":[1,2,3],"lora_name":"adapter-a"}"#
+        );
+        assert!(matches!(
+            deserialized,
+            RouterRequest::PotentialLoads {
+                tokens,
+                block_mm_infos: None,
+                lora_name: Some(ref lora_name),
+            } if tokens == vec![1, 2, 3] && lora_name == "adapter-a"
+        ));
+    }
+
+    #[test]
+    fn test_router_request_potential_loads_defaults_lora_name() {
+        let deserialized: RouterRequest =
+            serde_json::from_str(r#"{"method":"potential_loads","tokens":[1,2,3]}"#).unwrap();
+
+        assert!(matches!(
+            deserialized,
+            RouterRequest::PotentialLoads {
+                tokens,
+                block_mm_infos: None,
+                lora_name: None,
+            } if tokens == vec![1, 2, 3]
         ));
     }
 
