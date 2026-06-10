@@ -73,6 +73,7 @@ import os
 import re as _re
 import subprocess
 import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -94,6 +95,11 @@ _SIZE_CAP_BYTES = 4 * 1024 * 1024  # 4 MB; 1 MB headroom under GitLab's 5 MB pai
 _DEFAULT_FROM_SBOM_CACHE_DIR = (
     Path(os.environ.get("TMPDIR", "/tmp")) / "dynamo-compliance-syft-cache"
 )
+
+# Fixed namespace for deterministic baseline-BOM serial numbers. Any constant
+# UUID works; this one is dedicated to dynamo compliance baselines so the
+# derived UUIDv5 serials are stable and never collide with other uuid5 callers.
+_SERIAL_NAMESPACE = uuid.UUID("d9b2d63d-a233-4123-847e-0a3fbf6b1a77")
 
 
 # ---- registry: digest + layer resolution -------------------------------------
@@ -163,8 +169,35 @@ def syft_scan(ref: str, platform: str) -> dict:
     return json.loads(result.stdout)
 
 
+def _deterministic_serial_number(doc: dict) -> str | None:
+    """Derive a stable ``urn:uuid:`` serial from the scanned image identity.
+
+    syft stamps every scan with a random ``serialNumber`` and a wall-clock
+    ``metadata.timestamp``; both churn on every run and would swamp the diff
+    when a baseline is refreshed. We replace the serial with a UUIDv5 over the
+    image's ``metadata.component`` name:version so re-capturing an unchanged
+    image is byte-identical, matching the deterministic-serial pattern used in
+    ``osrb/package.py``. Returns None when no component identity is present, in
+    which case the caller drops the field entirely.
+    """
+    component = (doc.get("metadata") or {}).get("component") or {}
+    name = component.get("name")
+    if not name:
+        return None
+    version = component.get("version")
+    seed = f"{name}:{version}" if version else name
+    return f"urn:uuid:{uuid.uuid5(_SERIAL_NAMESPACE, seed)}"
+
+
 def slim_cyclonedx(doc: dict) -> dict:
-    """Drop properties/hashes from components; drop the dependencies graph.
+    """Drop properties/hashes from components; drop the dependencies graph; and
+    normalize the two non-deterministic document fields.
+
+    ``serialNumber`` is replaced with a deterministic UUIDv5 derived from the
+    scanned image identity (or dropped when no identity is present), and the
+    wall-clock ``metadata.timestamp`` is dropped. Both otherwise change on every
+    syft run, so normalizing them lets an unchanged image re-capture to a zero
+    diff -- the whole point of committing these baselines.
 
     Keeps `components[].evidence` -- the paths where each package was
     found inside the image are critical for audit.
@@ -176,7 +209,32 @@ def slim_cyclonedx(doc: dict) -> dict:
     for c in components:
         c_out = {k: v for k, v in c.items() if k not in ("properties", "hashes")}
         slimmed.append(c_out)
+    # Own the component order rather than inheriting syft's. syft's intrinsic
+    # ordering can shift between releases, which would churn the entire file
+    # even when the image is unchanged; sorting here keeps re-capture diffs
+    # proportional to actual package changes (and survives syft upgrades).
+    # bom-ref is a deterministic tiebreaker for duplicate (name, version) rows.
+    slimmed.sort(
+        key=lambda c: (
+            str(c.get("name", "")),
+            str(c.get("version", "")),
+            str(c.get("type", "")),
+            str(c.get("purl", "")),
+            str(c.get("bom-ref", "")),
+        )
+    )
     out["components"] = slimmed
+
+    serial = _deterministic_serial_number(out)
+    if serial is not None:
+        out["serialNumber"] = serial
+    else:
+        out.pop("serialNumber", None)
+    metadata = out.get("metadata")
+    if isinstance(metadata, dict):
+        metadata = dict(metadata)
+        metadata.pop("timestamp", None)
+        out["metadata"] = metadata
     return out
 
 
@@ -655,7 +713,11 @@ def capture(
     # baseline-cache check could short-circuit syft.
     slim = slim_cyclonedx(baseline_sbom)
 
-    payload = json.dumps(slim, separators=(",", ":"))
+    # Pretty-print with sorted object keys (matching manifest.json) so the
+    # committed baselines produce readable, line-oriented diffs when a base
+    # is refreshed. Component array order is left as syft emits it. The slim
+    # filter keeps these comfortably under the size cap even indented.
+    payload = json.dumps(slim, indent=2, sort_keys=True) + "\n"
     payload_bytes = payload.encode("utf-8")
     size = len(payload_bytes)
     if size > _SIZE_CAP_BYTES:
