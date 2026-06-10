@@ -3054,7 +3054,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             or 0
                         )
                         prompt_len = len(getattr(res, "prompt_token_ids", None) or [])
-                        effective_start = min(raw_start, prompt_len) if prompt_len else raw_start
+                        effective_start = min(raw_start, prompt_len)
                         routed_experts = _serialize_routed_experts(
                             raw_routed_experts_by_output.get(output_idx),
                             start=effective_start,
