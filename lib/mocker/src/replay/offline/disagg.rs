@@ -656,7 +656,11 @@ impl DisaggRuntime {
         _worker_idx: usize,
         _completed_requests: usize,
         output_signals: Vec<OutputSignal>,
+        accept_length_output_tokens: usize,
+        accept_length_decode_forwards: usize,
     ) -> Result<()> {
+        self.traffic
+            .on_accept_length_sample(accept_length_output_tokens, accept_length_decode_forwards);
         for signal in output_signals {
             self.process_decode_signal(signal)?;
         }
@@ -683,6 +687,8 @@ impl DisaggRuntime {
                         payload.worker_idx,
                         payload.completed_requests,
                         payload.output_signals,
+                        payload.accept_length_output_tokens,
+                        payload.accept_length_decode_forwards,
                     )?;
                 }
                 SimulationWorkerStage::Aggregated => {
@@ -816,6 +822,8 @@ impl DisaggRuntime {
                 payload.worker_idx,
                 payload.completed_requests,
                 payload.output_signals,
+                payload.accept_length_output_tokens,
+                payload.accept_length_decode_forwards,
             )?;
         }
         for ScheduledWorkerCompletion { at_ms, payload } in effects.scheduled_completions {
@@ -911,6 +919,9 @@ impl DisaggRuntime {
             };
 
             if next_timestamp_ms > until_ms {
+                if until_ms > self.now_ms {
+                    self.now_ms = until_ms;
+                }
                 break;
             }
 
@@ -1600,6 +1611,26 @@ mod tests {
             DisaggPhase::RunningPrefill
         );
         assert_eq!(runtime.stats.prefill_assignments[&Uuid::from_u128(2)], 1);
+    }
+
+    #[test]
+    fn test_advance_to_moves_clock_across_idle_gap() {
+        let config = disagg_config();
+        let mut runtime = DisaggRuntime::new(
+            &config,
+            None,
+            None,
+            VecDeque::from([request(1, 64, 2, 1000.0)]),
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        runtime.advance_to(500.0).unwrap();
+
+        assert_eq!(runtime.now_ms(), 500.0);
+        let stats = runtime.drain_traffic();
+        assert!((stats.duration_s - 0.5).abs() < 1e-9);
     }
 
     /// Setting `max_sim_time_ms` causes `run()` to break before scheduled

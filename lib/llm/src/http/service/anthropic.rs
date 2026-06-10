@@ -26,7 +26,7 @@ use axum::{
 };
 use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
-use futures::{StreamExt, stream};
+use futures::StreamExt;
 use tracing::Instrument;
 
 use super::{
@@ -370,65 +370,54 @@ async fn anthropic_messages(
     if streaming {
         stream_handle.arm();
 
-        use std::sync::atomic::{AtomicBool, Ordering};
-
         let mut converter = match anthropic_ctx {
             Some(ctx) => {
                 AnthropicStreamConverter::with_context(model_for_resp, estimated_input_tokens, ctx)
             }
             None => AnthropicStreamConverter::new(model_for_resp, estimated_input_tokens),
         };
-        let start_events = converter.emit_start_events();
-
-        let converter = std::sync::Arc::new(std::sync::Mutex::new(converter));
-        let converter_end = converter.clone();
-
-        let saw_error = std::sync::Arc::new(AtomicBool::new(false));
-        let saw_error_end = saw_error.clone();
 
         let mut http_queue_guard = Some(http_queue_guard);
+        let mut engine_stream = engine_stream;
 
-        let event_stream = engine_stream
-            .inspect(move |response| {
+        let full_stream = async_stream::stream! {
+            let mut events = Vec::with_capacity(4);
+            converter.append_start_events(&mut events);
+            for event in events.drain(..) {
+                yield event.map_err(axum::Error::new);
+            }
+
+            let mut saw_error = false;
+
+            while let Some(annotated_chunk) = engine_stream.next().await {
                 process_response_and_observe_metrics(
-                    response,
+                    &annotated_chunk,
                     &mut response_collector,
                     &mut http_queue_guard,
                 );
-            })
-            .filter_map(move |annotated_chunk| {
-                let converter = converter.clone();
-                let saw_error = saw_error.clone();
-                async move {
-                    if annotated_chunk.data.is_none() {
-                        if annotated_chunk.event.as_deref() == Some("error") {
-                            saw_error.store(true, Ordering::Release);
-                        }
-                        return None;
+
+                let Some(stream_resp) = annotated_chunk.data else {
+                    if annotated_chunk.event.as_deref() == Some("error") {
+                        saw_error = true;
                     }
-                    let stream_resp = annotated_chunk.data?;
-                    let mut conv = converter.lock().expect("converter lock poisoned");
-                    let events = conv.process_chunk(&stream_resp);
-                    Some(stream::iter(events))
+                    continue;
+                };
+
+                converter.append_chunk_events(&stream_resp, &mut events);
+                for event in events.drain(..) {
+                    yield event.map_err(axum::Error::new);
                 }
-            })
-            .flatten();
+            }
 
-        let start_stream = stream::iter(start_events);
-
-        let done_stream = stream::once(async move {
-            let mut conv = converter_end.lock().expect("converter lock poisoned");
-            let end_events = if saw_error_end.load(Ordering::Acquire) {
-                conv.emit_error_events()
+            if saw_error {
+                converter.append_error_events(&mut events);
             } else {
-                conv.emit_end_events()
-            };
-            stream::iter(end_events)
-        })
-        .flatten();
-
-        let full_stream = start_stream.chain(event_stream).chain(done_stream);
-        let full_stream = full_stream.map(|result| result.map_err(axum::Error::new));
+                converter.append_end_events(&mut events);
+            }
+            for event in events.drain(..) {
+                yield event.map_err(axum::Error::new);
+            }
+        };
 
         let stream = monitor_for_disconnects(full_stream, ctx, inflight_guard, stream_handle);
 

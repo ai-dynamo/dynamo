@@ -109,6 +109,27 @@ pub(crate) fn build_fpm_snapshot(
     }
 }
 
+/// Return (visible output tokens, request-forwards) for accept-length
+/// accounting. One output signal corresponds to one visible token; multiple
+/// signals with the same UUID in a pass are an MTP/spec-decode burst.
+pub(crate) fn accept_length_sample(output_signals: &[OutputSignal]) -> (usize, usize) {
+    let visible_tokens = output_signals
+        .iter()
+        .filter(|signal| !signal.rejected)
+        .count();
+    if visible_tokens == 0 {
+        return (0, 0);
+    }
+
+    let request_forwards = output_signals
+        .iter()
+        .filter(|signal| !signal.rejected)
+        .map(|signal| signal.uuid)
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    (visible_tokens, request_forwards)
+}
+
 pub(crate) use sglang::SglangCore;
 pub use sglang::SglangScheduler;
 pub(crate) use vllm::VllmCore;
@@ -134,6 +155,10 @@ pub(crate) struct EnginePassResult {
     pub(crate) kv_events: Vec<RouterEvent>,
     /// Forward pass metrics snapshot for this iteration.
     pub(crate) fpm: Option<ForwardPassSnapshot>,
+    /// Visible output tokens emitted by this pass for accept-length accounting.
+    pub(crate) accept_length_output_tokens: usize,
+    /// Number of request decode forwards that emitted those visible tokens.
+    pub(crate) accept_length_decode_forwards: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
