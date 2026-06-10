@@ -1,0 +1,48 @@
+diff --git a/vllm/v1/worker/mamba_utils.py b/vllm/v1/worker/mamba_utils.py
+index 1f8c83b80..2d3f1b2a1 100644
+--- a/vllm/v1/worker/mamba_utils.py
++++ b/vllm/v1/worker/mamba_utils.py
+@@ -219,21 +219,31 @@ def ds_conv_tail_copy_kernel(
+ ):
+     pid_d = tl.program_id(0)
+     pid_t = tl.program_id(1)
+-    rows = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
+-    cols = pid_t * BLOCK_T + tl.arange(0, BLOCK_T)
++    rows = (pid_d * BLOCK_D + tl.arange(0, BLOCK_D)).to(tl.int64)
++    cols = (pid_t * BLOCK_T + tl.arange(0, BLOCK_T)).to(tl.int64)
++    # NEMOTRON_ULTRA_DS_TAIL_I64_OFFSET_FIX: DS-layout Mamba state
++    # tensors can have block ids large enough that block_id * stride_block
++    # exceeds signed 32-bit range. Keep all pointer offset arithmetic in
++    # int64 so logically valid source/destination blocks do not wrap.
++    src_block_i64 = tl.full((), src_block_id, tl.int64)
++    dst_block_i64 = tl.full((), dst_block_id, tl.int64)
++    offset_i64 = tl.full((), offset, tl.int64)
++    stride_block_i64 = tl.full((), stride_block, tl.int64)
++    stride_dim_i64 = tl.full((), stride_dim, tl.int64)
++    stride_state_i64 = tl.full((), stride_state, tl.int64)
+     tail_len = state_len - offset
+     mask = (rows[:, None] < dim) & (cols[None, :] < tail_len)
+-    src = (
+-        state
+-        + src_block_id * stride_block
+-        + rows[:, None] * stride_dim
+-        + (cols[None, :] + offset) * stride_state
++    src_offsets = (
++        src_block_i64 * stride_block_i64
++        + rows[:, None] * stride_dim_i64
++        + (cols[None, :] + offset_i64) * stride_state_i64
+     )
+-    dst = (
+-        state
+-        + dst_block_id * stride_block
+-        + rows[:, None] * stride_dim
+-        + cols[None, :] * stride_state
++    dst_offsets = (
++        dst_block_i64 * stride_block_i64
++        + rows[:, None] * stride_dim_i64
++        + cols[None, :] * stride_state_i64
+     )
++    src = state + src_offsets
++    dst = state + dst_offsets
+     values = tl.load(src, mask=mask, other=0)
+     tl.store(dst, values, mask=mask)

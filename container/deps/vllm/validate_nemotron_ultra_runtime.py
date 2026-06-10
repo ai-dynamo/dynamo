@@ -35,6 +35,7 @@ MARKER_GROUPS = {
     ],
     "mtp_ds_copy": [
         "NEMOTRON_ULTRA_MTP_DS_COPY",
+        "NEMOTRON_ULTRA_DS_TAIL_I64_OFFSET_FIX",
         "ds_conv_tail_copy",
     ],
     "ssm_nixl_tailfix": [
