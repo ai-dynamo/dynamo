@@ -126,6 +126,21 @@ class Launcher:
     def nnodes(self):
         return len(self.nodes)
 
+    # --- dynamic-behavior / recovery injection primitives (DIS-2172 dynamic) ---
+    def kill_pattern(self, pattern, sig="TERM", node_idx=0):
+        """Send `sig` to every process whose cmdline matches `pattern` on a node.
+
+        Used to inject worker-leave (kill a mocker) graceful-SIGTERM disturbances.
+        `pattern` is a `pkill -f` substring; scope it to the cell namespace so a
+        kill never touches another cell's processes. Returns nothing; the caller
+        captures t0 (node0 monotonic) immediately BEFORE calling this.
+        """
+        raise NotImplementedError
+
+    def spawn_mocker(self, argv, env, logpath, node_idx=0):
+        """Spawn ONE extra mocker mid-run (worker-join). Same as popen()."""
+        return self.popen(argv, env, logpath, node_idx)
+
 
 class LocalLauncher(Launcher):
     name = "local"
@@ -138,6 +153,10 @@ class LocalLauncher(Launcher):
 
     def addr(self, node_idx=0):
         return "127.0.0.1"
+
+    def kill_pattern(self, pattern, sig="TERM", node_idx=0):
+        # Local: pkill -f directly on this host. -<sig> by name.
+        subprocess.call(["pkill", f"-{sig}", "-f", pattern])
 
 
 class SlurmLauncher(Launcher):
@@ -223,6 +242,15 @@ class SlurmLauncher(Launcher):
     def addr(self, node_idx=0):
         return self.nodes[node_idx]  # hostname, resolvable across the allocation
 
+    def kill_pattern(self, pattern, sig="TERM", node_idx=0):
+        # slurm: srun pkill -f on the target node's HOST (enroot runs in the host
+        # PID namespace, so a host pkill reaches the in-container mocker). No
+        # --container-* flags. Best-effort; --overlap so it shares the alloc.
+        node = self.nodes[node_idx % len(self.nodes)]
+        srun = ["srun", "--nodes=1", "--ntasks=1", "--overlap",
+                f"--nodelist={node}", "--", "pkill", f"-{sig}", "-f", pattern]
+        subprocess.call(srun, env=dict(os.environ))
+
 
 def make_launcher(name):
     return {"local": LocalLauncher, "slurm": SlurmLauncher}[name]()
@@ -231,6 +259,20 @@ def make_launcher(name):
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+def clock_pair():
+    """Back-to-back (CLOCK_MONOTONIC, CLOCK_REALTIME) reading in ns on node0.
+
+    The orchestrator and the bench_subs are co-located on node0, so both read the
+    SAME kernel CLOCK_MONOTONIC. recovery.py uses this pair plus each sub's epoch
+    line to put t0 (orchestrator monotonic) and the sub's bucket timestamps (sub
+    monotonic) onto one node0-monotonic axis — a difference of two node0 monotonic
+    instants, hence PTP-immune (no cross-node clock comparison).
+    """
+    mono_ns = time.monotonic_ns()
+    real_ns = time.time_ns()
+    return mono_ns, real_ns
+
+
 def wait_model(frontend_addr, port, timeout=120):
     import urllib.request
     url = f"http://{frontend_addr}:{port}/v1/models"
@@ -387,7 +429,20 @@ def teardown(procs):
 # One (transport, p, s, trial) cell
 # --------------------------------------------------------------------------- #
 def run_cell(lr, transport, p, s, topics, gpus_per_node, duration, warmup,
-             conc, lg_procs, outdir, idx, trial, infra_addr, speedup_ratio):
+             conc, lg_procs, outdir, idx, trial, infra_addr, speedup_ratio,
+             scenario="none", bucket_ms=100, observe_tail=0, inject_offset=None,
+             slow_sleep_ms=0):
+    """Run one cell.
+
+    DYNAMIC-BEHAVIOR scenarios (DIS-2172 dynamic test), selected by `scenario`:
+      none        : steady-state (no disturbance) — the clean stock sweep.
+      leave       : SIGTERM one mocker (worker leave, graceful) at inject_offset.
+      join        : spawn one extra mocker (worker join) at inject_offset.
+      sub_restart : SIGTERM+relaunch one bench_sub at inject_offset.
+      slow        : one bench_sub runs slow (slow_sleep_ms) the whole run; no kill.
+    Recovery is computed off the per-sub 100ms bucket timeline (bench_sub) aligned
+    to t0 = the node0 CLOCK_MONOTONIC instant the orchestrator issues the kill/spawn.
+    """
     ns = f"dis2172_{idx}"
     fe_addr = lr.addr(0)
     env = dict(os.environ)
@@ -436,21 +491,38 @@ def run_cell(lr, transport, p, s, topics, gpus_per_node, duration, warmup,
                  "n_subs": s, "topic": t, "trial": trial} for t in topics]
 
     # subscribers on node0 (the router/frontend node)
+    dynamic = scenario not in ("none", "")
+
+    def sub_env(topic, si, outp, slow_ms=0):
+        senv = dict(env)
+        senv.update(
+            DYN_BENCH_NAMESPACE=ns, DYN_BENCH_COMPONENT="backend",
+            DYN_BENCH_TOPIC=topic, DYN_BENCH_TRANSPORT=bench_transport,
+            DYN_BENCH_SCOPE=("namespace" if topic in NS_SCOPED_TOPICS else "component"),
+            DYN_BENCH_CLOCK=lr.clock,          # subscriber clock (match publisher)
+            DYN_BENCH_DURATION=str(duration), DYN_BENCH_WARMUP=str(warmup),
+            DYN_BENCH_FIRST_EVENT_TIMEOUT=str(FIRST_EVENT_TIMEOUT),
+            DYN_BENCH_OUT=outp)
+        if dynamic:
+            # Time-resolved 100ms buckets + observe tail so the post-inject dip
+            # and recovery are captured; buckets land beside the result JSON.
+            senv.update(
+                DYN_BENCH_BUCKET_MS=str(bucket_ms),
+                DYN_BENCH_OBSERVE_TAIL=str(observe_tail),
+                DYN_BENCH_BUCKETS_OUT=f"{outp}.buckets.jsonl")
+            if slow_ms > 0:
+                senv["DYN_BENCH_SLOW_SLEEP_MS"] = str(slow_ms)
+        return senv
+
     subs = []
     for topic in topics:
         for si in range(s):
             outp = f"{outdir}/{transport}_p{p}_s{s}_t{trial}_{topic}_sub{si}.json"
-            senv = dict(env)
-            senv.update(
-                DYN_BENCH_NAMESPACE=ns, DYN_BENCH_COMPONENT="backend",
-                DYN_BENCH_TOPIC=topic, DYN_BENCH_TRANSPORT=bench_transport,
-                DYN_BENCH_SCOPE=("namespace" if topic in NS_SCOPED_TOPICS else "component"),
-                DYN_BENCH_CLOCK=lr.clock,          # subscriber clock (match publisher)
-                DYN_BENCH_DURATION=str(duration), DYN_BENCH_WARMUP=str(warmup),
-                DYN_BENCH_FIRST_EVENT_TIMEOUT=str(FIRST_EVENT_TIMEOUT),
-                DYN_BENCH_OUT=outp)
+            # scenario=slow: sub0 is the deliberately-slow consumer; rest are fast.
+            slow_ms = slow_sleep_ms if (scenario == "slow" and si == 0) else 0
+            senv = sub_env(topic, si, outp, slow_ms)
             subs.append((lr.popen([SUB_BIN], senv, f"{LOGDIR}/sub_{idx}_{topic}_{si}.log", 0),
-                         outp, topic, si))
+                         outp, topic, si, slow_ms))
 
     time.sleep(2)
     # A single asyncio loadgen process is CPU-bound and caps at ~100 req/s
@@ -465,9 +537,10 @@ def run_cell(lr, transport, p, s, topics, gpus_per_node, duration, warmup,
     # window. With first-event anchoring (DIS-2172 #2) a slow-to-subscribe sub can
     # begin its warmup+measure window late, so the load source must outlast that:
     # cover FIRST_EVENT_TIMEOUT (worst-case time-to-first-event) + warmup + duration
-    # + EXTRACT_PAD slack. (Loadgen is just the source; it's torn down as soon as
-    # the subs finish, so over-provisioning its --duration costs nothing.)
-    lg_duration = FIRST_EVENT_TIMEOUT + duration + warmup + 4 + EXTRACT_PAD
+    # + observe_tail (dynamic recovery tail) + EXTRACT_PAD slack. (Loadgen is just
+    # the source; it's torn down as soon as the subs finish, so over-provisioning
+    # its --duration costs nothing.)
+    lg_duration = FIRST_EVENT_TIMEOUT + duration + warmup + observe_tail + 4 + EXTRACT_PAD
     lgs = []
     for li in range(lg_procs):
         lgs.append(lr.popen(
@@ -476,41 +549,137 @@ def run_cell(lr, transport, p, s, topics, gpus_per_node, duration, warmup,
              "--duration", str(lg_duration)],
             {**env, "LOADGEN_HOST": fe_addr}, log(f"load{li}"), li))
 
+    import threading
+
+    # --- DYNAMIC-BEHAVIOR injection scheduler (DIS-2172 dynamic). Fires the
+    # disturbance mid-window in a background thread (foreground sub.wait() is
+    # unperturbed) and records t0 = node0 CLOCK_MONOTONIC at the instant the
+    # orchestrator ISSUES the kill/spawn syscall. Written to <cell>_inject.json
+    # with the orchestrator clock-bridge pair so recovery.py can align t0 to each
+    # sub's bucket timeline. ---
+    inject_info = {"scenario": scenario}
+    inject_thread = None
+    # inject_offset = seconds after subs start until the disturbance. Default =
+    # warmup + duration/2 (mid measure-window), leaving observe_tail for recovery.
+    if inject_offset is None:
+        inject_offset = warmup + max(duration // 2, 1)
+
+    if scenario in ("leave", "join", "sub_restart"):
+        omono, oreal = clock_pair()
+        inject_info["orch_clock_pair_ns"] = {"mono_ns": omono, "real_ns": oreal}
+
+        def _inject_loop():
+            time.sleep(inject_offset)
+            t0_mono, t0_real = clock_pair()
+            inject_info["t0_mono_ns"] = t0_mono
+            inject_info["t0_real_ns"] = t0_real
+            inject_info["inject_offset_s"] = inject_offset
+            try:
+                if scenario == "leave":
+                    # SIGTERM one mocker (graceful). Single-node: all p workers
+                    # are in one PID -> this leaves ALL p. Multi-node: targets the
+                    # mocker process on the LAST worker node (node nnodes-1).
+                    tgt_node = lr.nnodes - 1
+                    pat = f"dynamo.mocker.*dis2172_{idx}\\."
+                    inject_info["action"] = f"SIGTERM mocker node{tgt_node} pat={pat!r}"
+                    lr.kill_pattern(pat, sig="TERM", node_idx=tgt_node)
+                elif scenario == "join":
+                    tgt_node = lr.nnodes - 1
+                    jenv = dict(env)
+                    jp = lr.spawn_mocker(
+                        [PY, "-m", "dynamo.mocker", "--model-path", MODEL,
+                         "--model-name", "mock",
+                         "--endpoint", f"dyn://{ns}.backend.generate",
+                         "--num-workers", "1",
+                         "--event-plane", bench_transport,
+                         "--speedup-ratio", speedup_ratio],
+                        jenv, log("mk_join"), tgt_node)
+                    procs.append(jp)
+                    inject_info["action"] = f"spawn +1 mocker node{tgt_node}"
+                elif scenario == "sub_restart":
+                    # SIGKILL sub0 then relaunch an identical sub0 (NEW out file
+                    # _restart so we get the restarted instance's own timeline).
+                    pp0, outp0, topic0, si0, _slow0 = subs[0]
+                    try:
+                        pp0.kill()
+                    except Exception:
+                        pass
+                    rout = f"{outp0}.restart.json"
+                    renv = sub_env(topic0, si0, rout, 0)
+                    rp = lr.popen([SUB_BIN], renv,
+                                  f"{LOGDIR}/sub_{idx}_{topic0}_{si0}_restart.log", 0)
+                    # Replace the slot so the wait/rows loops pick up the restarted
+                    # sub's output (its recovery is what we measure for this scen).
+                    subs[0] = (rp, rout, topic0, si0, 0)
+                    inject_info["action"] = f"SIGKILL+relaunch sub0 topic={topic0}"
+                    inject_info["restart_out"] = rout
+            except Exception as e:
+                inject_info["inject_error"] = str(e)
+            print(f"    [inject] {scenario} t0_mono_ns={inject_info.get('t0_mono_ns')} "
+                  f"{inject_info.get('action','')}", flush=True)
+
+        inject_thread = threading.Thread(target=_inject_loop, daemon=True)
+        inject_thread.start()
+
     # CHANGE #3: take resource-cost snapshots DURING the measurement window in a
     # background thread, so the foreground sub.wait() is unperturbed. Snapshots
     # are spread across ~[warmup .. warmup+duration] (mid-window). Each fires a
-    # cheap host-level ressample.py on every node. Collected after the subs join.
+    # cheap host-level ressample.py on every node. In DYNAMIC mode we sample at a
+    # HIGHER cadence across the whole [warmup .. warmup+duration+observe_tail] span
+    # so the ZMQ established-TCP conn-count rebuild is visible vs the throughput
+    # dip (the brokerless cost NATS doesn't pay). Collected after the subs join.
     res_snaps = []
     res_thread = None
     if RESSAMPLE and RESSAMPLE_N > 0:
-        import threading
+        n_snaps = RESSAMPLE_N
+        total_span = duration + observe_tail
+        if dynamic:
+            # ~1 snapshot/sec across the whole observe span (capped) so the
+            # conn-count timeline brackets t0 closely.
+            n_snaps = max(RESSAMPLE_N, min(int(total_span), 30))
 
         def _sampler_loop():
-            # Wait out warmup, then space N snapshots across the measure window.
-            time.sleep(min(warmup + 2, duration + warmup))
-            span = max(duration - 2, 1)
-            step = span / max(RESSAMPLE_N, 1)
-            for k in range(RESSAMPLE_N):
+            # Wait out warmup, then space n_snaps snapshots across the span.
+            time.sleep(min(warmup + 2, total_span + warmup))
+            span = max(total_span - 2, 1)
+            step = span / max(n_snaps, 1)
+            for k in range(n_snaps):
                 try:
                     res_snaps.extend(res_snapshot(lr, transport, idx, f"s{k}"))
                 except Exception:
                     pass
-                if k < RESSAMPLE_N - 1:
+                if k < n_snaps - 1:
                     time.sleep(step)
 
         res_thread = threading.Thread(target=_sampler_loop, daemon=True)
         res_thread.start()
 
-    for (pp, _o, _t, _s) in subs:
+    if inject_thread is not None:
+        # Give the scheduler time to fire BEFORE we start waiting on subs (so a
+        # sub_restart swaps subs[0] before the wait loop reads it).
+        inject_thread.join(timeout=inject_offset + 30)
+    sub_wait = FIRST_EVENT_TIMEOUT + duration + warmup + observe_tail + 60 + EXTRACT_PAD
+    for slot in subs:
+        pp = slot[0]
         try:
             # Must allow a sub to wait up to FIRST_EVENT_TIMEOUT for its first event
-            # and THEN run a full warmup+duration window (DIS-2172 #2), so never
+            # and THEN run a full warmup+duration+observe_tail window, so never
             # kill it before that whole span + slack has elapsed.
-            pp.wait(timeout=FIRST_EVENT_TIMEOUT + duration + warmup + 60 + EXTRACT_PAD)
+            pp.wait(timeout=sub_wait)
         except subprocess.TimeoutExpired:
             pp.kill()
     if res_thread is not None:
         res_thread.join(timeout=40)
+
+    # Persist the injection record (t0 + clock-bridge) for recovery.py.
+    if scenario in ("leave", "join", "sub_restart"):
+        try:
+            with open(f"{outdir}/{transport}_p{p}_s{s}_t{trial}_inject.json", "w") as f:
+                json.dump({**inject_info, "mode": transport, "n_workers": p,
+                           "n_subs": s, "trial": trial, "cell": idx,
+                           "topics": topics, "nnodes": lr.nnodes}, f, indent=2)
+        except Exception as e:
+            print(f"    [inject] write failed: {e}", flush=True)
     # Subscribers have finished measuring; the loadgens are just the load source
     # (their --duration is padded by EXTRACT_PAD and they are almost always still
     # running here). Tear them all down at once -- do NOT wait 15s on each, which
@@ -549,14 +718,23 @@ def run_cell(lr, transport, p, s, topics, gpus_per_node, duration, warmup,
               f"snaps={sm.get('n_snapshots')}", flush=True)
 
     rows = []
-    for (pp, outp, topic, si) in subs:
+    for slot in subs:
+        pp, outp, topic, si, slow_ms = slot
         try:
             with open(outp) as f:
                 r = json.load(f)
         except Exception:
             r = {"error": "no_output", "topic": topic}
         r.update(mode=transport, n_workers=p, n_subs=s, sub_idx=si, trial=trial,
-                 launcher=lr.name, clock=lr.clock, nnodes=lr.nnodes)
+                 launcher=lr.name, clock=lr.clock, nnodes=lr.nnodes,
+                 scenario=scenario)
+        if dynamic:
+            r["buckets_out"] = f"{outp}.buckets.jsonl"
+            if slow_ms > 0:
+                r["slow_sleep_ms"] = slow_ms
+            if scenario in ("leave", "join", "sub_restart"):
+                r["t0_mono_ns"] = inject_info.get("t0_mono_ns")
+                r["inject_offset_s"] = inject_info.get("inject_offset_s")
         if RESSAMPLE and res_summary:
             r["res"] = res_summary
         rows.append(r)
@@ -587,6 +765,21 @@ def main():
                          "concurrency is split across them (DIS-2172 change B)")
     ap.add_argument("--speedup-ratio", default="10",
                     help="mocker exec speedup; 0 = unthrottled (saturation test, no-PTP throughput mode)")
+    ap.add_argument("--scenario", default="none",
+                    choices=["none", "leave", "join", "sub_restart", "slow"],
+                    help="DYNAMIC-BEHAVIOR disturbance: none=steady-state; "
+                         "leave=SIGTERM a mocker; join=spawn a mocker; "
+                         "sub_restart=SIGKILL+relaunch one sub; slow=one slow sub")
+    ap.add_argument("--observe-tail", type=int, default=0,
+                    help="extra seconds the per-sub timeline keeps recording after "
+                         "the measure window (for recovery after a mid-window inject)")
+    ap.add_argument("--bucket-ms", type=int, default=100,
+                    help="time-resolved bucket width ms for the recovery timeline")
+    ap.add_argument("--slow-sleep-ms", type=int, default=0,
+                    help="scenario=slow: per-event sleep ms for the slow sub "
+                         "(0 = auto-calibrate from a short pre-measure of event rate)")
+    ap.add_argument("--inject-offset", type=int, default=None,
+                    help="seconds after subs start to inject (default warmup+dur/2)")
     ap.add_argument("--trials", type=int, default=1)
     ap.add_argument("--infra-addr", default=None,
                     help="etcd/nats host (default: node0 address)")
@@ -609,15 +802,31 @@ def main():
     subs = [int(x) for x in a.subs.split(",")]
     topics = a.topics.split(",")
 
+    etcd_lease_ttl = os.environ.get("ETCD_LEASE_TTL", "10 (default)")
     meta = dict(launcher=lr.name, nodes=lr.nodes, clock=lr.clock, infra_addr=infra_addr,
                 transports=transports, workers=workers, subs=subs, topics=topics,
-                gpus_per_node=a.gpus_per_node, duration=a.duration, trials=a.trials,
-                concurrency=a.concurrency, loadgen_procs=a.loadgen_procs,
-                ressample=RESSAMPLE, ressample_n=RESSAMPLE_N)
+                gpus_per_node=a.gpus_per_node, duration=a.duration, warmup=a.warmup,
+                trials=a.trials, concurrency=a.concurrency, loadgen_procs=a.loadgen_procs,
+                ressample=RESSAMPLE, ressample_n=RESSAMPLE_N,
+                scenario=a.scenario, observe_tail=a.observe_tail, bucket_ms=a.bucket_ms,
+                slow_sleep_ms=a.slow_sleep_ms, inject_offset=a.inject_offset,
+                etcd_lease_ttl=etcd_lease_ttl)
     with open(f"{a.out}/meta.json", "w") as f:
         json.dump(meta, f, indent=2)
     print(f"[bench] launcher={lr.name} nodes={lr.nnodes} clock={lr.clock} "
-          f"infra={infra_addr}", flush=True)
+          f"infra={infra_addr} scenario={a.scenario} etcd_lease_ttl={etcd_lease_ttl}",
+          flush=True)
+
+    # Slow-consumer auto-calibration: if scenario=slow and --slow-sleep-ms 0, pick
+    # S so the slow sub's consume ceiling (1/S) sits well below the per-publisher
+    # event rate. We use a conservative fixed target ceiling that any high-load
+    # kv-events cell (thousands of events/s) easily exceeds, forcing backpressure
+    # without auto-runs that could stall. Target ceiling ~100 events/s -> S=10ms.
+    slow_sleep_ms = a.slow_sleep_ms
+    if a.scenario == "slow" and slow_sleep_ms <= 0:
+        slow_sleep_ms = 10  # 10ms/event -> <=100 events/s ceiling (auto-calibrated)
+        print(f"[bench] slow auto-calibrated slow_sleep_ms={slow_sleep_ms} "
+              f"(consume ceiling ~{1000//slow_sleep_ms} events/s)", flush=True)
 
     all_rows, idx = [], 0
     for trial in range(1, a.trials + 1):
@@ -625,11 +834,15 @@ def main():
             for p in workers:
                 for s in subs:
                     idx += 1
-                    print(f"[bench] trial={trial} {t} p={p} s={s} topics={topics}",
-                          flush=True)
+                    print(f"[bench] trial={trial} {t} p={p} s={s} topics={topics} "
+                          f"scenario={a.scenario}", flush=True)
                     rows = run_cell(lr, t, p, s, topics, a.gpus_per_node, a.duration,
                                     a.warmup, a.concurrency, a.loadgen_procs, a.out, idx,
-                                    trial, infra_addr, a.speedup_ratio)
+                                    trial, infra_addr, a.speedup_ratio,
+                                    scenario=a.scenario, bucket_ms=a.bucket_ms,
+                                    observe_tail=a.observe_tail,
+                                    inject_offset=a.inject_offset,
+                                    slow_sleep_ms=slow_sleep_ms)
                     for r in rows:
                         w = r.get("window_secs") or 1
                         rps = (r.get("received", 0) / w) if "received" in r else None

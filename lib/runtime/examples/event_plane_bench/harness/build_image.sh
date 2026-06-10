@@ -22,9 +22,9 @@
 # from a fresh shallow clone of the (public) PR branch instead.
 set -euo pipefail
 
-BRANCH="${BRANCH:-zhongdaor/event_plane_transport_clean}"
-WORKDIR="${WORKDIR:-/tmp/dynamo-dis2172-clean}"    # on the build host's local NVMe
-IMAGE="${IMAGE:-dynamo:transport-clean-dev}"       # local tag; retag/push below
+BRANCH="${BRANCH:-zhongdaor/event_plane_dynamic}"
+WORKDIR="${WORKDIR:-/tmp/dynamo-dis2172-dynamic}"  # on the build host's local NVMe
+IMAGE="${IMAGE:-dynamo:transport-dynamic-dev}"     # local tag; retag/push below
 # Push to the INTERNAL GITLAB registry ONLY (do NOT use nvcr.io).
 # e.g. gitlab-master.nvidia.com:5005/<your-namespace>/dynamo:dis2172-dev
 PUSH_TO="${PUSH_TO:-}"
