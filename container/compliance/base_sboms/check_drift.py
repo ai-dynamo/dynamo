@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -142,6 +143,87 @@ def check_entry(entry: dict) -> list[str]:
     return problems
 
 
+_CAPTURE_SCRIPT = "container/compliance/base_sboms/capture_baseline_sbom.py"
+
+
+def _remediation_command(entry: dict) -> str:
+    """The exact capture_baseline_sbom.py invocation that refreshes this entry."""
+    cmd = (
+        f"python3 {_CAPTURE_SCRIPT} \\\n"
+        f"    --from {entry['from_image']}:{entry['from_tag']} \\\n"
+        f"    --baseline {entry['baseline_image']}:{entry['baseline_tag']}"
+    )
+    platform = entry.get("platform", _DEFAULT_PLATFORM)
+    if platform != _DEFAULT_PLATFORM:
+        cmd += f" \\\n    --platform {platform}"
+    return cmd
+
+
+def _render_markdown(failed: list[tuple[dict, list[str]]], total: int) -> str:
+    """Build a GitHub-flavoured-markdown drift report for the job summary."""
+    if not failed:
+        return (
+            "## ✅ Base-image drift check passed\n\n"
+            f"All **{total}** tracked baseline SBOM(s) still match the registry.\n"
+        )
+
+    # Real drift (fix = re-capture) vs transient registry failures (fix = retry).
+    recapture = [(e, p) for e, p in failed if not all("lookup failed" in s for s in p)]
+    transient = [(e, p) for e, p in failed if all("lookup failed" in s for s in p)]
+
+    out = [
+        "## ⚠️ Base-image drift detected\n",
+        f"**{len(failed)}** of **{total}** tracked baseline SBOM(s) no longer match "
+        "the registry. The committed baselines are stale, so per-image NOTICES are "
+        "subtracting an out-of-date floor.\n",
+    ]
+
+    if recapture:
+        seen: set[str] = set()
+        blocks: list[str] = []
+        for entry, _ in recapture:
+            ref = f"{entry['from_image']}:{entry['from_tag']}"
+            if ref in seen:  # one re-capture fixes all of an entry's failed checks
+                continue
+            seen.add(ref)
+            blocks.append(f"# {ref}\n{_remediation_command(entry)}")
+        out.append("### Re-capture the drifted baselines\n")
+        out.append(
+            "Run each command, then commit the regenerated SBOM + the updated "
+            "`container/compliance/base_sboms/manifest.json` and open a PR — its CI "
+            "re-runs the license policy gate against the new SBOM:\n"
+        )
+        out.append("```bash\n" + "\n\n".join(blocks) + "\n```\n")
+
+    if transient:
+        refs = ", ".join(f"`{e['from_image']}:{e['from_tag']}`" for e, _ in transient)
+        out.append(
+            "### ⏳ Registry lookup failed (transient)\n\n"
+            f"Could not reach the registry for: {refs}. Treated as drift so CI never "
+            "silently passes — re-run the job; if it persists, check registry "
+            "auth/availability.\n"
+        )
+
+    detail = "\n".join(f"- {p}" for _, problems in failed for p in problems)
+    out.append(
+        "<details><summary>Full drift report</summary>\n\n"
+        f"```\n{detail}\n```\n\n</details>\n"
+    )
+    return "\n".join(out)
+
+
+def _write_step_summary(markdown: str) -> None:
+    """Append the markdown report to GITHUB_STEP_SUMMARY when running in CI."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(markdown + "\n")
+    except OSError as exc:
+        logger.warning("could not write GITHUB_STEP_SUMMARY: %s", exc)
+
+
 def check(manifest_path: Path) -> int:
     if not manifest_path.is_file():
         logger.error("manifest.json not found at %s", manifest_path)
@@ -151,16 +233,25 @@ def check(manifest_path: Path) -> int:
     entries = manifest.get("entries", []) or []
     if not entries:
         print("base_sboms manifest is empty; nothing to verify.")
+        _write_step_summary(
+            "## ✅ Base-image drift check passed\n\n"
+            "The baseline SBOM manifest is empty; nothing to verify.\n"
+        )
         return 0
 
+    failed: list[tuple[dict, list[str]]] = []
     all_problems: list[str] = []
     for entry in entries:
         problems = check_entry(entry)
         if problems:
+            failed.append((entry, problems))
             all_problems.extend(problems)
         else:
             from_ref = f"{entry['from_image']}:{entry['from_tag']}"
             print(f"  {from_ref} OK ({entry['from_digest'][:19]}...)")
+
+    # Always emit a job-summary report (✅ on success, fix-it commands on drift).
+    _write_step_summary(_render_markdown(failed, len(entries)))
 
     if not all_problems:
         print(f"All {len(entries)} tracked base images current.")

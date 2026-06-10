@@ -7,11 +7,12 @@
 # surfaces immediately as a build-blocking failure instead of going
 # unnoticed until the next cron tick.
 #
-# When this fails, the action is to:
-#   1. Run container/compliance/base_sboms/refresh.py to regenerate the
-#      slim CycloneDX SBOM for the drifted base image.
-#   2. Update manifest.json with the new digest and SBOM filename.
-#   3. Open a PR; the bot's own CI re-runs policy/validate.py against the
+# When this fails, the job summary prints the exact command(s) to run. The
+# remediation is:
+#   1. Run container/compliance/base_sboms/capture_baseline_sbom.py with the
+#      --from / --baseline printed in the summary to regenerate the slim
+#      CycloneDX SBOM and update manifest.json for the drifted base image.
+#   2. Open a PR; the bot's own CI re-runs policy/validate.py against the
 #      new SBOM and blocks merge if a new disallowed license appears.
 
 name: Compliance — Base-Image Drift
