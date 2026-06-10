@@ -17,7 +17,7 @@ use super::{
 use crate::protocols::common::{
     llm_backend::PreprocessedRequest,
     preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
-    timing::RequestTracker,
+    timing::{RequestTracker, RoutingData},
 };
 
 pub(super) struct PrefillCompletion {
@@ -285,7 +285,7 @@ impl PrefillRouter {
 
         let worker_info = prefill_worker_info(
             tracker.as_deref(),
-            &disaggregated_params,
+            output.routing_data.as_ref(),
             simple_direct_worker_info,
         );
         Ok(PrefillCompletion {
@@ -431,14 +431,15 @@ impl PrefillRouter {
 
 fn prefill_worker_info(
     tracker: Option<&RequestTracker>,
-    disaggregated_params: &serde_json::Value,
+    routing_data: Option<&RoutingData>,
     simple_direct_worker_info: Option<(u64, Option<u32>)>,
 ) -> Option<(u64, Option<u32>)> {
-    // Prefer router-owned attribution over backend payloads: KvRouter records
-    // in the tracker, SimpleRouter direct routing uses the explicit target.
+    // Prefer router-owned attribution over forwarded payloads: KvRouter records
+    // in the tracker, SimpleRouter direct routing uses the explicit target, and a
+    // standalone router forwards it on `routing_data.worker_id`.
     tracker_prefill_worker_info(tracker)
         .or(simple_direct_worker_info)
-        .or_else(|| payload_prefill_worker_info(disaggregated_params))
+        .or_else(|| routing_data_prefill_worker_info(routing_data))
 }
 
 fn tracker_prefill_worker_info(tracker: Option<&RequestTracker>) -> Option<(u64, Option<u32>)> {
@@ -450,21 +451,12 @@ fn tracker_prefill_worker_info(tracker: Option<&RequestTracker>) -> Option<(u64,
         })
 }
 
-fn payload_prefill_worker_info(
-    disaggregated_params: &serde_json::Value,
+fn routing_data_prefill_worker_info(
+    routing_data: Option<&RoutingData>,
 ) -> Option<(u64, Option<u32>)> {
-    disaggregated_params
-        .get("worker_id")
-        .and_then(|worker_id_json| {
-            let worker_id = worker_id_json
-                .get("prefill_worker_id")
-                .and_then(|v| v.as_u64())?;
-            let dp_rank = worker_id_json
-                .get("prefill_dp_rank")
-                .and_then(|v| v.as_u64())
-                .and_then(|r| u32::try_from(r).ok());
-            Some((worker_id, dp_rank))
-        })
+    let info = routing_data?.worker_id.as_ref()?;
+    let worker_id = info.prefill_worker_id?;
+    Some((worker_id, info.prefill_dp_rank))
 }
 
 /// Derive a `bootstrap_room` from a pre-sampled `r` such that
@@ -491,83 +483,70 @@ fn compute_bootstrap_room(dp_rank: Option<u32>, dp_size: Option<u32>, r: u64) ->
 mod tests {
     use super::*;
     use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
-    use serde_json::json;
+    use crate::protocols::openai::nvext::WorkerIdInfo;
 
     const MAX_ROOM: u64 = i64::MAX as u64;
 
+    /// `routing_data` carrying just the prefill attribution, as forwarded by a
+    /// standalone router (see `inject_worker_id_from_tracker`).
+    fn routing_data_with_prefill(
+        prefill_worker_id: u64,
+        prefill_dp_rank: Option<u32>,
+    ) -> RoutingData {
+        RoutingData {
+            worker_id: Some(WorkerIdInfo {
+                prefill_worker_id: Some(prefill_worker_id),
+                prefill_dp_rank,
+                decode_worker_id: None,
+                decode_dp_rank: None,
+            }),
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn prefill_worker_info_prefers_tracker_over_payload_and_direct_target() {
+    fn prefill_worker_info_prefers_tracker_over_routing_data_and_direct_target() {
         let tracker = RequestTracker::new();
         tracker.record_worker(10, Some(2), WORKER_TYPE_PREFILL);
-        let disaggregated_params = json!({
-            "worker_id": {
-                "prefill_worker_id": 20,
-                "prefill_dp_rank": 3
-            }
-        });
+        let routing_data = routing_data_with_prefill(20, Some(3));
 
         assert_eq!(
-            prefill_worker_info(Some(&tracker), &disaggregated_params, Some((30, None))),
+            prefill_worker_info(Some(&tracker), Some(&routing_data), Some((30, None))),
             Some((10, Some(2)))
         );
     }
 
     #[test]
-    fn prefill_worker_info_prefers_direct_target_over_payload() {
-        let disaggregated_params = json!({
-            "worker_id": {
-                "prefill_worker_id": 20,
-                "prefill_dp_rank": 3
-            }
-        });
+    fn prefill_worker_info_prefers_direct_target_over_routing_data() {
+        let routing_data = routing_data_with_prefill(20, Some(3));
 
         assert_eq!(
-            prefill_worker_info(None, &disaggregated_params, Some((30, None))),
+            prefill_worker_info(None, Some(&routing_data), Some((30, None))),
             Some((30, None))
         );
     }
 
     #[test]
-    fn prefill_worker_info_falls_back_to_payload_worker_id() {
-        let disaggregated_params = json!({
-            "worker_id": {
-                "prefill_worker_id": 20,
-                "prefill_dp_rank": 3
-            }
-        });
+    fn prefill_worker_info_falls_back_to_routing_data_worker_id() {
+        let routing_data = routing_data_with_prefill(20, Some(3));
 
         assert_eq!(
-            prefill_worker_info(None, &disaggregated_params, None),
+            prefill_worker_info(None, Some(&routing_data), None),
             Some((20, Some(3)))
-        );
-    }
-
-    #[test]
-    fn prefill_worker_info_ignores_out_of_range_payload_dp_rank() {
-        let disaggregated_params = json!({
-            "worker_id": {
-                "prefill_worker_id": 20,
-                "prefill_dp_rank": u64::from(u32::MAX) + 1
-            }
-        });
-
-        assert_eq!(
-            prefill_worker_info(None, &disaggregated_params, None),
-            Some((20, None))
         );
     }
 
     #[test]
     fn prefill_worker_info_falls_back_to_direct_target() {
         assert_eq!(
-            prefill_worker_info(None, &json!({}), Some((30, None))),
+            prefill_worker_info(None, None, Some((30, None))),
             Some((30, None))
         );
     }
 
     #[test]
     fn prefill_worker_info_returns_none_without_authoritative_source() {
-        assert_eq!(prefill_worker_info(None, &json!({}), None), None);
+        assert_eq!(prefill_worker_info(None, None, None), None);
     }
 
     #[test]

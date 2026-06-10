@@ -245,6 +245,8 @@ impl EngineComponent {
                 completed_requests: executed.completed_requests,
                 output_signals: executed.output_signals,
                 kv_events: completion_kv_events,
+                accept_length_output_tokens: executed.accept_length_output_tokens,
+                accept_length_decode_forwards: executed.accept_length_decode_forwards,
             };
 
             if executed.end_ms == now_ms {
