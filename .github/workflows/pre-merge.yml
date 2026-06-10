@@ -168,7 +168,7 @@ jobs:
     - name: Install cargo-nextest
       # Prebuilt binary (a few seconds) rather than `cargo install` (compiles for
       # minutes). nextest emits JUnit natively (see .config/nextest.toml).
-      run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+      run: curl -LsSf https://get.nexte.st/0.9.137/linux | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
     - name: Verify Code Formatting
       working-directory: ${{ matrix.dir }}
       run: cargo fmt -- --check

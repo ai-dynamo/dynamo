@@ -149,7 +149,7 @@ jobs:
           /workspace/container/use-sccache.sh install
           eval $(/workspace/container/use-sccache.sh setup-env)
           rustup component add rustfmt clippy
-          curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C "${CARGO_HOME:-/usr/local/cargo}/bin"
+          curl -LsSf https://get.nexte.st/0.9.137/linux | tar zxf - -C "${CARGO_HOME:-/usr/local/cargo}/bin"
           cargo fmt -- --check
           cargo clippy --features block-manager,media-ffmpeg,testing-nixl,integration --no-deps --all-targets -- -D warnings
           cargo nextest run --locked --profile ci --no-tests=pass --features=block-manager,media-ffmpeg,testing-nixl,integration
