@@ -66,15 +66,6 @@ class DynamoVllmArgGroup(ArgGroup):
             help="Use vLLM's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend.",
         )
 
-        add_argument(
-            g,
-            flag_name="--model-express-url",
-            env_var="MODEL_EXPRESS_URL",
-            default=None,
-            help="DEPRECATED: accepted for compatibility with older ModelExpress "
-            "manifests. The vLLM ModelExpress plugin reads its own configuration.",
-        )
-
         # Multimodal
         add_negatable_bool_argument(
             g,
@@ -169,6 +160,16 @@ class DynamoVllmArgGroup(ArgGroup):
             help="Run in headless mode for multi-node TP/PP. "
             "Secondary nodes run vLLM workers only, no dynamo endpoints. "
             "See vLLM multi-node data parallel documentation for more details.",
+        )
+
+        # ModelExpress P2P
+        add_argument(
+            g,
+            flag_name="--model-express-url",
+            env_var="MODEL_EXPRESS_URL",
+            default=None,
+            help="DEPRECATED: accepted for compatibility with older ModelExpress "
+            "manifests. The vLLM ModelExpress plugin reads its own configuration.",
         )
 
         # GMS (GPU Memory Service) shadow mode
@@ -268,7 +269,6 @@ class DynamoVllmConfig(ConfigBase):
     is_prefill_worker: bool
     is_decode_worker: bool
     use_vllm_tokenizer: bool
-    model_express_url: Optional[str] = None
 
     # Multimodal
     route_to_encoder: bool
@@ -287,6 +287,9 @@ class DynamoVllmConfig(ConfigBase):
 
     # Headless mode for multi-node TP/PP
     headless: bool = False
+
+    # ModelExpress P2P
+    model_express_url: Optional[str] = None
 
     # GMS shadow mode
     gms_shadow_mode: bool = False

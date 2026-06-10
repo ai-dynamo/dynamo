@@ -199,6 +199,8 @@ services:
           - --load-format
           - modelexpress
         env:
+          - name: VLLM_PLUGINS
+            value: modelexpress
           - name: MODEL_EXPRESS_URL
             value: http://model-express-server.model-express.svc.cluster.local:8080
 ```
@@ -206,7 +208,7 @@ services:
 When `dynamo-operator.modelExpressURL` is configured, the operator injects `MODEL_EXPRESS_URL` into component pods, so you do not need to repeat it in every worker manifest. If different workers should use different ModelExpress servers, or if you are using a ModelStreamer-only flow that does not need a server, set the relevant env vars explicitly in the DGD manifest instead.
 
 <Note>
-`VLLM_PLUGINS=modelexpress` is a runtime-image compatibility detail for vLLM plugin discovery. MX-enabled Dynamo vLLM images should provide it. If a manifest overrides `VLLM_PLUGINS` for other vLLM plugins, include `modelexpress` in that value. Customer manifests should otherwise only include topology settings such as `MODEL_EXPRESS_URL`, `MX_MODEL_URI`, credentials, and `MODEL_EXPRESS_NO_SHARED_STORAGE`.
+`VLLM_PLUGINS=modelexpress` is required while vLLM discovers this loader through the plugin path. Set it in the DGD manifest when using `--load-format=modelexpress`. If a manifest enables additional vLLM plugins, include `modelexpress` in the same comma-separated value.
 </Note>
 
 ### Streaming Without Shared Storage

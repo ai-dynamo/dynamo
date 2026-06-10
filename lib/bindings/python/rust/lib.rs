@@ -537,19 +537,13 @@ fn register_model<'p>(
             return Ok(());
         }
 
-        let _ = ignore_weights;
-
         // For non-TensorBased models, resolve the model path (local or fetch from HuggingFace).
-        // Pass ignore_weights=true: register_model only consumes metadata (config.json,
-        // tokenizer*, generation_config.json, chat template) when building the MDC, so any
-        // weight files would be downloaded and discarded. Engines load weights independently
-        // before register_model runs — SGLang and vLLM via an explicit fetch_model pre-flight,
-        // TRT-LLM via a pre-staged local path (which takes the fs::exists branch above) or
-        // via its own runtime resolving the HF repo.
+        // ModelExpress load paths pass ignore_weights=true because the engine already owns
+        // weight acquisition; other load paths keep the default full-fetch behavior.
         let model_path = if fs::exists(&source_path)? {
             PathBuf::from(&source_path)
         } else {
-            LocalModel::fetch(&source_path, true)
+            LocalModel::fetch(&source_path, ignore_weights)
                 .await
                 .map_err(to_pyerr)?
         };

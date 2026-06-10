@@ -2148,8 +2148,8 @@ async def register_model(
         AND-set, the outer list is OR. `worker_type` is required; backends
         declare it literally at each call site.
 
-    `ignore_weights` is accepted for backend compatibility. Registration only
-    consumes tokenizer/config metadata; model engines own weight loading.
+    When `ignore_weights` is true, remote HuggingFace model resolution skips
+    weight files and downloads only the metadata needed for registration.
     """
     ...
 

@@ -112,14 +112,11 @@ ARG DEEPGEMM_REF=""
 # aws-sdk-cpp tag for the NIXL OBJ / S3 backend (built in wheel_builder).
 ARG AWS_SDK_CPP_VERSION={{ context.vllm.aws_sdk_cpp_version }}
 {% endif %}
-
-# ModelExpress Python client for model loading (optional)
-ARG MODELEXPRESS_VERSION={{ context.vllm.modelexpress_version }}
 {%- endif -%}
 
-{% if framework == "sglang" -%}
+{% if framework in ["vllm", "sglang"] -%}
 # ModelExpress Python client for model loading (optional)
-ARG MODELEXPRESS_VERSION={{ context.sglang.modelexpress_version }}
+ARG MODELEXPRESS_VERSION={{ context[framework].modelexpress_version }}
 {%- endif -%}
 
 {% if framework == "sglang" and device == "xpu" -%}

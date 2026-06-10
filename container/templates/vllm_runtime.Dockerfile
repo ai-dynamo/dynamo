@@ -202,11 +202,6 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv; \
     uv pip install --system --no-deps \
         "modelexpress==${MODELEXPRESS_VERSION}"
-
-# vLLM discovers out-of-tree load formats through VLLM_PLUGINS. Set the image
-# default so --load-format=modelexpress works out of the box. A deployment that
-# overrides VLLM_PLUGINS for additional plugins must include modelexpress too.
-ENV VLLM_PLUGINS=modelexpress
 {% endif %}
 
 {% endif %}
