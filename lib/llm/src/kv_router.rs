@@ -412,10 +412,10 @@ fn tier_overlap_blocks_from_tiered_matches(
     tier_overlap_blocks
 }
 
-/// Generates a dp_rank-specific endpoint name for the worker KV indexer query service.
+/// Generates a worker/dp_rank-specific endpoint name for the worker KV indexer query service.
 /// Each dp_rank has its own LocalKvIndexer and query endpoint to ensure per-dp_rank monotonicity.
-pub fn worker_kv_indexer_query_endpoint(dp_rank: DpRank) -> String {
-    format!("worker_kv_indexer_query_dp{dp_rank}")
+pub fn worker_kv_indexer_query_endpoint(worker_id: WorkerId, dp_rank: DpRank) -> String {
+    format!("worker_kv_indexer_query_worker{worker_id}_dp{dp_rank}")
 }
 
 fn log_routing_input_hashes(
@@ -748,12 +748,22 @@ where
         let expires_at_ms = created_at_ms.saturating_add(REMOTE_KV_REUSE_PLAN_TTL_MS);
         let best_local_prefix_blocks = {
             let workers = self.workers_with_configs.borrow();
-            remote_g2_best_local_prefix_blocks(
-                &workers,
-                allowed_worker_ids.as_ref(),
-                &tier_overlap_blocks,
-                &cache_hit_estimates,
-            )
+            if let Some(pinned_worker) = pinned_worker {
+                // Exact pins make the global best-local worker infeasible, so
+                // score Direct G2 against the selected target's local prefix.
+                remote_g2_target_local_prefix_blocks(
+                    pinned_worker,
+                    &tier_overlap_blocks,
+                    &cache_hit_estimates,
+                )
+            } else {
+                remote_g2_best_local_prefix_blocks(
+                    &workers,
+                    allowed_worker_ids.as_ref(),
+                    &tier_overlap_blocks,
+                    &cache_hit_estimates,
+                )
+            }
         };
         let remote_g2_candidates = {
             let workers = self.workers_with_configs.borrow();

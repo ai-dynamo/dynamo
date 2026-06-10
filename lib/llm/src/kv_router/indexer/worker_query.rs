@@ -35,7 +35,7 @@ const RECOVERY_INITIAL_BACKOFF_MS: u64 = 200;
 const RECOVERY_CONCURRENCY_LIMIT: usize = 16;
 
 /// Prefix for worker KV indexer query endpoint names.
-const QUERY_ENDPOINT_PREFIX: &str = "worker_kv_indexer_query_dp";
+const QUERY_ENDPOINT_PREFIX: &str = "worker_kv_indexer_query_worker";
 
 type RecoveryKey = (WorkerId, DpRank);
 
@@ -84,7 +84,7 @@ trait WorkerQueryTransport: Send + Sync {
 
 struct RuntimeWorkerQueryTransport {
     component: Component,
-    routers: DashMap<DpRank, Arc<PushRouter<WorkerKvQueryRequest, WorkerKvQueryResponse>>>,
+    routers: DashMap<RecoveryKey, Arc<PushRouter<WorkerKvQueryRequest, WorkerKvQueryResponse>>>,
 }
 
 impl RuntimeWorkerQueryTransport {
@@ -95,22 +95,24 @@ impl RuntimeWorkerQueryTransport {
         }
     }
 
-    async fn get_router_for_dp_rank(
+    async fn get_router_for_worker_rank(
         &self,
+        worker_id: WorkerId,
         dp_rank: DpRank,
     ) -> Result<Arc<PushRouter<WorkerKvQueryRequest, WorkerKvQueryResponse>>> {
-        if let Some(router) = self.routers.get(&dp_rank) {
+        let key = (worker_id, dp_rank);
+        if let Some(router) = self.routers.get(&key) {
             return Ok(router.clone());
         }
 
-        let endpoint_name = worker_kv_indexer_query_endpoint(dp_rank);
+        let endpoint_name = worker_kv_indexer_query_endpoint(worker_id, dp_rank);
         let endpoint = self.component.endpoint(&endpoint_name);
         let client = endpoint.client().await?;
         let router = Arc::new(
             PushRouter::from_client_no_fault_detection(client, RouterMode::RoundRobin).await?,
         );
 
-        Ok(self.routers.entry(dp_rank).or_insert(router).clone())
+        Ok(self.routers.entry(key).or_insert(router).clone())
     }
 }
 
@@ -123,7 +125,7 @@ impl WorkerQueryTransport for RuntimeWorkerQueryTransport {
         start_event_id: Option<u64>,
         end_event_id: Option<u64>,
     ) -> Result<WorkerKvQueryResponse> {
-        let router = self.get_router_for_dp_rank(dp_rank).await?;
+        let router = self.get_router_for_worker_rank(worker_id, dp_rank).await?;
 
         let request = WorkerKvQueryRequest {
             worker_id,
@@ -153,7 +155,7 @@ impl WorkerQueryTransport for RuntimeWorkerQueryTransport {
 /// Router-side client for querying worker local KV indexers.
 ///
 /// Discovers query endpoints via `ComponentEndpoints` discovery, filtering for
-/// the `worker_kv_indexer_query_dp{N}` name pattern. Coordinates restore and
+/// the `worker_kv_indexer_query_worker{worker_id}_dp{N}` name pattern. Coordinates restore and
 /// gap recovery at the worker level while still querying each `(worker_id,
 /// dp_rank)` endpoint independently.
 ///
@@ -258,9 +260,20 @@ impl WorkerQueryClient {
         let DiscoveryInstance::Endpoint(inst) = instance else {
             return None;
         };
-        let dp_rank = inst.endpoint.strip_prefix(QUERY_ENDPOINT_PREFIX)?;
+        let suffix = inst.endpoint.strip_prefix(QUERY_ENDPOINT_PREFIX)?;
+        let (worker_id, dp_rank) = suffix.split_once("_dp")?;
+        let worker_id: WorkerId = worker_id.parse().ok()?;
+        if worker_id != inst.instance_id {
+            tracing::warn!(
+                endpoint = %inst.endpoint,
+                endpoint_worker_id = worker_id,
+                instance_id = inst.instance_id,
+                "Ignoring worker KV query endpoint with mismatched worker id"
+            );
+            return None;
+        }
         let dp_rank: DpRank = dp_rank.parse().ok()?;
-        Some((inst.instance_id, dp_rank))
+        Some((worker_id, dp_rank))
     }
 
     /// Parse a query endpoint from a discovery instance ID (for removals).
@@ -270,9 +283,20 @@ impl WorkerQueryClient {
         let dynamo_runtime::discovery::DiscoveryInstanceId::Endpoint(eid) = id else {
             return None;
         };
-        let dp_rank = eid.endpoint.strip_prefix(QUERY_ENDPOINT_PREFIX)?;
+        let suffix = eid.endpoint.strip_prefix(QUERY_ENDPOINT_PREFIX)?;
+        let (worker_id, dp_rank) = suffix.split_once("_dp")?;
+        let worker_id: WorkerId = worker_id.parse().ok()?;
+        if worker_id != eid.instance_id {
+            tracing::warn!(
+                endpoint = %eid.endpoint,
+                endpoint_worker_id = worker_id,
+                instance_id = eid.instance_id,
+                "Ignoring removed worker KV query endpoint with mismatched worker id"
+            );
+            return None;
+        }
         let dp_rank: DpRank = dp_rank.parse().ok()?;
-        Some((eid.instance_id, dp_rank))
+        Some((worker_id, dp_rank))
     }
 
     fn get_or_create_worker_state(&self, worker_id: WorkerId) -> Arc<Mutex<WorkerState>> {
@@ -687,7 +711,7 @@ pub(crate) async fn start_worker_kv_query_endpoint(
         }
     };
 
-    let endpoint_name = worker_kv_indexer_query_endpoint(dp_rank);
+    let endpoint_name = worker_kv_indexer_query_endpoint(worker_id, dp_rank);
     tracing::info!(
         "WorkerKvQuery endpoint starting for worker {worker_id} dp_rank {dp_rank} on endpoint '{endpoint_name}'"
     );
