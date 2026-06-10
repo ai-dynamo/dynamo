@@ -26,8 +26,8 @@ use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
 use dynamo_runtime::DistributedRuntime;
-use dynamo_runtime::config::{env_is_falsey, env_is_truthy};
 use dynamo_runtime::config::environment_names::llm as env_llm;
+use dynamo_runtime::config::{env_is_falsey, env_is_truthy};
 use dynamo_runtime::discovery::Discovery;
 use dynamo_runtime::logging::{make_inference_request_span, make_system_request_span};
 use dynamo_runtime::metrics::{
@@ -61,10 +61,6 @@ pub struct State {
     discovery_client: Arc<dyn Discovery>,
     flags: StateFlags,
     cancel_token: CancellationToken,
-    /// When false, the chat / completions / responses handlers drop
-    /// `request.nvext` at the boundary and ignore the routing-override
-    /// headers. Read once at construction from `DYN_ENABLE_NVEXT` (default
-    /// `true`); never mutated after that, so a plain `bool` suffices.
     nvext_enabled: bool,
 }
 
@@ -137,13 +133,10 @@ impl State {
         discovery_client: Arc<dyn Discovery>,
         cancel_token: CancellationToken,
     ) -> Self {
-        Self::new_with_flags(manager, discovery_client, cancel_token, true)
+        Self::new_with_nvext_enabled(manager, discovery_client, cancel_token, true)
     }
 
-    /// Constructor that lets the caller seed the runtime-immutable
-    /// `nvext_enabled` master switch. `State::new` defaults it to `true`
-    /// for callers that don't care.
-    pub fn new_with_flags(
+    pub fn new_with_nvext_enabled(
         manager: Arc<ModelManager>,
         discovery_client: Arc<dyn Discovery>,
         cancel_token: CancellationToken,
@@ -191,9 +184,8 @@ impl State {
         self.cancel_token.is_cancelled()
     }
 
-    /// Whether the `nvext` extension protocol is active for this service.
-    /// `false` ⇒ chat / completions / responses handlers drop `request.nvext`
-    /// and ignore routing-override headers (`DYN_ENABLE_NVEXT=false`).
+    /// Master switch for the `nvext` extension protocol (see
+    /// [`environment_names::llm::DYN_ENABLE_NVEXT`]).
     #[inline]
     pub fn nvext_enabled(&self) -> bool {
         self.nvext_enabled
@@ -305,17 +297,14 @@ pub struct HttpServiceConfig {
     #[builder(default = "false")]
     enable_rl: bool,
 
-    /// Master switch for the `nvext` extension protocol. Default `true`.
-    /// Mirrored via the `DYN_ENABLE_NVEXT` env var at service-construction
-    /// time (env-falsy ⇒ disabled). When disabled, the frontend handlers
-    /// drop `request.nvext` and ignore routing-override headers.
+    /// Master switch for the `nvext` extension protocol. Default `true`,
+    /// env-falsey on `DYN_ENABLE_NVEXT` overrides to `false`.
     #[builder(default = "true")]
     enable_nvext: bool,
 
-    /// Master switch for the frontend's HTTP admin API surface
-    /// (`POST/GET /busy_threshold`, `POST /clear_kv_blocks`). Default `true`.
-    /// Mirrored via `DYN_ENABLE_FRONTEND_ADMIN_API`. When disabled, those
-    /// routes are not registered.
+    /// Master switch for the frontend admin API surface (`GET` /
+    /// `POST /busy_threshold`). Default `true`, env-falsey on
+    /// `DYN_ENABLE_FRONTEND_ADMIN_API` overrides to `false`.
     #[builder(default = "true")]
     enable_admin_api: bool,
 
@@ -607,18 +596,12 @@ impl HttpServiceConfigBuilder {
                 cancel_token.child_token(),
             )) as Arc<dyn Discovery>
         });
-        // Env-var mirrors for the two master switches. Read once at
-        // service-construction time so the per-request hot path is a single
-        // struct-field load (no env::var on every request, no atomics).
-        // `enable_nvext` / `enable_admin_api` come from the builder
-        // (Python frontend_args sets them from CLI); the env vars give
-        // operators a way to flip the switch without a CLI change.
-        let nvext_enabled = config.enable_nvext
-            && !env_is_falsey(env_llm::DYN_ENABLE_NVEXT);
-        let admin_api_enabled = config.enable_admin_api
-            && !env_is_falsey(env_llm::DYN_ENABLE_FRONTEND_ADMIN_API);
+        // Env-falsey overrides the builder; unset preserves the builder default.
+        let nvext_enabled = config.enable_nvext && !env_is_falsey(env_llm::DYN_ENABLE_NVEXT);
+        let admin_api_enabled =
+            config.enable_admin_api && !env_is_falsey(env_llm::DYN_ENABLE_FRONTEND_ADMIN_API);
 
-        let state = Arc::new(State::new_with_flags(
+        let state = Arc::new(State::new_with_nvext_enabled(
             model_manager,
             discovery_client,
             cancel_token,
@@ -715,25 +698,14 @@ impl HttpServiceConfigBuilder {
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
         ];
         if admin_api_enabled {
-            // GET /busy_threshold + POST /busy_threshold are the
-            // cluster-mutating admin surface on the frontend. Gated under a
-            // single switch so operators can close off "out-of-band
-            // scheduler / worker control" without affecting inference,
-            // metrics, models, or health/liveness probes.
-            //
-            // Note: the historical `POST /clear_kv_blocks` route was removed
-            // in PR #1629 ("fix: remove http endpoint for clearing kv
-            // blocks"); the handler module is orphaned and not re-exposed
-            // here.
             system_routes.push(super::busy_threshold::busy_threshold_router(
                 state.clone(),
                 None,
             ));
         } else {
             tracing::info!(
-                "frontend admin API disabled — busy_threshold routes not \
-                 registered (DYN_ENABLE_FRONTEND_ADMIN_API=false or \
-                 builder enable_admin_api=false)"
+                env = env_llm::DYN_ENABLE_FRONTEND_ADMIN_API,
+                "frontend admin API disabled — busy_threshold routes not registered"
             );
         }
         let mut system_router = axum::Router::new();
@@ -937,5 +909,64 @@ mod tests {
 
         // Clean up
         handle.abort();
+    }
+
+    /// `enable_admin_api=false` ⇒ `GET /busy_threshold` is not registered and
+    /// returns 404, not 503 or 405. Inference is unaffected (covered by other
+    /// tests).
+    #[tokio::test]
+    async fn test_admin_api_disabled_404s_busy_threshold() {
+        let cancel_token = Arc::new(CancellationToken::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder()
+            .port(port)
+            .enable_admin_api(false)
+            .build()
+            .unwrap();
+
+        let service_token = cancel_token.clone();
+        let handle = tokio::spawn(async move {
+            service
+                .run_with_listener((*service_token).clone(), listener)
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://localhost:{}/busy_threshold", port))
+            .send()
+            .await
+            .expect("request failed");
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+        // And /live still works (sanity: only the admin surface is gated).
+        let live = reqwest::Client::new()
+            .get(format!("http://localhost:{}/live", port))
+            .send()
+            .await
+            .expect("request failed");
+        assert_eq!(live.status(), reqwest::StatusCode::OK);
+
+        cancel_token.cancel();
+        handle.abort();
+    }
+
+    /// `enable_nvext` is wired from the builder onto `State.nvext_enabled` and
+    /// exposed via the accessor used by the openai handlers.
+    #[test]
+    fn test_enable_nvext_propagates_through_builder_to_state() {
+        let on = HttpService::builder().enable_nvext(true).build().unwrap();
+        assert!(on.state.nvext_enabled());
+
+        let off = HttpService::builder().enable_nvext(false).build().unwrap();
+        assert!(!off.state.nvext_enabled());
+
+        let default = HttpService::builder().build().unwrap();
+        assert!(
+            default.state.nvext_enabled(),
+            "default should preserve current behavior (nvext on)"
+        );
     }
 }
