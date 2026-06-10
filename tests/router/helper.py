@@ -38,6 +38,14 @@ def get_kv_indexer_command() -> list[str]:
     return [sys.executable, "-m", "dynamo.indexer"]
 
 
+def get_kv_indexer_test_env() -> Dict[str, str]:
+    """Indexer launch env that enables the listener-control test endpoints
+    (gated off by default; used by the ZMQ replay scenario)."""
+    env = os.environ.copy()
+    env["DYN_KV_INDEXER_TEST_ENDPOINTS"] = "1"
+    return env
+
+
 def assert_event_dumps_equal(
     expected: list[dict],
     actual: list[dict],
@@ -667,11 +675,13 @@ async def send_request_via_python_kv_router(
                     f"Stream finished with reason: {response['finish_reason']}"
                 )
 
-            # Extract worker IDs and dp_ranks from disaggregated_params if present
-            if return_worker_ids and "disaggregated_params" in response:
-                disagg_params = response["disaggregated_params"]
-                if isinstance(disagg_params, dict) and "worker_id" in disagg_params:
-                    worker_id_info = disagg_params["worker_id"]
+            # Extract worker IDs and dp_ranks from routing_data if present. The KvRouter
+            # binding forwards worker attribution on the typed ``routing_data.worker_id``
+            # field rather than the legacy ``disaggregated_params`` JSON blob.
+            if return_worker_ids and "routing_data" in response:
+                routing_data = response["routing_data"]
+                if isinstance(routing_data, dict) and "worker_id" in routing_data:
+                    worker_id_info = routing_data["worker_id"]
                     if isinstance(worker_id_info, dict):
                         if "prefill_worker_id" in worker_id_info:
                             prefill_worker_id = worker_id_info["prefill_worker_id"]

@@ -37,7 +37,13 @@ CMakeCache.txt
 *.vcxproj
 *.vcxproj.filters
 *_pb2.py
+*_pb2_grpc.py
 *_pb2.pyi
+# Planner plugin framework: stubs are checked in so test/build environments
+# don't need grpcio-tools or a protoc step just to import the module.
+!components/src/dynamo/planner/plugins/proto/v1/plugin_pb2.py
+!components/src/dynamo/planner/plugins/proto/v1/plugin_pb2_grpc.py
+!components/src/dynamo/planner/plugins/proto/v1/plugin_pb2.pyi
 *.svg
 !docs/assets/**/*.svg
 

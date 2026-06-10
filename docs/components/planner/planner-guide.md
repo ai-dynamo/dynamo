@@ -123,7 +123,6 @@ features:
 | `max_num_fpm_samples` | int | `64` | Maximum retained FPM observations for online tuning or regression. |
 | `fpm_sample_bucket_size` | int | `16` | Number of buckets for observation retirement (must be a perfect square). |
 | `load_scaling_down_sensitivity` | int | `80` | Scale-down sensitivity 0–100 (0=never, 100=aggressive). |
-| `load_metric_samples` | int | `10` | Number of metric samples to collect per decision. |
 | `load_min_observations` | int | `5` | Minimum observations before making scaling decisions. |
 
 ### General Settings
@@ -140,10 +139,12 @@ features:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `load_predictor` | string | `arima` | Prediction method: `constant`, `arima`, `kalman`, or `prophet`. |
-| `load_predictor_log1p` | bool | `false` | Apply log1p transform to load data before prediction. |
+| `load_predictor` | string | `arima` | Prediction method for request count, ISL, and OSL: `constant`, `arima`, `kalman`, or `prophet`. Runtime metadata such as KV hit rate and speculative decode accept length uses the latest valid observation instead. |
+| `load_predictor_log1p` | bool | `false` | Apply log1p transform to predicted request count, ISL, and OSL data. |
 | `prophet_window_size` | int | `50` | Window size (seconds) for Prophet predictor. |
 | `load_predictor_warmup_trace` | string | `null` | Path to a warmup trace file for bootstrapping predictions. |
+
+KV hit rate and speculative decode accept length are runtime engine/router signals, not traffic shape. The planner stores the latest valid observation for each signal and reuses it until a newer valid value arrives. On cold start, missing KV hit rate means no prefix-cache discount, and missing accept length means `1.0`.
 
 ### Kalman Filter Settings
 
@@ -165,6 +166,47 @@ features:
 The same diagnostic signals surfaced in these reports are also exported as Prometheus metrics under the `dynamo_planner_*` prefix—for example estimated TTFT/ITL (`dynamo_planner_estimated_ttft_ms`, `dynamo_planner_estimated_itl_ms`), recommended replica counts (`dynamo_planner_predicted_num_prefill_replicas`, `dynamo_planner_predicted_num_decode_replicas`), per-engine capacity and FPM queue depths, and load/throughput scaling decision enums.
 
 The Replica Counts plot overlays actual prefill/decode replicas with discrete recommendation markers for the Planner's recommended prefill/decode replicas. When `advisory: true`, these recommended counts are suggestions only; the Planner records what it would do without applying the change.
+
+### Scheduling / engine selection
+
+Settings that control which tick engine the planner runs (PR 7 dual-path
+cutover). Live under the `scheduling` sub-tree of `PlannerConfig`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `scheduling.use_orchestrator` | bool | `false` | When `false`, planner runs the legacy single-class state machine (PSM path — pre-PR-7 behaviour). When `true`, planner runs the plugin-based orchestrator (PROPOSE / RECONCILE / CONSTRAIN / EXECUTE pipeline with the 5 builtin plugins). The orchestrator path emits the full set of `dynamo_planner_plugin_*` Prometheus metrics and structured audit events; the PSM path keeps the legacy metric surface only. **Decision outputs are byte-identical between paths** (locked by `tests/integration/test_dual_path_parity.py`). Default `false` keeps existing behaviour; flip after canary observation. |
+| `scheduling.request_timeout_seconds` | float | `5.0` | Per-plugin RPC timeout. Plugins exceeding this raise `PluginTimeoutError`; the stage continues with the remaining plugins. Only meaningful when `use_orchestrator=true`. |
+| `scheduling.tick_max_duration_seconds` | float | `30.0` | Outer deadline wrapping the entire 4-stage pipeline. Exceeding it aborts the tick; the next tick runs from a clean state. Only meaningful when `use_orchestrator=true`. |
+
+#### How to enable on a DGD
+
+Add the field under `features.planner` in your DGDR (or directly in the
+generated DGD's planner `--config` JSON):
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: my-deployment
+spec:
+  model: Qwen/Qwen3-0.6B
+  features:
+    planner:
+      optimization_target: sla
+      enable_load_scaling: true
+      ttft: 200.0
+      itl: 10.0
+      pre_deployment_sweeping_mode: rapid
+      scheduling:
+        use_orchestrator: true        # opt into plugin-based orchestrator
+        # request_timeout_seconds: 5.0    # default; tune if user plugins are slow
+        # tick_max_duration_seconds: 30.0
+```
+
+For ad-hoc validation on an already-deployed DGD, patch the planner's
+`--config` JSON to add `"scheduling": {"use_orchestrator": true}` and
+restart the planner Pod. See the rollout runbook for staged-flip
+guidance.
 
 ## Integration with Profiler
 

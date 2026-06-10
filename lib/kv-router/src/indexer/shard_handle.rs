@@ -100,8 +100,9 @@ pub trait AsyncShardHandle: Send + Sync + 'static {
 /// running in the same process.
 ///
 /// * Writes are channel sends (sync, wrapped in async).
-/// * `find_matches_from_anchor` runs on a `spawn_blocking` thread since the
-///   underlying trie `find_matches_from_anchor` is synchronous.
+/// * `find_matches_from_anchor` runs inline on the caller's task, matching
+///   `ThreadPoolIndexer::find_matches` and avoiding scheduler overhead in the
+///   in-process branch-sharded hot path.
 impl<T: AnchorCapableSyncIndexer> AsyncShardHandle for ThreadPoolIndexer<T> {
     async fn apply_event(&self, event: RouterEvent) {
         KvIndexerInterface::apply_event(self, event).await;
@@ -120,10 +121,7 @@ impl<T: AnchorCapableSyncIndexer> AsyncShardHandle for ThreadPoolIndexer<T> {
         anchor: AnchorRef,
         suffix: Vec<LocalBlockHash>,
     ) -> Result<OverlapScores, KvRouterError> {
-        let backend = self.backend_arc();
-        tokio::task::spawn_blocking(move || backend.find_matches_from_anchor(anchor, &suffix))
-            .await
-            .map_err(|_| KvRouterError::IndexerOffline)?
+        self.backend().find_matches_from_anchor(anchor, &suffix)
     }
 
     async fn remove_worker(&self, worker_id: WorkerId) {

@@ -163,7 +163,9 @@ fn is_deepseek_v3_2_non_exp(model_type_lower: &Option<String>, display_name_lowe
         && display_name_lower.contains("v3.2")
         && !display_name_lower.contains("exp");
     match model_type_lower.as_deref() {
-        Some("deepseek_v3_2") => !display_name_lower.contains("exp"),
+        // HF ships `deepseek_v32` (no underscore between 3 and 2); Dynamo's
+        // internal/tool-parser key is `deepseek_v3_2`. Accept both.
+        Some("deepseek_v3_2" | "deepseek_v32") => !display_name_lower.contains("exp"),
         Some(_) => false,
         None => name_match,
     }
@@ -281,6 +283,13 @@ mod detection_tests {
         assert!(is_deepseek_v3_2_non_exp(&v3_2, "deepseek-v3.2"));
         // V3.2-Exp is a separate model family; suppress even via config.
         assert!(!is_deepseek_v3_2_non_exp(&v3_2, "deepseek-v3.2-exp"));
+
+        // The actual HF config.json spelling has no underscore between 3 and 2
+        // (`deepseek_v32`). It must trigger identically to the internal key.
+        let hf_real = Some("deepseek_v32".to_string());
+        assert!(is_deepseek_v3_2_non_exp(&hf_real, "whatever"));
+        assert!(is_deepseek_v3_2_non_exp(&hf_real, "deepseek-v3.2-nvfp4"));
+        assert!(!is_deepseek_v3_2_non_exp(&hf_real, "deepseek-v3.2-exp"));
 
         // Other config types lose regardless of display name.
         let other = Some("deepseek_v4".to_string());

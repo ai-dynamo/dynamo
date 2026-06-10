@@ -54,7 +54,6 @@ pub struct LocalModelBuilder {
     source_path: Option<PathBuf>,
     model_name: Option<String>,
     endpoint_id: Option<EndpointId>,
-    context_length: Option<u32>,
     template_file: Option<PathBuf>,
     router_config: Option<RouterConfig>,
     kv_cache_block_size: u32,
@@ -90,7 +89,6 @@ impl Default for LocalModelBuilder {
             source_path: Default::default(),
             model_name: Default::default(),
             endpoint_id: Default::default(),
-            context_length: Default::default(),
             template_file: Default::default(),
             router_config: Default::default(),
             migration_limit: Default::default(),
@@ -131,11 +129,6 @@ impl LocalModelBuilder {
 
     pub fn endpoint_id(&mut self, endpoint_id: Option<EndpointId>) -> &mut Self {
         self.endpoint_id = endpoint_id;
-        self
-    }
-
-    pub fn context_length(&mut self, context_length: Option<u32>) -> &mut Self {
-        self.context_length = context_length;
         self
     }
 
@@ -332,11 +325,6 @@ impl LocalModelBuilder {
 
         card.kv_cache_block_size = self.kv_cache_block_size;
 
-        // Override max number of tokens in context. We usually only do this to limit kv cache allocation.
-        if let Some(context_length) = self.context_length {
-            card.context_length = context_length;
-        }
-
         card.migration_limit = self.migration_limit;
         card.user_data = self.user_data.take();
         card.runtime_config = self.runtime_config.clone();
@@ -483,9 +471,9 @@ impl LocalModel {
     /// For base models, pass `lora_name = None`.
     /// For LoRA adapters, pass `lora_name = Some("adapter-name")`.
     ///
-    /// `worker_type` and `needs` carry the topology readiness fields. Pass
-    /// `None` / empty `Vec` for callers that haven't been updated to declare
-    /// their role yet — readers apply the missing-field shim.
+    /// `worker_type` and `needs` carry the model-serving-readiness fields.
+    /// Cards without a declared `worker_type` are treated as misconfigured
+    /// and do not count toward readiness.
     pub async fn attach(
         &mut self,
         endpoint: &Endpoint,
