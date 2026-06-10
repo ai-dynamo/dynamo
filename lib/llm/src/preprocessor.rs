@@ -1648,6 +1648,15 @@ impl
         let (mut common_request, annotations, prompt_injected_reasoning) = self
             .preprocess_request(&request, tracker.as_deref())
             .await?;
+        let x_request_id = dynamo_runtime::logging::get_distributed_tracing_context()
+            .and_then(|context| context.x_request_id)
+            .or_else(|| {
+                context
+                    .get::<String>(crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY)
+                    .ok()
+                    .map(|value| value.as_ref().clone())
+            });
+        common_request.x_request_id = x_request_id.clone();
         tracing::trace!(request = ?common_request, prompt_injected_reasoning, "Pre-processed request");
         let trace_state = if crate::agents::trace::is_enabled() {
             common_request.agent_context.clone().map(|agent_context| {
@@ -1657,14 +1666,6 @@ impl
                     &common_request.token_ids,
                     self.kv_cache_block_size,
                 );
-                let x_request_id = dynamo_runtime::logging::get_distributed_tracing_context()
-                    .and_then(|context| context.x_request_id)
-                    .or_else(|| {
-                        context
-                            .get::<String>(crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY)
-                            .ok()
-                            .map(|value| value.as_ref().clone())
-                    });
                 (
                     agent_context,
                     request_model,

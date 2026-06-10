@@ -274,6 +274,7 @@ fn remote_g2_candidates_from_tiered_matches(
     allowed_worker_ids: Option<&HashSet<WorkerId>>,
     best_local_prefix_blocks: u32,
     request_id: &str,
+    x_request_id: Option<&str>,
     created_at_ms: u64,
     expires_at_ms: u64,
 ) -> HashMap<WorkerWithDpRank, RemoteG2CandidateScore> {
@@ -295,6 +296,7 @@ fn remote_g2_candidates_from_tiered_matches(
                 remote_g2_target_local_prefix_blocks(target, tiered_matches);
             let decision = select_remote_g2_candidate(RemoteKvReuseSelectionInput {
                 request_id,
+                x_request_id,
                 target,
                 target_local_prefix_blocks,
                 best_local_prefix_blocks,
@@ -647,6 +649,7 @@ where
     pub(crate) async fn find_best_match_details(
         &self,
         context_id: Option<&str>,
+        x_request_id: Option<&str>,
         tokens: &[u32],
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         router_config_override: Option<&RouterConfigOverride>,
@@ -765,6 +768,7 @@ where
                 allowed_worker_ids.as_ref(),
                 best_local_prefix_blocks,
                 context_id.unwrap_or_default(),
+                x_request_id,
                 created_at_ms,
                 expires_at_ms,
             )
@@ -801,6 +805,7 @@ where
             remote_g2_target_local_prefix_blocks(response.best_worker, &tiered_matches);
         let selected_remote_g2_input = RemoteKvReuseSelectionInput {
             request_id: context_id.unwrap_or_default(),
+            x_request_id,
             target: response.best_worker,
             target_local_prefix_blocks: selected_target_local_prefix_blocks,
             best_local_prefix_blocks,
@@ -920,6 +925,7 @@ where
                 .unwrap_or_else(Vec::new);
             tracing::warn!(
                 request_id = context_id.unwrap_or_default(),
+                x_request_id = x_request_id.unwrap_or_default(),
                 target_worker_id = response.best_worker.worker_id,
                 target_dp_rank = response.best_worker.dp_rank,
                 request_blocks = block_hashes.len(),
@@ -1014,6 +1020,7 @@ where
         let result = self
             .find_best_match_details(
                 context_id,
+                None,
                 tokens,
                 block_mm_infos,
                 router_config_override,
@@ -1440,6 +1447,7 @@ mod tests {
             Some(&allowed_worker_ids),
             4027,
             "request-1",
+            None,
             1000,
             2000,
         );
@@ -1637,6 +1645,7 @@ mod tests {
         RemoteKvReusePlan {
             plan_id: "plan-1".to_string(),
             request_id: "request-1".to_string(),
+            x_request_id: Some("client-request-1".to_string()),
             target_worker_id: 42,
             target_dp_rank: 2,
             source_worker_id: 7,

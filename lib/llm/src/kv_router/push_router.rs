@@ -308,12 +308,14 @@ impl KvPushRouter {
         let expected_output_tokens = routing.and_then(|r| r.expected_output_tokens);
         let allowed_worker_ids = routing.and_then(|r| r.allowed_worker_ids.clone());
         let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
+        let x_request_id = request.x_request_id.as_deref();
         let Some((pinned_worker_id, requested_dp_rank)) = pinned_worker_hint(phase, routing) else {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
             let selection = self
                 .chooser
                 .find_best_match_details(
                     Some(context_id),
+                    x_request_id,
                     routing_token_ids,
                     block_mm_infos,
                     request.router_config_override.as_ref(),
@@ -372,6 +374,7 @@ impl KvPushRouter {
                 .chooser
                 .find_best_match_details(
                     Some(context_id),
+                    x_request_id,
                     routing_token_ids,
                     block_mm_infos,
                     request.router_config_override.as_ref(),
@@ -413,6 +416,7 @@ impl KvPushRouter {
                 .chooser
                 .find_best_match_details(
                     Some(context_id),
+                    x_request_id,
                     routing_token_ids,
                     block_mm_infos,
                     request.router_config_override.as_ref(),

@@ -217,6 +217,11 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timestamp_ms: Option<f64>,
 
+    /// Optional client request id forwarded from the OpenAI x-request-id header.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_request_id: Option<String>,
+
     /// Optional request tracker for per-request metrics (shared with DeltaGenerator)
     #[builder(default)]
     #[serde(skip)]
@@ -375,6 +380,7 @@ mod tests {
         RemoteKvReusePlan {
             plan_id: "plan-1".to_string(),
             request_id: "request-1".to_string(),
+            x_request_id: Some("client-request-1".to_string()),
             target_worker_id: 42,
             target_dp_rank: 2,
             source_worker_id: 7,

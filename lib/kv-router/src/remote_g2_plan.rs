@@ -15,6 +15,8 @@ pub const REMOTE_KV_REUSE_PLAN_VERSION: u32 = 1;
 pub struct RemoteKvReusePlan {
     pub plan_id: String,
     pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_request_id: Option<String>,
     pub target_worker_id: WorkerId,
     pub target_dp_rank: DpRank,
     pub source_worker_id: WorkerId,
@@ -81,6 +83,7 @@ impl RemoteKvReuseNoPlanReason {
 #[derive(Clone, Copy)]
 pub struct RemoteKvReuseSelectionInput<'a> {
     pub request_id: &'a str,
+    pub x_request_id: Option<&'a str>,
     pub target: WorkerWithDpRank,
     pub target_local_prefix_blocks: u32,
     pub best_local_prefix_blocks: u32,
@@ -404,6 +407,7 @@ pub fn materialize_remote_g2_reuse_plan(
                 input.created_at_ms
             ),
             request_id: input.request_id.to_string(),
+            x_request_id: input.x_request_id.map(str::to_string),
             target_worker_id: input.target.worker_id,
             target_dp_rank: input.target.dp_rank,
             source_worker_id: candidate.source.worker_id,
@@ -458,6 +462,7 @@ mod tests {
         RemoteKvReusePlan {
             plan_id: "plan-1".to_string(),
             request_id: "request-1".to_string(),
+            x_request_id: Some("client-request-1".to_string()),
             target_worker_id: 9,
             target_dp_rank: 0,
             source_worker_id: 7,
@@ -506,6 +511,7 @@ mod tests {
     ) -> RemoteKvReuseSelectionInput<'a> {
         RemoteKvReuseSelectionInput {
             request_id: "request-1",
+            x_request_id: None,
             target,
             target_local_prefix_blocks: 0,
             best_local_prefix_blocks: 0,
@@ -699,6 +705,7 @@ mod tests {
         let matches = tiered_matches(&[], &[(source, 3)]);
         let input = RemoteKvReuseSelectionInput {
             request_id: "req-meta",
+            x_request_id: Some("client-req-meta"),
             target,
             target_local_prefix_blocks: 0,
             best_local_prefix_blocks: 0,
@@ -715,6 +722,7 @@ mod tests {
         match decision {
             RemoteKvReuseDecision::Plan { plan, .. } => {
                 assert_eq!(plan.request_id, "req-meta");
+                assert_eq!(plan.x_request_id.as_deref(), Some("client-req-meta"));
                 assert_eq!(plan.block_size_tokens, 32);
                 assert_eq!(plan.created_at_ms, 1234);
                 assert_eq!(plan.expires_at_ms, 5678);
