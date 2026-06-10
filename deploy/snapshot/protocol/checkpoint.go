@@ -87,6 +87,13 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 	// liveness/startup probes are cleared — a checkpoint job runs to a
 	// quiesce-and-sit state, not a long-lived serving state.
 	EnsureControlVolume(&podTemplate.Spec, targetContainer)
+	storage := Storage{
+		Type:     podTemplate.Annotations[CheckpointStorageTypeAnnotation],
+		BasePath: podTemplate.Annotations[CheckpointStorageBasePathAnnotation],
+	}
+	if resolvedStorage, err := ResolveCheckpointStorage(opts.CheckpointID, opts.ArtifactVersion, storage); err == nil {
+		EnsureVLLMCheckpointRestoreEnv(targetContainer, resolvedStorage)
+	}
 	targetContainer.ReadinessProbe = &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
 			Exec: &corev1.ExecAction{

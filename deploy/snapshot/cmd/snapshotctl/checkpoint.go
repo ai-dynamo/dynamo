@@ -77,6 +77,20 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (*result, er
 		annotations[k] = v
 	}
 	annotations[snapshotprotocol.TargetContainersAnnotation] = targetValue
+	snapshotprotocol.ApplyCheckpointStorageMetadata(annotations, resolvedStorage)
+	targetNames, err := snapshotprotocol.ParseTargetContainers(targetValue)
+	if err != nil {
+		return nil, err
+	}
+	if len(targetNames) != 1 {
+		return nil, fmt.Errorf("checkpoint requires exactly one target container, got %d", len(targetNames))
+	}
+	snapshotprotocol.InjectCheckpointVolume(&pod.Spec, resolvedStorage.PVCName)
+	targetContainer := findContainer(pod.Spec, targetNames[0])
+	if targetContainer == nil {
+		return nil, fmt.Errorf("checkpoint target container %q not found", targetNames[0])
+	}
+	snapshotprotocol.InjectCheckpointVolumeMount(targetContainer, resolvedStorage.BasePath)
 
 	checkpointJobName := pod.Name + "-checkpoint"
 	job, err := snapshotprotocol.NewCheckpointJob(&corev1.PodTemplateSpec{
@@ -171,6 +185,15 @@ func waitForCheckpoint(ctx context.Context, clientset kubernetes.Interface, name
 		return "", fmt.Errorf("checkpoint job %s/%s timed out: %s", namespace, jobName, checkpointTimeoutSummary(clientset, namespace, jobName, status))
 	}
 	return status, nil
+}
+
+func findContainer(podSpec corev1.PodSpec, name string) *corev1.Container {
+	for i := range podSpec.Containers {
+		if podSpec.Containers[i].Name == name {
+			return &podSpec.Containers[i]
+		}
+	}
+	return nil
 }
 
 func checkpointTimeoutSummary(clientset kubernetes.Interface, namespace string, jobName string, status string) string {

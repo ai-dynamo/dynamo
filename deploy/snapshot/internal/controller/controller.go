@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -809,9 +808,9 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		return nil
 	}
 
-	rendezvousConfig, err := restoreRendezvousConfig(pod, containerName, checkpointID)
+	rendezvousHost, err := restoreRendezvousHost(pod, containerName)
 	if err != nil {
-		log.Error(err, "Failed to build rendezvous file")
+		log.Error(err, "Failed to build restore rendezvous metadata")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
 		if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
 			return statusErr
@@ -819,22 +818,11 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		if killErr := snapshotruntime.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "restore rendezvous failed"); killErr != nil {
 			log.Error(killErr, "Failed to kill placeholder after rendezvous failure")
 		}
-		return fmt.Errorf("failed to build rendezvous file: %w", err)
-	}
-	if err := snapshotruntime.WriteRendezvousFile(placeholderHostPID, rendezvousConfig); err != nil {
-		log.Error(err, "Failed to write rendezvous file")
-		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
-		if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
-			return statusErr
-		}
-		if killErr := snapshotruntime.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "restore rendezvous failed"); killErr != nil {
-			log.Error(killErr, "Failed to kill placeholder after rendezvous failure")
-		}
-		return fmt.Errorf("failed to write rendezvous file: %w", err)
+		return fmt.Errorf("failed to build restore rendezvous metadata: %w", err)
 	}
 
 	ncclKVSEndpoint := restoreNCCLCheckpointKVSEndpoint(
-		rendezvousConfig.Store.Host,
+		rendezvousHost,
 		pod,
 		checkpointID,
 		containerName,
@@ -849,6 +837,18 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 			log.Error(killErr, "Failed to kill placeholder after NCCL KVS failure")
 		}
 		return fmt.Errorf("failed to write NCCL checkpoint KVS file: %w", err)
+	}
+
+	if err := snapshotruntime.RemoveFileIfExists(vllmCheckpointRestoreFileStoreHostPath(checkpointLocation, containerName)); err != nil {
+		log.Error(err, "Failed to remove vLLM checkpoint FileStore rendezvous file")
+		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
+		if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
+			return statusErr
+		}
+		if killErr := snapshotruntime.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "restore FileStore reset failed"); killErr != nil {
+			log.Error(killErr, "Failed to kill placeholder after FileStore reset failure")
+		}
+		return fmt.Errorf("failed to remove vLLM checkpoint FileStore rendezvous file: %w", err)
 	}
 
 	// Any PID inside the container mount namespace reaches the control
@@ -882,9 +882,8 @@ func (w *NodeController) tryAcquire(podKey string) bool {
 	return true
 }
 
-func restoreRendezvousConfig(pod *corev1.Pod, containerName string, checkpointID string) (snapshotruntime.RendezvousConfig, error) {
+func restoreRendezvousHost(pod *corev1.Pod, containerName string) (string, error) {
 	host := pod.Status.PodIP
-	port := 29500
 	env := map[string]string{}
 	for i := range pod.Spec.Containers {
 		container := &pod.Spec.Containers[i]
@@ -896,39 +895,16 @@ func restoreRendezvousConfig(pod *corev1.Pod, containerName string, checkpointID
 		if parsedHost := flagValue(args, "--master-addr"); parsedHost != "" {
 			host = parsedHost
 		}
-		if parsedPort := flagValue(args, "--master-port"); parsedPort != "" {
-			parsedPort = expandEnvReferences(parsedPort, env)
-			n, err := strconv.Atoi(parsedPort)
-			if err != nil || n <= 0 {
-				return snapshotruntime.RendezvousConfig{}, fmt.Errorf("invalid --master-port value %q", parsedPort)
-			}
-			port = n
-		}
 		break
 	}
 	if annotatedHost := strings.TrimSpace(pod.Annotations[snapshotprotocol.RendezvousHostAnnotation]); annotatedHost != "" {
 		host = annotatedHost
 	}
-	if annotatedPort := strings.TrimSpace(pod.Annotations[snapshotprotocol.RendezvousPortAnnotation]); annotatedPort != "" {
-		annotatedPort = expandEnvReferences(annotatedPort, env)
-		n, err := strconv.Atoi(annotatedPort)
-		if err != nil || n <= 0 {
-			return snapshotruntime.RendezvousConfig{}, fmt.Errorf("invalid %s value %q", snapshotprotocol.RendezvousPortAnnotation, annotatedPort)
-		}
-		port = n
-	}
 	host = expandEnvReferences(host, env)
 	if hasUnresolvedEnvReference(host) {
-		return snapshotruntime.RendezvousConfig{}, fmt.Errorf("rendezvous host %q still contains unresolved env references", host)
+		return "", fmt.Errorf("rendezvous host %q still contains unresolved env references", host)
 	}
-	return snapshotruntime.RendezvousConfig{
-		RestoreID: checkpointID,
-		Store: snapshotruntime.RendezvousStore{
-			Host:       host,
-			Port:       port,
-			MasterRank: 0,
-		},
-	}, nil
+	return host, nil
 }
 
 func restoreNCCLCheckpointKVSEndpoint(host string, pod *corev1.Pod, checkpointID string, containerName string) string {
@@ -953,6 +929,10 @@ func restoreNCCLCheckpointKVSGroup(pod *corev1.Pod, checkpointID string, contain
 		}
 	}
 	return strings.Join(parts, "_")
+}
+
+func vllmCheckpointRestoreFileStoreHostPath(location checkpointLocations, containerName string) string {
+	return snapshotprotocol.VLLMCheckpointRestoreFileStorePathForTarget(location.HostPath, containerName)
 }
 
 func safePathComponent(value string) string {

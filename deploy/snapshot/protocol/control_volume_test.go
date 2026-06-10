@@ -25,7 +25,6 @@ func TestEnsureControlVolume(t *testing.T) {
 			t.Fatalf("expected subPath=%q, got %q", "main", c.VolumeMounts[0].SubPath)
 		}
 		assertEnv(t, c.Env, SnapshotControlDirEnv, SnapshotControlMountPath)
-		assertEnv(t, c.Env, TorchC10dRendezvousFileEnv, SnapshotControlMountPath+"/"+TorchC10dRendezvousFile)
 		assertEnv(t, c.Env, NCCLCheckpointKVSPathEnv, SnapshotControlMountPath+"/"+NCCLCheckpointKVSFile)
 	})
 
@@ -53,7 +52,7 @@ func TestEnsureControlVolume(t *testing.T) {
 		EnsureControlVolume(ps, &ps.Containers[0])
 		EnsureControlVolume(ps, &ps.Containers[0])
 		c := ps.Containers[0]
-		if len(ps.Volumes) != 1 || len(c.VolumeMounts) != 1 || len(c.Env) != 3 {
+		if len(ps.Volumes) != 1 || len(c.VolumeMounts) != 1 || len(c.Env) != 2 {
 			t.Fatalf("expected single volume/mount/env after two calls, got volumes=%d mounts=%d env=%d", len(ps.Volumes), len(c.VolumeMounts), len(c.Env))
 		}
 	})
@@ -89,10 +88,45 @@ func TestEnsureControlVolume(t *testing.T) {
 		}
 		EnsureControlVolume(ps, &ps.Containers[0])
 		c := ps.Containers[0]
-		if len(ps.Volumes) != 2 || len(c.VolumeMounts) != 2 || len(c.Env) != 4 {
+		if len(ps.Volumes) != 2 || len(c.VolumeMounts) != 2 || len(c.Env) != 3 {
 			t.Fatalf("expected existing + control entries, got volumes=%#v mounts=%#v env=%#v", ps.Volumes, c.VolumeMounts, c.Env)
 		}
 	})
+}
+
+func TestEnsureVLLMCheckpointRestoreEnv(t *testing.T) {
+	container := &corev1.Container{
+		Name: "main",
+		Env:  []corev1.EnvVar{{Name: VLLMDistributedUseSplitGroupEnv, Value: "1"}},
+	}
+	EnsureVLLMCheckpointRestoreEnv(container, Storage{
+		Location: "/checkpoints/hash/versions/2",
+	})
+
+	assertEnv(t, container.Env, VLLMCheckpointRestoreEnabledEnv, "1")
+	assertEnv(t, container.Env, VLLMDistributedUseSplitGroupEnv, "0")
+	assertEnv(
+		t,
+		container.Env,
+		VLLMCheckpointRestoreFileStorePathEnv,
+		"/checkpoints/hash/vllm-filestore/2/main/torch_pg",
+	)
+}
+
+func TestVLLMCheckpointRestoreFileStorePathForLocation(t *testing.T) {
+	got := VLLMCheckpointRestoreFileStorePathForLocation("/checkpoints/hash/versions/2")
+	want := "/checkpoints/hash/vllm-filestore/2/torch_pg"
+	if got != want {
+		t.Fatalf("FileStore path = %q, want %q", got, want)
+	}
+	got = VLLMCheckpointRestoreFileStorePathForTarget(
+		"/checkpoints/hash/versions/2",
+		"main",
+	)
+	want = "/checkpoints/hash/vllm-filestore/2/main/torch_pg"
+	if got != want {
+		t.Fatalf("target FileStore path = %q, want %q", got, want)
+	}
 }
 
 func assertEnv(t *testing.T, env []corev1.EnvVar, name, value string) {

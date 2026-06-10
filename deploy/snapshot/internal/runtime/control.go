@@ -4,7 +4,6 @@
 package runtime
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,35 +33,6 @@ func WriteControlSentinel(hostPID int, name string) error {
 	return writeSentinelInDir(dir, name)
 }
 
-type RendezvousConfig struct {
-	RestoreID string          `json:"restore_id,omitempty"`
-	Store     RendezvousStore `json:"store"`
-}
-
-type RendezvousStore struct {
-	Host       string `json:"host"`
-	Port       int    `json:"port"`
-	MasterRank int    `json:"master_rank"`
-}
-
-func WriteRendezvousFile(hostPID int, config RendezvousConfig) error {
-	if hostPID <= 0 {
-		return fmt.Errorf("invalid host PID %d for rendezvous file", hostPID)
-	}
-	if config.Store.Host == "" {
-		return fmt.Errorf("rendezvous store host is empty")
-	}
-	if config.Store.Port <= 0 {
-		return fmt.Errorf("invalid rendezvous store port %d", config.Store.Port)
-	}
-	dir := filepath.Join(HostProcPath, strconv.Itoa(hostPID), "root", snapshotprotocol.SnapshotControlMountPath)
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal rendezvous file: %w", err)
-	}
-	return writeFileInDir(dir, snapshotprotocol.TorchC10dRendezvousFile, append(data, '\n'))
-}
-
 func WriteNCCLCheckpointKVSFile(hostPID int, endpoint string) error {
 	if hostPID <= 0 {
 		return fmt.Errorf("invalid host PID %d for NCCL checkpoint KVS file", hostPID)
@@ -85,6 +55,16 @@ func writeNCCLCheckpointKVSFileInRoot(root string, endpoint string) error {
 		snapshotprotocol.NCCLCheckpointKVSFile,
 		[]byte(endpoint+"\n"),
 	)
+}
+
+func RemoveFileIfExists(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("path is empty")
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove %s: %w", path, err)
+	}
+	return nil
 }
 
 func writeSentinelInDir(dir, name string) error {

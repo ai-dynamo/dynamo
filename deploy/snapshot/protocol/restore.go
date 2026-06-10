@@ -93,6 +93,7 @@ func PrepareRestorePodSpec(
 			InjectCheckpointVolumeMount(container, storage.BasePath)
 		}
 		EnsureControlVolume(podSpec, container)
+		EnsureVLLMCheckpointRestoreEnv(container, storage)
 		if isCheckpointReady && needsNCCLCheckpointRedis(annotations, container) {
 			needsNCCLRedis = true
 		}
@@ -361,6 +362,22 @@ func ValidateRestorePodSpec(
 		}
 		if !hasNCCLKvsEnv {
 			return fmt.Errorf("missing %s env var on container %q", NCCLCheckpointKVSPathEnv, name)
+		}
+		hasVLLMCheckpointRestoreEnv := false
+		hasVLLMFileStoreEnv := false
+		for _, env := range container.Env {
+			if env.Name == VLLMCheckpointRestoreEnabledEnv {
+				hasVLLMCheckpointRestoreEnv = true
+			}
+			if env.Name == VLLMCheckpointRestoreFileStorePathEnv {
+				hasVLLMFileStoreEnv = true
+			}
+		}
+		if !hasVLLMCheckpointRestoreEnv {
+			return fmt.Errorf("missing %s env var on container %q", VLLMCheckpointRestoreEnabledEnv, name)
+		}
+		if !hasVLLMFileStoreEnv {
+			return fmt.Errorf("missing %s env var on container %q", VLLMCheckpointRestoreFileStorePathEnv, name)
 		}
 		if container.StartupProbe == nil {
 			return fmt.Errorf("missing restore-complete startup probe on container %q", name)

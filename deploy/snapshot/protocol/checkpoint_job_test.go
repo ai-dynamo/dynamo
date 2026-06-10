@@ -28,8 +28,10 @@ func TestNewCheckpointJob(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Labels: map[string]string{"existing": "label"},
 			Annotations: map[string]string{
-				"existing":                 "annotation",
-				TargetContainersAnnotation: "main",
+				"existing":                          "annotation",
+				TargetContainersAnnotation:          "main",
+				CheckpointStorageTypeAnnotation:     StorageTypePVC,
+				CheckpointStorageBasePathAnnotation: "/checkpoints",
 			},
 		},
 		Spec: corev1.PodSpec{
@@ -81,6 +83,9 @@ func TestNewCheckpointJob(t *testing.T) {
 		t.Fatalf("expected control mount subPath=main, got %#v", main.VolumeMounts[0])
 	}
 	assertEnv(t, main.Env, NCCLCheckpointKVSPathEnv, SnapshotControlMountPath+"/"+NCCLCheckpointKVSFile)
+	assertEnv(t, main.Env, VLLMCheckpointRestoreEnabledEnv, "1")
+	assertEnv(t, main.Env, VLLMDistributedUseSplitGroupEnv, "0")
+	assertEnv(t, main.Env, VLLMCheckpointRestoreFileStorePathEnv, "/checkpoints/hash/vllm-filestore/2/main/torch_pg")
 	if main.ReadinessProbe == nil || main.ReadinessProbe.Exec == nil {
 		t.Fatalf("expected ready-file readiness probe, got %#v", main.ReadinessProbe)
 	}

@@ -45,6 +45,7 @@ func TestNewRestorePod(t *testing.T) {
 		ArtifactVersion: "2",
 		Storage: Storage{
 			Type:     StorageTypePVC,
+			Location: "/checkpoints/hash/versions/2",
 			PVCName:  "snapshot-pvc",
 			BasePath: "/checkpoints",
 		},
@@ -119,6 +120,8 @@ func TestNewRestorePod(t *testing.T) {
 	}
 	foundEnv := false
 	foundNCCLKvsEnv := false
+	foundVLLMCheckpointRestoreEnv := false
+	foundVLLMFileStoreEnv := false
 	for _, e := range main.Env {
 		if e.Name == SnapshotControlDirEnv {
 			foundEnv = true
@@ -126,12 +129,24 @@ func TestNewRestorePod(t *testing.T) {
 		if e.Name == NCCLCheckpointKVSPathEnv {
 			foundNCCLKvsEnv = true
 		}
+		if e.Name == VLLMCheckpointRestoreEnabledEnv {
+			foundVLLMCheckpointRestoreEnv = true
+		}
+		if e.Name == VLLMCheckpointRestoreFileStorePathEnv {
+			foundVLLMFileStoreEnv = true
+		}
 	}
 	if !foundEnv {
 		t.Fatalf("expected %s env, got %#v", SnapshotControlDirEnv, main.Env)
 	}
 	if !foundNCCLKvsEnv {
 		t.Fatalf("expected %s env, got %#v", NCCLCheckpointKVSPathEnv, main.Env)
+	}
+	if !foundVLLMCheckpointRestoreEnv {
+		t.Fatalf("expected %s env, got %#v", VLLMCheckpointRestoreEnabledEnv, main.Env)
+	}
+	if !foundVLLMFileStoreEnv {
+		t.Fatalf("expected %s env, got %#v", VLLMCheckpointRestoreFileStorePathEnv, main.Env)
 	}
 	redis := findRestoreContainer(t, restorePod.Spec.Containers, NCCLCheckpointRedisContainerName)
 	if redis.Image != NCCLCheckpointRedisImage {
@@ -304,6 +319,7 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 
 	storage := Storage{
 		Type:     StorageTypePVC,
+		Location: "/checkpoints/hash/versions/1",
 		PVCName:  "snapshot-pvc",
 		BasePath: "/checkpoints",
 	}
@@ -344,13 +360,27 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 		t.Fatalf("expected single %s mount after repeated calls, got %#v", SnapshotControlVolumeName, container.VolumeMounts)
 	}
 	envCount := 0
+	vllmCheckpointRestoreEnvCount := 0
+	vllmFileStoreEnvCount := 0
 	for _, e := range container.Env {
 		if e.Name == SnapshotControlDirEnv {
 			envCount++
 		}
+		if e.Name == VLLMCheckpointRestoreEnabledEnv {
+			vllmCheckpointRestoreEnvCount++
+		}
+		if e.Name == VLLMCheckpointRestoreFileStorePathEnv {
+			vllmFileStoreEnvCount++
+		}
 	}
 	if envCount != 1 {
 		t.Fatalf("expected single %s env after repeated calls, got %#v", SnapshotControlDirEnv, container.Env)
+	}
+	if vllmCheckpointRestoreEnvCount != 1 {
+		t.Fatalf("expected single %s env after repeated calls, got %#v", VLLMCheckpointRestoreEnabledEnv, container.Env)
+	}
+	if vllmFileStoreEnvCount != 1 {
+		t.Fatalf("expected single %s env after repeated calls, got %#v", VLLMCheckpointRestoreFileStorePathEnv, container.Env)
 	}
 	if len(container.Command) != 2 || container.Command[0] != "sleep" || container.Command[1] != "infinity" {
 		t.Fatalf("expected placeholder command, got %#v", container.Command)
@@ -600,6 +630,8 @@ func validRestoreSpecFixture(profile string, targets ...string) (*corev1.PodSpec
 			Env: []corev1.EnvVar{
 				{Name: SnapshotControlDirEnv, Value: SnapshotControlMountPath},
 				{Name: NCCLCheckpointKVSPathEnv, Value: SnapshotControlMountPath + "/" + NCCLCheckpointKVSFile},
+				{Name: VLLMCheckpointRestoreEnabledEnv, Value: "1"},
+				{Name: VLLMCheckpointRestoreFileStorePathEnv, Value: "/checkpoints/hash/vllm-filestore/1/main/torch_pg"},
 			},
 		}
 		ensureRestoreStartupProbe(&container)
@@ -677,6 +709,25 @@ func TestValidateRestorePodSpec(t *testing.T) {
 	badSpec.Containers[0].Env = []corev1.EnvVar{{Name: SnapshotControlDirEnv, Value: SnapshotControlMountPath}}
 	if err := ValidateRestorePodSpec(badSpec, annotations, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != fmt.Sprintf(`missing %s env var on container "main"`, NCCLCheckpointKVSPathEnv) {
 		t.Fatalf("expected missing NCCL KVS env error, got %v", err)
+	}
+
+	badSpec = podSpec.DeepCopy()
+	badSpec.Containers[0].Env = []corev1.EnvVar{
+		{Name: SnapshotControlDirEnv, Value: SnapshotControlMountPath},
+		{Name: NCCLCheckpointKVSPathEnv, Value: SnapshotControlMountPath + "/" + NCCLCheckpointKVSFile},
+	}
+	if err := ValidateRestorePodSpec(badSpec, annotations, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != fmt.Sprintf(`missing %s env var on container "main"`, VLLMCheckpointRestoreEnabledEnv) {
+		t.Fatalf("expected missing vLLM checkpoint env error, got %v", err)
+	}
+
+	badSpec = podSpec.DeepCopy()
+	badSpec.Containers[0].Env = []corev1.EnvVar{
+		{Name: SnapshotControlDirEnv, Value: SnapshotControlMountPath},
+		{Name: NCCLCheckpointKVSPathEnv, Value: SnapshotControlMountPath + "/" + NCCLCheckpointKVSFile},
+		{Name: VLLMCheckpointRestoreEnabledEnv, Value: "1"},
+	}
+	if err := ValidateRestorePodSpec(badSpec, annotations, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != fmt.Sprintf(`missing %s env var on container "main"`, VLLMCheckpointRestoreFileStorePathEnv) {
+		t.Fatalf("expected missing vLLM FileStore env error, got %v", err)
 	}
 
 	badSpec = podSpec.DeepCopy()
