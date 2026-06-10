@@ -220,7 +220,7 @@ RUN uv pip uninstall triton && \
 # dead weight, not a compliance issue.
 RUN set -eux; \
     purge=$(dpkg-query -W -f='${Package}\n' 2>/dev/null \
-        | grep -E '^(ffmpeg|libav[a-z]|libsw[a-z]|libpostproc|libx264|libx265|libmp3lame|libaom|libdav1d|libvpx|libtheora|libvorbis|libopus|libsoxr)' \
+        | grep -E '^(ffmpeg|libav[a-z]|libsw[a-z]|libpostproc|libx264|libx265|libmp3lame|libaom|libdav1d|libvpx|libtheora|libvorbis|libopus|libsoxr|libcaca|libcdio|libzvbi|libgme|libvidstab|libdc1394|libraw1394|libiec61883|libtwolame|libshine|libsrt[0-9]|libudfread|libsvtav1|libbs2b|librubberband|libchromaprint|libcodec2|libgsm|libass[0-9]|libbluray|libxvidcore|libflite)' \
         || true); \
     if [ -n "$purge" ]; then \
         DEBIAN_FRONTEND=noninteractive apt-get purge -y $purge; \

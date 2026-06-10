@@ -953,3 +953,33 @@ overrides:
   - { ecosystem: rust, name: zvariant, license: "MIT", source: "crates.io declared license — https://crates.io/crates/zvariant" }
   - { ecosystem: rust, name: zvariant_derive, license: "MIT", source: "crates.io declared license — https://crates.io/crates/zvariant_derive" }
   - { ecosystem: rust, name: zvariant_utils, license: "MIT", source: "crates.io declared license — https://crates.io/crates/zvariant_utils" }
+
+  # --- vllm-runtime base dpkg packages syft/DEP-5 left UNKNOWN (permissive X.Org/Wayland/BSD; nvidia/cuda baseline) ---
+  - { ecosystem: dpkg, name: fontconfig, license: "MIT", source: "Ubuntu 24.04 fontconfig (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libduktape207, license: "MIT", source: "Ubuntu 24.04 libduktape207 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libice6, license: "MIT", source: "Ubuntu 24.04 libice6 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libjxl0.7, license: "BSD-3-Clause", source: "Ubuntu 24.04 libjxl0.7 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libsm6, license: "MIT", source: "Ubuntu 24.04 libsm6 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libstemmer0d, license: "BSD-3-Clause", source: "Ubuntu 24.04 libstemmer0d (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libtiff6, license: "libtiff", source: "Ubuntu 24.04 libtiff6 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libwayland-client0, license: "MIT", source: "Ubuntu 24.04 libwayland-client0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libwayland-cursor0, license: "MIT", source: "Ubuntu 24.04 libwayland-cursor0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libwayland-egl1, license: "MIT", source: "Ubuntu 24.04 libwayland-egl1 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxcb-dri3-0, license: "MIT", source: "Ubuntu 24.04 libxcb-dri3-0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxcb-glx0, license: "MIT", source: "Ubuntu 24.04 libxcb-glx0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxcb-present0, license: "MIT", source: "Ubuntu 24.04 libxcb-present0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxcb-randr0, license: "MIT", source: "Ubuntu 24.04 libxcb-randr0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxcb-render0, license: "MIT", source: "Ubuntu 24.04 libxcb-render0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxcb-shape0, license: "MIT", source: "Ubuntu 24.04 libxcb-shape0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxcb-shm0, license: "MIT", source: "Ubuntu 24.04 libxcb-shm0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxcb-sync1, license: "MIT", source: "Ubuntu 24.04 libxcb-sync1 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxcb-xfixes0, license: "MIT", source: "Ubuntu 24.04 libxcb-xfixes0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxcursor1, license: "MIT", source: "Ubuntu 24.04 libxcursor1 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxfixes3, license: "MIT", source: "Ubuntu 24.04 libxfixes3 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxi6, license: "MIT", source: "Ubuntu 24.04 libxi6 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxkbcommon0, license: "MIT", source: "Ubuntu 24.04 libxkbcommon0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxrandr2, license: "MIT", source: "Ubuntu 24.04 libxrandr2 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxshmfence1, license: "MIT", source: "Ubuntu 24.04 libxshmfence1 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxv1, license: "MIT", source: "Ubuntu 24.04 libxv1 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxxf86vm1, license: "MIT", source: "Ubuntu 24.04 libxxf86vm1 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: xkb-data, license: "MIT", source: "Ubuntu 24.04 xkb-data (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }

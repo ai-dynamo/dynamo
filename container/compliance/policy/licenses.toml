@@ -45,6 +45,7 @@ allow = [
   "CC0-1.0",
   "CDLA-Permissive-2.0",
   "ISC",
+  "libtiff",            # Sam Leffler/SGI permissive (the libtiff license); used by libtiff6
   "MIT",
   "MIT-0",
   "MIT-CMU",            # variant of MIT used by Pillow + a few others
@@ -2567,5 +2568,233 @@ reason = "CRIU runs as a separate process invoked by snapshot-agent; not linked 
 [[exceptions]]
 type = "dpkg"
 name = "libgfortran5"
-allow = ["GPL-3.0-only", "GPL-3.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
 reason = "GNU toolchain - GPL with the GCC Runtime Library Exception (GCC-exception-3.1): runtime libs leave compiled output unencumbered, compilers are mere aggregation (not linked into our Apache-2.0 work); Ubuntu source available via OSRB archive. Required for torch.compile/inductor runtime JIT."
+
+[[exceptions]]
+type = "dpkg"
+name = "libasound2-data"
+allow = ["LGPL-2.1-only"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libasound2t64"
+allow = ["LGPL-2.1-only"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libasyncns0"
+allow = ["LGPL-2.1-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libcairo-gobject2"
+allow = ["LGPL-2.1-only"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libcairo2"
+allow = ["LGPL-2.1-only"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libdatrie1"
+allow = ["GPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libfftw3-double3"
+allow = ["GPL-2.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libflac12t64"
+allow = ["GPL-2.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libfribidi0"
+allow = ["LGPL-2.1-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libgdk-pixbuf-2.0-0"
+allow = ["GPL-2.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libgdk-pixbuf2.0-common"
+allow = ["GPL-2.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libgl1"
+allow = ["GPL-3.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libglvnd0"
+allow = ["GPL-3.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libglx0"
+allow = ["GPL-3.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libharfbuzz0b"
+allow = ["GPL-3.0-or-later", "LGPL-2.1-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libjbig0"
+allow = ["GPL-2.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libjpeg8"
+allow = ["LGPL-2.1-only"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "liblcms2-2"
+allow = ["GPL-2.0-or-later", "GPL-3.0-only"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libmpg123-0t64"
+allow = ["LGPL-2.1-only"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libopenal-data"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libopenal1"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libpango-1.0-0"
+allow = ["LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libpangocairo-1.0-0"
+allow = ["LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libpangoft2-1.0-0"
+allow = ["LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "librsvg2-2"
+allow = ["LGPL-2.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libsamplerate0"
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libsensors-config"
+allow = ["LGPL-2.1-only"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libsensors5"
+allow = ["LGPL-2.1-only"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libslang2"
+allow = ["GPL-2.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libssh-gcrypt-4"
+allow = ["LGPL-2.1-only"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libthai-data"
+allow = ["GPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libthai0"
+allow = ["GPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libusb-1.0-0"
+allow = ["LGPL-2.1-only"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libva-drm2"
+allow = ["GPL-2.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libva-x11-2"
+allow = ["GPL-2.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "libva2"
+allow = ["GPL-2.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "shared-mime-info"
+allow = ["GPL-2.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
+
+[[exceptions]]
+type = "dpkg"
+name = "sudo"
+allow = ["GPL-2.0-or-later"]
+reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
