@@ -37,10 +37,7 @@ fn warn_legacy_readiness_once(model: &str, namespace: &str) {
         tracing::warn!(
             model = model,
             namespace = namespace,
-            "Serving-readiness is using the legacy compat path: a worker registered \
-             without a `worker_type` (legacy binary). Role-completeness gating is \
-             disabled for such namespaces until all workers are upgraded to register \
-             a worker_type. This compatibility shim will be removed in a future release."
+            "Serving-readiness in compatibility mode, please upgrade the workers to latest version. This compatibility shim will be removed in a future release."
         );
     });
 }
@@ -192,12 +189,6 @@ impl Model {
     // at least one alternative is fully covered by the worker types
     // currently present (workers with worker_count > 0).
     //
-    // New workers register an explicit `worker_type` and `needs`
-    // (`register_model` rejects a missing `worker_type`). A card with no
-    // `worker_type` therefore comes from an old (pre-`worker_type`) worker;
-    // a namespace containing such a legacy card falls back to the
-    // cross-version compat path in `is_workers_ready` (ready if any worker is
-    // live) rather than being strictly readiness-gated. See that method.
 
     /// Distinct namespaces represented by this model's WorkerSets, sorted.
     /// Each namespace identifies one deployment of the model.
@@ -252,10 +243,7 @@ impl Model {
     }
 
     /// Core readiness check over an explicit set of WorkerSets that all share
-    /// one namespace. Returns false when `wsets` is empty. Reads only the
-    /// passed-in slice (no `self.worker_sets` access), so the selection path can
-    /// evaluate it against a snapshot without re-entering the DashMap. See
-    /// [`Self::is_workers_ready`] for the readiness contract.
+    /// one namespace. Returns false when `wsets` is empty.
     fn namespace_ready(&self, wsets: &[Arc<WorkerSet>]) -> bool {
         if wsets.is_empty() {
             return false;
@@ -488,10 +476,6 @@ impl Model {
     /// The `extract` closure should return `Some(value)` if the WorkerSet has the
     /// desired engine, or `None` if it doesn't.
     ///
-    /// Selection is confined to namespaces with a complete worker set
-    /// (`is_workers_ready`), so a decode-only namespace with no prefill peer is
-    /// never routed to. Legacy (pre-`worker_type`) cards count as ready when
-    /// live, preserving cross-version behavior.
     fn select_worker_set_with<T, F>(&self, extract: F) -> Option<T>
     where
         F: Fn(&WorkerSet) -> Option<T>,
