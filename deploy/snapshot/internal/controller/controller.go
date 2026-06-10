@@ -913,6 +913,11 @@ func restoreNCCLCheckpointKVSEndpoint(host string, pod *corev1.Pod, checkpointID
 }
 
 func restoreNCCLCheckpointKVSGroup(pod *corev1.Pod, checkpointID string, containerName string) string {
+	if pod != nil {
+		if group := strings.TrimSpace(pod.Annotations[snapshotprotocol.NCCLCheckpointKVSGroupAnnotation]); group != "" {
+			return group
+		}
+	}
 	parts := []string{checkpointID, containerName}
 	if pod != nil {
 		for _, key := range []string{

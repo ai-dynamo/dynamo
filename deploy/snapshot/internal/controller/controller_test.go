@@ -306,6 +306,23 @@ func TestRestoreNCCLCheckpointKVSEndpoint(t *testing.T) {
 	if got != want {
 		t.Fatalf("restoreNCCLCheckpointKVSEndpoint() = %q, want %q", got, want)
 	}
+
+	pod.Annotations = map[string]string{
+		snapshotprotocol.NCCLCheckpointKVSGroupAnnotation: "tp16-shared-group",
+	}
+	got = restoreNCCLCheckpointKVSEndpoint(
+		"leader-pod.default.svc",
+		pod,
+		"checkpoint-1",
+		"main",
+	)
+	want = fmt.Sprintf(
+		"leader-pod.default.svc:%d/tp16-shared-group",
+		snapshotprotocol.NCCLCheckpointRedisPort,
+	)
+	if got != want {
+		t.Fatalf("restoreNCCLCheckpointKVSEndpoint() with override = %q, want %q", got, want)
+	}
 }
 
 func TestRestoreCheckpointReady(t *testing.T) {

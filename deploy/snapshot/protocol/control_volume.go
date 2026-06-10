@@ -38,6 +38,12 @@ const (
 	// the Redis endpoint and prefix to use for this restore attempt.
 	NCCLCheckpointKVSFile = "nccl-kvs.txt"
 
+	// NCCLCheckpointKVSGroupAnnotation optionally overrides the Redis key
+	// prefix used by NCCL checkpoint restore. This is useful for multi-pod
+	// restores where each pod has a distinct checkpoint artifact ID, but all
+	// ranks in the distributed communicator must rendezvous in one KVS group.
+	NCCLCheckpointKVSGroupAnnotation = "nvidia.com/snapshot-nccl-kvs-group"
+
 	// NCCLCheckpointRedisContainerName is the implicit restore-only Redis
 	// sidecar used by NCCL checkpoint_restore to exchange fresh unique IDs.
 	NCCLCheckpointRedisContainerName = "nccl-checkpoint-redis"
