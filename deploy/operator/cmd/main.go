@@ -54,7 +54,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsfilters "sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -380,13 +379,12 @@ func main() {
 		runtimeConfig.ExcludedNamespaces = leaseWatcher
 	}
 
-	// Register resource counter background runnable (after ExcludedNamespaces is set).
-	// The manager starts non-leader-election runnables after the cache has synced.
+	// Register after ExcludedNamespaces is set so cluster-wide metrics skip restricted namespaces.
 	setupLog.Info("Registering resource counter")
-	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-		observability.StartResourceCounter(ctx, mgr.GetClient(), runtimeConfig.ExcludedNamespaces)
-		return nil
-	})); err != nil {
+	if err := mgr.Add(observability.NewResourceCounter(
+		mgr.GetClient(),
+		runtimeConfig.ExcludedNamespaces,
+	)); err != nil {
 		setupLog.Error(err, "unable to register resource counter")
 		os.Exit(1)
 	}
