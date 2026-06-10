@@ -230,6 +230,11 @@ discovery and the NATS event plane. Some backends, such as vLLM and SGLang,
 emit raw KV events over ZMQ; the Dynamo worker consumes those backend events
 and republishes router events through the Dynamo event plane.
 
+For more detail on router modes, environment variables, and backend KV-event
+flags, see [Router Guide](../components/router/router-guide.md), [Router
+Configuration](../components/router/router-configuration.md), and [Router
+Operations](../components/router/router-operations.md).
+
 ### EPP and Gateway Routing
 
 EPP/Gateway routing is a different topology from the standalone frontend that
@@ -249,6 +254,10 @@ DGDR does not currently generate EPP components or frontend sidecars. Also,
 `overrides.dgd` only patches services that already exist in the generated DGD,
 so it cannot be used to add a missing `Epp` service to a DGDR-generated
 deployment. Use a direct DGD manifest or a GAIE recipe for EPP deployments.
+The [Gateway API Inference Extension](inference-gateway.md) guide covers the
+standard EPP path and the optional [Rust EPP
+implementation](../../deploy/inference-gateway/ext-proc/), which is currently
+documented as experimental.
 
 A current v1beta1 DGD EPP deployment has this shape:
 
