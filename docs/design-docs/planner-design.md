@@ -44,6 +44,27 @@ those enabled intervals, so existing load and throughput fire times are preserve
 
 ![Planner plugin pipeline showing shared builtin state and OBSERVE, PREDICT, PROPOSE, RECONCILE, CONSTRAIN, and EXEC stages](../assets/img/planner-plugin-pipeline.png)
 
+### Why Two Scaling Loops?
+
+The two builtin scaling loops serve different control horizons.
+Throughput-based scaling is the slower predictive capacity loop: it uses a
+longer traffic window, load prediction, and profiling or perf-model capacity
+estimates to provision for sustained demand. This avoids reacting to short-lived
+metric noise and gives scale-out enough time to complete before the predicted
+load arrives.
+
+Load-based scaling is the faster reactive SLA-correction loop. It uses current
+FPM, queue, worker-count, and online perf-model observations to handle short-term
+overload, prediction or profiling error, runtime metadata changes such as KV hit
+rate or speculative accept length, and the actual state observed after previous
+scaling actions.
+
+When both loops are enabled, throughput-based scaling sets the replica lower
+bound, and load-based scaling runs more frequently above that floor. This keeps
+capacity that was predicted for near-future demand from being removed because of
+short idle periods, while still allowing the planner to react faster than the
+throughput interval when real-time SLA pressure appears.
+
 ### Builtin Shared State
 
 The pipeline context is a per-tick data plane: observations, predictions, and
