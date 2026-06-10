@@ -11420,6 +11420,7 @@ spec:
                           field to 0 when replicas is 0 and to 1 otherwise.
                           For non-Grove deployments, setting this field will result in a validation error.
                         format: int32
+                        minimum: 0
                         type: integer
                       modelRef:
                         description: |-
@@ -11763,8 +11764,6 @@ spec:
                         type: array
                     type: object
                     x-kubernetes-validations:
-                      - message: minAvailable must be non-negative
-                        rule: '!has(self.minAvailable) || self.minAvailable >= 0'
                       - message: minAvailable must be less than or equal to replicas
                         rule: '!has(self.minAvailable) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                       - message: minAvailable may be 0 only when replicas is 0
@@ -12561,6 +12560,7 @@ spec:
                           field to 0 when replicas is 0 and to 1 otherwise.
                           For non-Grove deployments, setting this field will result in a validation error.
                         format: int32
+                        minimum: 0
                         type: integer
                       modelRef:
                         description: |-
@@ -20739,8 +20739,6 @@ spec:
                     x-kubernetes-validations:
                       - message: eppConfig may only be set when type is epp
                         rule: '!has(self.eppConfig) || (has(self.type) && self.type == ''epp'')'
-                      - message: minAvailable must be non-negative
-                        rule: '!has(self.minAvailable) || self.minAvailable >= 0'
                       - message: minAvailable must be less than or equal to replicas
                         rule: '!has(self.minAvailable) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                       - message: minAvailable may be 0 only when replicas is 0

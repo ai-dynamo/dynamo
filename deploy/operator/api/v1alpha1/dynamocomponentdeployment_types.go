@@ -48,7 +48,6 @@ type DynamoComponentDeploymentSpec struct {
 	DynamoComponentDeploymentSharedSpec `json:",inline"`
 }
 
-// +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || self.minAvailable >= 0",message="minAvailable must be non-negative"
 // +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas"
 // +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || self.minAvailable != 0 || (has(self.replicas) && self.replicas == 0)",message="minAvailable may be 0 only when replicas is 0"
 type DynamoComponentDeploymentSharedSpec struct {
@@ -131,6 +130,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// For Grove-backed DynamoGraphDeployment services, admission defaults this
 	// field to 0 when replicas is 0 and to 1 otherwise.
 	// For non-Grove deployments, setting this field will result in a validation error.
+	// +kubebuilder:validation:Minimum=0
 	// +optional
 	MinAvailable *int32 `json:"minAvailable,omitempty"`
 
