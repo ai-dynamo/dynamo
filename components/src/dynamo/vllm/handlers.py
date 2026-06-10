@@ -669,8 +669,7 @@ def _serialize_routed_experts(
         return None
 
     return {
-        # base64 (not base85): the prime-rl RL consumer decodes with
-        # pybase64.b64decode, matching the SGLang / SLIME / vLLM-native encoding.
+        # base64, matching vLLM-native encoding.
         "data": base64.b64encode(tobytes()).decode("ascii"),
         "shape": [int(dim) for dim in shape],
         # Row offset of the first returned routing entry within the full

@@ -348,7 +348,6 @@ class TestReasoningParserForwarding:
         assert routed["dtype"] == "int32"
         # start defaults to 0 when routed_experts_prompt_start is unset.
         assert routed["start"] == 0
-        # base64 (not base85): the prime-rl RL consumer decodes with b64.
         decoded = np.frombuffer(
             base64.b64decode(routed["data"]), dtype=np.dtype(routed["dtype"])
         )
