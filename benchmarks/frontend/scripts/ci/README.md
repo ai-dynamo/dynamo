@@ -41,6 +41,19 @@ coarse regression thresholds:
 - ITL p50 rises more than 20%;
 - ITL p99 rises more than 35%.
 
+## Baseline Storage
+
+The guard does not have a hard-coded baseline location. `--export-baseline`
+writes a JSON file to the path passed on the command line, and `--baseline`
+reads that same format back from the path passed to the guard.
+
+The PR workflow currently leaves `frontend_perf_guard_baseline` empty, so the
+guard runs in sanity-only mode and uploads the candidate results as the
+`frontend-perf-pr-guard-${run_id}-${run_attempt}` artifact. When baseline gating
+is enabled, store a runner-specific baseline JSON at a path available inside the
+test image or checked-out workspace and pass that path through
+`frontend_perf_guard_baseline`.
+
 ## Create A Baseline Candidate
 
 Run on the same runner class that will execute the PR guard:

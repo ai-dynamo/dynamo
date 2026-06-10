@@ -12,16 +12,19 @@ FROM ${BASE_IMAGE} AS test_image
 # Install test dependencies on top of runtime image
 USER root
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+    --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
     --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     if [ -n "$VIRTUAL_ENV" ]; then \
         uv pip install \
-            --requirement /tmp/requirements.test.txt; \
+            --requirement /tmp/requirements.test.txt \
+            --requirement /tmp/requirements.benchmark.txt; \
     else \
         pip install --break-system-packages \
-            --requirement /tmp/requirements.test.txt; \
+            --requirement /tmp/requirements.test.txt \
+            --requirement /tmp/requirements.benchmark.txt; \
     fi
 
 USER dynamo
