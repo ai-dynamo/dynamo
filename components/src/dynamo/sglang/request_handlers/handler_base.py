@@ -812,6 +812,37 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
                 logging.error(f"Failed to resume memory occupation: {e}")
                 return {"status": "error", "message": str(e)}
 
+    async def clear_kv_blocks(self, request: Optional[Dict[str, Any]] = None):
+        """Flush SGLang's local cache and configured HiCache storage backend."""
+        try:
+            async with self._pause_lock:
+                tokenizer_manager = self.engine.tokenizer_manager
+                result = await tokenizer_manager.flush_cache()
+
+                if not result.success:
+                    yield {
+                        "status": "error",
+                        "message": getattr(result, "message", None)
+                        or "KV cache clear failed",
+                    }
+                    return
+
+                backend = tokenizer_manager.server_args.hicache_storage_backend
+                if backend and backend != "none":
+                    result = await tokenizer_manager.clear_hicache_storage()
+                    if not result.success:
+                        yield {
+                            "status": "error",
+                            "message": getattr(result, "message", None)
+                            or "External KV cache clear failed",
+                        }
+                        return
+
+                yield {"status": "success", "message": "KV cache cleared"}
+        except Exception as e:
+            logging.error("Failed to clear KV cache: %s", e)
+            yield {"status": "error", "message": str(e)}
+
     async def start_profile(self, body: dict) -> dict:
         """Start profiling on the engine.
 

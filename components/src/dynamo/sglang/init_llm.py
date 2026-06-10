@@ -57,6 +57,9 @@ async def init_decode(
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
+    clear_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.clear_kv_blocks"
+    )
 
     # Use pre-created engine if provided (snapshot mode)
     if snapshot_engine is not None:
@@ -167,6 +170,10 @@ async def init_decode(
                 handler.list_loras,
                 metrics_labels=metrics_labels,
             ),
+            clear_endpoint.serve_endpoint(
+                handler.clear_kv_blocks,
+                metrics_labels=metrics_labels,
+            ),
             register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
@@ -214,6 +221,9 @@ async def init_prefill(
 
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
+    )
+    clear_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.clear_kv_blocks"
     )
 
     # Use pre-created engine if provided (snapshot mode)
@@ -299,6 +309,10 @@ async def init_prefill(
             ),
             list_loras_endpoint.serve_endpoint(
                 handler.list_loras,
+                metrics_labels=metrics_labels,
+            ),
+            clear_endpoint.serve_endpoint(
+                handler.clear_kv_blocks,
                 metrics_labels=metrics_labels,
             ),
             register_model_with_readiness_gate(
