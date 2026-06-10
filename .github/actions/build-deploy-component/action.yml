@@ -74,6 +74,10 @@ runs:
         else
           echo "build_platforms=linux/amd64" >> $GITHUB_OUTPUT
         fi
+        # Compliance /legal + /sboms are platform-invariant for these Go-only
+        # builds, so the extract steps run on a single platform. Both go@ and
+        # cuda-dl-base@ baselines have an -amd64 variant (snapshot is amd64-only).
+        echo "lint_platform=linux/amd64" >> $GITHUB_OUTPUT
 
     - name: Initialize Dynamo Builder
       uses: ./.github/actions/init-dynamo-builder
@@ -181,9 +185,9 @@ runs:
         # image does. Keep these two if-blocks in sync.
         BASELINE_SBOM_FILE=""
         if [[ "${{ inputs.component }}" == "operator" ]]; then
-          BASELINE_SBOM_FILE="go@e86c88d0.cdx.json"
+          BASELINE_SBOM_FILE="go@e86c88d0"
         elif [[ "${{ inputs.component }}" == "snapshot" ]]; then
-          BASELINE_SBOM_FILE="cuda-dl-base@8315e245.cdx.json"
+          BASELINE_SBOM_FILE="cuda-dl-base@8315e245"
         fi
         # Extraction runs on a single platform (lint platform) — both /legal
         # and /sboms are platform-invariant for a Go-only build.
@@ -221,9 +225,9 @@ runs:
         mkdir -p /tmp/sources
         BASELINE_SBOM_FILE=""
         if [[ "${{ inputs.component }}" == "operator" ]]; then
-          BASELINE_SBOM_FILE="go@e86c88d0.cdx.json"
+          BASELINE_SBOM_FILE="go@e86c88d0"
         elif [[ "${{ inputs.component }}" == "snapshot" ]]; then
-          BASELINE_SBOM_FILE="cuda-dl-base@8315e245.cdx.json"
+          BASELINE_SBOM_FILE="cuda-dl-base@8315e245"
         fi
         docker buildx build \
             --platform ${{ steps.settings.outputs.lint_platform }} \
