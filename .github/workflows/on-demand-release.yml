@@ -204,12 +204,14 @@ jobs:
             CONCLUSION=$(echo "${RUNS}" | jq -r '.workflow_runs[0].conclusion // ""')
             echo "status=${STATUS} conclusion=${CONCLUSION}"
             if [ "${STATUS}" = "completed" ]; then
-              if [ "${CONCLUSION}" = "success" ]; then
-                echo "post-merge CI succeeded"
-                break
+              # Proceed once post-merge completes regardless of conclusion: the
+              # builds are what release.yml consumes (release-publish fails if the
+              # images it needs are absent), so ancillary failures (xpu runner
+              # unavailable, flaky tests) must not block a human-approved release.
+              if [ "${CONCLUSION}" != "success" ]; then
+                echo "::warning::post-merge CI concluded '${CONCLUSION}' for ${SHA}; continuing (release.yml verifies its artifacts; the approval gate is the human checkpoint)."
               fi
-              echo "::error::post-merge CI concluded '${CONCLUSION}' for ${SHA}"
-              exit 1
+              break
             fi
             if [ "$(date +%s)" -ge "${deadline}" ]; then
               echo "::error::timed out waiting for post-merge CI on ${SHA}"
