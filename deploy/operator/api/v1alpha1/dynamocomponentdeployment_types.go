@@ -122,14 +122,12 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	Replicas *int32 `json:"replicas,omitempty"`
 
-	// MinAvailable is this component's contribution to a coherent minimal
-	// viable update/serving unit. For Grove-backed DynamoGraphDeployments it
-	// maps to generated Grove PodClique or PodCliqueScalingGroup
-	// spec.minAvailable and therefore affects gang scheduling, readiness, and
-	// gang termination behavior in addition to coherent rollout shape.
-	// Deployment-backed DGD support is not implemented yet; admission rejects
-	// this field outside the Grove pathway.
-	// +optional
+	// MinAvailable maps to Grove PodClique minAvailable for single-node and
+	// Grove PodCliqueScalingGroup minAvailable for multi-node components.
+	// This field determines 1) the minimum number of replicas that are guaranteed to be gang-scheduled,
+	// and 2) if minAvailable replicas is violated, will result in gang termination.
+	// For non-Grove deployments, setting this field will result in a validation error.
+	// + optional
 	MinAvailable *int32 `json:"minAvailable,omitempty"`
 
 	// Multinode is the configuration for multinode components.
