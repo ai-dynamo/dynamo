@@ -546,6 +546,22 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     echo "rust license harvest: $(find /opt/dynamo/rust-licenses -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l) crates with license files"; \
     true
 
+# Compliance: bundle the human-readable third-party Rust NOTICES into the
+# maturin wheels themselves (PEP 639 <dist-info>/licenses/), using the harvested
+# crate license texts. The wheel already carries maturin's CycloneDX SBOM (the
+# machine-readable inventory); this adds the texts the redistributed wheel's
+# MIT/BSD/Apache attribution clauses require. Best-effort + non-fatal: a failure
+# leaves the wheel with its SBOM intact rather than breaking the build.
+COPY container/compliance /opt/compliance
+RUN set -u; injected=0; \
+    for whl in /opt/dynamo/dist/ai_dynamo_runtime*.whl; do \
+        [ -e "$whl" ] || continue; \
+        PYTHONPATH=/opt python3 -m compliance.bundle_wheel_notices \
+            --wheel "$whl" --licenses-dir /opt/dynamo/rust-licenses -v \
+            && injected=$((injected+1)) || echo "::warning::wheel NOTICES bundling failed for $whl (SBOM retained)"; \
+    done; \
+    echo "wheel NOTICES bundled into $injected wheel(s)"
+
 # Compliance source archival: vendor the workspace lockfile for the OSRB
 # bundle. Gated on ENABLE_SOURCE_ARCHIVAL so PR builds skip the ~200-400 MB
 # vendor pull. The vendor tree is consumed downstream by each runtime
@@ -732,6 +748,30 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 
 # Consolidate all wheels from the runtime wheel builder stage
 COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
+
+# Compliance: bundle third-party Rust NOTICES into the kvbm wheel built in this
+# stage (the ai-dynamo-runtime wheel was already bundled in runtime_wheel_builder
+# and arrives consolidated above). Harvest kvbm's crate licenses from the cargo
+# registry, then inject into its auditwheel-repaired wheel. Best-effort/non-fatal.
+COPY container/compliance /opt/compliance
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+    set -u; \
+    for src in "${CARGO_HOME}/registry/src" /root/.cargo/registry/src; do \
+        [ -d "$src" ] || continue; \
+        find "$src" -mindepth 2 -maxdepth 2 -type d | while IFS= read -r crate; do \
+            dest="/opt/dynamo/rust-licenses/$(basename "$crate")"; \
+            for lf in "$crate"/LICENSE* "$crate"/LICENCE* "$crate"/COPYING* "$crate"/NOTICE* "$crate"/UNLICENSE*; do \
+                [ -e "$lf" ] || continue; mkdir -p "$dest" && cp "$lf" "$dest/" 2>/dev/null || true; \
+            done; \
+        done; \
+    done; \
+    for whl in /opt/dynamo/dist/kvbm*.whl; do \
+        [ -e "$whl" ] || continue; \
+        PYTHONPATH=/opt python3 -m compliance.bundle_wheel_notices \
+            --wheel "$whl" --licenses-dir /opt/dynamo/rust-licenses -v \
+            || echo "::warning::kvbm wheel NOTICES bundling failed (SBOM retained)"; \
+    done; \
+    echo "kvbm wheel NOTICES step done"
 
 {% else %}
 # SGLang CUDA uses NIXL from the upstream lmsysorg/sglang runtime image and

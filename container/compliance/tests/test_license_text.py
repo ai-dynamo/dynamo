@@ -127,3 +127,78 @@ def test_go_prefers_harvested_via_escaped_path(tmp_path):
 def test_read_harvested_license_none_when_absent(tmp_path):
     assert read_harvested_license(None, "x-1.0") is None
     assert read_harvested_license(tmp_path, "missing-9.9") is None
+
+
+def _make_wheel(path, dist_info, extra_members):
+    import json
+    import zipfile
+
+    members = {
+        f"{dist_info[:-10]}/__init__.py": b"",
+        f"{dist_info}/METADATA": b"Metadata-Version: 2.1\nName: x\nVersion: 1.0\n",
+        **extra_members,
+    }
+    record = "".join(f"{n},,{len(d)}\n" for n, d in members.items())
+    record += f"{dist_info}/RECORD,,\n"
+    with zipfile.ZipFile(path, "w") as z:
+        for n, d in members.items():
+            z.writestr(n, d)
+        z.writestr(f"{dist_info}/RECORD", record)
+    return json  # unused; keeps import local
+
+
+def test_bundle_wheel_notices_injects_and_keeps_record_valid(tmp_path):
+    import base64
+    import hashlib
+    import json
+    import zipfile
+
+    from compliance import bundle_wheel_notices
+
+    di = "foo-1.0.dist-info"
+    sbom = {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.5",
+        "components": [
+            {
+                "type": "library",
+                "name": "serde",
+                "version": "1.0.0",
+                "purl": "pkg:cargo/serde@1.0.0",
+                "licenses": [{"expression": "MIT OR Apache-2.0"}],
+            }
+        ],
+    }
+    whl = tmp_path / "foo-1.0-py3-none-any.whl"
+    _make_wheel(
+        whl, di, {f"{di}/sboms/foo.cyclonedx.json": json.dumps(sbom).encode()}
+    )
+
+    assert bundle_wheel_notices.process(whl, None) == 0
+
+    arc = f"{di}/licenses/THIRD-PARTY-RUST-LICENSES.txt"
+    with zipfile.ZipFile(whl) as z:
+        assert arc in z.namelist()
+        data = z.read(arc)
+        assert b"serde" in data and b"MIT" in data
+        want = "sha256=" + base64.urlsafe_b64encode(
+            hashlib.sha256(data).digest()
+        ).decode().rstrip("=")
+        record = z.read(f"{di}/RECORD").decode()
+        assert any(
+            ln.startswith(arc) and want in ln and str(len(data)) in ln
+            for ln in record.splitlines()
+        )
+
+
+def test_bundle_wheel_notices_noop_without_sbom(tmp_path):
+    import zipfile
+
+    from compliance import bundle_wheel_notices
+
+    di = "bar-1.0.dist-info"
+    whl = tmp_path / "bar-1.0-py3-none-any.whl"
+    _make_wheel(whl, di, {})
+    assert bundle_wheel_notices.process(whl, None) == 0
+    with zipfile.ZipFile(whl) as z:
+        assert not any("THIRD-PARTY" in n for n in z.namelist())
