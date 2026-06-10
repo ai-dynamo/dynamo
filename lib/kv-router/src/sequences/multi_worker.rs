@@ -928,6 +928,7 @@ mod tests {
         ActiveSequenceEvent, ActiveSequenceEventData, BlockHashOptions, PrefillLoadHint,
         compute_block_hash_for_seq, compute_seq_hash_for_block,
     };
+    use crate::sequences::single::EXPIRY_DURATION;
     use crate::test_utils::NoopSequencePublisher;
 
     fn make_sequences() -> ActiveSequencesMultiWorker<NoopSequencePublisher> {
@@ -1309,7 +1310,7 @@ mod tests {
             )
             .unwrap();
 
-        tokio::time::advance(Duration::from_secs(331)).await;
+        tokio::time::advance(EXPIRY_DURATION + Duration::from_secs(31)).await;
         sequences.force_expire_requests_across_all_workers();
 
         assert!(sequences.request_index.is_empty());
@@ -1337,7 +1338,7 @@ mod tests {
             )
             .unwrap();
 
-        tokio::time::advance(Duration::from_secs(331)).await;
+        tokio::time::advance(EXPIRY_DURATION + Duration::from_secs(31)).await;
 
         sequences
             .add_request(
