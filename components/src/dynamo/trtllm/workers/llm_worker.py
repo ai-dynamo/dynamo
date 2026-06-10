@@ -65,6 +65,12 @@ from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
 )
+from dynamo.trtllm.self_benchmark import (
+    TRTLLM_SELF_BENCHMARK_RUNTIME_KEY,
+    prepare_self_benchmark,
+    trtllm_self_benchmark_cli_args,
+    wait_for_self_benchmark_output,
+)
 from dynamo.trtllm.utils.trtllm_utils import deep_update, get_spec_decode_runtime_data
 
 # Default buffer size for kv cache events.
@@ -300,6 +306,13 @@ async def init_llm_worker(
 
     _sync_config_from_engine_args(config, arg_map)
 
+    benchmark_config = prepare_self_benchmark(config, arg_map)
+    if benchmark_config is not None:
+        logging.info(
+            "TRT-LLM self-benchmark enabled with native args: %s",
+            trtllm_self_benchmark_cli_args(benchmark_config),
+        )
+
     event_buffer_max_size = 0
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
@@ -510,9 +523,21 @@ async def init_llm_worker(
         endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
         )
+        benchmark_results = None
+        perf_endpoint = None
+        if benchmark_config is not None:
+            benchmark_results = await wait_for_self_benchmark_output(
+                benchmark_config,
+                worker_id=str(endpoint.connection_id()),
+            )
+            perf_endpoint = runtime.endpoint(
+                f"{config.namespace}.{config.component}.get_perf_metrics"
+            )
 
         if shutdown_endpoints is not None:
             shutdown_endpoints[:] = [endpoint]
+            if perf_endpoint is not None:
+                shutdown_endpoints.append(perf_endpoint)
 
         # should ideally call get_engine_runtime_config
         # this is because we don't have a good way to
@@ -570,6 +595,13 @@ async def init_llm_worker(
                 "Published TRT-LLM spec decode runtime metadata: %s",
                 spec_decode_runtime_data,
             )
+
+        if benchmark_results is not None:
+            runtime_config.set_engine_specific(
+                TRTLLM_SELF_BENCHMARK_RUNTIME_KEY,
+                json.dumps(benchmark_results),
+            )
+            logging.info("Published TRT-LLM self-benchmark runtime metadata")
 
         logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
         logging.info(
@@ -778,6 +810,7 @@ async def init_llm_worker(
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
+                handler._benchmark_results = benchmark_results
                 if config.load_format == "gms":
                     _register_memory_routes(runtime, handler)
 
@@ -789,19 +822,37 @@ async def init_llm_worker(
                         model_name=model_name_for_metrics,
                         component_name=config.component,
                     )
-                await endpoint.serve_endpoint(
-                    handler.generate,
-                    metrics_labels=metrics_labels,
-                    health_check_payload=health_check_payload,
-                )
+                serve_tasks = [
+                    endpoint.serve_endpoint(
+                        handler.generate,
+                        metrics_labels=metrics_labels,
+                        health_check_payload=health_check_payload,
+                    )
+                ]
+                if perf_endpoint is not None:
+                    serve_tasks.append(
+                        perf_endpoint.serve_endpoint(
+                            handler.get_perf_metrics,
+                            metrics_labels=metrics_labels,
+                        )
+                    )
+                await asyncio.gather(*serve_tasks)
 
             # Shutdown consolidator publisher if it was created
             if consolidator_publisher:
                 consolidator_publisher.shutdown()
         else:
             handler = RequestHandlerFactory().get_request_handler(handler_config)
+            handler._benchmark_results = benchmark_results
             if config.load_format == "gms":
                 _register_memory_routes(runtime, handler)
-            await endpoint.serve_endpoint(
-                handler.generate, health_check_payload=health_check_payload
-            )
+            serve_tasks = [
+                endpoint.serve_endpoint(
+                    handler.generate, health_check_payload=health_check_payload
+                )
+            ]
+            if perf_endpoint is not None:
+                serve_tasks.append(
+                    perf_endpoint.serve_endpoint(handler.get_perf_metrics)
+                )
+            await asyncio.gather(*serve_tasks)

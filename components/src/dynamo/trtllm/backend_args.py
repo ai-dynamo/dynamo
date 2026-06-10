@@ -17,6 +17,7 @@ from dynamo.common.configuration.utils import add_argument, add_negatable_bool_a
 
 from . import __version__
 from .constants import DisaggregationMode, Modality
+from .self_benchmark import benchmark_options_without_mode
 
 DEFAULT_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
@@ -231,6 +232,81 @@ class DynamoTrtllmArgGroup(ArgGroup):
             choices=["xgrammar", "llguidance"],
             help="Backend to use for guided decoding (structured output). "
             "Options: xgrammar, llguidance.",
+        )
+
+        # Benchmark / self-profiling. These flags intentionally match the
+        # Dynamo vLLM benchmark path; they are translated to TRT-LLM's native
+        # self_benchmark_* CLI/LLM args at launch.
+        add_argument(
+            g,
+            flag_name="--benchmark-mode",
+            env_var="DYN_BENCHMARK_MODE",
+            default=None,
+            obsolete_flag="--self_benchmark_mode",
+            choices=["prefill", "decode", "agg"],
+            help=(
+                "Run TRT-LLM startup self-benchmark before registering this "
+                "worker for routing."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-prefill-granularity",
+            env_var="DYN_BENCHMARK_PREFILL_GRANULARITY",
+            default=None,
+            arg_type=int,
+            dest="benchmark_prefill_isl_granularity",
+            obsolete_flag="--self_benchmark_prefill_granularity",
+            help="Number of ISL sample points for TRT-LLM prefill sweep.",
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-decode-length-granularity",
+            env_var="DYN_BENCHMARK_DECODE_LENGTH_GRANULARITY",
+            default=None,
+            arg_type=int,
+            dest="benchmark_decode_context_granularity",
+            obsolete_flag="--self_benchmark_decode_length_granularity",
+            help="Number of context length sample points for TRT-LLM decode sweep.",
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-decode-batch-granularity",
+            env_var="DYN_BENCHMARK_DECODE_BATCH_GRANULARITY",
+            default=None,
+            arg_type=int,
+            obsolete_flag="--self_benchmark_decode_batch_granularity",
+            help="Number of batch size sample points per decode context length.",
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-warmup-iterations",
+            env_var="DYN_BENCHMARK_WARMUP_ITERATIONS",
+            default=None,
+            arg_type=int,
+            obsolete_flag="--self_benchmark_warmup_iterations",
+            help="Warmup iterations before TRT-LLM self-benchmark.",
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-output-path",
+            env_var="DYN_BENCHMARK_OUTPUT_PATH",
+            default=None,
+            obsolete_flag="--self_benchmark_output_path",
+            help=(
+                "Path for TRT-LLM rank-0 self-benchmark JSON. If omitted, "
+                "Dynamo generates a unique /tmp path."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-timeout",
+            env_var="DYN_BENCHMARK_TIMEOUT",
+            default=None,
+            arg_type=int,
+            dest="benchmark_timeout_s",
+            obsolete_flag="--self_benchmark_timeout",
+            help="Maximum seconds to wait for TRT-LLM self-benchmark output.",
         )
 
         # --- Diffusion Options ---
@@ -452,6 +528,13 @@ class DynamoTrtllmConfig(ConfigBase):
     load_format: str
     model_loader_extra_config: str
     guided_decoding_backend: Optional[str] = None
+    benchmark_mode: Optional[str] = None
+    benchmark_prefill_isl_granularity: Optional[int] = None
+    benchmark_decode_context_granularity: Optional[int] = None
+    benchmark_decode_batch_granularity: Optional[int] = None
+    benchmark_warmup_iterations: Optional[int] = None
+    benchmark_output_path: Optional[str] = None
+    benchmark_timeout_s: Optional[int] = None
 
     disaggregation_mode: DisaggregationMode
     modality: Modality
@@ -488,5 +571,21 @@ class DynamoTrtllmConfig(ConfigBase):
             self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
         if isinstance(self.modality, str):
             self.modality = Modality(self.modality)
+        missing_mode_options = benchmark_options_without_mode(self)
+        if missing_mode_options:
+            raise ValueError(
+                "Self-benchmark options require --benchmark-mode: "
+                + ", ".join(missing_mode_options)
+            )
+        if self.benchmark_mode is not None:
+            if self.disaggregation_mode == DisaggregationMode.ENCODE:
+                raise ValueError(
+                    "TRT-LLM self-benchmark is not supported for encode workers"
+                )
+            if self.enable_attention_dp:
+                raise ValueError(
+                    "TRT-LLM self-benchmark is not supported with "
+                    "--enable-attention-dp"
+                )
         if not self.served_model_name:
             self.served_model_name = None
