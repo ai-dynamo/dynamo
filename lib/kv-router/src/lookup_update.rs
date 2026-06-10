@@ -11,27 +11,28 @@ use rustc_hash::FxHashMap;
 ///
 /// Duplicate store/repair paths often revisit keys that already resolve to the
 /// same node. Skipping those replacements avoids unnecessary hash table writes
-/// and `Arc` refcount churn while still repairing stale entries.
+/// and `Arc` refcount churn while still repairing stale entries. Returns the
+/// number of entries that were inserted or changed.
 pub(crate) fn update_arc_lookup_for_keys<K, T>(
     lookup: &mut FxHashMap<K, Arc<T>>,
     keys: impl IntoIterator<Item = K>,
     node: &Arc<T>,
-) -> bool
+) -> usize
 where
     K: Eq + Hash,
 {
-    let mut changed = false;
+    let mut changed = 0;
 
     for key in keys {
         match lookup.entry(key) {
             Entry::Occupied(mut entry) if !Arc::ptr_eq(entry.get(), node) => {
                 entry.insert(Arc::clone(node));
-                changed = true;
+                changed += 1;
             }
             Entry::Occupied(_) => {}
             Entry::Vacant(entry) => {
                 entry.insert(Arc::clone(node));
-                changed = true;
+                changed += 1;
             }
         }
     }

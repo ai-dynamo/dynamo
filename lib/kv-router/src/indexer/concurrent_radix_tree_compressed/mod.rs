@@ -213,7 +213,7 @@ impl ConcurrentRadixTreeCompressed {
             worker_lookup,
             blocks.iter().map(|block| block.block_hash),
             node,
-        )
+        ) > 0
     }
 
     // ------------------------------------------------------------------

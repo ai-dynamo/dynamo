@@ -130,7 +130,7 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
         } else {
             self.bucket_expiry(now + self.ttl)
         };
-        let mut bucket_inserts = Vec::with_capacity(len);
+        let mut bucket_inserts: Option<Vec<K>> = None;
 
         self.timers.reserve(len);
         for key in keys {
@@ -147,10 +147,12 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
                     entry.insert(expiry_time);
                 }
             }
-            bucket_inserts.push(key);
+            bucket_inserts
+                .get_or_insert_with(|| Vec::with_capacity(len))
+                .push(key);
         }
 
-        if !bucket_inserts.is_empty() {
+        if let Some(bucket_inserts) = bucket_inserts {
             let bucket = self.expirations.entry(expiry_time).or_default();
             bucket.reserve(bucket_inserts.len());
             bucket.extend(bucket_inserts);
