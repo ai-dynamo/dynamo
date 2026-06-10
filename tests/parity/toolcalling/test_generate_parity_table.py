@@ -83,7 +83,7 @@ def test_generate_parser_parity_table_html() -> None:
     assert 'data-marker-parity-sglang="DV"' in html
     assert 'data-marker-parity-dynamo="↯="' in html
     assert 'data-marker-parity-dynamo="↯VS"' in html
-    assert 'data-marker-dynamo="D!"' not in html
+    assert 'data-marker-dynamo="D✗"' not in html
     assert ".view-details.parity-mode .parity-explainer { display: block; }" in html
     assert "<strong>Parity:</strong>" in html
     assert "color: #8b949e;" in html
@@ -117,8 +117,8 @@ def test_generate_parser_parity_table_html() -> None:
         r'<div class="ttip"><div class="ttip-head">TOOLCALLING\.batch\.4\.a — deepseek_v4',
         html,
     )
-    assert 'data-marker-vllm="!"' in html
-    assert 'data-marker-parity-vllm="!"' in html
+    assert 'data-marker-vllm="✗"' in html
+    assert 'data-marker-parity-vllm="✗"' in html
     assert re.search(
         r'data-status-dynamo="ok" data-status-vllm="ok" data-status-sglang="problem" '
         r'data-marker-dynamo="" data-marker-vllm="" data-marker-sglang="↯" '
@@ -199,8 +199,10 @@ def test_generate_reasoning_parity_table_leak_markers_are_parser_specific() -> N
         r'data-col-toggle="model"[^>]+data-default-visible="true"[^>]+aria-pressed="true"',
         html,
     )
+    # qwen3 3.b is an input-less n/a stub; the vLLM/SGLang Python parsers raise
+    # KeyError: 'model_text' on it, so it renders as a parser-exception cell.
     assert re.search(
-        r'<td class="cell na[^"]*"[^>]*><a href="fixtures/qwen3/REASONING\.batch\.yaml">n/a</a>'
+        r'<td class="cell err[^"]*"[^>]*><a href="fixtures/qwen3/REASONING\.batch\.yaml">V✗S✗</a>'
         r'<div class="ttip"><div class="ttip-head">REASONING\.batch\.3\.b — qwen3',
         html,
     )

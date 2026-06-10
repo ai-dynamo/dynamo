@@ -1582,6 +1582,7 @@ dependencies = [
  "dynamo-parsers",
  "dynamo-protocols",
  "dynamo-renderer",
+ "dynamo-rl",
  "dynamo-runtime",
  "dynamo-tokenizers",
  "dynamo-tokens",
@@ -1731,6 +1732,20 @@ dependencies = [
  "minijinja-contrib",
  "serde",
  "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "dynamo-rl"
+version = "1.3.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "dynamo-runtime",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
  "tracing",
 ]
 

@@ -199,8 +199,15 @@ async def test_chat_completion_http_error(http_server, msg_to_code: tuple[str, i
             assert response.status == msg_to_code[1]
             error_json = await response.json()
             if msg_to_code[0] == MSG_CONTAINS_ERROR:
+                # 4xx HTTP protocol contract: backend message is forwarded
+                # to the client so callers can react to validation errors.
                 assert MSG_CONTAINS_ERROR in str(error_json)
             elif msg_to_code[0] == MSG_CONTAINS_STATUS_ERROR:
+                # Same 4xx contract via the duck-typed `.status` path.
                 assert MSG_CONTAINS_STATUS_ERROR in str(error_json)
             elif msg_to_code[0] == MSG_CONTAINS_INTERNAL_ERROR:
-                assert "simulated internal error" in str(error_json).lower()
+                # 5xx is sanitized: the client receives a static message
+                # and never the raw backend error text; the underlying
+                # detail is logged server-side.
+                assert "simulated internal error" not in str(error_json).lower()
+                assert "internal server error" in str(error_json).lower()

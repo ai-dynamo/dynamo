@@ -529,7 +529,10 @@ class ReplayPlannerAdapter:
         self, tick: ScheduledTick, result: dict[str, Any]
     ) -> TickInput:
         """Convert bridge result dict to planner TickInput."""
-        now_s = result["now_ms"] / 1000.0
+        # Keep planner cadence on the scheduled replay clock. The Rust bridge
+        # also advances idle gaps to this timestamp so traffic windows drain
+        # with the same duration the planner sees.
+        now_s = tick.at_s
 
         worker_counts = None
         if tick.need_worker_states:
@@ -597,6 +600,7 @@ class ReplayPlannerAdapter:
                     isl=t.get("avg_isl", 0.0),
                     osl=t.get("avg_osl", 0.0),
                     kv_hit_rate=t.get("avg_kv_hit_rate"),
+                    accept_length=t.get("avg_accept_length"),
                 )
                 # Stash observed TTFT/ITL for the diagnostics recorder.
                 # When num_req == 0, the Rust accumulator returns 0 as a
@@ -609,6 +613,7 @@ class ReplayPlannerAdapter:
                     isl=traffic.isl,
                     osl=traffic.osl,
                     kv_hit_rate=traffic.kv_hit_rate,
+                    accept_length=traffic.accept_length,
                 )
 
         return TickInput(

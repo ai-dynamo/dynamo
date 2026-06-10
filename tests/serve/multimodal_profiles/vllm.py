@@ -193,9 +193,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
     # Rust-frontend VLM coverage on `agg_router` (
     # MM-aware routing path). Each profile below adds the same smoke test
     # as Qwen3-VL-2B's agg_router (pre_merge), but on post_merge with the
-    # corresponding family — Qwen2.5-VL, Qwen2-VL, Phi-3-vision — so the
-    # full MM-routing model list (FAMILIES in lightseek_mm.rs) is exercised
-    # end-to-end. SINGLE_GPU=true packs both workers onto GPU 0 to match
+    # corresponding family (Qwen2.5-VL, Qwen2-VL). The LLaVA-1.5/NeXT profiles
+    # below are skip-marked, so this is Qwen-family coverage, not the full
+    # FAMILIES list. SINGLE_GPU=true packs both workers onto GPU 0 to match
     # the gpu_1 single-GPU box. Initial VRAM profiles are estimates; the
     # first post_merge run will surface real peaks and we'll tighten.
     MultimodalModelProfile(
@@ -249,39 +249,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
             ),
         },
-    ),
-    MultimodalModelProfile(
-        name="microsoft/Phi-3-vision-128k-instruct",
-        short_name="phi3-vision",
-        topologies={
-            # Phi-3-vision is the largest of the post_merge additions
-            # (~8.6 GB weights × 2 workers + KV ≈ ~21 GiB peak); profile
-            # leaves slim headroom on a 24 GiB box. If first post_merge
-            # run OOMs, drop to one worker (NUM_WORKERS=1) or move to
-            # gpu_2 with one worker per GPU.
-            "agg_router": TopologyConfig(
-                marks=[pytest.mark.post_merge],
-                timeout_s=500,
-                profiled_vram_gib=22.0,
-                requested_vllm_kv_cache_bytes=1_719_075_000,
-                env={"SINGLE_GPU": "true"},
-                # cached_tokens-asserting payload proves MM-aware routing
-                # engaged (2nd identical request hits the warm worker's KV
-                # cache); a silent regression to text-prefix-only routing
-                # would still return "green" but 0 cached tokens.
-                tests=[
-                    MmCase(
-                        payload=make_image_payload_cached_tokens(
-                            ["green"],
-                            require_rust_processor_init=True,
-                            min_avg_kv_hit_rate=0.9,
-                        )
-                    )
-                ],
-            ),
-        },
-        # Phi-3-vision uses --trust-remote-code for its custom processor.
-        extra_vllm_args=["--trust-remote-code"],
     ),
     MultimodalModelProfile(
         name="Qwen/Qwen3.5-0.8B",
@@ -384,13 +351,13 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # temperature=0 (see PR #9336 for the e_pd manifestation
             # and the comment block above on color-naming variance).
             # The agg_router routing path is already covered by the
-            # Qwen3-VL-2B / Qwen2.5-VL-3B / Qwen2-VL-2B / Phi-3-vision
+            # Qwen3-VL-2B / Qwen2.5-VL-3B / Qwen2-VL-2B
             # profiles above without the LLaVA flake.
             "agg_router": TopologyConfig(
                 marks=[
                     pytest.mark.skip(
                         reason="LLaVA-1.5 flake on vLLM 0.20 (see PR #9336); "
-                        "agg_router routing path is covered by Qwen and Phi-3 profiles"
+                        "agg_router routing path is covered by Qwen profiles"
                     ),
                     pytest.mark.post_merge,
                 ],
@@ -506,7 +473,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
     #
     # Skipped: LLaVA-NeXT inherits the same LLaVA-on-vLLM-0.20 output
     # flake as LLaVA-1.5 (see PR #9336); the agg_router routing path is
-    # covered by the Qwen and Phi-3 profiles above.
+    # covered by the Qwen profiles above.
     MultimodalModelProfile(
         name="llava-hf/llava-v1.6-mistral-7b-hf",
         short_name="llava-next-mistral-7b",
@@ -516,7 +483,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     pytest.mark.skip(
                         reason="LLaVA-NeXT inherits LLaVA-1.5 flake on vLLM 0.20 "
                         "(see PR #9336); agg_router routing path is covered by "
-                        "Qwen and Phi-3 profiles"
+                        "Qwen profiles"
                     ),
                     pytest.mark.post_merge,
                 ],

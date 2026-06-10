@@ -1744,6 +1744,9 @@ impl PlannerReplayBridge {
     ///   - `avg_itl_ms`      (f64): mean inter-token latency in milliseconds,
     ///                              averaged only over requests that generated
     ///                              at least one token gap (0.0 when no samples)
+    ///   - `avg_accept_length` (f64 | None): mean visible tokens per decode
+    ///                              request-forward, including the base token
+    ///                              (`None` when no decode forwards were observed)
     ///   - `avg_kv_hit_rate` (f64): arithmetic mean of per-request
     ///                              ``overlap_blocks / isl_blocks`` ratios
     ///                              across router admissions in the window
@@ -1769,6 +1772,7 @@ impl PlannerReplayBridge {
             "avg_osl": stats.avg_osl,
             "avg_ttft_ms": stats.avg_ttft_ms,
             "avg_itl_ms": stats.avg_itl_ms,
+            "avg_accept_length": stats.avg_accept_length,
             "avg_kv_hit_rate": stats.avg_kv_hit_rate,
         });
 
