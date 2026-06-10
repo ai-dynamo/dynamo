@@ -800,9 +800,9 @@ jobs:
 
   # ============================================================================
   # ARTIFACTORY STAGING: publish the publishable workspace crates to the
-  # Artifactory cargo registry (sw-dl-dynamo-cargo-local) via `cargo publish`,
-  # dependency-ordered. Runs inside the dynamo build image (cargo + native deps
-  # for the per-crate `cargo check`). On-demand releases only.
+  # Artifactory cargo registry (location from the ARTIFACTORY_CARGO_INDEX secret)
+  # via `cargo publish`, dependency-ordered. Runs inside the dynamo build image
+  # (cargo + native deps for the per-crate `cargo check`). On-demand releases only.
   # ============================================================================
 
   stage-crates-artifactory:
@@ -826,13 +826,11 @@ jobs:
 
       - name: Publish crates to Artifactory cargo registry
         env:
-          ARTIFACTORY_CARGO_TOKEN: ${{ secrets.ARTIFACTORY_CARGO_TOKEN }}
+          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
+          ARTIFACTORY_CARGO_INDEX: ${{ secrets.ARTIFACTORY_CARGO_INDEX }}
         run: |
           set -euo pipefail
-          python3 .github/scripts/stage_crates.py \
-            --registry artifactory \
-            --host artifactory.nvidia.com \
-            --repo sw-dl-dynamo-cargo-local
+          python3 .github/scripts/stage_crates.py --registry artifactory
 
   # Combined NGC + Artifactory staging reply on the nightly thread.
   notify-slack-staging:

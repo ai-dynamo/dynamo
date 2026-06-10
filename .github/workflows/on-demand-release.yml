@@ -123,18 +123,25 @@ jobs:
           fi
 
           if git ls-remote --exit-code --heads origin "${BRANCH}" >/dev/null 2>&1; then
-            if [[ "${IS_TEST}" == "true" ]]; then
-              echo "Test branch ${BRANCH} exists; deleting it for a clean re-run"
-              git push origin --delete "${BRANCH}"
-            else
-              echo "::error::${BRANCH} already exists; refusing to clobber"
-              exit 1
+            # Branch exists: reuse it if it already carries the target version
+            # (idempotent re-run, no push); otherwise fail — we don't delete/clobber.
+            git fetch origin "${BRANCH}"
+            EXISTING_VER=$(git show FETCH_HEAD:pyproject.toml | awk '/^version = /{gsub(/"/,"",$3); print $3; exit}')
+            if [ "${EXISTING_VER}" = "${RELEASE_VERSION}" ]; then
+              echo "${BRANCH} already at ${RELEASE_VERSION}; reusing it (no push)."
+              {
+                echo "branch=${BRANCH}"
+                echo "bump_sha=$(git rev-parse FETCH_HEAD)"
+                echo "is_test=${IS_TEST}"
+              } >> "$GITHUB_OUTPUT"
+              exit 0
             fi
+            echo "::error::${BRANCH} exists with version '${EXISTING_VER}' (expected '${RELEASE_VERSION}'); delete it and re-run."
+            exit 1
           fi
 
-          # Run the version-set script from THIS workflow's commit (GITHUB_SHA),
-          # not from source_ref — source_ref (main, or an old release/* branch)
-          # may predate the --set-version support. Applied to the source tree (.).
+          # New branch: set the version from THIS workflow's script (GITHUB_SHA, not
+          # source_ref which may predate --set-version), sync the lockfile, push.
           git show "${GITHUB_SHA}:.github/scripts/apply_dev_version.py" > "${RUNNER_TEMP}/apply_dev_version.py"
           python3 "${RUNNER_TEMP}/apply_dev_version.py" "" . --set-version "${RELEASE_VERSION}"
 
@@ -171,7 +178,9 @@ jobs:
   await-post-merge:
     name: Wait for post-merge CI
     needs: [prepare-branch]
-    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && needs.prepare-branch.outputs.is_test != 'true' }}
+    # TEMPORARY(test): run the full chain on push/test runs too, so the await->approval->release linkage executes on release/0.0.0test. REVERT to the commented line.
+    if: ${{ !inputs.dry_run }}
+    # if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && needs.prepare-branch.outputs.is_test != 'true' }}
     runs-on: prod-default-small-v2
     permissions:
       contents: read
@@ -215,7 +224,9 @@ jobs:
   release-approval:
     name: Release approval gate
     needs: [prepare-branch, await-post-merge]
-    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && needs.prepare-branch.outputs.is_test != 'true' }}
+    # TEMPORARY(test): run the full chain on push/test runs too, so the await->approval->release linkage executes on release/0.0.0test. REVERT to the commented line.
+    if: ${{ !inputs.dry_run }}
+    # if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && needs.prepare-branch.outputs.is_test != 'true' }}
     runs-on: prod-default-small-v2
     environment: manual-release-approval
     permissions:
@@ -230,12 +241,15 @@ jobs:
   invoke-release:
     name: Stage release
     needs: [prepare-branch, await-post-merge, release-approval]
-    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && needs.prepare-branch.outputs.is_test != 'true' }}
+    # TEMPORARY(test): run the full chain on push/test runs too, so the await->approval->release linkage executes on release/0.0.0test. REVERT to the commented line.
+    if: ${{ !inputs.dry_run }}
+    # if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && needs.prepare-branch.outputs.is_test != 'true' }}
     uses: ./.github/workflows/release.yml
     with:
       commit_sha: ${{ needs.prepare-branch.outputs.bump_sha }}
       on_demand: true
-      release_version: ${{ inputs.release_version }}
-      artifacts: ${{ inputs.artifacts }}
-      skip_gitlab_pipeline: ${{ inputs.skip_gitlab_pipeline }}
+      # TEMPORARY(test): || defaults let push/test runs (no inputs) reach release.yml. REVERT to bare inputs.* .
+      release_version: ${{ inputs.release_version || '0.0.0' }}
+      artifacts: ${{ inputs.artifacts || 'crate,container,wheel,helm' }}
+      skip_gitlab_pipeline: ${{ inputs.skip_gitlab_pipeline || false }}
     secrets: inherit
