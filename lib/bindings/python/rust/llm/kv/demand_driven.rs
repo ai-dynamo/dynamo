@@ -192,9 +192,9 @@ impl<T: 'static> Drop for DemandDrivenOwner<T> {
 
         // Python can release the stream outside Tokio. Keep the final Arc alive
         // until the PyO3 runtime drops it so nested router guards can spawn cleanup.
-        let _ = pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+        drop(pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
             drop(state);
-        });
+        }));
     }
 }
 

@@ -35,6 +35,8 @@ use super::entrypoint::AicPerfConfig;
 
 mod demand_driven;
 
+const MAX_RESPONSE_BUFFER_SIZE: usize = tokio::sync::Semaphore::MAX_PERMITS;
+
 #[derive(Clone, Copy)]
 enum ResponseBufferMode {
     Rendezvous,
@@ -42,17 +44,20 @@ enum ResponseBufferMode {
 }
 
 fn validate_response_buffer_size(response_buffer_size: isize) -> PyResult<ResponseBufferMode> {
-    if response_buffer_size < 0 {
-        return Err(PyValueError::new_err(
-            "response_buffer_size must be non-negative",
-        ));
-    }
+    let capacity = usize::try_from(response_buffer_size)
+        .map_err(|_| PyValueError::new_err("response_buffer_size must be non-negative"))?;
 
-    if response_buffer_size == 0 {
+    if capacity == 0 {
         return Ok(ResponseBufferMode::Rendezvous);
     }
 
-    Ok(ResponseBufferMode::Buffered(response_buffer_size as usize))
+    if capacity > MAX_RESPONSE_BUFFER_SIZE {
+        return Err(PyValueError::new_err(format!(
+            "response_buffer_size must not exceed {MAX_RESPONSE_BUFFER_SIZE}"
+        )));
+    }
+
+    Ok(ResponseBufferMode::Buffered(capacity))
 }
 
 fn depythonize_block_mm_infos(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Option<BlockExtraInfo>>> {
