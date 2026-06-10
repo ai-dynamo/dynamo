@@ -348,8 +348,8 @@ class SchedulingConfig(BaseModel):
 class PlannerConfig(BaseModel):
     """Pydantic configuration for the Dynamo Planner.
 
-    Replaces the argparse-based CLI. All fields mirror the former CLI flags
-    with defaults sourced from SLAPlannerDefaults.
+    Defines the JSON/YAML config consumed by ``python -m dynamo.planner``.
+    Defaults are sourced from SLAPlannerDefaults.
     """
 
     pre_deployment_sweeping_mode: Optional[PlannerPreDeploymentSweepMode] = Field(
@@ -679,7 +679,7 @@ class PlannerConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _default_scale_interval_from_legacy_intervals(cls, data: object) -> object:
+    def _default_scale_interval_from_builtin_intervals(cls, data: object) -> object:
         if not isinstance(data, dict):
             return data
         scheduling = data.get("scheduling")

@@ -181,7 +181,7 @@ DGDR planner features and generated ConfigMaps are materialized into these
 | `prefill_scale_up_queue_tokens` / `prefill_scale_down_queue_tokens` | `null` | Queue token thresholds for `optimization_target: load` prefill scaling. |
 | `decode_scale_up_kv_rate` / `decode_scale_down_kv_rate` | `null` | Decode KV utilization thresholds for `optimization_target: load` decode scaling. |
 | **Plugin pipeline** | | |
-| `scheduling.scale_interval_seconds` | gcd of enabled legacy intervals | Base pipeline cadence. Plugins fire according to their own execution intervals. |
+| `scheduling.scale_interval_seconds` | gcd of enabled builtin intervals | Base pipeline cadence. Plugins fire according to their own execution intervals. |
 | `scheduling.tick_max_duration_seconds` | `30.0` | Deadline for one full plugin pipeline tick. |
 | `plugin_registration.transport.request_timeout_seconds` | `5.0` | Per-plugin RPC timeout. |
 

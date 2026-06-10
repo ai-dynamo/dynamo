@@ -38,7 +38,7 @@ Internal responsibilities
    External plugins declaring ``needs=["observations.fpm"]`` receive
    the FPM map; an empty/absent submap means "no FPM this tick".
 3. **FPM regression observation**:
-   Before legacy load-loop ticks, feeds FPM into the shared scaling-state
+   Before load-cadence ticks, feeds FPM into the shared scaling-state
    regression models. This is a planner-internal regression-fit path,
    distinct from delivering FPM to plugins that request
    ``observations.fpm``.

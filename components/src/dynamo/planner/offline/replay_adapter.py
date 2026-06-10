@@ -13,10 +13,9 @@ This adapter sits between the bridge and the planner tick engine:
 
 The tick engine is the builtin orchestrator path:
 ``OrchestratorEngineAdapter`` wrapping ``LocalPlannerOrchestrator`` +
-the builtin local-planner plugins. It preserves the legacy planner's
-``PlannerEffects.scale_to`` decisions while using plugin-era
-observability (Prometheus metrics, audit events, plugin-aware
-diagnostics).
+the builtin local-planner plugins. It preserves the planner's
+``PlannerEffects.scale_to`` replay contract while using plugin-aware
+observability (Prometheus metrics, audit events, diagnostics).
 
 Replay keeps its sync ``run()`` API; async orchestrator calls
 (``bootstrap_from_fpms`` / ``tick``) run inside a single replay-scoped

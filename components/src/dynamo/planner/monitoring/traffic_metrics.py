@@ -252,7 +252,7 @@ class PrometheusAPIClient:
             #       RouterRequestMetrics in lib/llm/src/kv_router/metrics.rs
             #       registers dynamo_component_router_request_duration_seconds.
             #       Until then this queries a non-existent metric and returns 0,
-            #       which causes the decode planner correction factor to use
+            #       which causes throughput planning to see
             #       concurrency=0 (under-estimated), inflating replica recommendations.
             return self._get_average_metric(
                 f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.work_handler.REQUEST_DURATION_SECONDS}",

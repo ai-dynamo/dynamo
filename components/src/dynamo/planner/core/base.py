@@ -972,8 +972,8 @@ class NativePlannerBase:
     ) -> bool:
         """Return True for ticks that should affect operator diagnostics.
 
-        The plugin pipeline may run more frequently than the legacy load /
-        throughput loops.  No-op pipeline ticks should not overwrite
+        The plugin pipeline may run more frequently than load / throughput
+        builtin plugins. No-op pipeline ticks should not overwrite
         Prometheus gauges, add blank report rows, or spam summary logs.
         """
         diag = effects.diagnostics
