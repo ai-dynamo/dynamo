@@ -961,7 +961,7 @@ impl OverlapScores {
     pub fn new() -> Self {
         Self {
             scores: FxHashMap::default(),
-            frequencies: Vec::with_capacity(32),
+            frequencies: Vec::new(),
         }
     }
 
