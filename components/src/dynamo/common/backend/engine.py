@@ -299,11 +299,10 @@ class LLMEngine(ABC):
         return None
 
     def supported_controls(self) -> set[str]:
-        """Engine-control capability keys this engine supports.
+        """Return the set of engine-control capability keys this engine supports.
 
-        The unified backend maps these keys to runtime endpoints. Engines only
-        advertise and implement semantic controls; they do not own transport or
-        route registration details.
+        Controls are semantic operations on the engine's serving lifecycle.
+        Engines advertise the keys they implement.
         """
         return set()
 
@@ -317,13 +316,11 @@ class LLMEngine(ABC):
         }
 
     def supported_updates(self) -> set[str]:
-        """Engine-update capability keys this engine supports.
+        """Return the set of engine-update capability keys this engine supports.
 
         Updates are a sibling surface to :meth:`supported_controls` for
-        operations that mutate engine-managed assets (e.g. vLLM dynamic LoRA
-        load/unload/list) rather than the engine's serving lifecycle. Keeping
-        them separate avoids inflating the control surface. The unified backend
-        maps these keys onto ``/engine/update/<key>`` routes.
+        operations that mutate engine-managed assets rather than the engine's
+        serving lifecycle. Engines advertise the keys they implement.
         """
         return set()
 
@@ -335,13 +332,11 @@ class LLMEngine(ABC):
         }
 
     async def on_endpoint_ready(self, endpoint) -> None:
-        """Receive the runtime serving ``Endpoint`` once, before serving
-        begins and before any engine controls are exposed.
+        """Receive the runtime serving ``Endpoint`` once, before serving begins.
 
-        Default no-op. Engines that publish their own discovery records
-        (e.g. vLLM dynamic LoRA via ``register_model`` / ``unregister_model``)
-        stash it for use from :meth:`engine_update`. ``Worker`` calls this
-        exactly once; a raised exception is fatal to startup."""
+        Default no-op. Engines that publish their own discovery records stash
+        it for use from :meth:`engine_update`. ``Worker`` calls this exactly
+        once; a raised exception is fatal to startup."""
         return None
 
 

@@ -742,7 +742,7 @@ class VllmLLMEngine(LLMEngine):
                     ),
                 }
 
-            logger.debug(f"load_lora request keys: {list(request.keys())}")
+            logger.debug("load_lora request keys: %s", list(request.keys()))
 
             source = request.get("source")
             if not source or not isinstance(source, dict):
@@ -781,15 +781,18 @@ class VllmLLMEngine(LLMEngine):
                         and lora_name not in self._published_loras
                     ):
                         logger.info(
-                            f"LoRA '{lora_name}' loaded but unpublished; "
-                            f"retrying discovery publish"
+                            "LoRA '%s' loaded but unpublished; "
+                            "retrying discovery publish",
+                            lora_name,
                         )
                         try:
                             await self._publish_lora_card(lora_name, lora_id)
                             self._published_loras.add(lora_name)
                         except Exception as e:
                             logger.exception(
-                                f"Failed to publish LoRA {lora_name} ModelDeploymentCard: {e}"
+                                "Failed to publish LoRA %s ModelDeploymentCard: %s",
+                                lora_name,
+                                e,
                             )
                             return {
                                 "status": "error",
@@ -797,8 +800,10 @@ class VllmLLMEngine(LLMEngine):
                                 "lora_name": lora_name,
                             }
                     logger.info(
-                        f"LoRA adapter already loaded (concurrent request completed): "
-                        f"{lora_name} with ID {lora_id}"
+                        "LoRA adapter already loaded (concurrent request completed): "
+                        "%s with ID %s",
+                        lora_name,
+                        lora_id,
                     )
                     return {
                         "status": "success",
@@ -807,7 +812,7 @@ class VllmLLMEngine(LLMEngine):
                         "lora_id": lora_id,
                     }
 
-                logger.info(f"Downloading LoRA adapter: {lora_name} from {lora_uri}")
+                logger.info("Downloading LoRA adapter: %s from %s", lora_name, lora_uri)
                 download_result = await lora_manager.download_lora(lora_uri)
 
                 if download_result["status"] != "success":
@@ -817,7 +822,7 @@ class VllmLLMEngine(LLMEngine):
                     }
 
                 lora_path = download_result["local_path"]
-                logger.debug(f"LoRA downloaded to: {lora_path}")
+                logger.debug("LoRA downloaded to: %s", lora_path)
 
                 # Deterministic ID from lora_name before using it.
                 lora_id = lora_name_to_id(lora_name)
@@ -832,24 +837,31 @@ class VllmLLMEngine(LLMEngine):
 
                 self.loaded_loras[lora_name] = LoRAInfo(id=lora_id, path=lora_path)
                 logger.info(
-                    f"Successfully loaded LoRA adapter: {lora_name} with ID {lora_id}"
+                    "Successfully loaded LoRA adapter: %s with ID %s",
+                    lora_name,
+                    lora_id,
                 )
 
                 # Publish the LoRA as a ModelDeploymentCard so the frontend
                 # can discover it and route to this worker instance.
                 if self._endpoint is not None:
                     logger.debug(
-                        f"Publishing LoRA '{lora_name}' ModelDeploymentCard to {self._endpoint}"
+                        "Publishing LoRA '%s' ModelDeploymentCard to %s",
+                        lora_name,
+                        self._endpoint,
                     )
                     try:
                         await self._publish_lora_card(lora_name, lora_id)
                         self._published_loras.add(lora_name)
                         logger.info(
-                            f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
+                            "Successfully published LoRA '%s' ModelDeploymentCard",
+                            lora_name,
                         )
                     except Exception as e:
                         logger.exception(
-                            f"Failed to publish LoRA {lora_name} ModelDeploymentCard: {e}"
+                            "Failed to publish LoRA %s ModelDeploymentCard: %s",
+                            lora_name,
+                            e,
                         )
 
                         # Rollback: remove the LoRA from the engine to keep
@@ -859,14 +871,19 @@ class VllmLLMEngine(LLMEngine):
                         # so a retried load reconciles the publish.
                         try:
                             logger.debug(
-                                f"Rolling back: removing LoRA '{lora_name}' from engine"
+                                "Rolling back: removing LoRA '%s' from engine",
+                                lora_name,
                             )
                             await self.engine_client.remove_lora(lora_id)
                             self.loaded_loras.pop(lora_name, None)
-                            logger.debug(f"Successfully rolled back LoRA '{lora_name}'")
+                            logger.debug(
+                                "Successfully rolled back LoRA '%s'", lora_name
+                            )
                         except Exception as rollback_error:
                             logger.exception(
-                                f"Failed to rollback LoRA {lora_name}: {rollback_error}"
+                                "Failed to rollback LoRA %s: %s",
+                                lora_name,
+                                rollback_error,
                             )
                         self._published_loras.discard(lora_name)
 
@@ -877,7 +894,8 @@ class VllmLLMEngine(LLMEngine):
                         }
                 else:
                     logger.debug(
-                        f"Cannot publish LoRA '{lora_name}': serving endpoint not ready"
+                        "Cannot publish LoRA '%s': serving endpoint not ready",
+                        lora_name,
                     )
 
                 return {
@@ -887,7 +905,7 @@ class VllmLLMEngine(LLMEngine):
                     "lora_id": lora_id,
                 }
         except Exception as e:
-            logger.exception(f"Failed to load LoRA adapter: {e}")
+            logger.exception("Failed to load LoRA adapter: %s", e)
             return {"status": "error", "message": str(e)}
 
     async def unload_lora(self, body: dict) -> dict:
@@ -921,8 +939,9 @@ class VllmLLMEngine(LLMEngine):
                         and lora_name in self._published_loras
                     ):
                         logger.info(
-                            f"LoRA '{lora_name}' not loaded but still published; "
-                            f"retrying discovery unregister"
+                            "LoRA '%s' not loaded but still published; "
+                            "retrying discovery unregister",
+                            lora_name,
                         )
                         try:
                             await unregister_model(
@@ -937,7 +956,9 @@ class VllmLLMEngine(LLMEngine):
                             }
                         except Exception as e:
                             logger.exception(
-                                f"Failed to unregister stale LoRA {lora_name} ModelDeploymentCard: {e}"
+                                "Failed to unregister stale LoRA %s ModelDeploymentCard: %s",
+                                lora_name,
+                                e,
                             )
                             return {
                                 "status": "error",
@@ -949,7 +970,7 @@ class VllmLLMEngine(LLMEngine):
                         "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self.loaded_loras.keys())}",
                     }
 
-                logger.debug(f"Unloading LoRA adapter: {lora_name}")
+                logger.debug("Unloading LoRA adapter: %s", lora_name)
                 lora_id = lora.id
 
                 # Stop advertising the adapter *before* removing it from the
@@ -959,7 +980,8 @@ class VllmLLMEngine(LLMEngine):
                 # longer has the adapter (falling back to base or failing).
                 if self._endpoint is not None and lora_name in self._published_loras:
                     logger.debug(
-                        f"Unregistering LoRA '{lora_name}' ModelDeploymentCard"
+                        "Unregistering LoRA '%s' ModelDeploymentCard",
+                        lora_name,
                     )
                     try:
                         await unregister_model(
@@ -968,7 +990,8 @@ class VllmLLMEngine(LLMEngine):
                         )
                         self._published_loras.discard(lora_name)
                         logger.info(
-                            f"Successfully unregistered LoRA '{lora_name}' ModelDeploymentCard"
+                            "Successfully unregistered LoRA '%s' ModelDeploymentCard",
+                            lora_name,
                         )
                     except Exception as e:
                         # Nothing mutated yet: the engine still has the
@@ -976,7 +999,9 @@ class VllmLLMEngine(LLMEngine):
                         # (consistent and still routable). Surface the error
                         # and leave state intact for a retry.
                         logger.exception(
-                            f"Failed to unregister LoRA {lora_name} ModelDeploymentCard: {e}"
+                            "Failed to unregister LoRA %s ModelDeploymentCard: %s",
+                            lora_name,
+                            e,
                         )
                         return {
                             "status": "error",
@@ -985,7 +1010,8 @@ class VllmLLMEngine(LLMEngine):
                         }
                 elif self._endpoint is None:
                     logger.debug(
-                        f"Cannot unregister LoRA '{lora_name}': serving endpoint not ready"
+                        "Cannot unregister LoRA '%s': serving endpoint not ready",
+                        lora_name,
                     )
 
                 # Discovery no longer routes to this adapter; remove it from
@@ -998,7 +1024,9 @@ class VllmLLMEngine(LLMEngine):
                     # loaded_loras so a retried unload skips the unregister
                     # and retries only the engine removal.
                     logger.exception(
-                        f"Failed to remove LoRA {lora_name} from engine: {e}"
+                        "Failed to remove LoRA %s from engine: %s",
+                        lora_name,
+                        e,
                     )
                     return {
                         "status": "error",
@@ -1009,7 +1037,9 @@ class VllmLLMEngine(LLMEngine):
                 del self.loaded_loras[lora_name]
 
                 logger.info(
-                    f"Successfully unloaded LoRA adapter: {lora_name} with ID {lora_id}"
+                    "Successfully unloaded LoRA adapter: %s with ID %s",
+                    lora_name,
+                    lora_id,
                 )
                 return {
                     "status": "success",
@@ -1018,7 +1048,7 @@ class VllmLLMEngine(LLMEngine):
                     "lora_id": lora_id,
                 }
         except Exception as e:
-            logger.exception(f"Failed to unload LoRA adapter: {e}")
+            logger.exception("Failed to unload LoRA adapter: %s", e)
             return {"status": "error", "message": str(e)}
 
     async def list_loras(self, body: dict) -> dict:
@@ -1031,7 +1061,7 @@ class VllmLLMEngine(LLMEngine):
                 "count": len(loras),
             }
         except Exception as e:
-            logger.error(f"Failed to list LoRA adapters: {e}")
+            logger.error("Failed to list LoRA adapters: %s", e)
             return {"status": "error", "message": str(e)}
 
     async def sleep(self, body: dict) -> dict:
