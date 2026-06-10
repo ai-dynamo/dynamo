@@ -1,0 +1,69 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Infra smoke test: create vCluster + namespace, verify operator is running,
+# then tear down. No model images are pulled — validates the infrastructure
+# lifecycle only. Completes in ~5-8 minutes.
+
+name: Infra Smoke Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      operator_tag:
+        description: 'Operator image tag (default: main-operator)'
+        required: false
+        default: 'main-operator'
+
+jobs:
+  infra-smoke:
+    name: vCluster lifecycle smoke test
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Setup vCluster and operator
+        id: setup
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ inputs.operator_tag || 'main-operator' }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+
+      - name: Connect to vCluster
+        id: connect
+        uses: ./.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
+          vcluster_namespace: ${{ steps.setup.outputs.namespace }}
+
+      - name: Verify operator is running inside vCluster
+        shell: bash
+        run: |
+          echo "::group::Operator pod status"
+          kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
+            get pods -n default -o wide
+          echo "::endgroup::"
+
+          echo "::group::Check all deployments are available"
+          kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
+            rollout status deployment -n default --timeout=120s
+          echo "::endgroup::"
+
+          echo "::group::Namespaces visible inside vCluster"
+          kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster get ns
+          echo "::endgroup::"
+
+          echo "### Infra smoke PASSED" | tee -a $GITHUB_STEP_SUMMARY
+          echo "- vCluster: \`${{ steps.setup.outputs.vcluster_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Namespace: \`${{ steps.setup.outputs.namespace }}\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Teardown vCluster
+        if: always()
+        uses: ./.github/actions/teardown-dynamo-operator
+        with:
+          vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
+          vcluster_namespace: ${{ steps.setup.outputs.namespace }}
