@@ -79,9 +79,10 @@ For the complete CRD spec, see the [API Reference](api-reference.md).
 
 > [!NOTE]
 > DGDR does not currently expose a `features.kvRouter` field. To configure
-> router mode or KV-aware routing details, see [Routing](#routing). Use a
-> direct DGD or tuned recipe when you need full router control or EPP/Gateway
-> routing.
+> router mode or KV-aware routing details, see [Routing](#routing).
+> `overrides.dgd` can configure the generated standalone frontend and worker
+> services. Use a direct DGD or tuned recipe when you need a topology DGDR does
+> not generate, such as EPP/Gateway routing.
 
 ### Generated DGD Overrides
 
