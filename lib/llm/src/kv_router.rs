@@ -222,29 +222,29 @@ fn cached_tokens_from_effective_overlap(block_size: u32, effective_overlap_block
 
 fn remote_g2_target_local_prefix_blocks(
     target: WorkerWithDpRank,
-    tier_overlap_blocks: &TierOverlapBlocks,
-    cache_hit_estimates: &CacheHitEstimates,
+    tiered_matches: &indexer::TieredMatchDetails,
 ) -> u32 {
-    let effective_blocks = cache_hit_estimates
-        .effective_overlap_blocks
+    let device_blocks = tiered_matches
+        .device
+        .overlap_scores
+        .scores
         .get(&target)
         .copied()
-        .unwrap_or(0.0)
-        .round()
-        .max(0.0) as u32;
-    let host_pinned_blocks = tier_overlap_blocks
-        .host_pinned
-        .get(&target)
+        .unwrap_or(0);
+    let host_pinned_blocks = tiered_matches
+        .lower_tier
+        .get(&dynamo_kv_router::protocols::StorageTier::HostPinned)
+        .and_then(|matches| matches.hits.get(&target))
         .copied()
-        .unwrap_or(0) as u32;
-    effective_blocks.max(host_pinned_blocks)
+        .unwrap_or(0)
+        .min(u32::MAX as usize) as u32;
+    device_blocks.saturating_add(host_pinned_blocks)
 }
 
 fn remote_g2_best_local_prefix_blocks(
     workers: &HashMap<WorkerId, ModelRuntimeConfig>,
     allowed_worker_ids: Option<&HashSet<WorkerId>>,
-    tier_overlap_blocks: &TierOverlapBlocks,
-    cache_hit_estimates: &CacheHitEstimates,
+    tiered_matches: &indexer::TieredMatchDetails,
 ) -> u32 {
     workers
         .iter()
@@ -258,9 +258,7 @@ fn remote_g2_best_local_prefix_blocks(
             let end = start + config.data_parallel_size();
             (start..end).map(move |dp_rank| WorkerWithDpRank::new(*worker_id, dp_rank))
         })
-        .map(|target| {
-            remote_g2_target_local_prefix_blocks(target, tier_overlap_blocks, cache_hit_estimates)
-        })
+        .map(|target| remote_g2_target_local_prefix_blocks(target, tiered_matches))
         .max()
         .unwrap_or(0)
 }
@@ -273,8 +271,6 @@ fn remote_g2_candidates_from_tiered_matches(
     block_hashes: &[LocalBlockHash],
     block_size: u32,
     tiered_matches: &indexer::TieredMatchDetails,
-    tier_overlap_blocks: &TierOverlapBlocks,
-    cache_hit_estimates: &CacheHitEstimates,
     allowed_worker_ids: Option<&HashSet<WorkerId>>,
     best_local_prefix_blocks: u32,
     request_id: &str,
@@ -295,11 +291,8 @@ fn remote_g2_candidates_from_tiered_matches(
         let data_parallel_start_rank = config.data_parallel_start_rank();
         for dp_rank in data_parallel_start_rank..(data_parallel_start_rank + data_parallel_size) {
             let target = WorkerWithDpRank::new(*worker_id, dp_rank);
-            let target_local_prefix_blocks = remote_g2_target_local_prefix_blocks(
-                target,
-                tier_overlap_blocks,
-                cache_hit_estimates,
-            );
+            let target_local_prefix_blocks =
+                remote_g2_target_local_prefix_blocks(target, tiered_matches);
             let decision = select_remote_g2_candidate(RemoteKvReuseSelectionInput {
                 request_id,
                 target,
@@ -751,17 +744,12 @@ where
             if let Some(pinned_worker) = pinned_worker {
                 // Exact pins make the global best-local worker infeasible, so
                 // score Direct G2 against the selected target's local prefix.
-                remote_g2_target_local_prefix_blocks(
-                    pinned_worker,
-                    &tier_overlap_blocks,
-                    &cache_hit_estimates,
-                )
+                remote_g2_target_local_prefix_blocks(pinned_worker, &tiered_matches)
             } else {
                 remote_g2_best_local_prefix_blocks(
                     &workers,
                     allowed_worker_ids.as_ref(),
-                    &tier_overlap_blocks,
-                    &cache_hit_estimates,
+                    &tiered_matches,
                 )
             }
         };
@@ -774,8 +762,6 @@ where
                 &block_hashes,
                 self.block_size,
                 &tiered_matches,
-                &tier_overlap_blocks,
-                &cache_hit_estimates,
                 allowed_worker_ids.as_ref(),
                 best_local_prefix_blocks,
                 context_id.unwrap_or_default(),
@@ -811,11 +797,8 @@ where
             )
             .instrument(tracing::info_span!("kv_router.schedule"))
             .await?;
-        let selected_target_local_prefix_blocks = remote_g2_target_local_prefix_blocks(
-            response.best_worker,
-            &tier_overlap_blocks,
-            &cache_hit_estimates,
-        );
+        let selected_target_local_prefix_blocks =
+            remote_g2_target_local_prefix_blocks(response.best_worker, &tiered_matches);
         let selected_remote_g2_input = RemoteKvReuseSelectionInput {
             request_id: context_id.unwrap_or_default(),
             target: response.best_worker,
@@ -1326,7 +1309,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use async_trait::async_trait;
     use dynamo_kv_router::{
@@ -1402,6 +1385,69 @@ mod tests {
             Some(&0.75)
         );
         assert_eq!(estimates.cached_tokens.get(&worker_2), Some(&12));
+    }
+
+    #[test]
+    fn remote_g2_candidates_skip_suffix_already_covered_by_target_host_pinned() {
+        let source = WorkerWithDpRank::new(1, 0);
+        let target = WorkerWithDpRank::new(2, 0);
+        let mut device_overlap_scores = OverlapScores::new();
+        device_overlap_scores.scores.insert(source, 1537);
+        device_overlap_scores.scores.insert(target, 1499);
+        let mut host_match_details = LowerTierMatchDetails::default();
+        host_match_details.hits.insert(source, 2490);
+        host_match_details.hits.insert(target, 2528);
+
+        let tiered_matches = indexer::TieredMatchDetails {
+            device: MatchDetails {
+                overlap_scores: device_overlap_scores,
+                ..Default::default()
+            },
+            lower_tier: HashMap::from([(StorageTier::HostPinned, host_match_details)]),
+        };
+        let mut config = KvRouterConfig {
+            remote_g2_reuse_enabled: true,
+            shared_cache_multiplier: 0.5,
+            remote_g2_cost_blocks: 16.0,
+            remote_g2_cost_per_block: 0.02,
+            ..Default::default()
+        };
+        config.host_cache_hit_weight = 0.75;
+        let cache_hit_estimates =
+            cache_hit_estimates_from_tiered_matches(&config, 16, &tiered_matches);
+        assert_eq!(
+            cache_hit_estimates.effective_overlap_blocks.get(&target),
+            Some(&3395.0)
+        );
+        assert_eq!(
+            remote_g2_target_local_prefix_blocks(target, &tiered_matches),
+            4027
+        );
+
+        let workers = HashMap::from([
+            (source.worker_id, ModelRuntimeConfig::new()),
+            (target.worker_id, ModelRuntimeConfig::new()),
+        ]);
+        let allowed_worker_ids = HashSet::from([target.worker_id]);
+        let block_hashes = (0..4168).map(LocalBlockHash).collect::<Vec<_>>();
+        let candidates = remote_g2_candidates_from_tiered_matches(
+            &config,
+            None,
+            &workers,
+            &block_hashes,
+            16,
+            &tiered_matches,
+            Some(&allowed_worker_ids),
+            4027,
+            "request-1",
+            1000,
+            2000,
+        );
+
+        assert!(
+            !candidates.contains_key(&target),
+            "remote G2 must not select a suffix already covered by target HostPinned"
+        );
     }
 
     struct FakeSharedCache {
