@@ -597,15 +597,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         if let Some(bootstrap_info) = &request.bootstrap_info
             && self.engine_args.is_decode()
         {
-            // DIS-2147 (F1): the decode worker waits for its own KV cache + seq slot to
-            // have capacity before connecting to the prefill bootstrap server. Gated only
-            // by capacity (block + seq) — there is no decode-side timer. The prefill side's
-            // `kv_transfer_abort_timeout_ms` is the authoritative DIS-2147 timeout; if it
-            // fires, the prefill bootstrap room closes and a later `connect_to_prefill`
-            // surfaces a closed-room error. This matches real vLLM (WAITING_FOR_REMOTE_KVS
-            // stays until admitted) and sglang (PreallocQueue blocks until pool + token
-            // budget have room). Only run the wait when abort_timeout is configured at all —
-            // preserves the pre-DIS-2147 "skip the wait entirely" behavior for legacy DGDs.
+            // DIS-2147: gate decode on local KV capacity before connecting (see
+            // wait_for_decode_kv_capacity). Only when abort_timeout is configured, to
+            // preserve the pre-DIS-2147 "skip the wait" path for legacy DGDs.
             if abort_timeout.is_some() {
                 self.wait_for_decode_kv_capacity(dp_rank)
                     .await
