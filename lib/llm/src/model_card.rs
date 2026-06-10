@@ -20,6 +20,7 @@ use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_type::{ModelInput, ModelType};
+use crate::protocols::tensor::TensorModelConfig;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_runtime::{slug::Slug, storage::kv};
@@ -671,8 +672,10 @@ pub struct ModelDeploymentCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_context: Option<Vec<PromptContextMixin>>,
 
-    /// Max context (in number of tokens) this model can handle
-    pub context_length: u32,
+    /// Architectural context maximum derived from model or tokenizer metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub architectural_max_context_length: Option<u32>,
 
     /// Size of a KV cache block.
     /// Passed to the engine, KV router, and trace replay hash path.
@@ -724,6 +727,11 @@ pub struct ModelDeploymentCard {
 
     #[serde(default)]
     pub runtime_config: ModelRuntimeConfig,
+
+    /// Tensor model configuration for tensor-serving protocols.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub tensor_model_config: Option<TensorModelConfig>,
 
     /// Media decoding configuration
     #[serde(default)]
@@ -816,6 +824,14 @@ impl ModelDeploymentCard {
         &self.slug
     }
 
+    /// Effective serving context: runtime engine limit, then architectural maximum.
+    pub fn effective_context_length(&self) -> u32 {
+        self.runtime_config
+            .context_length
+            .or(self.architectural_max_context_length)
+            .unwrap_or(0)
+    }
+
     /// Serialize the model deployment card to a JSON string
     pub fn to_json(&self) -> Result<String, anyhow::Error> {
         Ok(serde_json::to_string(self)?)
@@ -872,7 +888,7 @@ impl ModelDeploymentCard {
                     // fine. If the debug representation changes that only happens in a new release.
                     bytes_to_hash.extend(format!("{prompt_context_vec:?}").as_bytes());
                 }
-                bytes_to_hash.extend(self.context_length.to_be_bytes());
+                bytes_to_hash.extend(self.effective_context_length().to_be_bytes());
                 bytes_to_hash.extend(self.kv_cache_block_size.to_be_bytes());
 
                 // Topology fields participate in the checksum so that a rolling
@@ -1408,7 +1424,7 @@ impl ModelDeploymentCard {
         let local_path = local_path.as_ref();
 
         // This is usually the right choice
-        let context_length =
+        let architectural_max_context_length =
             crate::file_json_field(&local_path.join("config.json"), "max_position_embeddings")
                 // But sometimes this is
                 .or_else(|_| {
@@ -1417,8 +1433,8 @@ impl ModelDeploymentCard {
                         "model_max_length",
                     )
                 })
-                // If neither of those are present let the engine default it
-                .unwrap_or(0);
+                .ok()
+                .filter(|context_length| *context_length > 0);
 
         let is_mistral_model = is_exclusively_mistral_model(local_path);
 
@@ -1473,7 +1489,7 @@ impl ModelDeploymentCard {
             prompt_formatter,
             chat_template_file,
             prompt_context: None, // TODO - auto-detect prompt context
-            context_length,
+            architectural_max_context_length,
             kv_cache_block_size: 0, // set later
             migration_limit: 0,
             model_type: Default::default(),  // set later
@@ -1483,6 +1499,7 @@ impl ModelDeploymentCard {
             lora: None,
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
+            tensor_model_config: None,
             media_decoder: None,
             media_fetcher: None,
             router_config: None,
@@ -2353,6 +2370,48 @@ mod tests {
         );
         assert!(slug.path().join("special_tokens_map.json").exists());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    #[test]
+    fn effective_context_prefers_runtime_then_architecture_then_unknown() {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        assert_eq!(card.effective_context_length(), 0);
+
+        card.architectural_max_context_length = Some(32_768);
+        assert_eq!(card.effective_context_length(), 32_768);
+
+        card.runtime_config.context_length = Some(8_192);
+        assert_eq!(card.effective_context_length(), 8_192);
+
+        card.runtime_config.context_length = Some(0);
+        assert_eq!(card.effective_context_length(), 0);
+    }
+
+    #[test]
+    fn tensor_config_serializes_at_card_top_level() {
+        let mut card = ModelDeploymentCard::with_name_only("tensor");
+        card.tensor_model_config = Some(TensorModelConfig {
+            name: "tensor".to_string(),
+            ..Default::default()
+        });
+
+        let value = serde_json::to_value(&card).unwrap();
+        assert_eq!(value["tensor_model_config"]["name"], "tensor");
+        assert!(value["runtime_config"].get("tensor_model_config").is_none());
+
+        let parsed: ModelDeploymentCard = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            parsed
+                .tensor_model_config
+                .as_ref()
+                .map(|config| config.name.as_str()),
+            Some("tensor")
+        );
     }
 }
 

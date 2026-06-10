@@ -1029,12 +1029,14 @@ impl TokensWithHashes {
     /// Adds multimodal extra info for blocks.
     pub fn with_mm_infos(mut self, infos: Vec<Option<BlockExtraInfo>>) -> Self {
         self.block_mm_infos = Some(infos);
+        self.invalidate_hashes();
         self
     }
 
     /// Sets the LoRA adapter name for hash computation.
     pub fn with_lora_name(mut self, name: String) -> Self {
         self.lora_name = Some(name);
+        self.invalidate_hashes();
         self
     }
 
@@ -1052,6 +1054,10 @@ impl TokensWithHashes {
         }
 
         self.is_eagle = is_eagle;
+        self.invalidate_hashes();
+    }
+
+    fn invalidate_hashes(&mut self) {
         self.block_hashes = None;
         self.seq_hashes = None;
     }
@@ -1284,6 +1290,63 @@ mod tests {
         for (b, l) in base_hashes.iter().zip(lora_hashes.iter()) {
             assert_ne!(b, l);
         }
+    }
+
+    #[test]
+    fn test_tokens_with_hashes_lora_change_recomputes_cached_hashes() {
+        let tokens: Vec<u32> = (0..8).collect();
+        let mut with_hashes = TokensWithHashes::new(tokens.clone(), 4);
+        let base_sequence_hashes = with_hashes.get_or_compute_seq_hashes().to_vec();
+
+        let mut with_hashes = with_hashes.with_lora_name("my-adapter".to_string());
+        let actual_block_hashes = with_hashes.get_or_compute_block_hashes().to_vec();
+        let actual_sequence_hashes = with_hashes.get_or_compute_seq_hashes().to_vec();
+        let expected_block_hashes = compute_block_hash_for_seq(
+            &tokens,
+            4,
+            BlockHashOptions {
+                lora_name: Some("my-adapter"),
+                ..Default::default()
+            },
+        );
+        let expected_sequence_hashes = compute_seq_hash_for_block(&expected_block_hashes);
+
+        assert_eq!(actual_block_hashes, expected_block_hashes);
+        assert_eq!(actual_sequence_hashes, expected_sequence_hashes);
+        assert_ne!(actual_sequence_hashes, base_sequence_hashes);
+    }
+
+    #[test]
+    fn test_tokens_with_hashes_mm_change_recomputes_cached_hashes() {
+        let tokens: Vec<u32> = (0..4).collect();
+        let mm_infos = vec![
+            Some(BlockExtraInfo {
+                mm_objects: vec![BlockMmObjectInfo {
+                    mm_hash: 42,
+                    offsets: vec![(0, 1)],
+                }],
+            }),
+            None,
+        ];
+        let mut with_hashes = TokensWithHashes::new(tokens.clone(), 2);
+        let text_sequence_hashes = with_hashes.get_or_compute_seq_hashes().to_vec();
+
+        let mut with_hashes = with_hashes.with_mm_infos(mm_infos.clone());
+        let actual_block_hashes = with_hashes.get_or_compute_block_hashes().to_vec();
+        let actual_sequence_hashes = with_hashes.get_or_compute_seq_hashes().to_vec();
+        let expected_block_hashes = compute_block_hash_for_seq(
+            &tokens,
+            2,
+            BlockHashOptions {
+                block_mm_infos: Some(&mm_infos),
+                ..Default::default()
+            },
+        );
+        let expected_sequence_hashes = compute_seq_hash_for_block(&expected_block_hashes);
+
+        assert_eq!(actual_block_hashes, expected_block_hashes);
+        assert_eq!(actual_sequence_hashes, expected_sequence_hashes);
+        assert_ne!(actual_sequence_hashes, text_sequence_hashes);
     }
 
     #[test]

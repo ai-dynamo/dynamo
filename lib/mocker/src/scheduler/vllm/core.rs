@@ -18,18 +18,20 @@ use uuid::Uuid;
 use crate::common::protocols::G1;
 use crate::common::protocols::{
     DirectRequest, KvEventPublishers, MockEngineArgs, MoveBlock, OutputSignal, PreemptionMode,
-    WorkerType,
+    PrefillCost, WorkerType,
 };
 use crate::common::sequence::ActiveSequence;
+use crate::common::speculative::{SpeculativeDecodeSampler, normalize_conditional_accept_rates};
 use crate::common::utils::compute_prefill_handoff_delay_ms;
 use crate::kv_manager::KvManager;
 #[cfg(feature = "kvbm-offload")]
 use crate::kv_manager::kvbm_backend::SwapInRegistrationBlock;
 use crate::replay::TraceCollector;
-use crate::scheduler::trtllm;
+use crate::scheduler::vllm::policy::{self, AdmissionDecision};
 use crate::scheduler::{
     AdmissionEvent, CapturedRouterEventBuffer, EnginePassResult, ForwardPassSnapshot,
-    MockerMetrics, RouterEventVisibility, build_fpm_snapshot, capture_router_event_sink,
+    MockerMetrics, RouterEventVisibility, accept_length_sample, build_fpm_snapshot,
+    capture_router_event_sink,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -355,6 +357,7 @@ pub(crate) struct VllmCore {
     dp_rank: u32,
     pub(super) state: SchedulerState,
     pub(super) kv_manager: KvManager,
+    speculative_sampler: Option<SpeculativeDecodeSampler>,
     kv_event_buffer: Option<CapturedRouterEventBuffer>,
 
     /// Requests parked on pending G2→G1 swap-ins. Populated by the
@@ -371,7 +374,11 @@ pub(crate) struct VllmCore {
 
 impl VllmCore {
     pub(crate) fn new(args: MockEngineArgs) -> Self {
-        Self::new_internal(args, 0, None, KvEventPublishers::default())
+        Self::new_internal(args, 0, 0, None, KvEventPublishers::default())
+    }
+
+    pub(crate) fn new_with_worker_id(args: MockEngineArgs, worker_id: WorkerId) -> Self {
+        Self::new_internal(args, 0, worker_id, None, KvEventPublishers::default())
     }
 
     pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: WorkerId) -> Self {
@@ -379,6 +386,7 @@ impl VllmCore {
         Self::new_internal(
             args,
             0,
+            worker_id,
             Some(buffer),
             KvEventPublishers::new(Some(sink), None),
         )
@@ -389,16 +397,23 @@ impl VllmCore {
         dp_rank: u32,
         kv_event_publishers: KvEventPublishers,
     ) -> Self {
-        Self::new_internal(args, dp_rank, None, kv_event_publishers)
+        Self::new_internal(args, dp_rank, u64::from(dp_rank), None, kv_event_publishers)
     }
 
     fn new_internal(
         args: MockEngineArgs,
         dp_rank: u32,
+        worker_id: WorkerId,
         kv_event_buffer: Option<CapturedRouterEventBuffer>,
         kv_event_publishers: KvEventPublishers,
     ) -> Self {
         let args = args.normalized().expect("invalid MockEngineArgs");
+        let speculative_sampler = args.aic_nextn.map(|nextn| {
+            let rates =
+                normalize_conditional_accept_rates(nextn, args.aic_nextn_accept_rates.as_deref())
+                    .expect("normalized MTP acceptance rates");
+            SpeculativeDecodeSampler::new(rates, args.aic_mtp_seed.wrapping_add(worker_id))
+        });
         Self {
             kv_manager: KvManager::new_with_event_sink(
                 args.num_gpu_blocks,
@@ -409,6 +424,7 @@ impl VllmCore {
             args,
             dp_rank,
             state: SchedulerState::default(),
+            speculative_sampler,
             kv_event_buffer,
             #[cfg(feature = "kvbm-offload")]
             requests_awaiting_swap_in: Vec::new(),
@@ -437,26 +453,22 @@ impl VllmCore {
     pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
         let mut max_output_tokens = request.max_output_tokens;
-        if trtllm::is_no_evict(self.args.scheduling_policy()) {
-            // TRT-LLM enqueue normalization: clamp the output so prompt + output
-            // fits the KV pool (keeps the request valid and admittable).
-            if let Some(clamped) = trtllm::normalize_max_output_tokens(
-                request.tokens.len(),
-                max_output_tokens,
-                self.args.num_gpu_blocks,
-                self.args.block_size,
-            ) {
-                if clamped != max_output_tokens {
-                    tracing::warn!(%uuid, requested = max_output_tokens, clamped,
-                        "clamped TRT-LLM max_output_tokens to KV-pool capacity");
-                }
-                max_output_tokens = clamped;
+        if let Some(clamped) = policy::normalize_max_output_tokens(
+            self.args.scheduling_policy(),
+            request.tokens.len(),
+            max_output_tokens,
+            self.args.num_gpu_blocks,
+            self.args.block_size,
+        ) {
+            if clamped != max_output_tokens {
+                tracing::warn!(%uuid, requested = max_output_tokens, clamped,
+                    "clamped TRT-LLM max_output_tokens to KV-pool capacity");
             }
-            // The `None` case (prompt alone exceeds the pool) is left unchanged
-            // here on purpose: terminal rejection is decided at the admission gate,
-            // the only place that can emit the terminal rejection signal and where
-            // the no-evict footprint check lives (see `execute_pass_internal`).
+            max_output_tokens = clamped;
         }
+        // The `None` case (a TRT-LLM prompt alone leaves no decode room) is
+        // unchanged here. The waiting-admission policy owns terminal rejection
+        // because that path can emit the lifecycle signal.
         let sequence = ActiveSequence::new(
             request.tokens,
             max_output_tokens,
@@ -488,8 +500,8 @@ impl VllmCore {
         self.state.requests.len()
     }
 
-    /// Read-only view of the scheduler state, for tests in sibling modules
-    /// (e.g. `crate::scheduler::trtllm`) that assert on queue membership.
+    /// Read-only view of the scheduler state for policy tests that assert on
+    /// queue membership.
     #[cfg(test)]
     pub(crate) fn state(&self) -> &SchedulerState {
         &self.state
@@ -637,7 +649,12 @@ impl VllmCore {
     /// By passing only the uncached-suffix PLHs to the engine, we avoid
     /// redundantly re-onboarding the G1-cached prefix.
     #[cfg(feature = "kvbm-offload")]
-    fn try_park_for_swap_in(&mut self, uuid: Uuid, now_ms: f64) -> SwapInAdmissionAttempt {
+    fn try_park_for_swap_in(
+        &mut self,
+        uuid: Uuid,
+        now_ms: f64,
+        prefill_cost: &PrefillCost,
+    ) -> SwapInAdmissionAttempt {
         use crate::kv_manager::kvbm_backend::BatchSwapInOutcome;
         if !self.kv_manager.has_offload_engine() {
             return SwapInAdmissionAttempt::NoHit;
@@ -650,14 +667,13 @@ impl VllmCore {
         if !matches!(request.status, RequestStatus::Waiting) {
             return SwapInAdmissionAttempt::NoHit;
         }
-        let cost = self.kv_manager.get_prefill_cost(&request.sequence);
         let block_size = request.sequence.block_size();
-        let skip_blocks = cost.cached_tokens / block_size;
+        let skip_blocks = prefill_cost.cached_tokens / block_size;
         let plhs = request.sequence.positional_lineage_hashes();
         tracing::trace!(
             %uuid,
             now_ms,
-            cached_tokens = cost.cached_tokens,
+            cached_tokens = prefill_cost.cached_tokens,
             skip_blocks,
             plhs_len = plhs.len(),
             "kvbm-offload: swap-in admission probe"
@@ -768,6 +784,7 @@ impl VllmCore {
             match self.schedule_request(
                 uuid,
                 false,
+                None,
                 &mut token_budget,
                 &mut scheduled,
                 &mut batch_count,
@@ -797,77 +814,53 @@ impl VllmCore {
         }
 
         let max_num_running = self.args.max_num_seqs.unwrap_or(usize::MAX);
-        let trtllm_no_evict = trtllm::is_no_evict(self.args.scheduling_policy());
+        let scheduling_policy = self.args.scheduling_policy();
         let mut rejected_uuids: Vec<Uuid> = Vec::new();
         while !preempted_any && self.state.running.len() < max_num_running {
             let Some(uuid) = self.state.next_waiting_uuid() else {
                 break;
             };
-            // TRT-LLM GUARANTEED_NO_EVICT capacity gate: only admit a waiting
-            // request if its prompt + max_output footprint fits after the
-            // to-completion reservations of all running requests. Halt at the
-            // first non-fitting candidate (no skip-ahead) to preserve FIFO
-            // fairness, matching TRT-LLM's `capacityScheduler.cpp`.
-            if trtllm_no_evict {
-                // "Can it ever fit?" uses the UNDISCOUNTED footprint: a reused
-                // prefix block stays physically resident while the request runs, so
-                // a request whose full footprint exceeds the whole pool can never be
-                // admitted even when reusing an active prefix. Terminally reject it —
-                // leaving it at the FIFO head would block every follower and hang
-                // offline (`in_flight`) / live (`waiter`) replay. The terminal signal
-                // is emitted after `emit_ready_tokens`.
-                let footprint = self
+            let decision = {
+                let request = self
                     .state
                     .requests
                     .get(&uuid)
-                    .map(|request| request.sequence.to_completion_blocks())
-                    .unwrap_or(0);
-                if footprint > self.args.num_gpu_blocks {
-                    tracing::warn!(
-                        %uuid,
-                        footprint,
-                        num_gpu_blocks = self.args.num_gpu_blocks,
-                        "rejecting TRT-LLM request whose footprint exceeds the entire KV pool"
-                    );
-                    rejected_uuids.push(uuid);
-                    self.drop_request(uuid);
-                    continue;
-                }
-                // "Can it be admitted now?" uses the prefix-discounted `needed`
-                // against the reservation-aware free pool.
-                let needed = self
-                    .state
-                    .requests
-                    .get(&uuid)
-                    .map(|request| {
-                        trtllm::blocks_needed_to_finish(
-                            &request.sequence,
-                            self.args.block_size,
-                            &self.kv_manager,
-                        )
-                    })
-                    .unwrap_or(0);
+                    .expect("waiting request missing from state");
                 let running_seqs = self
                     .state
                     .running
                     .iter()
                     .filter_map(|running_uuid| self.state.requests.get(running_uuid))
                     .map(|request| &request.sequence);
-                if needed
-                    > trtllm::available_blocks(
-                        running_seqs,
-                        self.args.num_gpu_blocks,
-                        self.args.block_size,
-                        &self.kv_manager,
-                    )
-                {
-                    // Fits the pool but not right now (running reservations);
-                    // halt here (FIFO, no skip-ahead) and retry next pass.
+                policy::decide_waiting_admission(
+                    scheduling_policy,
+                    &request.sequence,
+                    request.status == RequestStatus::Waiting,
+                    running_seqs,
+                    self.args.num_gpu_blocks,
+                    self.args.block_size,
+                    &self.kv_manager,
+                )
+            };
+            let prefill_cost = match decision {
+                AdmissionDecision::Admit { prefill_cost } => prefill_cost,
+                AdmissionDecision::Wait => {
                     break;
                 }
-            }
+                AdmissionDecision::Reject => {
+                    tracing::warn!(
+                        %uuid,
+                        ?scheduling_policy,
+                        num_gpu_blocks = self.args.num_gpu_blocks,
+                        "rejecting request whose admission footprint exceeds the entire KV pool"
+                    );
+                    rejected_uuids.push(uuid);
+                    self.drop_request(uuid);
+                    continue;
+                }
+            };
             #[cfg(feature = "kvbm-offload")]
-            match self.try_park_for_swap_in(uuid, now_ms) {
+            match self.try_park_for_swap_in(uuid, now_ms, &prefill_cost) {
                 SwapInAdmissionAttempt::Parked => continue,
                 SwapInAdmissionAttempt::BlockedOnG1Offload => break,
                 SwapInAdmissionAttempt::NoHit => {}
@@ -875,6 +868,7 @@ impl VllmCore {
             match self.schedule_request(
                 uuid,
                 true,
+                Some(&prefill_cost),
                 &mut token_budget,
                 &mut scheduled,
                 &mut batch_count,
@@ -940,6 +934,8 @@ impl VllmCore {
         }
 
         let fpm = self.compute_fpm(&scheduled, (end_ms - now_ms) / 1000.0);
+        let (accept_length_output_tokens, accept_length_decode_forwards) =
+            accept_length_sample(&output_signals);
         self.state.debug_assert_invariants();
         EnginePassResult {
             end_ms,
@@ -954,6 +950,8 @@ impl VllmCore {
                 .map(CapturedRouterEventBuffer::drain)
                 .unwrap_or_default(),
             fpm: Some(fpm),
+            accept_length_output_tokens,
+            accept_length_decode_forwards,
         }
     }
 
@@ -972,11 +970,10 @@ impl VllmCore {
     /// Under vLLM semantics this evicts a running request on KV pressure. Under
     /// TRT-LLM `GUARANTEED_NO_EVICT` preemption must never happen — the capacity
     /// gate reserves blocks for every admitted request up front — so reaching
-    /// this path is reported as a hard error (see
-    /// [`trtllm::report_no_evict_violation`]) and nothing is evicted.
+    /// this path is reported as a hard error and nothing is evicted.
     pub(super) fn policy_preempt(&mut self) -> Option<PreemptedRequest> {
-        if trtllm::is_no_evict(self.args.scheduling_policy()) {
-            trtllm::report_no_evict_violation();
+        if !policy::allows_preemption(self.args.scheduling_policy()) {
+            policy::report_no_preemption_violation();
             return None;
         }
         self.state.preempt(self.args.preemption_mode)
@@ -1035,6 +1032,7 @@ impl VllmCore {
         &mut self,
         uuid: Uuid,
         from_waiting: bool,
+        prefill_cost: Option<&PrefillCost>,
         token_budget: &mut usize,
         scheduled: &mut FxHashMap<Uuid, ScheduledWork>,
         batch_count: &mut usize,
@@ -1049,9 +1047,13 @@ impl VllmCore {
             .unwrap_or_else(|| panic!("schedule_request: {uuid} missing from state.requests"));
         request.debug_assert_invariants(uuid);
         let cached_prefix_tokens = if request.num_computed_tokens == 0 {
-            self.kv_manager
-                .get_prefill_cost(&request.sequence)
-                .cached_tokens
+            prefill_cost
+                .map(|cost| cost.cached_tokens)
+                .unwrap_or_else(|| {
+                    self.kv_manager
+                        .get_prefill_cost(&request.sequence)
+                        .cached_tokens
+                })
         } else {
             0
         };
@@ -1229,6 +1231,10 @@ impl VllmCore {
             return (Duration::ZERO, Vec::new());
         }
 
+        if self.speculative_sampler.is_some() {
+            return self.emit_speculative_ready_tokens(ready, collector, decode_start_ms);
+        }
+
         // For prefill workers, the first decode token is produced as part of
         // the prefill forward pass — no separate decode iteration needed.
         let (decode_time, decode_end_ms) = if self.args.worker_type == WorkerType::Prefill {
@@ -1315,6 +1321,203 @@ impl VllmCore {
                 self.state.compact_running();
             }
             return (Duration::ZERO, output_signals);
+        }
+
+        if running_changed {
+            self.state.compact_running();
+        }
+        (decode_time, output_signals)
+    }
+
+    fn emit_speculative_ready_tokens(
+        &mut self,
+        mut ready: Vec<Uuid>,
+        collector: Option<&mut TraceCollector>,
+        decode_start_ms: f64,
+    ) -> (Duration, Vec<OutputSignal>) {
+        let max_burst = if self.args.worker_type == WorkerType::Prefill {
+            1
+        } else {
+            self.args
+                .aic_nextn
+                .expect("speculative sampler requires nextn")
+                + 1
+        };
+        let mut running_changed = false;
+        let mut reservation = loop {
+            let required_blocks = ready
+                .iter()
+                .filter_map(|uuid| self.state.requests.get(uuid))
+                .map(|request| {
+                    let remaining = request
+                        .sequence
+                        .max_output_tokens()
+                        .saturating_sub(request.sequence.generated_tokens());
+                    let burst = max_burst.min(remaining);
+                    let current_blocks = request.sequence.len().div_ceil(self.args.block_size);
+                    let target_blocks =
+                        (request.sequence.len() + burst).div_ceil(self.args.block_size);
+                    target_blocks.saturating_sub(current_blocks)
+                })
+                .sum();
+
+            if let Some(reservation) = self.kv_manager.reserve_decode_blocks(required_blocks) {
+                break reservation;
+            }
+
+            let Some(preempted) = self.policy_preempt() else {
+                if running_changed {
+                    self.state.compact_running();
+                }
+                return (Duration::ZERO, Vec::new());
+            };
+            running_changed = true;
+            for signal in preempted.signals {
+                self.kv_manager.process(&signal);
+            }
+
+            ready.clear();
+            for uuid in self.state.running.iter().copied() {
+                let Some(request) = self.state.requests.get(&uuid) else {
+                    continue;
+                };
+                if request.num_computed_tokens == request.sequence.len()
+                    && request.sequence.generated_tokens() < request.sequence.max_output_tokens()
+                {
+                    ready.push(uuid);
+                }
+            }
+            if ready.is_empty() {
+                self.state.compact_running();
+                return (Duration::ZERO, Vec::new());
+            }
+        };
+
+        let total_length = ready
+            .iter()
+            .filter_map(|uuid| self.state.requests.get(uuid))
+            .map(|request| request.sequence.len())
+            .sum::<usize>();
+        let (decode_time, decode_end_ms) = if self.args.worker_type == WorkerType::Prefill {
+            (Duration::ZERO, decode_start_ms)
+        } else {
+            let active_kv_tokens = self
+                .kv_manager
+                .num_active_blocks()
+                .saturating_sub(reservation.len())
+                * self.args.block_size;
+            let total_kv_tokens = self.args.num_gpu_blocks * self.args.block_size;
+            let context_length = total_length / ready.len();
+            let decode_ms = self.args.perf_model.predict_decode_time(
+                ready.len(),
+                active_kv_tokens,
+                context_length,
+                total_kv_tokens,
+            );
+            let duration = scale_decode_time(decode_ms, &self.args);
+            (duration, decode_start_ms + duration.as_secs_f64() * 1000.0)
+        };
+
+        let sampled_bursts = {
+            let sampler = self
+                .speculative_sampler
+                .as_mut()
+                .expect("speculative sampler checked above");
+            ready
+                .iter()
+                .map(|uuid| {
+                    let request = self
+                        .state
+                        .requests
+                        .get(uuid)
+                        .expect("ready request must remain active");
+                    let remaining = request
+                        .sequence
+                        .max_output_tokens()
+                        .saturating_sub(request.sequence.generated_tokens());
+                    let burst = if self.args.worker_type == WorkerType::Prefill {
+                        remaining.min(1)
+                    } else {
+                        sampler.sample_output_tokens(remaining)
+                    };
+                    (*uuid, burst)
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut output_signals =
+            Vec::with_capacity(sampled_bursts.iter().map(|(_, burst)| *burst).sum());
+        for (uuid, burst) in sampled_bursts {
+            let mut completed = false;
+            for _ in 0..burst {
+                let signals = {
+                    let request = self
+                        .state
+                        .requests
+                        .get_mut(&uuid)
+                        .expect("sampled request must remain active");
+                    request.sequence.generate()
+                };
+                for signal in &signals {
+                    self.kv_manager
+                        .process_decode_signal(signal, &mut reservation);
+                }
+
+                let (is_complete, prompt_tokens) = {
+                    let request = self
+                        .state
+                        .requests
+                        .get_mut(&uuid)
+                        .expect("sampled request must remain active");
+                    let is_complete =
+                        request.sequence.generated_tokens() >= request.sequence.max_output_tokens();
+                    if !is_complete {
+                        request.sequence.commit_allocation(request.sequence.len());
+                    }
+                    (is_complete, request.sequence.num_input_tokens())
+                };
+                output_signals.push(OutputSignal {
+                    uuid,
+                    completed: is_complete,
+                    rejected: false,
+                    handoff_delay_ms: compute_prefill_handoff_delay_ms(
+                        self.args.worker_type,
+                        is_complete,
+                        prompt_tokens,
+                        self.args.kv_transfer_bandwidth,
+                        self.args.kv_bytes_per_token,
+                    ),
+                });
+                if is_complete {
+                    completed = true;
+                    break;
+                }
+            }
+
+            if completed {
+                self.state.complete(&uuid);
+                running_changed = true;
+                continue;
+            }
+
+            let request = self
+                .state
+                .requests
+                .get_mut(&uuid)
+                .expect("nonterminal sampled request must remain active");
+            request.num_computed_tokens = request.sequence.len().saturating_sub(1);
+            request.debug_assert_progress(uuid);
+            debug_assert_eq!(
+                request.sequence.len() - request.num_computed_tokens,
+                1,
+                "nonterminal speculative decode must leave exactly one dangling token"
+            );
+        }
+
+        if let Some(collector) = collector {
+            for signal in &output_signals {
+                collector.on_token(signal.uuid, decode_end_ms);
+            }
         }
 
         if running_changed {

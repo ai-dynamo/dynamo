@@ -49,6 +49,7 @@ class TrafficObservation:
     isl: float
     osl: float
     kv_hit_rate: Optional[float] = None
+    accept_length: Optional[float] = None
 
 
 @dataclass
@@ -106,7 +107,8 @@ class TickDiagnostics:
     estimated_ttft_ms: Optional[float] = None
     estimated_itl_ms: Optional[float] = None
 
-    # Throughput-scaling: predicted next-interval traffic
+    # Throughput-scaling: predicted next-interval traffic and last-value
+    # runtime metadata used by throughput decisions.
     predicted_num_req: Optional[float] = None
     predicted_isl: Optional[float] = None
     predicted_osl: Optional[float] = None
@@ -197,6 +199,7 @@ class EngineCapabilities:
     context_length: Optional[int] = None
     max_kv_tokens: Optional[int] = None
     kv_cache_block_size: Optional[int] = None
+    speculative_nextn: Optional[int] = None
 
 
 @dataclass
