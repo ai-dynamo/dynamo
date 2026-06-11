@@ -2,84 +2,46 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "Qwen3-VL-30B"
-subtitle: "vLLM aggregated multimodal recipe with embedding cache enabled on GB200."
+subtitle: "Serve Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 with Dynamo and vLLM, with the multimodal embedding cache enabled on GB200."
 ---
 
-<div className="dynamo-model-detail-hero">
-<div className="dynamo-model-hero-copy">
-<div className="dynamo-model-title-lockup">
-<img className="dynamo-model-logo large" src="../assets/img/recipes/providers/qwen.webp" alt="" />
-<div>
-<p className="dynamo-recipe-eyebrow">Qwen / vLLM / 1x GB200</p>
-<h2>vLLM aggregated multimodal recipe with embedding cache enabled on GB200.</h2>
-</div>
-</div>
-<p>Use the cache-on recipe for repeated-image multimodal traffic. The cache-off run is a benchmark baseline, not a separate recipe target.</p>
-<div className="dynamo-hero-actions">
-<a href="#recipe-targets">Recipe targets</a>
-<a href="#deploy">Deploy</a>
-<a href="#smoke-test">Smoke test</a>
-<a href="#benchmark">Benchmark</a>
-<a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-vl-30b">Source</a>
-</div>
-</div>
+This recipe deploys Qwen3-VL-30B aggregated on a single GB200 with a 10 GiB multimodal embedding cache, delivering +16% output throughput and -28% average TTFT versus cache-off on repeated-image traffic. The cache-off run is a benchmark baseline, not a separate recipe target.
 
-<div className="dynamo-recommendation-card">
-<span>Primary target</span>
-<strong>Aggregated + embedding cache ON</strong>
-<p>+16% output throughput and -28% average TTFT versus cache-off when repeated images remain cacheable.</p>
-<div className="dynamo-recommendation-facts">
-<div><span>Model</span><strong>Qwen/Qwen3-VL-30B-A3B-Instruct-FP8</strong></div>
-<div><span>Traffic</span><strong>1,000 requests, 1 image each, 200-image pool (80% reuse)</strong></div>
-<div><span>Technique</span><strong>Aggregated serving; Embedding cache</strong></div>
+<div className="dynamo-target-picker static">
+<p className="dynamo-target-picker-title">Deployment target</p>
+<div className="dynamo-target-picker-summary">
+<span><b>Checkpoint</b> Qwen/Qwen3-VL-30B-A3B-Instruct-FP8</span>
+<span><b>GPUs</b> 1x GB200</span>
+<span><b>Techniques</b> Aggregated serving, embedding cache (10 GiB)</span>
+<span><b>Trace</b> 1,000 requests, 1 image each, 200-image pool (80% reuse)</span>
 </div>
-</div>
-</div>
-
-## Recipe Targets
-
-<div id="recipe-targets"></div>
-
-<div className="dynamo-variant-table-wrap">
-<table className="dynamo-variant-table dynamo-recipe-target-table">
-<thead><tr><th>Recipe target</th><th>Runtime</th><th>Hardware</th><th>Traffic</th><th>Technique</th><th>Artifacts</th></tr></thead>
-<tbody><tr className="recommended">
-<td><strong>Aggregated + embedding cache ON</strong><span>Higher output TPS and lower TTFT when repeated images remain cacheable.</span></td>
-<td>vLLM</td>
-<td>1x GB200</td>
-<td>1,000 requests, 80% image reuse</td>
-<td>Aggregated serving; Embedding cache (10 GiB)</td>
-<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-vl-30b/vllm/agg-embedding-cache/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-vl-30b/vllm/agg-embedding-cache/perf.yaml">perf.yaml</a></td>
-</tr></tbody>
-</table>
 </div>
 
 ## Prerequisites
 
-<div className="dynamo-prereq-grid">
-<div><span>Hardware</span><strong>1x GB200</strong></div>
-<div><span>Runtime</span><strong>vllm-runtime:1.2.0 image; embedding cache uses vLLM 0.17+ native ec_both ECConnector</strong></div>
-<div><span>Dataset</span><strong>Generated multimodal JSONL (data-gen job)</strong></div>
-<div><span>Traffic</span><strong>1,000 requests; 400 text tokens each; 80% image reuse</strong></div>
-<div><span>Cache setting</span><strong>DYN_MULTIMODAL_EMBEDDING_CACHE_GB=10</strong></div>
-<div><span>Setup assets</span><strong>model-cache.yaml (3 PVCs), model-download.yaml, generate-datasets-job.yaml</strong></div>
-</div>
+- A Kubernetes cluster with the Dynamo platform (operator) installed and **1x GB200** available.
+- A Hugging Face token (the model downloads via the `hf-token-secret`).
+- The `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0` image (already pinned in `deploy.yaml`); the embedding cache uses vLLM 0.17+'s native `ec_both` ECConnector.
+
+Create the namespace and token secret:
+
+```bash
+export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token" \
+  -n ${NAMESPACE}
+```
 
 <Warning>
-Edit cluster-specific values before applying these manifests: `storageClassName: "your-storage-class-name"` in `model-cache/model-cache.yaml`, your namespace, and the `hf-token-secret` Hugging Face token secret. The Dynamo Platform (operator) must be installed in the cluster.
+Edit cluster-specific values before applying these manifests: `storageClassName: "your-storage-class-name"` in `model-cache/model-cache.yaml` and your namespace.
 </Warning>
 
-## Deployment Instructions
-
-<div id="deploy"></div>
-
-<h3 id="deploy-aggregated-embedding-cache-on">Aggregated + embedding cache ON</h3>
+## Deploy
 
 Create storage, download the model, generate the dataset, then deploy. The dataset generation job is part of the reproduce path — `perf.yaml` fails fast if the generated JSONL is missing.
 
 ```bash
-export NAMESPACE=your-namespace
-
 # 1. Create the model-cache, compilation-cache, and perf-cache PVCs.
 kubectl apply -f recipes/qwen3-vl-30b/model-cache/model-cache.yaml -n ${NAMESPACE}
 
@@ -98,12 +60,9 @@ kubectl wait --for=condition=Ready dynamographdeployment/qwen3-vl-agg -n ${NAMES
 
 ## Smoke Test
 
-<div id="smoke-test"></div>
-
 Run a small request before starting the benchmark. The Dynamo operator creates the `qwen3-vl-agg-frontend` service for this deployment.
 
 ```bash
-export NAMESPACE=your-namespace
 kubectl port-forward svc/qwen3-vl-agg-frontend 8000:8000 -n ${NAMESPACE}
 
 curl http://localhost:8000/v1/chat/completions \
@@ -111,16 +70,15 @@ curl http://localhost:8000/v1/chat/completions \
   -d '{"model":"Qwen/Qwen3-VL-30B-A3B-Instruct-FP8","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
 ```
 
-## Benchmark Instructions
+## Benchmark
 
-<div id="benchmark"></div>
-
-<h3>Aggregated + embedding cache ON</h3>
-
-The checked-in `perf.yaml` wraps this AIPerf run (aiperf 0.6.0). Use the manifest for the Kubernetes pod, and keep this command visible so the traffic shape is understandable.
+The checked-in [`perf.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-vl-30b/vllm/agg-embedding-cache/perf.yaml) wraps this AIPerf run (aiperf 0.6.0):
 
 ```bash
-aiperf profile --model Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 --input-file qwen3_vl_1000req_1img_pool200.jsonl --custom-dataset-type single_turn --url http://qwen3-vl-agg-frontend:8000 --streaming --request-count 1000 --concurrency 64 --request-rate-mode constant --warmup-request-count 3 --extra-inputs max_tokens:150 --extra-inputs min_tokens:150 --extra-inputs ignore_eos:true
+aiperf profile --model Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 --input-file qwen3_vl_1000req_1img_pool200.jsonl \
+  --custom-dataset-type single_turn --url http://qwen3-vl-agg-frontend:8000 --streaming \
+  --request-count 1000 --concurrency 64 --request-rate-mode constant --warmup-request-count 3 \
+  --extra-inputs max_tokens:150 --extra-inputs min_tokens:150 --extra-inputs ignore_eos:true
 ```
 
 ```bash

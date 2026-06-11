@@ -2858,3 +2858,60 @@ body:has(input[name="recipe-sku"][value="h200"]:checked):has(input[name="recipe-
     opacity: 1;
     font-weight: 600;
 }
+
+/* Picker dimension extensions: hopper/blackwell SKUs and a generic
+   recipe-variant axis for single-dimension pickers (topology, build, etc.) */
+body:has(input[name="recipe-sku"][value="hopper"]:checked) [data-sku]:not([data-sku~="hopper"]),
+body:has(input[name="recipe-sku"][value="blackwell"]:checked) [data-sku]:not([data-sku~="blackwell"]),
+body:has(input[name="recipe-variant"][value="agg"]:checked) [data-variant]:not([data-variant~="agg"]),
+body:has(input[name="recipe-variant"][value="disagg"]:checked) [data-variant]:not([data-variant~="disagg"]),
+body:has(input[name="recipe-variant"][value="disagg-single-node"]:checked) [data-variant]:not([data-variant~="disagg-single-node"]),
+body:has(input[name="recipe-variant"][value="disagg-multi-node"]:checked) [data-variant]:not([data-variant~="disagg-multi-node"]),
+body:has(input[name="recipe-variant"][value="trtllm-agg"]:checked) [data-variant]:not([data-variant~="trtllm-agg"]),
+body:has(input[name="recipe-variant"][value="trtllm-disagg"]:checked) [data-variant]:not([data-variant~="trtllm-disagg"]),
+body:has(input[name="recipe-variant"][value="vllm-disagg"]:checked) [data-variant]:not([data-variant~="vllm-disagg"]),
+body:has(input[name="recipe-variant"][value="standard"]:checked) [data-variant]:not([data-variant~="standard"]),
+body:has(input[name="recipe-variant"][value="efa"]:checked) [data-variant]:not([data-variant~="efa"]),
+body:has(input[name="recipe-variant"][value="kvbm"]:checked) [data-variant]:not([data-variant~="kvbm"]) {
+    display: none;
+}
+
+/* Row highlighting for the recipe-variant axis */
+body:has(input[name="recipe-variant"]:checked) tr[data-variant] {
+    opacity: 0.55;
+}
+
+body:has(input[name="recipe-variant"][value="agg"]:checked) tr[data-variant~="agg"],
+body:has(input[name="recipe-variant"][value="disagg"]:checked) tr[data-variant~="disagg"],
+body:has(input[name="recipe-variant"][value="disagg-single-node"]:checked) tr[data-variant~="disagg-single-node"],
+body:has(input[name="recipe-variant"][value="disagg-multi-node"]:checked) tr[data-variant~="disagg-multi-node"],
+body:has(input[name="recipe-variant"][value="trtllm-agg"]:checked) tr[data-variant~="trtllm-agg"],
+body:has(input[name="recipe-variant"][value="trtllm-disagg"]:checked) tr[data-variant~="trtllm-disagg"],
+body:has(input[name="recipe-variant"][value="vllm-disagg"]:checked) tr[data-variant~="vllm-disagg"],
+body:has(input[name="recipe-variant"][value="standard"]:checked) tr[data-variant~="standard"],
+body:has(input[name="recipe-variant"][value="efa"]:checked) tr[data-variant~="efa"],
+body:has(input[name="recipe-variant"][value="kvbm"]:checked) tr[data-variant~="kvbm"] {
+    opacity: 1;
+    font-weight: 600;
+}
+
+/* Combined sku x variant row highlighting (Hopper/Blackwell matrix pages) */
+body:has(input[name="recipe-sku"]:checked):has(input[name="recipe-variant"]:checked) tr[data-sku][data-variant] {
+    opacity: 0.55;
+    font-weight: 400;
+}
+
+body:has(input[name="recipe-sku"][value="hopper"]:checked):has(input[name="recipe-variant"][value="agg"]:checked) tr[data-sku~="hopper"][data-variant~="agg"],
+body:has(input[name="recipe-sku"][value="hopper"]:checked):has(input[name="recipe-variant"][value="disagg"]:checked) tr[data-sku~="hopper"][data-variant~="disagg"],
+body:has(input[name="recipe-sku"][value="blackwell"]:checked):has(input[name="recipe-variant"][value="agg"]:checked) tr[data-sku~="blackwell"][data-variant~="agg"],
+body:has(input[name="recipe-sku"][value="blackwell"]:checked):has(input[name="recipe-variant"][value="disagg"]:checked) tr[data-sku~="blackwell"][data-variant~="disagg"] {
+    opacity: 1;
+    font-weight: 600;
+}
+
+/* Static single-target summary panel (degenerate, no-picker form) */
+.dynamo-target-picker.static .dynamo-target-picker-summary {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: none;
+}

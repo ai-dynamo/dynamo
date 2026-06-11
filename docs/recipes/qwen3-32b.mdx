@@ -2,102 +2,80 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "Qwen3-32B"
-subtitle: "Disaggregated vLLM serving with KV-aware routing for long-context prefix reuse."
+subtitle: "Serve Qwen3-32B with Dynamo and vLLM, with KV-aware routing or single-GPU KVBM offload."
 ---
 
-<div className="dynamo-model-detail-hero">
-<div className="dynamo-model-hero-copy">
-<div className="dynamo-model-title-lockup">
-<img className="dynamo-model-logo large" src="../assets/img/recipes/providers/qwen.webp" alt="" />
-<div>
-<p className="dynamo-recipe-eyebrow">Qwen / vLLM / 16x H200</p>
-<h2>Disaggregated vLLM serving with KV-aware routing for long-context prefix reuse.</h2>
-</div>
-</div>
-<p>Start here for Qwen3-32B prefix-reuse traffic: use the disaggregated KV-router target for trace-backed multi-node serving, or the single-GPU KVBM target when you want host-memory KV offload on one GPU.</p>
-<div className="dynamo-hero-actions">
-<a href="#recipe-targets">Recipe targets</a>
-<a href="#deploy">Deploy</a>
-<a href="#smoke-test">Smoke test</a>
-<a href="#benchmark">Benchmark</a>
-<a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b">Source</a>
-</div>
-</div>
+Two validated vLLM targets for `Qwen/Qwen3-32B` prefix-reuse traffic: a 16x H200 disaggregated deployment with KV-aware routing, benchmarked against a real Mooncake conversation trace (12,031 requests, 12K avg ISL), and a single-GPU aggregated deployment with KVBM host-memory KV offload for long or repeated prompts. Pick your target; every command on this page updates to match.
 
-<div className="dynamo-recommendation-card">
-<span>Primary target</span>
-<strong>Disagg + KV router</strong>
-<p>Best candidate when prefix reuse is high enough for KV-aware routing to matter.</p>
-<div className="dynamo-recommendation-facts">
-<div><span>Model</span><strong>Qwen/Qwen3-32B</strong></div>
-<div><span>Traffic</span><strong>Mooncake conversation trace, 12K avg ISL</strong></div>
-<div><span>Technique</span><strong>Disaggregated prefill/decode; KV-aware routing</strong></div>
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Target</span>
+<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" defaultChecked />
+<label htmlFor="recipe-variant-disagg">Disagg + KV router (16x H200) <span className="dynamo-target-picker-hint">Recommended</span></label>
+<input type="radio" id="recipe-variant-kvbm" name="recipe-variant" value="kvbm" />
+<label htmlFor="recipe-variant-kvbm">Aggregated + KVBM (1 GPU)</label>
 </div>
+<div className="dynamo-target-picker-summary" data-variant="disagg">
+<span><b>Checkpoint</b> Qwen/Qwen3-32B</span>
+<span><b>Precision</b> BF16</span>
+<span><b>GPUs</b> 16x H200, 2 nodes: 6x TP2 prefill + 2x TP2 decode</span>
+<span><b>Technique</b> Disaggregated P/D + KV-aware routing</span>
+<span><b>Trace</b> Mooncake conversation, 12K avg ISL / 343 avg OSL</span>
 </div>
+<div className="dynamo-target-picker-summary" data-variant="kvbm">
+<span><b>Checkpoint</b> Qwen/Qwen3-32B</span>
+<span><b>Precision</b> BF16</span>
+<span><b>GPUs</b> 1x H200 or B200</span>
+<span><b>Technique</b> Aggregated + KVBM host-memory KV offload (100 GB CPU cache)</span>
+<span><b>Workload</b> Long or repeated prompts with prefix reuse</span>
 </div>
-
-## Recipe Targets
-
-<div id="recipe-targets"></div>
-
-<div className="dynamo-variant-table-wrap">
-<table className="dynamo-variant-table dynamo-recipe-target-table">
-<thead><tr><th>Recipe target</th><th>Runtime</th><th>Hardware</th><th>Traffic</th><th>Technique</th><th>Artifacts</th></tr></thead>
-<tbody><tr className="recommended">
-<td><strong>Disagg + KV router</strong><span>6x prefill + 2x decode workers (TP2 each); best candidate when prefix reuse is high enough for KV-aware routing to matter.</span></td>
-<td>vLLM</td>
-<td>16x H200 (2 nodes)</td>
-<td>Mooncake conversation trace: 12,031 requests, 12K avg ISL, 343 avg OSL</td>
-<td>Disaggregated prefill/decode; KV-aware routing</td>
-<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/disagg-kv-router/perf.yaml">perf.yaml</a></td>
-</tr><tr>
-<td><strong>Aggregated + KVBM</strong><span>Single-GPU aggregated serving with KVBM host-memory KV offload for long or repeated prompts.</span></td>
-<td>vLLM</td>
-<td>1x H200 or B200</td>
-<td>Long or repeated prompts with prefix reuse</td>
-<td>Aggregated serving; KVBM host-memory KV offload</td>
-<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/agg-kvbm/deploy.yaml">deploy.yaml</a></td>
-</tr></tbody>
-</table>
 </div>
 
 ## Prerequisites
 
-<div className="dynamo-prereq-grid">
-<div><span>Hardware</span><strong>16x H200 (2 nodes) for the P/D target; 1x H200/B200 for KVBM</strong></div>
-<div><span>Runtime</span><strong>vLLM Dynamo runtime</strong></div>
-<div><span>Dataset</span><strong>Mooncake conversation trace (FAST25)</strong></div>
-<div><span>Traffic</span><strong>12,031 requests over ~59 min; 12K avg input tokens</strong></div>
-<div><span>Goodput target</span><strong>TTFT 2s / ITL 25ms</strong></div>
-<div><span>Setup assets</span><strong>model-cache/cache.yaml and model-cache/model-download.yaml</strong></div>
+<div data-variant="disagg">
+
+- A Kubernetes cluster with the Dynamo platform installed and **16x H200 across 2 nodes** available.
+
 </div>
+
+<div data-variant="kvbm">
+
+- A Kubernetes cluster with the Dynamo platform installed and **1x H200 or B200** available, on a node with roughly 150 GiB of free host memory for the KVBM CPU cache.
+
+</div>
+
+- A Hugging Face token with access to `Qwen/Qwen3-32B`.
+
+Create the namespace and token secret:
+
+```bash
+export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token" \
+  -n ${NAMESPACE}
+```
 
 <Warning>
 Edit namespace, storage class, image tags, node selectors, resource claims, Hugging Face secrets, and cluster-specific placement before applying these manifests.
 </Warning>
 
-## Deployment Instructions
+## Deploy
 
-<div id="deploy"></div>
-
-Create the Hugging Face token secret and prepare the model cache once, then deploy a target.
+Prepare the model cache and download the checkpoint (shared by both targets — `cache.yaml` creates the `model-cache`, `compilation-cache`, and `perf-cache` PVCs):
 
 ```bash
-export NAMESPACE=your-namespace
-
-kubectl create secret generic hf-token-secret \
-  --from-literal=HF_TOKEN="your-token" \
-  -n ${NAMESPACE}
-
 # Edit storageClassName in cache.yaml to match your cluster first.
 kubectl apply -f recipes/qwen3-32b/model-cache/cache.yaml -n ${NAMESPACE}
 kubectl apply -f recipes/qwen3-32b/model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=600s
 ```
 
-<h3 id="deploy-disagg-kv-router">Disagg + KV router</h3>
+Then deploy:
 
-Best candidate when prefix reuse is high enough for KV-aware routing to matter.
+<div data-variant="disagg">
 
 ```bash
 kubectl apply -f recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml -n ${NAMESPACE}
@@ -107,9 +85,11 @@ kubectl wait --for=condition=ready pod \
   -n ${NAMESPACE} --timeout=1200s
 ```
 
-<h3 id="deploy-aggregated-kvbm">Aggregated + KVBM</h3>
+</div>
 
-Single-GPU deployment with the KV Block Manager offloading cold KV blocks to pinned host memory (`DYN_KVBM_CPU_CACHE_GB=100`). The node needs roughly 150 GiB of free host memory; if you raise the cache size, bump the worker's memory requests/limits by the same delta.
+<div data-variant="kvbm">
+
+The KV Block Manager offloads cold KV blocks to pinned host memory (`DYN_KVBM_CPU_CACHE_GB=100`). If you raise the cache size, bump the worker's memory requests/limits by the same delta.
 
 ```bash
 kubectl apply -f recipes/qwen3-32b/vllm/agg-kvbm/deploy.yaml -n ${NAMESPACE}
@@ -119,32 +99,39 @@ kubectl wait --for=condition=ready pod \
   -n ${NAMESPACE} --timeout=1200s
 ```
 
+</div>
+
 ## Smoke Test
 
-<div id="smoke-test"></div>
+Run a small request before benchmarking:
 
-Run a small request before starting the benchmark. Use the frontend service that matches your target.
+<div data-variant="disagg">
 
 ```bash
-export NAMESPACE=your-namespace
-
-# Disagg + KV router:
 kubectl port-forward svc/disagg-router-6p-2d-frontend 8000:8000 -n ${NAMESPACE}
-# Aggregated + KVBM:
-# kubectl port-forward svc/agg-kvbm-qwen3-32b-frontend 8000:8000 -n ${NAMESPACE}
+```
 
+</div>
+
+<div data-variant="kvbm">
+
+```bash
+kubectl port-forward svc/agg-kvbm-qwen3-32b-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+```bash
 curl http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"Qwen/Qwen3-32B","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
 ```
 
-## Benchmark Instructions
+<div data-variant="disagg">
 
-<div id="benchmark"></div>
+## Benchmark
 
-<h3>Disagg + KV router</h3>
-
-The checked-in `perf.yaml` wraps this AIPerf run. It downloads the Mooncake conversation trace and replays it on a fixed schedule, so throughput is set by the trace and latency is what you measure.
+The checked-in `perf.yaml` downloads the Mooncake conversation trace (FAST25; 12,031 requests over ~59 minutes) and replays it on a fixed schedule, so throughput is set by the trace and latency is what you measure. It wraps this AIPerf run:
 
 ```bash
 aiperf profile -m Qwen/Qwen3-32B \
@@ -165,6 +152,18 @@ kubectl exec -it -n ${NAMESPACE} <benchmark-pod-name> -- tmux a -t benchmark
 ```
 
 Results land on the `perf-cache` PVC under `/perf-cache/artifacts/`.
+
+</div>
+
+## Compare All Targets
+
+| | Disagg + KV router | Aggregated + KVBM |
+|---|---|---|
+| **GPUs** | 16x H200 (2 nodes) | 1x H200 or B200 |
+| **Workers** | 6x TP2 prefill + 2x TP2 decode | 1 worker |
+| **Technique** | Disaggregated P/D, KV-aware routing | Aggregated, KVBM host-memory KV offload |
+| **Workload** | Mooncake conversation trace, 12K avg ISL | Long or repeated prompts with prefix reuse |
+| **Benchmark** | Trace-replay `perf.yaml` | None checked in |
 
 ## Related Feature Benchmarks
 

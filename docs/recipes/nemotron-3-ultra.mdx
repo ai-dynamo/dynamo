@@ -2,160 +2,198 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "Nemotron-3-Ultra"
-subtitle: "Aggregated vLLM serving for NVIDIA's 550B hybrid Mamba/Attention/MoE with MTP speculative decoding on B200 and H200."
+subtitle: "Serve nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4 with Dynamo and vLLM, tuned per GPU and workload."
 ---
 
-<div className="dynamo-model-detail-hero">
-<div className="dynamo-model-hero-copy">
-<div className="dynamo-model-title-lockup">
-<img className="dynamo-model-logo large" src="../assets/img/recipes/providers/nvidia.webp" alt="" />
-<div>
-<p className="dynamo-recipe-eyebrow">NVIDIA / vLLM / 4x B200 · 8x H200</p>
-<h2>Aggregated vLLM serving for NVIDIA's 550B hybrid Mamba/Attention/MoE with MTP speculative decoding on B200 and H200.</h2>
-</div>
-</div>
-<p>Pick the target that matches your hardware and traffic shape: four aggregated MTP targets cover B200 and H200 for chat and agentic workloads, and a 1P1D disaggregated B200 fallback covers agentic traffic without MTP. All targets serve <code>nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4</code> (~550B total, ~55B active) with KV-aware routing.</p>
-<div className="dynamo-hero-actions">
-<a href="#recipe-targets">Recipe targets</a>
-<a href="#deploy">Deploy</a>
-<a href="#smoke-test">Smoke test</a>
-<a href="#benchmark">Benchmark</a>
-<a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra">Source</a>
-</div>
-</div>
+Each target below is a validated aggregated vLLM deployment of Nemotron-3-Ultra — NVIDIA's ~550B hybrid Mamba/Attention/MoE model (~55B active) — with MTP speculative decoding (1 token) and KV-aware routing; the B200 agentic target measured 310.8 system output tok/s per GPU on its trace. Pick your GPU and workload; every command on this page updates to match.
 
-<div className="dynamo-recommendation-card">
-<span>Primary target</span>
-<strong>B200 chat + MTP</strong>
-<p>Default benchmark configuration: aggregated TP4 + EP on 4x B200 with 1-token MTP speculative decoding.</p>
-<div className="dynamo-recommendation-facts">
-<div><span>Model</span><strong>nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4</strong></div>
-<div><span>Traffic</span><strong>8K/1K chat Moontrace replay</strong></div>
-<div><span>Technique</span><strong>Aggregated TP4 + EP; MTP spec dec; KV-aware routing</strong></div>
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">GPU</span>
+<input type="radio" id="recipe-sku-b200" name="recipe-sku" value="b200" defaultChecked />
+<label htmlFor="recipe-sku-b200">B200 <span className="dynamo-target-picker-hint">Recommended</span></label>
+<input type="radio" id="recipe-sku-h200" name="recipe-sku" value="h200" />
+<label htmlFor="recipe-sku-h200">H200</label>
 </div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Workload</span>
+<input type="radio" id="recipe-usecase-chat" name="recipe-usecase" value="chat" defaultChecked />
+<label htmlFor="recipe-usecase-chat">Chat</label>
+<input type="radio" id="recipe-usecase-agentic" name="recipe-usecase" value="agentic" />
+<label htmlFor="recipe-usecase-agentic">Agentic</label>
 </div>
+<div className="dynamo-target-picker-summary" data-sku="b200" data-usecase="chat">
+<span><b>Checkpoint</b> nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4</span>
+<span><b>Precision</b> NVFP4 + FP8</span>
+<span><b>GPUs / worker</b> 4x B200, TP4 + EP</span>
+<span><b>Spec decode</b> MTP, 1 token</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Trace</b> Chat 8K/1K Moontrace, 70% KV reuse</span>
 </div>
-
-## Recipe Targets
-
-<div id="recipe-targets"></div>
-
-All targets share one AIPerf trace-replay Job, [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/perf/perf.yaml) — retarget it per variant by editing its env block.
-
-<div className="dynamo-variant-table-wrap">
-<table className="dynamo-variant-table dynamo-recipe-target-table">
-<thead><tr><th>Recipe target</th><th>Runtime</th><th>Hardware</th><th>Traffic</th><th>Technique</th><th>Artifacts</th></tr></thead>
-<tbody><tr className="recommended">
-<td><strong>B200 chat + MTP</strong><span>Recommended B200 target for chat-shaped traffic; the perf Job defaults to this variant.</span></td>
-<td>vLLM</td>
-<td>4x B200</td>
-<td>8K/1K chat Moontrace</td>
-<td>Aggregated TP4 + EP; MTP (1 token); KV-aware routing</td>
-<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/vllm/agg-b200-chat-mtp/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/perf/perf.yaml">perf.yaml</a></td>
-</tr><tr className="recommended">
-<td><strong>B200 agentic + MTP</strong><span>Recommended B200 target for long-input agentic traffic; highest measured tok/s/GPU in this recipe.</span></td>
-<td>vLLM</td>
-<td>4x B200</td>
-<td>64K/400 agentic Moontrace</td>
-<td>Aggregated TP4 + EP; MTP (1 token); KV-aware routing</td>
-<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/vllm/agg-b200-agentic-mtp/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/perf/perf.yaml">perf.yaml</a></td>
-</tr><tr className="recommended">
-<td><strong>H200 chat + MTP</strong><span>Recommended H200 target for chat-shaped traffic.</span></td>
-<td>vLLM</td>
-<td>8x H200</td>
-<td>8K/1K chat Moontrace</td>
-<td>Aggregated TP8 + EP; MTP (1 token); KV-aware routing</td>
-<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/vllm/agg-h200-chat-mtp/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/perf/perf.yaml">perf.yaml</a></td>
-</tr><tr className="recommended">
-<td><strong>H200 agentic + MTP</strong><span>Recommended H200 target for long-input agentic traffic.</span></td>
-<td>vLLM</td>
-<td>8x H200</td>
-<td>64K/400 agentic Moontrace</td>
-<td>Aggregated TP8 + EP; MTP (1 token); KV-aware routing</td>
-<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/vllm/agg-h200-agentic-mtp/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/perf/perf.yaml">perf.yaml</a></td>
-</tr><tr>
-<td><strong>B200 disaggregated agentic (1P1D)</strong><span>Disaggregated fallback for agentic traffic; no MTP. Use when you want prefill/decode separation on B200.</span></td>
-<td>vLLM</td>
-<td>8x B200 (4 prefill + 4 decode)</td>
-<td>64K/400 agentic Moontrace</td>
-<td>Disaggregated 1P1D, TP4 per role; KV-aware routing + P/D transfer</td>
-<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/vllm/disagg-b200-agentic/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/perf/perf.yaml">perf.yaml</a></td>
-</tr></tbody>
-</table>
+<div className="dynamo-target-picker-summary" data-sku="b200" data-usecase="agentic">
+<span><b>Checkpoint</b> nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4</span>
+<span><b>Precision</b> NVFP4 + FP8</span>
+<span><b>GPUs / worker</b> 4x B200, TP4 + EP</span>
+<span><b>Spec decode</b> MTP, 1 token</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Trace</b> Agentic 64K/400 Moontrace, 90% KV reuse</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="h200" data-usecase="chat">
+<span><b>Checkpoint</b> nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4</span>
+<span><b>Precision</b> NVFP4 + FP8</span>
+<span><b>GPUs / worker</b> 8x H200, TP8 + EP</span>
+<span><b>Spec decode</b> MTP, 1 token</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Trace</b> Chat 8K/1K Moontrace, 70% KV reuse</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="h200" data-usecase="agentic">
+<span><b>Checkpoint</b> nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4</span>
+<span><b>Precision</b> NVFP4 + FP8</span>
+<span><b>GPUs / worker</b> 8x H200, TP8 + EP</span>
+<span><b>Spec decode</b> MTP, 1 token</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Trace</b> Agentic 64K/400 Moontrace, 90% KV reuse</span>
+</div>
 </div>
 
 ## Prerequisites
 
-<div className="dynamo-prereq-grid">
-<div><span>Hardware</span><strong>4x B200 (TP4) or 8x H200 (TP8); 8x B200 for the disaggregated target</strong></div>
-<div><span>Runtime</span><strong>nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-ultra-dev.1</strong></div>
-<div><span>Dataset</span><strong>Bundled Moontrace JSONL traces (15%, 30%, full)</strong></div>
-<div><span>Traffic</span><strong>Chat 8K/1K and agentic 64K/400 Mooncake-format replays</strong></div>
-<div><span>Secrets</span><strong>NGC pull secret nvcr-secret; HF token secret hf-token-secret</strong></div>
-<div><span>Setup assets</span><strong>model-cache/model-cache.yaml, model-download.yaml, model-validate.yaml</strong></div>
+<div data-sku="b200">
+
+- A Kubernetes cluster with the Dynamo Platform installed (DGD CRDs served) and **4x B200 per aggregated worker** available (8x B200 for the disaggregated fallback).
+- An NGC image pull secret named `nvcr-secret` for `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-ultra-dev.1`.
+- A Hugging Face token with access to `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4`.
+- A `shared-model-cache` PVC containing the tokenizer-patched Ultra model view, or permission to create and populate it with the manifests in `model-cache/` (~1200 Gi).
+
 </div>
 
-You need the Dynamo Platform installed on the target cluster with the DGD CRDs served, plus a `shared-model-cache` PVC containing the tokenizer-patched Ultra model view (or permission to create and populate it with the manifests in `model-cache/`).
+<div data-sku="h200">
 
-<Warning>
-Edit namespace, storage class, image tags, node selectors, and cluster-specific placement before applying these manifests.
-</Warning>
+- A Kubernetes cluster with the Dynamo Platform installed (DGD CRDs served) and **8x H200 per worker** available.
+- An NGC image pull secret named `nvcr-secret` for `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-ultra-dev.1`.
+- A Hugging Face token with access to `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4`.
+- A `shared-model-cache` PVC containing the tokenizer-patched Ultra model view, or permission to create and populate it with the manifests in `model-cache/` (~1200 Gi).
 
-## Deployment Instructions
+</div>
 
-<div id="deploy"></div>
-
-First create and populate the model cache, then validate the patched model view before deploying any server:
+Create the namespace and token secret:
 
 ```bash
 export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="$HF_TOKEN" \
+  -n ${NAMESPACE}
+```
 
-# Create + populate the shared model cache (edit storage class first if needed)
+<Warning>
+Edit namespace, storage class, image tags, node selectors, and cluster-specific placement in the manifests before applying them.
+</Warning>
+
+## Deploy
+
+Create and populate the model cache, then validate the patched model view before deploying any server:
+
+```bash
+# 1. Storage — edit storageClassName in model-cache.yaml first (kubectl get storageclass).
 kubectl apply -f recipes/nemotron-3-ultra/model-cache/model-cache.yaml -n ${NAMESPACE}
+
+# 2. Download the checkpoint and build the tokenizer-patched model view.
 kubectl apply -f recipes/nemotron-3-ultra/model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/nemotron-ultra-model-download -n ${NAMESPACE} --timeout=12h
 
-# Validate the patched model view (model/tokenizer/parser files) before deploying
+# 3. Validate the patched model view (model/tokenizer/parser files).
 kubectl apply -f recipes/nemotron-3-ultra/model-cache/model-validate.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/nemotron-ultra-model-validate -n ${NAMESPACE} --timeout=30m
 ```
 
-### Aggregated targets (B200/H200 × chat/agentic)
+Then deploy:
 
-Pick the SKU and use case, then apply the matching manifest. The DGD is named `ultra-agg-<sku>-<usecase>-mtp`:
+<div data-sku="b200" data-usecase="chat">
 
 ```bash
-SKU=b200       # or h200
-USECASE=chat   # or agentic
-
-kubectl apply -f recipes/nemotron-3-ultra/vllm/agg-${SKU}-${USECASE}-mtp/deploy.yaml -n ${NAMESPACE}
-
-DGD=ultra-agg-${SKU}-${USECASE}-mtp
-kubectl get dgd ${DGD} -n ${NAMESPACE} -w
+kubectl apply -f recipes/nemotron-3-ultra/vllm/agg-b200-chat-mtp/deploy.yaml -n ${NAMESPACE}
+kubectl get dgd ultra-agg-b200-chat-mtp -n ${NAMESPACE} -w
 ```
 
-No-MTP fallback manifests live alongside the MTP ones at `vllm/agg-<sku>-<usecase>-nomtp/deploy.yaml`; their DGD names carry the `-nomtp` suffix.
+</div>
 
-### B200 disaggregated agentic (1P1D)
+<div data-sku="b200" data-usecase="agentic">
 
-The disaggregated recipe is currently agentic B200, no-MTP only. The DGD is named `ultra-disagg-b200-1p1d-agentic-nomtp`:
+```bash
+kubectl apply -f recipes/nemotron-3-ultra/vllm/agg-b200-agentic-mtp/deploy.yaml -n ${NAMESPACE}
+kubectl get dgd ultra-agg-b200-agentic-mtp -n ${NAMESPACE} -w
+```
+
+### Alternate topology: disaggregated fallback (1P1D, no MTP)
+
+A disaggregated B200 agentic fallback splits prefill and decode into separate TP4 workers (8x B200 total: 4 prefill + 4 decode) with KV-aware routing plus P/D transfer, and runs without MTP. Its frontend service is `ultra-disagg-b200-1p1d-agentic-nomtp-frontend`; benchmark it by retargeting the same perf Job at that endpoint with the agentic trace at concurrency 32:
 
 ```bash
 kubectl apply -f recipes/nemotron-3-ultra/vllm/disagg-b200-agentic/deploy.yaml -n ${NAMESPACE}
 kubectl get dgd ultra-disagg-b200-1p1d-agentic-nomtp -n ${NAMESPACE} -w
 ```
 
-## Smoke Test
+Measured on the 15% agentic trace at concurrency 32: **61.6 user output tok/s** and **231.1 system output tok/s/GPU** (also listed in the performance table below).
 
-<div id="smoke-test"></div>
+</div>
 
-Each DGD exposes a frontend service named `<dgd-name>-frontend` (for example `ultra-agg-b200-chat-mtp-frontend`):
+<div data-sku="h200" data-usecase="chat">
 
 ```bash
-export NAMESPACE=your-namespace
-DGD=ultra-agg-b200-chat-mtp   # match the target you deployed
-kubectl port-forward svc/${DGD}-frontend 8000:8000 -n ${NAMESPACE}
+kubectl apply -f recipes/nemotron-3-ultra/vllm/agg-h200-chat-mtp/deploy.yaml -n ${NAMESPACE}
+kubectl get dgd ultra-agg-h200-chat-mtp -n ${NAMESPACE} -w
+```
 
+</div>
+
+<div data-sku="h200" data-usecase="agentic">
+
+```bash
+kubectl apply -f recipes/nemotron-3-ultra/vllm/agg-h200-agentic-mtp/deploy.yaml -n ${NAMESPACE}
+kubectl get dgd ultra-agg-h200-agentic-mtp -n ${NAMESPACE} -w
+```
+
+</div>
+
+## Smoke Test
+
+Run a small request before benchmarking:
+
+<div data-sku="b200" data-usecase="chat">
+
+```bash
+kubectl port-forward svc/ultra-agg-b200-chat-mtp-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="b200" data-usecase="agentic">
+
+```bash
+kubectl port-forward svc/ultra-agg-b200-agentic-mtp-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="h200" data-usecase="chat">
+
+```bash
+kubectl port-forward svc/ultra-agg-h200-chat-mtp-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="h200" data-usecase="agentic">
+
+```bash
+kubectl port-forward svc/ultra-agg-h200-agentic-mtp-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+```bash
 MODEL_ID=nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
 
 curl http://localhost:8000/v1/models
@@ -167,11 +205,23 @@ curl http://localhost:8000/v1/chat/completions \
        \"chat_template_kwargs\":{\"enable_thinking\":false,\"force_nonempty_content\":true}}"
 ```
 
-## Benchmark Instructions
+## Benchmark
 
-<div id="benchmark"></div>
+A single AIPerf trace-replay Job ([`perf/perf.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/perf/perf.yaml)) covers every target — only `ENDPOINT`, `TRACE_FILE`, and `CONCURRENCY` change in its env block. First stage the bundled Moontrace files from [`recipes/nemotron-3-ultra/perf/traces/`](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra/perf/traces) onto the `shared-model-cache` PVC:
 
-A single AIPerf trace-replay Job, `perf/perf.yaml`, covers every target. Edit `ENDPOINT`, `TRACE_FILE`, and `CONCURRENCY` in the Job env block to match the variant you deployed (defaults target B200 chat MTP at concurrency 18). The Job runs this AIPerf raw Moontrace replay:
+```bash
+kubectl run pvc-helper -n ${NAMESPACE} \
+  --image=busybox:1.36 --restart=Never \
+  --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.36","command":["sleep","3600"],"volumeMounts":[{"name":"model-cache","mountPath":"/opt/models"}]}],"volumes":[{"name":"model-cache","persistentVolumeClaim":{"claimName":"shared-model-cache"}}]}}' \
+  --command -- sleep 3600
+
+kubectl exec -n ${NAMESPACE} pvc-helper -- mkdir -p /opt/models/traces
+kubectl cp recipes/nemotron-3-ultra/perf/traces/. ${NAMESPACE}/pvc-helper:/opt/models/traces/
+```
+
+<div data-sku="b200" data-usecase="chat">
+
+Set `ENDPOINT` to `ultra-agg-b200-chat-mtp-frontend:8000` (the Job default) with the chat trace at concurrency 18, then apply. The Job wraps this AIPerf raw Moontrace replay:
 
 ```bash
 aiperf profile \
@@ -187,7 +237,69 @@ aiperf profile \
   --concurrency 18 --random-seed 42
 ```
 
-Stage the bundled traces on the `shared-model-cache` PVC under `/opt/models/traces/` (see the [perf README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/perf/README.md) for the helper-pod workflow), then run the Job:
+</div>
+
+<div data-sku="b200" data-usecase="agentic">
+
+Set `ENDPOINT` to `ultra-agg-b200-agentic-mtp-frontend:8000` with the agentic trace at concurrency 20, then apply. The Job wraps this AIPerf raw Moontrace replay:
+
+```bash
+aiperf profile \
+  -m nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4 \
+  --tokenizer /opt/models/patched/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4 \
+  --tokenizer-trust-remote-code \
+  --input-file /opt/models/traces/nim_turbo_64k_400_90kv_agent_new_noschedule_short_15perc.jsonl \
+  --custom-dataset-type mooncake_trace \
+  --prompt-input-tokens-block-size 512 \
+  --url http://ultra-agg-b200-agentic-mtp-frontend:8000 \
+  --streaming --use-server-token-count \
+  --extra-inputs ignore_eos:true \
+  --concurrency 20 --random-seed 42
+```
+
+For the disaggregated fallback, point `ENDPOINT` at `ultra-disagg-b200-1p1d-agentic-nomtp-frontend:8000` with the same agentic trace at concurrency 32.
+
+</div>
+
+<div data-sku="h200" data-usecase="chat">
+
+Set `ENDPOINT` to `ultra-agg-h200-chat-mtp-frontend:8000` with the chat trace at concurrency 10, then apply. The Job wraps this AIPerf raw Moontrace replay:
+
+```bash
+aiperf profile \
+  -m nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4 \
+  --tokenizer /opt/models/patched/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4 \
+  --tokenizer-trust-remote-code \
+  --input-file /opt/models/traces/nim_turbo_8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl \
+  --custom-dataset-type mooncake_trace \
+  --prompt-input-tokens-block-size 512 \
+  --url http://ultra-agg-h200-chat-mtp-frontend:8000 \
+  --streaming --use-server-token-count \
+  --extra-inputs ignore_eos:true \
+  --concurrency 10 --random-seed 42
+```
+
+</div>
+
+<div data-sku="h200" data-usecase="agentic">
+
+Set `ENDPOINT` to `ultra-agg-h200-agentic-mtp-frontend:8000` with the agentic trace at concurrency 8, then apply. The Job wraps this AIPerf raw Moontrace replay:
+
+```bash
+aiperf profile \
+  -m nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4 \
+  --tokenizer /opt/models/patched/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4 \
+  --tokenizer-trust-remote-code \
+  --input-file /opt/models/traces/nim_turbo_64k_400_90kv_agent_new_noschedule_short_15perc.jsonl \
+  --custom-dataset-type mooncake_trace \
+  --prompt-input-tokens-block-size 512 \
+  --url http://ultra-agg-h200-agentic-mtp-frontend:8000 \
+  --streaming --use-server-token-count \
+  --extra-inputs ignore_eos:true \
+  --concurrency 8 --random-seed 42
+```
+
+</div>
 
 ```bash
 kubectl apply -f recipes/nemotron-3-ultra/perf/perf.yaml -n ${NAMESPACE}
@@ -195,31 +307,57 @@ kubectl logs -n ${NAMESPACE} -l job-name=ultra-bench -f
 kubectl wait --for=condition=Complete job/ultra-bench -n ${NAMESPACE} --timeout=7200s
 ```
 
-Artifacts land on the PVC under `/opt/models/perf/<epoch>_ultra-bench/`. For concurrency sweeps, delete the worker pods between runs so residual KV/prefix-cache state does not skew results.
+Artifacts land on the PVC under `/opt/models/perf/<epoch>_ultra-bench/`. 15% and 30% prefix-slice traces are provided for shorter runs. For concurrency sweeps, delete the worker pods between runs so residual KV/prefix-cache state does not skew results — see the [benchmark README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/perf/README.md) for the full workflow, artifact layout, and tunable environment variables.
 
 ## Expected Performance
 
-B200 rows use 15% raw Moontrace replay with `raw_direct_no_filter` trace semantics; H200 rows use 300-sample replay evidence. `User output tok/s` is Gen TPS/user p50 from AIPerf; `System output tok/s/GPU` is TPS/GPU.
+Each target is tuned for its workload shape:
 
-| Recipe | GPU | Topology | Workload | MTP | Concurrency | User output tok/s | System output tok/s/GPU |
-|--------|-----|----------|----------|-----|-------------|-------------------|-------------------------|
-| `vllm/agg-b200-agentic-mtp/deploy.yaml` | B200 | AGG | agentic | yes | 20 | 80.6 | 310.8 |
-| `vllm/agg-b200-agentic-nomtp/deploy.yaml` | B200 | AGG | agentic | no | 8 | 99.5 | 175.9 |
-| `vllm/agg-b200-chat-mtp/deploy.yaml` | B200 | AGG | chat | yes | 18 | 52.0 | 201.4 |
-| `vllm/agg-b200-chat-nomtp/deploy.yaml` | B200 | AGG | chat | no | 16 | 51.0 | 181.3 |
-| `vllm/disagg-b200-agentic/deploy.yaml` | B200 | 1P1D | agentic | no | 32 | 61.6 | 231.1 |
-| `vllm/agg-h200-agentic-mtp/deploy.yaml` | H200 | AGG | agentic | yes | 8 | 53.2 | 27.4 |
-| `vllm/agg-h200-agentic-nomtp/deploy.yaml` | H200 | AGG | agentic | no | 8 | 52.3 | 26.5 |
-| `vllm/agg-h200-chat-mtp/deploy.yaml` | H200 | AGG | chat | yes | 10 | 58.7 | 46.8 |
-| `vllm/agg-h200-chat-nomtp/deploy.yaml` | H200 | AGG | chat | no | 8 | 54.2 | 43.0 |
+| Workload | Median ISL | Median OSL | KV cache hit rate |
+| --- | ---: | ---: | ---: |
+| Chat | 8K | 1K | 70% |
+| Agentic | 64K | 400 | 90% |
+
+B200 rows use 15% raw Moontrace replay with `raw_direct_no_filter` trace semantics; H200 rows use 300-sample replay evidence. `User output tok/s` is Gen TPS/user p50 from AIPerf; `System output tok/s/GPU` is TPS/GPU. Your selected target's rows are highlighted:
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead><tr><th>Recipe</th><th>GPU</th><th>Topology</th><th>Workload</th><th>MTP</th><th>Concurrency</th><th>User output tok/s</th><th>System output tok/s/GPU</th></tr></thead>
+<tbody>
+<tr data-sku="b200" data-usecase="chat"><td><code>vllm/agg-b200-chat-mtp/deploy.yaml</code></td><td>B200</td><td>AGG</td><td>chat</td><td>yes</td><td>18</td><td>52.0</td><td>201.4</td></tr>
+<tr data-sku="b200" data-usecase="chat"><td><code>vllm/agg-b200-chat-nomtp/deploy.yaml</code></td><td>B200</td><td>AGG</td><td>chat</td><td>no</td><td>16</td><td>51.0</td><td>181.3</td></tr>
+<tr data-sku="b200" data-usecase="agentic"><td><code>vllm/agg-b200-agentic-mtp/deploy.yaml</code></td><td>B200</td><td>AGG</td><td>agentic</td><td>yes</td><td>20</td><td>80.6</td><td>310.8</td></tr>
+<tr data-sku="b200" data-usecase="agentic"><td><code>vllm/agg-b200-agentic-nomtp/deploy.yaml</code></td><td>B200</td><td>AGG</td><td>agentic</td><td>no</td><td>8</td><td>99.5</td><td>175.9</td></tr>
+<tr data-sku="b200" data-usecase="agentic"><td><code>vllm/disagg-b200-agentic/deploy.yaml</code></td><td>B200</td><td>1P1D</td><td>agentic</td><td>no</td><td>32</td><td>61.6</td><td>231.1</td></tr>
+<tr data-sku="h200" data-usecase="chat"><td><code>vllm/agg-h200-chat-mtp/deploy.yaml</code></td><td>H200</td><td>AGG</td><td>chat</td><td>yes</td><td>10</td><td>58.7</td><td>46.8</td></tr>
+<tr data-sku="h200" data-usecase="chat"><td><code>vllm/agg-h200-chat-nomtp/deploy.yaml</code></td><td>H200</td><td>AGG</td><td>chat</td><td>no</td><td>8</td><td>54.2</td><td>43.0</td></tr>
+<tr data-sku="h200" data-usecase="agentic"><td><code>vllm/agg-h200-agentic-mtp/deploy.yaml</code></td><td>H200</td><td>AGG</td><td>agentic</td><td>yes</td><td>8</td><td>53.2</td><td>27.4</td></tr>
+<tr data-sku="h200" data-usecase="agentic"><td><code>vllm/agg-h200-agentic-nomtp/deploy.yaml</code></td><td>H200</td><td>AGG</td><td>agentic</td><td>no</td><td>8</td><td>52.3</td><td>26.5</td></tr>
+</tbody>
+</table>
+</div>
 
 Treat each row together with its matching recipe, image, trace, and server-shape artifacts.
+
+## Compare All Targets
+
+All targets serve `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4` on the dedicated dev runtime image `vllm-runtime:1.3.0-nemotron-ultra-dev.1` with KV-aware routing and a 262144 max model length:
+
+| | B200 chat | H200 chat | B200 agentic | H200 agentic | B200 disagg agentic |
+|---|---|---|---|---|---|
+| **GPUs** | 4x B200 | 8x H200 | 4x B200 | 8x H200 | 4x B200 prefill + 4x B200 decode |
+| **Mode** | aggregated | aggregated | aggregated | aggregated | disaggregated 1P1D |
+| **Parallelism** | TP4 + EP | TP8 + EP | TP4 + EP | TP8 + EP | TP4 prefill + TP4 decode |
+| **Spec decode** | MTP, 1 token | MTP, 1 token | MTP, 1 token | MTP, 1 token | no MTP |
+| **Max sequences** | 64 | 16 | 24 | 32 | 32 |
+| **Reference concurrency** | 18 | 10 | 20 | 8 | 32 |
+| **Workload** | Chat trace | Chat trace | Agentic trace | Agentic trace | Agentic trace |
 
 ## Notes
 
 - This is a Day-0 recipe on a dedicated dev runtime image (`vllm-runtime:1.3.0-nemotron-ultra-dev.1`); it is functional and benchmarked but not yet promoted to a release runtime image.
 - The recipes pin `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel` and pass `--no-enable-flashinfer-autotune` on vLLM workers. Do not remove these unless rerunning the benchmark qualification — they select the non-FlashInfer FP8 linear kernel path and avoid a measured vLLM 0.22 FlashInfer FP8 regression.
-- No-MTP fallback manifests (`vllm/agg-*-nomtp/deploy.yaml`) are included for every aggregated target; their measured rows appear in the performance table above.
+- No-MTP fallback manifests are included for every aggregated target at `vllm/agg-<sku>-<usecase>-nomtp/deploy.yaml`; their DGD names carry the `-nomtp` suffix, and their measured rows appear in the performance table above.
 - Reasoning is controlled per request via `chat_template_kwargs` (`enable_thinking`, `force_nonempty_content`) and `nvext.max_thinking_tokens`. Do not send `force_nonempty_content` as a top-level request parameter. Top-level reasoning controls such as `include_reasoning` and `reasoning_effort` are part of shared Dynamo API compatibility work, not Ultra-specific failures.
 - Raw Moontrace replay may contain over-context or pathological long-generation rows. Preserve them as HTTP/error evidence rather than dropping them silently.
 - Tool calling uses the `qwen3_coder` parser; reasoning parsing uses the model-local `ultra_v3_reasoning_parser.py` (validated by the model-validate Job).

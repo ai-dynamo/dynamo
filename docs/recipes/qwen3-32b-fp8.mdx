@@ -2,159 +2,166 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "Qwen3-32B FP8"
-subtitle: "FP8 Qwen3-32B recipes across TensorRT-LLM and vLLM aggregated and disaggregated targets."
+subtitle: "Serve Qwen/Qwen3-32B-FP8 with Dynamo on TensorRT-LLM or vLLM, aggregated or disaggregated."
 ---
 
-<div className="dynamo-model-detail-hero">
-<div className="dynamo-model-hero-copy">
-<div className="dynamo-model-title-lockup">
-<img className="dynamo-model-logo large" src="../assets/img/recipes/providers/qwen.webp" alt="" />
-<div>
-<p className="dynamo-recipe-eyebrow">Qwen / TRT-LLM / 2x GPU</p>
-<h2>FP8 Qwen3-32B recipes across TensorRT-LLM and vLLM aggregated and disaggregated targets.</h2>
-</div>
-</div>
-<p>Choose the small TensorRT-LLM aggregate target or one of the disaggregated FP8 targets. Traffic shapes differ between the TRT-LLM and vLLM rows, so this page is not a backend benchmark.</p>
-<div className="dynamo-hero-actions">
-<a href="#recipe-targets">Recipe targets</a>
-<a href="#deploy">Deploy</a>
-<a href="#smoke-test">Smoke test</a>
-<a href="#benchmark">Benchmark</a>
-<a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b-fp8">Source</a>
-</div>
-</div>
+Each target below is a validated FP8 deployment of Qwen3-32B — from a 2-GPU TensorRT-LLM aggregate to 8-GPU disaggregated prefill/decode setups on TensorRT-LLM or vLLM — each with a checked-in AIPerf benchmark Job. The targets use different traffic shapes and GPU counts, so this page is not a backend benchmark. Pick your target; every command on this page updates to match.
 
-<div className="dynamo-recommendation-card">
-<span>Primary target</span>
-<strong>TRT-LLM aggregated</strong>
-<p>Smallest checked-in FP8 deployment footprint; single TP2 worker with round-robin routing.</p>
-<div className="dynamo-recommendation-facts">
-<div><span>Model</span><strong>Qwen/Qwen3-32B-FP8</strong></div>
-<div><span>Traffic</span><strong>4K ISL / 500 OSL, concurrency 4</strong></div>
-<div><span>Technique</span><strong>Aggregated serving</strong></div>
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Target</span>
+<input type="radio" id="recipe-variant-trtllm-agg" name="recipe-variant" value="trtllm-agg" defaultChecked />
+<label htmlFor="recipe-variant-trtllm-agg">TRT-LLM aggregated (2 GPU) <span className="dynamo-target-picker-hint">Recommended</span></label>
+<input type="radio" id="recipe-variant-trtllm-disagg" name="recipe-variant" value="trtllm-disagg" />
+<label htmlFor="recipe-variant-trtllm-disagg">TRT-LLM disaggregated (8 GPU)</label>
+<input type="radio" id="recipe-variant-vllm-disagg" name="recipe-variant" value="vllm-disagg" />
+<label htmlFor="recipe-variant-vllm-disagg">vLLM disaggregated (8 GPU)</label>
 </div>
+<div className="dynamo-target-picker-summary" data-variant="trtllm-agg">
+<span><b>Checkpoint</b> Qwen/Qwen3-32B-FP8</span>
+<span><b>GPUs</b> 2x H100/H200/A100, single TP2 worker</span>
+<span><b>Routing</b> Round-robin</span>
+<span><b>Techniques</b> CUDA graphs, FP8 KV cache</span>
+<span><b>Traffic</b> 4K ISL / 500 OSL, concurrency 4</span>
 </div>
+<div className="dynamo-target-picker-summary" data-variant="trtllm-disagg">
+<span><b>Checkpoint</b> Qwen/Qwen3-32B-FP8</span>
+<span><b>GPUs</b> 8x H100/H200/A100</span>
+<span><b>Topology</b> 4x prefill (TP1) + 2x decode (TP2)</span>
+<span><b>Routing</b> Round-robin</span>
+<span><b>Traffic</b> 4K ISL / 500 OSL, concurrency 48</span>
 </div>
-
-## Recipe Targets
-
-<div id="recipe-targets"></div>
-
-<div className="dynamo-variant-table-wrap">
-<table className="dynamo-variant-table dynamo-recipe-target-table">
-<thead><tr><th>Recipe target</th><th>Runtime</th><th>Hardware</th><th>Traffic</th><th>Technique</th><th>Artifacts</th></tr></thead>
-<tbody><tr className="recommended">
-<td><strong>TRT-LLM aggregated</strong><span>Single TP2 worker, round-robin routing, CUDA graphs enabled.</span></td>
-<td>TRT-LLM</td>
-<td>2x GPU (H100/H200/A100)</td>
-<td>4K ISL / 500 OSL, concurrency 4</td>
-<td>Aggregated serving</td>
-<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b-fp8/trtllm/agg/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b-fp8/trtllm/agg/perf.yaml">perf.yaml</a></td>
-</tr><tr>
-<td><strong>TRT-LLM disaggregated</strong><span>4x prefill (TP1) + 2x decode (TP2) workers.</span></td>
-<td>TRT-LLM</td>
-<td>8x GPU (H100/H200/A100)</td>
-<td>4K ISL / 500 OSL, concurrency 48</td>
-<td>Disaggregated prefill/decode</td>
-<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b-fp8/trtllm/disagg/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b-fp8/trtllm/disagg/perf.yaml">perf.yaml</a></td>
-</tr><tr>
-<td><strong>vLLM disaggregated</strong><span>2x prefill (TP2) + 1x decode (TP4) with NIXL KV transfer; traffic shape differs from the TRT-LLM rows.</span></td>
-<td>vLLM</td>
-<td>8x GPU (H100/H200/A100), single node</td>
-<td>2K ISL / 500 OSL, concurrency 8</td>
-<td>Disaggregated prefill/decode</td>
-<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b-fp8/vllm/disagg/deploy.yaml">deploy.yaml</a><br /><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b-fp8/vllm/disagg/perf.yaml">perf.yaml</a></td>
-</tr></tbody>
-</table>
+<div className="dynamo-target-picker-summary" data-variant="vllm-disagg">
+<span><b>Checkpoint</b> Qwen/Qwen3-32B-FP8</span>
+<span><b>GPUs</b> 8x H100/H200/A100, single node</span>
+<span><b>Topology</b> 2x prefill (TP2) + 1x decode (TP4)</span>
+<span><b>KV transfer</b> NIXL (NixlConnector)</span>
+<span><b>Traffic</b> 2K ISL / 500 OSL, concurrency 8</span>
+</div>
 </div>
 
 ## Prerequisites
 
-<div className="dynamo-prereq-grid">
-<div><span>Hardware</span><strong>H100/H200/A100-class GPUs (2x or 8x per target)</strong></div>
-<div><span>Runtime options</span><strong>TensorRT-LLM and vLLM</strong></div>
-<div><span>TRT-LLM traffic</span><strong>4K ISL / 500 OSL synthetic</strong></div>
-<div><span>vLLM traffic</span><strong>2K ISL / 500 OSL synthetic</strong></div>
-<div><span>Benchmark coverage</span><strong>perf.yaml on all three targets</strong></div>
-<div><span>Setup assets</span><strong>model-cache/model-cache.yaml and model-cache/model-download.yaml</strong></div>
+<div data-variant="trtllm-agg">
+
+- A Kubernetes cluster with the Dynamo platform installed and **2x H100/H200/A100-class GPUs** available.
+- A Hugging Face token with access to `Qwen/Qwen3-32B-FP8`.
+
 </div>
 
-<Warning>
-Edit namespace, storage class, image tags, node selectors, resource claims, Hugging Face secrets, and cluster-specific placement before applying these manifests.
-</Warning>
+<div data-variant="trtllm-disagg">
 
-## Deployment Instructions
+- A Kubernetes cluster with the Dynamo platform installed and **8x H100/H200/A100-class GPUs** available.
+- A Hugging Face token with access to `Qwen/Qwen3-32B-FP8`.
 
-<div id="deploy"></div>
+</div>
 
-Create the Hugging Face token secret and prepare the model cache once, then deploy a target.
+<div data-variant="vllm-disagg">
+
+- A Kubernetes cluster with the Dynamo platform installed and **8x H100/H200/A100-class GPUs on a single node** — all prefill and decode workers must be co-located for NIXL KV transfer.
+- A Hugging Face token with access to `Qwen/Qwen3-32B-FP8`.
+
+</div>
+
+Create the namespace and token secret:
 
 ```bash
 export NAMESPACE=your-namespace
-
+kubectl create namespace ${NAMESPACE}
 kubectl create secret generic hf-token-secret \
   --from-literal=HF_TOKEN="your-token" \
   -n ${NAMESPACE}
+```
 
-# Edit storageClassName in model-cache/model-cache.yaml to match your cluster first.
+<Warning>
+Edit namespace, storage class, image tags, node selectors, resource claims, and cluster-specific placement in the manifests before applying them.
+</Warning>
+
+## Deploy
+
+Prepare the model cache and download the checkpoint:
+
+```bash
+# Edit storageClassName in model-cache/model-cache.yaml to match your cluster first
+# (kubectl get storageclass).
 kubectl apply -f recipes/qwen3-32b-fp8/model-cache/ -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=1800s
 ```
 
-<h3 id="deploy-trt-llm-aggregated">TRT-LLM aggregated</h3>
+Then deploy:
 
-Single TP2 worker with round-robin routing and CUDA graphs enabled.
+<div data-variant="trtllm-agg">
+
+A single TP2 TensorRT-LLM worker with round-robin routing and CUDA graphs enabled:
 
 ```bash
 kubectl apply -f recipes/qwen3-32b-fp8/trtllm/agg/deploy.yaml -n ${NAMESPACE}
 ```
 
-<h3 id="deploy-trt-llm-disaggregated">TRT-LLM disaggregated</h3>
+</div>
 
-4x prefill workers (TP1) and 2x decode workers (TP2).
+<div data-variant="trtllm-disagg">
+
+4x prefill workers (TP1) and 2x decode workers (TP2):
 
 ```bash
 kubectl apply -f recipes/qwen3-32b-fp8/trtllm/disagg/deploy.yaml -n ${NAMESPACE}
 ```
 
-<h3 id="deploy-vllm-disaggregated">vLLM disaggregated</h3>
+</div>
 
-2x prefill workers (TP2) and 1x decode worker (TP4) using NixlConnector KV transfer; all workers must be co-located on one node.
+<div data-variant="vllm-disagg">
+
+2x prefill workers (TP2) and 1x decode worker (TP4) using NixlConnector KV transfer; all workers must land on one node:
 
 ```bash
 kubectl apply -f recipes/qwen3-32b-fp8/vllm/disagg/deploy.yaml -n ${NAMESPACE}
 ```
 
+</div>
+
 ## Smoke Test
 
-<div id="smoke-test"></div>
+Run a small request before benchmarking:
 
-Run a small request before starting the benchmark. Use the frontend service that matches your target.
+<div data-variant="trtllm-agg">
 
 ```bash
-export NAMESPACE=your-namespace
-
-# TRT-LLM aggregated:
 kubectl port-forward svc/qwen3-32b-fp8-agg-frontend 8000:8000 -n ${NAMESPACE}
-# TRT-LLM disaggregated:
-# kubectl port-forward svc/qwen3-32b-fp8-disagg-frontend 8000:8000 -n ${NAMESPACE}
-# vLLM disaggregated:
-# kubectl port-forward svc/qwen3-32b-fp8-vllm-disagg-frontend 8000:8000 -n ${NAMESPACE}
+```
 
+</div>
+
+<div data-variant="trtllm-disagg">
+
+```bash
+kubectl port-forward svc/qwen3-32b-fp8-disagg-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-variant="vllm-disagg">
+
+```bash
+kubectl port-forward svc/qwen3-32b-fp8-vllm-disagg-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+```bash
 curl http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"Qwen/Qwen3-32B-FP8","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
 ```
 
-## Benchmark Instructions
+## Benchmark
 
-<div id="benchmark"></div>
+Each target ships its own `perf.yaml` AIPerf Job, sized at a fixed concurrency per GPU with `request-count = 10x concurrency`. Artifacts land on the `model-cache` PVC under `/model-cache/perf`.
 
-Each target's `perf.yaml` runs an AIPerf job sized at a fixed concurrency per GPU and `request-count = 10x concurrency`, writing artifacts to the `model-cache` PVC under `/model-cache/perf`.
+<div data-variant="trtllm-agg">
 
-<h3>TRT-LLM aggregated</h3>
-
-The checked-in `perf.yaml` wraps this AIPerf run (concurrency 4 = 2 per GPU x 2 GPUs).
+The Job wraps this AIPerf run — 4K ISL / 500 OSL at concurrency 4 (2 per GPU x 2 GPUs):
 
 ```bash
 aiperf profile \
@@ -170,23 +177,67 @@ aiperf profile \
 
 ```bash
 kubectl apply -f recipes/qwen3-32b-fp8/trtllm/agg/perf.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/qwen3-32b-fp8-bench -n ${NAMESPACE} --timeout=7200s
 ```
 
-<h3>TRT-LLM disaggregated</h3>
+</div>
 
-The checked-in `perf.yaml` wraps the same AIPerf run at concurrency 48 (6 per GPU x 8 GPUs) with `--request-count 480` against `http://qwen3-32b-fp8-disagg-frontend:8000`.
+<div data-variant="trtllm-disagg">
+
+The Job wraps this AIPerf run — 4K ISL / 500 OSL at concurrency 48 (6 per GPU x 8 GPUs):
+
+```bash
+aiperf profile \
+  --model Qwen/Qwen3-32B-FP8 --tokenizer Qwen/Qwen3-32B-FP8 \
+  --endpoint-type chat --endpoint /v1/chat/completions \
+  --url http://qwen3-32b-fp8-disagg-frontend:8000 --streaming \
+  --synthetic-input-tokens-mean 4000 --synthetic-input-tokens-stddev 0 \
+  --output-tokens-mean 500 --output-tokens-stddev 0 \
+  --extra-inputs max_tokens:500 --extra-inputs min_tokens:500 --extra-inputs ignore_eos:true \
+  --concurrency 48 --request-count 480 --warmup-request-count 48 \
+  --random-seed 100
+```
 
 ```bash
 kubectl apply -f recipes/qwen3-32b-fp8/trtllm/disagg/perf.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/qwen3-32b-fp8-bench -n ${NAMESPACE} --timeout=7200s
 ```
 
-<h3>vLLM disaggregated</h3>
+</div>
 
-The checked-in `perf.yaml` runs 2K ISL / 500 OSL at concurrency 8 (1 per GPU x 8 GPUs) with `--request-count 80` against `http://qwen3-32b-fp8-vllm-disagg-frontend:8000`.
+<div data-variant="vllm-disagg">
+
+The Job wraps this AIPerf run — 2K ISL / 500 OSL at concurrency 8 (1 per GPU x 8 GPUs); note the shorter input length than the TRT-LLM targets:
+
+```bash
+aiperf profile \
+  --model Qwen/Qwen3-32B-FP8 --tokenizer Qwen/Qwen3-32B-FP8 \
+  --endpoint-type chat --endpoint /v1/chat/completions \
+  --url http://qwen3-32b-fp8-vllm-disagg-frontend:8000 --streaming \
+  --synthetic-input-tokens-mean 2000 --synthetic-input-tokens-stddev 0 \
+  --output-tokens-mean 500 --output-tokens-stddev 0 \
+  --extra-inputs max_tokens:500 --extra-inputs min_tokens:500 --extra-inputs ignore_eos:true \
+  --concurrency 8 --request-count 80 --warmup-request-count 8 \
+  --random-seed 100
+```
 
 ```bash
 kubectl apply -f recipes/qwen3-32b-fp8/vllm/disagg/perf.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/qwen3-32b-fp8-vllm-disagg-perf -n ${NAMESPACE} --timeout=7200s
 ```
+
+</div>
+
+## Compare All Targets
+
+All three targets serve `Qwen/Qwen3-32B-FP8`; they differ in runtime, GPU count, topology, and benchmark traffic:
+
+| | TRT-LLM aggregated | TRT-LLM disaggregated | vLLM disaggregated |
+|---|---|---|---|
+| **GPUs** | 2x H100/H200/A100 | 8x H100/H200/A100 | 8x H100/H200/A100, single node |
+| **Topology** | 1x worker, TP2 | 4x prefill (TP1) + 2x decode (TP2) | 2x prefill (TP2) + 1x decode (TP4) |
+| **Routing / KV transfer** | Round-robin | Round-robin | NIXL (NixlConnector) |
+| **Traffic** | 4K / 500, conc. 4 | 4K / 500, conc. 48 | 2K / 500, conc. 8 |
 
 ## Notes
 
