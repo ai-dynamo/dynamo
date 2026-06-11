@@ -33,12 +33,13 @@ pub use disagg::DisaggregationMode;
 pub use engine::{
     AsyncEngineContext, BootstrapInfo, CompletionUsage, ComponentSnapshot, EngineConfig,
     FinishReason, GenerateContext, HEALTH_CHECK_KEY, KvEventPublisher, KvEventSource, LLMEngine,
-    LLMEngineOutput, LLMEngineOutputExt, LogProbs, Metrics, MetricsBindings, MetricsCtx,
-    OnPublisherReady, OnSnapshotPublisherReady, OutputOptions, PrefillResult, PreprocessedRequest,
-    SamplingOptions, StopConditions, TopLogprob, TopLogprobs, chunk, usage,
+    LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, LogProbs, Metrics, MetricsBindings,
+    MetricsCtx, OnPublisherReady, OnSnapshotPublisherReady, OutputOptions, PrefillResult,
+    PreprocessedRequest, RawEngine, SamplingOptions, StopConditions, TopLogprob, TopLogprobs,
+    chunk, usage,
 };
 pub use error::{BackendError, DynamoError, ErrorType};
 pub use metrics::{ComponentGauges, EngineMetrics, LifecycleGauges};
-pub use run::run;
+pub use run::{run, run_raw};
 pub use snapshot_publisher::SnapshotPublisher;
 pub use worker::{RuntimeConfig, Worker, WorkerConfig};

@@ -195,7 +195,7 @@ pub enum MoveBlock {
         Uuid,
         SequenceHash,
         Option<u64>,
-        BlockHash,
+        Option<BlockHash>,
         PositionalLineageHash,
         Option<Vec<u32>>,
     ),

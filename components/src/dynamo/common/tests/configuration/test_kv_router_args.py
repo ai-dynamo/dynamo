@@ -119,6 +119,17 @@ def test_overlap_score_credit_cli_uses_kv_router_config_field() -> None:
     assert args.overlap_score_weight is None
 
 
+def test_overlap_score_credit_decay_cli_uses_kv_router_config_field() -> None:
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--router-kv-overlap-score-credit-decay", "0.5"])
+
+    assert args.overlap_score_credit_decay == 0.5
+    config = KvRouterConfigBase.from_cli_args(args)
+    assert config.kv_router_kwargs()["overlap_score_credit_decay"] == 0.5
+
+
 def test_deprecated_overlap_score_weight_cli_flows_to_binding_kwargs() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
