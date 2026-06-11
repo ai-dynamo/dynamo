@@ -975,11 +975,15 @@ async fn completions_batch(
 async fn embeddings(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateEmbeddingRequest>,
+    Json(mut request): Json<NvCreateEmbeddingRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service or per-model topology is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.inner.model)?;
+
+    if !state.nvext_enabled() {
+        request.nvext = None;
+    }
 
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
