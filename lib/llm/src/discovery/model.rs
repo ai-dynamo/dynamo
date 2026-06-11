@@ -75,6 +75,20 @@ pub struct ModelReadiness {
     pub namespaces: std::collections::BTreeMap<String, NamespaceReadiness>,
 }
 
+/// Per-namespace readiness facts — the single source of truth produced by
+/// [`Model::evaluate_namespace`] and consumed by both the serving gate
+/// ([`Model::is_workers_ready`]) and the `/ready` detail endpoint
+/// ([`Model::namespace_readiness`]). `present`/`missing` hold the cheap,
+/// allocation-light worker-type sets; the detail endpoint layers display data
+/// (per-type counts, reason strings) on top.
+struct NamespaceReadinessEval {
+    ready: bool,
+    has_legacy: bool,
+    legacy_live_workers: usize,
+    present: std::collections::HashSet<crate::worker_type::WorkerType>,
+    missing: std::collections::HashSet<crate::worker_type::WorkerType>,
+}
+
 /// A named model backed by one or more WorkerSets.
 pub struct Model {
     name: String,
@@ -273,63 +287,99 @@ impl Model {
             .filter(|entry| entry.value().namespace() == namespace)
             .map(|entry| entry.value().clone())
             .collect();
-        self.namespace_ready(&wsets)
+        self.evaluate_namespace(&wsets).ready
     }
 
-    /// Core readiness check over an explicit set of WorkerSets that all share
-    /// one namespace. Returns false when `wsets` is empty.
-    fn namespace_ready(&self, wsets: &[Arc<WorkerSet>]) -> bool {
-        if wsets.is_empty() {
-            return false;
-        }
+    /// Evaluate the readiness of one namespace's WorkerSets — the single source
+    /// of truth behind both the serving gate ([`Self::is_workers_ready`],
+    /// [`Self::select_worker_set_with`]) and the `/ready` detail endpoint
+    /// ([`Self::namespace_readiness`]), so the two can never disagree.
+    ///
+    /// `wsets` must all share one namespace. Strict (non-legacy) semantics: the
+    /// namespace is ready when it has a live worker, every registered worker
+    /// type has at least one live worker, and every *live* WorkerSet's `needs`
+    /// DNF is satisfied by the present worker types. Anything absent is recorded
+    /// in `missing`. A dead WorkerSet's own type is still flagged missing, but
+    /// its `needs` are moot (it isn't serving) and a live sibling of the same
+    /// type carries the same `needs`, so nothing is lost. A legacy card (no
+    /// `worker_type`) disables strict gating: ready iff any worker is live
+    /// (cross-version compat shim). Empty `wsets` is not ready.
+    fn evaluate_namespace(&self, wsets: &[Arc<WorkerSet>]) -> NamespaceReadinessEval {
         let mut present: std::collections::HashSet<crate::worker_type::WorkerType> =
             std::collections::HashSet::new();
+        let mut missing: std::collections::HashSet<crate::worker_type::WorkerType> =
+            std::collections::HashSet::new();
         let mut has_legacy = false;
+        let mut legacy_live_workers = 0usize;
         let mut has_live_worker = false;
+
+        // First pass: which worker types have a live worker (+ legacy detection).
         for ws in wsets {
+            let count = ws.worker_count();
+            if count > 0 {
+                has_live_worker = true;
+            }
             match Self::ws_type_and_needs(ws) {
                 Some((wt, _needs)) => {
-                    if ws.worker_count() > 0 {
+                    if count > 0 {
                         present.insert(wt);
                     }
                 }
                 // No declared worker_type → legacy card.
-                None => has_legacy = true,
-            }
-            if ws.worker_count() > 0 {
-                has_live_worker = true;
+                None => {
+                    has_legacy = true;
+                    legacy_live_workers += count;
+                }
             }
         }
 
-        // COMPAT branch: legacy card present → preserve legacy behavior.
+        // COMPAT branch: a legacy card disables strict gating; the disaggregated
+        // worker types can't be reconstructed, so ready iff any worker is live.
         if has_legacy {
             warn_legacy_readiness_once(&self.name, wsets[0].namespace());
-            return has_live_worker;
+            return NamespaceReadinessEval {
+                ready: has_live_worker,
+                has_legacy,
+                legacy_live_workers,
+                present,
+                missing,
+            };
         }
 
-        // Strict path: every WorkerSet must (a) have at least one live worker
-        // of its own worker type, and (b) have its `needs` DNF satisfied by the
-        // present worker types. (a) is what rejects an Aggregated WorkerSet with
-        // worker_count == 0: its `needs` is empty, but without a live worker
-        // the namespace cannot serve traffic.
+        // Strict path: a registered worker type with no live worker anywhere is
+        // missing; a *live* WorkerSet whose `needs` DNF is unsatisfied flags its
+        // absent peers.
         for ws in wsets {
             let Some((wt, needs)) = Self::ws_type_and_needs(ws) else {
-                return false;
+                continue;
             };
             if !present.contains(&wt) {
-                return false;
+                missing.insert(wt);
             }
-            if needs.is_empty() {
+            if ws.worker_count() == 0 || needs.is_empty() {
                 continue;
             }
-            let any_alt_satisfied = needs
+            let satisfied = needs
                 .iter()
                 .any(|alt| alt.iter().all(|t| present.contains(t)));
-            if !any_alt_satisfied {
-                return false;
+            if !satisfied {
+                for alt in &needs {
+                    for t in alt {
+                        if !present.contains(t) {
+                            missing.insert(*t);
+                        }
+                    }
+                }
             }
         }
-        true
+
+        NamespaceReadinessEval {
+            ready: has_live_worker && missing.is_empty(),
+            has_legacy,
+            legacy_live_workers,
+            present,
+            missing,
+        }
     }
 
     /// Return the namespace identifier of the first ready set of workers (in
@@ -349,102 +399,59 @@ impl Model {
     /// Structured per-namespace worker readiness for this model — the data
     /// behind the `GET /v1/models/{model}/ready` observability endpoint.
     ///
-    /// Reuses [`Self::is_workers_ready`] for each namespace's `ready` flag so
-    /// the endpoint can never disagree with the gate, and decomposes the same
-    /// inputs (present worker types, DNF `needs`, missing peers) for display.
+    /// Built on the same [`Self::evaluate_namespace`] facts the serving gate
+    /// uses, so the reported `ready`/`missing` can never disagree with routing;
+    /// this method only layers display data (per-type counts, reason strings).
     pub fn namespace_readiness(&self) -> ModelReadiness {
         let mut namespaces = std::collections::BTreeMap::new();
 
         for ns in self.distinct_namespaces_sorted() {
+            let wsets: Vec<Arc<WorkerSet>> = self
+                .worker_sets
+                .iter()
+                .filter(|entry| entry.value().namespace() == ns)
+                .map(|entry| entry.value().clone())
+                .collect();
+
+            // Authoritative readiness facts (shared with the serving gate).
+            let eval = self.evaluate_namespace(&wsets);
+
+            // Display layer: per-type live-worker counts and declared `needs`.
             let mut worker_types: std::collections::BTreeMap<String, WorkerTypeReadiness> =
                 std::collections::BTreeMap::new();
-            let mut present: std::collections::HashSet<crate::worker_type::WorkerType> =
-                std::collections::HashSet::new();
-            let mut has_legacy = false;
-            let mut legacy_live_workers = 0usize;
-
-            // Collect the (worker_type, needs) per WorkerSet in this namespace.
-            let mut wsets: Vec<(
-                Option<crate::worker_type::WorkerType>,
-                Vec<Vec<crate::worker_type::WorkerType>>,
-                usize,
-            )> = Vec::new();
-            for entry in self.worker_sets.iter() {
-                let ws = entry.value();
-                if ws.namespace() != ns {
-                    continue;
-                }
+            for ws in &wsets {
                 let card = ws.card();
-                let count = ws.worker_count();
-                match card.worker_type {
-                    Some(wt) => {
-                        if count > 0 {
-                            present.insert(wt);
-                        }
-                        let wt_readiness = worker_types.entry(wt.as_str().to_string()).or_insert(
-                            WorkerTypeReadiness {
-                                workers: 0,
-                                needs: card
-                                    .needs
-                                    .iter()
-                                    .map(|alt| alt.iter().map(|t| t.as_str().to_string()).collect())
-                                    .collect(),
-                            },
-                        );
-                        wt_readiness.workers += count;
-                        wsets.push((Some(wt), card.needs.clone(), count));
-                    }
-                    None => {
-                        has_legacy = true;
-                        legacy_live_workers += count;
-                        wsets.push((None, Vec::new(), count));
-                    }
+                if let Some(wt) = card.worker_type {
+                    let entry = worker_types
+                        .entry(wt.as_str().to_string())
+                        .or_insert_with(|| WorkerTypeReadiness {
+                            workers: 0,
+                            needs: card
+                                .needs
+                                .iter()
+                                .map(|alt| alt.iter().map(|t| t.as_str().to_string()).collect())
+                                .collect(),
+                        });
+                    entry.workers += ws.worker_count();
                 }
             }
 
-            let ready = self.is_workers_ready(&ns);
-
-            // Worker types referenced by a live worker type's unsatisfied `needs` that
-            // aren't present — the actionable "what's missing" hint.
-            let mut missing: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-            if !has_legacy {
-                for (wt, needs, count) in &wsets {
-                    let Some(wt) = wt else { continue };
-                    // A typed worker type with no live workers is itself missing — record
-                    // it so the reason isn't an empty "missing worker types: ".
-                    // Only when the worker type is absent entirely: another live WorkerSet
-                    // of the same worker type makes it present, so fall through to the
-                    // `needs` check instead of falsely flagging it missing.
-                    if *count == 0 {
-                        if !present.contains(wt) {
-                            missing.insert(wt.as_str().to_string());
-                        }
-                        continue;
-                    }
-                    if needs.is_empty() {
-                        continue;
-                    }
-                    let satisfied = needs
-                        .iter()
-                        .any(|alt| alt.iter().all(|t| present.contains(t)));
-                    if !satisfied {
-                        for alt in needs {
-                            for t in alt {
-                                if !present.contains(t) {
-                                    missing.insert(t.as_str().to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            let mut present_vec: Vec<String> =
-                present.iter().map(|wt| wt.as_str().to_string()).collect();
+            let mut present_vec: Vec<String> = eval
+                .present
+                .iter()
+                .map(|wt| wt.as_str().to_string())
+                .collect();
             present_vec.sort();
+            let mut missing_vec: Vec<String> = eval
+                .missing
+                .iter()
+                .map(|wt| wt.as_str().to_string())
+                .collect();
+            missing_vec.sort();
 
-            let reason = if ready {
-                if has_legacy {
+            let reason = if eval.ready {
+                if eval.has_legacy {
+                    let legacy_live_workers = eval.legacy_live_workers;
                     Some(format!(
                         "legacy worker(s) present (no worker_type); readiness gating bypassed \
                          (ready while {legacy_live_workers} worker(s) live) — compat window only"
@@ -452,23 +459,20 @@ impl Model {
                 } else {
                     None
                 }
-            } else if has_legacy {
+            } else if eval.has_legacy {
                 Some("legacy worker(s) present but no live worker".to_string())
             } else {
-                Some(format!(
-                    "missing worker types: {}",
-                    missing.iter().cloned().collect::<Vec<_>>().join(", ")
-                ))
+                Some(format!("missing worker types: {}", missing_vec.join(", ")))
             };
 
             namespaces.insert(
                 ns.clone(),
                 NamespaceReadiness {
-                    ready,
+                    ready: eval.ready,
                     reason,
                     worker_types,
                     present: present_vec,
-                    missing_worker_types: missing.into_iter().collect(),
+                    missing_worker_types: missing_vec,
                 },
             );
         }
@@ -676,7 +680,7 @@ impl Model {
                     .filter(|ws| ws.namespace() == *ns)
                     .cloned()
                     .collect();
-                self.namespace_ready(&in_ns)
+                self.evaluate_namespace(&in_ns).ready
             })
             .collect();
 
