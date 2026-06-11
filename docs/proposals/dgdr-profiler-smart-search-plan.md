@@ -251,81 +251,81 @@ class SearchSpace(BaseModel):
     """Inputs to one search run, grouped by component. Each group lists its
     swept knobs (list-typed candidate sets; a single-element list pins that
     knob) followed by the `Pinned` knobs that group needs (scalars). When
-    `deploymentMode` lists both branches the optimizer runs one flat study per
+    `deployment_mode` lists both branches the optimizer runs one flat study per
     branch and ranks across both; engine batching is read per branch
     (prefill/decode for disagg, agg for aggregated). This is the main-sweep
     space; planner load-predictor tuning is a separate grid sweep (see below)."""
     model_config = ConfigDict(extra="forbid")
 
     # deployment: branch + backend + legal parallel shapes
-    deploymentMode: list[str] = ["disagg", "agg"]  # branches to explore; pin with one
+    deployment_mode: list[str] = ["disagg", "agg"]  # branches to explore; pin with one
     backend: list[str] = ["vllm"]                  # vllm | sglang | trtllm
-    parallelConfigs: list[dict[str, Any]]          # generated legal TP/TEP/DEP shapes
+    parallel_configs: list[dict[str, Any]]          # generated legal TP/TEP/DEP shapes
     # pinned
-    modelName: str                                 # HF id or private model name
-    hardwareSku: str                               # e.g. "h200_sxm"
-    gpuBudget: int = 32                            # max GPUs per candidate
-    minGpuBudget: int | None = None                # lower bound for candidate generation
-    minEndpoint: int | None = None                 # min replicas per component
-    enableKvrouter: bool = True                    # emit/evaluate KV-router config
-    enablePlanner: bool = True                     # emit planner config
-    contextLength: int | None = None               # model + runtime constraint
-    startupTime: float | None = None               # worker startup time (s)
-    aicNextn: int | None = None                    # speculative-decode (MTP) depth, 1..5
+    model_name: str                                 # HF id or private model name
+    hardware_sku: str                               # e.g. "h200_sxm"
+    gpu_budget: int = 32                            # max GPUs per candidate
+    min_gpu_budget: int | None = None                # lower bound for candidate generation
+    min_endpoint: int | None = None                 # min replicas per component
+    enable_kvrouter: bool = True                    # emit/evaluate KV-router config
+    enable_planner: bool = True                     # emit planner config
+    context_length: int | None = None               # model + runtime constraint
+    startup_time: float | None = None               # worker startup time (s)
+    aic_nextn: int | None = None                    # speculative-decode (MTP) depth, 1..5
 
     # prefill engine (disagg branch): scheduler batching capacity
-    prefillMaxNumBatchedTokens: list[int] = [8192, 16384, 32768]
-    prefillMaxNumSeqs: list[int] = [1, 2, 4, 8]
+    prefill_max_num_batched_tokens: list[int] = [8192, 16384, 32768]
+    prefill_max_num_seqs: list[int] = [1, 2, 4, 8]
     # pinned
-    prefillBlockSize: int = 64                     # KV block / page size
-    prefillGpuMemoryUtilization: float = 0.9       # KV memory budget fraction
-    prefillEnablePrefixCaching: bool = True
+    prefill_block_size: int = 64                     # KV block / page size
+    prefill_gpu_memory_utilization: float = 0.9       # KV memory budget fraction
+    prefill_enable_prefix_caching: bool = True
 
     # decode engine (disagg branch): scheduler batching capacity
-    decodeMaxNumBatchedTokens: list[int] = [8192]
-    decodeMaxNumSeqs: list[int] = [256, 512, 1024]
+    decode_max_num_batched_tokens: list[int] = [8192]
+    decode_max_num_seqs: list[int] = [256, 512, 1024]
     # pinned
-    decodeBlockSize: int = 64
-    decodeGpuMemoryUtilization: float = 0.9
-    decodeEnablePrefixCaching: bool = False        # forced off for decode workers
+    decode_block_size: int = 64
+    decode_gpu_memory_utilization: float = 0.9
+    decode_enable_prefix_caching: bool = False        # forced off for decode workers
 
     # agg engine (agg branch): scheduler batching capacity
-    aggMaxNumBatchedTokens: list[int] = [8192, 16384, 32768]
-    aggMaxNumSeqs: list[int] = [256, 512, 1024]
+    agg_max_num_batched_tokens: list[int] = [8192, 16384, 32768]
+    agg_max_num_seqs: list[int] = [256, 512, 1024]
     # pinned
-    aggBlockSize: int = 64
-    aggGpuMemoryUtilization: float = 0.9
-    aggEnablePrefixCaching: bool = True
+    agg_block_size: int = 64
+    agg_gpu_memory_utilization: float = 0.9
+    agg_enable_prefix_caching: bool = True
 
     # kv manager: multi-tier offload policy (all pinned; G3/G4 extend G2)
-    numG2Blocks: int = 0                           # 0 disables host offload
-    bandwidthG1ToG2Gbps: float | None = None
-    bandwidthG2ToG1Gbps: float | None = None
-    offloadBatchSize: int | None = None
+    num_g2_blocks: int = 0                           # 0 disables host offload
+    bandwidth_g1_to_g2_gbps: float | None = None
+    bandwidth_g2_to_g1_gbps: float | None = None
+    offload_batch_size: int | None = None
 
     # router (KV-router knobs are ignored under round_robin)
-    routerMode: list[str] = ["kv_router", "round_robin"]
-    overlapScoreCredit: list[float] = [0.0, 0.5, 1.0]
-    prefillLoadScale: list[float] = [0.0, 0.25, 0.5, 1.0, 2.0, 4.0]
-    hostCacheHitWeight: list[float] = [0.5, 0.75, 1.0]
-    diskCacheHitWeight: list[float] = [0.0, 0.25, 0.5]
-    routerTemperature: list[float] = [0.0, 0.2, 0.5, 1.0]
+    router_mode: list[str] = ["kv_router", "round_robin"]
+    overlap_score_credit: list[float] = [0.0, 0.5, 1.0]
+    prefill_load_scale: list[float] = [0.0, 0.25, 0.5, 1.0, 2.0, 4.0]
+    host_cache_hit_weight: list[float] = [0.5, 0.75, 1.0]
+    disk_cache_hit_weight: list[float] = [0.0, 0.25, 0.5]
+    router_temperature: list[float] = [0.0, 0.2, 0.5, 1.0]
     # pinned (admission control)
-    activeDecodeBlocksThreshold: int | None = None
-    activePrefillTokensThreshold: int | None = None
-    activePrefillTokensThresholdFrac: float | None = None
-    noAdmissionControl: bool = False
+    active_decode_blocks_threshold: int | None = None
+    active_prefill_tokens_threshold: int | None = None
+    active_prefill_tokens_threshold_frac: float | None = None
+    no_admission_control: bool = False
 
     # planner: preset ids expanded by the candidate generator
-    plannerScalingPolicy: list[str] = [
+    planner_scaling_policy: list[str] = [
         "throughput_180_5", "throughput_600_5",
         "load_180_5", "load_180_10",
         "hybrid_180_5", "hybrid_600_5",
     ]
-    plannerFpmSampling: list[str] = ["small", "default", "large", "fine"]
-    plannerLoadSensitivity: list[str] = ["aggressive", "default", "conservative"]
+    planner_fpm_sampling: list[str] = ["small", "default", "large", "fine"]
+    planner_load_sensitivity: list[str] = ["aggressive", "default", "conservative"]
     # pinned
-    loadPredictorPreset: str | None = None         # chosen by the separate load-predictor grid sweep
+    load_predictor_preset: str | None = None         # chosen by the separate load-predictor grid sweep
 
 
 class OptimizationTarget(str, Enum):
@@ -336,11 +336,11 @@ class OptimizationTarget(str, Enum):
 
 
 class SLATarget(BaseModel):
-    """Per-request latency bounds in ms. Set ttftMs+itlMs, or e2eMs."""
+    """Per-request latency bounds in ms. Set ttft_ms+itl_ms, or e2e_ms."""
     model_config = ConfigDict(extra="forbid")
-    ttftMs: float | None = None
-    itlMs: float | None = None
-    e2eMs: float | None = None
+    ttft_ms: float | None = None
+    itl_ms: float | None = None
+    e2e_ms: float | None = None
 
 
 class OptimizationGoal(BaseModel):
@@ -356,12 +356,12 @@ class OptimizationGoal(BaseModel):
             OptimizationTarget.GOODPUT_PER_GPU,
         )
         has_sla = self.sla is not None and (
-            self.sla.e2eMs is not None
-            or (self.sla.ttftMs is not None and self.sla.itlMs is not None)
+            self.sla.e2e_ms is not None
+            or (self.sla.ttft_ms is not None and self.sla.itl_ms is not None)
         )
         if needs_sla and not has_sla:
             raise ValueError(
-                f"{self.target.value} requires an SLA target (ttftMs+itlMs or e2eMs)"
+                f"{self.target.value} requires an SLA target (ttft_ms+itl_ms or e2e_ms)"
             )
         return self
 
@@ -369,17 +369,17 @@ class OptimizationGoal(BaseModel):
 class SweepConfig(BaseModel):
     """Sweep run-control."""
     model_config = ConfigDict(extra="forbid")
-    maxRounds: int = 20                    # total Vizier suggestion/evaluation rounds
-    parallelEvals: int = 16                # concurrent CPU replay evaluations
-    candidatesPerRound: int | None = None  # defaults to parallelEvals
-    randomSeed: int = 1
+    max_rounds: int = 20                    # total Vizier suggestion/evaluation rounds
+    parallel_evals: int = 16                # concurrent CPU replay evaluations
+    candidates_per_round: int | None = None  # defaults to parallel_evals
+    random_seed: int = 1
 
 
 class Candidate(BaseModel):
     """One evaluated configuration and its replay performance."""
     model_config = ConfigDict(extra="forbid")
     config: dict[str, Any]     # the decoded knob assignment (engine/router/planner)
-    usedGpus: int
+    used_gpus: int
     score: float               # objective score, normalized so higher is better
     metrics: dict[str, float]  # replay performance: throughput, ttft, itl, e2e, goodput
 
@@ -388,7 +388,7 @@ class SmartSearchConfig(BaseModel):
     """Top-level config integrating every search input, so a single YAML file
     drives a whole run (`--config smart_sweep.yaml`)."""
     model_config = ConfigDict(extra="forbid")
-    searchSpace: SearchSpace
+    search_space: SearchSpace
     goal: OptimizationGoal = Field(default_factory=OptimizationGoal)
     sweep: SweepConfig = Field(default_factory=SweepConfig)
 
@@ -407,29 +407,29 @@ def run_smart_search(config: SmartSearchConfig, *, evaluator: Any = None) -> lis
     ...
 ```
 
-Each returned `Candidate` carries its decoded knob assignment (`config`) and measured `metrics`. The list is sorted best-first by `score`, which normalizes objective direction so larger is always better: `throughput`, `goodput`, and `goodput_per_gpu` use the metric directly (pick the max), while `e2e_latency` uses its negative (pick the min latency). `goodput_per_gpu` divides goodput by `usedGpus`.
+Each returned `Candidate` carries its decoded knob assignment (`config`) and measured `metrics`. The list is sorted best-first by `score`, which normalizes objective direction so larger is always better: `throughput`, `goodput`, and `goodput_per_gpu` use the metric directly (pick the max), while `e2e_latency` uses its negative (pick the min latency). `goodput_per_gpu` divides goodput by `used_gpus`.
 
-`SearchSpace` mirrors the deployment, engine, KV-manager, router, and planner inventories above: each group lists its `Search` / `Composite Search` dimensions (list-typed) followed by the `Pinned` knobs it needs (scalar). Planner load-predictor tuning is deliberately excluded — it runs as a separate deterministic grid sweep (see [Planner Load Predictor Independent Grid Sweep](#planner-load-predictor-independent-grid-sweep)), and its selected preset is pinned (`loadPredictorPreset`) before the main sweep.
+`SearchSpace` mirrors the deployment, engine, KV-manager, router, and planner inventories above: each group lists its `Search` / `Composite Search` dimensions (list-typed) followed by the `Pinned` knobs it needs (scalar). Planner load-predictor tuning is deliberately excluded — it runs as a separate deterministic grid sweep (see [Planner Load Predictor Independent Grid Sweep](#planner-load-predictor-independent-grid-sweep)), and its selected preset is pinned (`load_predictor_preset`) before the main sweep.
 
 A single YAML maps to `SmartSearchConfig`, so the whole run is `--config`-driven:
 
 ```yaml
 # smart_sweep.yaml
-searchSpace:
-  deploymentMode: [disagg, agg]
-  modelName: deepseek-ai/DeepSeek-V3
-  hardwareSku: h200_sxm
-  gpuBudget: 32
+search_space:
+  deployment_mode: [disagg, agg]
+  model_name: deepseek-ai/DeepSeek-V3
+  hardware_sku: h200_sxm
+  gpu_budget: 32
   backend: [vllm]
-  routerMode: [kv_router, round_robin]
-  plannerScalingPolicy: [throughput_180_5, hybrid_180_5]
+  router_mode: [kv_router, round_robin]
+  planner_scaling_policy: [throughput_180_5, hybrid_180_5]
   # other *Candidates omitted -> defaults apply
 goal:
   target: goodput_per_gpu
-  sla: {ttftMs: 2000, itlMs: 30}
+  sla: {ttft_ms: 2000, itl_ms: 30}
 sweep:
-  maxRounds: 40
-  parallelEvals: 16
+  max_rounds: 40
+  parallel_evals: 16
 ```
 
 Standalone, this is driven by `python -m dynamo.profiler.v2 --config smart_sweep.yaml` (Replay evaluator by default). The next section covers connecting the same config into AIC.
@@ -450,7 +450,7 @@ The per-worker `Predictor` cannot express whole-deployment Replay, so AIC adds a
 
 ### Config and output mapping
 
-`SmartSearchConfig` is the single input object (one YAML). Its leaf candidate fields map to AIC `Task` fields by name: engine/parallel reuse AIC's `tp/pp/dp/moe_*` + `*_candidates` convention; router/planner add new `*_candidates` of the same shape. Aligning leaf names to AIC snake_case (`router_mode_candidates`, `prefill_max_num_batched_tokens`, …) keeps the Task-field mapping mechanical. The returned `list[Candidate]` maps to AIC's `ColumnsAgg` / `ColumnsDisagg` DataFrame through a thin adapter, so AIC's downstream picking / Pareto views consume it unchanged.
+`SmartSearchConfig` is the single input object (one YAML). Field names are already snake_case to match AIC `Task`; the only remaining step at merge is the `*_candidates` suffix that AIC uses for swept dimensions (e.g. `router_mode` → `router_mode_candidates`, `agg_tp` → `agg_tp_candidates`). Engine/parallel fields reuse AIC's `tp/pp/dp/moe_*` directly; router/planner add new `*_candidates` of the same shape; pinned scalars (`model_name`, `gpu_budget`, `prefill_block_size`, …) map 1:1. The returned `list[Candidate]` maps to AIC's `ColumnsAgg` / `ColumnsDisagg` DataFrame through a thin adapter, so AIC's downstream picking / Pareto views consume it unchanged.
 
 ### CLI
 
