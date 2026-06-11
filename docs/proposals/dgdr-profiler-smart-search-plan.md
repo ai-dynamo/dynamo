@@ -191,7 +191,7 @@ Engine batching values in this table are per attention-DP rank. Candidate decodi
 | Router | `router_host_cache_hit_weight` | `Search` | `host_cache_hit_weight` | `0.5`, `0.75`, `1.0` | Active for KV router mode; default is `0.75`. |
 | Router | `router_disk_cache_hit_weight` | `Search` | `disk_cache_hit_weight` | `0.0`, `0.25`, `0.5` | Active for KV router mode; default is `0.25`. |
 | Router | `router_temperature` | `Search` | `router_temperature` | `0.0`, `0.2`, `0.5`, `1.0` | `0.0` keeps deterministic selection; higher values increase sampling randomness. |
-| Planner | `planner_scaling_policy` | `Composite Search` | `enable_throughput_scaling`, `enable_load_scaling`, `throughput_adjustment_interval_seconds`, `load_adjustment_interval_seconds` | `throughput_180_5`: `{true, false, 180, 5}`; `throughput_600_5`: `{true, false, 600, 5}`; `load_180_5`: `{false, true, 180, 5}`; `load_180_10`: `{false, true, 180, 10}`; `hybrid_180_5`: `{true, true, 180, 5}`; `hybrid_600_5`: `{true, true, 600, 5}` | Composite categorical dimension. Candidate generator may filter policies by `optimization_target`. |
+| Planner | `planner_scaling_policy` | `Composite Search` | `enable_throughput_scaling`, `enable_load_scaling`, `throughput_adjustment_interval_seconds`, `load_adjustment_interval_seconds` | `disabled`: `{false, false, -, -}`; `throughput_180_5`: `{true, false, 180, 5}`; `throughput_600_5`: `{true, false, 600, 5}`; `load_180_5`: `{false, true, 180, 5}`; `load_180_10`: `{false, true, 180, 10}`; `hybrid_180_5`: `{true, true, 180, 5}`; `hybrid_600_5`: `{true, true, 600, 5}` | Composite categorical dimension; `disabled` turns off autoscaling (no planner). Candidate generator may filter policies by `optimization_target`. |
 | Planner | `planner_fpm_sampling` | `Composite Search` | `max_num_fpm_samples`, `fpm_sample_bucket_size` | `small`: `{32, 4}`; `default`: `{64, 16}`; `large`: `{128, 16}`; `fine`: `{128, 64}` | Paired presets keep bucket size compatible with sample count. `fpm_sample_bucket_size` must be a perfect square. |
 | Planner | `planner_load_sensitivity` | `Search` | `load_scaling_down_sensitivity`, `load_min_observations` | `aggressive`: `{70, 3}`; `default`: `{80, 5}`; `conservative`: `{90, 8}` | Controls scale-down conservativeness and regression cold-start threshold. |
 
@@ -317,7 +317,10 @@ class SearchSpace(BaseModel):
     no_admission_control: bool = False
 
     # planner: preset ids expanded by the candidate generator
+    # "disabled" = planner not enabled (no autoscaling, static replica count);
+    # lets the sweep compare with-planner vs no-planner in one study.
     planner_scaling_policy: list[str] = [
+        "disabled",
         "throughput_180_5", "throughput_600_5",
         "load_180_5", "load_180_10",
         "hybrid_180_5", "hybrid_600_5",
