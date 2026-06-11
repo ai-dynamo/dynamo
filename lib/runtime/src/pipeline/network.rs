@@ -417,6 +417,7 @@ mod tests {
         DEFAULT_STREAM_BUFFER_COUNT, RequestControlMessage, RequestType, ResponseType,
         StreamOptions,
     };
+    use crate::engine::AsyncEngineContextProvider;
     use crate::pipeline::Context;
 
     #[test]
@@ -447,7 +448,7 @@ mod tests {
     fn stream_options_default_to_legacy_buffer_count() {
         let context = Context::new(());
         let options = StreamOptions::builder()
-            .context(context.content())
+            .context(context.context())
             .enable_request_stream(true)
             .enable_response_stream(true)
             .build()
@@ -461,7 +462,7 @@ mod tests {
     fn stream_options_reject_zero_buffer_counts() {
         let context = Context::new(());
         let err = StreamOptions::builder()
-            .context(context.content())
+            .context(context.context())
             .enable_request_stream(true)
             .enable_response_stream(true)
             .send_buffer_count(0)
@@ -472,7 +473,7 @@ mod tests {
 
         let context = Context::new(());
         let err = StreamOptions::builder()
-            .context(context.content())
+            .context(context.context())
             .enable_request_stream(true)
             .enable_response_stream(true)
             .recv_buffer_count(0)
