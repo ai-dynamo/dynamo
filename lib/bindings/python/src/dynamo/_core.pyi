@@ -2688,6 +2688,7 @@ class KvRouter:
             block_mm_infos: Optional block-level multimodal metadata aligned to request
                            blocks. When provided, this is used in hash computation
                            for MM-aware potential-load estimation.
+            lora_name: Optional LoRA adapter name used in block hash computation.
 
         Returns:
             A list of dictionaries, each containing:
@@ -2695,6 +2696,7 @@ class KvRouter:
                 - dp_rank: The data parallel rank
                 - potential_prefill_tokens: Number of tokens that would need prefill
                 - potential_decode_blocks: Number of blocks currently in decode phase
+                - active_requests: Number of active requests tracked on the worker
 
         Note:
             Each (worker_id, dp_rank) pair is returned as a separate entry.
