@@ -8,7 +8,11 @@ For general TensorRT-LLM features and configuration, see the [Reference Guide](t
 
 ---
 
-In disaggregated serving architectures, KV cache must be transferred between prefill and decode workers. TensorRT-LLM supports two methods for this transfer:
+In disaggregated serving architectures, KV cache must be transferred between prefill and decode workers. TensorRT-LLM supports three methods for this transfer:
+* NIXL with UCX (default)
+* NIXL with Libfabric
+* using UCX directly
+
 
 ## Using NIXL for KV Cache Transfer
 
