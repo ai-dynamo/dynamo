@@ -377,6 +377,14 @@ class VllmProcessor:
         nvext_max_thinking_tokens = (request.get("nvext") or {}).get(
             "max_thinking_tokens"
         )
+        # routed_experts_prompt_start (RL capture offset) also rides nvext and is
+        # applied onto SamplingParams worker-side. This native vLLM chat path
+        # bypasses the Rust OpenAIPreprocessor, so forward it explicitly via
+        # extra_args.nvext (the shape build_sampling_params reads) — otherwise it
+        # silently drops and the engine ships the full-sequence routing blob.
+        nvext_routed_experts_prompt_start = (request.get("nvext") or {}).get(
+            "routed_experts_prompt_start"
+        )
         logprobs = request_for_sampling.logprobs
         top_logprobs = request_for_sampling.top_logprobs
         if logprobs is True:
@@ -460,6 +468,11 @@ class VllmProcessor:
             dynamo_preproc["reasoning_ended"] = reasoning_ended
         if reasoning_parser_kwargs is not None:
             dynamo_preproc["reasoning_parser_kwargs"] = reasoning_parser_kwargs
+        if nvext_routed_experts_prompt_start is not None:
+            extra_args = dynamo_preproc.setdefault("extra_args", {})
+            extra_args.setdefault("nvext", {})[
+                "routed_experts_prompt_start"
+            ] = nvext_routed_experts_prompt_start
 
         # Extract MM routing metadata and prepare transfer.
         cleanup_items: list = []

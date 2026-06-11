@@ -753,12 +753,29 @@ def build_sampling_params(
         if value is not None and hasattr(sampling_params, key):
             setattr(sampling_params, key, value)
 
+    # routed_experts_prompt_start (RL capture offset) rides nvext, not the
+    # standard sampling_options (Dynamo's chat schema rejects unknown top-level
+    # fields). Apply it onto SamplingParams so vLLM trims the leading prompt rows
+    # from the returned routing engine-side (instead of the client trimming the
+    # full-sequence blob after it crosses the wire).
+    for source in _iter_nvext_sources(request):
+        reps_nvext = source.get("routed_experts_prompt_start")
+        if reps_nvext is not None and hasattr(
+            sampling_params, "routed_experts_prompt_start"
+        ):
+            sampling_params.routed_experts_prompt_start = reps_nvext
+            break
+
     # routed_experts_prompt_start (RL capture offset) must be a non-negative
-    # int; reject bad client values so the worker emits a sane `start` instead
-    # of a bogus offset the consumer cannot align (vLLM clamps the upper bound).
+    # int within the frontend's u32 range; reject bad client values so the worker
+    # emits a sane `start` instead of a bogus offset the consumer cannot align
+    # (vLLM clamps the upper bound against the actual sequence length).
     reps = getattr(sampling_params, "routed_experts_prompt_start", None)
     if reps is not None and (
-        isinstance(reps, bool) or not isinstance(reps, int) or reps < 0
+        isinstance(reps, bool)
+        or not isinstance(reps, int)
+        or reps < 0
+        or reps > 0xFFFFFFFF
     ):
         logger.warning(
             "Ignoring invalid routed_experts_prompt_start=%r (want non-negative int)",
