@@ -10,13 +10,13 @@ This sweeper is not an engine/kernel autotuner. Its focus is high-level Dynamo c
 
 ## Scope
 
-This plan defines the DGDR profiler V2 smart-search surface. Profiler V2 uses Vizier as the smart sweeping optimizer. This document inventories deployment, engine, KV manager, router, and planner knobs, then classifies each knob by optimizer treatment. It does not finalize the DGDR API.
+This plan defines the Profiler V2 smart-search surface. Profiler V2 uses Vizier as the smart sweeping optimizer. This document inventories deployment, engine, KV manager, router, and planner knobs, then classifies each knob by optimizer treatment. It does not define how the search inputs are populated.
 
 ## V2 Refactor Direction
 
 V2 should land as an opt-in implementation under `components/src/dynamo/profiler/v2/`. It should own search-space construction, candidate decoding, replay evaluation, ranking, and report generation for opt-in runs.
 
-V2 should not change the existing V1 profiler defaults, DGDR CR behavior, or k8s controller/operator path. In the opt-in path, V2 replaces the current AIC sweeper/picker role, while AIC remains a lower-level provider for backend support checks, legal parallelism hints, perf model data, and memory/capacity estimates.
+V2 should not change the existing V1 profiler defaults or k8s controller/operator path. In the opt-in path, V2 replaces the current AIC sweeper/picker role, while AIC remains a lower-level provider for backend support checks, legal parallelism hints, perf model data, and memory/capacity estimates.
 
 ## Overview
 
@@ -24,7 +24,7 @@ Profiler V2 uses two sweep paths. The main Vizier sweep is manually branched by 
 
 ```mermaid
 flowchart TD
-    input["DGDR input + replay traces"] --> profiler["Profiler V2"]
+    input["Search space + goal + replay traces"] --> profiler["Profiler V2"]
     profiler --> throughputPlanner{"Throughput planner enabled?"}
     throughputPlanner -->|yes| loadPredictor["Independent planner load predictor sweep"]
     loadPredictor --> predictorPreset["Selected predictor preset"]
@@ -76,8 +76,8 @@ Deployment owns model identity, hardware target, topology, backend type, and bud
 
 | Category | Knob | Applies | Proposed treatment | Notes |
 | --- | --- | --- | --- | --- |
-| model | `model_name` | all | `Pinned` | Model identity from the DGDR `model` field (HF id or private model name). Selects the AIC perf-model table and memory-fit estimates; never a search dimension. One model is shared across all components in a candidate. Maps to `EngineSpec.model`. |
-| hardware | `hardware_sku` | all | `Pinned` | GPU SKU from the DGDR `hardware.gpuSku` field (e.g. `h200_sxm`, `h100_sxm`). Selects the AIC hardware system and bounds legal parallelism and `gpu_budget`; never a search dimension. Maps to `HardwareSpec.gpuSku`. |
+| model | `model_name` | all | `Pinned` | Model identity (HF id or private model name). Selects the AIC perf-model table and memory-fit estimates; never a search dimension. One model is shared across all components in a candidate. Maps to `EngineSpec.model`. |
+| hardware | `hardware_sku` | all | `Pinned` | GPU SKU (e.g. `h200_sxm`, `h100_sxm`). Selects the AIC hardware system and bounds legal parallelism and `gpu_budget`; never a search dimension. Maps to `HardwareSpec.gpuSku`. |
 | deployment mode | `deployment_mode`: `agg`, `disagg` | all | `Pinned`+`Branch` | Pin when user specifies one mode; otherwise split studies outside Vizier and rank branches globally. |
 | backend type | `backend` + `engine_type`: `vllm`, `sglang`, `trtllm` | all | `Search` | Search only across candidate backends with comparable replay+perf model support; can be pinned by user override. Disagg first pass uses one shared backend type for prefill+decode unless mixed-backend deployment is explicitly enabled. |
 | objective | `optimization_target`: `throughput`, `e2e_latency`, `goodput`, `goodput_per_gpu`; optional SLA targets: `ttft_ms`+`itl_ms` or `e2e_ms` | profiler+planner | `Pinned` | User-selected replay objective. `goodput` and `goodput_per_gpu` require an SLA target. |
@@ -242,7 +242,7 @@ The selected predictor preset is emitted as pinned planner config for the main V
 
 ## Internal Search API
 
-This is a pure internal search API. It takes a search space, an optimization goal, and a sweep config, runs the Vizier + replay sweep, and returns the evaluated candidates ranked by performance. It is decoupled from DGDR and k8s — how the search space and goal get populated (from a DGDR spec, a CLI, or a test) is out of scope here.
+This is a pure internal search API. It takes a search space, an optimization goal, and a sweep config, runs the Vizier + replay sweep, and returns the evaluated candidates ranked by performance. It is decoupled from any orchestration or deployment-request layer — how the search space and goal get populated (from a config file, a CLI, or a test) is out of scope here.
 
 ```python
 # components/src/dynamo/profiler/v2/__init__.py
