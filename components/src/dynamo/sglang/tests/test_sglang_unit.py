@@ -551,6 +551,7 @@ async def test_register_model_uses_metadata_only_for_sglang_modelexpress(monkeyp
         endpoint=SimpleNamespace(),
         server_args=server_args,
         dynamo_args=dynamo_args,
+        worker_type=sglang_register.WorkerType.Aggregated,
     )
 
     assert result is True

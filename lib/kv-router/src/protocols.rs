@@ -438,8 +438,24 @@ pub enum RouterRequest {
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
         #[serde(default, skip_serializing_if = "RoutingConstraints::is_empty")]
         routing_constraints: RoutingConstraints,
+        #[serde(default)]
+        priority_jump: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lora_name: Option<String>,
     },
-    MarkPrefill,
+    PotentialLoads {
+        tokens: Vec<Token>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lora_name: Option<String>,
+    },
+    MarkPrefill {
+        // once prefill completes, the frontend might not be allowed to send a
+        // request with linking the id. In this case, the request_id is provided in the payload.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     MarkFree {
         // once request is cancelled, the frontend might not be allowed to send a
         // request with linking the id. In this case, the request_id is provided in the payload.
@@ -454,6 +470,8 @@ impl Default for RouterRequest {
             tokens: vec![],
             block_mm_infos: None,
             routing_constraints: RoutingConstraints::default(),
+            priority_jump: 0.0,
+            lora_name: None,
         }
     }
 }
@@ -485,6 +503,15 @@ pub enum RouterResponse {
     },
     FreeMarked {
         success: bool,
+    },
+    PotentialLoads {
+        // loads of every worker tracked by the scheduler.
+        loads: Vec<crate::scheduling::PotentialLoad>,
+        // the queue sizes for this specific router instance.
+        #[serde(default)]
+        pending_count: usize,
+        #[serde(default)]
+        pending_isl_tokens: usize,
     },
 }
 
@@ -1619,5 +1646,164 @@ mod tests {
                 request_id: Some(ref request_id)
             } if request_id == "req-123"
         ));
+    }
+
+    #[test]
+    fn test_router_request_new_serialization_with_priority_jump() {
+        let request = RouterRequest::New {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            routing_constraints: RoutingConstraints::default(),
+            priority_jump: 5.0,
+            lora_name: None,
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            serialized,
+            r#"{"method":"new","tokens":[1,2,3],"priority_jump":5.0}"#
+        );
+        assert!(matches!(
+            deserialized,
+            RouterRequest::New {
+                priority_jump,
+                ..
+            } if priority_jump == 5.0
+        ));
+    }
+
+    #[test]
+    fn test_router_request_new_serialization_with_lora_name() {
+        let request = RouterRequest::New {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            routing_constraints: RoutingConstraints::default(),
+            priority_jump: 0.0,
+            lora_name: Some("adapter-a".to_string()),
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            serialized,
+            r#"{"method":"new","tokens":[1,2,3],"priority_jump":0.0,"lora_name":"adapter-a"}"#
+        );
+        assert!(matches!(
+            deserialized,
+            RouterRequest::New {
+                tokens,
+                lora_name: Some(ref lora_name),
+                ..
+            } if tokens == vec![1, 2, 3] && lora_name == "adapter-a"
+        ));
+    }
+
+    #[test]
+    fn test_router_request_new_defaults_lora_name() {
+        let deserialized: RouterRequest =
+            serde_json::from_str(r#"{"method":"new","tokens":[1,2,3]}"#).unwrap();
+
+        assert!(matches!(
+            deserialized,
+            RouterRequest::New {
+                tokens,
+                lora_name: None,
+                ..
+            } if tokens == vec![1, 2, 3]
+        ));
+    }
+
+    #[test]
+    fn test_router_request_potential_loads_serialization_with_lora_name() {
+        let request = RouterRequest::PotentialLoads {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            lora_name: Some("adapter-a".to_string()),
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            serialized,
+            r#"{"method":"potential_loads","tokens":[1,2,3],"lora_name":"adapter-a"}"#
+        );
+        assert!(matches!(
+            deserialized,
+            RouterRequest::PotentialLoads {
+                tokens,
+                block_mm_infos: None,
+                lora_name: Some(ref lora_name),
+            } if tokens == vec![1, 2, 3] && lora_name == "adapter-a"
+        ));
+    }
+
+    #[test]
+    fn test_router_request_potential_loads_defaults_lora_name() {
+        let deserialized: RouterRequest =
+            serde_json::from_str(r#"{"method":"potential_loads","tokens":[1,2,3]}"#).unwrap();
+
+        assert!(matches!(
+            deserialized,
+            RouterRequest::PotentialLoads {
+                tokens,
+                block_mm_infos: None,
+                lora_name: None,
+            } if tokens == vec![1, 2, 3]
+        ));
+    }
+
+    #[test]
+    fn test_router_request_mark_prefill_serialization_with_request_id() {
+        let request = RouterRequest::MarkPrefill {
+            request_id: Some("req-123".to_string()),
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            serialized,
+            r#"{"method":"mark_prefill","request_id":"req-123"}"#
+        );
+        assert!(matches!(
+            deserialized,
+            RouterRequest::MarkPrefill {
+                request_id: Some(ref request_id)
+            } if request_id == "req-123"
+        ));
+    }
+
+    #[test]
+    fn test_potential_load_defaults_active_requests() {
+        let load = serde_json::from_str::<crate::scheduling::PotentialLoad>(
+            r#"{"worker_id":1,"dp_rank":0,"potential_prefill_tokens":16,"potential_decode_blocks":4}"#,
+        )
+        .unwrap();
+
+        assert_eq!(load.worker_id, 1);
+        assert_eq!(load.dp_rank, 0);
+        assert_eq!(load.potential_prefill_tokens, 16);
+        assert_eq!(load.potential_decode_blocks, 4);
+        assert_eq!(load.active_requests, 0);
+    }
+
+    #[test]
+    fn test_potential_load_serializes_active_requests() {
+        let load = crate::scheduling::PotentialLoad {
+            worker_id: 1,
+            dp_rank: 0,
+            potential_prefill_tokens: 16,
+            potential_decode_blocks: 4,
+            active_requests: 2,
+        };
+
+        assert_eq!(
+            serde_json::to_string(&load).unwrap(),
+            r#"{"worker_id":1,"dp_rank":0,"potential_prefill_tokens":16,"potential_decode_blocks":4,"active_requests":2}"#
+        );
     }
 }

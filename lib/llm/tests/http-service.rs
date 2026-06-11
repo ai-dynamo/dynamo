@@ -908,3 +908,57 @@ async fn test_request_id_annotation() {
     cancel_token.cancel();
     task.await.unwrap().unwrap();
 }
+
+/// With nvext disabled, a request asking for response `extra_fields` must not
+/// produce any `nvext` field in the response.
+#[tokio::test]
+async fn test_nvext_disabled_strips_request_and_response() {
+    dynamo_runtime::logging::init();
+
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .enable_chat_endpoints(true)
+        .enable_nvext(false)
+        .port(port)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let card = ModelDeploymentCard::with_name_only("test-model");
+    manager
+        .add_chat_completions_model("test-model", card.mdcsum(), Arc::new(CounterEngine {}))
+        .unwrap();
+
+    let response = reqwest::Client::new()
+        .post(format!("http://localhost:{port}/v1/chat/completions"))
+        .header("x-worker-instance-id", "42")
+        .json(&serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true,
+            "max_tokens": 1,
+            "nvext": {
+                "extra_fields": ["worker_id", "timing", "engine_data"],
+                "backend_instance_id": 99
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert!(response.status().is_success());
+
+    let body = response.text().await.expect("read body");
+    assert!(
+        !body.contains("\"nvext\""),
+        "nvext gate off: response must not contain an `nvext` field, got: {body}"
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
