@@ -332,7 +332,7 @@ fn resolve_routing_image_token_id(model_id: &str, model_dir: &str) -> Option<u32
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false))]
 #[allow(clippy::too_many_arguments)]
 fn register_model<'p>(
     py: Python<'p>,
@@ -354,6 +354,7 @@ fn register_model<'p>(
     needs: Option<Vec<Vec<WorkerType>>>,
     self_host_metadata: Option<bool>,
     tensor_model_config: Option<&Bound<'p, PyDict>>,
+    ignore_weights: bool,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Every worker registers with an explicit `worker_type`. Reject `None`
     // outright — a missing role would produce a card whose readiness math
@@ -537,16 +538,12 @@ fn register_model<'p>(
         }
 
         // For non-TensorBased models, resolve the model path (local or fetch from HuggingFace).
-        // Pass ignore_weights=true: register_model only consumes metadata (config.json,
-        // tokenizer*, generation_config.json, chat template) when building the MDC, so any
-        // weight files would be downloaded and discarded. Engines load weights independently
-        // before register_model runs — SGLang and vLLM via an explicit fetch_model pre-flight,
-        // TRT-LLM via a pre-staged local path (which takes the fs::exists branch above) or
-        // via its own runtime resolving the HF repo.
+        // ModelExpress load paths pass ignore_weights=true because the engine already owns
+        // weight acquisition; other load paths keep the default full-fetch behavior.
         let model_path = if fs::exists(&source_path)? {
             PathBuf::from(&source_path)
         } else {
-            LocalModel::fetch(&source_path, true)
+            LocalModel::fetch(&source_path, ignore_weights)
                 .await
                 .map_err(to_pyerr)?
         };

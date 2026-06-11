@@ -297,6 +297,8 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: vllm
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
@@ -322,6 +324,8 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: vllm
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
@@ -342,6 +346,8 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: sglang
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
@@ -368,6 +374,8 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: sglang
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
@@ -388,6 +396,8 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: trtllm
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
@@ -414,6 +424,8 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: trtllm
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2

@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
-# Profiler Guide
-
 This guide covers deployment, configuration, integration, and troubleshooting for the Dynamo Profiler.
 
 ## What is a DynamoGraphDeploymentRequest (DGDR)?
@@ -285,13 +283,14 @@ Pass arguments to the SLA planner via the features section:
 ```yaml
 features:
   planner:
-    planner_min_endpoint: 2                    # Minimum endpoints to maintain
-    planner_adjustment_interval: 60            # Adjustment interval (seconds)
-    planner_load_predictor: linear             # Load prediction method
+    min_endpoint: 2                            # Minimum endpoints to maintain
+    load_adjustment_interval_seconds: 5        # Load-scaling interval (seconds)
+    throughput_adjustment_interval_seconds: 60 # Throughput-scaling interval (seconds)
+    load_predictor: linear                     # Load prediction method
 ```
 
 > [!NOTE]
-> Planner arguments use `planner_` prefix. See the AI Configurator documentation for full list.
+> Planner arguments use the `PlannerConfig` field names consumed by the planner service. See the AI Configurator documentation for full list.
 
 ### Model Cache PVC (Advanced)
 

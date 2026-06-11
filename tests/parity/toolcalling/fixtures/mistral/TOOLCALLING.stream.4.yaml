@@ -48,7 +48,7 @@ cases:
     expected:
       dynamo:
         calls: []
-        normal_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"loc'
+        normal_text: ''
       sglang:
         calls: []
         normal_text: ''
@@ -57,6 +57,7 @@ cases:
         - name: get_weather
           arguments: '{"loc'
         normal_text: ''
+        reason: vLLM emits a malformed partial call with the incomplete argument fragment as arguments; Dynamo suppresses the unterminated call and emits empty content.
   TOOLCALLING.stream.4.c:
     description: Stream reaches length after a valid inner tool-call body without the required outer wrapper, followed by
       repeated close markers
@@ -80,3 +81,4 @@ cases:
       sglang:
         calls: []
         normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}[/TOOL_CALLS[/TOOL_CALLS[/TOOL_CALLS'
+        reason: SGLang strips the trailing ] from each orphan [/TOOL_CALLS] close marker (leaving bracket fragments); Dynamo and vLLM keep the bare body and markers verbatim when the [TOOL_CALLS] opener is absent.
