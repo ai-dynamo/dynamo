@@ -14,7 +14,6 @@ subtitle: "How do Dynamo frontend-decoding and the embedding cache change a sing
 <a href="#arms">Compared arms</a>
 <a href="#results">Results</a>
 <a href="#reproduce">Reproduce</a>
-<a href="/dynamo/dev/recipes/qwen3-6-35b">Related recipe</a>
 <a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3.6-35b">Source</a>
 </div>
 </div>
@@ -136,6 +135,6 @@ Each config's `profile_export_aiperf.json` is retrieved locally and holds the he
 - The recipe expects a `shared-model-cache` RWX PVC in the namespace; `Qwen/Qwen3.6-35B-A3B-FP8` is public, so no HuggingFace token is required.
 - The vLLM command uses `--mm-processor-cache-gb 30` and `--max-model-len 32768` to handle the 5-image multimodal context.
 
-## Related Recipe
+## Winning Configuration
 
-The `dynamo-fd-ec` arm is the promoted deployment target: [Qwen3.6-35B](../recipes/qwen3-6-35b.mdx). The `vllm-serve` baseline and `dynamo-fd` step exist as benchmark controls.
+The `dynamo-fd-ec` arm is the winning configuration; its deploy assets are above, and a recommended Recipe may be promoted from this benchmark in a future release. The `vllm-serve` baseline and `dynamo-fd` step exist as benchmark controls.

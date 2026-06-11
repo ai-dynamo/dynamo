@@ -14,7 +14,6 @@ subtitle: "How much does enabling the vLLM multimodal embedding cache improve re
 <a href="#arms">Compared arms</a>
 <a href="#results">Results</a>
 <a href="#reproduce">Reproduce</a>
-<a href="/dynamo/dev/recipes/qwen3-vl-30b">Related recipe</a>
 <a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-vl-30b">Source</a>
 </div>
 </div>
@@ -122,6 +121,6 @@ The helper script `recipes/qwen3-vl-30b/vllm/agg-embedding-cache/run-benchmark.s
 - The aggregated embedding cache uses vLLM's native `ec_both` ECConnector role, supported in vLLM 0.17+ with no patches — see [multimodal vLLM docs](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-vllm.md#embedding-cache).
 - Replace the `storageClassName` and `image:` placeholders in the YAML files before running.
 
-## Related Recipe
+## Winning Configuration
 
-The cache-ON arm is the promoted deployment target: [Qwen3-VL-30B](../recipes/qwen3-vl-30b.mdx). The cache-OFF configuration is the same manifest with the cache disabled, kept as the benchmark control.
+The cache-ON arm is the winning configuration and is deployable from its arm assets above; a recommended Recipe may be promoted from this benchmark in a future release. The cache-OFF configuration is the same manifest with the cache disabled, kept as the benchmark control.

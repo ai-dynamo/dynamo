@@ -96,13 +96,15 @@ benchmarks:
   results:
     available: true
     summary: ~130 tok/s/user / ~5,400 tok/s/GPU (winner) vs ~105 / ~1,700 (baseline); full 4-arm table verified against README
-  related_recipes:
-  - kimi-k2-5
+  related_recipes: []
   maintainer: null
   gaps:
   - result numbers approximate (~) in source; Pareto plot only as embedded image
   - deploy.yaml image tag placeholder (tensorrtllm-runtime:my-tag)
   - maintainer unknown
+  promotion_candidate:
+    deferred_recipe_id: kimi-k2-5
+    note: winning arm is a recipe-promotion candidate; held back in R1, see deferred_recipes in recipes.yaml
 - id: qwen3-6-35b-feature-stack
   title: Qwen3.6 Frontend and Cache Benchmark
   page: benchmarks/qwen3-6-35b-feature-stack.mdx
@@ -136,12 +138,14 @@ benchmarks:
   results:
     available: true
     summary: Full H100 + GB200 RPS/ITL/TTFT tables from docs/benchmarks/embedding_cache.md, reproduced on-page
-  related_recipes:
-  - qwen3-6-35b
+  related_recipes: []
   maintainer: null
   gaps:
   - deploy YAMLs are envsubst templates, not directly kubectl-applicable; reproduce via run-benchmark.sh
   - maintainer unknown
+  promotion_candidate:
+    deferred_recipe_id: qwen3-6-35b
+    note: winning arm is a recipe-promotion candidate; held back in R1, see deferred_recipes in recipes.yaml
 - id: qwen3-vl-embedding-cache
   title: Qwen3-VL Embedding Cache A/B
   page: benchmarks/qwen3-vl-embedding-cache.mdx
@@ -170,12 +174,14 @@ benchmarks:
   results:
     available: true
     summary: +16.4% TPS, -27.7% TTFT avg, -30.1% TTFT p50, -8.8% ITL, -13.4% req latency — verified against README
-  related_recipes:
-  - qwen3-vl-30b
+  related_recipes: []
   maintainer: null
   gaps:
   - both arms share one deploy.yaml (cache toggled by env var); baseline has no distinct manifest
   - maintainer unknown
+  promotion_candidate:
+    deferred_recipe_id: qwen3-vl-30b
+    note: winning arm is a recipe-promotion candidate; held back in R1, see deferred_recipes in recipes.yaml
 - id: deepseek-v3-2-wideep-routing
   title: DeepSeek V3.2 WideEP Routing A/B
   page: benchmarks/deepseek-v3-2-wideep-routing.mdx

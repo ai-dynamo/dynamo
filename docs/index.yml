@@ -63,21 +63,12 @@ navigation:
       - page: Nemotron 3 Super
         path: recipes/nemotron-3-super.mdx
         slug: nemotron-3-super
-      - page: Qwen3.6-35B-A3B FP8
-        path: recipes/qwen3-6-35b.mdx
-        slug: qwen3-6-35b
       - page: GLM-5 NVFP4
         path: recipes/glm-5-nvfp4.mdx
         slug: glm-5-nvfp4
-      - page: Kimi-K2.5 NVFP4
-        path: recipes/kimi-k2-5.mdx
-        slug: kimi-k2-5
       - page: DeepSeek V3.2 NVFP4
         path: recipes/deepseek-v3-2-nvfp4.mdx
         slug: deepseek-v3-2-nvfp4
-      - page: Qwen3-VL-30B
-        path: recipes/qwen3-vl-30b.mdx
-        slug: qwen3-vl-30b
       - page: GPT-OSS-120B
         path: recipes/gpt-oss-120b.mdx
         slug: gpt-oss-120b

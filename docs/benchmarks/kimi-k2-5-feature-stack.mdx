@@ -14,7 +14,6 @@ subtitle: "How much throughput and interactivity do we gain as KV routing, Eagle
 <a href="#arms">Compared arms</a>
 <a href="#results">Results</a>
 <a href="#reproduce">Reproduce</a>
-<a href="/dynamo/dev/recipes/kimi-k2-5">Related recipe</a>
 <a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k2.5">Source</a>
 </div>
 </div>
@@ -130,6 +129,6 @@ kubectl apply -f recipes/kimi-k2.5/trtllm/<arm>/perf.yaml -n ${NAMESPACE}
 - Your HuggingFace token needs access to both `nvidia/Kimi-K2.5-NVFP4` and the `nvidia/Kimi-K2.5-Thinking-Eagle3` speculative-decoding head.
 - If you rename the ComputeDomain CR, mirror the change in every `deploy.yaml` under `extraPodSpec.resourceClaims` and `resources.claims`.
 
-## Related Recipe
+## Winning Configuration
 
-The disaggregated Eagle3 + KV router + offload arm is the promoted deployment target: [Kimi-K2.5 NVFP4](../recipes/kimi-k2-5.mdx). The aggregated arms exist as benchmark steps and controls.
+The disaggregated Eagle3 + KV router + offload arm is the winning configuration and is deployable from its arm assets above. A recommended Recipe may be promoted from this benchmark in a future release; the aggregated arms exist as benchmark steps and controls.
