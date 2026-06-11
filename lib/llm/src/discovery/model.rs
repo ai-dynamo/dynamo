@@ -37,11 +37,7 @@ fn warn_legacy_readiness_once(model: &str, namespace: &str) {
         tracing::warn!(
             model = model,
             namespace = namespace,
-            "Serving-readiness is using the legacy compat path: a worker registered \
-             without a `worker_type` (legacy binary). Disaggregated topology \
-             gating is disabled for such namespaces until all workers are upgraded \
-             to register a worker_type. This compatibility shim will be removed in a \
-             future release."
+            "Serving-readiness in compatibility mode, please upgrade the workers to latest version. This compatibility shim will be removed in a future release."
         );
     });
 }
@@ -193,12 +189,6 @@ impl Model {
     // at least one alternative is fully covered by the worker types
     // currently present (workers with worker_count > 0).
     //
-    // New workers register an explicit `worker_type` and `needs`
-    // (`register_model` rejects a missing `worker_type`). A card with no
-    // `worker_type` therefore comes from an old (pre-`worker_type`) worker;
-    // a namespace containing such a legacy card falls back to the
-    // cross-version compat path in `is_workers_ready` (ready if any worker is
-    // live) rather than being strictly topology-gated. See that method.
 
     /// Distinct namespaces represented by this model's WorkerSets, sorted.
     /// Each namespace identifies one deployment of the model.
@@ -237,23 +227,32 @@ impl Model {
     ///
     /// **Cross-version compat:** if the namespace still contains a legacy card
     /// (a worker with no declared `worker_type`, i.e. an old pre-`worker_type`
-    /// binary), its disaggregated topology cannot be reconstructed — old decode
-    /// and old aggregated workers are indistinguishable on the wire. Rather than
-    /// hide the model, we fall back to legacy behavior and report ready as long
-    /// as some worker is live. Strict topology gating resumes automatically once
-    /// every worker in the namespace carries a `worker_type`. Remove this branch
-    /// when the compat shim is retired.
+    /// binary), its disaggregated roles cannot be reconstructed — old decode and
+    /// old aggregated workers are indistinguishable on the wire. Rather than hide
+    /// the model, we fall back to legacy behavior and report ready as long as some
+    /// worker is live. Strict gating resumes once every worker in the namespace
+    /// carries a `worker_type`. Remove this branch when the compat shim is retired.
     pub fn is_workers_ready(&self, namespace: &str) -> bool {
+        let wsets: Vec<Arc<WorkerSet>> = self
+            .worker_sets
+            .iter()
+            .filter(|entry| entry.value().namespace() == namespace)
+            .map(|entry| entry.value().clone())
+            .collect();
+        self.namespace_ready(&wsets)
+    }
+
+    /// Core readiness check over an explicit set of WorkerSets that all share
+    /// one namespace. Returns false when `wsets` is empty.
+    fn namespace_ready(&self, wsets: &[Arc<WorkerSet>]) -> bool {
+        if wsets.is_empty() {
+            return false;
+        }
         let mut present: std::collections::HashSet<crate::worker_type::WorkerType> =
             std::collections::HashSet::new();
-        let mut wsets: Vec<std::sync::Arc<WorkerSet>> = Vec::new();
         let mut has_legacy = false;
         let mut has_live_worker = false;
-        for entry in self.worker_sets.iter() {
-            let ws = entry.value();
-            if ws.namespace() != namespace {
-                continue;
-            }
+        for ws in wsets {
             match Self::ws_role_and_needs(ws) {
                 Some((wt, _needs)) => {
                     if ws.worker_count() > 0 {
@@ -266,15 +265,11 @@ impl Model {
             if ws.worker_count() > 0 {
                 has_live_worker = true;
             }
-            wsets.push(ws.clone());
-        }
-        if wsets.is_empty() {
-            return false;
         }
 
         // COMPAT branch: legacy card present → preserve legacy behavior.
         if has_legacy {
-            warn_legacy_readiness_once(&self.name, namespace);
+            warn_legacy_readiness_once(&self.name, wsets[0].namespace());
             return has_live_worker;
         }
 
@@ -283,7 +278,7 @@ impl Model {
         // present roles. (a) is what rejects an Aggregated WorkerSet with
         // worker_count == 0: its `needs` is empty, but without a live worker
         // the namespace cannot serve traffic.
-        for ws in &wsets {
+        for ws in wsets {
             let Some((wt, needs)) = Self::ws_role_and_needs(ws) else {
                 return false;
             };
@@ -311,8 +306,8 @@ impl Model {
             .find(|ns| self.is_workers_ready(ns))
     }
 
-    /// Whether at least one set of workers (one topology) in this model is
-    /// ready to serve traffic.
+    /// Whether at least one namespace's worker set in this model is ready to
+    /// serve traffic.
     pub fn has_ready_workers(&self) -> bool {
         self.first_ready_workers().is_some()
     }
@@ -325,14 +320,15 @@ impl Model {
     /// Used by KServe gRPC `model_ready` / `server_ready` to avoid the race
     /// where a `ModelDeploymentCard` is registered before its WorkerSet has
     /// been wired up.
+    ///
+    /// Delegates to [`Self::select_worker_set_with`] so readiness reports
+    /// exactly what request routing would accept — including the namespace
+    /// completeness gate. Without that, a live decode-only WorkerSet with a
+    /// chat engine but no prefill peer would report ready while every request
+    /// was rejected.
     pub fn is_ready_to_serve(&self) -> bool {
-        self.worker_sets.iter().any(|entry| {
-            let ws = entry.value();
-            if ws.worker_count() == 0 || !ws.can_serve_requests() {
-                return false;
-            }
-            ws.has_any_serving_engine()
-        })
+        self.select_worker_set_with(|ws| ws.has_any_serving_engine().then_some(()))
+            .is_some()
     }
 
     /// Whether this model should be visible in /v1/models.
@@ -479,32 +475,62 @@ impl Model {
     ///
     /// The `extract` closure should return `Some(value)` if the WorkerSet has the
     /// desired engine, or `None` if it doesn't.
+    ///
     fn select_worker_set_with<T, F>(&self, extract: F) -> Option<T>
     where
         F: Fn(&WorkerSet) -> Option<T>,
     {
-        // Fast path: single set (same zero-worker filtering as the multi-set path below)
-        if self.worker_sets.len() == 1 {
-            return self.worker_sets.iter().next().and_then(|entry| {
-                let ws = entry.value();
-                if ws.worker_count() == 0 || !ws.can_serve_requests() {
-                    return None;
-                }
-                extract(ws)
-            });
-        }
-
-        // Collect eligible sets with their worker counts, skipping sets with no workers
-        // or sets whose prefill router has died under enforce_disagg.
-        // In-process models (no discovery watcher) return count=1, so they always participate.
-        // Discovery models with count=0 have no available workers and are skipped.
-        let eligible: Vec<(T, usize)> = self
+        // One snapshot drives both the readiness filter and candidate
+        // eligibility, so a concurrent add/remove can't make us treat a
+        // namespace as complete while routing to a set that lost a peer. It also
+        // avoids re-entering the DashMap mid-iteration, which can deadlock.
+        let snapshot: Vec<Arc<WorkerSet>> = self
             .worker_sets
             .iter()
-            .filter_map(|entry| {
-                let ws = entry.value();
+            .map(|entry| entry.value().clone())
+            .collect();
+
+        // Namespaces whose worker set is complete, evaluated against the snapshot.
+        let mut namespaces: Vec<&str> = snapshot.iter().map(|ws| ws.namespace()).collect();
+        namespaces.sort_unstable();
+        namespaces.dedup();
+        let ready_namespaces: std::collections::HashSet<&str> = namespaces
+            .into_iter()
+            .filter(|ns| {
+                let in_ns: Vec<Arc<WorkerSet>> = snapshot
+                    .iter()
+                    .filter(|ws| ws.namespace() == *ns)
+                    .cloned()
+                    .collect();
+                self.namespace_ready(&in_ns)
+            })
+            .collect();
+
+        // Fast path: single set (same zero-worker filtering as the multi-set path below)
+        if snapshot.len() == 1 {
+            let ws = &snapshot[0];
+            if ws.worker_count() == 0
+                || !ws.can_serve_requests()
+                || !ready_namespaces.contains(ws.namespace())
+            {
+                return None;
+            }
+            return extract(ws);
+        }
+
+        // Collect eligible sets with their worker counts, skipping sets with no workers,
+        // sets whose prefill router has died under enforce_disagg, or sets in a namespace
+        // whose worker set is incomplete.
+        // In-process models (no discovery watcher) return count=1, so they always participate.
+        // Discovery models with count=0 have no available workers and are skipped.
+        let eligible: Vec<(T, usize)> = snapshot
+            .iter()
+            .filter_map(|ws| {
                 let count = ws.worker_count();
-                if count == 0 || !ws.can_serve_requests() {
+                if count == 0
+                    || !ws.can_serve_requests()
+                    || !ready_namespaces.contains(ws.namespace())
+                {
                     return None;
                 }
                 extract(ws).map(|val| (val, count))
@@ -1108,7 +1134,7 @@ mod tests {
 
     #[test]
     fn readiness_scale_down_flips_to_not_ready() {
-        // Decode worker_count drops to 0 → topology flips from ready to
+        // Decode worker_count drops to 0 → readiness flips from ready to
         // not-ready with no clearing hook (the point of live-compute).
         let model = Model::new("llama".to_string());
         let (p, _tp) = ws_with_role(
@@ -1134,7 +1160,7 @@ mod tests {
         tx_d.send(vec![]).unwrap();
         assert!(!model.is_workers_ready("dynamo"));
 
-        // Rejoin a decode worker — topology flips back to ready.
+        // Rejoin a decode worker — readiness flips back to ready.
         tx_d.send(vec![2]).unwrap();
         assert!(model.is_workers_ready("dynamo"));
     }
@@ -1142,12 +1168,11 @@ mod tests {
     // -- Cross-version compat: legacy cards (no worker_type) --
     //
     // A new frontend may see cards from old (pre-`worker_type`) workers that
-    // carry no `worker_type`. Their disaggregated topology can't be
-    // reconstructed (old
-    // decode and old aggregated workers are wire-indistinguishable), so a
+    // carry no `worker_type`. Their disaggregated roles can't be reconstructed
+    // (old decode and old aggregated workers are wire-indistinguishable), so a
     // namespace containing any legacy card falls back to legacy behavior:
-    // ready iff some worker is live. Strict topology gating resumes once every
-    // worker carries a worker_type.
+    // ready iff some worker is live. Strict gating resumes once every worker
+    // carries a worker_type.
 
     #[test]
     fn readiness_legacy_card_with_live_worker_is_ready() {
@@ -1178,9 +1203,9 @@ mod tests {
     #[test]
     fn readiness_legacy_disagg_pd_is_ready() {
         // COMPAT: old disaggregated deployment (prefill + decode, both legacy
-        // and cardless of worker_type) seen by a new frontend. The topology
-        // can't be reconstructed, so the namespace is ready as long as workers
-        // are live — matching legacy behavior.
+        // and cardless of worker_type) seen by a new frontend. The roles can't
+        // be reconstructed, so the namespace is ready as long as workers are
+        // live — matching legacy behavior.
         let model = Model::new("llama".to_string());
         let (p, _tp) = make_worker_set_with_count("dynamo", "mdc-p", vec![1]);
         let (d, _td) = make_worker_set_with_count("dynamo", "mdc-d", vec![2]);
@@ -1316,5 +1341,120 @@ mod tests {
         Arc::new(crate::engines::StreamingEngineAdapter::new(
             crate::engines::make_echo_engine(),
         ))
+    }
+
+    /// Build a WorkerSet with an explicit worker_type / needs, a live worker
+    /// count, AND a chat engine attached (i.e. it can be selected to serve a
+    /// chat request).
+    fn ws_serving_role(
+        namespace: &str,
+        mdcsum: &str,
+        worker_type: WorkerType,
+        needs: Vec<Vec<WorkerType>>,
+        worker_ids: Vec<u64>,
+    ) -> (Arc<WorkerSet>, watch::Sender<Vec<u64>>) {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(worker_type);
+        card.needs = needs;
+        let (tx, rx) = watch::channel(worker_ids);
+        let mut ws = WorkerSet::new(namespace.to_string(), mdcsum.to_string(), card);
+        ws.set_instance_watcher(rx);
+        ws.chat_engine = Some(make_test_chat_engine());
+        (Arc::new(ws), tx)
+    }
+
+    /// A single deployment with an incomplete worker set (decode-only, no
+    /// prefill peer) must not be selected for serving, even though it has a
+    /// live worker and a chat engine attached. Confirms the fast-path
+    /// readiness filter in `select_worker_set_with`.
+    #[test]
+    fn select_skips_unready_namespace_single_set() {
+        let model = Model::new("llama".to_string());
+        let (decode, _tx) = ws_serving_role(
+            "bad",
+            "mdc-d",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![1],
+        );
+        model.add_worker_set("bad".to_string(), decode);
+
+        assert!(!model.is_workers_ready("bad"));
+        assert!(
+            model.get_chat_engine().is_err(),
+            "decode-only namespace (missing prefill) must not be selectable"
+        );
+        // KServe readiness must agree with routability: an incomplete namespace
+        // is not ready to serve even though it has a live worker + chat engine.
+        assert!(
+            !model.is_ready_to_serve(),
+            "incomplete namespace must not report ready to serve"
+        );
+    }
+
+    /// With two deployments of one model — a ready P/D pair and an unready
+    /// decode-only namespace — selection must only ever land on the ready one.
+    /// The decode WorkerSets in BOTH namespaces carry a chat engine and a live
+    /// worker, so before the readiness filter the unready namespace could be
+    /// picked. Removing the ready namespace leaves only the unready one, which
+    /// must then be unservable rather than silently accepting (and failing) the
+    /// request.
+    #[test]
+    fn select_skips_unready_namespace_multi_set() {
+        let model = Model::new("llama".to_string());
+
+        // Ready deployment: live prefill + live decode (decode is the front door).
+        let (good_prefill, _tx_gp) = ws_with_role(
+            "good",
+            "mdc-gp",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![1],
+        );
+        let (good_decode, _tx_gd) = ws_serving_role(
+            "good",
+            "mdc-gd",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![2],
+        );
+        model.add_worker_set("good:prefill".to_string(), good_prefill);
+        model.add_worker_set("good".to_string(), good_decode);
+
+        // Unready deployment: live decode only, no prefill peer.
+        let (bad_decode, _tx_bd) = ws_serving_role(
+            "bad",
+            "mdc-bd",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![3],
+        );
+        model.add_worker_set("bad".to_string(), bad_decode);
+
+        assert!(model.is_workers_ready("good"));
+        assert!(!model.is_workers_ready("bad"));
+
+        // The ready namespace keeps the model servable.
+        assert!(
+            model.get_chat_engine().is_ok(),
+            "a ready namespace must keep the model servable"
+        );
+        assert!(
+            model.is_ready_to_serve(),
+            "a ready namespace must report ready to serve"
+        );
+
+        // Drop the ready namespace; only the unready decode-only namespace is
+        // left. It must NOT be selectable despite having a live worker + engine.
+        model.remove_worker_set("good:prefill");
+        model.remove_worker_set("good");
+        assert!(
+            model.get_chat_engine().is_err(),
+            "unready namespace must never be selected for serving"
+        );
+        assert!(
+            !model.is_ready_to_serve(),
+            "only an incomplete namespace remains: not ready to serve"
+        );
     }
 }

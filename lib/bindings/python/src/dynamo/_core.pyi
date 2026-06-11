@@ -708,6 +708,15 @@ class ModelDeploymentCard:
         """Return the source path of this deployment card."""
         ...
 
+    def local_dir(self) -> str:
+        """Resolved metadata directory (post-`download_config`). Raises
+        ValueError if the path contains non-UTF-8 bytes."""
+        ...
+
+    def name(self) -> str:
+        """Return the model name."""
+        ...
+
     def runtime_config(self) -> Any:
         """Return the runtime configuration as a dict."""
         ...
@@ -823,13 +832,9 @@ class RadixTree:
     release the Python GIL.
     """
 
-    def __init__(self, expiration_duration_secs: Optional[float] = None) -> None:
+    def __init__(self) -> None:
         """
         Create a new RadixTree instance.
-
-        Args:
-            expiration_duration_secs: Optional expiration duration in seconds for cached blocks.
-                                    If None, blocks never expire.
         """
         ...
 
@@ -2127,6 +2132,8 @@ async def register_model(
     lora_name: Optional[str] = None,
     base_model_path: Optional[str] = None,
     needs: Optional[List[List[WorkerType]]] = None,
+    self_host_metadata: Optional[bool] = None,
+    ignore_weights: bool = False,
 ) -> None:
     """
     Attach the model at path to the given endpoint, and advertise it as model_type.
@@ -2145,6 +2152,9 @@ async def register_model(
         peer dependencies. `needs` is a DNF list — each inner list is an
         AND-set, the outer list is OR. `worker_type` is required; backends
         declare it literally at each call site.
+
+    When `ignore_weights` is true, remote HuggingFace model resolution skips
+    weight files and downloads only the metadata needed for registration.
     """
     ...
 
@@ -2948,11 +2958,9 @@ class backend:
         Prefill: "backend.DisaggregationMode"
         Decode: "backend.DisaggregationMode"
 
-    class EngineConfig:
+    class LlmRegistration:
         def __init__(
             self,
-            model: str,
-            served_model_name: Optional[str] = None,
             context_length: Optional[int] = None,
             kv_cache_block_size: Optional[int] = None,
             total_kv_blocks: Optional[int] = None,
@@ -2962,12 +2970,7 @@ class backend:
             data_parallel_start_rank: Optional[int] = None,
             bootstrap_host: Optional[str] = None,
             bootstrap_port: Optional[int] = None,
-            runtime_data: Optional[Dict[str, Any]] = None,
         ) -> None: ...
-        @property
-        def model(self) -> str: ...
-        @property
-        def served_model_name(self) -> Optional[str]: ...
         @property
         def context_length(self) -> Optional[int]: ...
         @property
@@ -2986,8 +2989,23 @@ class backend:
         def bootstrap_host(self) -> Optional[str]: ...
         @property
         def bootstrap_port(self) -> Optional[int]: ...
+
+    class EngineConfig:
+        def __init__(
+            self,
+            model: str,
+            served_model_name: Optional[str] = None,
+            runtime_data: Optional[Dict[str, Any]] = None,
+            llm: Optional["backend.LlmRegistration"] = None,
+        ) -> None: ...
+        @property
+        def model(self) -> str: ...
+        @property
+        def served_model_name(self) -> Optional[str]: ...
         @property
         def runtime_data(self) -> Dict[str, Any]: ...
+        @property
+        def llm(self) -> Optional["backend.LlmRegistration"]: ...
 
     class RuntimeConfig:
         def __init__(
@@ -3028,5 +3046,6 @@ class backend:
             engine: Any,
             config: "backend.WorkerConfig",
             event_loop: Any,
+            raw: bool = False,
         ) -> None: ...
         def run(self) -> Awaitable[None]: ...

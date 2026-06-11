@@ -525,16 +525,12 @@ pub(crate) struct RadixTree {
 #[pymethods]
 impl RadixTree {
     #[new]
-    #[pyo3(signature = (expiration_duration_secs=None))]
-    fn new(expiration_duration_secs: Option<f64>) -> PyResult<Self> {
-        let expiration_duration = expiration_duration_secs.map(std::time::Duration::from_secs_f64);
-
+    fn new() -> PyResult<Self> {
         let (request_tx, request_rx) = mpsc::channel::<RadixTreeRequest>();
 
         // Spawn dedicated thread with simplified sync processing
         std::thread::spawn(move || {
-            let mut radix_tree =
-                dynamo_kv_router::indexer::RadixTree::new_with_frequency(expiration_duration);
+            let mut radix_tree = dynamo_kv_router::indexer::RadixTree::new();
 
             loop {
                 match request_rx.recv() {

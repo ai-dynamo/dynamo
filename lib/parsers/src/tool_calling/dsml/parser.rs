@@ -447,22 +447,21 @@ mod tests {
     //   - TOOLCALLING.harmony.1 / TOOLCALLING.harmony.2 N/A — Harmony-only.
     //
     // EOF recovery:
-    //   - TOOLCALLING.stream.4.a  Stream finalization sets
-    //             `allow_eof_recovery=true` and recovers complete
-    //             <｜DSML｜invoke>...</｜DSML｜invoke> pairs even when the
-    //             outer close fence is absent at EOS. Streaming early-exit and
-    //             batch/non-streaming aggregate paths keep recovery disabled so
-    //             they do not claim DSML calls before `</｜DSML｜tool_calls>`
-    //             actually arrives.
+    //   - TOOLCALLING.stream.4.a / TOOLCALLING.batch.5  Both the stream-finalize
+    //             and batch/non-streaming finalize paths set
+    //             `allow_eof_recovery=true` (via
+    //             `detect_and_parse_tool_call_with_recovery`) and recover every
+    //             complete <｜DSML｜invoke>...</｜DSML｜invoke> pair even when the
+    //             outer close fence is absent at EOS, keeping the pre-block prose
+    //             as normal_text and dropping any trailing invoke that was never
+    //             closed. Only streaming early-exit keeps recovery disabled so it
+    //             does not claim DSML calls before `</｜DSML｜tool_calls>` actually
+    //             arrives (see test_parse_deepseek_v4_missing_end_token_without_recovery).
     //
     // TODO — bugs pinned, parser still needs to be fixed:
-    //   - TOOLCALLING.batch.5  BUG: parser drops all calls when </｜DSML｜tool_calls> is
-    //             absent (max_tokens / EOS before close). Same class as
-    //             Kimi K2 pre-PR #8208. Fix: scan for complete
-    //             <｜DSML｜invoke>...</｜DSML｜invoke> pairs even without the
-    //             outer close fence (see kimi_k2_parser.rs for precedent).
-    //             Pinning tests below assert the current silent-drop;
-    //             flip them once the parser is fixed.
+    //   - (TOOLCALLING.batch.5  FIXED: batch/non-streaming finalize now recovers
+    //     complete invokes when </｜DSML｜tool_calls> is absent, matching the
+    //     stream-finalize path. Same class as Kimi K2 pre-PR #8208.)
     //   - (TOOLCALLING.batch.4 missing-parameter-close & middle-invoke-truncation now
     //     pinned: see test_parse_deepseek_v4_missing_parameter_close_loses_param,
     //     test_parse_deepseek_v4_middle_invoke_truncation_corrupts_next.)
