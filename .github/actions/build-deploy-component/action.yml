@@ -198,7 +198,7 @@ runs:
             --build-arg BASELINE_SBOM_FILE="${BASELINE_SBOM_FILE}" \
             --build-context snapshot=../snapshot \
             --build-context compliance=../../container/compliance \
-            --target compliance \
+            --target compliance_artifact \
             --output type=local,dest=/tmp/compliance \
             --progress=plain \
             -f Dockerfile .

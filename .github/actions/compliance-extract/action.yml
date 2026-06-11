@@ -87,7 +87,7 @@ runs:
         docker buildx build \
             --builder ${{ inputs.builder_name }} \
             --platform ${{ inputs.platform }} \
-            --target compliance \
+            --target compliance_artifact \
             --output type=local,dest=/tmp/compliance \
             --progress=plain \
             -f ${{ steps.render.outputs.rendered }} \

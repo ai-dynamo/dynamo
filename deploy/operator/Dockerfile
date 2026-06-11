@@ -157,7 +157,7 @@ RUN python3 -m compliance.policy.validate \
 # + osrb.cdx.json. The runtime stage below COPYs from `licenses` directly; this
 # scratch stage exists purely for CI extraction.
 
-FROM scratch AS compliance
+FROM scratch AS compliance_artifact
 COPY --from=licenses /legal/ /
 
 

@@ -13,8 +13,10 @@
 #                           previously-defined build stage, validates output
 #                           against policy, and stages the unified /legal tree
 #                           (flat NOTICES-<Eco>.txt + osrb-deps.csv + osrb.cdx.json).
-#   2. compliance        -- FROM scratch; exposes the unified /legal tree for CI
-#                           extraction as a single `-compliance` artifact.
+#   2. compliance_artifact -- FROM scratch; exposes the unified /legal tree for
+#                           CI extraction as a single `-compliance` artifact.
+#                           (Named *_artifact to avoid colliding with the
+#                           `compliance` build-context the deploy Dockerfiles use.)
 #   3. sources_collect   -- gated on ENABLE_SOURCE_ARCHIVAL; runs
 #                           compliance.collect_sources to produce /sources.zip.
 #   4. sources_archive   -- FROM scratch; exposes /sources.zip.
@@ -136,7 +138,7 @@ RUN python3 -m compliance.policy.validate \
 # osrb-deps.csv (with Notes) + osrb.cdx.json (delta CycloneDX). Export is bounded
 # by these files' size (a few MB) regardless of runtime image size.
 
-FROM scratch AS compliance
+FROM scratch AS compliance_artifact
 COPY --from=licenses /legal/ /
 
 

@@ -280,7 +280,7 @@ RUN python3 -m compliance.policy.validate \
 # =============================================================================
 # Stage: Compliance: artifact (single unified -compliance tree for CI extraction)
 # =============================================================================
-FROM scratch AS compliance
+FROM scratch AS compliance_artifact
 COPY --from=licenses /legal/ /
 
 
