@@ -103,11 +103,17 @@ pub struct TcpStreamServer {
 struct RequestedSendConnection {
     context: Arc<dyn AsyncEngineContext>,
     connection: oneshot::Sender<Result<StreamSender, String>>,
+    /// Capacity of the per-stream mpsc buffer between the socket task and the
+    /// engine producer; carried from the registration [`StreamOptions`].
+    send_buffer_count: usize,
 }
 
 struct RequestedRecvConnection {
     context: Arc<dyn AsyncEngineContext>,
     connection: oneshot::Sender<Result<StreamReceiver, String>>,
+    /// Capacity of the per-stream mpsc buffer between the socket task and the
+    /// engine consumer; carried from the registration [`StreamOptions`].
+    send_buffer_count: usize,
 }
 
 // /// When registering a new TcpStream on the server, the registration method will return a [`Connections`] object.
@@ -396,6 +402,7 @@ impl ResponseService for TcpStreamServer {
             let connection_info = RequestedSendConnection {
                 context: options.context.clone(),
                 connection: pending_sender_tx,
+                send_buffer_count: options.send_buffer_count,
             };
 
             let mut state = self.state.lock().await;
@@ -443,6 +450,7 @@ impl ResponseService for TcpStreamServer {
             let connection_info = RequestedRecvConnection {
                 context: options.context.clone(),
                 connection: pending_recver_tx,
+                send_buffer_count: options.send_buffer_count,
             };
 
             let mut state = self.state.lock().await;
@@ -652,11 +660,13 @@ async fn tcp_listener(
         let RequestedSendConnection {
             context,
             connection,
+            send_buffer_count,
         } = request_stream;
 
-        // Buffer size matches `process_response_stream`; both should be driven
-        // by the registration options rather than hard-coded. See #10293.
-        let (request_tx, request_rx) = mpsc::channel(64);
+        // Buffer size is driven by the registration options
+        // ([`StreamOptions::send_buffer_count`]) rather than hard-coded; the
+        // same applies to `process_response_stream`. See #10293.
+        let (request_tx, request_rx) = mpsc::channel(send_buffer_count);
 
         if connection
             .send(Ok(crate::pipeline::network::StreamSender {
@@ -769,6 +779,7 @@ async fn tcp_listener(
         let RequestedRecvConnection {
             context,
             connection,
+            send_buffer_count,
         } = response_stream;
 
         // the [`Prologue`]
@@ -807,9 +818,10 @@ async fn tcp_listener(
             return Err(error!("Received error prologue: {}", error));
         }
 
-        // Buffer size should be driven by the registration options rather than
-        // hard-coded; the same applies to `process_request_stream`. See #10293.
-        let (response_tx, response_rx) = mpsc::channel(64);
+        // Buffer size is driven by the registration options
+        // ([`StreamOptions::send_buffer_count`]) rather than hard-coded; the
+        // same applies to `process_request_stream`. See #10293.
+        let (response_tx, response_rx) = mpsc::channel(send_buffer_count);
 
         if connection
             .send(Ok(crate::pipeline::network::StreamReceiver {
