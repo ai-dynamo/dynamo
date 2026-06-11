@@ -42,13 +42,14 @@ routing see live cache state.
 [NVIDIA AI Cluster Runtime (AICR)](https://github.com/NVIDIA/aicr) packages the lower stack as a
 validated, version-locked recipe. You bring an existing GPU Kubernetes cluster. AICR captures its
 state, selects a matching recipe, validates the constraints, and renders a deployable bundle. For
-Dynamo users, that makes AICR a fast path from "I have GPUs in Kubernetes" to "I have a validated
-Dynamo 1.2 runtime."
+Dynamo users, that makes AICR a fast path from "I have GPUs in Kubernetes" to "I have a full,
+validated Dynamo 1.2 inference runtime stack."
 
 ## Why the Runtime Below Dynamo Matters
 
 Dynamo coordinates inference across multiple components: frontends, routers, workers, the Dynamo
-operator, and optional Gateway API Inference Extension (GAIE) / Endpoint Picker Plugin (EPP)
+operator, and optional
+[Gateway API Inference Extension (GAIE) / Endpoint Picker Plugin (EPP)](../kubernetes/inference-gateway.md)
 components. Those components depend on cluster-level services that must agree on Kubernetes version,
 driver stack, GPU allocation model, scheduling policy, node health, metrics, and network reachability.
 
@@ -94,14 +95,25 @@ repeatable.
 
 ## Dynamo 1.2 in the Recipe
 
-Dynamo 1.2 is the right baseline for the AICR path because it aligns the Kubernetes deployment model
-around the v1beta1 graph API, Kubernetes discovery, the Dynamo platform chart, and NATS-backed event
-delivery for KV-aware routing.
+Dynamo 1.2 is the stable release where the `DynamoGraphDeployment` API has moved from alpha to a
+more production-oriented `nvidia.com/v1beta1` API. AICR uses that API as the recipe boundary for the
+serving graph, while the `dynamo-platform` chart provides the operator, CRDs, NATS, and supporting
+control-plane services.
 
-In the AICR Dynamo recipe, Kubernetes discovery is the expected path. That means Dynamo components
-discover each other through Kubernetes resources instead of an etcd deployment. The `dynamo-platform`
-chart still installs NATS because the event plane is separate from discovery: KV-aware routing needs
-live worker cache events, and the validated Kubernetes path uses NATS for those events.
+Dynamo is Kubernetes-native in this path. Frontends, vLLM workers, EPP components, and other Dynamo
+services discover each other through Kubernetes resources instead of an etcd deployment. The
+`dynamo-platform` chart still installs NATS because the event plane is separate from discovery:
+KV-aware routing needs live worker cache events, and the validated Kubernetes path uses NATS for
+those events.
+
+KV-aware routing is one of the main reasons to run Dynamo. Agentic workloads repeatedly append to a
+long prefix: system prompt, tool definitions, conversation history, tool results, and generated
+reasoning. If each turn lands on a worker that does not already hold the prefix, the system
+recomputes the same tokens again and again. Cache-aware placement keeps turns close to the workers
+that already hold their KV blocks. Together with disaggregated serving, this changes the shape of
+many long-running token workloads from repeated prefix recomputation toward reuse of already computed
+state. For sessions whose prompt grows turn by turn, that moves the dominant prefill work from
+quadratic growth toward linear reuse.
 
 > [!IMPORTANT]
 > The request plane and the KV event plane are separate. In Dynamo 1.2, the request plane defaults
@@ -116,8 +128,7 @@ That distinction matters for vLLM. A vLLM worker may include a setting like:
 
 That ZMQ publisher is the local vLLM engine event source. Dynamo reads those raw local KV events from
 the worker, normalizes them, and republishes them onto the Dynamo event plane. In the Kubernetes AICR
-path, that event plane is NATS. The recipe should not set `DYN_EVENT_PLANE=zmq` for the Dynamo
-runtime unless it is intentionally leaving the validated Kubernetes event-plane path.
+path, that event plane is NATS.
 
 ## Two Routing Paths
 
@@ -129,12 +140,30 @@ The default path is the **Dynamo frontend router**. A `Frontend` component runs 
 events, and chooses a worker based on cache overlap and load. This path keeps the user-facing service
 inside the Dynamo graph and is the shortest route for validating Dynamo itself.
 
+```mermaid
+flowchart LR
+    Client["Client"] -->|"OpenAI-compatible request"| Frontend["Dynamo Frontend\nDYN_ROUTER_MODE=kv"]
+    Frontend -->|"request plane\nTCP by default"| Worker["vLLM worker"]
+    Worker -.->|"local ZMQ\nraw KV events"| Publisher["Dynamo worker\nKV publisher"]
+    Publisher -.->|"NATS-backed\nKV event plane"| Frontend
+```
+
 The Kubernetes-native ingress path is **Gateway / EPP**. In that mode, traffic flows through the
 Kubernetes Gateway API and an InferencePool. The EPP performs endpoint selection using Dynamo's
 KV-aware scoring. Worker frontend sidecars run in `--router-mode direct`, so they honor the worker
 chosen by the EPP instead of making another placement decision. This path matters when the platform
 team wants model-aware routing at the Kubernetes Gateway layer while keeping Dynamo's cache-aware
 selection logic.
+
+```mermaid
+flowchart LR
+    Client["Client"] -->|"HTTP"| Gateway["Kubernetes Gateway"]
+    Gateway -->|"InferencePool"| EPP["Dynamo EPP\nKV-aware selection"]
+    EPP -->|"chosen worker"| Sidecar["Worker frontend sidecar\n--router-mode direct"]
+    Sidecar --> Worker["vLLM worker"]
+    Worker -.->|"local ZMQ\nraw KV events"| Publisher["Dynamo worker\nKV publisher"]
+    Publisher -.->|"NATS-backed\nKV event plane"| EPP
+```
 
 Both paths depend on the same principle: workers must publish live KV cache events. Without live
 events, Dynamo can fall back to approximate routing, but that is not the validated AICR path for
