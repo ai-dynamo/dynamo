@@ -334,6 +334,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
         depth: usize,
     ) {
         let score = depth as u32;
+        scores.scores.reserve(active.len());
         for &worker in active {
             let entry = scores.scores.entry(worker).or_insert(0);
             *entry = (*entry).max(score);
@@ -341,7 +342,10 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
     }
 
     fn collect_live_workers(node: &RoutingNode) -> FxHashSet<WorkerWithDpRank> {
-        node.live_workers.iter().map(|worker| *worker).collect()
+        let mut active =
+            FxHashSet::with_capacity_and_hasher(node.live_workers.len(), FxBuildHasher);
+        active.extend(node.live_workers.iter().map(|worker| *worker));
+        active
     }
 
     fn reconcile_active_workers(
@@ -357,6 +361,9 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
             return;
         }
         let score = drop_depth as u32;
+        scores
+            .scores
+            .reserve(active.len().saturating_sub(node.live_workers.len()));
         active.retain(|worker| {
             if node.live_workers.contains(worker) {
                 true
@@ -371,7 +378,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
     async fn dispatch_read(
         &self,
         node: Arc<RoutingNode>,
-        sequence: Vec<LocalBlockHash>,
+        sequence: &[LocalBlockHash],
         mut scores: OverlapScores,
         active: FxHashSet<WorkerWithDpRank>,
     ) -> Result<OverlapScores, KvRouterError> {
@@ -387,10 +394,10 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
         let Some(anchor) = self.anchor_for_parent(&node) else {
             return Ok(scores);
         };
-        let suffix = if anchor.anchor_depth <= sequence.len() {
-            sequence[anchor.anchor_depth..].to_vec()
+        let suffix: &[LocalBlockHash] = if anchor.anchor_depth <= sequence.len() {
+            &sequence[anchor.anchor_depth..]
         } else {
-            Vec::new()
+            &[]
         };
         let shard = Arc::clone(&self.shards[shard_idx]);
         let mut shard_scores = shard
@@ -728,7 +735,7 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
                 #[cfg(feature = "bench")]
                 let t_shard = Instant::now();
                 let result = self
-                    .dispatch_read(node, sequence, router_scores, active)
+                    .dispatch_read(node, &sequence, router_scores, active)
                     .await;
                 #[cfg(feature = "bench")]
                 {
@@ -1345,8 +1352,9 @@ mod tests {
         KvIndexerInterface::apply_event(shard, direct_worker_event).await;
         index.flush().await;
 
+        let suffix = local_hashes(&[7]);
         let scores = index.shards[shard_idx]
-            .find_matches_from_anchor(anchor, local_hashes(&[7]))
+            .find_matches_from_anchor(anchor, &suffix)
             .await
             .unwrap();
         assert_eq!(score(&scores, worker(2)), Some(4));
