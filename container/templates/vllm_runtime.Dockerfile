@@ -155,16 +155,6 @@ RUN wget https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.7/int
     ln -s /opt/intel/oneapi/ccl/2021.15 /opt/intel/oneapi/ccl/latest
 {% endif %}
 
-{% if context.vllm.enable_modelexpress == "true" %}
-# Install only the ModelExpress client package. --no-deps preserves the upstream
-# vLLM runtime dependency stack.
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
-    set -eux; \
-    export UV_CACHE_DIR=/root/.cache/uv; \
-    uv pip install --system --no-deps \
-        "modelexpress==${MODELEXPRESS_VERSION}"
-{% endif %}
-
 {% if device == "cpu" %}
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -363,13 +353,15 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sh
         if [ -n "$GMS_WHEEL" ]; then uv pip install "$GMS_WHEEL"; fi; \
     fi
 
-# Install ModelExpress for P2P weight transfer (optional)
-ARG ENABLE_MODELEXPRESS_P2P
-ARG MODELEXPRESS_REF
-RUN if [ "${ENABLE_MODELEXPRESS_P2P}" = "true" ]; then \
-        echo "Installing ModelExpress from ref: ${MODELEXPRESS_REF}" && \
-        uv pip install "modelexpress @ git+https://github.com/ai-dynamo/modelexpress.git@${MODELEXPRESS_REF}#subdirectory=modelexpress_client/python"; \
-    fi
+{% if context.vllm.enable_modelexpress == "true" %}
+# Install only the ModelExpress client package. --no-deps preserves the upstream
+# vLLM runtime dependency stack.
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
+    set -eux; \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv; \
+    uv pip install --no-deps \
+        "modelexpress==${MODELEXPRESS_VERSION}"
+{% endif %}
 {% endif %}
 
 # Install runtime dependencies (common + vllm-specific + benchmarks).
