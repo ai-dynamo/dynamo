@@ -2484,7 +2484,7 @@ fn get_model_readiness(
         .manager()
         .get_model(model_id)
         .ok_or_else(ErrorMessage::model_not_found)?;
-    Ok(Json(model.namespace_topology()).into_response())
+    Ok(Json(model.namespace_readiness()).into_response())
 }
 
 /// Create an Axum [`Router`] for the OpenAI API Responses endpoint
