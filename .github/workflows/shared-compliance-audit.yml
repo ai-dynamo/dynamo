@@ -1,0 +1,123 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Independent compliance completeness audit. Syft-scans the FINAL pushed image,
+# subtracts the baseline SBOM, and reports any shipped component missing from the
+# build's unified osrb-deps.csv — the authoritative "did the generators miss
+# anything" check that verify_sbom_diff never was (it only compared our own
+# outputs). Runs as a sibling job (needs:[<fw>-build]) IN PARALLEL with the test
+# jobs so the slow syft pull+scan never blocks testing. SOFT GATE: report-only
+# (no --fail-on-findings) until the name-normalization is proven low-noise; the
+# job is not a required check.
+name: Shared Compliance Audit
+
+on:
+  workflow_call:
+    inputs:
+      framework:
+        description: 'Framework (vllm, sglang, trtllm, dynamo)'
+        required: true
+        type: string
+      target:
+        description: 'Docker target (runtime, planner, frontend)'
+        required: true
+        type: string
+      cuda_version:
+        description: 'Single CUDA version (e.g. 13.0); empty for cpu targets'
+        required: false
+        type: string
+        default: ''
+      target_tag_plain:
+        description: 'Plain image tag prefix from the build job (also the compliance artifact prefix)'
+        required: true
+        type: string
+      make_efa:
+        description: 'Match the build render (EFA images)'
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      AWS_DEFAULT_REGION:
+        required: true
+      AWS_ACCOUNT_ID:
+        required: true
+
+jobs:
+  audit:
+    name: Compliance audit
+    runs-on: prod-default-small-v2
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Install syft
+        shell: bash
+        run: curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+      - name: Resolve image ref, baseline + artifact name
+        id: resolve
+        shell: bash
+        env:
+          ECR: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          set -euo pipefail
+          CUDA="${{ inputs.cuda_version }}"
+          # Image tag — keep in sync with shared-copy.yml/shared-build-image.yml:
+          # cuda13 is implicit (no suffix); other majors keep -cuda<major>.
+          IMAGE_TAG="${{ github.sha }}-${{ inputs.target_tag_plain }}"
+          if [ -n "${CUDA}" ] && [ "${CUDA%%.*}" != "13" ]; then
+            IMAGE_TAG="${IMAGE_TAG}-cuda${CUDA%%.*}"
+          fi
+          echo "image_ref=${ECR}/ai-dynamo/dynamo:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          # Compliance artifact name — mirror compliance-extract's suffix step.
+          if [ -n "${CUDA}" ]; then SUFFIX="${CUDA}-amd64-arm64"; else SUFFIX="cpu-amd64-arm64"; fi
+          echo "artifact=compliance-${{ inputs.target_tag_plain }}-${SUFFIX}-compliance" >> "$GITHUB_OUTPUT"
+          # Baseline SBOM stem — render the Dockerfile and read it back (same as
+          # the runtime licenses stage). amd64 baseline matches the amd64 scan.
+          RENDER_ARGS="--framework ${{ inputs.framework }} --target ${{ inputs.target }} --platform linux/amd64"
+          [ -n "${CUDA}" ] && RENDER_ARGS="${RENDER_ARGS} --cuda-version ${CUDA}"
+          [ "${{ inputs.make_efa }}" = "true" ] && RENDER_ARGS="${RENDER_ARGS} --make-efa"
+          python3 container/render.py ${RENDER_ARGS} --output-short-filename
+          STEM=$(grep -E '^ARG BASELINE_SBOM_FILE=' container/rendered.Dockerfile | head -1 \
+                 | sed -E 's/^ARG BASELINE_SBOM_FILE="?([^"]*)"?$/\1/')
+          if [ -n "${STEM}" ] && [ -f "container/compliance/base_sboms/${STEM}-amd64.cdx.json" ]; then
+            echo "baseline=container/compliance/base_sboms/${STEM}-amd64.cdx.json" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::no amd64 baseline SBOM for stem '${STEM}'; auditing full image"
+            echo "baseline=" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Download build compliance artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: ${{ steps.resolve.outputs.artifact }}
+          path: /tmp/compliance
+      - name: Syft scan (amd64) + audit vs osrb-deps.csv
+        continue-on-error: true   # soft gate — never block tests/merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          syft "${{ steps.resolve.outputs.image_ref }}" --platform linux/amd64 \
+            -o cyclonedx-json=/tmp/syft.cdx.json
+          OUR_CSV=$(find /tmp/compliance -path '*linux_amd64*' -name 'osrb-*.csv' | head -1)
+          [ -z "${OUR_CSV}" ] && OUR_CSV=$(find /tmp/compliance -name 'osrb-*.csv' | head -1)
+          echo "auditing against ${OUR_CSV}"
+          BASE_ARG=""
+          [ -n "${{ steps.resolve.outputs.baseline }}" ] && BASE_ARG="--base-sbom ${{ steps.resolve.outputs.baseline }}"
+          PYTHONPATH=container python3 -m compliance.audit_image_sbom \
+            --syft-sbom /tmp/syft.cdx.json \
+            ${BASE_ARG} \
+            --our-csv "${OUR_CSV}" \
+            --image "${{ steps.resolve.outputs.image_tag }}" \
+            --report /tmp/audit-report.txt -v
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: compliance-audit-${{ inputs.target_tag_plain }}-${{ steps.resolve.outputs.image_tag }}
+          path: /tmp/audit-report.txt
+          retention-days: 7
+          if-no-files-found: ignore

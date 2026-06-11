@@ -549,14 +549,83 @@ jobs:
   # ============================================================================
   # IMAGE COMPLIANCE
   # ============================================================================
-  # Compliance extract + verify (per-ecosystem /sboms CSVs + /legal NOTICES, plus
-  # the SBOM-diff completeness check) runs as an inline step INSIDE each shipped
-  # framework build job (inline_compliance: true above) — same job, same warm
-  # builder, so it's a cache hit + small scratch export rather than a cold
-  # full-image rebuild. License-policy enforcement also happens in the licenses
-  # Dockerfile stage during the build. Because the extract is now part of the
-  # build job, a compliance failure fails the build and (via needs:) preempts the
-  # dependent tests. EFA images are covered too (make_efa flows to the extract).
+  # Compliance extract (unified /legal NOTICES + osrb-deps.csv + osrb.cdx.json)
+  # runs as an inline step INSIDE each shipped framework build job
+  # (inline_compliance: true above) — same job, same warm builder, so it's a
+  # cache hit + small scratch export rather than a cold full-image rebuild.
+  # License-policy enforcement also happens in the licenses Dockerfile stage; a
+  # compliance failure fails the build and (via needs:) preempts dependent tests.
+  #
+  # The *-compliance-audit jobs below are the INDEPENDENT completeness check:
+  # they syft-scan the pushed image and diff it against the build's osrb-deps.csv
+  # to surface anything shipped-but-unattributed. They need:[<fw>-build] and run
+  # in PARALLEL with the test jobs (the slow syft pull+scan stays off the test
+  # critical path). Soft gate: report-only, non-required. EFA-image audits are a
+  # follow-up (same caller pattern).
+
+  vllm-compliance-audit:
+    name: vllm-runtime # grouped in the UI with other vllm jobs
+    needs: [changed-files, vllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-compliance-audit.yml
+    with:
+      framework: vllm
+      target: runtime
+      cuda_version: '13.0'
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+    secrets: inherit
+
+  sglang-compliance-audit:
+    name: sglang-runtime # grouped in the UI with other sglang jobs
+    needs: [changed-files, sglang-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-compliance-audit.yml
+    with:
+      framework: sglang
+      target: runtime
+      cuda_version: '13.0'
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+    secrets: inherit
+
+  trtllm-compliance-audit:
+    name: trtllm-runtime # grouped in the UI with other trtllm jobs
+    needs: [changed-files, trtllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-compliance-audit.yml
+    with:
+      framework: trtllm
+      target: runtime
+      cuda_version: '13.1'
+      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+    secrets: inherit
+
+  planner-compliance-audit:
+    name: planner # grouped in the UI with other planner jobs
+    needs: [changed-files, planner-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
+    uses: ./.github/workflows/shared-compliance-audit.yml
+    with:
+      framework: dynamo
+      target: planner
+      cuda_version: ''
+      target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
+    secrets: inherit
+
+  frontend-compliance-audit:
+    name: frontend # grouped in the UI with other frontend jobs
+    needs: [changed-files, frontend-build]
+    if: |
+      needs.changed-files.outputs.frontend == 'true' ||
+      needs.changed-files.outputs.operator == 'true' ||
+      needs.changed-files.outputs.snapshot == 'true' ||
+      needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-compliance-audit.yml
+    with:
+      framework: dynamo
+      target: frontend
+      cuda_version: ''
+      target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
+    secrets: inherit
 
   # ============================================================================
   # IMAGE COPY PIPELINES
