@@ -1589,4 +1589,35 @@ mod tests {
             );
         });
     }
+
+    #[cfg(feature = "stateful-responses-redb")]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn responses_store_init_failure_fails_startup() {
+        const STORE_URL_ENV: &str = "DYN_STATEFUL_RESPONSES_STORE_URL";
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let store_url = format!("redb:{}", db_dir.path().display());
+
+        temp_env::async_with_vars([(STORE_URL_ENV, Some(store_url.as_str()))], async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("failed to bind ephemeral port");
+            let service = HttpService::builder()
+                .port(listener.local_addr().unwrap().port())
+                .build()
+                .unwrap();
+
+            let err = service
+                .run_with_listener(CancellationToken::new(), listener)
+                .await
+                .expect_err("bad redb store should fail before serving");
+            assert!(
+                err.to_string()
+                    .contains("failed to initialize stateful Responses store"),
+                "{err:#}"
+            );
+        })
+        .await;
+    }
 }

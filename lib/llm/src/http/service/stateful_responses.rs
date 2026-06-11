@@ -23,7 +23,6 @@ use thiserror::Error;
 use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
-use crate::protocols::openai::nvext::NvExt;
 use crate::protocols::openai::responses::NvCreateResponse;
 
 const DEFAULT_TTL_SECS: u64 = 30 * 24 * 60 * 60;
@@ -593,6 +592,10 @@ impl ResponseContextStoreManager {
         Ok(store)
     }
 
+    pub async fn warmup(&self) -> anyhow::Result<()> {
+        self.store().await.map(|_| ())
+    }
+
     pub async fn prepare_request(
         &self,
         request: &mut NvCreateResponse,
@@ -695,8 +698,6 @@ fn expand_typed_request(
     let should_store = request.inner.store.unwrap_or(true);
     request.inner.store = Some(should_store);
 
-    strip_input_token_data(&mut request.nvext);
-
     Ok(ExpandedResponseContext {
         input_items,
         should_store,
@@ -721,15 +722,10 @@ fn message_item(role: &str, content_type: &str, text: &str) -> Value {
     })
 }
 
-fn strip_input_token_data(nvext: &mut Option<NvExt>) {
-    if let Some(nvext) = nvext {
-        nvext.token_data = None;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::common::extensions::NvExt;
     use dynamo_protocols::types::responses::{
         AssistantRole, FunctionToolCall, InputItem, Item, MessageItem, OutputItem, OutputMessage,
         OutputMessageContent, OutputStatus, OutputTextContent,
@@ -753,6 +749,7 @@ mod tests {
 
     fn text_request(text: &str) -> NvCreateResponse {
         NvCreateResponse {
+            extensions: Default::default(),
             inner: dynamo_protocols::types::responses::CreateResponse {
                 input: InputParam::Text(text.into()),
                 model: Some("m".into()),
@@ -809,7 +806,7 @@ mod tests {
         assert_eq!(expanded.input_items[0]["role"], "user");
         assert_eq!(request.inner.store, Some(true));
         let nvext = request.nvext.as_ref().unwrap();
-        assert!(nvext.token_data.is_none());
+        assert_eq!(nvext.token_data.as_deref(), Some(&[1, 2, 3][..]));
         assert_eq!(
             nvext.extra_fields.as_ref().unwrap(),
             &vec!["worker_id".to_string()]

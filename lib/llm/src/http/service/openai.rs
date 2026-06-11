@@ -77,6 +77,7 @@ use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
+use dynamo_protocols::types::responses::{IncludeEnum, Tool, ToolChoiceParam, Truncation};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
@@ -2121,6 +2122,11 @@ async fn responses(
         return Ok(resp.into_response());
     }
 
+    if let Err(err_response) = validate_response_fields_generic(&request) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+
     let expanded_response_context = state
         .responses_context_store()
         .prepare_request(&mut request)
@@ -2161,13 +2167,19 @@ async fn responses(
         text: request.inner.text.clone(),
         service_tier: request.inner.service_tier,
         include: request.inner.include.clone(),
+        top_logprobs: request.inner.top_logprobs,
+        completion_token_logprobs: request
+            .nvext
+            .as_ref()
+            .and_then(|nvext| nvext.extra_fields.as_ref())
+            .is_some_and(|fields| {
+                fields
+                    .iter()
+                    .any(|field| field == "completion_token_logprobs")
+            }),
         truncation: request.inner.truncation,
-        // Upstream `CreateResponse` doesn't carry these yet; plumbed through so
-        // the response serializer can default to 0.0 without hardcoding at the
-        // build site. When upstream (or our shadow) adds the fields, sourcing
-        // from the request becomes a one-line change here.
-        presence_penalty: None,
-        frequency_penalty: None,
+        presence_penalty: request.extensions.presence_penalty,
+        frequency_penalty: request.extensions.frequency_penalty,
         // Pass-through metadata — accepted on the request, echoed back on the
         // response so the caller can confirm receipt. Dynamo doesn't act on
         // these; see `validate_response_unsupported_fields` for rationale.
@@ -2320,6 +2332,7 @@ async fn responses(
                     tracing::error!(%err, "failed to persist streamed stateful Responses context");
                     persist_failed_in_stream.store(true, Ordering::Release);
                     events.extend(converter.emit_failed_event(
+                        completed_response.output,
                         "server_error",
                         "Failed to persist stateful Responses context.",
                     ));
@@ -2459,7 +2472,79 @@ pub fn validate_response_unsupported_fields(
             VALIDATION_PREFIX.to_string() + "`max_tool_calls` is not supported.",
         ));
     }
+    if inner.conversation.is_some() {
+        return Some(ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string() + "`conversation` is not supported.",
+        ));
+    }
+    if inner.stream_options.is_some() {
+        return Some(ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string() + "`stream_options` is not supported.",
+        ));
+    }
+    if inner.include.as_ref().is_some_and(|include| {
+        include
+            .iter()
+            .any(|item| !matches!(item, IncludeEnum::MessageOutputTextLogprobs))
+    }) {
+        return Some(ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string()
+                + "Only `message.output_text.logprobs` is supported in `include`.",
+        ));
+    }
+    if inner
+        .reasoning
+        .as_ref()
+        .is_some_and(|reasoning| reasoning.summary.is_some())
+    {
+        return Some(ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string() + "`reasoning.summary` is not supported.",
+        ));
+    }
+    if inner
+        .text
+        .as_ref()
+        .is_some_and(|text| text.verbosity.is_some())
+    {
+        return Some(ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string() + "`text.verbosity` is not supported.",
+        ));
+    }
+    if matches!(inner.truncation, Some(Truncation::Auto)) {
+        return Some(ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string() + "`truncation: auto` is not supported.",
+        ));
+    }
+    if inner
+        .tools
+        .as_ref()
+        .is_some_and(|tools| tools.iter().any(|tool| !matches!(tool, Tool::Function(_))))
+    {
+        return Some(ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string() + "Only function tools are supported.",
+        ));
+    }
+    if inner.tool_choice.as_ref().is_some_and(|choice| {
+        !matches!(
+            choice,
+            ToolChoiceParam::Function(_) | ToolChoiceParam::Mode(_)
+        )
+    }) {
+        return Some(ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string()
+                + "Only function or none/auto/required tool choices are supported.",
+        ));
+    }
     None
+}
+
+pub fn validate_response_fields_generic(request: &NvCreateResponse) -> Result<(), ErrorResponse> {
+    ValidateRequest::validate(request).map_err(|error| {
+        ErrorMessage::from_http_error(HttpError {
+            code: StatusCode::BAD_REQUEST.as_u16(),
+            message: VALIDATION_PREFIX.to_string() + &error.to_string(),
+        })
+    })
 }
 
 // todo - abstract this to the top level lib.rs to be reused
@@ -3365,6 +3450,7 @@ mod tests {
 
     fn make_base_request() -> NvCreateResponse {
         NvCreateResponse {
+            extensions: Default::default(),
             inner: CreateResponse {
                 input: Input::Text("hello".into()),
                 model: Some("test-model".into()),
@@ -3711,6 +3797,56 @@ mod tests {
             let result = validate_response_unsupported_fields(&req);
             assert!(result.is_some(), "Expected rejection for `{field}`");
         }
+    }
+
+    #[test]
+    fn test_validate_unsupported_fields_rejects_unimplemented_semantics() {
+        let cases = [
+            ("conversation", serde_json::json!("conv_123")),
+            ("include", serde_json::json!(["file_search_call.results"])),
+            (
+                "stream_options",
+                serde_json::json!({"include_obfuscation": false}),
+            ),
+            ("reasoning", serde_json::json!({"summary": "auto"})),
+            (
+                "text",
+                serde_json::json!({
+                    "format": {"type": "text"},
+                    "verbosity": "low"
+                }),
+            ),
+            ("truncation", serde_json::json!("auto")),
+            ("tools", serde_json::json!([{"type": "local_shell"}])),
+            ("tool_choice", serde_json::json!({"type": "shell"})),
+        ];
+
+        for (field, value) in cases {
+            let mut payload = serde_json::json!({
+                "model": "test-model",
+                "input": "hello"
+            });
+            payload.as_object_mut().unwrap().insert(field.into(), value);
+            let request: NvCreateResponse = serde_json::from_value(payload).unwrap();
+            assert!(
+                validate_response_unsupported_fields(&request).is_some(),
+                "expected `{field}` to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_response_fields_generic_rejects_unknown_parameter() {
+        let request: NvCreateResponse = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "input": "hello",
+            "unknown_parameter": true
+        }))
+        .unwrap();
+
+        let error = validate_response_fields_generic(&request).unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.message.contains("unknown_parameter"));
     }
 
     /// Pass-through metadata fields (`prompt_cache_key`,

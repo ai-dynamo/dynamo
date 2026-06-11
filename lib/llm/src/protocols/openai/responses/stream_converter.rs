@@ -34,8 +34,8 @@ use uuid::Uuid;
 use dynamo_protocols::types::{ChatCompletionMessageContent, FinishReason};
 
 use super::ResponseParams;
+use crate::protocols::common::extensions::merge_response_nvext;
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
-use crate::protocols::openai::nvext::merge_response_nvext;
 use crate::protocols::unified::ResponsesContext;
 
 /// State machine that converts a chat completion stream into Responses API events.
