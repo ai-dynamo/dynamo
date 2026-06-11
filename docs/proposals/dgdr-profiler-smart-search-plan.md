@@ -51,12 +51,31 @@ Treatment labels:
 - `Derived`: generated from branch, backend, shape, AIC output, or candidate generation.
 - `Pinned`: fixed by user input, environment, model, or backend policy.
 
+## Optimization Goal
+
+Profiler V2 does not return a single tuned configuration. Its goal is to produce a ranked set of viable deployment candidates for the requested `model_name`, `hardware_sku`, and workload, so the user can compare the top recommendation against alternatives, binding constraints, and skipped-candidate reasons.
+
+The optimization goal is user-owned and always `Pinned`; it is never a search dimension:
+
+- `optimization_target` defines what "better" means: `throughput`, `e2e_latency`, `goodput`, or `goodput_per_gpu`.
+- SLA targets (`ttft_ms`+`itl_ms`, or `e2e_ms`) are user constraints. `goodput` and `goodput_per_gpu` require an SLA target; `throughput` and `e2e_latency` may run without one.
+- `gpu_budget` bounds the GPU footprint every candidate may use.
+
+Candidates are ranked in two stages:
+
+1. Feasibility gate — a candidate must pass candidate generation and preflight (legal parallel shape, memory fit, backend/SKU support, `gpu_budget`, and any user-pinned knobs) and, when an SLA is set, satisfy it under replay. Infeasible candidates are dropped with a structured reason instead of being scored.
+2. Objective ranking — feasible candidates are ordered by the `optimization_target` score computed from their replay report.
+
+If no candidate clears the feasibility gate, V2 reports `NoViableCandidate` rather than emitting an unproven configuration. The concrete per-candidate score that the Vizier main sweep optimizes for each objective is defined in [Main Sweep Optimization Goal](#main-sweep-optimization-goal).
+
 ## Deployment Knobs
 
-Deployment owns topology, backend type, and budget envelope: branch, replica counts, GPU budget, and per-engine GPU accounting. Engine and KV manager consume these derived values.
+Deployment owns model identity, hardware target, topology, backend type, and budget envelope: model, GPU SKU, branch, replica counts, GPU budget, and per-engine GPU accounting. Engine and KV manager consume these derived values.
 
 | Category | Knob | Applies | Proposed treatment | Notes |
 | --- | --- | --- | --- | --- |
+| model | `model_name` | all | `Pinned` | Model identity from the DGDR `model` field (HF id or private model name). Selects the AIC perf-model table and memory-fit estimates; never a search dimension. One model is shared across all components in a candidate. Maps to `EngineSpec.model`. |
+| hardware | `hardware_sku` | all | `Pinned` | GPU SKU from the DGDR `hardware.gpuSku` field (e.g. `h200_sxm`, `h100_sxm`). Selects the AIC hardware system and bounds legal parallelism and `gpu_budget`; never a search dimension. Maps to `HardwareSpec.gpuSku`. |
 | deployment mode | `deployment_mode`: `agg`, `disagg` | all | `Pinned`+`Branch` | Pin when user specifies one mode; otherwise split studies outside Vizier and rank branches globally. |
 | backend type | `backend` + `engine_type`: `vllm`, `sglang`, `trtllm` | all | `Search` | Search only across candidate backends with comparable replay+perf model support; can be pinned by user override. Disagg first pass uses one shared backend type for prefill+decode unless mixed-backend deployment is explicitly enabled. |
 | objective | `optimization_target`: `throughput`, `e2e_latency`, `goodput`, `goodput_per_gpu`; optional SLA targets: `ttft_ms`+`itl_ms` or `e2e_ms` | profiler+planner | `Pinned` | User-selected replay objective. `goodput` and `goodput_per_gpu` require an SLA target. |
@@ -219,94 +238,34 @@ where `err(pred, actual) = abs(log1p(max(pred, 0)) - log1p(max(actual, 0)))`. Th
 
 The selected predictor preset is emitted as pinned planner config for the main V2 candidate evaluation.
 
-## V2 Entrypoint Definition
+## Internal Entrypoint
 
-The current V1 profiler entrypoint accepts a `DynamoGraphDeploymentRequestSpec` through `python -m dynamo.profiler --config <json-or-yaml>`. V2 should keep the DGDR spec shape as the base input, but merge V2 sweep controls directly into the DGDR-style spec instead of using a separate V2 envelope. This entrypoint is local/offline first and should not imply k8s controller wiring.
+Profiler V2 is reached through the existing profiler entrypoint, not a separate V2 CLI or a parallel sweep-spec envelope. The user still submits a `DynamoGraphDeploymentRequestSpec` to `python -m dynamo.profiler --config <json-or-yaml>`; V2 is an internal, opt-in code path inside `run_profile`, so the DGDR contract stays the single source of truth and the operator wiring is unchanged.
 
-```yaml
-# Proposed local entrypoint:
-#   python -m dynamo.profiler.v2 --config profiler-v2-sweep.yaml
-spec:
-  # Existing DGDR v1beta1 fields remain at the top level.
-  model: deepseek-ai/DeepSeek-R1
-  backend: auto
-  image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:latest
-  modelCache:
-    pvcName: model-cache
-    pvcModelPath: deepseek-r1
-  hardware:
-    gpuSku: h200_sxm
-    totalGpus: 32
-    numGpusPerNode: 8
-    interconnect: nvlink
-    rdma: true
-
-  # Load accepts either a static traffic summary or a dynamic traffic trace.
-  load:
-    mode: dynamic                 # static | dynamic
-    static:
-      isl: 4000
-      osl: 1000
-      concurrency: null
-      requestRate: 25
-    trace:
-      path: /data/replay/traffic.jsonl
-      format: replay_jsonl
-      warmupTrace: /data/replay/traffic-warmup.jsonl
-
-  # Objective carries both the optimization goal and optional latency targets.
-  objective:
-    target: goodput_per_gpu       # throughput | e2e_latency | goodput | goodput_per_gpu
-    latency:
-      mode: ttft_itl              # none | ttft_itl | e2e
-      ttftMs: 2000
-      itlMs: 30
-      e2eMs: null
-
-  # Controls the Vizier/replay execution budget.
-  sweep:
-    maxRounds: 20                 # total Vizier suggestion/evaluation rounds
-    parallelSweepThreads: 16       # replay simulations to run concurrently on CPU
-    candidatesPerRound: 16         # defaults to parallelSweepThreads when omitted
-    randomSeed: 1
-
-  # Component enablement and optimizer knobs are controlled through
-  # search-space configs and overrides.
-  searchSpaceConfigs:
-    deployment.deployment_mode: disagg
-    deployment.enable_planner: true
-    deployment.enable_kvrouter: true
-    deployment.backend_type: vllm
-    deployment.gpu_budget: 32
-    router.router_mode: kv
-    planner.planner_scaling_policy: throughput_180_5
-    kv_manager.num_g2_blocks: 0
-
-  searchSpaceOverrides:
-    deployment.backend_type:
-      candidates: [vllm, sglang]
-    deployment.replica_parallel_config:
-      generator:
-        parallelStrategies: [tp, tep, dep]
-        maxGpuBudget: 32
-        allowAgg: true
-        allowDisagg: true
-    engine.prefill.max_num_batched_tokens:
-      candidates: [16384]
-    engine.decode.max_num_batched_tokens:
-      candidates: [8192]
-    engine.decode.max_num_seqs:
-      candidates: [256, 512]
-    router.router_temperature:
-      candidates: [0.0, 0.2]
+```bash
+# Opt-in flag routes run_profile() into the V2 smart-search path.
+python -m dynamo.profiler --config dgdr.yaml --smart-search
 ```
 
-Entrypoint rules:
+Dispatch:
 
-1. Existing DGDR v1beta1 fields remain valid at `spec.*`; V2 adds `load`, `objective`, `sweep`, `searchSpaceConfigs`, and `searchSpaceOverrides`.
-2. `spec.load.mode=dynamic` uses `load.trace` as the replay input; `static` uses `load.static.isl`, `load.static.osl`, and either `load.static.concurrency` or `load.static.requestRate`.
-3. `spec.objective.target` selects the replay score reported to Vizier. `goodput` and `goodput_per_gpu` require `objective.latency.mode` to be `ttft_itl` or `e2e`.
-4. `spec.sweep.maxRounds` bounds total optimization rounds; `spec.sweep.parallelSweepThreads` bounds concurrent CPU replay evaluations.
-5. Use `searchSpaceConfigs` or `searchSpaceOverrides` for planner, KV router, and other component enablement.
-6. `searchSpaceConfigs` takes precedence over default search spaces and `searchSpaceOverrides`.
-7. `searchSpaceOverrides` can narrow scalar search dimensions or replace generated composite candidates.
+1. `run_profile(dgdr, ops)` parses and validates the same `DynamoGraphDeploymentRequestSpec` as V1.
+2. When the V2 opt-in is set (a `ProfilerOperationalConfig` flag exposed as `--smart-search`, off by default), `run_profile` delegates to the V2 module instead of the V1 AIC sweeper/picker:
+
+```python
+# components/src/dynamo/profiler/v2/__init__.py
+async def run_smart_search(
+    dgdr: DynamoGraphDeploymentRequestSpec,
+    ops: ProfilerOperationalConfig,
+) -> RankedCandidates:
+    """Build the search space from the DGDR spec, run the Vizier+replay
+    sweep, rank candidates, and write the report into ops.output_dir."""
+    ...
+```
+
+3. V2 reads `model_name`, `backend`, `hardware_sku`, workload, SLA, objective, and component-enablement directly off the DGDR spec — the same fields V1 already consumes. It does **not** introduce a parallel top-level YAML envelope (`load` / `objective` / `sweep` / `searchSpaceConfigs` / `searchSpaceOverrides`); when dynamic-workload inputs and pin/override controls are finalized they extend the DGDR spec contract itself, not a V2-only schema (out of scope for this plan).
+4. Sweep execution budget (max rounds, concurrent replay evaluations, candidates per round, random seed) is V2 run-control carried on `ProfilerOperationalConfig` / CLI flags, mirroring how V1 already exposes interpolation granularity and deployment timeouts. It is operational config, not part of the deployment request.
+5. For each decoded Vizier sample, V2 constructs a per-candidate `replay_optimize.ReplayOptimizeSpec` (`EngineSpec` model/backend/engine args, `HardwareSpec`, `WorkloadSpec`, `SLASpec`, `RouterSpec`) and evaluates it through `optimize_dense_agg_with_replay` / `optimize_dense_disagg_with_replay`. V2 owns search-space construction, candidate decoding, ranking, and report generation around those calls; AIC and replay stay lower-level providers.
+6. V2 writes its ranked-candidate report and `profiler_status.yaml` into `ops.output_dir`, exactly as V1 reports results, so the surrounding sidecar/controller flow needs no change.
+
+This keeps V2 local/offline-first and strictly additive: it does not change V1 defaults, DGDR CR behavior, or the k8s controller/operator path, and it reuses the profiler's existing input contract instead of defining a second one. A user-facing sweep-control surface can be layered on later once the internal path is proven.
