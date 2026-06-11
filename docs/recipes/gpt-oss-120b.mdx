@@ -17,15 +17,15 @@ Two validated TensorRT-LLM targets cover the two traffic shapes this model is mo
 <label htmlFor="recipe-variant-disagg">Disaggregated P/D</label>
 </div>
 <div className="dynamo-target-picker-summary" data-variant="agg">
-<span><b>Model</b> openai/gpt-oss-120b</span>
+<span><b>Checkpoint</b> openai/gpt-oss-120b</span>
 <span><b>GPUs</b> 4x GB200 (ARM64), WideEP TP4</span>
-<span><b>Traffic fit</b> Short prompts, long outputs, high concurrency (128 ISL / 1000 OSL)</span>
+<span><b>Workload</b> Short prompts, long outputs, high concurrency (128 ISL / 1000 OSL)</span>
 <span><b>Runtime</b> TensorRT-LLM (tensorrtllm-runtime:1.2.0)</span>
 </div>
 <div className="dynamo-target-picker-summary" data-variant="disagg">
-<span><b>Model</b> openai/gpt-oss-120b</span>
+<span><b>Checkpoint</b> openai/gpt-oss-120b</span>
 <span><b>GPUs</b> 5x GB200/B200 (TP1 prefill + TP4 decode)</span>
-<span><b>Traffic fit</b> Long-context generation (8K ISL / 1K OSL)</span>
+<span><b>Workload</b> Long-context generation (8K ISL / 1K OSL)</span>
 <span><b>Quantization</b> W4A8_MXFP4_MXFP8</span>
 <span><b>Runtime</b> TensorRT-LLM (tensorrtllm-runtime:1.2.0)</span>
 </div>
@@ -169,7 +169,7 @@ kubectl logs -f -l job-name=gpt-oss-120b-disagg-bench -n ${NAMESPACE}
 |---|---|---|
 | **GPUs** | 4x GB200 (ARM64 required) | 5x GB200/B200 |
 | **Topology** | WideEP TP4 | TP1 prefill + TP4 decode |
-| **Traffic fit** | 128 ISL / 1000 OSL, 3,600 concurrency | 8K ISL / 1K OSL, 1,536 concurrency |
+| **Workload** | 128 ISL / 1000 OSL, 3,600 concurrency | 8K ISL / 1K OSL, 1,536 concurrency |
 | **Quantization** | Checkpoint default | W4A8_MXFP4_MXFP8 |
 | **KV transfer** | — | UCX cache transceiver |
 

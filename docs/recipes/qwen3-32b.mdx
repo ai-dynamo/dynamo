@@ -20,14 +20,14 @@ Two validated vLLM targets for `Qwen/Qwen3-32B` prefix-reuse traffic: a 16x H200
 <span><b>Checkpoint</b> Qwen/Qwen3-32B</span>
 <span><b>Precision</b> BF16</span>
 <span><b>GPUs</b> 16x H200, 2 nodes: 6x TP2 prefill + 2x TP2 decode</span>
-<span><b>Technique</b> Disaggregated P/D + KV-aware routing</span>
-<span><b>Trace</b> Mooncake conversation, 12K avg ISL / 343 avg OSL</span>
+<span><b>Techniques</b> Disaggregated P/D + KV-aware routing</span>
+<span><b>Workload</b> Mooncake conversation, 12K avg ISL / 343 avg OSL</span>
 </div>
 <div className="dynamo-target-picker-summary" data-variant="kvbm">
 <span><b>Checkpoint</b> Qwen/Qwen3-32B</span>
 <span><b>Precision</b> BF16</span>
 <span><b>GPUs</b> 1x H200 or B200</span>
-<span><b>Technique</b> Aggregated + KVBM host-memory KV offload (100 GB CPU cache)</span>
+<span><b>Techniques</b> Aggregated + KVBM host-memory KV offload (100 GB CPU cache)</span>
 <span><b>Workload</b> Long or repeated prompts with prefix reuse</span>
 </div>
 </div>

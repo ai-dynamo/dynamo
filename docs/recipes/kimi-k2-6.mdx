@@ -26,34 +26,34 @@ Each target below is a validated aggregated vLLM deployment of Kimi-K2.6 — tex
 <div className="dynamo-target-picker-summary" data-sku="b200" data-usecase="chat">
 <span><b>Checkpoint</b> nvidia/Kimi-K2.6-NVFP4</span>
 <span><b>Precision</b> NVFP4 + FP8 KV cache</span>
-<span><b>GPUs / worker</b> 4x B200, TP4</span>
-<span><b>MoE</b> FlashInfer-TRTLLM</span>
+<span><b>GPUs</b> 4x B200 per worker, TP4</span>
+<span><b>MoE backend</b> FlashInfer-TRTLLM</span>
 <span><b>Attention</b> TokenSpeed MLA</span>
-<span><b>Trace</b> Chat, 70% KV reuse</span>
+<span><b>Workload</b> Chat, 70% KV reuse</span>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="b200" data-usecase="agentic">
 <span><b>Checkpoint</b> nvidia/Kimi-K2.6-NVFP4</span>
 <span><b>Precision</b> NVFP4 + FP8 KV cache</span>
-<span><b>GPUs / worker</b> 4x B200, TP4</span>
-<span><b>MoE</b> FlashInfer-TRTLLM</span>
+<span><b>GPUs</b> 4x B200 per worker, TP4</span>
+<span><b>MoE backend</b> FlashInfer-TRTLLM</span>
 <span><b>Attention</b> TokenSpeed MLA</span>
-<span><b>Trace</b> Agentic, 64K-median ISL, 90% KV reuse</span>
+<span><b>Workload</b> Agentic, 64K-median ISL, 90% KV reuse</span>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="h200" data-usecase="chat">
 <span><b>Checkpoint</b> moonshotai/Kimi-K2.6 (native INT4)</span>
 <span><b>Precision</b> INT4</span>
-<span><b>GPUs / worker</b> 8x H200, TP8</span>
-<span><b>MoE</b> Marlin</span>
+<span><b>GPUs</b> 8x H200 per worker, TP8</span>
+<span><b>MoE backend</b> Marlin</span>
 <span><b>Attention</b> FlashAttention MLA</span>
-<span><b>Trace</b> Chat, 70% KV reuse</span>
+<span><b>Workload</b> Chat, 70% KV reuse</span>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="h200" data-usecase="agentic">
 <span><b>Checkpoint</b> moonshotai/Kimi-K2.6 (native INT4)</span>
 <span><b>Precision</b> INT4</span>
-<span><b>GPUs / worker</b> 8x H200, TP8</span>
-<span><b>MoE</b> Marlin</span>
+<span><b>GPUs</b> 8x H200 per worker, TP8</span>
+<span><b>MoE backend</b> Marlin</span>
 <span><b>Attention</b> FlashAttention MLA</span>
-<span><b>Trace</b> Agentic, 64K-median ISL, 90% KV reuse</span>
+<span><b>Workload</b> Agentic, 64K-median ISL, 90% KV reuse</span>
 </div>
 </div>
 

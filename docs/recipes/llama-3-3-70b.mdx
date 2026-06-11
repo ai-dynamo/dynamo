@@ -22,22 +22,22 @@ Three validated vLLM topologies for `RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic
 <span><b>Checkpoint</b> RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic</span>
 <span><b>Precision</b> FP8 dynamic</span>
 <span><b>GPUs</b> 4x H100/H200, one TP4 worker</span>
-<span><b>Technique</b> Aggregated serving</span>
-<span><b>Traffic</b> 8K ISL / 1K OSL, 64 concurrency</span>
+<span><b>Techniques</b> Aggregated serving</span>
+<span><b>Workload</b> 8K ISL / 1K OSL, 64 concurrency</span>
 </div>
 <div className="dynamo-target-picker-summary" data-variant="disagg-single-node">
 <span><b>Checkpoint</b> RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic</span>
 <span><b>Precision</b> FP8 dynamic</span>
 <span><b>GPUs</b> 8x H100/H200: 2x TP2 prefill + 1x TP4 decode</span>
-<span><b>Technique</b> Disaggregated P/D over NIXL</span>
-<span><b>Traffic</b> 8K ISL / 1K OSL, 128 concurrency</span>
+<span><b>Techniques</b> Disaggregated P/D over NIXL</span>
+<span><b>Workload</b> 8K ISL / 1K OSL, 128 concurrency</span>
 </div>
 <div className="dynamo-target-picker-summary" data-variant="disagg-multi-node">
 <span><b>Checkpoint</b> RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic</span>
 <span><b>Precision</b> FP8 dynamic</span>
 <span><b>GPUs</b> 16x H100/H200: 1x TP8 prefill + 1x TP8 decode</span>
-<span><b>Technique</b> Disaggregated P/D over NIXL</span>
-<span><b>Traffic</b> 8K ISL / 1K OSL, 256 concurrency</span>
+<span><b>Techniques</b> Disaggregated P/D over NIXL</span>
+<span><b>Workload</b> 8K ISL / 1K OSL, 256 concurrency</span>
 </div>
 </div>
 

@@ -29,7 +29,7 @@ Each target below is a validated TensorRT-LLM deployment of Qwen3-235B-A22B-FP8 
 <span><b>Parallelism</b> TP4 x EP4 per worker</span>
 <span><b>MoE backend</b> DEEPGEMM (required on SM100+)</span>
 <span><b>Routing</b> KV-aware</span>
-<span><b>Traffic</b> 4K ISL / 200 OSL, concurrency 32</span>
+<span><b>Workload</b> 4K ISL / 200 OSL, concurrency 32</span>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="blackwell" data-variant="disagg">
 <span><b>Checkpoint</b> Qwen/Qwen3-235B-A22B-FP8</span>
@@ -37,7 +37,7 @@ Each target below is a validated TensorRT-LLM deployment of Qwen3-235B-A22B-FP8 
 <span><b>Parallelism</b> 6x prefill (TP2) + 1x decode (TP4 x EP4)</span>
 <span><b>MoE backend</b> DEEPGEMM (required on SM100+)</span>
 <span><b>Routing</b> KV-aware</span>
-<span><b>Traffic</b> 4K ISL / 200 OSL, concurrency 32</span>
+<span><b>Workload</b> 4K ISL / 200 OSL, concurrency 32</span>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="hopper" data-variant="agg">
 <span><b>Checkpoint</b> Qwen/Qwen3-235B-A22B-FP8</span>
@@ -45,7 +45,7 @@ Each target below is a validated TensorRT-LLM deployment of Qwen3-235B-A22B-FP8 
 <span><b>Parallelism</b> TP4 x EP4 per worker</span>
 <span><b>MoE backend</b> CUTLASS (TRT-LLM default)</span>
 <span><b>Routing</b> KV-aware</span>
-<span><b>Traffic</b> 4K ISL / 200 OSL, concurrency 32</span>
+<span><b>Workload</b> 4K ISL / 200 OSL, concurrency 32</span>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="hopper" data-variant="disagg">
 <span><b>Checkpoint</b> Qwen/Qwen3-235B-A22B-FP8</span>
@@ -53,7 +53,7 @@ Each target below is a validated TensorRT-LLM deployment of Qwen3-235B-A22B-FP8 
 <span><b>Parallelism</b> 6x prefill (TP2) + 1x decode (TP4 x EP4)</span>
 <span><b>MoE backend</b> CUTLASS (TRT-LLM default)</span>
 <span><b>Routing</b> KV-aware</span>
-<span><b>Traffic</b> 4K ISL / 200 OSL, concurrency 32</span>
+<span><b>Workload</b> 4K ISL / 200 OSL, concurrency 32</span>
 </div>
 </div>
 
@@ -246,7 +246,7 @@ All four targets serve `Qwen/Qwen3-235B-A22B-FP8` on TensorRT-LLM (PyTorch backe
 | **Topology** | 4x workers, TP4 x EP4 | 6x prefill (TP2) + 1x decode (TP4 x EP4) | 4x workers, TP4 x EP4 | 6x prefill (TP2) + 1x decode (TP4 x EP4) |
 | **MoE backend** | DEEPGEMM | DEEPGEMM | CUTLASS (default) | CUTLASS (default) |
 | **Chunked prefill** | Enabled | Disabled | Enabled | Disabled |
-| **Traffic** | 4K / 200, conc. 32 | 4K / 200, conc. 32 | 4K / 200, conc. 32 | 4K / 200, conc. 32 |
+| **Workload** | 4K / 200, conc. 32 | 4K / 200, conc. 32 | 4K / 200, conc. 32 | 4K / 200, conc. 32 |
 
 ## Notes
 

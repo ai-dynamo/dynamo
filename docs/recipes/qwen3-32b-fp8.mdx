@@ -23,21 +23,21 @@ Each target below is a validated FP8 deployment of Qwen3-32B — from a 2-GPU Te
 <span><b>GPUs</b> 2x H100/H200/A100, single TP2 worker</span>
 <span><b>Routing</b> Round-robin</span>
 <span><b>Techniques</b> CUDA graphs, FP8 KV cache</span>
-<span><b>Traffic</b> 4K ISL / 500 OSL, concurrency 4</span>
+<span><b>Workload</b> 4K ISL / 500 OSL, concurrency 4</span>
 </div>
 <div className="dynamo-target-picker-summary" data-variant="trtllm-disagg">
 <span><b>Checkpoint</b> Qwen/Qwen3-32B-FP8</span>
 <span><b>GPUs</b> 8x H100/H200/A100</span>
 <span><b>Topology</b> 4x prefill (TP1) + 2x decode (TP2)</span>
 <span><b>Routing</b> Round-robin</span>
-<span><b>Traffic</b> 4K ISL / 500 OSL, concurrency 48</span>
+<span><b>Workload</b> 4K ISL / 500 OSL, concurrency 48</span>
 </div>
 <div className="dynamo-target-picker-summary" data-variant="vllm-disagg">
 <span><b>Checkpoint</b> Qwen/Qwen3-32B-FP8</span>
 <span><b>GPUs</b> 8x H100/H200/A100, single node</span>
 <span><b>Topology</b> 2x prefill (TP2) + 1x decode (TP4)</span>
 <span><b>KV transfer</b> NIXL (NixlConnector)</span>
-<span><b>Traffic</b> 2K ISL / 500 OSL, concurrency 8</span>
+<span><b>Workload</b> 2K ISL / 500 OSL, concurrency 8</span>
 </div>
 </div>
 
@@ -237,7 +237,7 @@ All three targets serve `Qwen/Qwen3-32B-FP8`; they differ in runtime, GPU count,
 | **GPUs** | 2x H100/H200/A100 | 8x H100/H200/A100 | 8x H100/H200/A100, single node |
 | **Topology** | 1x worker, TP2 | 4x prefill (TP1) + 2x decode (TP2) | 2x prefill (TP2) + 1x decode (TP4) |
 | **Routing / KV transfer** | Round-robin | Round-robin | NIXL (NixlConnector) |
-| **Traffic** | 4K / 500, conc. 4 | 4K / 500, conc. 48 | 2K / 500, conc. 8 |
+| **Workload** | 4K / 500, conc. 4 | 4K / 500, conc. 48 | 2K / 500, conc. 8 |
 
 ## Notes
 

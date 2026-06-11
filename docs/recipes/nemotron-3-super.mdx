@@ -26,34 +26,34 @@ Each target below is a validated aggregated vLLM deployment of Nemotron-3-Super 
 <div className="dynamo-target-picker-summary" data-sku="b200" data-usecase="chat">
 <span><b>Checkpoint</b> nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4</span>
 <span><b>Precision</b> NVFP4 + FP8 KV cache</span>
-<span><b>GPUs / worker</b> 4x B200, TP4 + EP (2 replicas)</span>
+<span><b>GPUs</b> 4x B200 per worker, TP4 + EP (2 replicas)</span>
 <span><b>All2All</b> DeepEP high-throughput</span>
 <span><b>Spec decode</b> MTP, DL=3</span>
-<span><b>Trace</b> Chat 8K/1K, 70% KV reuse</span>
+<span><b>Workload</b> Chat 8K/1K, 70% KV reuse</span>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="b200" data-usecase="agentic">
 <span><b>Checkpoint</b> nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4</span>
 <span><b>Precision</b> NVFP4 + FP8 KV cache</span>
-<span><b>GPUs / worker</b> 4x B200, TP4 + EP (2 replicas)</span>
+<span><b>GPUs</b> 4x B200 per worker, TP4 + EP (2 replicas)</span>
 <span><b>All2All</b> DeepEP low-latency</span>
 <span><b>Spec decode</b> MTP, DL=3</span>
-<span><b>Trace</b> Agentic 64K/400, 90% KV reuse</span>
+<span><b>Workload</b> Agentic 64K/400, 90% KV reuse</span>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="h200" data-usecase="chat">
 <span><b>Checkpoint</b> nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8</span>
 <span><b>Precision</b> FP8 + FP8 KV cache</span>
-<span><b>GPUs / worker</b> 4x H200, TP4 + EP (2 replicas)</span>
+<span><b>GPUs</b> 4x H200 per worker, TP4 + EP (2 replicas)</span>
 <span><b>All2All</b> FlashInfer NVLink one-sided</span>
 <span><b>Spec decode</b> MTP, DL=3</span>
-<span><b>Trace</b> Chat 8K/1K, 70% KV reuse</span>
+<span><b>Workload</b> Chat 8K/1K, 70% KV reuse</span>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="h200" data-usecase="agentic">
 <span><b>Checkpoint</b> nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8</span>
 <span><b>Precision</b> FP8 + FP8 KV cache</span>
-<span><b>GPUs / worker</b> 4x H200, TP4 + EP (2 replicas)</span>
+<span><b>GPUs</b> 4x H200 per worker, TP4 + EP (2 replicas)</span>
 <span><b>All2All</b> DeepEP high-throughput</span>
 <span><b>Spec decode</b> MTP, DL=3</span>
-<span><b>Trace</b> Agentic 64K/400, 90% KV reuse</span>
+<span><b>Workload</b> Agentic 64K/400, 90% KV reuse</span>
 </div>
 </div>
 
