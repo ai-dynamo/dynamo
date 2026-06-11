@@ -122,7 +122,11 @@ struct RequestedRecvConnection {
 /// hard-coded constant; both `process_request_stream` and
 /// `process_response_stream` size their channel through this helper. See #10293.
 fn data_plane_channel<T>(send_buffer_count: usize) -> (mpsc::Sender<T>, mpsc::Receiver<T>) {
-    mpsc::channel(send_buffer_count)
+    // `tokio::sync::mpsc::channel` panics on a capacity of 0. Now that the value
+    // is caller-configurable via `StreamOptions::send_buffer_count`, clamp to at
+    // least 1 so a misconfigured `0` degrades to a minimal buffer instead of
+    // panicking the connection handler task.
+    mpsc::channel(send_buffer_count.max(1))
 }
 
 // /// When registering a new TcpStream on the server, the registration method will return a [`Connections`] object.
@@ -1108,6 +1112,10 @@ mod tests {
 
         let (tx, _rx) = data_plane_channel::<()>(DEFAULT_SEND_BUFFER_COUNT);
         assert_eq!(tx.max_capacity(), 64);
+
+        // A misconfigured 0 must clamp to 1, not panic (mpsc::channel(0) panics).
+        let (tx, _rx) = data_plane_channel::<()>(0);
+        assert_eq!(tx.max_capacity(), 1);
     }
 
     /// `register` must thread `StreamOptions::send_buffer_count` through to the
