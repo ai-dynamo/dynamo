@@ -1203,7 +1203,8 @@ def test_embedding_multi_worker_multi_model_dispatch(
 @pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.model("Qwen/Qwen3-0.6B")
-@pytest.mark.profiled_vram_gib(2.5)
+@pytest.mark.profiled_vram_gib(3.8)
+@pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000)
 @pytest.mark.timeout(240)
 @pytest.mark.pre_merge
 def test_vllm_aggregated_s3_model(
