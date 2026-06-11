@@ -80,9 +80,8 @@ fn create_replay_indexer(block_size: u32, num_threads: usize) -> ReplayIndexer {
         )));
     }
 
-    ReplayIndexer::Single(KvIndexer::new_with_frequency(
+    ReplayIndexer::Single(KvIndexer::new_with_pruning(
         CancellationToken::new(),
-        None,
         block_size,
         Arc::new(KvIndexerMetrics::new_unregistered()),
         None,

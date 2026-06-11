@@ -408,6 +408,11 @@ impl VllmCore {
         kv_event_publishers: KvEventPublishers,
     ) -> Self {
         let args = args.normalized().expect("invalid MockEngineArgs");
+        let kv_event_publishers = if args.enable_prefix_caching {
+            kv_event_publishers
+        } else {
+            KvEventPublishers::default()
+        };
         let speculative_sampler = args.aic_nextn.map(|nextn| {
             let rates =
                 normalize_conditional_accept_rates(nextn, args.aic_nextn_accept_rates.as_deref())
@@ -599,16 +604,15 @@ impl VllmCore {
             unique
                 .iter()
                 .zip(plhs.iter())
-                .zip(local_hashes.iter())
-                .zip(token_ids.iter())
+                .enumerate()
                 .skip(skip)
                 .take(count)
-                .filter_map(|(((block, plh), local), token_ids)| match block {
+                .filter_map(|(idx, (block, plh))| match block {
                     UniqueBlock::FullBlock(seq_hash) => Some(SwapInRegistrationBlock {
                         seq_hash: *seq_hash,
                         plh: *plh,
-                        local_hash: *local,
-                        token_ids: Some(token_ids.clone()),
+                        local_hash: local_hashes.get(idx).copied(),
+                        token_ids: token_ids.get(idx).cloned(),
                     }),
                     UniqueBlock::PartialBlock(_) => None,
                 })

@@ -822,3 +822,112 @@ impl GrpcInferenceService for KserveService {
         }))
     }
 }
+
+#[cfg(test)]
+mod readiness_gate_tests {
+    use super::inference::grpc_inference_service_server::GrpcInferenceService;
+    use super::inference::{ModelReadyRequest, ServerReadyRequest};
+    use super::*;
+    use crate::discovery::WorkerSet;
+    use crate::model_card::ModelDeploymentCard;
+    use crate::worker_type::WorkerType;
+    use tonic::Request;
+
+    /// A WorkerSet with an explicit role/needs, a live worker, and a chat engine
+    /// attached. `namespace` is the WorkerSet's own namespace (sets sharing it
+    /// form one deployment); the caller passes a distinct DashMap key.
+    fn chat_ws_with_role(
+        namespace: &str,
+        mdcsum: &str,
+        worker_type: WorkerType,
+        needs: Vec<Vec<WorkerType>>,
+    ) -> WorkerSet {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(worker_type);
+        card.needs = needs;
+        // Watch receiver keeps its last value after the sender drops → count 1.
+        let (_tx, rx) = tokio::sync::watch::channel(vec![1u64]);
+        let mut ws = WorkerSet::new(namespace.to_string(), mdcsum.to_string(), card);
+        ws.set_instance_watcher(rx);
+        ws.chat_engine = Some(Arc::new(crate::engines::StreamingEngineAdapter::new(
+            crate::engines::make_echo_engine(),
+        )));
+        ws
+    }
+
+    fn model_ready_req(name: &str) -> Request<ModelReadyRequest> {
+        Request::new(ModelReadyRequest {
+            name: name.to_string(),
+            version: String::new(),
+        })
+    }
+
+    /// KServe `ModelReady` / `ServerReady` must reflect the namespace
+    /// completeness gate: a live decode-only WorkerSet with a chat engine but no
+    /// prefill peer reports NOT ready (even though an engine is attached), and
+    /// flips to ready once the prefill peer joins the same namespace. Drives the
+    /// real gRPC handlers end to end through `is_model_ready_to_serve`.
+    #[tokio::test]
+    async fn model_ready_reflects_worker_set_completeness() {
+        let svc = KserveService::builder().build().unwrap();
+        let mm = svc.model_manager();
+
+        // Incomplete deployment: decode-only (needs a prefill peer), live + chat engine.
+        mm.add_worker_set(
+            "llama",
+            "dep1",
+            chat_ws_with_role(
+                "dep1",
+                "mdc-d",
+                WorkerType::Decode,
+                vec![vec![WorkerType::Prefill]],
+            ),
+        );
+
+        assert!(
+            !svc.model_ready(model_ready_req("llama"))
+                .await
+                .unwrap()
+                .get_ref()
+                .ready,
+            "decode-only (missing prefill) must report KServe ModelReady=false"
+        );
+        assert!(
+            !svc.server_ready(Request::new(ServerReadyRequest {}))
+                .await
+                .unwrap()
+                .get_ref()
+                .ready,
+            "no complete worker set → ServerReady=false"
+        );
+
+        // Prefill peer joins the SAME namespace (distinct DashMap key) → complete.
+        mm.add_worker_set(
+            "llama",
+            "dep1:prefill",
+            chat_ws_with_role(
+                "dep1",
+                "mdc-p",
+                WorkerType::Prefill,
+                vec![vec![WorkerType::Decode]],
+            ),
+        );
+
+        assert!(
+            svc.model_ready(model_ready_req("llama"))
+                .await
+                .unwrap()
+                .get_ref()
+                .ready,
+            "completing the worker set must flip KServe ModelReady=true"
+        );
+        assert!(
+            svc.server_ready(Request::new(ServerReadyRequest {}))
+                .await
+                .unwrap()
+                .get_ref()
+                .ready,
+            "a complete worker set → ServerReady=true"
+        );
+    }
+}

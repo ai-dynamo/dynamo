@@ -116,38 +116,22 @@ pub async fn try_tool_call_parse(
 }
 
 /// Same as [`detect_and_parse_tool_call`] but flips `allow_eof_recovery=true`
-/// on the JSON / XML configs so finalize / non-streaming aggregate paths
-/// recover from missing-end-token / truncated-JSON instead of silently
+/// on the JSON / XML / DSML configs so finalize / non-streaming aggregate
+/// paths recover from missing-end-token / truncated-JSON instead of silently
 /// dropping the call. Streaming jails MUST keep using the non-recovery
 /// variant — otherwise `should_exit_jail_early` fires before the end-token
 /// has actually arrived (see jail.rs).
+///
+/// DSML recovery covers DeepSeek V4: when the outer `</｜DSML｜tool_calls>`
+/// wrapper never arrives (EOS / max_tokens), still recover every complete
+/// `<｜DSML｜invoke>...</｜DSML｜invoke>` pair and keep the pre-block prose as
+/// `normal_text`, while dropping any trailing invoke that was never closed.
+/// This is best-effort recovery from the bytes already received, so the same
+/// behavior applies on both batch/non-streaming and stream-finalize paths.
 pub async fn detect_and_parse_tool_call_with_recovery(
     message: &str,
     parser_str: Option<&str>,
     tools: Option<&[ToolDefinition]>,
-) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
-    detect_and_parse_tool_call_with_recovery_options(message, parser_str, tools, false).await
-}
-
-/// Stream-end finalize variant of [`detect_and_parse_tool_call_with_recovery`].
-///
-/// DeepSeek V4's vLLM streaming parser emits a tool call once a complete
-/// `<｜DSML｜invoke>...</｜DSML｜invoke>` arrives, even if the outer
-/// `</｜DSML｜tool_calls>` wrapper never appears before EOS. Keep that recovery
-/// scoped to stream finalization so batch/non-streaming parity remains strict.
-pub async fn detect_and_parse_tool_call_with_stream_finalize_recovery(
-    message: &str,
-    parser_str: Option<&str>,
-    tools: Option<&[ToolDefinition]>,
-) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
-    detect_and_parse_tool_call_with_recovery_options(message, parser_str, tools, true).await
-}
-
-async fn detect_and_parse_tool_call_with_recovery_options(
-    message: &str,
-    parser_str: Option<&str>,
-    tools: Option<&[ToolDefinition]>,
-    recover_dsml_eof: bool,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
     let parser_map = get_tool_parser_map();
     let parser_key = match parser_str {
@@ -172,7 +156,7 @@ async fn detect_and_parse_tool_call_with_recovery_options(
             c.allow_eof_recovery = true;
             ParserConfig::Xml(c)
         }
-        ParserConfig::Dsml(c) if recover_dsml_eof => {
+        ParserConfig::Dsml(c) => {
             let mut c = c.clone();
             c.allow_eof_recovery = true;
             ParserConfig::Dsml(c)
@@ -187,6 +171,20 @@ async fn detect_and_parse_tool_call_with_recovery_options(
         structural_tag_builder: None,
     };
     try_tool_call_parse(message, &cfg, tools).await
+}
+
+/// Deprecated compatibility shim retained for the published `dynamo-parsers`
+/// API. Batch/non-streaming and stream-end finalize now share one recovery
+/// path; call [`detect_and_parse_tool_call_with_recovery`] directly.
+#[deprecated(
+    note = "batch and stream finalize now share one recovery path; use detect_and_parse_tool_call_with_recovery"
+)]
+pub async fn detect_and_parse_tool_call_with_stream_finalize_recovery(
+    message: &str,
+    parser_str: Option<&str>,
+    tools: Option<&[ToolDefinition]>,
+) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
+    detect_and_parse_tool_call_with_recovery(message, parser_str, tools).await
 }
 
 // Base Detector to call for all tool parsing
@@ -1909,8 +1907,12 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
             serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
         assert_eq!(args["timezone"], "Asia/Shanghai");
     }
+    /// Both the batch/non-streaming finalize and stream-finalize paths now run
+    /// `detect_and_parse_tool_call_with_recovery`, which enables DSML EOF
+    /// recovery: a complete `<｜DSML｜invoke>...</｜DSML｜invoke>` is recovered
+    /// even when the outer `</｜DSML｜tool_calls>` wrapper never arrives.
     #[tokio::test]
-    async fn test_deepseek_v4_common_recovery_stays_strict_without_outer_close() {
+    async fn test_deepseek_v4_recovery_recovers_without_outer_close() {
         let input = r#"<｜DSML｜tool_calls>
 <｜DSML｜invoke name="get_datetime">
 <｜DSML｜parameter name="timezone" string="true">Asia/Shanghai</｜DSML｜parameter>
@@ -1920,25 +1922,6 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
             detect_and_parse_tool_call_with_recovery(input, Some("deepseek_v4"), None)
                 .await
                 .expect("Failed to parse");
-
-        assert!(tool_calls.is_empty());
-        assert_eq!(normal_text, Some("".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_deepseek_v4_stream_finalize_recovery_recovers_without_outer_close() {
-        let input = r#"<｜DSML｜tool_calls>
-<｜DSML｜invoke name="get_datetime">
-<｜DSML｜parameter name="timezone" string="true">Asia/Shanghai</｜DSML｜parameter>
-</｜DSML｜invoke>"#;
-
-        let (tool_calls, normal_text) = detect_and_parse_tool_call_with_stream_finalize_recovery(
-            input,
-            Some("deepseek_v4"),
-            None,
-        )
-        .await
-        .expect("Failed to parse");
 
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].function.name, "get_datetime");

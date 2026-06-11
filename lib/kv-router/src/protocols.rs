@@ -988,7 +988,7 @@ impl OverlapScores {
     pub fn new() -> Self {
         Self {
             scores: FxHashMap::default(),
-            frequencies: Vec::with_capacity(32),
+            frequencies: Vec::new(),
         }
     }
 
@@ -1004,16 +1004,6 @@ impl OverlapScores {
         for worker in workers {
             let score = self.scores.entry(*worker).or_insert(0);
             *score += 1;
-        }
-    }
-
-    /// Add an entry in the frequency list.
-    pub fn add_frequency(&mut self, frequency: usize) {
-        if frequency != 0 {
-            self.frequencies
-                .last()
-                .inspect(|elem| debug_assert!(**elem >= frequency));
-            self.frequencies.push(frequency);
         }
     }
 }

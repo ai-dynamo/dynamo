@@ -230,12 +230,23 @@ async fn anthropic_messages(
     let (engine, parsing_options) = state
         .manager()
         .get_chat_completions_engine_with_parsing(&model)
-        .map_err(|_| {
-            anthropic_error(
+        .map_err(|e| match e {
+            // Registered but no complete worker set yet → retryable 503
+            // (mapped to "overloaded_error" by `anthropic_error`), matching the
+            // OpenAI path. Anything else is a genuine missing model → 404.
+            crate::discovery::ModelManagerError::ModelUnavailable(_) => anthropic_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "overloaded_error",
+                &format!(
+                    "Model '{}' is registered but has no complete worker set",
+                    model
+                ),
+            ),
+            _ => anthropic_error(
                 StatusCode::NOT_FOUND,
                 "not_found_error",
                 &format!("Model '{}' not found", model),
-            )
+            ),
         })?;
 
     let (orig_request, context) = request.into_parts();
@@ -570,7 +581,10 @@ async fn list_models(
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let models: HashSet<String> = state.manager().model_display_names();
+    // Only advertise models whose worker set is complete in at least one
+    // namespace, matching the OpenAI `/v1/models` gate. A registered-but-broken
+    // deployment (e.g. decode-only with no prefill peer) stays hidden.
+    let models: HashSet<String> = state.manager().serving_ready_display_names();
     let card_map = build_model_context_map(&state);
     let (cw_override, mot_override) = model_env_overrides();
 
@@ -655,6 +669,10 @@ async fn get_model(
     if !models.contains(model_id) {
         return Err(super::openai::ErrorMessage::model_not_found());
     }
+
+    // Registered but incomplete worker set → 503, mirroring the OpenAI retrieve
+    // path so an incomplete deployment isn't reported as retrievable.
+    super::openai::check_model_serving_ready(&state, model_id)?;
 
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -19,7 +19,7 @@ from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo._internal import ModelDeploymentCard
 from dynamo.frontend.frontend_args import FrontendConfig
-from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine, fetch_model
+from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import InvalidArgument, Unknown
 
 from .sglang_prepost import (
@@ -623,15 +623,15 @@ class SglangEngineFactory:
             )
         loop = asyncio.get_running_loop()
 
-        # TODO(gh-8749): consume mdc.model_info.path()'s parent (slug_dir)
-        # instead of re-running fetch_model. The MDC cache already has
-        # blake3-verified copies; this path duplicates the download.
-        source_path = mdc.source_path()
-        if not os.path.exists(source_path):
-            source_path = await fetch_model(source_path, ignore_weights=True)
+        local_dir = mdc.local_dir()
+        if not os.path.isdir(local_dir):
+            raise RuntimeError(
+                f"MDC local_dir {local_dir!r} not populated for model {mdc.name()!r}; "
+                f"download_config must run before the engine factory."
+            )
 
-        logger.info("Loading SGLang tokenizer from %s", source_path)
-        tokenizer = _load_tokenizer(source_path, self.trust_remote_code)
+        logger.info("Loading SGLang tokenizer from %s", local_dir)
+        tokenizer = _load_tokenizer(local_dir, self.trust_remote_code)
 
         eos_token_id = getattr(tokenizer, "eos_token_id", None)
 
@@ -662,13 +662,13 @@ class SglangEngineFactory:
             logger.info(
                 "Creating SGLang preprocess worker pool with %d workers for %s",
                 preprocess_workers,
-                source_path,
+                local_dir,
             )
             preprocess_pool = ProcessPoolExecutor(
                 max_workers=preprocess_workers,
                 initializer=_init_worker,
                 initargs=(
-                    source_path,
+                    local_dir,
                     tool_call_parser_name,
                     reasoning_parser_name,
                     self.config.exclude_tools_when_tool_choice_none,
