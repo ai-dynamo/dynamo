@@ -2713,3 +2713,148 @@ svg.card-icon{
         justify-self: start;
     }
 }
+
+/* ---------------------------------------------------------------------------
+   Recipe target picker (variant selector on multi-target recipe pages).
+   Pages opt in by rendering hidden radio inputs named "recipe-sku" /
+   "recipe-usecase" with an adjacent label, and tagging variant-scoped blocks
+   with data-sku / data-usecase (space-separated values allowed). Content is
+   hidden via body:has(), so browsers without :has() degrade to showing all
+   variants. Pages without a picker are unaffected.
+--------------------------------------------------------------------------- */
+
+.dynamo-target-picker {
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: 14px;
+    padding: 18px 20px;
+    margin: 1.25rem 0 1.75rem;
+    background: var(--nv-color-bg-alt);
+}
+
+.dark .dynamo-target-picker {
+    background: var(--nv-dark-grey-2);
+}
+
+.dynamo-target-picker-title {
+    margin: 0 0 12px;
+    font-size: 0.95rem;
+    font-weight: 700;
+}
+
+.dynamo-target-picker-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.dynamo-target-picker-row + .dynamo-target-picker-row {
+    margin-top: 10px;
+}
+
+.dynamo-target-picker-dim {
+    flex: 0 0 84px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--grayscale-a9, #777);
+}
+
+.dynamo-target-picker input[type="radio"] {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.dynamo-target-picker input[type="radio"] + label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 34px;
+    padding: 7px 16px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: var(--rounded);
+    background: var(--nv-color-bg-default);
+    color: var(--pst-color-text-base);
+    cursor: pointer;
+    font-size: 13.5px;
+    line-height: 1;
+    user-select: none;
+}
+
+.dark .dynamo-target-picker input[type="radio"] + label {
+    background: var(--nv-dark-grey-3);
+}
+
+.dynamo-target-picker input[type="radio"]:checked + label {
+    border-color: var(--nv-color-green);
+    box-shadow: 0 0 0 1px var(--nv-color-green);
+    font-weight: 700;
+}
+
+.dynamo-target-picker input[type="radio"]:focus-visible + label {
+    outline: 2px solid var(--nv-color-green);
+    outline-offset: 2px;
+}
+
+.dynamo-target-picker-hint {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--nv-color-green-2);
+    background: color-mix(in srgb, var(--nv-color-green) 18%, transparent);
+    border-radius: var(--rounded);
+    padding: 2px 8px;
+}
+
+.dark .dynamo-target-picker-hint {
+    color: var(--nv-color-green);
+}
+
+/* Selected-target summary strip inside the picker */
+.dynamo-target-picker-summary {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border, var(--grayscale-a5));
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 22px;
+    font-size: 13px;
+}
+
+.dynamo-target-picker-summary span {
+    display: inline-flex;
+    gap: 6px;
+    align-items: baseline;
+}
+
+.dynamo-target-picker-summary b {
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--grayscale-a9, #777);
+}
+
+/* Variant visibility: hide blocks that do not match the checked sku/usecase */
+body:has(input[name="recipe-sku"][value="b200"]:checked) [data-sku]:not([data-sku~="b200"]),
+body:has(input[name="recipe-sku"][value="h200"]:checked) [data-sku]:not([data-sku~="h200"]),
+body:has(input[name="recipe-sku"][value="h100"]:checked) [data-sku]:not([data-sku~="h100"]),
+body:has(input[name="recipe-sku"][value="gb200"]:checked) [data-sku]:not([data-sku~="gb200"]),
+body:has(input[name="recipe-usecase"][value="chat"]:checked) [data-usecase]:not([data-usecase~="chat"]),
+body:has(input[name="recipe-usecase"][value="agentic"]:checked) [data-usecase]:not([data-usecase~="agentic"]) {
+    display: none;
+}
+
+/* Highlight the matching row in an expected-performance or comparison table */
+body:has(input[name="recipe-sku"]:checked) tr[data-sku][data-usecase] {
+    opacity: 0.55;
+}
+
+body:has(input[name="recipe-sku"][value="b200"]:checked):has(input[name="recipe-usecase"][value="chat"]:checked) tr[data-sku~="b200"][data-usecase~="chat"],
+body:has(input[name="recipe-sku"][value="b200"]:checked):has(input[name="recipe-usecase"][value="agentic"]:checked) tr[data-sku~="b200"][data-usecase~="agentic"],
+body:has(input[name="recipe-sku"][value="h200"]:checked):has(input[name="recipe-usecase"][value="chat"]:checked) tr[data-sku~="h200"][data-usecase~="chat"],
+body:has(input[name="recipe-sku"][value="h200"]:checked):has(input[name="recipe-usecase"][value="agentic"]:checked) tr[data-sku~="h200"][data-usecase~="agentic"] {
+    opacity: 1;
+    font-weight: 600;
+}
