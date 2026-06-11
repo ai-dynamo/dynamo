@@ -6,38 +6,40 @@
 Bridges Dynamo's nixl_connect module to vllm-omni's connector registry,
 enabling real NIXL RDMA-based inter-stage AR->DIT disaggregation.
 
-Transfer model (PULL / READ, TENSOR-ONLY):
-    All payloads must be torch.Tensor or list[torch.Tensor].
+Transfer model (PULL / READ):
+    - Tensor payloads: torch.Tensor or list[torch.Tensor] (zero-copy tensor path)
+    - Generic Python payloads: serialized to bytes via OmniConnectorBase
+        and transported as a uint8 tensor.
 
-     1. Sender (put):
-         - Convert tensors to detached contiguous tensors (preserve source device)
-         - Wrap each in nixl_connect.Descriptor
-         - Await connector.create_readable(descriptor_or_list)
-         - Return serialized RdmaMetadata + tensor specs in metadata
-         - Keep tensors pinned in _pending until RDMA completes or cleanup occurs
+    1. Sender (put)
+        - Convert tensors to detached contiguous tensors (preserve source device)
+        - Wrap each tensor in nixl_connect.Descriptor
+        - Await connector.create_readable(descriptor_or_list)
+        - Return serialized RdmaMetadata + tensor specs in metadata
+        - Keep tensors pinned in _pending until RDMA completes or cleanup occurs
 
-    2. Receiver (get):
-       - Decode tensor specs from metadata and allocate matching local tensors
-       - Wrap in nixl_connect.Descriptor
-       - Await connector.begin_read(rdma_metadata, local_descriptor)
-       - Await read_op.wait_for_completion()
-       - Return tensors directly
+    2. Receiver (get)
+        - Decode tensor specs from metadata and allocate matching local tensors
+        - Wrap tensors in nixl_connect.Descriptor
+        - Await connector.begin_read(rdma_metadata, local_descriptor)
+        - Await read_op.wait_for_completion()
+        - Return tensors (or deserialize object payload)
 """
 
 import asyncio
 import logging
+import threading
 import time
 from typing import Any
 
 import torch
 from vllm_omni.distributed.omni_connectors.connectors.base import OmniConnectorBase
 
-from dynamo.vllm.omni.utils import is_tensor_payload
-
 logger = logging.getLogger(__name__)
 
 _METADATA_SCHEMA_VERSION = 1
 _TENSOR_PAYLOAD_KIND = "tensor_list"
+_SERIALIZED_PAYLOAD_KIND = "serialized_obj"
 _DEFAULT_PENDING_TIMEOUT_S = 300.0
 _DEFAULT_CLEANUP_INTERVAL_S = 5.0
 
@@ -53,17 +55,23 @@ except ImportError:
         "NIXL RDMA transfers will be disabled."
     )
 
+try:
+    from vllm_omni.distributed.omni_connectors.factory import OmniConnectorFactory
+
+    _OMNI_FACTORY_IMPORT_ERROR: Exception | None = None
+except ImportError as exc:
+    OmniConnectorFactory = None  # type: ignore[assignment]
+    _OMNI_FACTORY_IMPORT_ERROR = exc
+
 
 class DynamoOmniNixlConnector(OmniConnectorBase):
     """NIXL RDMA connector adapting dynamo.nixl_connect to vllm-omni OmniConnectorBase.
 
-    put()  - registers local tensor(s) as RDMA-readable via create_readable(),
-             returns serialized RdmaMetadata plus tensor specs in the
-             metadata dict that travels over gRPC.
-    get()  - allocates local tensor(s), calls begin_read() with the received
-             RdmaMetadata, awaits RDMA completion, returns (tensors, size).
+    Provides zero-copy tensor transfer and serialized Python object support:
+    - put(): Registers payload as RDMA-readable, returns metadata with RdmaMetadata
+    - get(): Allocates local tensors, pulls data via RDMA, deserializes if needed
 
-    Both put() and get() are async coroutines; callers must await them.
+    All operations are synchronous (blocking) but backed by async RDMA on a dedicated loop.
     """
 
     supports_raw_data: bool = True
@@ -71,6 +79,9 @@ class DynamoOmniNixlConnector(OmniConnectorBase):
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
         self._connector: Any = _nixl_connect.Connector() if _NIXL_AVAILABLE else None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loop_thread: threading.Thread | None = None
+        self._loop_ready = threading.Event()
         self._receive_device = _resolve_configured_receive_device(self.config)
         self._pending_timeout_s = float(
             self.config.get("pending_timeout_s", _DEFAULT_PENDING_TIMEOUT_S)
@@ -85,6 +96,7 @@ class DynamoOmniNixlConnector(OmniConnectorBase):
         self._cleanup_task: asyncio.Task[Any] | None = None
         self._closed = False
         self._metrics: dict[str, int] = {"puts": 0, "gets": 0, "errors": 0}
+        self._start_loop_thread()
         logger.info(
             "[DynamoOmniNixlConnector] Initialized (nixl_available=%s timeout=%ss interval=%ss receive_device=%s)",
             _NIXL_AVAILABLE,
@@ -92,6 +104,48 @@ class DynamoOmniNixlConnector(OmniConnectorBase):
             self._cleanup_interval_s,
             self._receive_device,
         )
+
+    def _start_loop_thread(self) -> None:
+        if self._loop_thread is not None and self._loop_thread.is_alive():
+            return
+
+        self._loop_ready.clear()
+
+        def _loop_main() -> None:
+            loop = asyncio.new_event_loop()
+            self._loop = loop
+            asyncio.set_event_loop(loop)
+            self._loop_ready.set()
+            loop.run_forever()
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True)
+                )
+            loop.close()
+
+        self._loop_thread = threading.Thread(
+            target=_loop_main,
+            name="dynamo-omni-nixl-connector-loop",
+            daemon=True,
+        )
+        self._loop_thread.start()
+        if not self._loop_ready.wait(timeout=5.0):
+            raise RuntimeError("Failed to start connector event loop thread")
+
+    def _run_in_loop(self, coro: Any) -> Any:
+        if (
+            self._loop is None
+            or self._loop_thread is None
+            or not self._loop_thread.is_alive()
+        ):
+            raise RuntimeError("Connector event loop is not running")
+        if threading.current_thread() is self._loop_thread:
+            raise RuntimeError("Cannot block waiting for loop result from loop thread")
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result()
 
     async def _cleanup_pending_loop(self) -> None:
         try:
@@ -137,38 +191,51 @@ class DynamoOmniNixlConnector(OmniConnectorBase):
         if (pending := self._pending.get(request_id)) and pending[0] == token:
             self._pending.pop(request_id, None)
 
-    def close(self) -> None:
-        """Release all resources; safe to call multiple times."""
-        if self._closed:
-            return
-        self._closed = True
+    async def _close_async(self) -> None:
         for request_id in tuple(self._pending):
             self._cancel_pending(request_id, "connector closed")
         if self._cleanup_task is not None:
             self._cleanup_task.cancel()
             self._cleanup_task = None
 
+    def close(self) -> None:
+        """Release all resources; safe to call multiple times."""
+        if self._closed:
+            return
+        self._closed = True
+
+        try:
+            if self._loop is not None and self._loop.is_running():
+                self._run_in_loop(self._close_async())
+        except Exception:
+            logger.exception("[DynamoOmniNixlConnector] close cleanup failed")
+
+        if self._loop is not None and self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._loop_thread is not None and self._loop_thread.is_alive():
+            self._loop_thread.join(timeout=5.0)
+        self._loop = None
+        self._loop_thread = None
+        self._loop_ready.clear()
+
     # ------------------------------------------------------------------
     # Sender side
     # ------------------------------------------------------------------
 
-    async def put(
+    async def _put_async(
         self,
         from_stage: str,
         to_stage: str,
         put_key: str,
         data: Any,
     ) -> tuple[bool, int, dict[str, Any] | None]:
-        """Register tensor payload as NIXL-readable and return transfer metadata.
+        """Register payload as NIXL-readable and return metadata for remote RDMA fetch.
 
-        The actual tensor data is transferred via NIXL RDMA when get() is called;
-        only serialized metadata and tensor specs travel over gRPC.
+        Handles two paths:
+        - Tensor payloads: Direct RDMA descriptor registration
+        - Non-tensor payloads: Serialize via OmniConnectorBase, wrap in uint8 tensor
 
-        Returns:
-            (success, total_size_bytes, metadata) where metadata contains:
-                - "rdma_metadata": RdmaMetadata.model_dump()
-                - "tensor_specs": list of {shape, dtype, device, size}
-                - "size": total tensor data size in bytes
+        Returns (success, bytes_transferred, metadata_dict).
         """
         if not _NIXL_AVAILABLE or self._connector is None:
             logger.error(
@@ -184,13 +251,18 @@ class DynamoOmniNixlConnector(OmniConnectorBase):
         try:
             self._ensure_cleanup_task()
 
-            if not is_tensor_payload(data):
-                raise RuntimeError(
-                    f"Unsupported payload type: expected torch.Tensor or list[torch.Tensor], "
-                    f"got {type(data)}"
+            kind = _TENSOR_PAYLOAD_KIND
+            if _is_tensor_payload(data):
+                tensors, tensor_specs = _normalize_tensor_payload(data)
+            else:
+                serialized_data = self.serialize_obj(data)
+                payload_tensor = _bytes_to_uint8_tensor(
+                    serialized_data,
+                    device=torch.device("cpu"),
                 )
+                tensors, tensor_specs = _normalize_tensor_payload(payload_tensor)
+                kind = _SERIALIZED_PAYLOAD_KIND
 
-            tensors, tensor_specs = _normalize_tensor_payload(data)
             descriptors = [_nixl_connect.Descriptor(t) for t in tensors]
             readable_op = await self._connector.create_readable(
                 descriptors[0] if len(descriptors) == 1 else descriptors
@@ -225,17 +297,18 @@ class DynamoOmniNixlConnector(OmniConnectorBase):
             total_size = sum(spec["size"] for spec in tensor_specs)
             out_metadata: dict[str, Any] = {
                 "schema_version": _METADATA_SCHEMA_VERSION,
-                "kind": _TENSOR_PAYLOAD_KIND,
+                "kind": kind,
                 "rdma_metadata": readable_op.metadata().model_dump(),
                 "tensor_specs": tensor_specs,
                 "size": total_size,
             }
             self._metrics["puts"] += 1
             logger.debug(
-                "[DynamoOmniNixlConnector.put] edge=%s->%s req=%s tensors=%d size=%d",
+                "[DynamoOmniNixlConnector.put] edge=%s->%s req=%s kind=%s tensors=%d size=%d",
                 from_stage,
                 to_stage,
                 put_key,
+                kind,
                 len(tensors),
                 total_size,
             )
@@ -255,21 +328,19 @@ class DynamoOmniNixlConnector(OmniConnectorBase):
     # Receiver side
     # ------------------------------------------------------------------
 
-    async def get(
+    async def _get_async(
         self,
         from_stage: str,
         to_stage: str,
         get_key: str,
         metadata: dict[str, Any] | None = None,
     ) -> tuple[Any, int] | None:
-        """RDMA-pull tensor data from sender.
+        """RDMA-pull payload from sender using RdmaMetadata.
 
-        Uses the RdmaMetadata from metadata["rdma_metadata"] to issue a
-        NIXL READ directly into locally allocated tensors; tensor bytes do not
-        travel through the gRPC payload.
+        Allocates local tensors, performs RDMA read, and deserializes if needed.
+        Payload bytes do not travel through gRPC; only metadata + RDMA offsets.
 
-        Returns:
-            (torch.Tensor or list[torch.Tensor], total_size_bytes) on success, None on failure.
+        Returns (payload, bytes_transferred) on success, None on failure.
         """
         if not _NIXL_AVAILABLE or self._connector is None:
             logger.error(
@@ -303,10 +374,12 @@ class DynamoOmniNixlConnector(OmniConnectorBase):
                 metadata["rdma_metadata"]
             )
 
-            if metadata.get("kind") != _TENSOR_PAYLOAD_KIND:
+            payload_kind = metadata.get("kind", _TENSOR_PAYLOAD_KIND)
+            if payload_kind not in (_TENSOR_PAYLOAD_KIND, _SERIALIZED_PAYLOAD_KIND):
                 raise RuntimeError(
-                    f"Unsupported payload kind: expected {_TENSOR_PAYLOAD_KIND!r}, "
-                    f"got {metadata.get('kind')!r}"
+                    "Unsupported payload kind: expected one of "
+                    f"{(_TENSOR_PAYLOAD_KIND, _SERIALIZED_PAYLOAD_KIND)!r}, "
+                    f"got {payload_kind!r}"
                 )
 
             tensor_specs = metadata.get("tensor_specs")
@@ -333,13 +406,24 @@ class DynamoOmniNixlConnector(OmniConnectorBase):
             await read_op.wait_for_completion()
 
             total_size = sum(spec.get("size", 0) for spec in tensor_specs)
-            result = local_tensors[0] if len(local_tensors) == 1 else local_tensors
+            if payload_kind == _SERIALIZED_PAYLOAD_KIND:
+                if len(local_tensors) != 1:
+                    raise RuntimeError(
+                        "Serialized payload requires exactly one tensor; "
+                        f"got {len(local_tensors)}"
+                    )
+                raw_bytes = _tensor_uint8_to_bytes(local_tensors[0])
+                result = self.deserialize_obj(raw_bytes)
+            else:
+                result = local_tensors[0] if len(local_tensors) == 1 else local_tensors
+
             self._metrics["gets"] += 1
             logger.debug(
-                "[DynamoOmniNixlConnector.get] edge=%s->%s req=%s tensors=%d size=%d",
+                "[DynamoOmniNixlConnector.get] edge=%s->%s req=%s kind=%s tensors=%d size=%d",
                 from_stage,
                 to_stage,
                 get_key,
+                payload_kind,
                 len(local_tensors),
                 total_size,
             )
@@ -357,9 +441,37 @@ class DynamoOmniNixlConnector(OmniConnectorBase):
             )
             return None
 
+    def put(
+        self,
+        from_stage: str,
+        to_stage: str,
+        put_key: str,
+        data: Any,
+    ) -> tuple[bool, int, dict[str, Any] | None]:
+        """Sync wrapper for NIXL put executed on the connector loop thread."""
+        return self._run_in_loop(self._put_async(from_stage, to_stage, put_key, data))
+
+    def get(
+        self,
+        from_stage: str,
+        to_stage: str,
+        get_key: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[Any, int] | None:
+        """Sync wrapper for NIXL get executed on the connector loop thread."""
+        return self._run_in_loop(
+            self._get_async(from_stage, to_stage, get_key, metadata)
+        )
+
     def cleanup(self, request_id: str) -> None:
         """Cancel and discard any pinned tensors/operations for *request_id*."""
-        self._cancel_pending(request_id, "explicit cleanup")
+        if self._closed:
+            return
+
+        async def _cleanup_request() -> None:
+            self._cancel_pending(request_id, "explicit cleanup")
+
+        self._run_in_loop(_cleanup_request())
 
     def health(self) -> dict[str, Any]:
         """Return connector health status and transfer metrics."""
@@ -369,6 +481,32 @@ class DynamoOmniNixlConnector(OmniConnectorBase):
             "pending_requests": len(self._pending),
             **self._metrics,
         }
+
+
+def _is_tensor_payload(payload: Any) -> bool:
+    if isinstance(payload, torch.Tensor):
+        return True
+    return (
+        isinstance(payload, (list, tuple))
+        and bool(payload)
+        and all(isinstance(item, torch.Tensor) for item in payload)
+    )
+
+
+def _tensor_uint8_to_bytes(tensor: torch.Tensor) -> bytes:
+    flat = tensor.detach().cpu().contiguous().view(-1)
+    if flat.dtype != torch.uint8:
+        flat = flat.to(dtype=torch.uint8)
+    return flat.numpy().tobytes()
+
+
+def _bytes_to_uint8_tensor(value: bytes, device: torch.device) -> torch.Tensor:
+    return (
+        torch.frombuffer(value, dtype=torch.uint8)
+        .clone()
+        .to(device=device)
+        .contiguous()
+    )
 
 
 def _normalize_tensor_payload(
@@ -467,7 +605,8 @@ def create_dynamoomni_nixl_connector(config: dict[str, Any]) -> DynamoOmniNixlCo
 def register_dynamoomni_nixl_connector() -> None:
     """Register DynamoOmniNixlConnector with vllm-omni's OmniConnectorFactory."""
     try:
-        from vllm_omni.distributed.omni_connectors.factory import OmniConnectorFactory
+        if OmniConnectorFactory is None:
+            raise ImportError(str(_OMNI_FACTORY_IMPORT_ERROR))
 
         connector_name = "NixlConnector"
         if connector_name in OmniConnectorFactory.list_registered_connectors():

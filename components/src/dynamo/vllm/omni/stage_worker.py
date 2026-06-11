@@ -7,19 +7,16 @@ import asyncio
 import atexit
 import importlib
 import inspect
-import json
 import logging
 import os
 import shutil
 import tempfile
 from dataclasses import dataclass
-from types import SimpleNamespace
 from typing import Any, AsyncGenerator
 
 import torch
 import yaml
 from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
-from vllm_omni.distributed.omni_connectors.utils.serialization import OmniSerializer
 from vllm_omni.engine.orchestrator import build_engine_core_request_from_tokens
 from vllm_omni.entrypoints.async_omni import AsyncOmni
 from vllm_omni.entrypoints.stage_utils import serialize_obj, shm_write_bytes
@@ -36,21 +33,13 @@ from dynamo.vllm.omni.connectors import register_dynamoomni_nixl_connector
 from dynamo.vllm.omni.types import StageEngine, StageRequest, _int_keyed
 from dynamo.vllm.omni.utils import (
     _build_sampling_params,
-    bytes_to_uint8_tensor,
-    coerce_token_ids_to_list,
     ensure_awaited,
     is_empty_payload,
-    is_tensor_payload,
-    json_to_uint8_tensor,
     parse_omni_request,
-    tensor_uint8_to_bytes,
-    try_json_encode,
     unwrap_connector_payload,
 )
 
 logger = logging.getLogger(__name__)
-
-_RAW_STAGE_TO_ROUTER_PREFIX = b"__dynamo_omni_raw_stage_to_router__"
 
 
 @dataclass
@@ -114,8 +103,8 @@ class OmniStageWorker:
             # Stage N > 0: fetch previous stage outputs from connectors, run pre-processor.
             sampling_params_list_override = req.sampling_params_list
             try:
-                stage_list = await self._fetch_stage_inputs(
-                    stage_connector_refs, request_id
+                stage_list = await ensure_awaited(
+                    self._fetch_stage_inputs(stage_connector_refs, request_id)
                 )
             except RuntimeError as e:
                 yield {"error": str(e), "finished": True}
@@ -398,7 +387,22 @@ class OmniStageWorker:
             f"{parameter_names}"
         )
 
-    async def _fetch_stage_inputs(
+    def _fetch_stage_inputs(
+        self, stage_connector_refs: dict[int, Any], request_id: str
+    ) -> list[_Proxy]:
+        """Backward-compatible synchronous wrapper for unit tests/callers.
+
+        Runtime pipeline code should use ``_fetch_stage_inputs_async``.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(
+                self._fetch_stage_inputs_async(stage_connector_refs, request_id)
+            )
+        return self._fetch_stage_inputs_async(stage_connector_refs, request_id)  # type: ignore[return-value]
+
+    async def _fetch_stage_inputs_async(
         self, stage_connector_refs: dict[int, Any], request_id: str
     ) -> list[_Proxy]:
         """Fetch previous stage outputs from connectors for the processor/engine.
@@ -438,10 +442,7 @@ class OmniStageWorker:
                 raise RuntimeError(
                     f"Stage {self.stage_id}: empty payload from connector ({stage_k}→{self.stage_id})"
                 )
-            # Stage 0 -> Stage 1: tensor-based embeddings payload
-            if stage_k == 0 and self.stage_id == 1 and is_tensor_payload(payload_data):
-                engine_inputs = _restore_stage0_stage1_embeddings_payload(payload_data)
-            elif isinstance(payload_data, dict) and "engine_inputs" in payload_data:
+            if isinstance(payload_data, dict) and "engine_inputs" in payload_data:
                 engine_inputs = payload_data["engine_inputs"]
                 _restore_completion_output_attrs(
                     engine_inputs,
@@ -705,34 +706,12 @@ def _prepare_connector_payload(
 ) -> Any:
     """Build connector payload for inter-stage transfer.
 
-    For NIXL edges, payloads are tensor-based:
-    - JSON uint8 tensors for structured outputs.
-    - Raw serialized uint8 tensor fallback for non-JSON image payloads
-      (e.g. PIL images).
-
-    For non-NIXL compatibility paths, this may return legacy Python objects.
+    Connector payloads are regular Python objects. Connectors that advertise
+    raw-data support (including NIXL) can serialize/deserialize these payloads
+    directly
     """
-    # Stage 0 -> Stage 1: embeddings payload (token_ids + multimodal)
-    if from_stage == 0 and str(to_stage) == "1":
-        return _build_stage0_stage1_embeddings_payload(engine_inputs)
-
-    # Final stage -> Router: output payload (outputs + multimodal + images)
-    if str(to_stage) == "router":
-        images = getattr(engine_inputs, "images", None)
-        multimodal_output = getattr(engine_inputs, "multimodal_output", None)
-        # If either images or multimodal_output aren't JSON-serializable,
-        # serialize the entire engine_inputs as a raw blob to preserve tensor data.
-        images_not_json = images is not None and try_json_encode(images) is None
-        mm_not_json = (
-            multimodal_output is not None and try_json_encode(multimodal_output) is None
-        )
-        if images_not_json or mm_not_json:
-            payload_device = _infer_payload_device(engine_inputs)
-            raw_bytes = _RAW_STAGE_TO_ROUTER_PREFIX + serialize_obj(engine_inputs)
-            return [bytes_to_uint8_tensor(raw_bytes, payload_device)]
-        return _build_stage_to_router_tensor_payload(engine_inputs)
-
-    # Backward-compatible fallback payload for other stage transitions.
+    _ = (from_stage, to_stage)
+    # Preserve completion-only fields that some serializers may drop.
     _promote_request_multimodal_output(engine_inputs)
     output_attrs = _collect_completion_output_attrs(engine_inputs)
     if len(output_attrs) == 0:
@@ -741,163 +720,6 @@ def _prepare_connector_payload(
         "engine_inputs": engine_inputs,
         "_dynamo_completion_output_attrs": output_attrs,
     }
-
-
-def _build_stage0_stage1_embeddings_payload(engine_inputs: Any) -> list[torch.Tensor]:
-    payload_device = _infer_payload_device(engine_inputs)
-    payload_tensors: list[torch.Tensor] = []
-    for output in _iter_completion_outputs(engine_inputs):
-        token_ids = getattr(output, "token_ids", None)
-        if token_ids is None:
-            token_ids = getattr(output, "cumulative_token_ids", None)
-        if isinstance(token_ids, torch.Tensor):
-            token_tensor = token_ids.detach().to(dtype=torch.long).contiguous()
-        else:
-            token_tensor = torch.as_tensor(
-                coerce_token_ids_to_list(token_ids),
-                dtype=torch.long,
-                device=payload_device,
-            ).contiguous()
-        payload_tensors.append(token_tensor)
-
-    request_mm = getattr(engine_inputs, "multimodal_output", None)
-    if isinstance(request_mm, dict):
-        prior_token_image_ids = request_mm.get("prior_token_image_ids")
-        if isinstance(prior_token_image_ids, torch.Tensor):
-            payload_tensors.append(prior_token_image_ids.detach().contiguous())
-        elif isinstance(prior_token_image_ids, list):
-            payload_tensors.extend(
-                tensor.detach().contiguous()
-                for tensor in prior_token_image_ids
-                if isinstance(tensor, torch.Tensor)
-            )
-
-    if not payload_tensors:
-        payload_tensors.append(torch.empty(0, dtype=torch.long).contiguous())
-
-    return payload_tensors
-
-
-def _build_stage_to_router_tensor_payload(engine_inputs: Any) -> list[torch.Tensor]:
-    """Build tensor-based payload for final stage -> router using NIXL.
-
-    Encodes token_ids, text, and finish_reason into contiguous uint8 tensors
-    containing JSON-serialized data. Allows router to reconstruct original
-    structure by decoding JSON from tensor bytes.
-    """
-    payload_device = _infer_payload_device(engine_inputs)
-    payload_tensors: list[torch.Tensor] = []
-
-    # Collect output info (token_ids, text, finish_reason) and encode as JSON tensor
-    outputs_info: list[dict[str, Any]] = []
-    for output in _iter_completion_outputs(engine_inputs):
-        token_ids = getattr(output, "token_ids", None)
-        outputs_info.append(
-            {
-                "token_ids": coerce_token_ids_to_list(token_ids),
-                "text": getattr(output, "text", ""),
-                "finish_reason": getattr(output, "finish_reason", None),
-            }
-        )
-
-    payload_tensors.append(json_to_uint8_tensor(outputs_info, payload_device))
-
-    # Optionally include multimodal_output (audio, model_outputs, sr)
-    multimodal_output = _filter_multimodal_output(
-        getattr(engine_inputs, "multimodal_output", None),
-        {"audio", "model_outputs", "sr"},
-    )
-    if multimodal_output is not None:
-        payload_tensors.append(json_to_uint8_tensor(multimodal_output, payload_device))
-
-    # Include images if present
-    images = getattr(engine_inputs, "images", None)
-    if images is not None:
-        payload_tensors.append(json_to_uint8_tensor({"images": images}, payload_device))
-
-    return payload_tensors
-
-
-def _restore_stage_to_router_tensor_payload(payload: Any) -> Any:
-    """Reconstruct final stage -> router payload from tensors.
-
-    Supports two encodings:
-    - JSON uint8 tensors (returns a stage_to_router payload dict).
-    - Raw serialized OmniRequestOutput blob in a uint8 tensor
-      (returns the deserialized object directly).
-    """
-    tensors = [payload] if isinstance(payload, torch.Tensor) else list(payload or [])
-    if not tensors:
-        raise RuntimeError("Invalid stage->router tensor payload: no tensors")
-
-    # First tensor: outputs_info (JSON)
-    outputs_bytes = tensor_uint8_to_bytes(tensors[0])
-    if outputs_bytes.startswith(_RAW_STAGE_TO_ROUTER_PREFIX):
-        return OmniSerializer.deserialize(
-            outputs_bytes[len(_RAW_STAGE_TO_ROUTER_PREFIX) :]
-        )
-    outputs_info = json.loads(outputs_bytes.decode("utf-8"))
-
-    result: dict[str, Any] = {
-        "_dynamo_payload_type": "stage_to_router_output",
-        "kind": "text" if outputs_info else "unknown",
-        "outputs": outputs_info,
-    }
-
-    # Check for additional metadata tensors
-    if len(tensors) > 1:
-        mm_bytes = tensor_uint8_to_bytes(tensors[1])
-        mm_data = json.loads(mm_bytes.decode("utf-8"))
-        if "images" in mm_data:
-            result["kind"] = "images"
-            result["images"] = mm_data["images"]
-        else:
-            result["multimodal_output"] = mm_data
-
-    if len(tensors) > 2:
-        images_bytes = tensor_uint8_to_bytes(tensors[2])
-        images_data = json.loads(images_bytes.decode("utf-8"))
-        result["images"] = images_data.get("images")
-
-    return result
-
-
-def _filter_multimodal_output(
-    multimodal_output: Any, allowed_keys: set[str]
-) -> Any | None:
-    if multimodal_output is None:
-        return None
-    if not isinstance(multimodal_output, dict):
-        return multimodal_output
-
-    filtered = {
-        key: value
-        for key, value in multimodal_output.items()
-        if key in allowed_keys or any(marker in key.lower() for marker in allowed_keys)
-    }
-    return filtered or None
-
-
-def _restore_stage0_stage1_embeddings_payload(payload: Any) -> Any:
-    tensors = [payload] if isinstance(payload, torch.Tensor) else list(payload or [])
-    if not tensors:
-        raise RuntimeError("Invalid stage0->stage1 embeddings payload: no tensors")
-
-    token_tensor = tensors[0].contiguous()
-    outputs = [SimpleNamespace(token_ids=token_tensor.tolist())]
-    completion = outputs[0]
-    completion.cumulative_token_ids = list(completion.token_ids)
-
-    if len(tensors) > 1:
-        prior_token_image_ids = [tensor.contiguous() for tensor in tensors[1:]]
-        multimodal_output = {"prior_token_image_ids": prior_token_image_ids}
-        completion.multimodal_output = multimodal_output
-        request_output = SimpleNamespace(
-            outputs=outputs, multimodal_output=multimodal_output
-        )
-    else:
-        request_output = SimpleNamespace(outputs=outputs)
-    return request_output
 
 
 def _collect_completion_output_attrs(engine_inputs: Any) -> list[dict[str, Any]]:
@@ -944,26 +766,6 @@ def _restore_completion_output_attrs(
             output.cumulative_token_ids = list(attrs["cumulative_token_ids"])
         if "multimodal_output" in attrs:
             output.multimodal_output = attrs["multimodal_output"]
-
-
-def _infer_payload_device(engine_inputs: Any) -> torch.device:
-    for output in _iter_completion_outputs(engine_inputs):
-        for attr in ("token_ids", "cumulative_token_ids"):
-            value = getattr(output, attr, None)
-            if isinstance(value, torch.Tensor):
-                return value.device
-
-    request_mm = getattr(engine_inputs, "multimodal_output", None)
-    if isinstance(request_mm, dict):
-        prior_token_image_ids = request_mm.get("prior_token_image_ids")
-        if isinstance(prior_token_image_ids, torch.Tensor):
-            return prior_token_image_ids.device
-        if isinstance(prior_token_image_ids, list):
-            for tensor in prior_token_image_ids:
-                if isinstance(tensor, torch.Tensor):
-                    return tensor.device
-
-    return torch.device("cpu")
 
 
 def _ensure_cumulative_token_ids(engine_inputs: Any) -> None:

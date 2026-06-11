@@ -52,7 +52,7 @@ export FLASHINFER_DISABLE_VERSION_CHECK=1
 
 # Stage 0: AR worker (GPU 0) — generates prior_token_ids
 echo "Starting Stage 0 (AR)..."
-CUDA_VISIBLE_DEVICES=0 DYN_SYSTEM_PORT=8081 \
+DYN_SYSTEM_PORT=8081 \
     python -m dynamo.vllm.omni \
     --model "$MODEL" \
     --stage-id 0 \
@@ -65,7 +65,7 @@ sleep 20
 # Stage 1: DiT worker (GPU 1) — diffusion denoising + VAE decode
 echo "Starting Stage 1 (DiT)..."
 # Use CUDA_VISIBLE_DEVICES to select GPU 1, which appears as device "0" to this process
-CUDA_VISIBLE_DEVICES=1 DYN_SYSTEM_PORT=8082 \
+DYN_SYSTEM_PORT=8082 \
     python -m dynamo.vllm.omni \
     --model "$MODEL" \
     --stage-id 1 \

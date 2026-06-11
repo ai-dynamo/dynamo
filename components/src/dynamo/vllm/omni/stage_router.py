@@ -6,10 +6,8 @@
 import json
 import logging
 import uuid
-from types import SimpleNamespace
 from typing import Any, AsyncGenerator, Dict, List
 
-import torch
 from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
 from vllm_omni.entrypoints.utils import load_and_resolve_stage_configs
 
@@ -31,15 +29,12 @@ from dynamo.vllm.omni.stage_worker import (
     _ensure_stage_connectors,
     _resolve_model_type,
     _restore_completion_output_attrs,
-    _restore_stage_to_router_tensor_payload,
     _uses_nixl_connector,
 )
 from dynamo.vllm.omni.types import StageOutput
 from dynamo.vllm.omni.utils import (
-    coerce_token_ids_to_list,
     ensure_awaited,
     is_empty_payload,
-    is_tensor_payload,
     shm_deserialize,
     unwrap_connector_payload,
 )
@@ -56,6 +51,7 @@ class OmniStageRouter:
         stage_configs_path: str,
     ) -> None:
         self.config = config
+        self.connectors: dict[tuple[str, str], Any] = {}
         (
             resolved_stage_configs_path,
             self.stage_configs,
@@ -80,7 +76,14 @@ class OmniStageRouter:
                 logger.error("Router: failed to register NixlConnector: %s", e)
                 raise
 
-        _, self.connectors = initialize_orchestrator_connectors(connector_configs_path)  # type: ignore[arg-type]
+        try:
+            _, self.connectors = initialize_orchestrator_connectors(connector_configs_path)  # type: ignore[arg-type]
+        except FileNotFoundError:
+            logger.warning(
+                "Router: connector config %s not found; continuing without connectors",
+                connector_configs_path,
+            )
+            self.connectors = {}
         logger.info("Router: initialized %d connector(s)", len(self.connectors))
 
         media_fs = (
@@ -143,6 +146,7 @@ class OmniStageRouter:
                 return
 
         final = stage_outputs[-1]
+        connectors = getattr(self, "connectors", {})
         # Accept either connector-based output (multi-node) or SHM (single-node legacy).
         # Connector path: final stage wrote via connector.put(to_stage="router") and
         # returned stage_connector_refs[last_stage_id] = metadata.
@@ -150,14 +154,15 @@ class OmniStageRouter:
         has_connector_output = (
             final.stage_connector_refs is not None
             and str(final_stage_id) in final.stage_connector_refs
-            and self.connectors.get(_connector_key(final_stage_id, "router"))
-            is not None
+            and connectors.get(_connector_key(final_stage_id, "router")) is not None
         )
         if not has_connector_output and not final.shm_meta:
-            yield {
-                "error": "No output from final stage (no connector ref and no SHM)",
-                "finished": True,
-            }
+            error_msg = (
+                "No output from final stage (no connector ref and no SHM)"
+                if connectors
+                else "No SHM output from final stage"
+            )
+            yield {"error": error_msg, "finished": True}
             return
 
         # Build formatting context from the original request
@@ -204,7 +209,9 @@ class OmniStageRouter:
     ) -> AsyncGenerator[dict, None]:
         """Read OmniRequestOutput from connector (multi-node) or SHM (single-node) and format."""
         # --- Connector path (multi-node: router and final stage on different machines) ---
-        router_connector = self.connectors.get(_connector_key(final_stage_id, "router"))
+        router_connector = getattr(self, "connectors", {}).get(
+            _connector_key(final_stage_id, "router")
+        )
         meta_k = (
             stage_output.stage_connector_refs.get(str(final_stage_id))
             if stage_output.stage_connector_refs
@@ -224,16 +231,7 @@ class OmniStageRouter:
                 if is_empty_payload(payload_data):
                     raise RuntimeError("empty payload returned by connector.get()")
 
-                if is_tensor_payload(payload_data):
-                    payload_data = _restore_stage_to_router_tensor_payload(payload_data)
-
-                if (
-                    isinstance(payload_data, dict)
-                    and payload_data.get("_dynamo_payload_type")
-                    == "stage_to_router_output"
-                ):
-                    result = _payload_dict_to_result(payload_data)
-                elif isinstance(payload_data, dict) and "engine_inputs" in payload_data:
+                if isinstance(payload_data, dict) and "engine_inputs" in payload_data:
                     result = payload_data["engine_inputs"]
                     _restore_completion_output_attrs(
                         result,
@@ -273,74 +271,6 @@ class OmniStageRouter:
                 "error": f"Formatter returned no output for type '{final_output_type}'",
                 "finished": True,
             }
-
-
-def _payload_dict_to_result(payload_data: dict[str, Any]) -> Any:
-    kind = payload_data.get("kind")
-    if kind == "images":
-        return SimpleNamespace(
-            images=_coerce_images(payload_data.get("images")),
-            final_output_type="image",
-        )
-
-    if kind == "text":
-        outputs_raw = payload_data.get("outputs")
-        if not isinstance(outputs_raw, list):
-            raise RuntimeError("Invalid stage->router payload: missing text outputs")
-
-        outputs = [
-            SimpleNamespace(
-                token_ids=coerce_token_ids_to_list(item.get("token_ids")),
-                text=item.get("text", ""),
-                finish_reason=item.get("finish_reason"),
-            )
-            for item in outputs_raw
-            if isinstance(item, dict)
-        ]
-        request_output = SimpleNamespace(outputs=outputs)
-        result = SimpleNamespace(
-            request_output=request_output,
-            final_output_type="text",
-        )
-        if (multimodal_output := payload_data.get("multimodal_output")) is not None:
-            request_output.multimodal_output = multimodal_output
-        return result
-
-    result = SimpleNamespace(final_output_type="unknown")
-    if (images := payload_data.get("images")) is not None:
-        result.images = _coerce_images(images)
-        result.final_output_type = "image"
-        return result
-
-    multimodal_output = payload_data.get("multimodal_output")
-    if isinstance(multimodal_output, dict):
-        if "audio" in multimodal_output or "sr" in multimodal_output:
-            result.multimodal_output = multimodal_output
-            result.final_output_type = "audio"
-            return result
-        if "images" in multimodal_output:
-            result.images = _coerce_images(multimodal_output.get("images"))
-            result.final_output_type = "image"
-            return result
-        if "model_outputs" in multimodal_output:
-            result.images = _coerce_images(multimodal_output.get("model_outputs"))
-            result.multimodal_output = multimodal_output
-            result.final_output_type = "image"
-            return result
-
-    if kind == "audio":
-        if multimodal_output is not None:
-            result.multimodal_output = multimodal_output
-            result.final_output_type = "audio"
-    return result
-
-
-def _coerce_images(images: Any) -> Any:
-    if images is None:
-        return []
-    if isinstance(images, torch.Tensor):
-        return images.detach().cpu().tolist()
-    return images
 
 
 async def init_omni_stage_router(
