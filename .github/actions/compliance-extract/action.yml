@@ -46,7 +46,7 @@ inputs:
     required: false
     default: '30'
   git_sha:
-    description: 'Commit SHA used to name the per-arch OSRB files (osrb-<image>-<arch>-<sha8>.csv/.cdx.json). Pass ${{ github.sha }}.'
+    description: 'Commit SHA used to name the per-arch OSRB files (osrb-<image>-<arch>-<sha8>.csv/.cdx.json). Pass the github.sha context value.'
     required: false
     default: ''
 
