@@ -249,6 +249,8 @@ class HandlerBase(BaseGenerativeHandler):
     across all generative handlers (LLM, video, image).
     """
 
+    _benchmark_results: Optional[dict] = None
+
     def __init__(self, config: RequestHandlerConfig):
         self.engine = config.engine
         self.default_sampling_params = config.default_sampling_params
@@ -407,6 +409,14 @@ class HandlerBase(BaseGenerativeHandler):
             except Exception as exc:
                 logger.error("resume_memory_occupation failed: %s", exc)
                 return {"status": "error", "message": str(exc)}
+
+    async def get_perf_metrics(self, request=None):
+        """Return startup self-benchmark FPM results, or an error dict."""
+        result = getattr(self, "_benchmark_results", None)
+        if result is None:
+            yield {"status": "error", "message": "no benchmark data"}
+        else:
+            yield result
 
     @staticmethod
     def _extract_logprobs(

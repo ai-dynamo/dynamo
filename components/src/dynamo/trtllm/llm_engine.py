@@ -63,6 +63,12 @@ from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine
 from dynamo.trtllm.logits_processing.adapter import attach_logits_processors
 from dynamo.trtllm.request_handlers.handler_base import TRTLLMEnginePauseController
+from dynamo.trtllm.self_benchmark import (
+    TRTLLM_SELF_BENCHMARK_RUNTIME_KEY,
+    TrtllmSelfBenchmarkConfig,
+    prepare_self_benchmark,
+    wait_for_self_benchmark_output,
+)
 from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
@@ -134,6 +140,7 @@ class TrtllmLLMEngine(LLMEngine):
         disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED,
         component: str = "backend",
         publish_events_and_metrics: bool = False,
+        self_benchmark_config: TrtllmSelfBenchmarkConfig | None = None,
     ):
         self.engine_args = engine_args
         self.model_name = model_name
@@ -148,6 +155,8 @@ class TrtllmLLMEngine(LLMEngine):
         # `_kv_events_thread`). Component metrics + native `trtllm_*` metrics
         # emit unconditionally.
         self.publish_events_and_metrics = publish_events_and_metrics
+        self._self_benchmark_config = self_benchmark_config
+        self._benchmark_results: dict[str, Any] | None = None
         self._component = component
         self._additional_metrics: Optional["AdditionalMetricsCollector"] = None
         kv_cache_config = self.engine_args.get("kv_cache_config", {})
@@ -287,6 +296,8 @@ class TrtllmLLMEngine(LLMEngine):
                 kv_cfg["event_buffer_max_size"] = _DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
             engine_args["kv_cache_config"] = kv_cfg
 
+        self_benchmark_config = prepare_self_benchmark(config, engine_args)
+
         # Force tokenizer init for the smoke hook, after all overrides so an
         # explicit user `skip_tokenizer_init=True` can't starve the processor.
         # Gated to generation roles for the same reason as the spec resolution
@@ -309,6 +320,7 @@ class TrtllmLLMEngine(LLMEngine):
             disaggregation_mode=config.disaggregation_mode,
             component=config.component,
             publish_events_and_metrics=config.publish_events_and_metrics,
+            self_benchmark_config=self_benchmark_config,
         )
         worker_config = WorkerConfig.from_runtime_config(
             config,
@@ -333,6 +345,11 @@ class TrtllmLLMEngine(LLMEngine):
         self._engine = TensorRTLLMEngine(self.engine_args, self.disaggregation_mode)
         await self._engine.initialize()
         self._pause_controller = TRTLLMEnginePauseController(self._engine)
+        if self._self_benchmark_config is not None:
+            self._benchmark_results = await wait_for_self_benchmark_output(
+                self._self_benchmark_config,
+                worker_id=str(worker_id),
+            )
 
         # Resolve the engine-declared spec now the engine (and its tokenizer)
         # is initialized; see `logits_processor_spec()`.
@@ -379,6 +396,12 @@ class TrtllmLLMEngine(LLMEngine):
         )
         self._metrics_thread.start()
 
+        runtime_data = None
+        if self._benchmark_results is not None:
+            runtime_data = {
+                TRTLLM_SELF_BENCHMARK_RUNTIME_KEY: self._benchmark_results,
+            }
+
         return EngineConfig(
             model=self.model_name,
             served_model_name=self.served_model_name,
@@ -387,6 +410,7 @@ class TrtllmLLMEngine(LLMEngine):
             max_num_seqs=self.max_batch_size,
             max_num_batched_tokens=self.max_num_tokens,
             data_parallel_size=self._attention_dp_size,
+            runtime_data=runtime_data,
         )
 
     # TRT-LLM's `get_kv_cache_events` / `get_stats` block the calling
