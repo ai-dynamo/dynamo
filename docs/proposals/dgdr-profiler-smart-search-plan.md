@@ -1,104 +1,69 @@
-# DGDR Profiler Smart Search Knob Plan
+# Profiler V2: Smart Sweeping Tool for Dynamo Deployments
+
+## Motivation
+
+Dynamo deployments are hard to configure. A good setup depends on multiple interacting components, including engines, routers, planners, KV policy, replica counts, and parallelization choices. The right choice can also change under dynamic traffic, where static rules of thumb are often not enough.
+
+Replay gives us a fast way to try candidate configurations before deployment, but today the process still needs a human expert to decide what to try next. Profiler V2 should automate that loop: generate legal candidates, evaluate them with replay, and use Vizier to guide the next sweep samples.
+
+This sweeper is not an engine/kernel autotuner. Its focus is high-level Dynamo configuration: scheduling, routing, autoscaling, deployment shape, replica counts, and runtime capacity knobs that affect serving behavior.
 
 ## Scope
 
-这个 plan 先做 knob inventory，不直接决定最终 DGDR API。目标是把 engine、router、planner 里可能影响 replay/profiler search 的配置列出来，再按优化器视角分类。
-
-主要来源：
-
-- `components/src/dynamo/profiler/utils/replay_optimize/*`
-- `components/src/dynamo/planner/config/*`
-- `components/src/dynamo/planner/core/*`
-- `components/src/dynamo/common/configuration/groups/*`
-- `lib/bindings/python/rust/llm/replay.rs`
-- `lib/mocker/src/common/protocols.rs`
-- `lib/kv-router/src/scheduling/config.rs`
-- `origin/main` 上 replay 已经 merge 但本地分支还没有的字段
-
-分类：
-
-- `Branch`: 不放进单个 Vizier flat study，由 DGDR profiler 在外层分支。
-- `Search`: 可以成为 Vizier candidate dimension。All `Search` knobs can also be pinned by user override.
-- `Composite`: 搜一个高层 shape，再 decode 成多个底层字段。
-- `Derived`: 从 branch、backend、shape、AIC 或 candidate generation 结果生成。
-- `Pinned`: 用户、环境、模型或 backend 固定。
+This plan defines the DGDR profiler V2 smart-search surface. Profiler V2 uses Vizier as the smart sweeping optimizer. This document inventories deployment, engine, KV manager, router, and planner knobs, then classifies each knob by optimizer treatment. It does not finalize the DGDR API.
 
 ## V2 Refactor Direction
 
-大方向是 refactor DGDR profiler，但第一阶段不替换现有 V1 行为。V2 先作为 profiler 里的独立实现落地，目标是把 replay-based search、candidate decoding、ranked output 做完整，同时避免影响当前 DGDR/k8s feature。
+V2 should land as an opt-in implementation under `components/src/dynamo/profiler/v2/`. It should own search-space construction, candidate decoding, replay evaluation, ranking, and report generation for opt-in runs.
 
-### Guardrails
+V2 should not change the existing V1 profiler defaults, DGDR CR behavior, or k8s controller/operator path. In the opt-in path, V2 replaces the current AIC sweeper/picker role, while AIC remains a lower-level provider for backend support checks, legal parallelism hints, perf model data, and memory/capacity estimates.
 
-- 不改现有 DGDR V1 profiler 的默认入口和行为。
-- 不接 k8s controller/operator 路径，不从 DGDR CR 自动触发 V2。
-- 不改现有 `v1beta1` schema 的语义，除非只是读取/转换输入。
-- 不做 deployment apply，只生成 candidate DGD/router/planner config 和 replay report。
-- V2 failure 不应影响 V1 profiler、rapid/thorough profiling、planner sweep 现有流程。
+## Overview
 
-### Proposed V2 Layout
+Profiler V2 uses two sweep paths. The main Vizier sweep is manually branched by deployment mode, so `agg` and `disagg` each expose a flat search space. Vizier samples are guided by replay's virtual-clock simulation, and replay evaluations can run in parallel on CPU. Planner load prediction can be tuned separately with an independent simple grid sweep when throughput planner is enabled.
 
-V2 代码建议独立放在 profiler 下，而不是混进 `profile_sla.py` 或现有 `utils/replay_optimize` 的启发式搜索里：
-
-```text
-components/src/dynamo/profiler/v2/
-  __init__.py
-  spec.py              # V2 internal spec and validation
-  search_space.py      # branch-specific legal latent spaces
-  candidates.py        # candidate model and ranking metadata
-  decoder.py           # latent candidate -> replay args, router config, planner config, DGD
-  evaluator.py         # replay execution and score extraction
-  optimizer.py         # Vizier adapter plus fallback enumerator for tests
-  report.py            # ranked output, skipped/failed reasons, refs
+```mermaid
+flowchart TD
+    input["DGDR input + replay traces"] --> profiler["Profiler V2"]
+    profiler --> throughputPlanner{"Throughput planner enabled?"}
+    throughputPlanner -->|yes| loadPredictor["Independent planner load predictor sweep"]
+    loadPredictor --> predictorPreset["Selected predictor preset"]
+    predictorPreset --> branch["Manual branch on deployment_mode"]
+    throughputPlanner -->|no| branch
+    branch --> agg["agg branch"]
+    branch --> disagg["disagg branch"]
+    agg --> aggVizier["Vizier main sweep: flat agg space"]
+    disagg --> disaggVizier["Vizier main sweep: flat disagg space"]
+    aggVizier --> rank["Replay evaluation + direct agg/disagg comparison"]
+    disaggVizier --> rank
 ```
-
-Current `components/src/dynamo/profiler/profile_sla.py` remains V1. A local/offline V2 entrypoint can be added later, for example `profile_sla_v2.py` or a hidden CLI command, but it should not be wired into DGDR k8s until the V2 result contract is stable.
-
-### Phase Boundary
-
-| Phase | Scope | Non-goals |
-| --- | --- | --- |
-| V2 alpha | Local/offline profiler path, replay-based evaluation, candidate ranking, generated configs/reports | k8s integration, CRD behavior change, replacing rapid/thorough |
-| V2 opt-in | Explicit CLI/config opt-in, compatibility adapter from existing DGDR inputs, replacement path for the current AIC sweeper/picker | automatic controller integration, changing V1 defaults |
-| V2 integration | DGDR API/controller wiring after output contract is reviewed | silent fallback to V1 or hidden behavior changes |
-
-### AIC Sweeper Replacement Boundary
-
-In the opt-in phase, V2 should replace the current AIC-driven sweep orchestration for that explicit path:
-
-- V2 owns search-space construction, branch splitting, candidate generation, replay evaluation, scoring, ranking, and report generation.
-- V2 replaces AIC's current rapid-mode sweep/pick role for opt-in runs.
-- V2 may still call AIC as a lower-level provider for model/backend support checks, legal parallelism hints, perf model data, and memory/capacity estimates.
-- AIC output should be treated as input evidence for the V2 candidate decoder/evaluator, not as the final search result.
-- Existing V1 rapid/thorough paths keep their current AIC behavior until V2 integration is explicitly wired.
-
-## Branch Model
-
-顶层先按 deployment mode 分 branch，而不是把 `agg/disagg` 放进一个 Vizier conditional space。
 
 | Branch | Engine | Router | Planner |
 | --- | --- | --- | --- |
 | `agg` | aggregated workers: `tp/pp/dp/moe_tp/moe_ep`, `workers`, agg engine args | agg-compatible router modes and queue policy | `mode=agg`, agg engine GPU shape |
 | `disagg` | prefill/decode workers: separate prefill shape, decode shape, prefill worker count, decode worker count | disagg router mode, prefill/decode scoring, admission | `mode=disagg`, prefill/decode engine GPU shape |
 
-每个 branch 里给 Vizier 一个 flat search space。DGDR profiler 负责：
+Treatment labels:
 
-- 生成 branch-specific legal candidates。
-- 把 composite knob decode 成 DGD、router config、planner config、replay `MockEngineArgs`。
-- 对少量 runtime 失败 candidate 标记 infeasible。
-- 全局合并 agg/disagg 的 ranked result。
+- `Branch`: split outside a single Vizier flat study.
+- `Search`: Vizier candidate dimension. All `Search` knobs can also be pinned by user override.
+- `Composite Search`: one high-level candidate dimension decoded into multiple runtime fields.
+- `Derived`: generated from branch, backend, shape, AIC output, or candidate generation.
+- `Pinned`: fixed by user input, environment, model, or backend policy.
 
 ## Deployment Knobs
 
-Deployment owns topology and budget envelope: branch, replica counts, GPU budget, and per-engine GPU accounting. Engine and KV manager consume these derived values.
+Deployment owns topology, backend type, and budget envelope: branch, replica counts, GPU budget, and per-engine GPU accounting. Engine and KV manager consume these derived values.
 
 | Category | Knob | Applies | Proposed treatment | Notes |
 | --- | --- | --- | --- | --- |
 | deployment mode | `deployment_mode`: `agg`, `disagg` | all | `Pinned`+`Branch` | Pin when user specifies one mode; otherwise split studies outside Vizier and rank branches globally. |
-| objective | `optimization_target`: `sla`, `throughput`, `latency`; SLA targets: `ttft_ms`+`itl_ms` or `e2e_ms` | profiler/planner | `Pinned` | User-selected evaluation objective; `sla` uses explicit latency constraints, while `throughput` and `latency` use replay metrics as the objective. |
+| backend type | `backend` + `engine_type`: `vllm`, `sglang`, `trtllm` | all | `Search` | Search only across candidate backends with comparable replay+perf model support; can be pinned by user override. Disagg first pass uses one shared backend type for prefill+decode unless mixed-backend deployment is explicitly enabled. |
+| objective | `optimization_target`: `throughput`, `e2e_latency`, `goodput`, `goodput_per_gpu`; optional SLA targets: `ttft_ms`+`itl_ms` or `e2e_ms` | profiler+planner | `Pinned` | User-selected replay objective. `goodput` and `goodput_per_gpu` require an SLA target. |
 | component enablement | `enable_kvrouter` | deployment | `Pinned` | Controls whether V2 emits/evaluates KV-router config; not a search knob. |
 | component enablement | `enable_planner` | deployment | `Pinned` | Controls whether V2 emits planner config; not a search knob. |
-| replicas | `workers`, `prefill_workers`, `decode_workers` | replay/profiler | `Composite Search` | Search together with the engine `parallel shape` as legal deployment-shape composites capped by `gpu_budget`. |
-| budget | `gpu_budget`, `max_gpu_budget`, `min_gpu_budget`, `min_endpoint` | hardware/planner | `Pinned` | `gpu_budget` is the single max-GPU budget concept and maps to planner `max_gpu_budget`; min constraints are pinned deployment inputs used by candidate generation. |
+| replica+parallel config | `workers`, `prefill_workers`, `decode_workers`, parallel strategy: `tp`, `tep`, `dep` (MLA) | replay+profiler+AIC | `Composite Search` | Search legal per-component parallel configs using the current profiler's TP+TEP+DEP (MLA) sweep, then compute replica counts from `gpu_budget` and combine them into one categorical candidate. PP is pinned outside this search. |
+| budget | `gpu_budget`, `max_gpu_budget`, `min_gpu_budget`, `min_endpoint` | hardware+planner | `Pinned` | `gpu_budget` is the single max-GPU budget concept and maps to planner `max_gpu_budget`; min constraints are pinned deployment inputs used by candidate generation. |
 
 ## Engine Knobs
 
@@ -106,18 +71,30 @@ Deployment owns topology and budget envelope: branch, replica counts, GPU budget
 
 | Category | Knob | Applies | Proposed treatment | Notes |
 | --- | --- | --- | --- | --- |
-| backend | `backend` / `engine_type`: `vllm`, `sglang`, `trtllm` | all | `Search` | Search only across candidate backends with comparable replay/perf model support. |
 | worker role | `worker_type`: `aggregated`, `prefill`, `decode` | replay engine | `Derived` | Derived from branch and component. |
-| parallel shape | `tp`, `pp`, `dp`, `moe_tp`, `moe_ep` | planner/AIC | `Composite Search` | Search with deployment replicas as one legal deployment-shape composite, not raw independent ints. |
-| KV capacity | `num_gpu_blocks`, `total_kv_blocks`, `max_kv_tokens` | replay/runtime | `Derived` | Derived from AIC/memory-fit and block layout; not a search knob in the first design pass. |
-| block layout | `block_size`, `kv_cache_block_size` | replay/runtime | `Pinned` | Backend/runtime policy. vLLM default differs from SGLang page size. |
-| context | `context_length` | runtime metadata | `Pinned` | Model/runtime constraint, not a search knob. |
-| memory budget policy | `gpu_memory_utilization`, `mem_fraction_static`, `free_gpu_memory_fraction` | replay/AIC/backend | `Pinned` | Different backend/config-surface names for the same KV memory budget fraction policy; pin one normalized value. |
-| batching | `max_num_seqs` | replay/runtime | `Search` | Important scheduler/capacity knob; controls concurrent sequence admission. |
-| batching | `max_num_batched_tokens` | replay/runtime | `Search` | Important scheduler/capacity knob; controls token batching capacity. |
-| cache | `enable_prefix_caching` | replay/runtime | `Pinned` | Pin from backend/runtime policy; decoder may still force worker-role-specific values such as false for decode workers. |
-| startup | `startup_time` | replay/planner | `Pinned` | Deployment/environment input. |
-| speculative decode | `aic_nextn`, `aic_nextn_accept_rates` | `origin/main` replay/AIC | `Pinned` | `aic_nextn` validates to 1..5 when set. Replay MTP token progression support should be clarified before searching this. |
+| parallel shape | `tp`, `pp`, `dp`, `moe_tp`, `moe_ep` | planner+AIC | `Composite Search` | Search together with deployment `replica+parallel config` as legal deployment-shape composites capped by `gpu_budget`; first pass only emits TP+TEP+DEP (MLA) candidates, with PP pinned. |
+| KV capacity | `num_gpu_blocks`, `total_kv_blocks`, `max_kv_tokens` | replay+runtime | `Derived` | Derived from AIC+memory-fit and block layout; not a search knob in the first design pass. |
+| block layout | `block_size`, `kv_cache_block_size` | replay+runtime | `Pinned` | Backend+runtime policy. vLLM default differs from SGLang page size. |
+| context | `context_length` | runtime metadata | `Pinned` | Model+runtime constraint, not a search knob. |
+| memory budget policy | `gpu_memory_utilization`, `mem_fraction_static`, `free_gpu_memory_fraction` | replay+AIC+backend | `Pinned` | Different backend/config-surface names for the same KV memory budget fraction policy; pin one normalized value. |
+| batching | `max_num_seqs` | replay+runtime | `Search` | Important scheduler capacity knob; controls concurrent sequence admission. |
+| batching | `max_num_batched_tokens` | replay+runtime | `Search` | Important scheduler capacity knob; controls token batching capacity. |
+| cache | `enable_prefix_caching` | replay+runtime | `Pinned` | Pin from backend+runtime policy; decoder may still force worker-role-specific values such as false for decode workers. |
+| startup | `startup_time` | replay+planner | `Pinned` | Deployment+environment input. |
+| speculative decode | `aic_nextn`, `aic_nextn_accept_rates` | `origin/main` replay+AIC | `Pinned` | `aic_nextn` validates to 1..5 when set. Replay MTP token progression support should be clarified before searching this. |
+
+### Engine Search Knobs By Component
+
+Parallelization mapping is searched as a composite together with deployment `replica+parallel config`; backend type is also owned by deployment. The component-level engine search below only covers runtime batching knobs.
+
+| Component | Search knob | Treatment | Notes |
+| --- | --- | --- | --- |
+| prefill | `max_num_batched_tokens` | `Search` | Primary prefill batching capacity knob. |
+| prefill | `max_num_seqs` | `Search` | Optional prefill admission and concurrency knob when the backend uses it. |
+| decode | `max_num_seqs` | `Search` | Primary decode concurrency knob. |
+| decode | `max_num_batched_tokens` | `Search` | Optional decode token batching cap when the backend exposes it. |
+| agg | `max_num_seqs` | `Search` | Aggregated concurrency and admission knob. |
+| agg | `max_num_batched_tokens` | `Search` | Aggregated token batching capacity knob. |
 
 ## KV Manager Knobs
 
@@ -156,13 +133,48 @@ KV manager owns multi-tier KV storage/offload policy. Engine search should only 
 | Category | Knob | Proposed treatment | Notes |
 | --- | --- | --- | --- |
 | mode/env | `mode`: `agg`, `disagg` | `Derived` | Comes from branch. |
-| mode/env | `environment`, `namespace`, `backend` | `Pinned` | Deployment context. |
+| mode/env | `environment`, `namespace` | `Pinned` | Deployment context. Backend type is owned by deployment search. |
 | per-engine GPU count | `decode_engine_num_gpu`, `prefill_engine_num_gpu` | `Derived` | Derived directly from the chosen parallel shape. |
 | scaling policy | `enable_throughput_scaling`, `enable_load_scaling`, `throughput_adjustment_interval_seconds`, `load_adjustment_interval_seconds` | `Composite Search` | Search as one legal planner scaling policy tuple. If both scaling modes are enabled, load cadence must be shorter than throughput cadence. |
-| FPM sampling | `max_num_fpm_samples`, `fpm_sample_bucket_size` | `Search` | Bucket size must be a perfect square. |
+| FPM sampling | `max_num_fpm_samples`, `fpm_sample_bucket_size` | `Composite Search` | Search as paired presets. Bucket size must be a perfect square. |
 | load scaling sensitivity | `load_scaling_down_sensitivity`, `load_min_observations` | `Search` | Applies to load scaling policy. |
 
-## Planner Load Predictor Grid Sweep
+## Main Sweep Optimization Goal
+
+The main sweep objective is user configurable. Every Vizier sample is decoded into a concrete candidate and evaluated by replay virtual-clock simulation; the replay report provides the metric used as the candidate score.
+
+| Objective | Direction | Requires SLA | Score definition |
+| --- | --- | --- | --- |
+| `throughput` | maximize | no | Replay throughput for the configured workload. |
+| `e2e_latency` | minimize | no | Replay end-to-end request latency for the configured workload. |
+| `goodput` | maximize | yes | Throughput from requests that satisfy the configured SLA. SLA can be `ttft_ms`+`itl_ms` or `e2e_ms`. |
+| `goodput_per_gpu` | maximize | yes | `goodput / used_gpus`, where `used_gpus` is derived from `replica_parallel_config`. |
+
+## Main Sweep Search Space
+
+Engine batching values in this table are per attention-DP rank. Candidate decoding should derive global component capacity from `attention_dp_size` in the selected `replica_parallel_config`.
+
+| Group | Search dimension | Treatment | Knobs controlled | Candidate values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Deployment | `backend_type` | `Search` | `backend` + `engine_type` | `vllm`, `sglang`, `trtllm` | All branches; can be pinned by user override. |
+| Deployment | `replica_parallel_config` | `Composite Search` | branch-specific workers + parallel configs | Generated legal TP+TEP+DEP (MLA) configs; replica counts computed from `gpu_budget` | Branch-aware categorical candidate. Agg decodes to `workers` + agg parallel config; disagg decodes to `prefill_workers`, `decode_workers` + prefill+decode parallel configs. |
+| Prefill Engine | `prefill_max_num_batched_tokens` | `Search` | `max_num_batched_tokens` | `8k`, `16k`, `32k` | Disagg branch only. |
+| Prefill Engine | `prefill_max_num_seqs` | `Search` | `max_num_seqs` | `1`, `2`, `4`, `8` | Disagg branch only. |
+| Decode Engine | `decode_max_num_batched_tokens` | `Search` | `max_num_batched_tokens` | `8k` | Disagg branch only; fixed search dimension for explicit config emission. |
+| Decode Engine | `decode_max_num_seqs` | `Search` | `max_num_seqs` | `256`, `512`, `1024` | Disagg branch only. |
+| Agg Engine | `agg_max_num_batched_tokens` | `Search` | `max_num_batched_tokens` | `8k`, `16k`, `32k` | Agg branch only. |
+| Agg Engine | `agg_max_num_seqs` | `Search` | `max_num_seqs` | `256`, `512`, `1024` | Agg branch only. |
+| Router | `router_mode` | `Search` | `router_mode` | `round-robin`, `kv` | Decoder normalizes runtime names to replay names such as `round_robin` and `kv_router`. |
+| Router | `router_overlap_score_credit` | `Search` | `overlap_score_credit` | `0.0`, `0.5`, `1.0` | Active for KV router mode; ignored by round-robin. |
+| Router | `router_prefill_load_scale` | `Search` | `prefill_load_scale` | `0.0`, `0.25`, `0.5`, `1.0`, `2.0`, `4.0` | Active for KV router mode; ignored by round-robin. |
+| Router | `router_host_cache_hit_weight` | `Search` | `host_cache_hit_weight` | `0.5`, `0.75`, `1.0` | Active for KV router mode; default is `0.75`. |
+| Router | `router_disk_cache_hit_weight` | `Search` | `disk_cache_hit_weight` | `0.0`, `0.25`, `0.5` | Active for KV router mode; default is `0.25`. |
+| Router | `router_temperature` | `Search` | `router_temperature` | `0.0`, `0.2`, `0.5`, `1.0` | `0.0` keeps deterministic selection; higher values increase sampling randomness. |
+| Planner | `planner_scaling_policy` | `Composite Search` | `enable_throughput_scaling`, `enable_load_scaling`, `throughput_adjustment_interval_seconds`, `load_adjustment_interval_seconds` | `throughput_180_5`: `{true, false, 180, 5}`; `throughput_600_5`: `{true, false, 600, 5}`; `load_180_5`: `{false, true, 180, 5}`; `load_180_10`: `{false, true, 180, 10}`; `hybrid_180_5`: `{true, true, 180, 5}`; `hybrid_600_5`: `{true, true, 600, 5}` | Composite categorical dimension. Candidate generator may filter policies by `optimization_target`. |
+| Planner | `planner_fpm_sampling` | `Composite Search` | `max_num_fpm_samples`, `fpm_sample_bucket_size` | `small`: `{32, 4}`; `default`: `{64, 16}`; `large`: `{128, 16}`; `fine`: `{128, 64}` | Paired presets keep bucket size compatible with sample count. `fpm_sample_bucket_size` must be a perfect square. |
+| Planner | `planner_load_sensitivity` | `Search` | `load_scaling_down_sensitivity`, `load_min_observations` | `aggressive`: `{70, 3}`; `default`: `{80, 5}`; `conservative`: `{90, 8}` | Controls scale-down conservativeness and regression cold-start threshold. |
+
+## Planner Load Predictor Independent Grid Sweep
 
 Planner load predictor tuning should be a separate deterministic grid search, not part of the main Vizier candidate space. It is easy to validate directly against replay/planner traces, so V2 should run a small predefined set of predictor configs and pick by forecast loss.
 
@@ -176,7 +188,7 @@ Scope: load predictors only matter when the planner uses predictive throughput s
 | prophet preset | `prophet_window_size` | Separate Grid Search | Predictor-specific preset field. |
 | kalman preset | `kalman_q_level`, `kalman_q_trend`, `kalman_r`, `kalman_min_points` | Separate Grid Search | Predictor-specific preset fields. |
 
-Predefined predictor presets:
+Load Predictor Search Space:
 
 | ID | `load_predictor` | Config | Notes |
 | --- | --- | --- | --- |
@@ -207,56 +219,94 @@ where `err(pred, actual) = abs(log1p(max(pred, 0)) - log1p(max(actual, 0)))`. Th
 
 The selected predictor preset is emitted as pinned planner config for the main V2 candidate evaluation.
 
-## Dependency Rules To Encode
+## V2 Entrypoint Definition
 
-Use candidate generation and validation for these, not post-hoc Vizier learning:
+The current V1 profiler entrypoint accepts a `DynamoGraphDeploymentRequestSpec` through `python -m dynamo.profiler --config <json-or-yaml>`. V2 should keep the DGDR spec shape as the base input, but merge V2 sweep controls directly into the DGDR-style spec instead of using a separate V2 envelope. This entrypoint is local/offline first and should not imply k8s controller wiring.
 
-1. `deployment_mode=agg` and `deployment_mode=disagg` are separate studies.
-2. Worker role is derived from branch: agg uses `aggregated`; disagg uses `prefill` and `decode`.
-3. Parallel shape fields are not independent. Search legal tuples from AIC/model/backend constraints.
-4. Worker counts and TP/PP/DP/MoE shape must fit GPU budget.
-5. Capacity fields should be derived from AIC/memory-fit unless we intentionally search memory policy.
-6. Generic `enable_chunked_prefill` is always on in V2 and is not a search knob.
-7. KV manager `num_g3_blocks` requires `num_g2_blocks`.
-8. KV manager `enable_g4_storage` requires `num_g2_blocks`.
-9. `aic_nextn`, when set, must be in 1..5.
-10. Planner `optimization_target=sla` requires either `ttft_ms`+`itl_ms` or `e2e_ms`.
-11. Planner `fpm_sample_bucket_size` must be a perfect square.
-12. If both planner load and throughput scaling are enabled, load adjustment interval must be shorter than throughput adjustment interval.
+```yaml
+# Proposed local entrypoint:
+#   python -m dynamo.profiler.v2 --config profiler-v2-sweep.yaml
+spec:
+  # Existing DGDR v1beta1 fields remain at the top level.
+  model: deepseek-ai/DeepSeek-R1
+  backend: auto
+  image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:latest
+  modelCache:
+    pvcName: model-cache
+    pvcModelPath: deepseek-r1
+  hardware:
+    gpuSku: h200_sxm
+    totalGpus: 32
+    numGpusPerNode: 8
+    interconnect: nvlink
+    rdma: true
 
-## Proposed First Design Pass
+  # Load accepts either a static traffic summary or a dynamic traffic trace.
+  load:
+    mode: dynamic                 # static | dynamic
+    static:
+      isl: 4000
+      osl: 1000
+      concurrency: null
+      requestRate: 25
+    trace:
+      path: /data/replay/traffic.jsonl
+      format: replay_jsonl
+      warmupTrace: /data/replay/traffic-warmup.jsonl
 
-### Latent Search Space
+  # Objective carries both the optimization goal and optional latency targets.
+  objective:
+    target: goodput_per_gpu       # throughput | e2e_latency | goodput | goodput_per_gpu
+    latency:
+      mode: ttft_itl              # none | ttft_itl | e2e
+      ttftMs: 2000
+      itlMs: 30
+      e2eMs: null
 
-Keep the first Vizier space compact:
+  # Controls the Vizier/replay execution budget.
+  sweep:
+    maxRounds: 20                 # total Vizier suggestion/evaluation rounds
+    parallelSweepThreads: 16       # replay simulations to run concurrently on CPU
+    candidatesPerRound: 16         # defaults to parallelSweepThreads when omitted
+    randomSeed: 1
 
-| Branch | Candidate dimensions |
-| --- | --- |
-| `agg` | `agg_parallel_shape`, `agg_workers`, `max_num_batched_tokens`, `max_num_seqs`, `router_mode`, `overlap_score_credit`, `prefill_load_scale` |
-| `disagg` | `prefill_parallel_shape`, `decode_parallel_shape`, `prefill_workers`, `decode_workers`, `prefill_max_num_batched_tokens`, `decode_max_num_seqs`, `router_mode`, `overlap_score_credit`, `prefill_load_scale` |
+  # Component enablement and optimizer knobs are controlled through
+  # search-space configs and overrides.
+  searchSpaceConfigs:
+    deployment.deployment_mode: disagg
+    deployment.enable_planner: true
+    deployment.enable_kvrouter: true
+    deployment.backend_type: vllm
+    deployment.gpu_budget: 32
+    router.router_mode: kv
+    planner.planner_scaling_policy: throughput_180_5
+    kv_manager.num_g2_blocks: 0
 
-### Candidate Decoder
+  searchSpaceOverrides:
+    deployment.backend_type:
+      candidates: [vllm, sglang]
+    deployment.replica_parallel_config:
+      generator:
+        parallelStrategies: [tp, tep, dep]
+        maxGpuBudget: 32
+        allowAgg: true
+        allowDisagg: true
+    engine.prefill.max_num_batched_tokens:
+      candidates: [16384]
+    engine.decode.max_num_batched_tokens:
+      candidates: [8192]
+    engine.decode.max_num_seqs:
+      candidates: [256, 512]
+    router.router_temperature:
+      candidates: [0.0, 0.2]
+```
 
-The decoder should emit:
+Entrypoint rules:
 
-- Replay engine args for every component.
-- KV manager policy and replay offload args when enabled.
-- Router config.
-- Planner config.
-- DGD candidate.
-- Validation metadata: branch, skipped reasons, derived capacity, GPU budget accounting.
-
-### Later Search Extensions
-
-Add only after replay results are stable:
-
-- Shared cache routing policy.
-
-## Open Questions
-
-1. First backend scope: vLLM only, SGLang only, TRT-LLM only, or backend branch comparison?
-2. Should planner be in the evaluation loop now, or should profiler only generate planner config from final ranked candidates?
-3. Do we want router queue policy in the first design pass, or pin `fcfs` until queueing replay is validated for DGDR workloads?
-4. Which AIC outputs should V2 consume as provider data, and which capacity/memory-fit knobs should V2 own as search dimensions?
-5. Should V2 accept pinned KV manager G2/G3/G4/offload config in the first target, or keep it disabled by default?
-6. Should DGDR output include all derived configs or only refs to generated files?
+1. Existing DGDR v1beta1 fields remain valid at `spec.*`; V2 adds `load`, `objective`, `sweep`, `searchSpaceConfigs`, and `searchSpaceOverrides`.
+2. `spec.load.mode=dynamic` uses `load.trace` as the replay input; `static` uses `load.static.isl`, `load.static.osl`, and either `load.static.concurrency` or `load.static.requestRate`.
+3. `spec.objective.target` selects the replay score reported to Vizier. `goodput` and `goodput_per_gpu` require `objective.latency.mode` to be `ttft_itl` or `e2e`.
+4. `spec.sweep.maxRounds` bounds total optimization rounds; `spec.sweep.parallelSweepThreads` bounds concurrent CPU replay evaluations.
+5. Use `searchSpaceConfigs` or `searchSpaceOverrides` for planner, KV router, and other component enablement.
+6. `searchSpaceConfigs` takes precedence over default search spaces and `searchSpaceOverrides`.
+7. `searchSpaceOverrides` can narrow scalar search dimensions or replace generated composite candidates.
