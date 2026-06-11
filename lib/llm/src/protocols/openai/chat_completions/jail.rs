@@ -332,11 +332,6 @@ impl ChoiceJailState {
             return;
         }
 
-        if let Some(continuation) = jail_stream.markerless_json_continuation(content) {
-            self.begin_jail(continuation, None);
-            return;
-        }
-
         if let MatchResult::Partial {
             prefix, partial, ..
         } = jail_stream.marker_matcher.process_chunk(content, "")
@@ -1055,33 +1050,6 @@ impl JailedStream {
             .any(|token| !token.is_empty() && content.contains(token))
     }
 
-    fn markerless_json_continuation(&self, content: &str) -> Option<String> {
-        if !self.marker_requires_configured_start_token() {
-            return None;
-        }
-
-        let parser_name = self.tool_call_parser.as_deref()?;
-        let parser_map = get_tool_parser_map();
-        let Some(ParserConfig::Json(config)) = parser_map
-            .get(parser_name)
-            .map(|config| &config.parser_config)
-        else {
-            return None;
-        };
-        let start_token = config
-            .tool_call_start_tokens
-            .iter()
-            .find(|token| !token.is_empty())?;
-
-        let trimmed = content.trim_start();
-        let candidate = trimmed.strip_prefix(';').unwrap_or(trimmed).trim_start();
-        if candidate.starts_with('{') || candidate.starts_with('[') {
-            Some(format!("{start_token}{candidate}"))
-        } else {
-            None
-        }
-    }
-
     fn prefix_before_first_tool_call_marker<'a>(&self, content: &'a str) -> Option<&'a str> {
         let mut first_marker: Option<usize> = None;
 
@@ -1173,6 +1141,17 @@ impl JailedStream {
             .min()
     }
 
+    fn should_keep_semicolon_continuation_jailed(
+        &self,
+        accumulated_content: &str,
+        split_pos: usize,
+    ) -> bool {
+        self.tool_call_parser.as_deref() == Some("llama3_json")
+            && accumulated_content
+                .get(split_pos..)
+                .is_some_and(|trailing| trailing.trim_start().starts_with(';'))
+    }
+
     async fn parse_marker_tool_calls(
         &self,
         accumulated_content: &str,
@@ -1222,9 +1201,7 @@ impl JailedStream {
                             self.tool_call_parser.as_deref().and_then(|parser| {
                                 find_tool_call_end_position(accumulated_content, Some(parser))
                             });
-                        let split_pos = parser_split_pos
-                            .map(|pos| pos.max(end_pos))
-                            .unwrap_or(end_pos);
+                        let split_pos = parser_split_pos.unwrap_or(end_pos);
                         let marker_parse_result = if split_pos < accumulated_content.len() {
                             Some(
                                 self.parse_marker_tool_calls(
@@ -1259,6 +1236,27 @@ impl JailedStream {
                     else {
                         return JailCompletion::Incomplete;
                     };
+
+                    if self
+                        .should_keep_semicolon_continuation_jailed(accumulated_content, split_pos)
+                    {
+                        let parse_result = self
+                            .parse_marker_tool_calls(accumulated_content, false)
+                            .await;
+                        if Self::marker_parse_has_tool_calls(&parse_result) {
+                            let split_pos = self
+                                .tool_call_parser
+                                .as_deref()
+                                .and_then(|parser| {
+                                    find_tool_call_end_position(accumulated_content, Some(parser))
+                                })
+                                .unwrap_or(accumulated_content.len());
+                            return JailCompletion::Complete(CompletedJail {
+                                split_pos,
+                                marker_parse_result: Some(parse_result),
+                            });
+                        }
+                    }
 
                     let jailed_part = &accumulated_content[..split_pos];
                     let parse_result = self.parse_marker_tool_calls(jailed_part, false).await;
