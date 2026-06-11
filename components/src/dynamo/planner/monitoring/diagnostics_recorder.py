@@ -60,7 +60,7 @@ class TickSnapshot:
     observed_output_sequence_tokens: Optional[float] = None
     observed_kv_hit_rate: Optional[float] = None
 
-    # Diagnostics from state machine
+    # Diagnostics from planner core
     estimated_ttft_ms: Optional[float] = None
     estimated_itl_ms: Optional[float] = None
     predicted_requests_per_second: Optional[float] = None
