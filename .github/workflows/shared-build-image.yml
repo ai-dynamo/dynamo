@@ -439,9 +439,13 @@ jobs:
               --output-short-filename
           # Emit the baseline SBOM stem (arch-independent) for the
           # <framework>-compliance-audit job, so it doesn't need render.py (and
-          # thus PyYAML/Jinja2/pip) on the lightweight audit runner.
+          # thus PyYAML/Jinja2/pip) on the lightweight audit runner. dev /
+          # local-dev images render no BASELINE_SBOM_FILE ARG (they skip baseline
+          # subtraction and never run the audit), so the grep finds nothing —
+          # the trailing `|| true` keeps that from tripping the step's
+          # `-e -o pipefail` shell (empty stem is correct for them).
           STEM=$(grep -E '^ARG BASELINE_SBOM_FILE=' container/rendered.Dockerfile | head -1 \
-                 | sed -E 's/^ARG BASELINE_SBOM_FILE="?([^"]*)"?$/\1/')
+                 | sed -E 's/^ARG BASELINE_SBOM_FILE="?([^"]*)"?$/\1/' || true)
           echo "baseline_stem=${STEM}" >> "$GITHUB_OUTPUT"
       - name: Apply nightly dev version
         if: inputs.dev_version_suffix != ''
