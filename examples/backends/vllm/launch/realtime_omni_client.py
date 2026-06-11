@@ -171,8 +171,10 @@ async def run(args: argparse.Namespace) -> int:
                         }
                     )
                 )
+                print(f"[client] sent {i + chunk_bytes} bytes of audio\n")
+                await asyncio.sleep(0.05)
             await ws.send_str(json.dumps({"type": "input_audio_buffer.commit"}))
-            print(f"[client] sent {len(pcm16)} bytes of audio + commit\n")
+            print("[client] commit audio\n")
 
             # 3) Print every server event until the response completes.
             while True:
