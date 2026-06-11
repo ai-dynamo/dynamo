@@ -48,14 +48,15 @@ jobs:
     # syft pulls the FULL multi-GB image (from our ECR) and catalogs it on disk.
     # Runner history: small-v2 died on every large image; prod-default-v2 fixed
     # the small ones (frontend, planner) but the ~15-20GB CUDA runtime images
-    # (vllm, sglang, trtllm) still killed the runner mid-scan. prod-deploy-tester-v1
-    # was NOT the answer: it has no AWS ECR instance role (deploy tests pull from
-    # Azure ACR and the image is pulled inside a vCluster, not on the runner), so
-    # `aws ecr get-login-password` fails with NoCredentials. Back on the
-    # ECR-credentialed prod-default-v2; the big-image disk pressure is handled by
-    # the "Reclaim disk" step below (docker prune) + the df -h snapshots, which
-    # reveal whether the disk ceiling is reachable for vllm/sglang.
-    runs-on: prod-default-v2
+    # (vllm, sglang, trtllm) still killed the runner mid-scan (disk too small).
+    # prod-deploy-tester-v1 was NOT the answer: its IRSA role lacks ECR (deploy
+    # tests pull from Azure ACR and the image is pulled inside a vCluster), so
+    # `aws ecr get-login-password` fails with NoCredentials. prod-builder-v3 is
+    # the build pool: its IRSA role HAS ECR (it pushes these images), and as a
+    # builder it carries large ephemeral disk for a 15-20GB pull. It builds via
+    # REMOTE BuildKit so it may have no usable local docker daemon — fine, the
+    # scan below is daemon-independent (syft pulls from the registry directly).
+    runs-on: prod-builder-v3
     # Safety net: if a scan still runs away, fail cleanly instead of holding a
     # runner for the 360-min default. A healthy scan completes in <20 min.
     timeout-minutes: 45
@@ -63,6 +64,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Docker Login
+        # Best-effort: prod-builder-v3 builds via remote BuildKit and may have no
+        # usable local docker daemon, so `docker login` can fail. That's fine —
+        # the scan auths to ECR directly via SYFT_REGISTRY_AUTH_* (see below),
+        # so this step must never block the job.
+        continue-on-error: true
         uses: ./.github/actions/docker-login
         with:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -116,19 +122,32 @@ jobs:
         run: |
           # The runner is shared/reused — stale docker images + build cache from
           # prior jobs can leave too little room for a 15-20GB CUDA image pull.
-          # Same prune pattern as .github/actions/docker-build. Best-effort.
+          # Same prune pattern as .github/actions/docker-build. Best-effort
+          # (no-op / failure tolerated if there's no local docker daemon).
           echo "::group::disk before prune"; df -h; echo "::endgroup::"
           docker system prune -af || true
           echo "::group::disk after prune"; df -h; echo "::endgroup::"
       - name: Syft scan (amd64) + audit vs osrb-deps.csv
         continue-on-error: true   # soft gate — never block tests/merge
         shell: bash
+        env:
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           set -euo pipefail
+          # Daemon-independent: scan straight from the registry (syft pulls image
+          # layers from ECR to a temp dir — no docker daemon / DinD needed, which
+          # matters on prod-builder-v3). Auth via SYFT_REGISTRY_AUTH_* from an ECR
+          # token (aws ecr get-login-password works here via the builder's IRSA
+          # role). Keeps creds out of docker config so it works with no daemon.
+          SYFT_REGISTRY_AUTH_PASSWORD="$(aws ecr get-login-password --region "${AWS_DEFAULT_REGION}")"
+          export SYFT_REGISTRY_AUTH_AUTHORITY="${ECR_HOSTNAME}"
+          export SYFT_REGISTRY_AUTH_USERNAME="AWS"
+          export SYFT_REGISTRY_AUTH_PASSWORD
           # syft materializes the full image to disk. If a large CUDA image still
           # exhausts the runner, the post-pull snapshot pinpoints it (a sudden
-          # 100% on the docker/overlay mount = disk ceiling too low for this pool).
-          syft "${{ steps.resolve.outputs.image_ref }}" --platform linux/amd64 \
+          # 100% on the work mount = disk ceiling too low even for the builder).
+          syft "registry:${{ steps.resolve.outputs.image_ref }}" --platform linux/amd64 \
             -o cyclonedx-json=/tmp/syft.cdx.json
           echo "::group::disk after scan"; df -h; echo "::endgroup::"
           OUR_CSV=$(find /tmp/compliance -path '*linux_amd64*' -name 'osrb-*.csv' | head -1)
