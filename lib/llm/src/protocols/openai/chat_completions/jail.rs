@@ -1009,12 +1009,36 @@ impl JailedStream {
                 .any(|seq| content.contains(seq));
 
         // Path 2: Check for tool call start pattern
+        let markerless_json_match = self.markerless_json_completion_base(content).is_some();
         let tool_call_match = self.tool_call_parser.is_some()
             && (!self.marker_requires_configured_start_token()
-                || self.has_configured_start_token(content))
+                || self.has_configured_start_token(content)
+                || markerless_json_match)
             && detect_tool_call_start(content, self.tool_call_parser.as_deref()).unwrap_or(false);
 
         sequence_match || tool_call_match
+    }
+
+    fn markerless_json_completion_base(&self, content: &str) -> Option<usize> {
+        if self.tool_call_parser.as_deref() != Some("mistral") {
+            return None;
+        }
+
+        content.find(['{', '['])
+    }
+
+    fn has_orphan_end_marker_after(&self, content: &str, split_pos: usize) -> bool {
+        if self.has_configured_start_token(content) {
+            return false;
+        }
+
+        let Some(trailing) = content.get(split_pos..) else {
+            return false;
+        };
+        let trailing = trailing.trim_start();
+        self.jail_end_sequences
+            .iter()
+            .any(|token| !token.is_empty() && trailing.starts_with(token))
     }
 
     fn marker_requires_configured_start_token(&self) -> bool {
@@ -1139,6 +1163,7 @@ impl JailedStream {
                     .map(|pos| pos + token.len())
             })
             .min()
+            .or_else(|| self.markerless_json_completion_base(accumulated_content))
     }
 
     fn should_keep_semicolon_continuation_jailed(
@@ -1192,6 +1217,22 @@ impl JailedStream {
                 if let Some(end_pos) =
                     self.find_incremental_end_marker(accumulated_content, progress)
                 {
+                    if let Some(json_base) =
+                        self.markerless_json_completion_base(accumulated_content)
+                        && let Some(split_pos) = progress
+                            .json
+                            .complete_end_from(accumulated_content, json_base)
+                        && self.has_orphan_end_marker_after(accumulated_content, split_pos)
+                    {
+                        return JailCompletion::Complete(CompletedJail {
+                            split_pos: accumulated_content.len(),
+                            marker_parse_result: Some(Ok((
+                                Vec::new(),
+                                Some(accumulated_content.to_string()),
+                            ))),
+                        });
+                    }
+
                     let parse_result = self
                         .parse_marker_tool_calls(accumulated_content, false)
                         .await;
