@@ -33,13 +33,13 @@ spec:
       envFromSecret: hf-token-secret
       componentType: frontend
       replicas: 1
+      envs:
+        - name: DYN_ROUTER_MODE
+          value: kv
       extraPodSpec:
         mainContainer:
           image: docker.io/library/dynamo-sglang-xpu:latest
           imagePullPolicy: IfNotPresent
-          env:
-            - name: DYN_ROUTER_MODE
-              value: kv
     decode:
       envFromSecret: hf-token-secret
       componentType: worker
