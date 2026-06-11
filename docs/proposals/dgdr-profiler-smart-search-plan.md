@@ -248,36 +248,60 @@ This is a pure internal search API. It takes a search space, an optimization goa
 # components/src/dynamo/profiler/v2/__init__.py
 
 class SearchSpace(BaseModel):
-    """Inputs to one search run: pinned context plus the knobs to sweep. Each
-    list-typed field is the candidate set the optimizer samples from; a
-    single-element list pins that knob. When `deploymentMode` lists both
-    branches the optimizer runs one flat study per branch and ranks across both;
-    engine batching is read per branch (prefill/decode for disagg, agg for
-    aggregated). This is the main-sweep space; planner load-predictor tuning is
-    a separate grid sweep (see below)."""
+    """Inputs to one search run, grouped by component. Each group lists its
+    swept knobs (list-typed candidate sets; a single-element list pins that
+    knob) followed by the `Pinned` knobs that group needs (scalars). When
+    `deploymentMode` lists both branches the optimizer runs one flat study per
+    branch and ranks across both; engine batching is read per branch
+    (prefill/decode for disagg, agg for aggregated). This is the main-sweep
+    space; planner load-predictor tuning is a separate grid sweep (see below)."""
     model_config = ConfigDict(extra="forbid")
-
-    # pinned context (not swept)
-    modelName: str                               # HF id or private model name
-    hardwareSku: str                             # e.g. "h200_sxm"
-    gpuBudget: int = 32                          # max GPUs per candidate
 
     # deployment: branch + backend + legal parallel shapes
     deploymentMode: list[str] = ["disagg", "agg"]  # branches to explore; pin with one
     backend: list[str] = ["vllm"]                  # vllm | sglang | trtllm
     parallelConfigs: list[dict[str, Any]]          # generated legal TP/TEP/DEP shapes
+    # pinned
+    modelName: str                                 # HF id or private model name
+    hardwareSku: str                               # e.g. "h200_sxm"
+    gpuBudget: int = 32                            # max GPUs per candidate
+    minGpuBudget: int | None = None                # lower bound for candidate generation
+    minEndpoint: int | None = None                 # min replicas per component
+    enableKvrouter: bool = True                    # emit/evaluate KV-router config
+    enablePlanner: bool = True                     # emit planner config
+    contextLength: int | None = None               # model + runtime constraint
+    startupTime: float | None = None               # worker startup time (s)
+    aicNextn: int | None = None                    # speculative-decode (MTP) depth, 1..5
 
     # prefill engine (disagg branch): scheduler batching capacity
     prefillMaxNumBatchedTokens: list[int] = [8192, 16384, 32768]
     prefillMaxNumSeqs: list[int] = [1, 2, 4, 8]
+    # pinned
+    prefillBlockSize: int = 16                     # KV block / page size
+    prefillGpuMemoryUtilization: float = 0.9       # KV memory budget fraction
+    prefillEnablePrefixCaching: bool = True
 
     # decode engine (disagg branch): scheduler batching capacity
     decodeMaxNumBatchedTokens: list[int] = [8192]
     decodeMaxNumSeqs: list[int] = [256, 512, 1024]
+    # pinned
+    decodeBlockSize: int = 16
+    decodeGpuMemoryUtilization: float = 0.9
+    decodeEnablePrefixCaching: bool = False        # forced off for decode workers
 
     # agg engine (agg branch): scheduler batching capacity
     aggMaxNumBatchedTokens: list[int] = [8192, 16384, 32768]
     aggMaxNumSeqs: list[int] = [256, 512, 1024]
+    # pinned
+    aggBlockSize: int = 16
+    aggGpuMemoryUtilization: float = 0.9
+    aggEnablePrefixCaching: bool = True
+
+    # kv manager: multi-tier offload policy (all pinned; G3/G4 extend G2)
+    numG2Blocks: int = 0                           # 0 disables host offload
+    bandwidthG1ToG2Gbps: float | None = None
+    bandwidthG2ToG1Gbps: float | None = None
+    offloadBatchSize: int | None = None
 
     # router (KV-router knobs are ignored under round_robin)
     routerMode: list[str] = ["kv_router", "round_robin"]
@@ -286,6 +310,11 @@ class SearchSpace(BaseModel):
     hostCacheHitWeight: list[float] = [0.5, 0.75, 1.0]
     diskCacheHitWeight: list[float] = [0.0, 0.25, 0.5]
     routerTemperature: list[float] = [0.0, 0.2, 0.5, 1.0]
+    # pinned (admission control)
+    activeDecodeBlocksThreshold: int | None = None
+    activePrefillTokensThreshold: int | None = None
+    activePrefillTokensThresholdFrac: float | None = None
+    noAdmissionControl: bool = False
 
     # planner: preset ids expanded by the candidate generator
     plannerScalingPolicy: list[str] = [
@@ -295,6 +324,8 @@ class SearchSpace(BaseModel):
     ]
     plannerFpmSampling: list[str] = ["small", "default", "large", "fine"]
     plannerLoadSensitivity: list[str] = ["aggressive", "default", "conservative"]
+    # pinned
+    loadPredictorPreset: str | None = None         # chosen by the separate load-predictor grid sweep
 
 
 class OptimizationTarget(str, Enum):
@@ -366,4 +397,4 @@ def run_smart_search(
 
 Each returned `Candidate` carries its decoded knob assignment (`config`) and measured `metrics`. The list is sorted best-first by `score`, which normalizes objective direction so larger is always better: `throughput`, `goodput`, and `goodput_per_gpu` use the metric directly (pick the max), while `e2e_latency` uses its negative (pick the min latency). `goodput_per_gpu` divides goodput by `usedGpus`.
 
-`SearchSpace` enumerates every main-sweep `Search` / `Composite Search` knob from the deployment, engine, router, and planner inventories above. Planner load-predictor tuning is deliberately excluded — it runs as a separate deterministic grid sweep (see [Planner Load Predictor Independent Grid Sweep](#planner-load-predictor-independent-grid-sweep)), and its selected preset is pinned before the main sweep.
+`SearchSpace` mirrors the deployment, engine, KV-manager, router, and planner inventories above: each group lists its `Search` / `Composite Search` dimensions (list-typed) followed by the `Pinned` knobs it needs (scalar). Planner load-predictor tuning is deliberately excluded — it runs as a separate deterministic grid sweep (see [Planner Load Predictor Independent Grid Sweep](#planner-load-predictor-independent-grid-sweep)), and its selected preset is pinned (`loadPredictorPreset`) before the main sweep.
