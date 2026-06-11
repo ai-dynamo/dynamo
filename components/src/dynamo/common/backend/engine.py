@@ -78,42 +78,57 @@ class GenerateChunk(TypedDict, total=False):
 
 
 @dataclass
-class EngineConfig:
-    model: str
-    served_model_name: Optional[str] = None
+class LlmRegistration:
+    """Token-pipeline registration metadata (KV cache, data-parallel layout,
+    disaggregation bootstrap). Set by :class:`LLMEngine`s; :class:`RawEngine`s
+    leave :attr:`EngineConfig.llm` ``None``. A ``None`` field isn't advertised
+    (the router falls back to its defaults)."""
+
     context_length: Optional[int] = None
     kv_cache_block_size: Optional[int] = None
     total_kv_blocks: Optional[int] = None
     max_num_seqs: Optional[int] = None
     max_num_batched_tokens: Optional[int] = None
-    # Number of data-parallel ranks this worker hosts (defaults to 1).
-    # Engines with attention-DP set this from their engine-side count
-    # (e.g. TRT-LLM's `get_attention_dp_size()`).
+    # DP ranks this worker hosts (default 1); attention-DP engines set it from
+    # the engine count (e.g. TRT-LLM's get_attention_dp_size()).
     data_parallel_size: Optional[int] = None
-    # Global index of the first DP rank this worker hosts (defaults to 0).
-    # Non-zero only under multi-worker DP layouts where each worker owns a
-    # sub-range — vLLM hybrid/external LB, SGLang DP-attention across
-    # multiple nodes. The router enumerates ranks
-    # `[data_parallel_start_rank, data_parallel_start_rank + data_parallel_size)`.
+    # First DP rank this worker hosts (default 0). Non-zero only when a worker
+    # owns a sub-range (vLLM hybrid/external LB, multi-node SGLang DP-attention);
+    # the router enumerates [start, start + data_parallel_size).
     data_parallel_start_rank: Optional[int] = None
-    # Bootstrap address advertised to decode peers. Only meaningful for
-    # backends with a Dynamo-level host/port handshake (today: SGLang).
-    # Backends whose KV transport is internal — TRT-LLM, vLLM
-    # NixlConnector — leave these None.
-    #
-    # Engines that do use it populate these from `start()` after the
-    # engine has resolved its KV-transport listening address. When both
-    # are set, the Rust Worker publishes them via
-    # `ModelRuntimeConfig.disaggregated_endpoint` so the frontend's
-    # `PrefillRouter` can take its optimised Bootstrap path (route
-    # decode concurrent with prefill).
+    # Bootstrap address advertised to decode peers. Only for backends with a
+    # Dynamo-level handshake (SGLang); internal-KV-transport backends (TRT-LLM,
+    # vLLM NixlConnector) leave it None. When both are set, Worker publishes
+    # them so the frontend's PrefillRouter can take its Bootstrap path.
     bootstrap_host: Optional[str] = None
     bootstrap_port: Optional[int] = None
+
+
+@dataclass
+class EngineConfig:
+    """Registration metadata returned by an engine's :meth:`start`.
+
+    The neutral fields (``model``, ``served_model_name``, ``runtime_data``)
+    apply to every modality; token-pipeline metadata lives in the optional
+    :attr:`llm` sub-record, which raw media engines leave ``None``.
+    """
+
+    model: str
+    served_model_name: Optional[str] = None
     runtime_data: Optional[dict[str, Any]] = None
+    # Token-pipeline registration metadata (KV cache, DP, bootstrap).
+    # ``Some`` for LLMEngines; ``None`` for RawEngines.
+    llm: Optional[LlmRegistration] = None
 
 
-class LLMEngine(ABC):
-    """Abstract base for inference engines.
+class BaseEngine(ABC):
+    """Abstract base for all engines — the modality-agnostic lifecycle.
+
+    ``Worker`` drives every engine through the same lifecycle regardless of
+    modality; only the request/response shape of :meth:`generate` differs.
+    That method is therefore declared on the modality-specific subclasses
+    (:class:`LLMEngine` for token-based inference, :class:`RawEngine` for
+    raw non-token media generation), not here.
 
     Lifecycle:
         1. from_args(argv) -- parse CLI args, return (engine, WorkerConfig)
@@ -130,7 +145,7 @@ class LLMEngine(ABC):
     @abstractmethod
     async def from_args(
         cls, argv: list[str] | None = None
-    ) -> tuple[LLMEngine, WorkerConfig]:
+    ) -> tuple[BaseEngine, WorkerConfig]:
         """Parse CLI args and construct the engine (not yet started).
 
         Args:
@@ -159,21 +174,6 @@ class LLMEngine(ABC):
         part of the contract — engines should treat it as opaque.
         """
         ...
-
-    @abstractmethod
-    async def generate(
-        self, request: GenerateRequest, context: Context
-    ) -> AsyncGenerator[GenerateChunk, None]:
-        """Yield streaming response chunks for a single request.
-
-        Called concurrently for multiple in-flight requests.
-
-        Each chunk: ``{"token_ids": [...], "index": 0}``
-        Final chunk must include: ``{"token_ids": [...], "index": 0,
-        "finish_reason": "...", "completion_usage": {...}}``
-        """
-        ...
-        yield  # type: ignore[misc]
 
     async def abort(self, context: Context) -> None:
         """Abort an in-flight request (optional, default no-op).
@@ -225,30 +225,6 @@ class LLMEngine(ABC):
         ``cleanup()`` call after a successful first is a safe no-op.
         """
         ...
-
-    async def kv_event_sources(self) -> list[KvEventSource]:
-        """KV event sources, one per data-parallel rank. Default opts out
-        of KV-aware routing. ``Worker`` calls once after :meth:`start`."""
-        return []
-
-    async def logits_processor_spec(self) -> "LogitsProcessorSpec | None":
-        """Engine-declared logits-processor activation. Default returns
-        ``None`` (no engine-level processors).
-
-        Subclasses override to return a :class:`LogitsProcessorSpec` whose
-        ``entries`` are backend-neutral activation data. Unlike
-        framework-consumed hooks (:meth:`kv_event_sources`,
-        :meth:`health_check_payload`), the result is consumed by the
-        engine's own :meth:`generate`: resolve it once after engine init
-        (typically in ``start()``), cache it, and pass it per request to
-        :func:`logits_processors_for_request`, which applies the shared
-        generation-stage gating.
-
-        Overrides typically delegate to
-        :func:`resolve_test_logits_processor_spec` to honour
-        ``DYN_ENABLE_TEST_LOGITS_PROCESSOR=1``; the future public
-        CLI/config loader will resolve from that source instead."""
-        return None
 
     async def register_prometheus(self, metrics: "EngineMetrics") -> None:
         """Bridge a vendor-prefixed Prometheus registry into the runtime's
@@ -312,6 +288,102 @@ class LLMEngine(ABC):
             "status": "error",
             "message": f"unsupported engine control: {control}",
         }
+
+
+class LLMEngine(BaseEngine):
+    """Abstract base for token-based inference engines (vLLM, SGLang, TRT-LLM).
+
+    The token pipeline: the Rust preprocessor tokenizes the prompt and sets
+    ``token_ids`` on the request; :meth:`generate` yields token chunks that
+    the Rust postprocessor detokenizes. Registered with
+    ``ModelInput.Tokens`` and served through the token request adapter.
+    """
+
+    @abstractmethod
+    async def generate(
+        self, request: GenerateRequest, context: Context
+    ) -> AsyncGenerator[GenerateChunk, None]:
+        """Yield streaming response chunks for a single request.
+
+        Called concurrently for multiple in-flight requests.
+
+        Each chunk: ``{"token_ids": [...], "index": 0}``
+        Final chunk must include: ``{"token_ids": [...], "index": 0,
+        "finish_reason": "...", "completion_usage": {...}}``
+        """
+        ...
+        yield  # type: ignore[misc]
+
+    async def kv_event_sources(self) -> list[KvEventSource]:
+        """KV event sources, one per data-parallel rank. Default opts out
+        of KV-aware routing. ``Worker`` calls once after :meth:`start`."""
+        return []
+
+    async def logits_processor_spec(self) -> "LogitsProcessorSpec | None":
+        """Engine-declared logits-processor activation. Default returns
+        ``None`` (no engine-level processors).
+
+        Subclasses override to return a :class:`LogitsProcessorSpec` whose
+        ``entries`` are backend-neutral activation data. Unlike
+        framework-consumed hooks (:meth:`kv_event_sources`,
+        :meth:`health_check_payload`), the result is consumed by the
+        engine's own :meth:`generate`: resolve it once after engine init
+        (typically in ``start()``), cache it, and pass it per request to
+        :func:`logits_processors_for_request`, which applies the shared
+        generation-stage gating.
+
+        Overrides typically delegate to
+        :func:`resolve_test_logits_processor_spec` to honour
+        ``DYN_ENABLE_TEST_LOGITS_PROCESSOR=1``; the future public
+        CLI/config loader will resolve from that source instead."""
+        return None
+
+
+# Raw (non-token) request/response for RawEngine.generate. The PyO3 bridge
+# passes the request through as a JSON ``dict`` and serializes each yielded
+# object back — no Rust request type (the modality-neutral trade-off).
+# Canonical field schemas: NvCreateImageRequest/NvImagesResponse in
+# dynamo.common.protocols.image_protocol (videos: video_protocol).
+RawRequest = dict[str, Any]
+RawResponseChunk = dict[str, Any]
+
+
+class RawEngine(BaseEngine):
+    """Engines for raw, non-token generation (image, video, audio).
+
+    Named for the *contract*, not a use case: unlike :class:`LLMEngine` there
+    is no token pipeline — the frontend forwards the OpenAI-shaped request as a
+    JSON object and :meth:`generate` yields the response object(s) directly.
+    Registered with ``ModelInput.Text`` and served through the raw request
+    adapter (no tokenization or KV cache). The ``dict`` contract is
+    modality-neutral, so a new media modality is a new engine, not a new
+    framework path; one engine may serve several modalities. Yield one
+    (terminal) object, or intermediate progress objects ending with a terminal
+    one. Subclasses like :class:`DiffusionEngine` add no contract.
+    """
+
+    @abstractmethod
+    async def generate(
+        self, request: RawRequest, context: Context
+    ) -> AsyncGenerator[RawResponseChunk, None]:
+        """Yield response object(s) for a single raw-media request.
+
+        ``request`` is the raw OpenAI-shaped request body (see
+        :data:`RawRequest`); yield the response body object(s) (see
+        :data:`RawResponseChunk`). For non-streaming modalities yield exactly
+        one (terminal) object; for streaming modalities yield intermediate
+        progress objects ending with the terminal one.
+        """
+        ...
+        yield  # type: ignore[misc]
+
+
+class DiffusionEngine(RawEngine):
+    """A :class:`RawEngine` for diffusion-family generation (image/video via
+    VisualGen, DiffGenerator). Names the family only — non-diffusion raw
+    modalities (e.g. TTS audio) subclass :class:`RawEngine` directly. Routing
+    keys off :class:`RawEngine`, so any subclass uses the raw adapter.
+    """
 
 
 # ---------------------------------------------------------------------------

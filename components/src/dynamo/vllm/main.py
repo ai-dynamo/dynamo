@@ -62,6 +62,21 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 shutdown_endpoints: list = []
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
+MX_LOAD_FORMATS = {"modelexpress", "mx"}
+
+
+def uses_modelexpress_load_format(config: Config) -> bool:
+    return getattr(config.engine_args, "load_format", None) in MX_LOAD_FORMATS
+
+
+def should_prefetch_model(config: Config) -> bool:
+    if os.path.exists(config.model):
+        return False
+    return not uses_modelexpress_load_format(config)
+
+
+def should_register_model_ignore_weights(config: Config) -> bool:
+    return uses_modelexpress_load_format(config)
 
 
 def build_headless_namespace(config: Config) -> argparse.Namespace:
@@ -85,7 +100,7 @@ def run_dynamo_headless(config: Config) -> None:
     no Dynamo endpoints. Bypasses DistributedRuntime entirely (no NATS/etcd).
     """
     # Propagate worker_cls for custom load formats so headless workers use
-    # the same model loader and patches as the leader node.
+    # the same model loader settings as the leader node.
     if config.engine_args.load_format == "gms":
         config.engine_args.worker_cls = (
             "gpu_memory_service.integrations.vllm.worker.GMSWorker"
@@ -101,8 +116,8 @@ def run_dynamo_headless(config: Config) -> None:
             configure_gms_lock_mode(config.engine_args)
             configure_mx_ports(config.engine_args)
 
-    elif config.engine_args.load_format in ("mx-source", "mx-target"):
-        config.engine_args.worker_cls = "modelexpress.vllm_worker.ModelExpressWorker"
+    # ModelExpress uses vLLM's plugin path with --load-format=modelexpress.
+    # Dynamo does not set a custom worker class here.
 
     # Keep the upstream CLI import local so tests that only exercise
     # build_headless_namespace() do not pull in vLLM's full CLI import graph.
@@ -124,8 +139,10 @@ async def worker() -> None:
 
     configure_rl_logprobs_mode(config)
 
-    # Download the model if necessary using modelexpress.
+    # Download the model if necessary using Dynamo's generic model fetch path.
     # We want it on disk before we start vllm to avoid downloading from HuggingFace.
+    # When vLLM uses the ModelExpress plugin, the plugin owns acquisition through
+    # P2P, ModelStreamer, GDS, or vLLM's native fallback.
     #
     # We don't set `config.engine_args.model` to the local path fetch_model returns
     # because vllm will send that name to its Ray pipeline-parallel workers, which
@@ -133,7 +150,7 @@ async def worker() -> None:
     # vllm will attempt to download the model again, but find it in the HF cache.
     # For non-HF models use a path instead of an HF name, and ensure all workers have
     # that path (ideally via a shared folder).
-    if not os.path.exists(config.model):
+    if should_prefetch_model(config):
         await fetch_model(config.model)
 
     # CHECKPOINT MODE: Load engine BEFORE runtime creation
@@ -527,21 +544,8 @@ def setup_vllm_engine(
             configure_gms_lock_mode(engine_args)
             configure_mx_ports(engine_args)
 
-    if engine_args.load_format in ("mx-source", "mx-target"):
-        try:
-            from modelexpress import register_modelexpress_loaders
-
-            # Ensure the ModelExpress server URL env var is set for the model loader
-            if config.model_express_url:
-                os.environ["MODEL_EXPRESS_URL"] = config.model_express_url
-            register_modelexpress_loaders()
-            # Use wrapper worker to ensure loaders are registered in spawned worker processes
-            engine_args.worker_cls = "modelexpress.vllm_worker.ModelExpressWorker"
-        except ImportError as e:
-            raise ImportError(
-                f"ModelExpress package required for --load-format={engine_args.load_format}. "
-                "Install with: pip install modelexpress"
-            ) from e
+    # ModelExpress uses vLLM's plugin path with --load-format=modelexpress.
+    # Dynamo does not register loaders or set a custom worker class here.
 
     # Load default sampling params from `generation_config.json`
     default_sampling_params = (
@@ -775,6 +779,7 @@ async def register_vllm_model(
         media_fetcher=media_fetcher,
         worker_type=worker_type,
         needs=needs,
+        ignore_weights=should_register_model_ignore_weights(config),
     )
 
 
