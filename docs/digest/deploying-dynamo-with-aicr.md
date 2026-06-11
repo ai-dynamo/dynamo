@@ -34,10 +34,10 @@ Editorial title direction:
   keep that clarification in the body.
 -->
 
-Running Dynamo on Kubernetes starts with a `DynamoGraphDeployment`, but the graph is only the top of
-the stack. A production inference cluster also needs GPU drivers, device discovery, scheduling,
-health signals, observability, Gateway API resources, and the event transport that lets KV-aware
-routing see live cache state.
+Running a model with Dynamo on Kubernetes starts with a `DynamoGraphDeployment`, but the graph is
+only the top of the stack. A production inference cluster also needs GPU drivers, device discovery,
+scheduling, health signals, observability, Gateway API resources, and the event transport that lets
+KV-aware routing see live cache state.
 
 [NVIDIA AI Cluster Runtime (AICR)](https://github.com/NVIDIA/aicr) packages the lower stack as a
 validated, version-locked recipe. You bring an existing GPU Kubernetes cluster. AICR captures its
