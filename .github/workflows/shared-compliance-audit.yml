@@ -45,14 +45,17 @@ on:
 jobs:
   audit:
     name: Compliance audit
-    # syft pulls the FULL multi-GB image and catalogs it on disk. small-v2 died
-    # on every large image; prod-default-v2 fixed the small ones (frontend,
-    # planner) but the ~15-20GB CUDA runtime images (vllm, sglang, trtllm) still
-    # killed the runner mid-scan (hard runner-loss: job failure that step-level
-    # continue-on-error can't absorb, no log uploaded). prod-deploy-tester-v1 is
-    # provisioned to pull + RUN full runtime images, so it has the disk/RAM to
-    # hold one image and scan it.
-    runs-on: prod-deploy-tester-v1
+    # syft pulls the FULL multi-GB image (from our ECR) and catalogs it on disk.
+    # Runner history: small-v2 died on every large image; prod-default-v2 fixed
+    # the small ones (frontend, planner) but the ~15-20GB CUDA runtime images
+    # (vllm, sglang, trtllm) still killed the runner mid-scan. prod-deploy-tester-v1
+    # was NOT the answer: it has no AWS ECR instance role (deploy tests pull from
+    # Azure ACR and the image is pulled inside a vCluster, not on the runner), so
+    # `aws ecr get-login-password` fails with NoCredentials. Back on the
+    # ECR-credentialed prod-default-v2; the big-image disk pressure is handled by
+    # the "Reclaim disk" step below (docker prune) + the df -h snapshots, which
+    # reveal whether the disk ceiling is reachable for vllm/sglang.
+    runs-on: prod-default-v2
     # Safety net: if a scan still runs away, fail cleanly instead of holding a
     # runner for the 360-min default. A healthy scan completes in <20 min.
     timeout-minutes: 45
@@ -107,14 +110,24 @@ jobs:
         with:
           name: ${{ steps.resolve.outputs.artifact }}
           path: /tmp/compliance
+      - name: Reclaim disk before scan
+        continue-on-error: true   # best-effort; never block the audit
+        shell: bash
+        run: |
+          # The runner is shared/reused — stale docker images + build cache from
+          # prior jobs can leave too little room for a 15-20GB CUDA image pull.
+          # Same prune pattern as .github/actions/docker-build. Best-effort.
+          echo "::group::disk before prune"; df -h; echo "::endgroup::"
+          docker system prune -af || true
+          echo "::group::disk after prune"; df -h; echo "::endgroup::"
       - name: Syft scan (amd64) + audit vs osrb-deps.csv
         continue-on-error: true   # soft gate — never block tests/merge
         shell: bash
         run: |
           set -euo pipefail
-          # Disk visibility: syft materializes the full image to disk. If a large
-          # CUDA image still exhausts the runner, this snapshot pinpoints it.
-          echo "::group::disk before scan"; df -h; echo "::endgroup::"
+          # syft materializes the full image to disk. If a large CUDA image still
+          # exhausts the runner, the post-pull snapshot pinpoints it (a sudden
+          # 100% on the docker/overlay mount = disk ceiling too low for this pool).
           syft "${{ steps.resolve.outputs.image_ref }}" --platform linux/amd64 \
             -o cyclonedx-json=/tmp/syft.cdx.json
           echo "::group::disk after scan"; df -h; echo "::endgroup::"
