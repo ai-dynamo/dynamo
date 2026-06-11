@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use regex::RegexBuilder;
 use serde_json::value::RawValue;
 use uuid::Uuid;
 
@@ -31,37 +30,62 @@ pub struct CalledFunctionArguments {
     pub arguments: Box<RawValue>,
 }
 
-// Extract the contents between start and end tokens using regex parsing.
-// Returns a JSON array string if there are multiple matches, otherwise returns the last match directly.
-fn extract_tool_call_content(input: &str, start_token: &str, end_token: &str) -> Option<String> {
-    let escaped_start = regex::escape(start_token);
-    let escaped_end = regex::escape(end_token);
-    let pattern = format!(r"{}(.*?){}", escaped_start, escaped_end);
+#[derive(Debug)]
+enum JsonPayload<'a> {
+    Borrowed(&'a str),
+    Owned(String),
+}
 
-    match RegexBuilder::new(&pattern)
-        .dot_matches_new_line(true)
-        .build()
-    {
-        Ok(regex) => {
-            // Get all matches and take the last one for now. TODO: Handle multiple tool calls
-            let matches: Vec<_> = regex
-                .captures_iter(input)
-                .filter_map(|captures| captures.get(1))
-                .map(|m| m.as_str().trim().to_string())
-                .collect();
-            if !matches.is_empty() {
-                // If only one match, return it directly, otherwise return as a JSON array string
-                if matches.len() == 1 {
-                    // Return the last match directly
-                    return Some(matches.last().unwrap().clone());
-                } else {
-                    // Join the matches into a JSON array string
-                    return Some(format!("[{}]", matches.join(",")));
-                }
-            }
-            None
+impl<'a> JsonPayload<'a> {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Borrowed(s) => s,
+            Self::Owned(s) => s.as_str(),
         }
-        Err(_) => None,
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CalledFunctionRaw {
+    name: String,
+    #[serde(default)]
+    parameters: Option<Box<RawValue>>,
+    #[serde(default)]
+    arguments: Option<Box<RawValue>>,
+}
+
+// Extract the contents between start and end tokens using slice search.
+// Returns a JSON array string if there are multiple matches, otherwise returns the last match directly.
+fn extract_tool_call_content<'a>(
+    input: &'a str,
+    start_token: &str,
+    end_token: &str,
+) -> Option<JsonPayload<'a>> {
+    if start_token.is_empty() || end_token.is_empty() {
+        return None;
+    }
+
+    let mut search_from = 0;
+    let mut matches = Vec::new();
+
+    while search_from < input.len() {
+        let Some(start_rel) = input[search_from..].find(start_token) else {
+            break;
+        };
+        let start_pos = start_rel + search_from;
+        let content_start = start_pos + start_token.len();
+        let Some(end_rel) = input[content_start..].find(end_token) else {
+            break;
+        };
+        let content_end = content_start + end_rel;
+        matches.push(input[content_start..content_end].trim());
+        search_from = content_end + end_token.len();
+    }
+
+    match matches.len() {
+        0 => None,
+        1 => Some(JsonPayload::Borrowed(matches[0])),
+        _ => Some(JsonPayload::Owned(format!("[{}]", matches.join(",")))),
     }
 }
 
@@ -69,11 +93,14 @@ fn extract_tool_call_content(input: &str, start_token: &str, end_token: &str) ->
 /// tail after `start_token` when the outer end-token never arrived. Gated on
 /// `JsonParserConfig::allow_eof_recovery` so streaming early-exit doesn't
 /// fire mid-stream before the end-token has shown up.
-fn extract_tool_call_content_eof_recovery(input: &str, start_token: &str) -> Option<String> {
+fn extract_tool_call_content_eof_recovery<'a>(
+    input: &'a str,
+    start_token: &str,
+) -> Option<JsonPayload<'a>> {
     let start_pos = input.find(start_token)?;
     let tail = input[start_pos + start_token.len()..].trim();
     if tail.starts_with('{') || tail.starts_with('[') {
-        Some(tail.to_string())
+        Some(JsonPayload::Borrowed(tail))
     } else {
         None
     }
@@ -310,10 +337,9 @@ fn try_parse_normal_text(input: &str, start_token: &str) -> String {
 /// let result = try_tool_call_parse_json(input)?;
 /// assert!(result.is_some());
 /// ```
-/// Parse `payload` into tool calls, trying the three canonical JSON shapes in
-/// order: an array of calls, a single `{name, arguments}`, then a single
-/// `{name, parameters}`. Within an array, each element is tried as
-/// `arguments` then `parameters`.
+/// Parse `payload` into tool calls. Arrays are parsed as raw JSON elements and
+/// each element prefers `arguments` over `parameters`; single-call payloads keep
+/// the existing `parameters`-before-`arguments` precedence.
 ///
 /// Returns:
 /// - `Ok(Some(calls))` when `payload` matched one of the shapes. The vec may be
@@ -326,36 +352,54 @@ fn try_parse_normal_text(input: &str, start_token: &str) -> String {
 /// than re-serializing a parsed `HashMap` / `Value`, which keeps them
 /// byte-identical to what the model emitted (required for KV-cache append-only
 /// prefix matching across multi-step tool use).
-fn parse_calls(payload: &str) -> anyhow::Result<Option<Vec<ToolCallResponse>>> {
-    let mk = |name: String, args: &RawValue| ToolCallResponse {
+fn make_tool_call(name: String, args: Box<RawValue>) -> ToolCallResponse {
+    ToolCallResponse {
         id: format!("call-{}", Uuid::new_v4()),
         tp: ToolCallType::Function,
         function: CalledFunction {
             name,
             arguments: args.get().to_string(),
         },
-    };
+    }
+}
 
+fn raw_call_to_tool_call(
+    raw: CalledFunctionRaw,
+    prefer_arguments: bool,
+) -> Option<ToolCallResponse> {
+    let CalledFunctionRaw {
+        name,
+        parameters,
+        arguments,
+    } = raw;
+
+    let args = if prefer_arguments {
+        arguments.or(parameters)
+    } else {
+        parameters.or(arguments)
+    }?;
+
+    Some(make_tool_call(name, args))
+}
+
+fn parse_calls(payload: &str) -> anyhow::Result<Option<Vec<ToolCallResponse>>> {
     if let Ok(array) = serde_json::from_str::<Vec<Box<RawValue>>>(payload) {
         let mut calls = Vec::new();
         for item in array {
             let item_str = item.get();
-            if let Ok(func_args) = serde_json::from_str::<CalledFunctionArguments>(item_str) {
-                calls.push(mk(func_args.name, &func_args.arguments));
-            } else if let Ok(func_params) =
-                serde_json::from_str::<CalledFunctionParameters>(item_str)
+            if let Ok(raw) = serde_json::from_str::<CalledFunctionRaw>(item_str)
+                && let Some(call) = raw_call_to_tool_call(raw, true)
             {
-                calls.push(mk(func_params.name, &func_params.parameters));
+                calls.push(call);
             }
             // Skip malformed entries silently.
         }
         return Ok(Some(calls));
     }
-    if let Ok(single) = serde_json::from_str::<CalledFunctionParameters>(payload) {
-        return Ok(Some(vec![mk(single.name, &single.parameters)]));
-    }
-    if let Ok(single) = serde_json::from_str::<CalledFunctionArguments>(payload) {
-        return Ok(Some(vec![mk(single.name, &single.arguments)]));
+    if let Ok(single) = serde_json::from_str::<CalledFunctionRaw>(payload)
+        && let Some(call) = raw_call_to_tool_call(single, false)
+    {
+        return Ok(Some(vec![call]));
     }
     Ok(None)
 }
@@ -385,7 +429,7 @@ pub fn try_tool_call_parse_basic_json(
 
     // Iterate over all start and end tokens and try to extract the content between them
     // Assumption : One message will not contain different tags for tool calls. Iteration over tags is to support different tags by default for multiple models
-    let mut json = trimmed.to_string();
+    let mut json = JsonPayload::Borrowed(trimmed);
     let mut normal_text = trimmed.to_string();
     let mut found_start_token_with_no_valid_json = false;
 
@@ -400,14 +444,14 @@ pub fn try_tool_call_parse_basic_json(
         // No start tokens found, try to extract JSON directly. Everything that starts with { or [ is considered a potential JSON.
         if let Some(idx) = normal_text.find(['{', '[']) {
             let extracted_normal = normal_text[..idx].trim().to_string();
-            let extracted_json = normal_text[idx..].trim().to_string();
+            let extracted_json = trimmed[idx..].trim();
             if !extracted_json.is_empty() {
                 normal_text = extracted_normal;
-                json = extracted_json;
+                json = JsonPayload::Borrowed(extracted_json);
             }
         }
     } else {
-        // Start tokens exist, use regex-based parsing
+        // Start tokens exist, extract payloads between or after the markers.
         // Try all combinations of start and end tokens
         'outer: for start_token in tool_call_start_tokens.iter() {
             for end_token in tool_call_end_tokens.iter() {
@@ -417,7 +461,7 @@ pub fn try_tool_call_parse_basic_json(
                 match (start_token.is_empty(), end_token.is_empty()) {
                     (false, true) => {
                         // Single token case
-                        let result = handle_single_token_tool_calls(&json, start_token);
+                        let result = handle_single_token_tool_calls(json.as_str(), start_token);
                         if let Some(content) = result {
                             // handle_single_token_tool_calls returns either:
                             //   Some("[{...}, ...]") — one or more extracted calls
@@ -430,7 +474,7 @@ pub fn try_tool_call_parse_basic_json(
                                 found_start_token_with_no_valid_json = true;
                             }
 
-                            json = content;
+                            json = JsonPayload::Owned(content);
                             // For single token case, use the normal text we extracted earlier
                             normal_text = new_normal_text;
 
@@ -439,21 +483,21 @@ pub fn try_tool_call_parse_basic_json(
                     }
                     (false, false) => {
                         // Start and end token case
-                        let mut result = extract_tool_call_content(&json, start_token, end_token);
+                        let mut result = extract_tool_call_content(trimmed, start_token, end_token);
                         // EOF recovery: only when explicitly opted in (finalize
                         // path). Streaming jails leave `allow_eof_recovery=false`
                         // so the parser doesn't claim a complete call before
                         // the end-token has actually arrived.
                         if result.is_none()
                             && config.allow_eof_recovery
-                            && json.contains(start_token.as_str())
+                            && trimmed.contains(start_token.as_str())
                         {
-                            result = extract_tool_call_content_eof_recovery(&json, start_token);
+                            result = extract_tool_call_content_eof_recovery(trimmed, start_token);
                         }
                         if let Some(content) = result {
                             // Check if we found a start token but got empty JSON back
                             // This indicates the token was found but no valid JSON followed
-                            if content.is_empty() {
+                            if content.as_str().is_empty() {
                                 found_start_token_with_no_valid_json = true;
                             }
 
@@ -677,6 +721,43 @@ mod repair_tests {
             serde_json::from_str::<serde_json::Value>(&repaired).is_ok(),
             "repaired must parse: {:?}",
             repaired
+        );
+    }
+
+    #[test]
+    fn test_raw_argument_bytes_are_preserved() {
+        let config = JsonParserConfig {
+            bare_json_mode: true,
+            ..Default::default()
+        };
+        let input = r#"{"name":"lookup","arguments":{ "b": 2, "a": 1.50 }}"#;
+
+        let (calls, _) = try_tool_call_parse_basic_json(input, &config, None).unwrap();
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "lookup");
+        assert_eq!(calls[0].function.arguments, r#"{ "b": 2, "a": 1.50 }"#);
+    }
+
+    #[test]
+    fn test_argument_parameter_precedence_matches_existing_shapes() {
+        let config = JsonParserConfig {
+            bare_json_mode: true,
+            ..Default::default()
+        };
+
+        let single = r#"{"name":"lookup","parameters":{"source":"parameters"},"arguments":{"source":"arguments"}}"#;
+        let (single_calls, _) = try_tool_call_parse_basic_json(single, &config, None).unwrap();
+        assert_eq!(
+            single_calls[0].function.arguments,
+            r#"{"source":"parameters"}"#
+        );
+
+        let array = r#"[{"name":"lookup","parameters":{"source":"parameters"},"arguments":{"source":"arguments"}}]"#;
+        let (array_calls, _) = try_tool_call_parse_basic_json(array, &config, None).unwrap();
+        assert_eq!(
+            array_calls[0].function.arguments,
+            r#"{"source":"arguments"}"#
         );
     }
 }
