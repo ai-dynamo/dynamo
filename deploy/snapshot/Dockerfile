@@ -268,27 +268,19 @@ RUN python3 -m compliance.generators \
     --native-yaml /opt/compliance/native_packages.yaml \
     --native-image snapshot-agent \
     --output-dir /legal \
+    --policy /opt/compliance/policy/licenses.toml \
     ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
     -v
-RUN find /legal -name '*-deps.csv' -print0 | \
-    xargs -0 -n1 -I {} python3 -m compliance.policy.validate \
+# Policy gate on the single unified CSV (its `ecosystem` column scopes each row).
+RUN python3 -m compliance.policy.validate \
         --policy /opt/compliance/policy/licenses.toml \
-        --input {}
-RUN find /legal -name '*-deps.csv' -print -exec sh -c \
-    'mkdir -p "/sboms/$(basename $(dirname "$1"))" && mv "$1" "/sboms/$(basename $(dirname "$1"))/$(basename "$1")"' _ {} \;
+        --input /legal/osrb-deps.csv
 
 
 # =============================================================================
-# Stage: Compliance: sboms
+# Stage: Compliance: artifact (single unified -compliance tree for CI extraction)
 # =============================================================================
-FROM scratch AS sboms
-COPY --from=licenses /sboms/ /
-
-
-# =============================================================================
-# Stage: Compliance: legal
-# =============================================================================
-FROM scratch AS legal
+FROM scratch AS compliance
 COPY --from=licenses /legal/ /
 
 

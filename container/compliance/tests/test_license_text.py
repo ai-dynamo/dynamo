@@ -19,6 +19,8 @@ from compliance.generators.common import (
     read_harvested_license,
     render_notices,
     spdx_license_text,
+    write_cyclonedx,
+    write_merged_csv,
 )
 
 _REPO = Path(__file__).resolve().parents[3]
@@ -216,3 +218,82 @@ def test_bundle_wheel_notices_noop_without_sbom(tmp_path):
     assert bundle_wheel_notices.process(whl, None) == 0
     with zipfile.ZipFile(whl) as z:
         assert not any("THIRD-PARTY" in n for n in z.namelist())
+
+
+def _sample_components() -> list[Component]:
+    return [
+        Component(
+            "python",
+            "accelerate",
+            "1.0",
+            "Apache-2.0",
+            "https://pypi.org/project/accelerate/1.0/",
+        ),
+        Component(
+            "python",
+            "nvidia-cublas",
+            "13.1",
+            "LicenseRef-NVIDIA-Proprietary",
+            "https://pypi.org/project/nvidia-cublas/13.1/",
+        ),
+        Component("rust", "serde", "1.0", "MIT", "pkg:cargo/serde@1.0"),
+        Component(
+            "dpkg", "libstdc++6", "14", "GPL-3.0-or-later WITH GCC-exception-3.1", None
+        ),
+    ]
+
+
+def test_write_merged_csv_notes_only_for_non_permissive(tmp_path):
+    import csv as _csv
+
+    comps = _sample_components()
+    # Only non-permissive packages (those with a matching exception) get a note.
+    exc = {
+        ("dpkg", "libstdc++6"): "GNU toolchain: GPL-3.0 with GCC runtime exception.",
+        ("python", "nvidia-cublas"): "NVIDIA proprietary CUDA wheel; redistributable.",
+    }
+    out = tmp_path / "osrb-deps.csv"
+    write_merged_csv(comps, exc, out)
+    rows = {(r["ecosystem"], r["name"]): r for r in _csv.DictReader(out.open())}
+    # 6-column schema incl. notes
+    assert list(next(iter(rows.values())).keys()) == [
+        "ecosystem",
+        "name",
+        "version",
+        "spdx",
+        "source_url",
+        "notes",
+    ]
+    assert rows[("dpkg", "libstdc++6")]["notes"].startswith("GNU toolchain")
+    assert rows[("python", "nvidia-cublas")]["notes"]
+    # Permissive packages carry no note.
+    assert rows[("python", "accelerate")]["notes"] == ""
+    assert rows[("rust", "serde")]["notes"] == ""
+
+
+def test_write_cyclonedx_is_valid_delta_sbom(tmp_path):
+    import json
+
+    out = tmp_path / "osrb.cdx.json"
+    write_cyclonedx(_sample_components(), out)
+    bom = json.loads(out.read_text())
+    assert bom["bomFormat"] == "CycloneDX" and bom["specVersion"] == "1.5"
+    by_name = {c["name"]: c for c in bom["components"]}
+    assert len(by_name) == 4
+    # SPDX id form, LicenseRef name form, compound expression form, purls.
+    assert by_name["serde"]["licenses"] == [{"license": {"id": "MIT"}}]
+    assert by_name["nvidia-cublas"]["licenses"] == [
+        {"license": {"name": "LicenseRef-NVIDIA-Proprietary"}}
+    ]
+    assert by_name["libstdc++6"]["licenses"] == [
+        {"expression": "GPL-3.0-or-later WITH GCC-exception-3.1"}
+    ]
+    assert by_name["serde"]["purl"] == "pkg:cargo/serde@1.0"
+    assert by_name["accelerate"]["purl"] == "pkg:pypi/accelerate@1.0"
+
+
+def test_nvidia_proprietary_licenseref_resolves_text():
+    # Part C: the proprietary CUDA wheels (LicenseRef-NVIDIA-Proprietary) now
+    # carry text via the canonical fallback; a generic LicenseRef still does not.
+    assert spdx_license_text("LicenseRef-NVIDIA-Proprietary")
+    assert spdx_license_text("LicenseRef-Proprietary") is None

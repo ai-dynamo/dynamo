@@ -193,6 +193,107 @@ def write_deps_csv(
     return csv_path
 
 
+# Map our ecosystem label to the corresponding Package-URL type, used to
+# synthesize a purl for the merged CycloneDX SBOM when a component's
+# source_url isn't already a purl (python/dpkg/go/native give registry URLs).
+_PURL_TYPE = {
+    "python": "pypi",
+    "rust": "cargo",
+    "dpkg": "deb",
+    "go": "golang",
+    "native": "generic",
+}
+
+
+def _component_purl(c: "Component") -> str | None:
+    """Best-effort Package-URL for a component (its own source_url if already a
+    purl, else synthesized from ecosystem/name/version)."""
+    if c.source_url and c.source_url.startswith("pkg:"):
+        return c.source_url
+    ptype = _PURL_TYPE.get(c.ecosystem)
+    if not ptype or not c.name or not c.version:
+        return None
+    return f"pkg:{ptype}/{c.name}@{c.version}"
+
+
+def _cdx_licenses(spdx: str) -> list[dict] | None:
+    """CycloneDX `licenses` array for an SPDX expression.
+
+    Single SPDX id -> {license:{id}}; LicenseRef-* / non-SPDX -> {license:{name}};
+    compound (AND/OR/WITH) -> {expression}; UNKNOWN/empty -> None (omit).
+    """
+    if not spdx or spdx == UNKNOWN:
+        return None
+    if any(f" {op} " in f" {spdx} " for op in _SPDX_OPERATORS):
+        return [{"expression": spdx}]
+    if spdx.startswith("LicenseRef-"):
+        return [{"license": {"name": spdx}}]
+    return [{"license": {"id": spdx}}]
+
+
+def write_merged_csv(
+    components: list[Component],
+    exception_reasons: dict[tuple[str, str], str],
+    output_path: Path,
+) -> Path:
+    """Write the single cross-ecosystem OSRB deps CSV. Stable byte-order.
+
+    Columns: ecosystem,name,version,spdx,source_url,notes
+
+    `notes` carries the justification for **non-permissive** packages: the
+    `reason` from the matching policy `[[exceptions]]` entry, keyed by
+    (ecosystem, name). A package only has an exception if its license wasn't
+    permissively allowed, so permissive packages get an empty note.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    sorted_comps = sorted(
+        components, key=lambda c: (c.ecosystem, c.name.lower(), c.version)
+    )
+    with output_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f, lineterminator="\n")
+        writer.writerow(["ecosystem", "name", "version", "spdx", "source_url", "notes"])
+        for c in sorted_comps:
+            note = exception_reasons.get((c.ecosystem, c.name), "")
+            writer.writerow(
+                [c.ecosystem, c.name, c.version, c.spdx, c.source_url or "", note]
+            )
+    return output_path
+
+
+def write_cyclonedx(components: list[Component], output_path: Path) -> Path:
+    """Write a CycloneDX 1.5 SBOM of the (baseline-subtracted delta) components.
+
+    This is the same component set as the merged CSV and NOTICES — only what
+    the image adds above its baseline, never the full image. Stable byte-order.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    sorted_comps = sorted(
+        components, key=lambda c: (c.ecosystem, c.name.lower(), c.version)
+    )
+    comps_json: list[dict] = []
+    for c in sorted_comps:
+        entry: dict = {"type": "library", "name": c.name, "version": c.version}
+        lic = _cdx_licenses(c.spdx)
+        if lic is not None:
+            entry["licenses"] = lic
+        purl = _component_purl(c)
+        if purl:
+            entry["purl"] = purl
+        if c.source_url and not c.source_url.startswith("pkg:"):
+            entry["externalReferences"] = [
+                {"type": "distribution", "url": c.source_url}
+            ]
+        comps_json.append(entry)
+    bom = {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.5",
+        "version": 1,
+        "components": comps_json,
+    }
+    output_path.write_text(json.dumps(bom, indent=2) + "\n", encoding="utf-8")
+    return output_path
+
+
 def load_subtract_keys(sbom_path: Path) -> set[tuple[str, str]]:
     """Load a baseline CycloneDX SBOM and return its (name, version) set.
 

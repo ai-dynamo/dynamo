@@ -139,39 +139,25 @@ RUN python3 -m compliance.generators \
     --go-sbom /tmp/sbom-go.cdx.json \
     --go-licenses-dir /tmp/go-licenses \
     --output-dir /legal \
+    --policy /opt/compliance/policy/licenses.toml \
     ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
     -v
-RUN find /legal -name '*-deps.csv' -print0 | \
-    xargs -0 -n1 -I {} python3 -m compliance.policy.validate \
+# Policy gate on the single unified CSV (its `ecosystem` column scopes each row).
+RUN python3 -m compliance.policy.validate \
         --policy /opt/compliance/policy/licenses.toml \
-        --input {}
-# Move *-deps.csv files OUT of /legal/ so only NOTICES + license text ship in
-# the runtime image. CSVs go to /sboms/ for CI extraction (--target sboms).
-RUN find /legal -name '*-deps.csv' -print -exec sh -c \
-    'mkdir -p "/sboms/$(basename $(dirname "$1"))" && mv "$1" "/sboms/$(basename $(dirname "$1"))/$(basename "$1")"' _ {} \;
+        --input /legal/osrb-deps.csv
 
 
 #######################################
-########## Compliance: sboms ##########
+####### Compliance: artifact ##########
 #######################################
 #
-# CI extracts via `docker buildx build --target sboms --output type=local,dest=...`
-# to archive per-ecosystem deps CSVs. NEVER COPY'd into the runtime image.
+# Single FROM-scratch stage exposing the unified compliance tree for CI
+# extraction (one `-compliance` artifact): flat NOTICES-<Eco>.txt + osrb-deps.csv
+# + osrb.cdx.json. The runtime stage below COPYs from `licenses` directly; this
+# scratch stage exists purely for CI extraction.
 
-FROM scratch AS sboms
-COPY --from=licenses /sboms/ /
-
-
-#######################################
-########## Compliance: legal ##########
-#######################################
-#
-# FROM scratch so CI can extract just the NOTICES tree without exporting the
-# multi-GB licenses-stage filesystem. The runtime stage below COPYs from
-# `licenses` directly (not from `legal`); the scratch stage exists purely
-# for CI extraction shape consistency with the runtime templates.
-
-FROM scratch AS legal
+FROM scratch AS compliance
 COPY --from=licenses /legal/ /
 
 

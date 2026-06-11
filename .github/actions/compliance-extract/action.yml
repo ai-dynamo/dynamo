@@ -3,16 +3,15 @@
 
 name: 'Compliance Extract'
 description: |
-  Extract /legal/ NOTICES tree and /sboms/ per-ecosystem deps CSVs from the
-  inline-compliance pipeline of an already-built dynamo container image,
-  cross-check them against the FROM base SBOM, and upload as workflow
-  artifacts.
+  Extract the unified inline-compliance tree (flat NOTICES-<Eco>.txt + the
+  cross-ecosystem osrb-deps.csv + osrb.cdx.json delta SBOM) from an already-built
+  dynamo container image and upload it as a single `-compliance` artifact.
 
   Designed to run as a step INSIDE each <framework>-build job (after
   shared-build-image.yml's "Build and Push Image" step), reusing the
-  warm BuildKit cache the build just populated. This is the inline-
-  compliance counterpart of the older shared-compliance.yml workflow,
-  which created a separate job and thus a cold cache.
+  warm BuildKit cache the build just populated. Authoritative completeness
+  (did the generators miss anything shipped) is checked separately by the
+  <framework>-compliance-audit job, which syft-scans the pushed image.
 
 inputs:
   framework:
@@ -43,9 +42,13 @@ inputs:
     required: false
     default: 'false'
   artifact_retention_days:
-    description: 'Retention (days) for the uploaded /legal NOTICES + /sboms CSV artifacts. PR passes 7; post-merge / nightly default to 30. The /sources OSRB tarball keeps its own longer retention.'
+    description: 'Retention (days) for the uploaded compliance artifact (NOTICES + CSV + CycloneDX). PR passes 7; post-merge / nightly default to 30. The /sources OSRB tarball keeps its own longer retention.'
     required: false
     default: '30'
+  git_sha:
+    description: 'Commit SHA used to name the per-arch OSRB files (osrb-<image>-<arch>-<sha8>.csv/.cdx.json). Pass ${{ github.sha }}.'
+    required: false
+    default: ''
 
 runs:
   using: 'composite'
@@ -73,71 +76,50 @@ runs:
         python3 container/render.py ${RENDER_ARGS} --output-short-filename
         echo "rendered=container/rendered.Dockerfile" >> $GITHUB_OUTPUT
 
-    # /legal/ — NOTICES tree. FROM scratch stage; export bounded by NOTICES file
-    # size (a few MB) regardless of runtime image size.
-    - name: Extract /legal/ (NOTICES)
+    # Unified compliance tree — flat NOTICES-<Eco>.txt + osrb-deps.csv +
+    # osrb.cdx.json. FROM scratch stage; export bounded by these files' size
+    # (a few MB) regardless of runtime image size. For a multi-platform build,
+    # buildx writes one subdir per platform (linux_amd64/, linux_arm64/).
+    - name: Extract /compliance/ (NOTICES + CSV + CycloneDX)
       shell: bash
       run: |
-        mkdir -p /tmp/legal
+        mkdir -p /tmp/compliance
         docker buildx build \
             --builder ${{ inputs.builder_name }} \
             --platform ${{ inputs.platform }} \
-            --target legal \
-            --output type=local,dest=/tmp/legal \
+            --target compliance \
+            --output type=local,dest=/tmp/compliance \
             --progress=plain \
             -f ${{ steps.render.outputs.rendered }} \
             .
 
-    # /sboms/ — per-ecosystem deps CSVs. Also FROM scratch.
-    - name: Extract /sboms/
+    # Name the OSRB CSV + CycloneDX per-arch: osrb-<image>-<arch>-<sha8>.{csv,cdx.json}.
+    # The generator writes generic names (osrb-deps.csv / osrb.cdx.json); we add
+    # the image/arch/commit identity here (the action knows all three). The flat
+    # NOTICES-<Eco>.txt files keep their names.
+    - name: Name OSRB files per arch
       shell: bash
       run: |
-        mkdir -p /tmp/sboms
-        docker buildx build \
-            --builder ${{ inputs.builder_name }} \
-            --platform ${{ inputs.platform }} \
-            --target sboms \
-            --output type=local,dest=/tmp/sboms \
-            --progress=plain \
-            -f ${{ steps.render.outputs.rendered }} \
-            .
-
-    # SBOM-diff verifier: every package in /sboms/ that isn't in the FROM base
-    # must be enumerated in /legal/NOTICES-*.txt. Catches generator bugs (e.g.
-    # vendored wheels missed by pip-licenses, dist-info dirs orphaned in
-    # site-packages from a prior install). License *policy* enforcement
-    # already happened inside the licenses Dockerfile stage during build.
-    #
-    # Baseline resolution: the rendered Dockerfile already has the per-
-    # framework/device baseline_sbom baked in as `ARG BASELINE_SBOM_FILE`
-    # (rendered from context.yaml). We parse it back out here so the
-    # verifier subtracts against the same file the runtime template used.
-    # Graceful skip if empty (xpu, cpu, dynamo cuda12.9 — no capture yet).
-    - name: SBOM-diff verifier
-      shell: bash
-      run: |
-        BASE_SBOM=$(grep -E '^ARG BASELINE_SBOM_FILE=' "${{ steps.render.outputs.rendered }}" \
-                    | head -1 \
-                    | sed -E 's/^ARG BASELINE_SBOM_FILE="?([^"]*)"?$/\1/')
-        if [ -z "${BASE_SBOM}" ]; then
-          echo "::notice::no baseline_sbom configured for ${{ inputs.framework }}/${{ inputs.target }}/${{ inputs.cuda_version }}; skipping SBOM-diff verification."
-          exit 0
+        IMG="${{ inputs.artifact_name_prefix }}"
+        if [ -n "${{ inputs.cuda_version }}" ]; then IMG="${IMG}-${{ inputs.cuda_version }}"; fi
+        SHA8=$(echo "${{ inputs.git_sha }}" | cut -c1-8)
+        [ -z "${SHA8}" ] && SHA8="nosha"
+        rename_dir() {  # $1 = dir, $2 = arch
+          [ -f "$1/osrb-deps.csv" ]  && mv "$1/osrb-deps.csv"  "$1/osrb-${IMG}-$2-${SHA8}.csv"
+          [ -f "$1/osrb.cdx.json" ]  && mv "$1/osrb.cdx.json"  "$1/osrb-${IMG}-$2-${SHA8}.cdx.json"
+        }
+        shopt -s nullglob
+        found=0
+        for d in /tmp/compliance/linux_*; do
+          [ -d "$d" ] || continue
+          found=1
+          rename_dir "$d" "$(basename "$d" | sed 's/^linux_//')"
+        done
+        if [ "${found}" -eq 0 ]; then  # single-platform: files directly under dest
+          rename_dir /tmp/compliance "$(echo "${{ inputs.platform }}" | sed 's|.*linux/||')"
         fi
-        # BASELINE_SBOM_FILE is a per-arch STEM (e.g. "vllm-openai@525c7fb8"); the
-        # runtime licenses stage appends -${TARGETARCH}.cdx.json. The SBOM-diff is a
-        # coarse "did the generators miss anything shipped" completeness check, so
-        # verify against the amd64 baseline — present for every captured stem
-        # (snapshot is amd64-only; all others also have an -amd64 variant).
-        BASE_SBOM_PATH="container/compliance/base_sboms/${BASE_SBOM}-amd64.cdx.json"
-        if [ ! -f "${BASE_SBOM_PATH}" ]; then
-          echo "::error::baseline SBOM file referenced by rendered Dockerfile not found: ${BASE_SBOM_PATH}"
-          exit 1
-        fi
-        echo "Verifying target SBOM against baseline: ${BASE_SBOM}"
-        PYTHONPATH=container python3 -m compliance.verify_sbom_diff \
-            --target-sboms-dir   /tmp/sboms \
-            --target-notices-dir /tmp/legal \
-            --base-sbom "${BASE_SBOM_PATH}"
+        echo "Named OSRB files for ${IMG} @ ${SHA8}:"
+        find /tmp/compliance -name 'osrb-*' -print
 
     # /sources/ — reproducible tarball of source archives for everything we
     # ship on top of the FROM base. Bigger than legal/sboms (typically
@@ -172,20 +154,12 @@ runs:
         fi
         echo "suffix=${SUFFIX}" >> $GITHUB_OUTPUT
 
-    - name: Upload /legal/ NOTICES artifact
+    - name: Upload compliance artifact (NOTICES + CSV + CycloneDX)
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       with:
-        name: compliance-${{ inputs.artifact_name_prefix }}-${{ steps.suffix.outputs.suffix }}-legal
-        path: /tmp/legal/
-        retention-days: ${{ inputs.artifact_retention_days }}
-
-    - name: Upload /sboms/ artifact
-      if: always()
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
-      with:
-        name: compliance-${{ inputs.artifact_name_prefix }}-${{ steps.suffix.outputs.suffix }}-sboms
-        path: /tmp/sboms/
+        name: compliance-${{ inputs.artifact_name_prefix }}-${{ steps.suffix.outputs.suffix }}-compliance
+        path: /tmp/compliance/
         retention-days: ${{ inputs.artifact_retention_days }}
 
     - name: Upload /sources/ tarball (post-merge / RC / release only)

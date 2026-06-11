@@ -467,7 +467,7 @@ jobs:
       # would do. Also runs in the legacy compliance_only sibling-job mode (no
       # caller sets that today; see the input note). Skipped for dev / local-dev
       # targets (those don't ship and don't go through OSRB).
-      - name: Compliance extract + verify
+      - name: Compliance extract
         if: ${{ (inputs.compliance_only || inputs.inline_compliance) && inputs.target != 'dev' && inputs.target != 'local-dev' }}
         uses: ./.github/actions/compliance-extract
         with:
@@ -477,6 +477,7 @@ jobs:
           cuda_version: ${{ matrix.cuda_version }}
           builder_name: ${{ inputs.builder_name }}
           artifact_name_prefix: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
+          git_sha: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
           # Must match the build's render: EFA images attribute libfabric /
           # aws-ofi-nccl via --make-efa, and a mismatch would cold-miss the cache.
           make_efa: ${{ inputs.make_efa }}

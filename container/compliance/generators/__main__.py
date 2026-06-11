@@ -141,6 +141,16 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--policy",
+        type=Path,
+        default=None,
+        help=(
+            "Path to policy/licenses.toml. When given, the unified osrb-deps.csv "
+            "Notes column is populated with the matching [[exceptions]] `reason` "
+            "(the justification for allowing a non-permissive package)."
+        ),
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
     args = parser.parse_args(argv)
@@ -164,9 +174,13 @@ def main(argv: list[str] | None = None) -> int:
 
         subtract = common.load_subtract_keys(args.subtract_sbom)
 
+    # Each generator writes its NOTICES-<Eco>.txt FLAT at --output-dir (no
+    # per-ecosystem subdir) and returns its (already baseline-subtracted)
+    # components, which we accumulate for the unified CSV + CycloneDX below.
     failures: list[str] = []
+    all_components: list = []
     for eco in args.ecosystem:
-        eco_out = args.output_dir / eco
+        comps = None
         try:
             if eco == "rust":
                 if not search_paths:
@@ -176,9 +190,9 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 from . import rust as gen
 
-                gen.generate(
+                comps = gen.generate(
                     search_paths,
-                    eco_out,
+                    args.output_dir,
                     subtract=subtract,
                     licenses_dir=args.rust_licenses_dir,
                 )
@@ -190,20 +204,20 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 from . import python as gen  # type: ignore[no-redef]
 
-                gen.generate(search_paths, eco_out, subtract=subtract)
+                comps = gen.generate(search_paths, args.output_dir, subtract=subtract)
             elif eco == "dpkg":
                 from . import dpkg as gen  # type: ignore[no-redef]
 
-                gen.generate(eco_out, subtract=subtract)
+                comps = gen.generate(args.output_dir, subtract=subtract)
             elif eco == "go":
                 if not args.go_sbom:
                     failures.append("go: at least one --go-sbom is required")
                     continue
                 from . import go as gen  # type: ignore[no-redef]
 
-                gen.generate(
+                comps = gen.generate(
                     args.go_sbom,
-                    eco_out,
+                    args.output_dir,
                     subtract=subtract,
                     licenses_dir=args.go_licenses_dir,
                 )
@@ -215,9 +229,9 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 from . import native as gen  # type: ignore[no-redef]
 
-                gen.generate(
+                comps = gen.generate(
                     args.native_yaml,
-                    eco_out,
+                    args.output_dir,
                     image_filter=args.native_image,
                     subtract=subtract,
                 )
@@ -232,6 +246,43 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:
             logger.exception("Generator for %s raised: %s", eco, exc)
             failures.append(f"{eco}: {exc}")
+        else:
+            if comps:
+                all_components.extend(comps)
+
+    # Unified OSRB outputs (delta-only — the accumulated components are already
+    # baseline-subtracted): one merged CSV with a Notes column + one CycloneDX
+    # SBOM. The merged CSV supersedes the per-ecosystem <eco>-deps.csv the
+    # generators wrote flat, so drop those (validation runs on the merged CSV).
+    from . import common
+
+    for eco in _ALL_ECOSYSTEMS:
+        (args.output_dir / f"{eco}-deps.csv").unlink(missing_ok=True)
+
+    exception_reasons: dict[tuple[str, str], str] = {}
+    if args.policy is not None:
+        try:
+            from ..policy.validate import load_policy
+
+            policy = load_policy(args.policy)
+            for exc in policy.exceptions:
+                etype, ename = exc.get("type"), exc.get("name")
+                if etype and ename:
+                    exception_reasons.setdefault(
+                        (etype, ename), exc.get("reason") or ""
+                    )
+        except Exception as exc:  # don't fail generation over the Notes column
+            logger.warning("could not load policy for Notes column: %s", exc)
+
+    common.write_merged_csv(
+        all_components, exception_reasons, args.output_dir / "osrb-deps.csv"
+    )
+    common.write_cyclonedx(all_components, args.output_dir / "osrb.cdx.json")
+    logger.info(
+        "Wrote unified osrb-deps.csv + osrb.cdx.json (%d components) to %s",
+        len(all_components),
+        args.output_dir,
+    )
 
     if failures:
         logger.error("Generator failures: %s", failures)

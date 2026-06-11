@@ -7,16 +7,17 @@
 # Inline-compliance Dockerfile stages, shared by every shipped runtime
 # template (dynamo / vllm / sglang / trtllm / frontend / planner).
 #
-# This template emits five stages in fixed order:
+# This template emits four stages in fixed order:
 #
 #   1. licenses          -- runs compliance.generators against the
-#                           previously-defined build stage, validates
-#                           output against policy, stages /legal/ + /sboms/.
-#   2. sboms             -- FROM scratch; exposes /sboms/ for CI extraction.
-#   3. legal             -- FROM scratch; exposes /legal/ for CI extraction.
-#   4. sources_collect   -- gated on ENABLE_SOURCE_ARCHIVAL; runs
+#                           previously-defined build stage, validates output
+#                           against policy, and stages the unified /legal tree
+#                           (flat NOTICES-<Eco>.txt + osrb-deps.csv + osrb.cdx.json).
+#   2. compliance        -- FROM scratch; exposes the unified /legal tree for CI
+#                           extraction as a single `-compliance` artifact.
+#   3. sources_collect   -- gated on ENABLE_SOURCE_ARCHIVAL; runs
 #                           compliance.collect_sources to produce /sources.zip.
-#   5. sources_archive   -- FROM scratch; exposes /sources.zip.
+#   4. sources_archive   -- FROM scratch; exposes /sources.zip.
 #
 # The caller (each per-framework runtime template) is expected to:
 #   - have defined `pre_runtime` / `pre_frontend` / `pre_planner` already
@@ -112,31 +113,28 @@ RUN {% if framework == "sglang" %}PKG_ARG="--site-packages $(python3 -c 'import 
     --go-licenses-dir /tmp/go-licenses \
 {% endif %}    --rust-licenses-dir /tmp/rust-licenses \
     --output-dir /legal \
+    --policy /opt/compliance/policy/licenses.toml \
 {% if make_efa %}    --native-yaml /opt/compliance/native_packages.yaml \
     --native-image {{ framework }}-runtime-efa \
 {% endif %}    ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
     -v
-RUN find /legal -name '*-deps.csv' -print0 | \
-    xargs -0 -n1 -I {} python3 -m compliance.policy.validate \
+# Policy gate runs on the single unified CSV (its `ecosystem` column scopes each
+# row), replacing the per-ecosystem loop. Non-zero exit fails the build.
+RUN python3 -m compliance.policy.validate \
         --policy /opt/compliance/policy/licenses.toml \
-        --input {}
-RUN find /legal -name '*-deps.csv' -print -exec sh -c \
-    'mkdir -p "/sboms/$(basename $(dirname "$1"))" && mv "$1" "/sboms/$(basename $(dirname "$1"))/$(basename "$1")"' _ {} \;
+        --input /legal/osrb-deps.csv
 
 
 #######################################
-########## Compliance: sboms ##########
+####### Compliance: artifact ##########
 #######################################
+#
+# Single FROM-scratch stage exposing the unified compliance tree for CI
+# extraction (one `-compliance` artifact): flat NOTICES-<Eco>.txt + the unified
+# osrb-deps.csv (with Notes) + osrb.cdx.json (delta CycloneDX). Export is bounded
+# by these files' size (a few MB) regardless of runtime image size.
 
-FROM scratch AS sboms
-COPY --from=licenses /sboms/ /
-
-
-#######################################
-########## Compliance: legal ##########
-#######################################
-
-FROM scratch AS legal
+FROM scratch AS compliance
 COPY --from=licenses /legal/ /
 
 
