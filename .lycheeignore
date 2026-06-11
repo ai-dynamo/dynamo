@@ -21,3 +21,6 @@
 # Served by Netlify and intermittently fails from GitHub runners.
 ^https://etcd\.io/?$
 ^https://etcd\.io/docs/v3\.5/install/?$
+
+# Intermittently refuses connections from GitHub runners.
+^https://nats\.io/download/?$
