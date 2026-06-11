@@ -2106,11 +2106,11 @@ mod tests {
         // response — must not duplicate ids).
         let chunks = vec![
             text_chunk_with_token_ids("Hello ", &[1]),
-            text_chunk_with_token_ids("<tool_call>{\"name\": \"get_weather\", \"arguments\"", &[2, 3]),
             text_chunk_with_token_ids(
-                ": {\"location\": \"SF\"}}</tool_call>\nDone!",
-                &[4, 5],
+                "<tool_call>{\"name\": \"get_weather\", \"arguments\"",
+                &[2, 3],
             ),
+            text_chunk_with_token_ids(": {\"location\": \"SF\"}}</tool_call>\nDone!", &[4, 5]),
         ];
 
         let input_stream = Box::pin(stream::iter(chunks));
@@ -2118,7 +2118,12 @@ mod tests {
         let responses: Vec<_> = output_stream.collect().await;
 
         let tool_calls = collect_tool_calls(&responses);
-        assert_eq!(tool_calls.len(), 1, "Expected 1 tool call: {:?}", tool_calls);
+        assert_eq!(
+            tool_calls.len(),
+            1,
+            "Expected 1 tool call: {:?}",
+            tool_calls
+        );
 
         let ids = collect_completion_token_ids(&responses);
         assert_eq!(
