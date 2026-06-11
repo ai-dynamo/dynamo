@@ -100,6 +100,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         bootstrap_host = self.bootstrap_host
         bootstrap_port = self.bootstrap_port
         bootstrap_room = None
+        require_reasoning = inner_request.get("require_reasoning", False)
 
         bootstrap_info_from_req = inner_request.get("bootstrap_info")
         if isinstance(bootstrap_info_from_req, dict):
@@ -147,6 +148,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         results = await self.engine.async_generate(
             **input_param,
             sampling_params=sampling_params,
+            require_reasoning=require_reasoning,
             stream=True,
             bootstrap_host=bootstrap_host,
             bootstrap_port=bootstrap_port,
