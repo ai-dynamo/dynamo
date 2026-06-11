@@ -40,7 +40,7 @@ pub use self::multi_worker_sequence::{
     SequenceRequest, SequenceSubscriber,
 };
 pub use self::sequence::{ActiveSequences, RequestId};
-pub use self::sequences::PrefillTokenDeltas;
+pub use self::sequences::{PrefillTokenDeltas, WorkerLoadProjection};
 pub use concurrent_radix_tree::ConcurrentRadixTree;
 pub use concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 pub use config::{
