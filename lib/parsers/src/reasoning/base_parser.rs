@@ -338,7 +338,12 @@ impl ReasoningParser for BasicReasoningParser {
                             .map(|tok| overlap(&current_text, tok))
                             .unwrap_or(0);
                         let ol = ol_end.max(ol_tool);
-                        if ol >= 2 {
+                        // Hold back ANY non-empty marker-prefix overlap, including a
+                        // lone '<'. A `>= 2` threshold dropped single-char overlaps, so a
+                        // </think> split at the '<' chunk boundary never reassembled —
+                        // reasoning never exited and the trailing content (e.g. a tool
+                        // call) was absorbed into reasoning_content (DIS-2223).
+                        if ol >= 1 {
                             let safe_end = current_text.len() - ol;
                             if safe_end > 0 {
                                 accumulated_reasoning.push_str(&current_text[..safe_end]);
@@ -499,6 +504,34 @@ mod tests {
         let result = parser.parse_reasoning_streaming_incremental("<think>with reasoning", &[]);
         assert_eq!(result.normal_text, "");
         assert_eq!(result.reasoning_text, "with reasoning");
+    }
+
+    #[test] // REASONING.stream.3.c — end token </think> split across chunks at the lone '<' boundary
+    fn test_streaming_end_token_split_at_open_bracket() {
+        // Repro for the Nemotron 3 Ultra tool-call leak (DIS-2223): nemotron3 /
+        // nemotron_v3 / deepseek_r1 are force-reasoning, so the completion starts
+        // in reasoning. When the </think> end marker is split so a lone '<' lands
+        // at a chunk boundary, the parser must still reassemble </think>, exit
+        // reasoning, and route the trailing content (e.g. a tool-call block) to
+        // normal_text. If it instead drops the lone '<', </think> never
+        // reassembles, reasoning never exits, and everything after is absorbed
+        // into reasoning_text (normal_text empty) — so the downstream tool jail
+        // never sees the tool call.
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), true, true);
+        let r1 = parser.parse_reasoning_streaming_incremental("reasoning content<", &[]);
+        let r2 =
+            parser.parse_reasoning_streaming_incremental("/think>\n<tool_call>x</tool_call>", &[]);
+        let reasoning = format!("{}{}", r1.reasoning_text, r2.reasoning_text);
+        let normal = format!("{}{}", r1.normal_text, r2.normal_text);
+        assert_eq!(
+            reasoning, "reasoning content",
+            "a </think> split at the lone '<' must not pull the marker or trailing content into reasoning"
+        );
+        assert_eq!(
+            normal, "\n<tool_call>x</tool_call>",
+            "content after a split </think> must reach normal_text (else the tool jail never sees the call)"
+        );
     }
 
     #[test] // REASONING.batch.6.a — multi-block
