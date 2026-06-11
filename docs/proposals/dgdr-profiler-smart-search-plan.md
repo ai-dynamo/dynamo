@@ -297,7 +297,7 @@ Dispatch:
 5. For each decoded Vizier sample, V2 constructs a per-candidate `replay_optimize.ReplayOptimizeSpec` (`EngineSpec` model/backend/engine args, `HardwareSpec`, `WorkloadSpec`, `SLASpec`, `RouterSpec`) and evaluates it through `optimize_dense_agg_with_replay` / `optimize_dense_disagg_with_replay`. V2 owns search-space construction, candidate decoding, ranking, and report generation around those calls; AIC and replay stay lower-level providers.
 6. V2 writes its ranked-candidate report and `profiler_status.yaml` into `ops.output_dir`, exactly as V1 reports results, so the surrounding sidecar/controller flow needs no change.
 
-The full internal API surface: the input is the existing DGDR spec, and the output is the ranked-candidate contract — which also carries the generated DGD, router, and planner config that the DEP output contract requires. `OptimizationGoal` is defined in [Optimization Goal](#optimization-goal):
+The full internal API surface: the input is the existing DGDR spec, and the output is the ranked-candidate contract — which carries the chosen deployment shape plus router and planner config (assembling the full DGD manifest is out of scope for this plan). `OptimizationGoal` is defined in [Optimization Goal](#optimization-goal):
 
 ```python
 # components/src/dynamo/profiler/v2/__init__.py
@@ -327,7 +327,6 @@ class Candidate(BaseModel):
     backend: str                           # "vllm" | "sglang" | "trtllm"
     replicaParallelConfig: dict[str, Any]  # decoded parallel shape + replica counts
     usedGpus: int
-    generatedDgd: dict[str, Any]           # DynamoGraphDeployment manifest
     routerConfig: dict[str, Any] | None = None
     plannerConfig: dict[str, Any] | None = None
     replayReportRef: str | None = None     # path/URI to the replay report
