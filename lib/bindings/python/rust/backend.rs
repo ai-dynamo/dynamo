@@ -1329,6 +1329,25 @@ impl LLMEngine for PyLLMEngine {
     ) -> Result<serde_json::Value, DynamoError> {
         self.core.engine_control(control, body).await
     }
+
+    async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
+        self.core.supported_updates().await
+    }
+
+    async fn engine_update(
+        &self,
+        update: String,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, DynamoError> {
+        self.core.engine_update(update, body).await
+    }
+
+    async fn on_endpoint_ready(
+        &self,
+        endpoint: rs::component::Endpoint,
+    ) -> Result<(), DynamoError> {
+        self.core.on_endpoint_ready(endpoint).await
+    }
 }
 
 // ---------------------------------------------------------------------------
