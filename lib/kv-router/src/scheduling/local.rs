@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -377,18 +377,16 @@ where
         } else {
             PrefillTokenDeltas::none()
         };
-        let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens_at(
-            token_seq.as_deref(),
-            &prefill_token_deltas,
-            decay_now,
-        );
+        let (decode_blocks, prefill_tokens, active_requests) =
+            self.slots.potential_blocks_and_tokens_at::<true>(
+                token_seq.as_deref(),
+                &prefill_token_deltas,
+                decay_now,
+            );
+        let active_requests = active_requests.expect("active request projection should be present");
 
-        let mut workers: FxHashSet<WorkerWithDpRank> = FxHashSet::default();
-        workers.extend(decode_blocks.keys().copied());
-        workers.extend(prefill_tokens.keys().copied());
-
-        let mut loads = Vec::with_capacity(workers.len());
-        for worker in workers {
+        let mut loads = Vec::with_capacity(decode_blocks.len());
+        for (worker, potential_decode_blocks) in decode_blocks {
             loads.push(PotentialLoad {
                 worker_id: worker.worker_id,
                 dp_rank: worker.dp_rank,
@@ -396,7 +394,8 @@ where
                     .get(&worker)
                     .copied()
                     .unwrap_or(isl_tokens),
-                potential_decode_blocks: decode_blocks.get(&worker).copied().unwrap_or(0),
+                potential_decode_blocks,
+                active_requests: active_requests.get(&worker).copied().unwrap_or(0),
             });
         }
 
@@ -671,6 +670,12 @@ mod tests {
             scheduler.get_active_lora_counts(),
             HashMap::from([(String::from("adapter-a"), 1)])
         );
+        let loads = scheduler.get_potential_loads(Some(vec![1, 2, 3, 4]), 64, HashMap::new(), true);
+        let worker_load = loads
+            .iter()
+            .find(|load| load.worker_id == response.best_worker.worker_id && load.dp_rank == 0)
+            .expect("scheduled worker should appear in potential loads");
+        assert_eq!(worker_load.active_requests, 1);
 
         cancel_token.cancel();
     }
@@ -1147,8 +1152,8 @@ mod tests {
         let token_seq = vec![11, 22, 33, 44];
 
         let prefill_token_deltas = PrefillTokenDeltas::uniform(128);
-        let (decode_blocks, prefill_tokens) =
-            slots.potential_blocks_and_tokens(Some(&token_seq), &prefill_token_deltas);
+        let (decode_blocks, prefill_tokens, _) =
+            slots.potential_blocks_and_tokens::<false>(Some(&token_seq), &prefill_token_deltas);
         let mut expected: Vec<_> = decode_blocks
             .keys()
             .map(|worker| PotentialLoad {
@@ -1156,6 +1161,7 @@ mod tests {
                 dp_rank: worker.dp_rank,
                 potential_prefill_tokens: prefill_tokens.get(worker).copied().unwrap_or(128),
                 potential_decode_blocks: decode_blocks.get(worker).copied().unwrap_or(0),
+                active_requests: 0,
             })
             .collect();
         expected.sort_by_key(|load| (load.worker_id, load.dp_rank));
@@ -1175,6 +1181,7 @@ mod tests {
                 actual.potential_decode_blocks,
                 expected.potential_decode_blocks
             );
+            assert_eq!(actual.active_requests, expected.active_requests);
         }
 
         cancel_token.cancel();

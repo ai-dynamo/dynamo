@@ -664,6 +664,11 @@ where
         self.scheduler.pending_count()
     }
 
+    /// Sum of ISL tokens for requests currently parked in the scheduler queue.
+    pub fn pending_isl_tokens(&self) -> usize {
+        self.scheduler.pending_isl_tokens()
+    }
+
     fn prefill_load_hint_for(
         &self,
         isl_tokens: usize,
@@ -961,7 +966,7 @@ where
 }
 
 // NOTE: KVRouter works like a PushRouter,
-// but without the reverse proxy functionality, but based on contract of 3 request types
+// but without the reverse proxy functionality, but based on the RouterRequest contract
 #[async_trait]
 impl<Sel> AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Error>
     for KvRouter<Sel>
@@ -980,6 +985,8 @@ where
                 tokens,
                 block_mm_infos,
                 routing_constraints,
+                priority_jump,
+                lora_name,
             } => {
                 match self
                     .find_best_match_details(
@@ -989,8 +996,8 @@ where
                         None,
                         true,
                         false,
-                        None,
-                        0.0,
+                        lora_name,
+                        priority_jump,
                         None,
                         None,
                         None,
@@ -1019,9 +1026,31 @@ where
                     Err(error) => return Err(error),
                 }
             }
-            RouterRequest::MarkPrefill => RouterResponse::PrefillMarked {
-                success: self.mark_prefill_completed(&context_id).await.is_ok(),
+            RouterRequest::PotentialLoads {
+                tokens,
+                block_mm_infos,
+                lora_name,
+            } => RouterResponse::PotentialLoads {
+                loads: self
+                    .get_potential_loads(
+                        &tokens,
+                        None,
+                        block_mm_infos.as_deref(),
+                        lora_name.as_deref(),
+                    )
+                    .await?,
+                pending_count: self.pending_count(),
+                pending_isl_tokens: self.pending_isl_tokens(),
             },
+            RouterRequest::MarkPrefill { request_id } => {
+                let request_id = match request_id.as_deref() {
+                    Some(request_id) if !request_id.trim().is_empty() => request_id,
+                    _ => &context_id,
+                };
+                RouterResponse::PrefillMarked {
+                    success: self.mark_prefill_completed(request_id).await.is_ok(),
+                }
+            }
             RouterRequest::MarkFree { request_id } => {
                 let request_id = match request_id.as_deref() {
                     Some(request_id) if !request_id.trim().is_empty() => request_id,

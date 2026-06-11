@@ -770,11 +770,11 @@ fn convert_input_items_to_messages(
 }
 
 /// Convert Responses API Tool to ChatCompletionTool.
-fn convert_tools(tools: &[Tool]) -> Result<Vec<ChatCompletionTool>, anyhow::Error> {
-    tools
+fn convert_tools(tools: &[Tool]) -> Vec<ChatCompletionTool> {
+    let converted = tools
         .iter()
-        .map(|tool| match tool {
-            Tool::Function(function) => Ok(ChatCompletionTool {
+        .filter_map(|tool| match tool {
+            Tool::Function(function) => Some(ChatCompletionTool {
                 r#type: ChatCompletionToolType::Function,
                 function: FunctionObject {
                     name: function.name.clone(),
@@ -783,11 +783,17 @@ fn convert_tools(tools: &[Tool]) -> Result<Vec<ChatCompletionTool>, anyhow::Erro
                     strict: function.strict,
                 },
             }),
-            _ => Err(anyhow::anyhow!(
-                "only function tools are supported by Dynamo Responses"
-            )),
+            _ => None,
         })
-        .collect()
+        .collect::<Vec<_>>();
+    if converted.len() != tools.len() {
+        tracing::debug!(
+            requested = tools.len(),
+            forwarded = converted.len(),
+            "non-function Responses tools are not forwarded to chat completions"
+        );
+    }
+    converted
 }
 
 /// Convert Responses API ToolChoiceParam to ChatCompletionToolChoiceOption.
@@ -952,7 +958,6 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             .tools
             .as_ref()
             .map(|tools| convert_tools(tools))
-            .transpose()?
             .filter(|tools| !tools.is_empty());
 
         // Convert tool_choice if present
@@ -2758,6 +2763,38 @@ mod tests {
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         assert!(chat_req.inner.tools.is_some());
         let tools = chat_req.inner.tools.unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].function.name, "get_weather");
+    }
+
+    #[test]
+    fn test_non_function_tools_do_not_reject_compatible_requests() {
+        let req = NvCreateResponse {
+            inner: CreateResponse {
+                input: InputParam::Text("hello".into()),
+                model: Some("test-model".into()),
+                tools: Some(vec![
+                    Tool::LocalShell,
+                    Tool::Function(FunctionTool {
+                        name: "get_weather".into(),
+                        parameters: Some(serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "location": {"type": "string"}
+                            }
+                        })),
+                        strict: Some(true),
+                        description: Some("Get weather info".into()),
+                        defer_loading: None,
+                    }),
+                ]),
+                ..Default::default()
+            },
+            nvext: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let tools = chat_req.inner.tools.expect("function tool forwarded");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].function.name, "get_weather");
     }
