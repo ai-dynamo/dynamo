@@ -268,11 +268,6 @@ impl WorkerQueryClient {
     }
 
     async fn remove_worker_dp_state(&self, worker_id: WorkerId, dp_rank: DpRank) {
-        // Stop any in-flight recovery retry/backoff loop for this rank.
-        if let Some((_, cancel)) = self.recovery_cancels.remove(&(worker_id, dp_rank)) {
-            cancel.cancel();
-        }
-
         let Some(worker_state) = self
             .worker_states
             .get(&worker_id)
@@ -288,6 +283,15 @@ impl WorkerQueryClient {
             }
             worker_state.is_empty()
         };
+
+        // Stop any in-flight recovery retry/backoff loop for this rank.  This
+        // runs AFTER the rank teardown above: a racing spawn either passed its
+        // liveness check before `remove_rank` (so its token is already
+        // registered and cancelled here), or it observes the rank as gone and
+        // exits on its own.
+        if let Some((_, cancel)) = self.recovery_cancels.remove(&(worker_id, dp_rank)) {
+            cancel.cancel();
+        }
 
         if should_remove_worker {
             tracing::warn!("WorkerQueryClient: all dp_ranks gone for worker {worker_id}, removing");
@@ -372,6 +376,28 @@ impl WorkerQueryClient {
         let cancel = self.recovery_cancels.entry(key).or_default().clone();
 
         tokio::spawn(async move {
+            // The caller decided to spawn outside the worker-state lock, so the
+            // rank may have been torn down in between — and a token registered
+            // after `remove_worker_dp_state` drained the map would never be
+            // cancelled.  Re-checking under the lock closes that race: if the
+            // rank is still present here, `remove_rank` has not run yet, so the
+            // removal path is guaranteed to see (and cancel) our token.
+            let alive = match client.worker_states.get(&key.0).map(|e| e.clone()) {
+                Some(worker_state) => {
+                    let worker_state = worker_state.lock().await;
+                    worker_state.epoch == epoch && worker_state.ranks.contains_key(&key.1)
+                }
+                None => false,
+            };
+            if !alive {
+                tracing::debug!(
+                    "Skipping recovery for worker {} dp_rank {}: rank removed or epoch changed",
+                    key.0,
+                    key.1
+                );
+                return;
+            }
+
             let recovery = async {
                 // Add jitter only for full-restore (start_event_id is None)
                 // to permute semaphore acquisition order and reduce thundering herd risk on initial discovery.
@@ -1125,6 +1151,20 @@ mod tests {
         // A non-cancelled task would retry after RECOVERY_INITIAL_BACKOFF_MS.
         tokio::time::sleep(Duration::from_millis(3 * RECOVERY_INITIAL_BACKOFF_MS)).await;
         assert_eq!(transport.call_count(), 1);
+        kv_indexer.flush().await;
+    }
+
+    #[tokio::test]
+    async fn test_spawn_recovery_for_removed_rank_does_not_query() {
+        let (client, transport, kv_indexer) = make_test_client("spawn-after-remove").await;
+
+        // A follow-up spawn can race rank removal (the spawn decision happens
+        // outside the worker-state lock). With no rank state, the task's
+        // liveness check must drop it before it ever queries the transport.
+        client.spawn_recovery_task((1, 0), 0, Some(5), None);
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(transport.call_count(), 0);
         kv_indexer.flush().await;
     }
 
