@@ -94,6 +94,7 @@ pub struct DefaultWorkerSelector {
 #[derive(Debug, Clone, Copy)]
 struct LogitWeights {
     overlap_score_credit: f64,
+    overlap_score_credit_decay: f64,
     prefill_load_scale: f64,
     shared_cache_multiplier: f64,
 }
@@ -111,6 +112,7 @@ impl DefaultWorkerSelector {
         request: &SchedulingRequest,
         worker: WorkerWithDpRank,
         block_size: u32,
+        min_active_prefill_tokens: usize,
         weights: LogitWeights,
         formula_name: &'static str,
     ) -> f64 {
@@ -174,7 +176,23 @@ impl DefaultWorkerSelector {
             };
 
         let raw_prefill_blocks = raw_prefill_tokens / block_size_f64;
-        let overlap_credit_blocks = weights.overlap_score_credit * device_overlap_blocks
+        // Normalize backlog above the least-loaded eligible worker by this request's
+        // size. The rational decay softly trades cache locality for prefill balance,
+        // while leaving workers at the load floor with their full device credit.
+        let overlap_credit_decay =
+            if request.track_prefill_tokens && weights.overlap_score_credit_decay > 0.0 {
+                let active_prefill_tokens = worker_load.unwrap_or_default().active_prefill_tokens;
+                let excess_active_prefill_blocks =
+                    active_prefill_tokens.saturating_sub(min_active_prefill_tokens) as f64
+                        / block_size_f64;
+                let normalized_prefill_load =
+                    excess_active_prefill_blocks / request.request_blocks(block_size) as f64;
+                1.0 / (1.0 + weights.overlap_score_credit_decay * normalized_prefill_load)
+            } else {
+                1.0
+            };
+        let effective_overlap_score_credit = weights.overlap_score_credit * overlap_credit_decay;
+        let overlap_credit_blocks = effective_overlap_score_credit * device_overlap_blocks
             + self.kv_router_config.host_cache_hit_weight * host_overlap_blocks
             + self.kv_router_config.disk_cache_hit_weight * disk_overlap_blocks
             + shared_overlap_blocks;
@@ -190,7 +208,8 @@ impl DefaultWorkerSelector {
                  {shared_beyond} shared blocks beyond device (multiplier={shared_cache_multiplier:.2}): {logit:.3} \
                  = prefill_load_scale * adjusted_prefill_blocks + decode_blocks \
                  = {prefill_load_scale:.3} * {adjusted_prefill_blocks:.3} + {decode_cost_blocks:.3} \
-                 (raw_prefill_blocks: {raw_prefill_blocks:.3}, overlap_credit_blocks: {overlap_credit_blocks:.3})",
+                 (raw_prefill_blocks: {raw_prefill_blocks:.3}, overlap_credit_blocks: {overlap_credit_blocks:.3}, \
+                 overlap_credit_decay: {overlap_credit_decay:.3})",
                 worker.worker_id,
                 worker.dp_rank,
                 shared_cache_multiplier = weights.shared_cache_multiplier,
@@ -201,7 +220,8 @@ impl DefaultWorkerSelector {
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
                  = prefill_load_scale * adjusted_prefill_blocks + decode_blocks \
                  = {prefill_load_scale:.3} * {adjusted_prefill_blocks:.3} + {decode_cost_blocks:.3} \
-                 (raw_prefill_blocks: {raw_prefill_blocks:.3}, overlap_credit_blocks: {overlap_credit_blocks:.3})",
+                 (raw_prefill_blocks: {raw_prefill_blocks:.3}, overlap_credit_blocks: {overlap_credit_blocks:.3}, \
+                 overlap_credit_decay: {overlap_credit_decay:.3})",
                 worker.worker_id,
                 worker.dp_rank,
                 prefill_load_scale = weights.prefill_load_scale
@@ -251,6 +271,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 .as_ref()
                 .and_then(|cfg| cfg.overlap_score_credit)
                 .unwrap_or(self.kv_router_config.overlap_score_credit),
+            overlap_score_credit_decay: self.kv_router_config.overlap_score_credit_decay,
             prefill_load_scale: request
                 .router_config_override
                 .as_ref()
@@ -274,7 +295,15 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 Err(_) => return Err(KvSchedulerError::NoEndpoints),
             }
 
-            let logit = self.worker_logit(request, worker, block_size, weights, "Pinned formula");
+            let min_active_prefill_tokens = request.worker_load_for(worker).active_prefill_tokens;
+            let logit = self.worker_logit(
+                request,
+                worker,
+                block_size,
+                min_active_prefill_tokens,
+                weights,
+                "Pinned formula",
+            );
             let effective_overlap_blocks = request.effective_overlap_blocks_for(worker);
             let cached_tokens = request.effective_cached_tokens_for(worker);
 
@@ -300,8 +329,26 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .as_ref()
             .and_then(|cfg| cfg.router_temperature)
             .unwrap_or(self.kv_router_config.router_temperature);
+        let min_active_prefill_tokens =
+            if request.track_prefill_tokens && weights.overlap_score_credit_decay > 0.0 {
+                let mut minimum = usize::MAX;
+                eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+                    minimum = minimum.min(request.worker_load_for(worker).active_prefill_tokens);
+                });
+                debug_assert_ne!(minimum, usize::MAX);
+                minimum
+            } else {
+                0
+            };
         let get_score = |worker: WorkerWithDpRank| -> f64 {
-            let base_score = self.worker_logit(request, worker, block_size, weights, "Formula");
+            let base_score = self.worker_logit(
+                request,
+                worker,
+                block_size,
+                min_active_prefill_tokens,
+                weights,
+                "Formula",
+            );
             let Some(config) = workers.get(&worker.worker_id) else {
                 return base_score;
             };
@@ -1158,19 +1205,74 @@ mod tests {
         let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "test");
         let weights = LogitWeights {
             overlap_score_credit: 1.0,
+            overlap_score_credit_decay: 0.0,
             prefill_load_scale: 2.0,
             shared_cache_multiplier: 0.0,
         };
 
         assert_eq!(
-            selector.worker_logit(&request, worker, 16, weights, "test"),
+            selector.worker_logit(&request, worker, 16, 0, weights, "test"),
             7.0
         );
 
         request.track_prefill_tokens = false;
         assert_eq!(
-            selector.worker_logit(&request, worker, 16, weights, "test"),
+            selector.worker_logit(&request, worker, 16, 0, weights, "test"),
             5.0
+        );
+    }
+
+    #[test]
+    fn test_overlap_credit_decay_can_prefer_less_loaded_cold_worker() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let block_size = 16u32;
+        let warm_worker = WorkerWithDpRank::from_worker_id(0);
+        let cold_worker = WorkerWithDpRank::from_worker_id(1);
+        let workers = HashMap::from([
+            (warm_worker.worker_id, SimpleWorkerConfig::default()),
+            (cold_worker.worker_id, SimpleWorkerConfig::default()),
+        ]);
+
+        let mut request = base_request(64);
+        request.tier_overlap_blocks.device.insert(warm_worker, 4);
+        request.effective_cached_tokens.insert(warm_worker, 64);
+        request.worker_loads.insert(
+            warm_worker,
+            crate::sequences::WorkerLoadProjection {
+                active_prefill_tokens: 48,
+                ..Default::default()
+            },
+        );
+
+        let no_decay = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                overlap_score_credit_decay: 0.0,
+                ..Default::default()
+            }),
+            "test",
+        );
+        let with_decay = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                overlap_score_credit_decay: 1.0,
+                ..Default::default()
+            }),
+            "test",
+        );
+
+        assert_eq!(
+            no_decay
+                .select_worker(&workers, &request, request.eligibility(), block_size)
+                .unwrap()
+                .worker,
+            warm_worker
+        );
+        assert_eq!(
+            with_decay
+                .select_worker(&workers, &request, request.eligibility(), block_size)
+                .unwrap()
+                .worker,
+            cold_worker
         );
     }
 
