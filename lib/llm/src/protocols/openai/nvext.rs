@@ -459,6 +459,20 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     pub routed_experts_prompt_start: Option<u32>,
 
+    /// Tokenize-only mode (RL bridge tokenization).
+    ///
+    /// When `true`, the chat-completions request is preprocessed (chat template
+    /// applied + tokenized) and the resulting prompt token IDs are returned in
+    /// `response.nvext.token_ids` **without dispatching to the engine** — no
+    /// generation runs. Lets an RL client tokenize multi-turn bridge segments
+    /// using the server's own tokenizer + chat template (closing the
+    /// turn-1-server / bridge-local tokenizer seam) instead of a separate
+    /// `/tokenize` route. Honors per-request `chat_template_args`
+    /// (e.g. `add_generation_prompt`) so the dual-tokenize bridge works.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub tokenize_only: Option<bool>,
+
     /// Extra fields to be included in the response's nvext
     /// This is a list of field names that should be populated in the response
     /// Supported fields include "worker_id", "timing", "routed_experts", "engine_data",

@@ -2851,7 +2851,7 @@ impl
         request.inner.stream = Some(true);
 
         // create a response generator
-        let response_generator = request.response_generator(context.id().to_string());
+        let mut response_generator = request.response_generator(context.id().to_string());
         let tracker = Some(response_generator.tracker());
         let preprocess_options = PreprocessRequestOptions {
             preserve_omitted_max_tokens: context
@@ -2864,6 +2864,41 @@ impl
         let (mut common_request, annotations, prompt_injected_reasoning) = self
             .preprocess_request_with_options(&request, tracker.as_deref(), preprocess_options)
             .await?;
+
+        // tokenize_only (RL bridge): the chat template has been applied and the
+        // prompt tokenized into `common_request.token_ids`. Return those IDs in
+        // `response.nvext.token_ids` and skip engine dispatch entirely — no
+        // generation runs. Lets an RL client tokenize multi-turn bridge segments
+        // with the server's own tokenizer + chat template (one source of truth)
+        // instead of a separate `/tokenize` route or a local HF tokenizer.
+        if request
+            .nvext
+            .as_ref()
+            .and_then(|n| n.tokenize_only)
+            .unwrap_or(false)
+        {
+            let token_ids = common_request.token_ids.clone();
+            let mut stream_response = response_generator.create_choice(
+                0,
+                None,
+                Some(dynamo_protocols::types::FinishReason::Stop),
+                None,
+            );
+            let nvext_response = crate::protocols::openai::nvext::NvExtResponse {
+                worker_id: None,
+                timing: None,
+                token_ids: Some(token_ids),
+                routed_experts: None,
+                engine_data: None,
+                stop_reason: None,
+                completion_token_ids: None,
+                prompt_logprobs: None,
+            };
+            stream_response.nvext = Some(serde_json::to_value(&nvext_response)?);
+            let ctx = context.context();
+            let output = stream::iter(vec![Annotated::from_data(stream_response)]);
+            return Ok(ResponseStream::new(Box::pin(output), ctx));
+        }
 
         let uses_tool_call_structural_tag = self.apply_tool_choice_guided_decoding(
             &request,
