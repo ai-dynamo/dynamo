@@ -174,7 +174,7 @@ kubectl apply -f $DEPLOYMENT_FILE -n $NAMESPACE
 
 #### Deploy with Intel XPU
 
-For Intel XPU clusters with DRA support (Kubernetes v1.34+ and [Intel GPU Resource Driver](https://github.com/intel/intel-resource-drivers-for-kubernetes) installed):
+For Intel XPU clusters with DRA support (Kubernetes v1.34+ and [Intel resource drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes) installed):
 
 ```bash
 # Apply any XPU template
