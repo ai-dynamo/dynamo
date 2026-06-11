@@ -137,6 +137,12 @@ class RealtimeOmniHandler:
         # Latest output modalities requested by the client via session.update;
         # snapshotted into each turn so the engine emits text/audio accordingly.
         session_output_modalities: list[str] | None = None
+        # Serialize turns so at most one response is in flight at a time, matching
+        # vLLM-Omni's single-active-generation assumption (its realtime connection
+        # ignores a commit while one is running). A new turn's audio still buffers
+        # via pump while it waits, so input is not dropped; responses are emitted
+        # strictly one-at-a-time and in order, which keeps response_id unambiguous.
+        turn_lock = asyncio.Lock()
 
         async def emit(event: dict) -> None:
             await out_queue.put(event)
@@ -147,7 +153,7 @@ class RealtimeOmniHandler:
                 active_turn = _Turn(output_modalities=session_output_modalities)
                 turns.append(active_turn)
                 active_turn.task = asyncio.create_task(
-                    self._run_turn(active_turn, context, emit)
+                    self._run_turn(active_turn, context, emit, turn_lock)
                 )
             return active_turn
 
@@ -227,54 +233,62 @@ class RealtimeOmniHandler:
         turn: _Turn,
         context: Context,
         emit: Callable[[dict], Awaitable[None]],
+        turn_lock: "asyncio.Lock",
     ) -> None:
-        """Drive one engine generation turn and translate its outputs."""
-        await emit(
-            {
-                "type": "response.created",
-                "event_id": _event_id(),
-                "response": _response_payload(turn.response_id, "in_progress"),
-            }
-        )
+        """Drive one engine generation turn and translate its outputs.
 
-        sent_audio = False
-        try:
-            async for output in self._drive_engine(turn):
-                if context.is_stopped():
-                    break
-
-                transcript = self._extract_transcript(output)
-                if transcript and self._emit_transcript:
-                    await emit(self._transcript_delta_event(turn, transcript))
-
-                for chunk in self._extract_audio_chunks(turn, output):
-                    sent_audio = True
-                    await emit(self._audio_delta_event(turn, chunk))
-
-            if sent_audio:
-                await emit(self._audio_done_event(turn))
+        Holds ``turn_lock`` for the whole ``response.created`` -> ``response.done``
+        lifecycle so only one turn's response is on the wire at a time; later
+        turns block here until this one finishes (their audio keeps buffering in
+        their own queue meanwhile).
+        """
+        async with turn_lock:
             await emit(
                 {
-                    "type": "response.done",
+                    "type": "response.created",
                     "event_id": _event_id(),
-                    "response": _response_payload(turn.response_id, "completed"),
+                    "response": _response_payload(turn.response_id, "in_progress"),
                 }
             )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - surface engine errors on the wire
-            logger.exception("realtime omni turn failed: %s", exc)
-            await emit(
-                {
-                    "type": "error",
-                    "event_id": _event_id(),
-                    "error": {
-                        "type": "server_error",
-                        "code": "omni_generation_error",
-                        "message": str(exc),
-                    },
-                }
-            )
+
+            sent_audio = False
+            try:
+                async for output in self._drive_engine(turn):
+                    if context.is_stopped():
+                        break
+
+                    transcript = self._extract_transcript(output)
+                    if transcript and self._emit_transcript:
+                        await emit(self._transcript_delta_event(turn, transcript))
+
+                    for chunk in self._extract_audio_chunks(turn, output):
+                        sent_audio = True
+                        await emit(self._audio_delta_event(turn, chunk))
+
+                if sent_audio:
+                    await emit(self._audio_done_event(turn))
+                await emit(
+                    {
+                        "type": "response.done",
+                        "event_id": _event_id(),
+                        "response": _response_payload(turn.response_id, "completed"),
+                    }
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - surface engine errors on the wire
+                logger.exception("realtime omni turn failed: %s", exc)
+                await emit(
+                    {
+                        "type": "error",
+                        "event_id": _event_id(),
+                        "error": {
+                            "type": "server_error",
+                            "code": "omni_generation_error",
+                            "message": str(exc),
+                        },
+                    }
+                )
 
     async def _drive_engine(self, turn: _Turn) -> AsyncGenerator[Any, None]:
         """Feed buffered audio into the engine and yield its stage outputs.

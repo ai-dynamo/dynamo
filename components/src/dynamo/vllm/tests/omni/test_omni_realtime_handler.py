@@ -234,3 +234,44 @@ def test_output_modalities_default_none_when_unset():
     asyncio.run(_drive(handler, events, _FakeContext()))
     # No output_modalities requested -> engine sees None (its launch default).
     assert engine.seen_output_modalities == [None]
+
+
+def test_turns_are_serialized_not_interleaved():
+    # Two commits => two turns. They must run one-at-a-time (vLLM-Omni's
+    # single-active-generation assumption): distinct response ids, and turn 2's
+    # events never interleave with turn 1's.
+    audio_b64 = base64.b64encode(
+        np.linspace(-8000, 8000, 16, dtype=np.int16).tobytes()
+    ).decode()
+    handler = _make_handler(_FakeEngine())
+    events = [
+        {"type": "session.update", "session": {"model": MODEL_NAME}},
+        {"type": "input_audio_buffer.append", "audio": audio_b64},
+        {"type": "input_audio_buffer.commit"},
+        {"type": "input_audio_buffer.append", "audio": audio_b64},
+        {"type": "input_audio_buffer.commit"},
+    ]
+    out = asyncio.run(_drive(handler, events, _FakeContext()))
+
+    created = [e["response"]["id"] for e in out if e["type"] == "response.created"]
+    done = [e["response"]["id"] for e in out if e["type"] == "response.done"]
+    assert len(created) == 2 and len(set(created)) == 2, created  # two distinct turns
+    assert created == done, (created, done)  # same ids, completed in start order
+
+    def rid(e: dict) -> str | None:
+        return e.get("response_id") or e.get("response", {}).get("id")
+
+    # Turn 1 fully completes (its response.done) before turn 2 starts, and no
+    # turn-2-tagged event appears before that point.
+    first_done = next(
+        i
+        for i, e in enumerate(out)
+        if e["type"] == "response.done" and e["response"]["id"] == created[0]
+    )
+    second_created = next(
+        i
+        for i, e in enumerate(out)
+        if e["type"] == "response.created" and e["response"]["id"] == created[1]
+    )
+    assert first_done < second_created
+    assert all(rid(e) != created[1] for e in out[: first_done + 1])
