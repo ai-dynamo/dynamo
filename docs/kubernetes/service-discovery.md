@@ -84,13 +84,14 @@ The Role is scoped to the `DynamoGraphDeployment` and is deleted with it.
 
 If a normal frontend or worker component needs to run as an existing Kubernetes
 ServiceAccount, such as a cloud workload identity ServiceAccount, set
-`spec.components[*].podTemplate.spec.serviceAccountName`. The controller does
-not overwrite a non-empty `podTemplate.spec.serviceAccountName` for normal
-frontend and worker components, including prefill and decode workers.
+`spec.components[*].podTemplate.spec.serviceAccountName`. The controller uses
+that custom ServiceAccount for normal frontend and worker components, including
+prefill and decode workers.
 
-Kubernetes-native service discovery still uses the generated
-`<DGD NAME>-k8s-service-discovery-role`. Bind your custom ServiceAccount to that
-Role in the same namespace as the `DynamoGraphDeployment`.
+Those component pods need the permissions defined in the generated
+`<DGD NAME>-k8s-service-discovery-role` for Kubernetes-native service
+discovery. Bind your custom ServiceAccount to that Role in the same namespace
+as the `DynamoGraphDeployment`.
 
 ```yaml
 # Relevant fields only.
@@ -138,9 +139,9 @@ Keep these caveats in mind:
 - The operator still creates the default discovery ServiceAccount and
   RoleBinding. This is harmless when the component pods use your custom
   ServiceAccount.
-- Planner and Endpoint Picker Plugin (EPP) components have separate
-  service-account and RBAC paths. Validate those paths before overriding their
-  pod template ServiceAccount.
+- This custom ServiceAccount path applies to normal frontend and worker
+  components. Planner and Endpoint Picker Plugin (EPP) components have separate
+  service-account and RBAC paths.
 
 #### Environment Variables
 
