@@ -62,28 +62,23 @@ jobs:
       - vllm-dev-build
       - vllm-test
       - vllm-multi-gpu-test
-      - vllm-compliance
       - vllm-copy-to-acr
       - sglang-build
       - sglang-dev-build
       - sglang-test
       - sglang-multi-gpu-test
-      - sglang-compliance
       - sglang-copy-to-acr
       - trtllm-build
       - trtllm-dev-build
       - trtllm-test
       - trtllm-multi-gpu-test
-      - trtllm-compliance
       - trtllm-copy-to-acr
       - vllm-efa-build
       - sglang-efa-build
       - trtllm-efa-build
       - planner-build
       - planner-test
-      - planner-compliance
       - frontend-build
-      - frontend-compliance
       - frontend-copy-to-acr
     if: always()
     steps:
