@@ -248,31 +248,53 @@ This is a pure internal search API. It takes a search space, an optimization goa
 # components/src/dynamo/profiler/v2/__init__.py
 
 class SearchSpace(BaseModel):
-    """The knobs to sweep. Each list is the candidate set the optimizer samples
-    from; a single-element list pins that knob. Branch (agg vs disagg) is fixed
-    per study, so one space stays flat."""
+    """Inputs to one search run: pinned context plus the knobs to sweep. Each
+    list-typed field is the candidate set the optimizer samples from; a
+    single-element list pins that knob. When `deploymentMode` lists both
+    branches the optimizer runs one flat study per branch and ranks across both;
+    engine batching is read per branch (prefill/decode for disagg, agg for
+    aggregated). This is the main-sweep space; planner load-predictor tuning is
+    a separate grid sweep (see below)."""
     model_config = ConfigDict(extra="forbid")
 
-    deploymentMode: str = "disagg"               # "agg" | "disagg"
+    # pinned context (not swept)
+    modelName: str                               # HF id or private model name
+    hardwareSku: str                             # e.g. "h200_sxm"
     gpuBudget: int = 32                          # max GPUs per candidate
 
-    # engine: backend + legal parallel shapes (TP/TEP/DEP, replicas from budget)
-    backend: list[str] = ["vllm"]                # vllm | sglang | trtllm
-    parallelConfigs: list[dict[str, Any]]        # generated legal shapes, branch-aware
+    # deployment: branch + backend + legal parallel shapes
+    deploymentMode: list[str] = ["disagg", "agg"]  # branches to explore; pin with one
+    backend: list[str] = ["vllm"]                  # vllm | sglang | trtllm
+    parallelConfigs: list[dict[str, Any]]          # generated legal TP/TEP/DEP shapes
 
-    # engine: scheduler batching capacity
-    maxNumBatchedTokens: list[int] = [8192, 16384, 32768]
-    maxNumSeqs: list[int] = [256, 512, 1024]
+    # prefill engine (disagg branch): scheduler batching capacity
+    prefillMaxNumBatchedTokens: list[int] = [8192, 16384, 32768]
+    prefillMaxNumSeqs: list[int] = [1, 2, 4, 8]
 
-    # router
+    # decode engine (disagg branch): scheduler batching capacity
+    decodeMaxNumBatchedTokens: list[int] = [8192]
+    decodeMaxNumSeqs: list[int] = [256, 512, 1024]
+
+    # agg engine (agg branch): scheduler batching capacity
+    aggMaxNumBatchedTokens: list[int] = [8192, 16384, 32768]
+    aggMaxNumSeqs: list[int] = [256, 512, 1024]
+
+    # router (KV-router knobs are ignored under round_robin)
     routerMode: list[str] = ["kv_router", "round_robin"]
     overlapScoreCredit: list[float] = [0.0, 0.5, 1.0]
-    prefillLoadScale: list[float] = [0.0, 0.5, 1.0, 2.0]
-    routerTemperature: list[float] = [0.0, 0.2]
+    prefillLoadScale: list[float] = [0.0, 0.25, 0.5, 1.0, 2.0, 4.0]
+    hostCacheHitWeight: list[float] = [0.5, 0.75, 1.0]
+    diskCacheHitWeight: list[float] = [0.0, 0.25, 0.5]
+    routerTemperature: list[float] = [0.0, 0.2, 0.5, 1.0]
 
     # planner: preset ids expanded by the candidate generator
-    plannerScalingPolicy: list[str] = ["throughput_180_5", "hybrid_180_5"]
-    plannerFpmSampling: list[str] = ["default", "large"]
+    plannerScalingPolicy: list[str] = [
+        "throughput_180_5", "throughput_600_5",
+        "load_180_5", "load_180_10",
+        "hybrid_180_5", "hybrid_600_5",
+    ]
+    plannerFpmSampling: list[str] = ["small", "default", "large", "fine"]
+    plannerLoadSensitivity: list[str] = ["aggressive", "default", "conservative"]
 
 
 class OptimizationTarget(str, Enum):
@@ -343,3 +365,5 @@ def run_smart_search(
 ```
 
 Each returned `Candidate` carries its decoded knob assignment (`config`) and measured `metrics`. The list is sorted best-first by `score`, which normalizes objective direction so larger is always better: `throughput`, `goodput`, and `goodput_per_gpu` use the metric directly (pick the max), while `e2e_latency` uses its negative (pick the min latency). `goodput_per_gpu` divides goodput by `usedGpus`.
+
+`SearchSpace` enumerates every main-sweep `Search` / `Composite Search` knob from the deployment, engine, router, and planner inventories above. Planner load-predictor tuning is deliberately excluded — it runs as a separate deterministic grid sweep (see [Planner Load Predictor Independent Grid Sweep](#planner-load-predictor-independent-grid-sweep)), and its selected preset is pinned before the main sweep.
