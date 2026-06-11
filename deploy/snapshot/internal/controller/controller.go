@@ -839,7 +839,13 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		return fmt.Errorf("failed to write NCCL checkpoint KVS file: %w", err)
 	}
 
-	if err := snapshotruntime.RemoveFileIfExists(vllmCheckpointRestoreFileStoreHostPath(checkpointLocation, containerName)); err != nil {
+	fileStoreHostPath := vllmCheckpointRestoreFileStoreHostPath(
+		pod,
+		checkpointLocation,
+		containerName,
+		placeholderHostPID,
+	)
+	if err := snapshotruntime.RemoveFileIfExists(fileStoreHostPath); err != nil {
 		log.Error(err, "Failed to remove vLLM checkpoint FileStore rendezvous file")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
 		if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
@@ -936,7 +942,30 @@ func restoreNCCLCheckpointKVSGroup(pod *corev1.Pod, checkpointID string, contain
 	return strings.Join(parts, "_")
 }
 
-func vllmCheckpointRestoreFileStoreHostPath(location checkpointLocations, containerName string) string {
+func vllmCheckpointRestoreFileStoreHostPath(pod *corev1.Pod, location checkpointLocations, containerName string, hostPID int) string {
+	if pod != nil {
+		for i := range pod.Spec.Containers {
+			container := &pod.Spec.Containers[i]
+			if container.Name != containerName {
+				continue
+			}
+			env := containerEnvMap(pod, container)
+			path := strings.TrimSpace(env[snapshotprotocol.VLLMCheckpointRestoreFileStorePathEnv])
+			if path == "" {
+				break
+			}
+			path = expandEnvReferences(path, env)
+			if filepath.IsAbs(path) && filepath.Clean(path) == path {
+				return filepath.Join(
+					snapshotruntime.HostProcPath,
+					fmt.Sprintf("%d", hostPID),
+					"root",
+					strings.TrimPrefix(path, string(os.PathSeparator)),
+				)
+			}
+			break
+		}
+	}
 	return snapshotprotocol.VLLMCheckpointRestoreFileStorePathForTarget(location.HostPath, containerName)
 }
 

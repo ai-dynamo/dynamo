@@ -275,6 +275,58 @@ func TestCheckpointLocationsFromPod(t *testing.T) {
 	})
 }
 
+func TestVLLMCheckpointRestoreFileStoreHostPath(t *testing.T) {
+	location := checkpointLocations{
+		HostPath:      "/checkpoints/pod-artifact/versions/1",
+		ContainerPath: "/checkpoints/pod-artifact/versions/1",
+	}
+
+	t.Run("uses env path through placeholder root", func(t *testing.T) {
+		pod := makePod(
+			"test-pod",
+			"default",
+			testNodeName,
+			corev1.PodRunning,
+			true,
+			nil,
+			nil,
+		)
+		pod.Spec.Containers[0].Env = []corev1.EnvVar{{
+			Name:  snapshotprotocol.VLLMCheckpointRestoreFileStorePathEnv,
+			Value: "/checkpoints/shared/vllm-filestore/1/main/torch_pg",
+		}}
+
+		got := vllmCheckpointRestoreFileStoreHostPath(pod, location, "main", 1234)
+		want := filepath.Join(
+			snapshotruntime.HostProcPath,
+			"1234",
+			"root",
+			"checkpoints/shared/vllm-filestore/1/main/torch_pg",
+		)
+		if got != want {
+			t.Fatalf("FileStore host path = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("falls back to artifact-derived path", func(t *testing.T) {
+		pod := makePod(
+			"test-pod",
+			"default",
+			testNodeName,
+			corev1.PodRunning,
+			true,
+			nil,
+			nil,
+		)
+
+		got := vllmCheckpointRestoreFileStoreHostPath(pod, location, "main", 1234)
+		want := "/checkpoints/pod-artifact/vllm-filestore/1/main/torch_pg"
+		if got != want {
+			t.Fatalf("FileStore host path = %q, want %q", got, want)
+		}
+	})
+}
+
 func TestRestoreNCCLCheckpointKVSEndpoint(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
