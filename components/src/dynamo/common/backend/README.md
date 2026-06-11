@@ -389,6 +389,31 @@ Performance note: attribute values are rendered via Python `repr()` for
 non-primitive types. Don't pass large objects per-token inside hot loops;
 record summary attributes instead.
 
+## Performance: streaming overhead
+
+`generate()` yields one chunk per engine step, and each chunk crosses into Rust
+through the PyO3 bridge (`spawn_blocking` + `with_gil` + deserialize). At high
+concurrency this per-token crossing is **GIL-bound**: aggregate throughput
+stays roughly flat as concurrency rises (adding cores/workers doesn't help) and
+per-token latency degrades. This is inherent to wrapping a Python engine — the
+unified bridge measures at parity with the legacy per-token path, not a
+regression.
+
+The lever is **fewer, larger crossings** — emit more tokens per chunk. Every
+backend has a native `stream_interval` for this; set it > 1 so the engine
+coalesces N tokens per streamed step:
+
+| Backend | How to set |
+|---|---|
+| vLLM | `--stream-interval N` |
+| SGLang | `--stream-interval N` |
+| TRT-LLM | `--trtllm.stream_interval N` (or `stream_interval: N` in the `--extra-engine-args` YAML, or `--override-engine-args '{"stream_interval": N}'`) |
+
+Tradeoff: coarser inter-token streaming (the client receives tokens in batches
+of N); TTFT is unaffected since the first token still flushes immediately. It
+matters most for high-concurrency serving of small/fast models, where the
+aggregate token rate can approach the bridge's single-GIL ceiling.
+
 ## File Index
 
 ```text
