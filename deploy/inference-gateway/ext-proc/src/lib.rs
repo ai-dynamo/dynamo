@@ -18,10 +18,12 @@ pub mod kv_republisher;
 pub mod picker;
 pub mod proto;
 pub mod router_only;
+pub mod router_only_reflector;
 pub mod server;
 
 pub use epp::Router;
 pub use kv_republisher::KvRepublisher;
 pub use picker::{Endpoint, EndpointPicker, PickResult, RequestInfo};
 pub use router_only::RouterOnlyConfig;
+pub use router_only_reflector::RouterOnlyPodReflector;
 pub use server::ExtProcServer;
