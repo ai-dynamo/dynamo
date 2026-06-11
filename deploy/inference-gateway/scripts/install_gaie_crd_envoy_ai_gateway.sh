@@ -27,15 +27,9 @@ trap 'echo "Error at line $LINENO. Exiting."' ERR
 NAMESPACE=${NAMESPACE:-default}
 echo "Installing inference-gateway into namespace: $NAMESPACE"
 
-# Install the Gateway API
-# GATEWAY_API_VERSION=v1.5.1
-# kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$GATEWAY_API_VERSION/standard-install.yaml
-
-
 # # Install the Inference Extension CRDs
 IGW_LATEST_RELEASE=v1.5.0
 kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${IGW_LATEST_RELEASE}/manifests.yaml
-
 
 # Install Envoy AI Gateway (controller + CRDs)
 EG_VERSION="v1.8.1"

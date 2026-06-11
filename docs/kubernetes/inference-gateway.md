@@ -41,10 +41,10 @@ cd deploy/inference-gateway
 export NAMESPACE=my-model # You can put the inference gateway into another namespace and then adjust your http-route.yaml
 
 # To install Envoy AI Gateway
-./scripts/install_gaie.sh envoy-ai-gateway
+./scripts/install_gaie_crd.sh envoy-ai-gateway
 
 # To install agentgateway
-./scripts/install_gaie.sh agentgateway
+./scripts/install_gaie_crd.sh agentgateway
 ```
 This script installs the Gateway API CRDs, the GAIE CRDs, the selected Inference Gateway implementation, and a `Gateway` named `inference-gateway` into `${NAMESPACE}`.
 

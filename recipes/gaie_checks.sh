@@ -82,7 +82,7 @@ info "Checking gateway controller in namespace '$GATEWAY_CONTROLLER_NAMESPACE' (
 # namespace must exist
 kubectl get ns "$GATEWAY_CONTROLLER_NAMESPACE" >/dev/null 2>&1 || fail "Namespace '$GATEWAY_CONTROLLER_NAMESPACE' not found (run step c Helm installs)"
 
-PODS=$(kubectl get pods -n "$GATEWAY_CONTROLLER_NAMESPACE" -o name -l "$GATEWAY_LABEL_FILTER" 2>/dev/null 2>&1)
+PODS=$(kubectl get pods -n "$GATEWAY_CONTROLLER_NAMESPACE" -o name -l "$GATEWAY_LABEL_FILTER" 2>/dev/null)
 # fallback label (charts sometimes label differently)
 [[ -z "${PODS:-}" ]] && PODS=$(kubectl get pods -n "$GATEWAY_CONTROLLER_NAMESPACE" -o name | grep -E 'agentgateway|envoy-gateway|gateway' || true)
 [[ -z "${PODS:-}" ]] && fail "gateway pods not found in '$GATEWAY_CONTROLLER_NAMESPACE'"
