@@ -166,7 +166,9 @@ The frontend exposes the following HTTP endpoints:
 
 ### Frontend feature switches
 
-Binary master switches that operators can flip to close off non-OpenAI-spec surfaces on a default-secure deployment. All default to `true`; an env value of `0` / `false` / `no` / `off` (case-insensitive) overrides to `false`. Unset env preserves the builder default.
+Environment variables controlling frontend extensions. Extensions are enabled by default. When deploying, consider whether each is needed for your use case; if not, disable it to prevent accidental abuse.
+
+Set an env value of `0` / `false` / `no` / `off` (case-insensitive) to disable.
 
 | Env Var | Default | Behavior when `false` |
 |---------|---------|------------------------|
