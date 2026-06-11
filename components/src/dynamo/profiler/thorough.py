@@ -456,9 +456,7 @@ async def run_thorough(
     )
 
     for candidate in prefill_candidates + decode_candidates:
-        auto_inject_trust_remote_code(
-            candidate.dgd_config, local_or_hf_model, backend
-        )
+        auto_inject_trust_remote_code(candidate.dgd_config, local_or_hf_model, backend)
 
     config_modifier = CONFIG_MODIFIERS[backend]
 

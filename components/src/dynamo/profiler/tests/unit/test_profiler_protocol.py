@@ -880,9 +880,9 @@ def test_auto_inject_trust_remote_code_skips_when_no_auto_map() -> None:
         modified = auto_inject_trust_remote_code(cfg, "some/model", "vllm")
 
     assert modified == []
-    args = cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
-        "mainContainer"
-    ]["args"]
+    args = cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"][
+        "args"
+    ]
     assert "--trust-remote-code" not in args
 
 
@@ -916,9 +916,9 @@ def test_auto_inject_trust_remote_code_is_idempotent() -> None:
         modified_second = auto_inject_trust_remote_code(cfg, "some/model", "vllm")
 
     assert modified_second == []
-    args = cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
-        "mainContainer"
-    ]["args"]
+    args = cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"][
+        "args"
+    ]
     assert args.count("--trust-remote-code") == 1
 
 
@@ -940,9 +940,9 @@ def test_auto_inject_trust_remote_code_respects_user_override() -> None:
         modified = auto_inject_trust_remote_code(cfg, "some/model", "vllm")
 
     assert modified == []
-    args = cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
-        "mainContainer"
-    ]["args"]
+    args = cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"][
+        "args"
+    ]
     assert args.count("--trust-remote-code") == 1
 
 
@@ -1037,12 +1037,12 @@ def test_auto_inject_trust_remote_code_uses_per_service_model_arg() -> None:
         # Fallback model does NOT have auto_map; the worker's --model does.
         modified = auto_inject_trust_remote_code(cfg, "original/model", "vllm")
 
-    assert modified == ["VllmDecodeWorker"], (
-        "Should inject because the worker's --model arg points to a model with auto_map"
-    )
-    args = cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
-        "mainContainer"
-    ]["args"]
+    assert modified == [
+        "VllmDecodeWorker"
+    ], "Should inject because the worker's --model arg points to a model with auto_map"
+    args = cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"][
+        "args"
+    ]
     assert "--trust-remote-code" in args
 
 
