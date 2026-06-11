@@ -565,18 +565,23 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     /// Query all workers for the potential blocks and tokens.
-    pub fn potential_blocks_and_tokens(
+    pub fn potential_blocks_and_tokens<const INCLUDE_ACTIVE_REQUESTS: bool>(
         &self,
         token_sequence: Option<&[SequenceHash]>,
         prefill_token_deltas: &PrefillTokenDeltas,
     ) -> (
         FxHashMap<WorkerWithDpRank, usize>,
         FxHashMap<WorkerWithDpRank, usize>,
+        Option<FxHashMap<WorkerWithDpRank, usize>>,
     ) {
-        self.potential_blocks_and_tokens_at(token_sequence, prefill_token_deltas, Instant::now())
+        self.potential_blocks_and_tokens_at::<INCLUDE_ACTIVE_REQUESTS>(
+            token_sequence,
+            prefill_token_deltas,
+            Instant::now(),
+        )
     }
 
-    pub fn potential_blocks_and_tokens_at(
+    pub fn potential_blocks_and_tokens_at<const INCLUDE_ACTIVE_REQUESTS: bool>(
         &self,
         token_sequence: Option<&[SequenceHash]>,
         prefill_token_deltas: &PrefillTokenDeltas,
@@ -584,6 +589,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     ) -> (
         FxHashMap<WorkerWithDpRank, usize>,
         FxHashMap<WorkerWithDpRank, usize>,
+        Option<FxHashMap<WorkerWithDpRank, usize>>,
     ) {
         #[cfg(feature = "bench")]
         let start = tokio::time::Instant::now();
@@ -591,11 +597,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         #[cfg(feature = "bench")]
         let num_workers = self.workers.read().slots.len();
 
-        let result = self.prompt_registry.potential_blocks_and_tokens(
-            token_sequence,
-            prefill_token_deltas,
-            decay_now,
-        );
+        let result = self
+            .prompt_registry
+            .potential_blocks_and_tokens::<INCLUDE_ACTIVE_REQUESTS>(
+                token_sequence,
+                prefill_token_deltas,
+                decay_now,
+            );
 
         #[cfg(feature = "bench")]
         {
@@ -1494,7 +1502,7 @@ mod tests {
         let expected =
             naive_potential_loads(&sequences, Some(&prompt), &prefill_token_deltas, decay_now);
 
-        let actual = sequences.potential_blocks_and_tokens_at(
+        let actual = sequences.potential_blocks_and_tokens_at::<false>(
             Some(&prompt),
             &prefill_token_deltas,
             decay_now,
@@ -1525,7 +1533,7 @@ mod tests {
             )
             .unwrap();
 
-        let (potential_blocks, _) = sequences.potential_blocks_and_tokens_at(
+        let (potential_blocks, _, _) = sequences.potential_blocks_and_tokens_at::<false>(
             Some(&[1, 2, 3, 5]),
             &PrefillTokenDeltas::none(),
             decay_now,
@@ -1581,7 +1589,7 @@ mod tests {
             &PrefillTokenDeltas::none(),
             decay_now,
         );
-        let actual = sequences.potential_blocks_and_tokens_at(
+        let actual = sequences.potential_blocks_and_tokens_at::<false>(
             Some(&base_prompt),
             &PrefillTokenDeltas::none(),
             decay_now,
@@ -1641,12 +1649,13 @@ mod tests {
             &PrefillTokenDeltas::none(),
             decay_now,
         );
-        let actual = sequences.potential_blocks_and_tokens_at(
+        let actual = sequences.potential_blocks_and_tokens_at::<false>(
             Some(&prompt_b),
             &PrefillTokenDeltas::none(),
             decay_now,
         );
-        assert_eq!(actual, expected);
+        assert_eq!(actual.0, expected.0);
+        assert_eq!(actual.1, expected.1);
         assert_eq!(actual.0.get(&worker_a).copied(), Some(4));
         assert_eq!(actual.0.get(&worker_b).copied(), Some(3));
 
@@ -1658,12 +1667,13 @@ mod tests {
             &PrefillTokenDeltas::none(),
             decay_now,
         );
-        let actual_after_free = sequences.potential_blocks_and_tokens_at(
+        let actual_after_free = sequences.potential_blocks_and_tokens_at::<false>(
             Some(&prompt_b),
             &PrefillTokenDeltas::none(),
             decay_now,
         );
-        assert_eq!(actual_after_free, expected_after_free);
+        assert_eq!(actual_after_free.0, expected_after_free.0);
+        assert_eq!(actual_after_free.1, expected_after_free.1);
         assert_eq!(actual_after_free.0.get(&worker_a).copied(), Some(4));
         assert_eq!(actual_after_free.0.get(&worker_b).copied(), Some(3));
 
@@ -1746,12 +1756,13 @@ mod tests {
             &PrefillTokenDeltas::none(),
             Instant::now(),
         );
-        let actual = sequences.potential_blocks_and_tokens_at(
+        let actual = sequences.potential_blocks_and_tokens_at::<false>(
             Some(&[1, 2, 3]),
             &PrefillTokenDeltas::none(),
             Instant::now(),
         );
-        assert_eq!(actual, expected);
+        assert_eq!(actual.0, expected.0);
+        assert_eq!(actual.1, expected.1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2455,8 +2466,11 @@ mod tests {
         let active_tokens = sequences.active_tokens(decay_now);
         assert_eq!(active_tokens.get(&worker).copied(), Some(50));
 
-        let (_, potential_tokens) =
-            sequences.potential_blocks_and_tokens_at(None, &PrefillTokenDeltas::none(), decay_now);
+        let (_, potential_tokens, _) = sequences.potential_blocks_and_tokens_at::<false>(
+            None,
+            &PrefillTokenDeltas::none(),
+            decay_now,
+        );
         assert_eq!(potential_tokens.get(&worker).copied(), Some(50));
 
         assert!(

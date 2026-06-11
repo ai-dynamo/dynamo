@@ -132,7 +132,7 @@ impl PromptRegistry {
         self.membership.maybe_cleanup();
     }
 
-    fn project_loads_from_membership(
+    fn project_loads_from_membership<const INCLUDE_ACTIVE_REQUESTS: bool>(
         &self,
         query_len: usize,
         matched_depth: &FxHashMap<WorkerWithDpRank, usize>,
@@ -141,11 +141,14 @@ impl PromptRegistry {
     ) -> (
         FxHashMap<WorkerWithDpRank, usize>,
         FxHashMap<WorkerWithDpRank, usize>,
+        Option<FxHashMap<WorkerWithDpRank, usize>>,
     ) {
         let mut potential_blocks =
             FxHashMap::with_capacity_and_hasher(self.loads.len(), FxBuildHasher);
         let mut potential_tokens =
             FxHashMap::with_capacity_and_hasher(self.loads.len(), FxBuildHasher);
+        let mut active_requests = INCLUDE_ACTIVE_REQUESTS
+            .then(|| FxHashMap::with_capacity_and_hasher(self.loads.len(), FxBuildHasher));
 
         for entry in &self.loads {
             let worker = *entry.key();
@@ -157,12 +160,15 @@ impl PromptRegistry {
 
             potential_blocks.insert(worker, load.active_blocks + new_blocks);
             potential_tokens.insert(worker, active_tokens + added_tokens);
+            if let Some(active_requests) = active_requests.as_mut() {
+                active_requests.insert(worker, load.active_requests);
+            }
         }
 
-        (potential_blocks, potential_tokens)
+        (potential_blocks, potential_tokens, active_requests)
     }
 
-    pub(super) fn potential_blocks_and_tokens(
+    pub(super) fn potential_blocks_and_tokens<const INCLUDE_ACTIVE_REQUESTS: bool>(
         &self,
         token_sequence: Option<&[SequenceHash]>,
         prefill_token_deltas: &PrefillTokenDeltas,
@@ -170,10 +176,11 @@ impl PromptRegistry {
     ) -> (
         FxHashMap<WorkerWithDpRank, usize>,
         FxHashMap<WorkerWithDpRank, usize>,
+        Option<FxHashMap<WorkerWithDpRank, usize>>,
     ) {
         let query_len = token_sequence.map_or(0, |query| query.len());
         let matched_depth = self.membership.compute_overlap_depths(token_sequence);
-        self.project_loads_from_membership(
+        self.project_loads_from_membership::<INCLUDE_ACTIVE_REQUESTS>(
             query_len,
             &matched_depth,
             prefill_token_deltas,
@@ -422,13 +429,14 @@ mod tests {
             &PrefillTokenDeltas::none(),
             decay_now,
         );
-        let actual = registry.potential_blocks_and_tokens(
+        let actual = registry.potential_blocks_and_tokens::<false>(
             Some(&full_prompt),
             &PrefillTokenDeltas::none(),
             decay_now,
         );
 
-        assert_eq!(actual, expected);
+        assert_eq!(actual.0, expected.0);
+        assert_eq!(actual.1, expected.1);
     }
 
     #[test]
@@ -457,7 +465,7 @@ mod tests {
         registry.assert_consistent_with_workers(&expected_loads, &expected_blocks);
         assert_eq!(registry.active_tokens(now).get(&worker).copied(), Some(9));
 
-        let actual = registry.potential_blocks_and_tokens(
+        let actual = registry.potential_blocks_and_tokens::<false>(
             Some(&[1, 2, 3]),
             &PrefillTokenDeltas::none(),
             now,
@@ -503,7 +511,7 @@ mod tests {
         registry.assert_consistent_with_workers(&expected_loads, &expected_blocks);
         assert!(!registry.active_blocks().contains_key(&worker_a));
 
-        let actual = registry.potential_blocks_and_tokens(
+        let actual = registry.potential_blocks_and_tokens::<false>(
             Some(&[1, 2, 3]),
             &PrefillTokenDeltas::none(),
             Instant::now(),
@@ -545,12 +553,13 @@ mod tests {
             &PrefillTokenDeltas::none(),
             decay_now,
         );
-        let actual = registry.potential_blocks_and_tokens(
+        let actual = registry.potential_blocks_and_tokens::<false>(
             Some(&[1, 2, 3]),
             &PrefillTokenDeltas::none(),
             decay_now,
         );
 
-        assert_eq!(actual, expected);
+        assert_eq!(actual.0, expected.0);
+        assert_eq!(actual.1, expected.1);
     }
 }

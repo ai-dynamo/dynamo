@@ -570,11 +570,12 @@ impl<
     /// Run the full scheduling pipeline for a single request:
     /// compute potential load -> select worker -> book tracked state -> respond.
     fn admit_one(&self, mut request: SchedulingRequest, decay_now: Instant) {
-        let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens_at(
-            request.token_seq.as_deref(),
-            &request.prefill_token_deltas(),
-            decay_now,
-        );
+        let (decode_blocks, prefill_tokens, _) =
+            self.slots.potential_blocks_and_tokens_at::<false>(
+                request.token_seq.as_deref(),
+                &request.prefill_token_deltas(),
+                decay_now,
+            );
         request.decode_blocks = decode_blocks;
         request.prefill_tokens = prefill_tokens;
 

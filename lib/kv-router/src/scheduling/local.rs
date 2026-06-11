@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -378,20 +378,16 @@ where
         } else {
             PrefillTokenDeltas::none()
         };
-        let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens_at(
-            token_seq.as_deref(),
-            &prefill_token_deltas,
-            decay_now,
-        );
-        let active_requests = self.slots.active_request_counts();
+        let (decode_blocks, prefill_tokens, active_requests) =
+            self.slots.potential_blocks_and_tokens_at::<true>(
+                token_seq.as_deref(),
+                &prefill_token_deltas,
+                decay_now,
+            );
+        let active_requests = active_requests.expect("active request projection should be present");
 
-        let mut workers: FxHashSet<WorkerWithDpRank> = FxHashSet::default();
-        workers.extend(decode_blocks.keys().copied());
-        workers.extend(prefill_tokens.keys().copied());
-        workers.extend(active_requests.keys().copied());
-
-        let mut loads = Vec::with_capacity(workers.len());
-        for worker in workers {
+        let mut loads = Vec::with_capacity(decode_blocks.len());
+        for (worker, potential_decode_blocks) in decode_blocks {
             loads.push(PotentialLoad {
                 worker_id: worker.worker_id,
                 dp_rank: worker.dp_rank,
@@ -399,7 +395,7 @@ where
                     .get(&worker)
                     .copied()
                     .unwrap_or(isl_tokens),
-                potential_decode_blocks: decode_blocks.get(&worker).copied().unwrap_or(0),
+                potential_decode_blocks,
                 active_requests: active_requests.get(&worker).copied().unwrap_or(0),
             });
         }
@@ -1157,8 +1153,8 @@ mod tests {
         let token_seq = vec![11, 22, 33, 44];
 
         let prefill_token_deltas = PrefillTokenDeltas::uniform(128);
-        let (decode_blocks, prefill_tokens) =
-            slots.potential_blocks_and_tokens(Some(&token_seq), &prefill_token_deltas);
+        let (decode_blocks, prefill_tokens, _) =
+            slots.potential_blocks_and_tokens::<false>(Some(&token_seq), &prefill_token_deltas);
         let mut expected: Vec<_> = decode_blocks
             .keys()
             .map(|worker| PotentialLoad {
