@@ -25,6 +25,38 @@ The Rust HTTP server also reads these environment variables (not exposed as CLI 
 | `DYN_HTTP_BODY_LIMIT_MB` | `192` | Maximum request body size in MB |
 | `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `5` | Graceful shutdown timeout in seconds |
 
+## Stateful Responses
+
+The `/v1/responses` endpoint stores response context when `store` is `true` or omitted. A later request can continue that context by setting `previous_response_id`. `DELETE /v1/responses/{response_id}` removes a stored context.
+
+The Rust frontend reads these environment variables:
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `DYN_STATEFUL_RESPONSES_STORE_URL` | `memory` | Context store URL. Supported schemes depend on build features; see below. |
+| `DYN_STATEFUL_RESPONSES_DEFAULT_TTL_SECS` | `2592000` (30 days) | Context lifetime. Set to `0`, `false`, `none`, or `never` to disable expiration. |
+| `DYN_STATEFUL_RESPONSES_TTL_SWEEP_SECS` | `3600` (1 hour) | Expired-context sweep interval. Set to `0`, `false`, `none`, or `never` to disable background sweeping. |
+
+Store URL schemes:
+
+| URL | Build requirement | Intended use |
+|-----|-------------------|--------------|
+| `memory` | None | Default for development and a single frontend process. State is lost on restart and is not shared across replicas. |
+| `redb:/path/to/context.redb` | `stateful-responses-redb` feature | Persistent storage for a single frontend process. Do not share one redb file between frontend replicas. |
+| `tikv://pd1:2379,pd2:2379/prefix` | `stateful-responses-tikv` feature | Shared storage for multiple frontend replicas. The prefix is optional and defaults to `dynamo/stateful-responses/`. |
+
+For high availability, all frontend replicas must use the same shared store. The `memory` and `redb` stores cannot preserve `previous_response_id` continuity when requests move between replicas.
+
+The current TiKV configuration accepts PD endpoints and a key prefix only. It does not expose TiKV client TLS or authentication settings. Keep the TiKV connection on a trusted network; deployments that require client TLS or authentication should not use this backend until those settings are supported.
+
+Example:
+
+```bash
+export DYN_STATEFUL_RESPONSES_STORE_URL='tikv://tikv-pd-0:2379,tikv-pd-1:2379/dynamo/responses/'
+export DYN_STATEFUL_RESPONSES_DEFAULT_TTL_SECS=86400
+python -m dynamo.frontend --http-port 8000
+```
+
 ## Router
 
 | CLI Argument | Env Var | Default | Description |
@@ -141,6 +173,7 @@ The frontend exposes the following HTTP endpoints:
 | `POST` | `/v1/completions` | Text completions |
 | `POST` | `/v1/embeddings` | Text embeddings |
 | `POST` | `/v1/responses` | Responses API |
+| `DELETE` | `/v1/responses/{response_id}` | Delete stored Responses context |
 | `POST` | `/v1/images/generations` | Image generation |
 | `POST` | `/v1/videos/generations` | Video generation |
 | `POST` | `/v1/videos/generations/stream` | Video generation (streaming) |
