@@ -537,6 +537,36 @@ fn copy_x_request_id<T: Send + Sync + 'static, U: Send + Sync + 'static>(
 /// OpenAI Completions Request Handler
 ///
 /// This method will handle the incoming request for the `/v1/completions endpoint`. The endpoint is a "source"
+/// Emit a single warning when a request carries `nvext` data — either a body
+/// `nvext` object or one of the routing-override headers — while the frontend
+/// `nvext` extension is disabled (`DYN_ENABLE_FRONTEND_NVEXT`). The data is
+/// dropped regardless; this just makes the otherwise-silent strip observable.
+///
+/// Only ever called from the disabled branch, so it adds nothing to the
+/// default (nvext-enabled) request path.
+fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap) {
+    use crate::protocols::openai::nvext::{
+        HEADER_DP_RANK, HEADER_DP_RANK_ALIAS, HEADER_PREFILL_DP_RANK, HEADER_PREFILL_INSTANCE_ID,
+        HEADER_WORKER_INSTANCE_ID,
+    };
+    let header_present = [
+        HEADER_WORKER_INSTANCE_ID,
+        HEADER_PREFILL_INSTANCE_ID,
+        HEADER_DP_RANK,
+        HEADER_DP_RANK_ALIAS,
+        HEADER_PREFILL_DP_RANK,
+    ]
+    .iter()
+    .any(|h| headers.contains_key(*h));
+
+    if nvext_present || header_present {
+        tracing::warn!(
+            endpoint,
+            "request carried nvext data (body and/or routing headers) but DYN_ENABLE_FRONTEND_NVEXT is disabled; dropping it"
+        );
+    }
+}
+
 /// for an [`super::OpenAICompletionsStreamingEngine`] and will return a stream of
 /// responses which will be forward to the client.
 ///
@@ -554,6 +584,7 @@ async fn handler_completions(
     request.nvext = if state.nvext_enabled() {
         apply_header_routing_overrides(request.nvext.take(), &headers)
     } else {
+        warn_nvext_disabled("completions", request.nvext.is_some(), &headers);
         None
     };
 
@@ -982,6 +1013,7 @@ async fn embeddings(
     check_model_serving_ready(&state, &request.inner.model)?;
 
     if !state.nvext_enabled() {
+        warn_nvext_disabled("embeddings", request.nvext.is_some(), &headers);
         request.nvext = None;
     }
 
@@ -1153,6 +1185,7 @@ async fn handler_chat_completions(
     request.nvext = if state.nvext_enabled() {
         apply_header_routing_overrides(request.nvext.take(), &headers)
     } else {
+        warn_nvext_disabled("chat_completions", request.nvext.is_some(), &headers);
         None
     };
 
@@ -1906,6 +1939,7 @@ async fn handler_responses(
     request.nvext = if state.nvext_enabled() {
         apply_header_routing_overrides(request.nvext.take(), &headers)
     } else {
+        warn_nvext_disabled("responses", request.nvext.is_some(), &headers);
         None
     };
 
