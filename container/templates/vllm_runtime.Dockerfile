@@ -19,10 +19,6 @@ ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG VLLM_OMNI_REF
-# Optional: install vLLM-Omni from this git commit/branch/tag instead of the
-# pinned PyPI release (e.g. when PyPI has no build matching the vLLM base).
-# Empty -> PyPI path (default). See container/deps/vllm/install_vllm_omni.sh.
-ARG VLLM_OMNI_GIT_REF=
 ARG NIXL_REF
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
@@ -171,15 +167,13 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     fi
 
 # vLLM-Omni's audio helpers shell out to SoX, and the launch script examples use
-# jq for readable curl output just like the upstream omni image does. git is
-# needed when VLLM_OMNI_GIT_REF selects a git install of vLLM-Omni.
+# jq for readable curl output just like the upstream omni image does.
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         jq \
         sox \
-        libsox-fmt-all \
-        git; \
+        libsox-fmt-all; \
     rm -rf /var/lib/apt/lists/*
 
 # Layer the released vLLM-Omni package matching the pinned upstream ref while
@@ -190,7 +184,6 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
     export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
-    export VLLM_OMNI_GIT_REF="${VLLM_OMNI_GIT_REF:-}"; \
     bash /tmp/install_vllm_omni.sh
 
 {% if device == "xpu" %}

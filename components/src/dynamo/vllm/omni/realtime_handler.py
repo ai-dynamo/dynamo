@@ -96,6 +96,10 @@ class _Turn:
     def __init__(self, output_modalities: list[str] | None = None) -> None:
         self.response_id = f"resp_{uuid.uuid4().hex}"
         self.item_id = f"item_{uuid.uuid4().hex}"
+        # Unbounded on purpose: filled by non-blocking put_nowait so the inbound
+        # demux never stalls control events (commit/clear/session.update) behind
+        # audio backpressure; paced by the client's input rate and drained by the
+        # engine.
         self.audio_queue: asyncio.Queue[Optional[np.ndarray]] = asyncio.Queue()
         self.audio_ref: np.ndarray | None = None
         self.task: asyncio.Task | None = None
@@ -131,17 +135,16 @@ class RealtimeOmniHandler:
         events onto a shared queue; this coroutine yields them in arrival order
         until the input stream ends and every in-flight turn has drained.
         """
-        out_queue: asyncio.Queue[Optional[dict]] = asyncio.Queue()
+        # Bounded for backpressure: a slow client (the consumer draining this
+        # queue) blocks emit() rather than letting server events pile up unbounded.
+        out_queue: asyncio.Queue[Optional[dict]] = asyncio.Queue(maxsize=256)
         active_turn: _Turn | None = None
         turns: list[_Turn] = []
         # Latest output modalities requested by the client via session.update;
         # snapshotted into each turn so the engine emits text/audio accordingly.
         session_output_modalities: list[str] | None = None
-        # Serialize turns so at most one response is in flight at a time, matching
-        # vLLM-Omni's single-active-generation assumption (its realtime connection
-        # ignores a commit while one is running). A new turn's audio still buffers
-        # via pump while it waits, so input is not dropped; responses are emitted
-        # strictly one-at-a-time and in order, which keeps response_id unambiguous.
+        # Serialize turns: at most one response in flight at a time, matching
+        # vLLM-Omni's single-active-generation model (see _run_turn).
         turn_lock = asyncio.Lock()
 
         async def emit(event: dict) -> None:
@@ -195,7 +198,10 @@ class RealtimeOmniHandler:
                             turn.audio_queue.put_nowait(None)
                             active_turn = None
                     elif etype == "input_audio_buffer.clear":
-                        # Drop anything buffered but not yet consumed; best effort.
+                        # Per the spec, clear only discards the *input* buffer (not
+                        # yet committed); it does not cancel an in-flight response
+                        # (that's response.cancel). After a final commit active_turn
+                        # is None, so a clear correctly no-ops.
                         if active_turn is not None:
                             _drain_queue(active_turn.audio_queue)
                     else:
@@ -227,6 +233,14 @@ class RealtimeOmniHandler:
             for turn in turns:
                 if turn.task is not None:
                     turn.task.cancel()
+            # Drive cancellation to completion so each turn's engine generate()
+            # async-gen is closed; otherwise the request leaks and asyncio warns
+            # about pending tasks.
+            await asyncio.gather(
+                pump_task,
+                *(turn.task for turn in turns if turn.task is not None),
+                return_exceptions=True,
+            )
 
     async def _run_turn(
         self,
@@ -264,6 +278,10 @@ class RealtimeOmniHandler:
                     for chunk in self._extract_audio_chunks(turn, output):
                         sent_audio = True
                         await emit(self._audio_delta_event(turn, chunk))
+
+                if context.is_stopped():
+                    # Connection torn down mid-turn; don't claim a completed response.
+                    return
 
                 if sent_audio:
                     await emit(self._audio_done_event(turn))
@@ -446,10 +464,15 @@ def _decode_pcm16(audio_b64: str) -> np.ndarray | None:
     """
     if not audio_b64:
         return None
-    waveform = (
-        np.frombuffer(base64.b64decode(audio_b64), dtype=np.int16).astype(np.float32)
-        / 32768.0
-    )
+    raw = base64.b64decode(audio_b64)
+    if len(raw) % 2:
+        # PCM16 is 2-byte aligned; np.frombuffer would raise. Drop the malformed
+        # chunk rather than let one bad frame tear down the whole session.
+        logger.warning(
+            "realtime omni: dropping odd-length (%d-byte) audio chunk", len(raw)
+        )
+        return None
+    waveform = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
     return waveform if waveform.size else None
 
 
@@ -499,7 +522,9 @@ def _raw_waveform_to_deltas(turn: _Turn, arr: np.ndarray) -> list[np.ndarray]:
         delta = arr[ref.shape[0] :]
         turn.audio_ref = arr.copy()
         return [delta] if delta.size > 0 else []
-    # True per-step delta (not a prefix extension of what we have seen).
+    # True per-step delta (not a prefix extension of what we have seen). The
+    # growing concat makes this O(n^2) over a response, but per-response audio is
+    # bounded (seconds); kept to mirror vLLM-Omni's realtime_connection handling.
     turn.audio_ref = np.concatenate([ref, arr])
     return [arr]
 
