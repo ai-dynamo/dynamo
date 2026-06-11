@@ -27,35 +27,11 @@ This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo)
 The local Docker workflow builds a runtime image from the [`Dockerfile`](https://github.com/ai-dynamo/dynamo/tree/main/examples/diffusers/Dockerfile):
 
 - Base image: `nvidia/cuda:13.1.1-devel-ubuntu24.04`
-- Installs [FastVideo](https://github.com/hao-ai-lab/FastVideo) from a pinned Git commit with `fastvideo.api` and NVFP4 transformer quantization support
+- Installs [FastVideo](https://github.com/hao-ai-lab/FastVideo) `0.2.0` from PyPI, which provides the `fastvideo.api` typed surface and NVFP4 transformer quantization support
 - Installs the `ai-dynamo` package with `/v1/videos` support
-- Compiles a [flash-attention](https://github.com/RandNMR73/flash-attention) fork from source
 
-The Dockerfile exposes `TORCH_CUDA_ARCH_LIST` as a build argument (default: `10.0 10.0a 12.0` for Blackwell data center GPUs and RTX 50-series GPUs). Pass `--build-arg` to target a different architecture:
-
-```bash
-# Blackwell (default)
-docker build examples/diffusers/ --build-arg TORCH_CUDA_ARCH_LIST="10.0 10.0a 12.0"
-
-# Hopper
-docker build examples/diffusers/ --build-arg TORCH_CUDA_ARCH_LIST="9.0 9.0a"
-```
-
-`MAX_JOBS` (default: `4`) controls parallel compilation jobs for flash-attention. Lower it if the build runs out of memory:
-
-```bash
-docker build examples/diffusers/ --build-arg MAX_JOBS=2
-```
-
-When using Docker Compose, set these as environment variables before running `docker compose up --build`:
-
-```bash
-# Hopper on a memory-constrained builder
-TORCH_CUDA_ARCH_LIST="9.0 9.0a" MAX_JOBS=2 COMPOSE_PROFILES=4 docker compose up --build
-```
-
-> [!WARNING]
-> The first Docker image build can take **20–40+ minutes** because FastVideo and CUDA-dependent components are compiled during the build. Subsequent builds are much faster if Docker layer cache is preserved. Compiling `flash-attention` can use significant RAM — low-memory builders may hit out-of-memory failures. If that happens, lower `MAX_JOBS` in the Dockerfile to reduce parallel compile memory usage. The [flash-attn install notes](https://pypi.org/project/flash-attn/) specifically recommend this on machines with less than 96 GB RAM and many CPU cores.
+> [!NOTE]
+> A from-source [flash-attention](https://github.com/RandNMR73/flash-attention) (FA4) build is deferred for now. The worker runs on FastVideo's default attention backends without it.
 
 ## Warmup Time
 
@@ -320,8 +296,6 @@ FastVideo exposes generated audio and `audio_sample_rate` on its Python result o
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| OOM during Docker build | `flash-attention` compilation uses too much RAM | Pass `--build-arg MAX_JOBS=2` (or lower) at build time |
-| `no kernel image available for this GPU` or CUDA arch error at runtime | Image was built for a different GPU architecture | Rebuild with the correct `TORCH_CUDA_ARCH_LIST` (e.g. `9.0 9.0a` for Hopper or `12.0` for RTX 50-series) |
 | 10–20 min wait on first start with `--torch-compile` enabled | Model download + `torch.compile` warmup | Expected behavior; subsequent starts are faster if weights are cached |
 | ~35 s second request | Runtime caches still warming | Steady-state performance from third request onward |
 | Lower throughput than expected on Blackwell GPUs | NVFP4/compile are opt-in | Pass `--fp4-quantization` and, if desired, `--torch-compile`; confirm NVFP4 activation in worker logs |
