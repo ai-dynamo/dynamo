@@ -30,7 +30,8 @@ use crate::replay::TraceCollector;
 use crate::scheduler::vllm::policy::{self, AdmissionDecision};
 use crate::scheduler::{
     AdmissionEvent, CapturedRouterEventBuffer, EnginePassResult, ForwardPassSnapshot,
-    MockerMetrics, RouterEventVisibility, build_fpm_snapshot, capture_router_event_sink,
+    MockerMetrics, RouterEventVisibility, accept_length_sample, build_fpm_snapshot,
+    capture_router_event_sink,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -407,6 +408,11 @@ impl VllmCore {
         kv_event_publishers: KvEventPublishers,
     ) -> Self {
         let args = args.normalized().expect("invalid MockEngineArgs");
+        let kv_event_publishers = if args.enable_prefix_caching {
+            kv_event_publishers
+        } else {
+            KvEventPublishers::default()
+        };
         let speculative_sampler = args.aic_nextn.map(|nextn| {
             let rates =
                 normalize_conditional_accept_rates(nextn, args.aic_nextn_accept_rates.as_deref())
@@ -598,16 +604,15 @@ impl VllmCore {
             unique
                 .iter()
                 .zip(plhs.iter())
-                .zip(local_hashes.iter())
-                .zip(token_ids.iter())
+                .enumerate()
                 .skip(skip)
                 .take(count)
-                .filter_map(|(((block, plh), local), token_ids)| match block {
+                .filter_map(|(idx, (block, plh))| match block {
                     UniqueBlock::FullBlock(seq_hash) => Some(SwapInRegistrationBlock {
                         seq_hash: *seq_hash,
                         plh: *plh,
-                        local_hash: *local,
-                        token_ids: Some(token_ids.clone()),
+                        local_hash: local_hashes.get(idx).copied(),
+                        token_ids: token_ids.get(idx).cloned(),
                     }),
                     UniqueBlock::PartialBlock(_) => None,
                 })
@@ -933,6 +938,8 @@ impl VllmCore {
         }
 
         let fpm = self.compute_fpm(&scheduled, (end_ms - now_ms) / 1000.0);
+        let (accept_length_output_tokens, accept_length_decode_forwards) =
+            accept_length_sample(&output_signals);
         self.state.debug_assert_invariants();
         EnginePassResult {
             end_ms,
@@ -947,6 +954,8 @@ impl VllmCore {
                 .map(CapturedRouterEventBuffer::drain)
                 .unwrap_or_default(),
             fpm: Some(fpm),
+            accept_length_output_tokens,
+            accept_length_decode_forwards,
         }
     }
 

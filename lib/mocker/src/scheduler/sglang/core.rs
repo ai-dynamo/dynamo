@@ -19,7 +19,7 @@ use super::prefill::get_new_batch_prefill;
 use super::request::SglangRequest;
 use crate::scheduler::{
     CapturedRouterEventBuffer, EnginePassResult, MockerMetrics, RouterEventVisibility,
-    build_fpm_snapshot, capture_router_event_sink,
+    accept_length_sample, build_fpm_snapshot, capture_router_event_sink,
 };
 
 pub(crate) struct SglangCore {
@@ -236,6 +236,8 @@ impl SglangCore {
             (decode.end_ms - now_ms) / 1000.0,
         );
 
+        let (accept_length_output_tokens, accept_length_decode_forwards) =
+            accept_length_sample(&decode.output_signals);
         debug_assert_sglang_scheduler_state(&self.waiting, &self.running, self.config.block_size);
         let active_decode_blocks = self.active_kv_blocks();
         EnginePassResult {
@@ -264,6 +266,8 @@ impl SglangCore {
                 .map(CapturedRouterEventBuffer::drain)
                 .unwrap_or_default(),
             fpm: Some(fpm),
+            accept_length_output_tokens,
+            accept_length_decode_forwards,
         }
     }
 

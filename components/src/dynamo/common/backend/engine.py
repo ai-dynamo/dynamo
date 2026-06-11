@@ -7,7 +7,9 @@ import os
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Optional, Required, TypedDict
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict
+
+from typing_extensions import Required
 
 from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode

@@ -26,12 +26,14 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -69,6 +71,7 @@ func checkpointTestScheme() *runtime.Scheme {
 	_ = corev1.AddToScheme(s)
 	_ = batchv1.AddToScheme(s)
 	_ = coordinationv1.AddToScheme(s)
+	_ = resourcev1.AddToScheme(s)
 	return s
 }
 
@@ -249,8 +252,13 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.Equal(t, int32(0), *job.Spec.BackoffLimit)
 	assert.Equal(t, int32(300), *job.Spec.TTLSecondsAfterFinished)
 
-	// Multi-GPU: wrapping decision uses identity.TensorParallelSize, not container GPU limits.
+	// Deprecated identity fields no longer control checkpoint launch wrapping.
 	ckpt.Spec.Identity.TensorParallelSize = 2
+	job, err = buildCheckpointJob(context.Background(), nil, r.Config, ckpt, defaultCheckpointJobName)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"python3", "-m", "dynamo.vllm"}, job.Spec.Template.Spec.Containers[0].Command)
+
+	// Multi-GPU: wrapping decision uses target-container GPU resources.
 	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Resources = corev1.ResourceRequirements{
 		Limits: corev1.ResourceList{
 			corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2"),
@@ -265,7 +273,6 @@ func TestBuildCheckpointJob(t *testing.T) {
 func TestBuildCheckpointJobWrapsWithCudaCheckpointForMultiGPU(t *testing.T) {
 	s := checkpointTestScheme()
 	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
-	ckpt.Spec.Identity.TensorParallelSize = 2
 	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers = []corev1.Container{
 		{
 			Name:    consts.MainContainerName,
@@ -309,6 +316,127 @@ func TestBuildCheckpointJobWrapsWithCudaCheckpointForMultiGPU(t *testing.T) {
 	assert.Nil(t, sidecar.StartupProbe)
 	for _, env := range sidecar.Env {
 		assert.NotEqual(t, snapshotprotocol.SnapshotControlDirEnv, env.Name)
+	}
+}
+
+func TestBuildCheckpointJobDRAResourceClaimsForCudaCheckpoint(t *testing.T) {
+	tests := []struct {
+		name          string
+		resourceClaim bool
+		missing       bool
+		deviceClass   string
+		gmsClass      string
+		allocation    resourcev1.DeviceAllocationMode
+		count         int64
+		wantWrap      bool
+		wantErr       string
+	}{
+		{
+			name:        "resource claim template exact count",
+			deviceClass: dra.DefaultDeviceClassName,
+			allocation:  resourcev1.DeviceAllocationModeExactCount,
+			count:       2,
+			wantWrap:    true,
+		},
+		{
+			name:          "resource claim exact count",
+			resourceClaim: true,
+			deviceClass:   dra.DefaultDeviceClassName,
+			allocation:    resourcev1.DeviceAllocationModeExactCount,
+			count:         2,
+			wantWrap:      true,
+		},
+		{
+			name:        "allocation mode all",
+			deviceClass: dra.DefaultDeviceClassName,
+			allocation:  resourcev1.DeviceAllocationModeAll,
+			wantWrap:    true,
+		},
+		{
+			name:        "custom configured device class",
+			deviceClass: "gpu.nvidia.com/h100",
+			gmsClass:    "gpu.nvidia.com/h100",
+			allocation:  resourcev1.DeviceAllocationModeExactCount,
+			count:       2,
+			wantWrap:    true,
+		},
+		{
+			name:        "unconfigured device class",
+			deviceClass: "gpu.nvidia.com/h100",
+			allocation:  resourcev1.DeviceAllocationModeExactCount,
+			count:       2,
+			wantWrap:    false,
+		},
+		{
+			name:    "missing template",
+			missing: true,
+			wantErr: "failed to get ResourceClaimTemplate default/checkpoint-gpu for checkpoint GPU count",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := checkpointTestScheme()
+			ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
+			if tt.gmsClass != "" {
+				ckpt.Spec.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled:         true,
+					DeviceClassName: tt.gmsClass,
+				}
+			}
+			podClaim := corev1.PodResourceClaim{Name: "gpu"}
+			if tt.resourceClaim {
+				podClaim.ResourceClaimName = ptr.To("checkpoint-gpu")
+			} else {
+				podClaim.ResourceClaimTemplateName = ptr.To("checkpoint-gpu")
+			}
+			ckpt.Spec.Job.PodTemplateSpec.Spec.ResourceClaims = []corev1.PodResourceClaim{podClaim}
+			ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+				Claims: []corev1.ResourceClaim{{Name: "gpu"}},
+			}
+
+			objects := []client.Object{ckpt}
+			if !tt.missing {
+				request := resourcev1.DeviceRequest{
+					Name: "gpus",
+					Exactly: &resourcev1.ExactDeviceRequest{
+						DeviceClassName: tt.deviceClass,
+						AllocationMode:  tt.allocation,
+						Count:           tt.count,
+					},
+				}
+				claimSpec := resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{request}}}
+				if tt.resourceClaim {
+					objects = append(objects, &resourcev1.ResourceClaim{
+						ObjectMeta: metav1.ObjectMeta{Name: "checkpoint-gpu", Namespace: testNamespace},
+						Spec:       claimSpec,
+					})
+				} else {
+					objects = append(objects, &resourcev1.ResourceClaimTemplate{
+						ObjectMeta: metav1.ObjectMeta{Name: "checkpoint-gpu", Namespace: testNamespace},
+						Spec:       resourcev1.ResourceClaimTemplateSpec{Spec: claimSpec},
+					})
+				}
+			}
+
+			r := makeCheckpointReconciler(s, objects...)
+			job, err := buildCheckpointJob(context.Background(), r.Client, r.Config, ckpt, defaultCheckpointJobName)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+
+			main := &job.Spec.Template.Spec.Containers[0]
+			if tt.wantWrap {
+				assert.Equal(t, []string{"cuda-checkpoint"}, main.Command)
+				assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, main.Args)
+			} else {
+				assert.Equal(t, []string{"python3", "-m", "dynamo.vllm"}, main.Command)
+				assert.Empty(t, main.Args)
+			}
+		})
 	}
 }
 

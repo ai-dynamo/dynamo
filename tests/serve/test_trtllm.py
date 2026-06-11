@@ -597,14 +597,16 @@ trtllm_configs = {
             pytest.mark.post_merge,
             pytest.mark.skip(reason="DIS-1566"),
             pytest.mark.timeout(
-                480
-            ),  # 3x measured time (83.85s) + download time (210s) for 7B model
+                300
+            ),  # 1.1B loads quickly; margin covers CI model download
         ],
-        model="deepseek-ai/deepseek-llm-7b-base",
+        # Base model with NO chat template (the point of completions_only),
+        # matching the vllm/sglang configs. Replaces deepseek-llm-7b-base (7B).
+        model="TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
         script_args=["--dyn-endpoint-types", "completions"],
         env={
-            "MODEL_PATH": "deepseek-ai/deepseek-llm-7b-base",
-            "SERVED_MODEL_NAME": "deepseek-ai/deepseek-llm-7b-base",
+            "MODEL_PATH": "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
+            "SERVED_MODEL_NAME": "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
         },
         request_payloads=[
             completion_payload_default(),

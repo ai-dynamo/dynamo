@@ -98,16 +98,14 @@ def test_radix_tree_binding():
 @pytest.mark.timeout(5)  # Expected: ~1s, timeout set to 5x for safety
 @pytest.mark.parametrize("num_threads", [2, 3, 5, 128])
 @pytest.mark.parametrize("prepopulate_worker_ids", [True, False])
-@pytest.mark.parametrize("expiration_duration_secs", [None])
 @pytest.mark.parametrize("is_threaded", [True, False])
 def test_radix_tree_thread_safety(
     num_threads,
     prepopulate_worker_ids,
-    expiration_duration_secs,
     is_threaded,
 ):
     """Test RadixTree thread safety by applying events from multiple threads."""
-    radix_tree = RadixTree(expiration_duration_secs=expiration_duration_secs)
+    radix_tree = RadixTree()
     threads = []
     done_counter = 0
     exception_counter = 0

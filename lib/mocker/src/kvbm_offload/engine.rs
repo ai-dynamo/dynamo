@@ -200,7 +200,7 @@ impl PendingStagedSwapIn {
 pub(crate) struct G2BlockEventMetadata {
     pub(crate) seq_hash: RouterSequenceHash,
     pub(crate) parent_hash: Option<RouterSequenceHash>,
-    pub(crate) local_hash: BlockHash,
+    pub(crate) local_hash: Option<BlockHash>,
     pub(crate) token_ids: Option<Vec<u32>>,
 }
 

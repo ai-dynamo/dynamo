@@ -514,8 +514,10 @@ def _has_dynamo_leak(case: dict[str, Any], family: str | None) -> bool:
 
 
 def _overview_status(case: dict[str, Any] | None, family: str | None, impl: str) -> str:
-    if case is None or "expected" not in case:
+    if case is None:
         return "na"
+    if "expected" not in case:
+        return "problem" if impl in _python_exception_impls(case, family) else "na"
     block = case.get("expected", {}).get(impl)
     if not isinstance(block, dict) or "unavailable" in block:
         return "na"
@@ -593,13 +595,15 @@ def _parser_marker(case: dict[str, Any] | None, family: str | None, impl: str) -
     if case is None:
         return "—"
     if "expected" not in case:
+        if impl in _python_exception_impls(case, family):
+            return "✗"
         return "n/a"
     expected = case.get("expected", {})
     block = expected.get(impl)
     if not isinstance(block, dict) or "unavailable" in block:
         return "n/a"
     if "error" in block:
-        return "!"
+        return "✗"
     if _block_leak_reason(block, family):
         return "↯"
     if impl == "dynamo":
@@ -771,11 +775,69 @@ def _is_na_stub(case: dict[str, Any]) -> bool:
     )
 
 
+def _case_has_parser_input(case: dict[str, Any]) -> bool:
+    return "model_text" in case or "chunks" in case
+
+
+def _python_peer_has_parser(family: str | None, impl: str) -> bool:
+    if family is None:
+        return False
+    if impl == "vllm":
+        return family in _FAMILY_TO_VLLM_REASONING
+    if impl == "sglang":
+        return family in _FAMILY_TO_SGLANG_REASONING
+    return False
+
+
+def _python_exception_impls(
+    case: dict[str, Any] | None,
+    family: str | None,
+) -> tuple[str, ...]:
+    """Impls whose Python parser would raise on this input-less n/a stub.
+
+    A no-`expected` n/a stub carries no `model_text`/`chunks`, so feeding it to
+    the vLLM/SGLang Python parser raises ``KeyError: 'model_text'``. Surface that
+    as a parser exception for any family that has a Python peer parser.
+    """
+    if not case or "expected" in case or not _is_na_stub(case):
+        return ()
+    if _case_has_parser_input(case):
+        return ()
+    return tuple(
+        impl for impl in ("vllm", "sglang") if _python_peer_has_parser(family, impl)
+    )
+
+
+def _python_exception_marker(
+    case: dict[str, Any] | None,
+    family: str | None,
+) -> str:
+    letters = {"vllm": "V", "sglang": "S"}
+    return "".join(
+        f"{letters[impl]}✗" for impl in _python_exception_impls(case, family)
+    )
+
+
+def _python_exception_tooltip_lines(
+    case: dict[str, Any] | None,
+    family: str | None,
+) -> list[str]:
+    names = {"vllm": "vLLM Python", "sglang": "SGLang Python"}
+    return [
+        f"{names[impl]}: parser exception — KeyError: 'model_text'"
+        for impl in _python_exception_impls(case, family)
+    ]
+
+
 def _cell(case: dict[str, Any] | None, family: str | None = None) -> tuple[str, str]:
     if case is None:
         return "—", "missing fixture coverage"
     if "expected" not in case:
         if _is_na_stub(case):
+            marker = _python_exception_marker(case, family)
+            if marker:
+                parts = [case["reason"], *_python_exception_tooltip_lines(case, family)]
+                return marker, "\n".join(parts)
             return "n/a", case["reason"]
         return "?", "fixture has no expected block"
 
@@ -794,8 +856,8 @@ def _cell(case: dict[str, Any] | None, family: str | None = None) -> tuple[str, 
             tooltip_parts.append(f"{impl}: unavailable — {spec['unavailable']}")
             continue
         if "error" in spec:
-            markers.append(f"{letter}!")
-            tooltip_parts.append(f"{impl}: expected error — {spec['error']}")
+            markers.append(f"{letter}✗")
+            tooltip_parts.append(f"{impl}: parser exception — {spec['error']}")
             continue
         if _canonical(spec) == _canonical(dynamo):
             tooltip_parts.append(f"{impl}: matches Dynamo")
@@ -1529,7 +1591,7 @@ def _tooltip_for(
             continue
         name = _IMPL_DISPLAY.get(impl, impl)
         if "error" in block:
-            parts.append(f"{name}: expected error matching {block['error']!r}")
+            parts.append(f"{name}: parser exception matching {block['error']!r}")
             continue
         if _canonical(block) == _canonical(dyn):
             continue
@@ -1583,10 +1645,19 @@ def _tooltip_html(
         )
     if "expected" not in case:
         reason = case.get("reason", "fixture has no expected block")
+        extra_sections = [("Why not applicable", linkify_text_html(str(reason)))]
+        parser_exceptions = _python_exception_tooltip_lines(case, family)
+        if parser_exceptions:
+            extra_sections.append(
+                (
+                    "Python parser exceptions",
+                    html_lib.escape("\n".join(parser_exceptions)),
+                )
+            )
         return build_parity_tooltip_html(
             head=head,
             description=str(description) if description else None,
-            extra_sections=[("Why not applicable", linkify_text_html(str(reason)))],
+            extra_sections=extra_sections,
             refs=[("Ref", case.get("ref")), ("Spec ref", case.get("spec_ref"))],
         )
 
@@ -2053,7 +2124,7 @@ def _compute_stats(
                     stats["parity"] += 1
                 elif marker in {"D", "·"}:
                     stats["dynamo_only"] += 1
-                elif "!" in marker:
+                elif "!" in marker or "✗" in marker:
                     stats["errors"] += 1
                 elif "?" in marker:
                     stats["research"] += 1
@@ -2114,8 +2185,8 @@ def _legend_html(rows: dict[str, dict[str, Any]], columns: list[str]) -> str:
         "(e.g. V?, S? — diverges with no <code>reason:</code> yet) · "
         '<span style="color:#b00">↯</span> Dynamo leaks reasoning markup '
         "or final-answer text · "
-        '<span style="color:#b00">!</span> expected-error suffix '
-        "(e.g. V!, S! — engine crashes by design) · "
+        '<span style="color:#b00">✗</span> parser exception '
+        "(e.g. V✗, S✗ — Python parser raised) · "
         '<span style="color:#aaa">n/a</span> not applicable'
         f"{missing_text}."
         "<br>"

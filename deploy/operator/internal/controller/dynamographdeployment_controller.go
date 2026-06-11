@@ -1623,6 +1623,7 @@ func applyDCDCheckpointStartupPolicy(
 			dcd.Spec.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{}
 		}
 		checkpointName := checkpointInfo.CheckpointName
+		dcd.Spec.Experimental.Checkpoint.Enabled = true
 		dcd.Spec.Experimental.Checkpoint.CheckpointRef = &checkpointName
 		dcd.Spec.Experimental.Checkpoint.Identity = nil
 		dcd.Spec.Experimental.Checkpoint.Job = nil
@@ -1812,8 +1813,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcilePVCs(ctx context.Context, dyn
 	return nil
 }
 
-// reconcileCheckpoints reconciles Checkpoint CRs for components with checkpointing enabled.
-// For Auto mode, it creates Checkpoint CRs if they do not exist.
+// reconcileCheckpoints reconciles checkpoint state for checkpoint-enabled components.
+// Without checkpointRef, it creates DGD-managed DynamoCheckpoint CRs when they
+// do not exist. With checkpointRef, it resolves the referenced checkpoint only.
 // Returns per-component checkpoint status and resolved checkpoint info.
 func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 	ctx context.Context,
@@ -1850,9 +1852,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 
 		var info *checkpoint.CheckpointInfo
 		var err error
-		isAutoCheckpoint := checkpointConfig.Mode == "" || checkpointConfig.Mode == nvidiacomv1beta1.CheckpointModeAuto
 		hasCheckpointRef := checkpointConfig.CheckpointRef != nil && *checkpointConfig.CheckpointRef != ""
-		if isAutoCheckpoint && !hasCheckpointRef {
+		if !hasCheckpointRef {
 			workerHash, err := r.checkpointWorkerHashForComponent(dynamoDeployment, componentName)
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to compute checkpoint worker hash for component %s: %w", componentName, err)
@@ -1900,11 +1901,11 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 		// Store checkpoint info for later use in pod spec generation
 		checkpointInfos[componentName] = info
 
-		// checkpointRef is authoritative. Auto mode creates a DGD-scoped checkpoint
-		// for this component generation without looking for reusable checkpoints.
-		if isAutoCheckpoint && !hasCheckpointRef {
+		// Without checkpointRef, the DGD creates a scoped automatic checkpoint for
+		// this component generation without looking for reusable checkpoints.
+		if !hasCheckpointRef {
 			if !info.Exists {
-				logger.Info("Creating DynamoCheckpoint CR in Auto mode", "component", componentName)
+				logger.Info("Creating DGD-managed DynamoCheckpoint CR", "component", componentName)
 			}
 
 			ckpt, err := r.createCheckpointCR(ctx, dynamoDeployment, componentName, component)
@@ -1935,7 +1936,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 	return checkpointStatuses, checkpointInfos, nil
 }
 
-// createCheckpointCR creates a DynamoCheckpoint CR for a component in Auto mode.
+// createCheckpointCR creates a DGD-managed DynamoCheckpoint CR for a component.
 //
 //nolint:gocyclo
 func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
@@ -1946,7 +1947,7 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 ) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
 	checkpointConfig := dynamo.GetCheckpoint(component)
 	if checkpointConfig == nil {
-		return nil, fmt.Errorf("checkpoint config is required for Auto mode")
+		return nil, fmt.Errorf("checkpoint config is required")
 	}
 
 	workerHash, err := r.checkpointWorkerHashForComponent(dynamoDeployment, componentName)

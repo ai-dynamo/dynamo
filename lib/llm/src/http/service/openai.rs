@@ -79,6 +79,14 @@ const VALIDATION_PREFIX: &str = "Validation: ";
 
 use super::error::SanitizedError;
 
+pub(super) fn rl_router(
+    drt: Arc<dynamo_runtime::DistributedRuntime>,
+) -> anyhow::Result<axum::Router> {
+    let config = dynamo_rl::RlDiscoveryConfig::from_env(drt);
+    let state = dynamo_rl::RlDiscoveryState::new(config);
+    Ok(dynamo_rl::rl_router(state))
+}
+
 // Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
 /// Default body limit in bytes (45MB) to support 500k+ token payloads.
 /// Can be configured at runtime using the DYN_HTTP_BODY_LIMIT_MB environment variable.
@@ -2084,72 +2092,56 @@ async fn responses(
         // The engine yields Annotated<NvCreateChatCompletionStreamResponse>. We extract the
         // inner stream response data and convert it to Responses API events.
         use crate::protocols::openai::responses::stream_converter::ResponseStreamConverter;
-        use std::sync::atomic::{AtomicBool, Ordering};
 
         let mut converter = match responses_ctx {
             Some(ctx) => ResponseStreamConverter::with_context(model.clone(), response_params, ctx),
             None => ResponseStreamConverter::new(model.clone(), response_params),
         };
-        let start_events = converter.emit_start_events();
-
-        // Use std::sync::Mutex (not tokio) since process_chunk/emit_end_events are
-        // synchronous -- no .await while lock is held. Avoids async lock overhead per token.
-        let converter = std::sync::Arc::new(std::sync::Mutex::new(converter));
-        let converter_end = converter.clone();
-
-        // Track whether the backend sent an error event during the stream.
-        // Shared between event_stream (writer) and done_stream (reader).
-        let saw_error = std::sync::Arc::new(AtomicBool::new(false));
-        let saw_error_end = saw_error.clone();
 
         let mut http_queue_guard = Some(http_queue_guard);
 
-        // Process each annotated chunk: extract the stream response data, convert to events
-        let event_stream = engine_stream
-            .inspect(move |response| {
+        let mut engine_stream = Box::pin(engine_stream);
+        let full_stream = async_stream::stream! {
+            let mut events = Vec::with_capacity(4);
+            converter.append_start_events(&mut events);
+            for event in events.drain(..) {
+                yield event.map_err(axum::Error::new);
+            }
+
+            // Track whether the backend sent an error event during the stream.
+            let mut saw_error = false;
+
+            while let Some(annotated_chunk) = engine_stream.next().await {
                 process_response_and_observe_metrics(
-                    response,
+                    &annotated_chunk,
                     &mut response_collector,
                     &mut http_queue_guard,
                 );
-            })
-            .filter_map(move |annotated_chunk| {
-                let converter = converter.clone();
-                let saw_error = saw_error.clone();
-                async move {
-                    // Check for backend error before extracting data.
-                    // Error events have data: None and event: Some("error").
-                    if annotated_chunk.data.is_none() {
-                        if annotated_chunk.event.as_deref() == Some("error") {
-                            saw_error.store(true, Ordering::Release);
-                        }
-                        return None;
-                    }
-                    let stream_resp = annotated_chunk.data?;
-                    let mut conv = converter.lock().expect("converter lock poisoned");
-                    let events = conv.process_chunk(&stream_resp);
-                    Some(stream::iter(events))
+
+                if extract_backend_error_if_present(&annotated_chunk).is_some() {
+                    saw_error = true;
+                    continue;
                 }
-            })
-            .flatten();
 
-        // Chain: start_events -> chunk_events -> end_events
-        let start_stream = stream::iter(start_events);
+                let Some(stream_resp) = annotated_chunk.data else {
+                    continue;
+                };
 
-        let done_stream = stream::once(async move {
-            let mut conv = converter_end.lock().expect("converter lock poisoned");
-            let end_events = if saw_error_end.load(Ordering::Acquire) {
-                conv.emit_error_events()
+                converter.append_chunk_events(&stream_resp, &mut events);
+                for event in events.drain(..) {
+                    yield event.map_err(axum::Error::new);
+                }
+            }
+
+            if saw_error {
+                converter.append_error_events(&mut events);
             } else {
-                conv.emit_end_events()
-            };
-            stream::iter(end_events)
-        })
-        .flatten();
-
-        let full_stream = start_stream.chain(event_stream).chain(done_stream);
-
-        let full_stream = full_stream.map(|result| result.map_err(axum::Error::new));
+                converter.append_end_events(&mut events);
+            }
+            for event in events.drain(..) {
+                yield event.map_err(axum::Error::new);
+            }
+        };
 
         // Wrap with disconnect monitoring: detects client disconnects, cancels generation,
         // and defers inflight_guard.mark_ok() until the stream completes.
@@ -2343,18 +2335,11 @@ async fn list_models_openai(
 
     let mut data = Vec::new();
 
-    let models: HashSet<String> = state.manager().model_display_names();
+    // Only list models whose worker set is complete in at least one namespace.
+    // A registered-but-broken deployment (e.g. decode-only with no prefill peer)
+    // is hidden until a peer joins.
+    let models: HashSet<String> = state.manager().serving_ready_display_names();
     for model_name in models {
-        // Only list models whose worker set is complete in at least one
-        // namespace. A registered-but-broken deployment (e.g. decode-only
-        // with no prefill peer) is hidden until a peer joins.
-        let serving_ready = state
-            .manager()
-            .get_model(&model_name)
-            .is_some_and(|m| m.has_ready_workers());
-        if !serving_ready {
-            continue;
-        }
         let context_window = cw_override.or_else(|| card_map.get(&model_name).map(|&cl| cl as u64));
         data.push(ModelListing {
             id: model_name.clone(),
@@ -2969,11 +2954,14 @@ async fn audio_speech(
 
     let streaming = false;
 
-    // model is optional in the request; fall back to the first registered model
+    // model is optional in the request; fall back to a model that can actually
+    // serve right now (complete worker set), not just any displayable one, so
+    // an incomplete deployment doesn't get picked as the implicit default while
+    // a ready model exists.
     let model = request.model.clone().unwrap_or_else(|| {
         state
             .manager()
-            .model_display_names()
+            .serving_ready_display_names()
             .into_iter()
             .next()
             .unwrap_or_default()
