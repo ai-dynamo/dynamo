@@ -79,18 +79,15 @@ For the complete CRD spec, see the [API Reference](api-reference.md).
 
 > [!NOTE]
 > DGDR does not currently expose a `features.kvRouter` field. To configure
-> router mode or KV-aware routing details, see [Routing](#routing).
-> `overrides.dgd` can configure the generated standalone frontend and worker
-> services. Use a direct DGD or tuned recipe when you need a topology DGDR does
-> not generate, such as EPP/Gateway routing.
+> router mode or KV-aware routing details, use a direct DGD, a tuned recipe, or
+> `overrides.dgd` when you still want DGDR to generate the base deployment.
 
 ### Generated DGD Overrides
 
 Use `spec.overrides.dgd` when the generated `DynamoGraphDeployment` needs a
 field that DGDR does not expose directly. The value is a partial
-DGD object that is merged into the profiler-generated deployment after Dynamo
-selects a configuration. The payload must match the generated DGD shape, so
-inspect the generated DGD first when overriding service-specific fields.
+`nvidia.com/v1alpha1` DGD object that is merged into the profiler-generated
+deployment after Dynamo selects a configuration.
 
 For example, to inject an environment variable into every generated service:
 
@@ -105,7 +102,7 @@ spec:
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.0"  # dynamo-frontend for Dynamo < 1.1.0
   overrides:
     dgd:
-      apiVersion: nvidia.com/v1beta1
+      apiVersion: nvidia.com/v1alpha1
       kind: DynamoGraphDeployment
       spec:
         envs:
@@ -120,7 +117,7 @@ target a single service, override that service's `envs` entry instead:
 spec:
   overrides:
     dgd:
-      apiVersion: nvidia.com/v1beta1
+      apiVersion: nvidia.com/v1alpha1
       kind: DynamoGraphDeployment
       spec:
         services:
@@ -137,9 +134,9 @@ spec:
 ### Routing
 
 DGDR-generated deployments include a standalone `Frontend` service. That
-frontend runs Dynamo's embedded router and defaults to `round-robin` routing.
-Because DGDR does not yet expose a first-class router feature, configure the
-generated frontend with `spec.overrides.dgd`.
+frontend runs Dynamo's embedded router and defaults to `round-robin` routing,
+which is often not optimal. Because DGDR does not yet expose a first-class
+router feature, configure the generated frontend with `spec.overrides.dgd`.
 
 For the full router mode and environment variable reference, see
 [Router Guide](../components/router/router-guide.md) and
