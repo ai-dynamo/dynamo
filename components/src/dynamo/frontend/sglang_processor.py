@@ -168,6 +168,7 @@ def _preprocess_worker(
         eos_token_id,
         pre.guided_decoding,
         pre.tool_call_parser,
+        pre.force_reasoning,
     )
 
     effective_reasoning_parser_name = (
@@ -190,6 +191,7 @@ def _build_dynamo_preproc(
     eos_token_id: int | None,
     guided_decoding: dict[str, Any] | None = None,
     tool_call_parser: ToolCallParserType | None = None,
+    require_reasoning: bool = False,
 ) -> dict[str, Any]:
     """Build the Dynamo preprocessed request dict from request fields."""
     max_tokens = request.get("max_completion_tokens") or request.get("max_tokens")
@@ -250,6 +252,7 @@ def _build_dynamo_preproc(
             "skip_special_tokens": tool_call_parser is None,
             "return_tokens_as_token_ids": request.get("return_tokens_as_token_ids"),
         },
+        "require_reasoning": require_reasoning,
         "eos_token_ids": [eos_token_id] if eos_token_id is not None else [],
         "annotations": [],
         "routing": request.get("routing"),
@@ -378,6 +381,7 @@ class SglangProcessor:
                 self.eos_token_id,
                 pre.guided_decoding,
                 pre.tool_call_parser,
+                pre.force_reasoning,
             )
         except InvalidArgument:
             raise

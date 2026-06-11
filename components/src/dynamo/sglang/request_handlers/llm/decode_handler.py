@@ -344,6 +344,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
         priority = (request.get("routing") or {}).get("priority")
+        require_reasoning = request.get("require_reasoning", False)
         logprob_kwargs = self._build_logprob_kwargs(request)
 
         output_options = request.get("output_options", {})
@@ -381,6 +382,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             decode = await self.engine.async_generate(
                 **input_param,
                 sampling_params=sampling_params,
+                require_reasoning=require_reasoning,
                 stream=True,
                 **self._routed_experts_kwargs,
                 bootstrap_host=bootstrap_info["bootstrap_host"],
@@ -447,6 +449,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **input_param,
                 image_data=image_data,
                 video_data=video_data,
+                require_reasoning=require_reasoning,
                 sampling_params=sampling_params,
                 stream=True,
                 **self._routed_experts_kwargs,
