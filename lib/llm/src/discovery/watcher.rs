@@ -1195,7 +1195,13 @@ impl ModelWatcher {
                 client, router_config.router_mode, None
             )
             .await?;
-            worker_set.tensor_engine = Some(Arc::new(push_router));
+            // Wrap in TensorDirectRoutingRouter so an externally-supplied
+            // worker-pin hint (`backend_instance_id` request parameter or
+            // `x-worker-instance-id` gRPC metadata) is dispatched via `direct()`,
+            // falling back to `router_mode` when no hint is present.
+            let tensor_router =
+                crate::grpc::service::tensor::TensorDirectRoutingRouter::new(push_router);
+            worker_set.tensor_engine = Some(Arc::new(tensor_router));
         } else if card.model_input == ModelInput::Text && card.model_type.supports_realtime() {
             // Case 7: Text + Realtime
             // 'Text' is being overloaded here, it simply means the I/O will be passed through

@@ -3,7 +3,10 @@
 
 use dynamo_runtime::{
     engine::AsyncEngineContext,
-    pipeline::{AsyncEngineContextProvider, Context},
+    pipeline::{
+        AsyncEngine, AsyncEngineContextProvider, Context, Error, ManyOut, PushRouter, SingleIn,
+        async_trait,
+    },
     protocols::annotated::AnnotationsProvider,
 };
 use futures::{Stream, StreamExt, stream};
@@ -24,10 +27,17 @@ use crate::http::service::{
     metrics::{CancellationLabels, Endpoint, process_response_and_observe_metrics},
 };
 
+use crate::protocols::openai::nvext::HEADER_WORKER_INSTANCE_ID;
 use crate::protocols::tensor;
 use crate::protocols::tensor::{
-    NvCreateTensorRequest, NvCreateTensorResponse, Tensor, TensorMetadata,
+    NvCreateTensorRequest, NvCreateTensorResponse, NvExt, Tensor, TensorMetadata,
 };
+
+/// Request parameter (and metadata) key that carries an external worker-pin
+/// hint. When present, the tensor request is dispatched directly to the named
+/// worker instead of applying `router_mode`. Mirrors the OpenAI HTTP path's
+/// `x-worker-instance-id` header -> `nvext.backend_instance_id`.
+pub const BACKEND_INSTANCE_ID_PARAM: &str = "backend_instance_id";
 
 use crate::grpc::service::kserve::inference;
 use crate::grpc::service::kserve::inference::DataType;
@@ -56,7 +66,7 @@ pub struct ExtendedNvCreateTensorResponse {
 /// non-streaming requests, we will fold the stream into a single response as part of this handler.
 pub async fn tensor_response_stream(
     state: Arc<kserve::State>,
-    request: NvCreateTensorRequest,
+    mut request: NvCreateTensorRequest,
     streaming: bool,
     metadata: &MetadataMap,
 ) -> Result<impl Stream<Item = Annotated<NvCreateTensorResponse>>, Status> {
@@ -68,6 +78,18 @@ pub async fn tensor_response_stream(
         endpoint: Endpoint::Tensor.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
+
+    // Honor a worker-pin hint supplied via gRPC metadata (`x-worker-instance-id`),
+    // mirroring the OpenAI HTTP path. Metadata takes priority over any hint already
+    // carried on `nvext` (e.g. from the `backend_instance_id` request parameter).
+    // When set, `TensorDirectRoutingRouter` dispatches via `direct()`.
+    if let Some(backend_instance_id) = backend_instance_id_from_grpc_metadata(metadata) {
+        request
+            .nvext
+            .get_or_insert_with(NvExt::default)
+            .backend_instance_id = Some(backend_instance_id);
+    }
+
     let metadata = extract_metadata_from_grpc(metadata)
         .map_err(|err| Status::invalid_argument(err.to_string()))?;
     let request = Context::with_id_and_metadata(request, request_id.clone(), metadata);
@@ -276,6 +298,81 @@ fn convert_dynamo_to_kserve_params(
         .collect()
 }
 
+/// Extract the `backend_instance_id` worker-pin hint from request parameters.
+///
+/// Accepts the value as either an unsigned or (non-negative) signed integer, the
+/// two integer parameter encodings clients are likely to send. Other types and
+/// negative values are ignored (treated as "no hint").
+fn backend_instance_id_from_parameters(parameters: &tensor::Parameters) -> Option<u64> {
+    match parameters.get(BACKEND_INSTANCE_ID_PARAM)? {
+        tensor::ParameterValue::Uint64(v) => Some(*v),
+        tensor::ParameterValue::Int64(v) if *v >= 0 => Some(*v as u64),
+        _ => None,
+    }
+}
+
+/// Extract the `x-worker-instance-id` worker-pin hint from gRPC metadata.
+///
+/// Mirrors the OpenAI HTTP path which reads the same header name. Binary or
+/// non-UTF-8 values, and values that do not parse as a `u64`, are ignored.
+fn backend_instance_id_from_grpc_metadata(metadata: &MetadataMap) -> Option<u64> {
+    metadata
+        .get(HEADER_WORKER_INSTANCE_ID)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+}
+
+/// Tensor-path router that honors an external worker-pin hint.
+///
+/// Wraps the generic tensor [`PushRouter`] and, for each request, checks for a
+/// `backend_instance_id` worker-pin hint on `nvext` (populated from the
+/// `backend_instance_id` request parameter or the `x-worker-instance-id` gRPC
+/// metadata). When the hint is present the request is dispatched directly to
+/// that worker via [`PushRouter::direct`], bypassing `router_mode`. Otherwise it
+/// falls back to the normal mode-based routing via [`PushRouter::generate`].
+///
+/// This mirrors the OpenAI LLM path's `DirectRoutingRouter`, but keeps the
+/// fallback so the tensor path continues to honor `router_mode` when no hint is
+/// supplied (the LLM `DirectRoutingRouter` is only installed for
+/// `RouterMode::Direct`).
+pub struct TensorDirectRoutingRouter {
+    inner: PushRouter<NvCreateTensorRequest, Annotated<NvCreateTensorResponse>>,
+}
+
+impl TensorDirectRoutingRouter {
+    pub fn new(
+        inner: PushRouter<NvCreateTensorRequest, Annotated<NvCreateTensorResponse>>,
+    ) -> Self {
+        Self { inner }
+    }
+
+    /// Read the worker-pin hint (`nvext.backend_instance_id`) from the request.
+    fn worker_pin(request: &NvCreateTensorRequest) -> Option<u64> {
+        request.nvext.as_ref().and_then(|n| n.backend_instance_id)
+    }
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<NvCreateTensorRequest>, ManyOut<Annotated<NvCreateTensorResponse>>, Error>
+    for TensorDirectRoutingRouter
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateTensorRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateTensorResponse>>, Error> {
+        match Self::worker_pin(&request) {
+            Some(worker_id) => {
+                tracing::debug!(
+                    worker_id,
+                    "Tensor request pinned to worker via backend_instance_id hint"
+                );
+                self.inner.direct(request, worker_id).await
+            }
+            None => self.inner.generate(request).await,
+        }
+    }
+}
+
 impl TryFrom<inference::ModelInferRequest> for NvCreateTensorRequest {
     type Error = Status;
 
@@ -293,6 +390,18 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateTensorRequest {
         // Extract request-level parameters
         let parameters = convert_kserve_to_dynamo_params(&request.parameters)?;
 
+        // Honor an externally-supplied worker-pin hint carried as a request
+        // parameter (`backend_instance_id`). This mirrors the OpenAI HTTP path's
+        // `x-worker-instance-id` -> `nvext.backend_instance_id` behavior so an
+        // external (e.g. KV-aware) router can pin a tensor request to a specific
+        // worker. A metadata-based hint (`x-worker-instance-id`) is layered on top
+        // of this in `tensor_response_stream`.
+        let nvext =
+            backend_instance_id_from_parameters(&parameters).map(|backend_instance_id| NvExt {
+                backend_instance_id: Some(backend_instance_id),
+                ..Default::default()
+            });
+
         let mut tensor_request = NvCreateTensorRequest {
             id: if !request.id.is_empty() {
                 Some(request.id.clone())
@@ -302,7 +411,7 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateTensorRequest {
             model: request.model_name.clone(),
             tensors: Vec::new(),
             parameters,
-            nvext: None,
+            nvext,
         };
 
         // iterate through inputs
@@ -798,5 +907,135 @@ impl FromStr for tensor::DataType {
             "BYTES" => Ok(tensor::DataType::Bytes),
             _ => Err(anyhow::anyhow!("Invalid data type")),
         }
+    }
+}
+
+#[cfg(test)]
+mod worker_pin_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use tonic::metadata::MetadataValue;
+
+    fn int64_param(v: i64) -> inference::InferParameter {
+        inference::InferParameter {
+            parameter_choice: Some(ParameterChoice::Int64Param(v)),
+        }
+    }
+
+    fn uint64_param(v: u64) -> inference::InferParameter {
+        inference::InferParameter {
+            parameter_choice: Some(ParameterChoice::Uint64Param(v)),
+        }
+    }
+
+    /// (a) Hint present in `parameters` (as an int64) is parsed into
+    /// `nvext.backend_instance_id` by the `ModelInferRequest` conversion.
+    #[test]
+    fn parameter_int64_hint_propagates_to_nvext() {
+        let request = inference::ModelInferRequest {
+            model_name: "tensor-model".to_string(),
+            parameters: HashMap::from([(BACKEND_INSTANCE_ID_PARAM.to_string(), int64_param(42))]),
+            ..Default::default()
+        };
+
+        let tensor_request = NvCreateTensorRequest::try_from(request).unwrap();
+        assert_eq!(
+            tensor_request.nvext.and_then(|n| n.backend_instance_id),
+            Some(42)
+        );
+    }
+
+    /// The unsigned-integer encoding of the same parameter is also honored.
+    #[test]
+    fn parameter_uint64_hint_propagates_to_nvext() {
+        let request = inference::ModelInferRequest {
+            model_name: "tensor-model".to_string(),
+            parameters: HashMap::from([(BACKEND_INSTANCE_ID_PARAM.to_string(), uint64_param(7))]),
+            ..Default::default()
+        };
+
+        let tensor_request = NvCreateTensorRequest::try_from(request).unwrap();
+        assert_eq!(
+            tensor_request.nvext.and_then(|n| n.backend_instance_id),
+            Some(7)
+        );
+    }
+
+    /// A negative (invalid) signed value is treated as "no hint".
+    #[test]
+    fn parameter_negative_hint_is_ignored() {
+        let params = tensor::Parameters::from([(
+            BACKEND_INSTANCE_ID_PARAM.to_string(),
+            tensor::ParameterValue::Int64(-1),
+        )]);
+        assert_eq!(backend_instance_id_from_parameters(&params), None);
+    }
+
+    /// (b) Hint present in gRPC metadata (`x-worker-instance-id`) is parsed.
+    #[test]
+    fn metadata_hint_parses() {
+        let mut metadata = MetadataMap::new();
+        metadata.insert(
+            HEADER_WORKER_INSTANCE_ID,
+            MetadataValue::try_from("99").unwrap(),
+        );
+        assert_eq!(backend_instance_id_from_grpc_metadata(&metadata), Some(99));
+    }
+
+    /// A non-numeric metadata value is ignored (treated as "no hint").
+    #[test]
+    fn metadata_non_numeric_hint_is_ignored() {
+        let mut metadata = MetadataMap::new();
+        metadata.insert(
+            HEADER_WORKER_INSTANCE_ID,
+            MetadataValue::try_from("not-a-number").unwrap(),
+        );
+        assert_eq!(backend_instance_id_from_grpc_metadata(&metadata), None);
+    }
+
+    /// (c) Hint absent from both carriers => no `nvext` hint, so dispatch falls
+    /// back to mode-based routing.
+    #[test]
+    fn no_hint_yields_no_nvext() {
+        let request = inference::ModelInferRequest {
+            model_name: "tensor-model".to_string(),
+            ..Default::default()
+        };
+        let tensor_request = NvCreateTensorRequest::try_from(request).unwrap();
+        assert!(
+            tensor_request
+                .nvext
+                .and_then(|n| n.backend_instance_id)
+                .is_none()
+        );
+
+        let metadata = MetadataMap::new();
+        assert_eq!(backend_instance_id_from_grpc_metadata(&metadata), None);
+    }
+
+    /// The `TensorDirectRoutingRouter` worker-pin extraction reads the hint that
+    /// the conversion/metadata layers surface on `nvext`.
+    #[test]
+    fn router_reads_worker_pin_from_nvext() {
+        let pinned = NvCreateTensorRequest {
+            id: None,
+            model: "tensor-model".to_string(),
+            tensors: Vec::new(),
+            parameters: tensor::Parameters::new(),
+            nvext: Some(NvExt {
+                backend_instance_id: Some(5),
+                ..Default::default()
+            }),
+        };
+        assert_eq!(TensorDirectRoutingRouter::worker_pin(&pinned), Some(5));
+
+        let unpinned = NvCreateTensorRequest {
+            id: None,
+            model: "tensor-model".to_string(),
+            tensors: Vec::new(),
+            parameters: tensor::Parameters::new(),
+            nvext: None,
+        };
+        assert_eq!(TensorDirectRoutingRouter::worker_pin(&unpinned), None);
     }
 }
