@@ -94,3 +94,91 @@ packages:
     images:
       - vllm-runtime-efa
       - trtllm-runtime-efa
+
+  # --- From-source binaries built in wheel_builder / dynamo_base and copied
+  # into the runtime images (no apt/pip/cargo metadata, so the python/rust/dpkg
+  # generators miss them). Image filters are best-effort by build config; the
+  # <framework>-compliance-audit job (syft scan of the pushed image) is the
+  # authoritative completeness check and will surface any miss or over-list.
+  # NOTE: NIXL ships as the `nixl` Python wheel (attributed by the python
+  # generator), so it is intentionally NOT duplicated here.
+
+  # LGPL media stack — built --disable-gpl in wheel_builder (h264_nvenc + libvpx)
+  # and copied into vllm/sglang runtime (container/templates/vllm_runtime.Dockerfile
+  # + sglang_runtime.Dockerfile). Replaces the purged GPL apt ffmpeg.
+  - name: ffmpeg
+    version: "8.1"
+    license: LGPL-2.1-or-later
+    source: https://ffmpeg.org/
+    images:
+      - vllm-runtime
+      - vllm-runtime-efa
+      - sglang-runtime
+      - sglang-runtime-efa
+
+  - name: libvpx
+    # VP8/VP9 codec library, ffmpeg's only non-NVIDIA encoder dependency.
+    version: v1.14.1
+    license: BSD-3-Clause
+    source: https://chromium.googlesource.com/webm/libvpx
+    images:
+      - vllm-runtime
+      - vllm-runtime-efa
+      - sglang-runtime
+      - sglang-runtime-efa
+
+  # UCX — Unified Communication X, built from source in wheel_builder and used by
+  # the NIXL transport. Installed to /usr/local (no dpkg metadata).
+  - name: UCX
+    version: v1.20.x
+    license: BSD-3-Clause
+    source: https://github.com/openucx/ucx
+    images:
+      - vllm-runtime
+      - vllm-runtime-efa
+      - sglang-runtime
+      - sglang-runtime-efa
+      - trtllm-runtime
+      - trtllm-runtime-efa
+
+  # gdrcopy — GPUDirect RDMA copy library, built from source in wheel_builder for
+  # CUDA images and installed outside apt.
+  - name: gdrcopy
+    version: v2.5.2
+    license: MIT
+    source: https://github.com/NVIDIA/gdrcopy
+    images:
+      - vllm-runtime
+      - vllm-runtime-efa
+      - trtllm-runtime
+      - trtllm-runtime-efa
+
+  # etcd — coordination store, downloaded as a release binary in dynamo_base and
+  # placed at /usr/local/bin (no apt metadata).
+  - name: etcd
+    version: v3.5.30
+    license: Apache-2.0
+    source: https://github.com/etcd-io/etcd
+    images:
+      - vllm-runtime
+      - vllm-runtime-efa
+      - sglang-runtime
+      - sglang-runtime-efa
+      - trtllm-runtime
+      - trtllm-runtime-efa
+      - dynamo-planner
+
+  # nats-server — messaging server, downloaded as a .deb in dynamo_base (dpkg -i
+  # may not survive into the final runtime layer attribution reliably).
+  - name: nats-server
+    version: v2.10.28
+    license: Apache-2.0
+    source: https://github.com/nats-io/nats-server
+    images:
+      - vllm-runtime
+      - vllm-runtime-efa
+      - sglang-runtime
+      - sglang-runtime-efa
+      - trtllm-runtime
+      - trtllm-runtime-efa
+      - dynamo-planner

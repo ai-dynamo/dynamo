@@ -50,8 +50,10 @@
 #     `pip install --break-system-packages`, not a venv.
 #   - frontend additionally feeds the EPP image's CycloneDX Go SBOM via
 #     `--go-sbom` (the EPP image is COPY'd from earlier in frontend.Dockerfile).
-#   - vllm + trtllm with make_efa=true also pull in native attribution
-#     for libfabric + aws-ofi-nccl via the YAML overlay.
+#   - native always runs (image filter "{framework}-{target}[-efa]"), attributing
+#     the from-source binaries the python/rust/dpkg scanners miss (ffmpeg, libvpx,
+#     UCX, NIXL, gdrcopy, libfabric, etcd, nats-server) per native_packages.yaml's
+#     per-image `images:` lists; make_efa adds the EFA-only entries.
 
 FROM {{ compliance_base_stage }} AS licenses
 
@@ -107,16 +109,16 @@ ARG TARGETARCH
 # tracked separately, not unique to planner.
 RUN {% if framework == "sglang" %}PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then PKG_ARG="--venv ${VIRTUAL_ENV}"; else PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
     python3 -m compliance.generators \
-    --ecosystem python,rust{% if target != "planner" %},dpkg{% endif %}{% if target == "frontend" %},go{% endif %}{% if make_efa %},native{% endif %} \
+    --ecosystem python,rust{% if target != "planner" %},dpkg{% endif %}{% if target == "frontend" %},go{% endif %},native \
     ${PKG_ARG} \
 {% if target == "frontend" %}    --go-sbom /tmp/sbom-go-epp.cdx.json \
     --go-licenses-dir /tmp/go-licenses \
 {% endif %}    --rust-licenses-dir /tmp/rust-licenses \
     --output-dir /legal \
     --policy /opt/compliance/policy/licenses.toml \
-{% if make_efa %}    --native-yaml /opt/compliance/native_packages.yaml \
-    --native-image {{ framework }}-runtime-efa \
-{% endif %}    ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
+    --native-yaml /opt/compliance/native_packages.yaml \
+    --native-image {{ framework }}-{{ target }}{% if make_efa %}-efa{% endif %} \
+    ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
     -v
 # Policy gate runs on the single unified CSV (its `ecosystem` column scopes each
 # row), replacing the per-ecosystem loop. Non-zero exit fails the build.
