@@ -1,13 +1,38 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Deploying Dynamo 1.2 with NVIDIA AI Cluster Runtime"
+title: "From Kubernetes to Datacenter-Scale Inference with NVIDIA Dynamo and AICR"
 sidebar-title: Deploying Dynamo with AICR
 subtitle: "Stefan Schimanski and Yuan Chen - June 2026"
-description: "How NVIDIA AI Cluster Runtime packages Dynamo 1.2 with the GPU, scheduling, health, observability, and routing components needed for Kubernetes inference."
+description: "How NVIDIA AI Cluster Runtime turns an existing GPU Kubernetes cluster into a validated Dynamo inference stack."
 keywords: Dynamo, NVIDIA AI Cluster Runtime, AICR, Kubernetes, GPU Operator, EPP, NATS, KV cache routing, vLLM
 last-updated: June 11, 2026
 ---
+
+<!--
+Editorial title direction:
+
+- Chosen title:
+  From Kubernetes to Datacenter-Scale Inference with NVIDIA Dynamo and AICR
+- Original direction:
+  From empty Kubernetes to datacenter-scale inference: with NVIDIA Dynamo and NVIDIA AICR Optimized Kubernetes Runtime.
+- Shorter variants considered:
+  - From GPU Kubernetes to Dynamo Inference with AICR
+  - Fast-Tracking Dynamo Inference on Kubernetes with AICR
+  - Dynamo on Kubernetes, Validated by AICR
+  - A Validated Path to Dynamo Inference on Kubernetes
+  - From Kubernetes Cluster to Dynamo Stack with AICR
+  - Deploying the Full Dynamo Stack with AICR
+  - Dynamo Inference on NVIDIA's Validated Kubernetes Runtime
+  - The Fast Path to Dynamo on Kubernetes
+  - AICR: The Validated Runtime Path for Dynamo on Kubernetes
+- Subtitle/narrative direction:
+  NVIDIA AI Cluster Runtime provides the optimized and validated Kubernetes runtime below Dynamo,
+  from GPU operators and node health to NATS, scheduling, observability, and Gateway/EPP routing.
+- Wording constraint:
+  Avoid rendering "empty Kubernetes" as-is because AICR assumes an existing GPU Kubernetes cluster;
+  keep that clarification in the body.
+-->
 
 Running Dynamo on Kubernetes starts with a `DynamoGraphDeployment`, but the graph is only the top of
 the stack. A production inference cluster also needs GPU drivers, device discovery, scheduling,
