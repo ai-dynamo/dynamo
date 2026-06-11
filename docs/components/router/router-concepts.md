@@ -77,7 +77,11 @@ For prefill load, the router first estimates the uncached prompt work for each c
 effective_isl = input_tokens - cached_tokens
 ```
 
-By default, that effective prefill load remains charged at full value until the first output token marks prefill complete. With `--router-prefill-load-model aic`, the router also asks AIC for an expected prefill duration using the effective ISL and cached prefix length. The active load tracker then decays the oldest active prefill request on each worker over that predicted duration. This only changes router-side prompt load accounting; it does not change backend execution.
+By default, that effective prefill load remains charged at full value until the first output token marks prefill complete. With `--router-prefill-load-model aic`, the router also asks AIC for an expected prefill duration using the effective ISL and cached prefix length. The active load tracker uses the oldest active prefill as a time anchor and applies elapsed time to the worker's aggregate modeled prefill backlog. When the oldest request completes, the next active prefill becomes the anchor. If a modeled non-anchor request completes first, the tracker adjusts the anchor to keep the reported load continuous.
+
+![Timeline showing how AIC decays active prefill load across an aggregate modeled backlog, compared with static accounting until the first output token.](../../assets/img/router-active-prefill-timeline.jpg)
+
+This model changes router-side prompt load accounting only; it does not change backend batching or execution.
 
 #### Decode Load Modeling
 
