@@ -983,3 +983,9 @@ overrides:
   - { ecosystem: dpkg, name: libxv1, license: "MIT", source: "Ubuntu 24.04 libxv1 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
   - { ecosystem: dpkg, name: libxxf86vm1, license: "MIT", source: "Ubuntu 24.04 libxxf86vm1 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
   - { ecosystem: dpkg, name: xkb-data, license: "MIT", source: "Ubuntu 24.04 xkb-data (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+
+  # --- vLLM-Omni kernel packages surfaced by the nvidia/cuda baseline (UNKNOWN
+  #     to syft/pip; resolved from upstream) ---
+  - { ecosystem: python, name: humming-kernels,               license: "Apache-2.0",                   source: "inclusionAI/humming JIT GEMM kernels — https://github.com/inclusionAI/humming/blob/main/LICENSE (Apache-2.0)" }
+  - { ecosystem: python, name: tokenspeed-mla,                license: "MIT",                          source: "LightSeek Foundation tokenspeed — https://github.com/lightseekorg/tokenspeed (MIT, PyPI license field)" }
+  - { ecosystem: python, name: nvidia-cutlass-dsl-libs-cu13,  license: "LicenseRef-NVIDIA-Proprietary", source: "NVIDIA CUTLASS Python DSL license — https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/license.html (PyPI classifier: Other/Proprietary)" }
