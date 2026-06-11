@@ -906,8 +906,8 @@ impl ModelDeploymentCard {
                 bytes_to_hash.extend(self.effective_context_length().to_be_bytes());
                 bytes_to_hash.extend(self.kv_cache_block_size.to_be_bytes());
 
-                // Topology fields participate in the checksum so that a rolling
-                // update that changes only worker_type/needs is correctly
+                // worker_type/needs participate in the checksum so that a rolling
+                // update that changes only those is correctly
                 // rejected as incompatible with the existing WorkerSet (forcing
                 // drain-and-redeploy) instead of silently joining and serving
                 // stale readiness data.
@@ -2507,7 +2507,7 @@ mod worker_type_tests {
     }
 
     /// mdcsum must cover `worker_type` and `needs` so that a rolling update
-    /// which changes only topology metadata produces a different checksum,
+    /// which changes only those produces a different checksum,
     /// triggering the drain-and-redeploy path in `watcher.rs` instead of
     /// silently joining an existing WorkerSet with a stale card.
     ///

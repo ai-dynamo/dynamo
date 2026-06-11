@@ -75,12 +75,8 @@ pub struct ModelReadiness {
     pub namespaces: std::collections::BTreeMap<String, NamespaceReadiness>,
 }
 
-/// Per-namespace readiness facts — the single source of truth produced by
-/// [`Model::evaluate_namespace`] and consumed by both the serving gate
-/// ([`Model::is_workers_ready`]) and the `/ready` detail endpoint
-/// ([`Model::namespace_readiness`]). `present`/`missing` hold the cheap,
-/// allocation-light worker-type sets; the detail endpoint layers display data
-/// (per-type counts, reason strings) on top.
+/// Readiness facts for one namespace, from [`Model::evaluate_namespace`].
+/// Shared by the serving gate and the `/ready` endpoint so they can't diverge.
 struct NamespaceReadinessEval {
     ready: bool,
     has_legacy: bool,
@@ -290,20 +286,15 @@ impl Model {
         self.evaluate_namespace(&wsets).ready
     }
 
-    /// Evaluate the readiness of one namespace's WorkerSets — the single source
-    /// of truth behind both the serving gate ([`Self::is_workers_ready`],
-    /// [`Self::select_worker_set_with`]) and the `/ready` detail endpoint
-    /// ([`Self::namespace_readiness`]), so the two can never disagree.
+    /// Evaluate readiness for one namespace's WorkerSets — the shared check
+    /// behind both the serving gate and the `/ready` endpoint.
     ///
-    /// `wsets` must all share one namespace. Strict (non-legacy) semantics: the
-    /// namespace is ready when it has a live worker, every registered worker
-    /// type has at least one live worker, and every *live* WorkerSet's `needs`
-    /// DNF is satisfied by the present worker types. Anything absent is recorded
-    /// in `missing`. A dead WorkerSet's own type is still flagged missing, but
-    /// its `needs` are moot (it isn't serving) and a live sibling of the same
-    /// type carries the same `needs`, so nothing is lost. A legacy card (no
-    /// `worker_type`) disables strict gating: ready iff any worker is live
-    /// (cross-version compat shim). Empty `wsets` is not ready.
+    /// Strict (non-legacy) semantics: ready when a worker is live, every
+    /// registered worker type has a live worker, and every *live* WorkerSet's
+    /// `needs` DNF is satisfied; anything absent goes in `missing`. A dead
+    /// WorkerSet's needs are ignored (a live sibling of the same type carries
+    /// the same `needs`). A legacy card (no `worker_type`) bypasses the strict
+    /// check: ready iff any worker is live. Empty `wsets` is not ready.
     fn evaluate_namespace(&self, wsets: &[Arc<WorkerSet>]) -> NamespaceReadinessEval {
         let mut present: std::collections::HashSet<crate::worker_type::WorkerType> =
             std::collections::HashSet::new();
