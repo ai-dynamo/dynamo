@@ -40,6 +40,8 @@ pub(super) struct SglangConfig {
     pub(super) kv_bytes_per_token: Option<usize>,
     pub(super) kv_transfer_bandwidth: Option<f64>,
     pub(super) speculative_max_tokens: Option<usize>,
+    /// Blended KV reuse simulation; `Some` only when enabled.
+    pub(super) semantic: Option<crate::common::semantic::SemanticSimConfig>,
 }
 
 impl SglangConfig {
@@ -89,6 +91,7 @@ impl SglangConfig {
             kv_bytes_per_token: args.kv_bytes_per_token,
             kv_transfer_bandwidth: args.kv_transfer_bandwidth,
             speculative_max_tokens: args.aic_nextn.map(|nextn| nextn + 1),
+            semantic: args.semantic_sim.as_ref().filter(|s| s.enabled).cloned(),
         }
     }
 }

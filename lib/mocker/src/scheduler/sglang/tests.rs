@@ -78,6 +78,8 @@ fn make_decoded_request(
         materialized_tokens: prompt_len,
         cached_tokens: 0,
         allocated_tokens: ceil_to_block(prompt_len, config.block_size),
+        reuse_plan: None,
+        semantic_outcome: None,
     }];
     let result = simulate_decode_step(&mut running, kv_manager, config, 0.0, false);
     assert_eq!(result.output_signals.len(), 1);
@@ -170,6 +172,8 @@ mod scheduling {
                 materialized_tokens: 0,
                 cached_tokens: 0,
                 allocated_tokens: 0,
+                reuse_plan: None,
+                semantic_outcome: None,
             },
             SglangRequest {
                 uuid: match_uuid,
@@ -181,6 +185,8 @@ mod scheduling {
                 materialized_tokens: 0,
                 cached_tokens: 0,
                 allocated_tokens: 0,
+                reuse_plan: None,
+                semantic_outcome: None,
             },
         ]);
 
@@ -215,6 +221,8 @@ mod scheduling {
                 materialized_tokens: 0,
                 cached_tokens: 0,
                 allocated_tokens: 0,
+                reuse_plan: None,
+                semantic_outcome: None,
             });
         }
         let unique_uuid = Uuid::new_v4();
@@ -228,6 +236,8 @@ mod scheduling {
             materialized_tokens: 0,
             cached_tokens: 0,
             allocated_tokens: 0,
+            reuse_plan: None,
+            semantic_outcome: None,
         });
 
         apply_schedule_policy(&mut waiting, &kv_manager, &config);
@@ -264,9 +274,18 @@ mod core_behavior {
             materialized_tokens: 0,
             cached_tokens: 0,
             allocated_tokens: 0,
+            reuse_plan: None,
+            semantic_outcome: None,
         }]);
 
-        let admit = get_new_batch_prefill(&mut waiting, &mut kv_manager, &config, 0.7, &[]);
+        let admit = get_new_batch_prefill(
+            &mut waiting,
+            &mut kv_manager,
+            &config,
+            0.7,
+            &[],
+            &std::collections::HashMap::new(),
+        );
         assert_eq!(admit.can_run.len(), 1);
         assert_eq!(admit.can_run[0].materialized_tokens, 6);
         assert_eq!(admit.can_run[0].allocated_tokens, 8);
@@ -299,6 +318,8 @@ mod core_behavior {
                 materialized_tokens: 0,
                 cached_tokens: 0,
                 allocated_tokens: 0,
+                reuse_plan: None,
+                semantic_outcome: None,
             },
             SglangRequest {
                 uuid: second_uuid,
@@ -310,10 +331,19 @@ mod core_behavior {
                 materialized_tokens: 0,
                 cached_tokens: 0,
                 allocated_tokens: 0,
+                reuse_plan: None,
+                semantic_outcome: None,
             },
         ]);
 
-        let admit = get_new_batch_prefill(&mut waiting, &mut kv_manager, &config, 0.7, &[]);
+        let admit = get_new_batch_prefill(
+            &mut waiting,
+            &mut kv_manager,
+            &config,
+            0.7,
+            &[],
+            &std::collections::HashMap::new(),
+        );
         assert_eq!(admit.can_run.len(), 1);
         assert_eq!(admit.can_run[0].uuid, first_uuid);
         assert_eq!(waiting.len(), 1);
@@ -344,6 +374,8 @@ mod core_behavior {
             materialized_tokens: 6,
             cached_tokens: 4,
             allocated_tokens: 8,
+            reuse_plan: None,
+            semantic_outcome: None,
         }];
 
         let first = simulate_decode_step(&mut running, &mut kv_manager, &config, 0.0, false);
@@ -389,6 +421,8 @@ mod core_behavior {
             materialized_tokens: 4,
             cached_tokens: 0,
             allocated_tokens: 4,
+            reuse_plan: None,
+            semantic_outcome: None,
         }];
 
         let mut fast_kv_manager = SglangKvManager::new(64, 4, KvEventPublishers::default(), 0);
@@ -403,6 +437,8 @@ mod core_behavior {
             materialized_tokens: 4,
             cached_tokens: 0,
             allocated_tokens: 4,
+            reuse_plan: None,
+            semantic_outcome: None,
         }];
 
         let base = simulate_decode_step(
@@ -453,6 +489,8 @@ mod core_behavior {
                 materialized_tokens: 7,
                 cached_tokens: 4,
                 allocated_tokens: 8,
+                reuse_plan: None,
+                semantic_outcome: None,
             },
             SglangRequest {
                 uuid: Uuid::new_v4(),
@@ -464,6 +502,8 @@ mod core_behavior {
                 materialized_tokens: 5,
                 cached_tokens: 4,
                 allocated_tokens: 8,
+                reuse_plan: None,
+                semantic_outcome: None,
             },
         ];
 
@@ -496,6 +536,8 @@ mod core_behavior {
             materialized_tokens: 4,
             cached_tokens: 0,
             allocated_tokens: 4,
+            reuse_plan: None,
+            semantic_outcome: None,
         }];
 
         simulate_decode_step(&mut running, &mut kv_manager, &config, 0.0, false);
@@ -792,6 +834,8 @@ mod router_events {
             materialized_tokens: 0,
             cached_tokens: 0,
             allocated_tokens: 0,
+            reuse_plan: None,
+            semantic_outcome: None,
         };
         let first_output = expected_request.next_output_token();
         expected_request.append_output_token(first_output);
@@ -893,15 +937,31 @@ mod router_events {
             materialized_tokens: 0,
             cached_tokens: 0,
             allocated_tokens: 0,
+            reuse_plan: None,
+            semantic_outcome: None,
         }]);
 
-        let chunk1 = get_new_batch_prefill(&mut waiting, &mut kv_manager, &config, 0.7, &[]);
+        let chunk1 = get_new_batch_prefill(
+            &mut waiting,
+            &mut kv_manager,
+            &config,
+            0.7,
+            &[],
+            &std::collections::HashMap::new(),
+        );
         let mut req1 = chunk1.can_run.into_iter().next().unwrap();
         decode::cache_materialized_prefix(&mut req1, &mut kv_manager, &config);
         waiting.push_front(req1);
         harness.apply_events(buffer.drain()).await;
 
-        let chunk2 = get_new_batch_prefill(&mut waiting, &mut kv_manager, &config, 0.7, &[]);
+        let chunk2 = get_new_batch_prefill(
+            &mut waiting,
+            &mut kv_manager,
+            &config,
+            0.7,
+            &[],
+            &std::collections::HashMap::new(),
+        );
         let mut running = chunk2.can_run;
         let decode1 = simulate_decode_step(&mut running, &mut kv_manager, &config, 0.0, false);
         assert_eq!(decode1.output_signals.len(), 1);
@@ -920,8 +980,14 @@ mod router_events {
         let mut now_ms = 0.0;
         let mut saw_remove = harness.ok_count(METRIC_EVENT_REMOVED) > 0;
         loop {
-            let admit =
-                get_new_batch_prefill(&mut waiting, &mut kv_manager, &config, 0.7, &running);
+            let admit = get_new_batch_prefill(
+                &mut waiting,
+                &mut kv_manager,
+                &config,
+                0.7,
+                &running,
+                &std::collections::HashMap::new(),
+            );
             for mut req in admit.can_run {
                 if req.materialized_tokens < req.current_sequence_len() {
                     decode::cache_materialized_prefix(&mut req, &mut kv_manager, &config);
@@ -1574,5 +1640,435 @@ mod forward_pass_metrics {
         assert_eq!(fpm.num_prefill_requests, 1);
         assert!(fpm.sum_prefill_tokens > 0);
         assert!(fpm.wall_time_secs > 0.0);
+    }
+}
+
+mod semantic_reuse {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use uuid::Uuid;
+
+    use super::super::core::SglangCore;
+    use super::super::prefill::get_new_batch_prefill;
+    use super::{SglangConfig, SglangKvManager, SglangRequest, test_args};
+    use crate::common::protocols::KvEventPublishers;
+    use crate::common::semantic::{
+        FallbackReason, ReuseSegment, SegmentMode, SemanticOutcome, SemanticReusePlan,
+        SemanticSimConfig,
+    };
+
+    const BLOCK_SIZE: usize = 16;
+
+    fn semantic_cfg(plans: HashMap<Uuid, SemanticReusePlan>) -> SemanticSimConfig {
+        SemanticSimConfig {
+            enabled: true,
+            kv_bytes_per_token: 114_688.0,
+            intra_worker_copy_gbps: 1500.0,
+            rope_repair_us_per_token: 0.5,
+            plan_overhead_ms: 0.2,
+            min_segment_tokens: 16,
+            min_total_saved_tokens: 32,
+            provider_generation: 0,
+            plans: Arc::new(plans),
+        }
+    }
+
+    fn config_with_semantic(num_gpu_blocks: usize, sem: Option<SemanticSimConfig>) -> SglangConfig {
+        let mut args = test_args(num_gpu_blocks, BLOCK_SIZE, 8192);
+        args.semantic_sim = sem;
+        SglangConfig::from_args(&args)
+    }
+
+    fn seg(r: (usize, usize), d: (usize, usize), mode: SegmentMode) -> ReuseSegment {
+        ReuseSegment {
+            recipient_range: r,
+            donor_range: d,
+            mode,
+        }
+    }
+
+    fn plan(donor: Uuid, segments: Vec<ReuseSegment>) -> SemanticReusePlan {
+        SemanticReusePlan {
+            donor_uuid: donor,
+            donor_worker: None,
+            segments,
+            provider_generation: 0,
+        }
+    }
+
+    fn request_with_plan(tokens: Vec<u64>, reuse_plan: Option<SemanticReusePlan>) -> SglangRequest {
+        SglangRequest {
+            uuid: Uuid::new_v4(),
+            prompt_tokens: tokens,
+            max_output_tokens: 1,
+            output_ids: Vec::new(),
+            last_node: None,
+            kv_indices: Vec::new(),
+            materialized_tokens: 0,
+            cached_tokens: 0,
+            allocated_tokens: 0,
+            reuse_plan,
+            semantic_outcome: None,
+        }
+    }
+
+    /// Allocate and cache a donor sequence so its KV is resident in the radix
+    /// tree, and register its prompt tokens for plan resolution.
+    fn seed_donor(
+        kv_manager: &mut SglangKvManager,
+        registry: &mut HashMap<Uuid, Vec<u64>>,
+        tokens: Vec<u64>,
+    ) -> Uuid {
+        let alloc = kv_manager.allocate_for_request(&tokens).unwrap();
+        // Whole sequence is freshly allocated, so the first new token is at 0.
+        kv_manager.cache_finished_req(&tokens, &alloc.kv_indices, alloc.last_node, 0);
+        let donor = Uuid::new_v4();
+        registry.insert(donor, tokens);
+        donor
+    }
+
+    fn tokens(range: std::ops::Range<u64>) -> Vec<u64> {
+        range.collect()
+    }
+
+    fn admit_one(
+        config: &SglangConfig,
+        kv_manager: &mut SglangKvManager,
+        registry: &HashMap<Uuid, Vec<u64>>,
+        req: SglangRequest,
+    ) -> super::super::prefill::AdmitResult {
+        let mut waiting = std::collections::VecDeque::from([req]);
+        get_new_batch_prefill(&mut waiting, kv_manager, config, 0.7, &[], registry)
+    }
+
+    #[test]
+    fn accepted_plan_trims_exact_prefix_and_counts_token_classes() {
+        let config = config_with_semantic(64, Some(semantic_cfg(HashMap::new())));
+        let mut kv_manager =
+            SglangKvManager::new(1024, BLOCK_SIZE, KvEventPublishers::default(), 0);
+        let mut registry = HashMap::new();
+
+        // Donor: 32 shared "system" tokens + 96 body tokens.
+        let donor_tokens = tokens(0..128);
+        let donor = seed_donor(&mut kv_manager, &mut registry, donor_tokens.clone());
+
+        // Recipient: same 32-token prefix, 32 fresh tokens, then donor body
+        // [32, 96) repositioned to [64, 128).
+        let mut recipient = tokens(0..32);
+        recipient.extend(tokens(1000..1032));
+        recipient.extend_from_slice(&donor_tokens[32..96]);
+        let p = plan(
+            donor,
+            vec![
+                // Fully covered by the exact radix prefix: must be trimmed.
+                seg((0, 32), (0, 32), SegmentMode::Copied),
+                seg((64, 80), (32, 48), SegmentMode::Recomputed),
+                seg((80, 128), (48, 96), SegmentMode::Repaired),
+            ],
+        );
+
+        let admit = admit_one(
+            &config,
+            &mut kv_manager,
+            &registry,
+            request_with_plan(recipient, Some(p)),
+        );
+
+        assert_eq!(admit.can_run.len(), 1);
+        assert_eq!(admit.accepted_plans, 1);
+        assert_eq!(
+            admit.total_copied, 0,
+            "prefix-covered segment must be trimmed"
+        );
+        assert_eq!(admit.total_repaired, 48);
+        assert_eq!(admit.total_prefix, 32, "exact radix prefix still counted");
+        assert_eq!(admit.plan_outcomes.len(), 1);
+        assert_eq!(
+            admit.plan_outcomes[0].1,
+            SemanticOutcome::Accepted {
+                copied_tokens: 0,
+                repaired_tokens: 48,
+                recomputed_halo_tokens: 16,
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_donor_falls_back_and_request_still_admits() {
+        let config = config_with_semantic(64, Some(semantic_cfg(HashMap::new())));
+        let mut kv_manager =
+            SglangKvManager::new(1024, BLOCK_SIZE, KvEventPublishers::default(), 0);
+        let registry = HashMap::new();
+
+        let p = plan(
+            Uuid::new_v4(),
+            vec![seg((0, 64), (0, 64), SegmentMode::Copied)],
+        );
+        let admit = admit_one(
+            &config,
+            &mut kv_manager,
+            &registry,
+            request_with_plan(tokens(0..64), Some(p)),
+        );
+
+        assert_eq!(admit.can_run.len(), 1, "fallback must not block admission");
+        assert_eq!(admit.accepted_plans, 0);
+        assert_eq!(admit.total_copied + admit.total_repaired, 0);
+        assert_eq!(
+            admit.plan_outcomes[0].1,
+            SemanticOutcome::Fallback {
+                reason: FallbackReason::DonorUnknown
+            }
+        );
+    }
+
+    #[test]
+    fn registered_but_evicted_donor_falls_back() {
+        let config = config_with_semantic(64, Some(semantic_cfg(HashMap::new())));
+        let mut kv_manager =
+            SglangKvManager::new(1024, BLOCK_SIZE, KvEventPublishers::default(), 0);
+        let mut registry = HashMap::new();
+        // Registered in the donor registry, but its KV never entered the tree.
+        registry.insert(Uuid::new_v4(), tokens(0..64));
+        let donor = *registry.keys().next().unwrap();
+
+        let p = plan(donor, vec![seg((0, 64), (0, 64), SegmentMode::Repaired)]);
+        let admit = admit_one(
+            &config,
+            &mut kv_manager,
+            &registry,
+            request_with_plan(tokens(500..564), Some(p)),
+        );
+
+        assert_eq!(
+            admit.plan_outcomes[0].1,
+            SemanticOutcome::Fallback {
+                reason: FallbackReason::DonorEvicted
+            }
+        );
+    }
+
+    #[test]
+    fn stale_provider_generation_falls_back() {
+        let mut sem = semantic_cfg(HashMap::new());
+        sem.provider_generation = 1; // plans below carry generation 0
+        let config = config_with_semantic(64, Some(sem));
+        let mut kv_manager =
+            SglangKvManager::new(1024, BLOCK_SIZE, KvEventPublishers::default(), 0);
+        let mut registry = HashMap::new();
+        let donor = seed_donor(&mut kv_manager, &mut registry, tokens(0..64));
+
+        let p = plan(donor, vec![seg((0, 64), (0, 64), SegmentMode::Repaired)]);
+        let admit = admit_one(
+            &config,
+            &mut kv_manager,
+            &registry,
+            request_with_plan(tokens(500..564), Some(p)),
+        );
+
+        assert_eq!(
+            admit.plan_outcomes[0].1,
+            SemanticOutcome::Fallback {
+                reason: FallbackReason::GenerationStale
+            }
+        );
+    }
+
+    #[test]
+    fn cross_worker_donor_hint_falls_back_in_v1() {
+        let config = config_with_semantic(64, Some(semantic_cfg(HashMap::new())));
+        let mut kv_manager =
+            SglangKvManager::new(1024, BLOCK_SIZE, KvEventPublishers::default(), 0);
+        let mut registry = HashMap::new();
+        let donor = seed_donor(&mut kv_manager, &mut registry, tokens(0..64));
+
+        let mut p = plan(donor, vec![seg((0, 64), (0, 64), SegmentMode::Repaired)]);
+        p.donor_worker = Some(1);
+        let admit = admit_one(
+            &config,
+            &mut kv_manager,
+            &registry,
+            request_with_plan(tokens(500..564), Some(p)),
+        );
+
+        assert_eq!(
+            admit.plan_outcomes[0].1,
+            SemanticOutcome::Fallback {
+                reason: FallbackReason::DonorUnknown
+            }
+        );
+    }
+
+    #[test]
+    fn chunked_admission_falls_back_but_still_chunks() {
+        let mut args = test_args(64, BLOCK_SIZE, 32); // chunk size < prompt len
+        args.semantic_sim = Some(semantic_cfg(HashMap::new()));
+        let config = SglangConfig::from_args(&args);
+        let mut kv_manager =
+            SglangKvManager::new(1024, BLOCK_SIZE, KvEventPublishers::default(), 0);
+        let mut registry = HashMap::new();
+        let donor = seed_donor(&mut kv_manager, &mut registry, tokens(0..64));
+
+        let p = plan(donor, vec![seg((0, 64), (0, 64), SegmentMode::Repaired)]);
+        let admit = admit_one(
+            &config,
+            &mut kv_manager,
+            &registry,
+            request_with_plan(tokens(500..564), Some(p)),
+        );
+
+        assert_eq!(admit.can_run.len(), 1);
+        assert_eq!(
+            admit.can_run[0].materialized_tokens, 32,
+            "chunked admission proceeds"
+        );
+        assert_eq!(
+            admit.plan_outcomes[0].1,
+            SemanticOutcome::Fallback {
+                reason: FallbackReason::ChunkedUnsupported
+            }
+        );
+    }
+
+    #[test]
+    fn oom_during_allocation_releases_donor_pin() {
+        let config = config_with_semantic(8, Some(semantic_cfg(HashMap::new())));
+        // Pool of 128 tokens: donor takes 64, recipient needs 96 -> OOM with
+        // the donor pinned (unevictable) during resolution.
+        let mut kv_manager = SglangKvManager::new(128, BLOCK_SIZE, KvEventPublishers::default(), 0);
+        let mut registry = HashMap::new();
+        let donor_tokens = tokens(0..64);
+        let donor = seed_donor(&mut kv_manager, &mut registry, donor_tokens.clone());
+
+        let mut recipient = tokens(500..548);
+        recipient.extend_from_slice(&donor_tokens[0..48]);
+        let p = plan(donor, vec![seg((48, 96), (0, 48), SegmentMode::Repaired)]);
+        let mut waiting = std::collections::VecDeque::from([request_with_plan(recipient, Some(p))]);
+        let admit =
+            get_new_batch_prefill(&mut waiting, &mut kv_manager, &config, 0.7, &[], &registry);
+
+        assert!(admit.oom);
+        assert!(admit.can_run.is_empty());
+        assert_eq!(waiting.len(), 1, "request returns to the waiting queue");
+        assert_eq!(
+            kv_manager.cache().protected_size,
+            0,
+            "donor pin must be released on the OOM path"
+        );
+        assert!(
+            admit.plan_outcomes.is_empty(),
+            "no outcome recorded; may retry"
+        );
+    }
+
+    #[test]
+    fn donor_pin_survives_recipient_eviction_pressure() {
+        let config = config_with_semantic(16, Some(semantic_cfg(HashMap::new())));
+        // Pool of 256 tokens: target donor (64) + evictable filler (64) leave
+        // 128 free; the 160-token recipient forces eviction, which must take
+        // the filler and never the pinned donor.
+        let mut kv_manager = SglangKvManager::new(256, BLOCK_SIZE, KvEventPublishers::default(), 0);
+        let mut registry = HashMap::new();
+        let donor_tokens = tokens(0..64);
+        let donor = seed_donor(&mut kv_manager, &mut registry, donor_tokens.clone());
+        seed_donor(&mut kv_manager, &mut registry, tokens(2000..2064)); // filler
+
+        let mut recipient = tokens(500..532);
+        recipient.extend_from_slice(&donor_tokens[0..64]);
+        recipient.extend(tokens(600..664));
+        let p = plan(donor, vec![seg((32, 96), (0, 64), SegmentMode::Repaired)]);
+        let admit = admit_one(
+            &config,
+            &mut kv_manager,
+            &registry,
+            request_with_plan(recipient, Some(p)),
+        );
+
+        assert_eq!(admit.accepted_plans, 1);
+        assert_eq!(admit.total_repaired, 64);
+        assert_eq!(
+            kv_manager.cache().prefix_match_len(&donor_tokens),
+            64,
+            "pinned donor must survive the recipient's eviction"
+        );
+    }
+
+    #[test]
+    fn disabled_semantic_ignores_attached_plans() {
+        let config = config_with_semantic(64, None);
+        let mut kv_manager =
+            SglangKvManager::new(1024, BLOCK_SIZE, KvEventPublishers::default(), 0);
+        let mut registry = HashMap::new();
+        let donor = seed_donor(&mut kv_manager, &mut registry, tokens(0..64));
+
+        let p = plan(donor, vec![seg((0, 64), (0, 64), SegmentMode::Repaired)]);
+        let admit = admit_one(
+            &config,
+            &mut kv_manager,
+            &registry,
+            request_with_plan(tokens(500..564), Some(p)),
+        );
+
+        assert_eq!(admit.can_run.len(), 1);
+        assert_eq!(admit.accepted_plans, 0);
+        assert!(admit.plan_outcomes.is_empty());
+        assert_eq!(admit.total_copied + admit.total_repaired, 0);
+    }
+
+    #[test]
+    fn core_attaches_plans_registers_donors_and_speeds_up_prefill() {
+        let donor_req = super::direct_request((0..2048u32).collect(), 1);
+        let variant_uuid = Uuid::new_v4();
+        let mut variant_tokens: Vec<u32> = (10_000..10_512u32).collect();
+        variant_tokens.extend(512..1536u32); // donor body, shifted by 512
+
+        let donor_uuid = Uuid::new_v4();
+        let mut donor_req = donor_req;
+        donor_req.uuid = Some(donor_uuid);
+        let variant_plan = plan(
+            donor_uuid,
+            vec![seg((512, 1536), (512, 1536), SegmentMode::Repaired)],
+        );
+
+        let run = |semantic: bool| -> f64 {
+            let mut args = test_args(1024, BLOCK_SIZE, 8192);
+            if semantic {
+                let mut plans = HashMap::new();
+                plans.insert(variant_uuid, variant_plan.clone());
+                args.semantic_sim = Some(semantic_cfg(plans));
+            }
+            let mut core = SglangCore::new(args);
+            core.receive(crate::common::protocols::DirectRequest {
+                uuid: Some(donor_uuid),
+                ..donor_req.clone()
+            });
+            let mut now_ms = 0.0;
+            for _ in 0..16 {
+                if core.is_empty() {
+                    break;
+                }
+                now_ms = core.execute_hidden_pass(now_ms).end_ms;
+            }
+            assert!(core.is_empty(), "donor must complete before the variant");
+
+            core.receive(crate::common::protocols::DirectRequest {
+                tokens: variant_tokens.clone(),
+                max_output_tokens: 1,
+                uuid: Some(variant_uuid),
+                dp_rank: 0,
+                arrival_timestamp_ms: None,
+                ..Default::default()
+            });
+            let start = now_ms;
+            core.execute_hidden_pass(now_ms).end_ms - start
+        };
+
+        let cold = run(false);
+        let blended = run(true);
+        assert!(
+            blended < cold,
+            "blended prefill ({blended:.3} ms) must beat cold prefill ({cold:.3} ms)"
+        );
     }
 }

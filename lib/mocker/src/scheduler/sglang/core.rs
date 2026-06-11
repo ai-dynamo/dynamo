@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use dynamo_kv_router::protocols::WorkerId;
@@ -31,6 +31,10 @@ pub(crate) struct SglangCore {
     pub(super) kv_manager: SglangKvManager,
     speculative_sampler: Option<SpeculativeDecodeSampler>,
     kv_event_buffer: Option<CapturedRouterEventBuffer>,
+    /// Prompt tokens of fully-prefilled requests on this worker, used to
+    /// resolve blended reuse plans. Only populated when semantic simulation
+    /// is enabled.
+    donor_registry: HashMap<Uuid, Vec<u64>>,
 }
 
 impl SglangCore {
@@ -92,11 +96,15 @@ impl SglangCore {
             ),
             speculative_sampler,
             kv_event_buffer,
+            donor_registry: HashMap::new(),
         }
     }
 
     pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
-        let request = SglangRequest::from(request);
+        let mut request = SglangRequest::from(request);
+        if let Some(sem) = self.config.semantic.as_ref() {
+            request.reuse_plan = sem.plans.get(&request.uuid).cloned();
+        }
         request.debug_assert_invariants(self.config.block_size);
         let uuid = request.uuid;
         self.waiting.push_back(request);
@@ -136,6 +144,7 @@ impl SglangCore {
             &self.config,
             self.new_token_ratio,
             &self.running,
+            &self.donor_registry,
         );
 
         if admit.oom {
@@ -148,6 +157,12 @@ impl SglangCore {
             }
         }
 
+        for (uuid, outcome) in &admit.plan_outcomes {
+            if let Some(collector) = collector.as_deref_mut() {
+                collector.on_semantic(*uuid, *outcome);
+            }
+        }
+
         // Capture per-request prefill FPM data before dispersing can_run.
         let prefill_fpm = admit.prefill_fpm;
 
@@ -157,19 +172,46 @@ impl SglangCore {
         } else {
             0
         };
+        // Copied/Repaired tokens are not computed: fold them into the prefix
+        // term so the perf model prices only miss + halo tokens, then add the
+        // blended extra (copy overlaps compute; RoPE repair serializes).
+        let reused_blended = admit.total_copied + admit.total_repaired;
         let mean_prefix = if batch_size > 0 {
-            admit.total_prefix / batch_size
+            (admit.total_prefix + reused_blended) / batch_size
         } else {
             0
         };
-        let prefill_time =
-            simulate_prefill_duration(batch_size, mean_isl, mean_prefix, &self.config, true);
+        let prefill_time = if reused_blended > 0
+            && let Some(sem) = self.config.semantic.as_ref()
+        {
+            let compute =
+                simulate_prefill_duration(batch_size, mean_isl, mean_prefix, &self.config, false);
+            let compute_ms = compute.as_secs_f64() * 1000.0;
+            let extra_ms = crate::common::semantic::blended_extra_ms(
+                compute_ms,
+                admit.total_copied,
+                admit.total_repaired,
+                admit.accepted_plans,
+                sem,
+            );
+            apply_prefill_speedup(
+                Duration::from_secs_f64((compute_ms + extra_ms) / 1000.0),
+                &self.config,
+            )
+        } else {
+            simulate_prefill_duration(batch_size, mean_isl, mean_prefix, &self.config, true)
+        };
 
+        let semantic_enabled = self.config.semantic.is_some();
         for mut req in admit.can_run {
             if req.materialized_tokens < req.current_sequence_len() {
                 cache_materialized_prefix(&mut req, &mut self.kv_manager, &self.config);
                 self.waiting.push_front(req);
             } else {
+                if semantic_enabled {
+                    self.donor_registry
+                        .insert(req.uuid, req.prompt_tokens.clone());
+                }
                 self.running.push(req);
             }
         }
@@ -304,10 +346,16 @@ fn simulate_prefill_duration(
         .predict_prefill_time(batch_size, mean_isl, mean_prefix);
     let total_time = Duration::from_secs_f64(prefill_time / 1000.0);
 
-    if !apply_speedup || config.speedup_ratio <= 0.0 || total_time <= Duration::ZERO {
+    if !apply_speedup {
         return total_time;
     }
+    apply_prefill_speedup(total_time, config)
+}
 
+fn apply_prefill_speedup(total_time: Duration, config: &SglangConfig) -> Duration {
+    if config.speedup_ratio <= 0.0 || total_time <= Duration::ZERO {
+        return total_time;
+    }
     Duration::from_secs_f64(total_time.as_secs_f64() / config.speedup_ratio)
 }
 

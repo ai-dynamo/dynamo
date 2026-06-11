@@ -463,6 +463,33 @@ pub fn simulate_trace_requests_with_router_mode(
     arrival_speedup_ratio: f64,
     router_mode: ReplayRouterMode,
 ) -> Result<TraceSimulationReport> {
+    simulate_trace_requests_with_router_mode_and_options(
+        args,
+        router_config,
+        prefill_load_estimator,
+        requests,
+        num_workers,
+        arrival_speedup_ratio,
+        router_mode,
+        false,
+        None,
+    )
+}
+
+/// Same as [`simulate_trace_requests_with_router_mode`], with per-request
+/// record capture and a simulation time cap exposed to external drivers.
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_trace_requests_with_router_mode_and_options(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    requests: Vec<DirectRequest>,
+    num_workers: usize,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_offline_replay_args(&args, num_workers, router_mode)?;
     if requests.is_empty() {
@@ -477,8 +504,8 @@ pub fn simulate_trace_requests_with_router_mode(
         num_workers,
         arrival_speedup_ratio,
         router_mode,
-        false,
-        None,
+        record_per_request,
+        max_sim_time_ms,
     )?;
     Ok(report)
 }

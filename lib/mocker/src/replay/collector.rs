@@ -259,6 +259,8 @@ struct TraceRequestStats {
     output_length: usize,
     reused_input_tokens: usize,
     first_admission_reused_input_tokens: usize,
+    /// Blended (semantic) reuse outcome decided at admission, if any.
+    semantic_outcome: Option<crate::common::semantic::SemanticOutcome>,
     /// Index of the prefill worker that handled this request, if any.
     /// `None` in two situations:
     ///   - Aggregated replay (no separate prefill pool) — meaningless field.
@@ -307,6 +309,9 @@ pub struct PerRequestRecord {
     pub reused_input_tokens: usize,
     pub prefill_worker_idx: Option<usize>,
     pub decode_worker_idx: Option<usize>,
+    /// Blended (semantic) reuse outcome, when semantic simulation is enabled
+    /// and a plan existed for this request.
+    pub semantic_outcome: Option<crate::common::semantic::SemanticOutcome>,
 }
 
 #[cfg(test)]
@@ -393,6 +398,7 @@ impl TraceCollector {
                 session_id: None,
                 turn_index: None,
                 first_admission_reused_input_tokens: 0,
+                semantic_outcome: None,
             },
         );
     }
@@ -448,6 +454,20 @@ impl TraceCollector {
                 stats.first_admit_ms = Some(admit_time_ms);
             }
             stats.reused_input_tokens = stats.reused_input_tokens.max(reused_input_tokens);
+        }
+    }
+
+    /// Record the blended (semantic) reuse outcome for a request. Set once;
+    /// the scheduler decides outcomes at most once per request.
+    pub(crate) fn on_semantic(
+        &mut self,
+        uuid: Uuid,
+        outcome: crate::common::semantic::SemanticOutcome,
+    ) {
+        if let Some(stats) = self.requests.get_mut(&uuid)
+            && stats.semantic_outcome.is_none()
+        {
+            stats.semantic_outcome = Some(outcome);
         }
     }
 
@@ -615,6 +635,7 @@ impl TraceCollector {
                 reused_input_tokens: stats.reused_input_tokens,
                 prefill_worker_idx: stats.prefill_worker_idx,
                 decode_worker_idx: stats.decode_worker_idx,
+                semantic_outcome: stats.semantic_outcome,
             });
         }
         // Stable ordering: by arrival_time_ms (with uuid as tiebreaker) so the

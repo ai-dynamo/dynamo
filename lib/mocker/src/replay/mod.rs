@@ -82,8 +82,8 @@ pub use entrypoints::{
     simulate_trace_live_requests_with_router_mode, simulate_trace_live_workload,
     simulate_trace_live_workload_with_router_mode, simulate_trace_requests,
     simulate_trace_requests_disagg_with_router_mode, simulate_trace_requests_with_router_mode,
-    simulate_trace_workload, simulate_trace_workload_disagg_with_router_mode,
-    simulate_trace_workload_with_router_mode,
+    simulate_trace_requests_with_router_mode_and_options, simulate_trace_workload,
+    simulate_trace_workload_disagg_with_router_mode, simulate_trace_workload_with_router_mode,
 };
 pub use planner_handle::{PlannerReplayHandle, PlannerTickData};
 pub use validate::validate_replay_args_mode;

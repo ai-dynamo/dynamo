@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::cache::radix_cache::NodeId;
 use crate::common::protocols::DirectRequest;
+use crate::common::semantic::{SemanticOutcome, SemanticReusePlan};
 
 #[derive(Clone, Debug)]
 pub(super) struct SglangRequest {
@@ -20,6 +21,10 @@ pub(super) struct SglangRequest {
     pub(super) materialized_tokens: usize,
     pub(super) cached_tokens: usize,
     pub(super) allocated_tokens: usize,
+    /// Blended KV reuse plan attached at receive() from the sidecar plan map.
+    pub(super) reuse_plan: Option<SemanticReusePlan>,
+    /// Outcome of plan resolution at first admission; recorded once.
+    pub(super) semantic_outcome: Option<SemanticOutcome>,
 }
 
 impl SglangRequest {
@@ -175,6 +180,8 @@ impl From<DirectRequest> for SglangRequest {
             materialized_tokens: 0,
             cached_tokens: 0,
             allocated_tokens: 0,
+            reuse_plan: None,
+            semantic_outcome: None,
         }
     }
 }

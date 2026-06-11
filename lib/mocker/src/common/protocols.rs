@@ -535,6 +535,7 @@ struct MockEngineArgsSerde {
     router_queue_policy: OptionalConfigValue<String>,
     sglang: OptionalConfigValue<SglangArgs>,
     trtllm: OptionalConfigValue<TrtllmArgs>,
+    semantic_sim: OptionalConfigValue<crate::common::semantic::SemanticSimConfig>,
     #[serde(rename = "has_perf_model")]
     _has_perf_model: OptionalConfigValue<serde_json::Value>,
 }
@@ -825,6 +826,12 @@ pub struct MockEngineArgs {
     /// TensorRT-LLM-specific configuration. Only used when `engine_type == Trtllm`.
     #[builder(default = "None")]
     pub trtllm: Option<TrtllmArgs>,
+
+    /// Blended (non-prefix) KV reuse simulation. Disabled when `None` or when
+    /// `enabled` is false; the scheduler path is unchanged in that case.
+    #[serde(default)]
+    #[builder(default = "None")]
+    pub semantic_sim: Option<crate::common::semantic::SemanticSimConfig>,
 }
 
 fn mock_engine_args_validation_error(code: &'static str, message: String) -> ValidationError {
@@ -1117,6 +1124,9 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         }
         if let Some(trtllm) = compat.trtllm.into_nullable() {
             builder = builder.trtllm(trtllm);
+        }
+        if let Some(semantic_sim) = compat.semantic_sim.into_nullable() {
+            builder = builder.semantic_sim(semantic_sim);
         }
 
         builder
