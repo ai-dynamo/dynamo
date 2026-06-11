@@ -1017,6 +1017,73 @@ async fn test_model_ready_endpoint() {
     task.await.unwrap().unwrap();
 }
 
+/// Regression: exact-match precedence must hold for a *non-displayable* model
+/// whose ID ends in `/ready`. Such a model is absent from `model_display_names()`,
+/// so keying the exact-match check off the displayable set (the earlier bug)
+/// would fall through to the `/ready` sub-resource and return a sibling `foo`'s
+/// readiness — shadowing the registered `foo/ready`. Exact match must win for
+/// *any* registered model, displayable or not.
+#[tokio::test]
+async fn test_model_ready_endpoint_non_displayable_shadow() {
+    use dynamo_llm::discovery::WorkerSet;
+    use dynamo_llm::worker_type::WorkerType;
+
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    // Base model `foo`: a normal, ready in-process model.
+    let foo = ModelDeploymentCard::with_name_only("foo");
+    manager
+        .add_chat_completions_model("foo", foo.mdcsum(), Arc::new(CounterEngine {}))
+        .unwrap();
+
+    // `foo/ready`: registered but NOT displayable (no serving engine) and NOT
+    // ready (decode worker type whose prefill peer is absent).
+    let mut card = ModelDeploymentCard::with_name_only("foo/ready");
+    card.worker_type = Some(WorkerType::Decode);
+    card.needs = vec![vec![WorkerType::Prefill]];
+    let ws = WorkerSet::new(
+        "__nd_foo_ready".to_string(),
+        card.mdcsum().to_string(),
+        card,
+    );
+    manager.add_worker_set("foo/ready", "__nd_foo_ready", ws);
+
+    // `GET /v1/models/foo/ready` must resolve to the registered `foo/ready`
+    // model (exact match wins), NOT the readiness sub-resource of `foo`. Since
+    // `foo/ready` is registered-but-not-ready, its gated retrieve returns 503 —
+    // crucially *not* a 200 readiness body for `foo` (the pre-fix behavior).
+    let resp = reqwest::Client::new()
+        .get(format!("http://localhost:{}/v1/models/foo/ready", port))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "exact match on registered (non-displayable) foo/ready must hit its gated retrieve (503), not foo's readiness (200)"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body.get("namespaces").is_none(),
+        "must not be foo's readiness body, got: {body}"
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
 /// With nvext disabled, a request asking for response `extra_fields` must not
 /// produce any `nvext` field in the response.
 #[tokio::test]

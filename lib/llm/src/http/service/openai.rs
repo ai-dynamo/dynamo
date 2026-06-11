@@ -2511,22 +2511,25 @@ async fn get_model_openai(
 
     let model_id = model_id.strip_prefix('/').unwrap_or(&model_id);
 
-    let models: HashSet<String> = state.manager().model_display_names();
-
     // The retrieve route (`/v1/models/{*model_id}`) is a catch-all, so model
     // IDs can contain '/' — and may even end in '/ready'. We therefore
     // dispatch by precedence: an *exact* model match always wins, and only when
     // there is no such model do we treat a trailing `/ready` as the
     // per-model readiness sub-resource (Mechanism 4). This means a model
     // literally named `foo/ready` is still retrievable and never shadowed.
-    if models.contains(model_id) {
+    //
+    // Exact match is resolved against ALL registered models (`get_model`), not
+    // just the displayable ones, so a registered-but-not-yet-ready `foo/ready`
+    // still wins over the readiness sub-resource of a sibling `foo`.
+    // `get_model_retrieve` applies the readiness gate itself (503 if not ready).
+    if state.manager().get_model(model_id).is_some() {
         return get_model_retrieve(&state, model_id);
     }
 
-    // Readiness sub-resource. Resolve against ALL registered models via
-    // `get_model` — NOT `model_display_names()`, which filters to displayable
-    // (ready) models. The whole point of this endpoint is to diagnose models
-    // that are registered but not yet ready, so it must find them too.
+    // Readiness sub-resource. Resolves against all registered models (above
+    // exact check failed, so `model_id` is not itself a registered model);
+    // the whole point of this endpoint is to diagnose models that are
+    // registered but not yet ready, so it must find them too.
     if let Some(base) = model_id.strip_suffix("/ready")
         && state.manager().get_model(base).is_some()
     {
