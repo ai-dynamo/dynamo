@@ -236,7 +236,7 @@ class HardwareSpec(BaseModel):
     )
     gpuSku: Optional[Union[GPUSKUType, XPUSKUType]] = Field(
         default=None,
-        description="GPUSKU is the AIC hardware system identifier for the GPU. When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels.",
+        description="GPUSKU selects the GPU type to target. When omitted, auto-detected by selecting the GPU with the highest node count, then highest VRAM. In mixed-GPU clusters, set this to choose which GPU type to use. Discovery and totalGpus are then restricted to nodes matching this SKU.",
     )
     vramMb: Optional[float] = Field(
         default=None,
