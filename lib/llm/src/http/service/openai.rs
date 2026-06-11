@@ -534,16 +534,8 @@ fn copy_x_request_id<T: Send + Sync + 'static, U: Send + Sync + 'static>(
     }
 }
 
-/// OpenAI Completions Request Handler
-///
-/// This method will handle the incoming request for the `/v1/completions endpoint`. The endpoint is a "source"
-/// Emit a single warning when a request carries `nvext` data — either a body
-/// `nvext` object or one of the routing-override headers — while the frontend
-/// `nvext` extension is disabled (`DYN_ENABLE_FRONTEND_NVEXT`). The data is
-/// dropped regardless; this just makes the otherwise-silent strip observable.
-///
-/// Only ever called from the disabled branch, so it adds nothing to the
-/// default (nvext-enabled) request path.
+/// Warn (once per request) when nvext data is dropped because the extension is
+/// disabled. Only called from the disabled branch, so the default path is free.
 fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap) {
     use crate::protocols::openai::nvext::{
         HEADER_DP_RANK, HEADER_DP_RANK_ALIAS, HEADER_PREFILL_DP_RANK, HEADER_PREFILL_INSTANCE_ID,
@@ -562,11 +554,14 @@ fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap)
     if nvext_present || header_present {
         tracing::warn!(
             endpoint,
-            "request carried nvext data (body and/or routing headers) but DYN_ENABLE_FRONTEND_NVEXT is disabled; dropping it"
+            "request carried nvext data but DYN_ENABLE_FRONTEND_NVEXT is disabled; dropping it"
         );
     }
 }
 
+/// OpenAI Completions Request Handler
+///
+/// This method will handle the incoming request for the `/v1/completions endpoint`. The endpoint is a "source"
 /// for an [`super::OpenAICompletionsStreamingEngine`] and will return a stream of
 /// responses which will be forward to the client.
 ///

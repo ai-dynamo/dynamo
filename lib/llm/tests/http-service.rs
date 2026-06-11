@@ -909,9 +909,8 @@ async fn test_request_id_annotation() {
     task.await.unwrap().unwrap();
 }
 
-/// End-to-end gate check for `DYN_ENABLE_FRONTEND_NVEXT`: when the master
-/// switch is off, a request asking for response-side `nvext.extra_fields`
-/// must not produce any `nvext` field in the streamed response.
+/// With nvext disabled, a request asking for response `extra_fields` must not
+/// produce any `nvext` field in the response.
 #[tokio::test]
 async fn test_nvext_disabled_strips_request_and_response() {
     dynamo_runtime::logging::init();
