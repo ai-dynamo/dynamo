@@ -655,6 +655,16 @@ impl Worker {
 
         let mut local_model = build_local_model(&self.config, engine_config).await?;
         tracing::debug!("local model built");
+
+        // Hand the engine its serving endpoint before registering the model
+        // with discovery. on_endpoint_ready is a fatal handoff: doing it first
+        // means a failure leaves nothing published, so there is no stale
+        // discovery entry to reclaim. Engines that publish their own discovery
+        // records (e.g. vLLM dynamic LoRA) stash the endpoint here, and this
+        // still runs before `register_engine_controls`, so `/engine/*` cannot
+        // fire before the engine has the endpoint.
+        self.engine.on_endpoint_ready(endpoint.clone()).await?;
+
         local_model
             .attach(
                 &endpoint,
@@ -673,12 +683,6 @@ impl Worker {
             })?;
         tracing::debug!("model registered with discovery");
 
-        // Hand the engine its serving endpoint before exposing any engine
-        // controls. Engines that publish their own discovery records (e.g.
-        // vLLM dynamic LoRA) stash it here; doing this before
-        // `register_engine_controls` closes the race where `/engine/*` could
-        // fire before the engine has the endpoint. A failure here is fatal.
-        self.engine.on_endpoint_ready(endpoint.clone()).await?;
         self.register_engine_controls(&endpoint).await?;
         self.register_engine_updates(&endpoint).await?;
 
