@@ -53,61 +53,22 @@ Treatment labels:
 
 ## Optimization Goal
 
-Profiler V2 does not return a single tuned configuration. Its goal is to produce a ranked set of viable deployment candidates for the requested `model_name`, `hardware_sku`, and workload, so the user can compare the top recommendation against alternatives, binding constraints, and skipped-candidate reasons.
+Profiler V2 does not return a single tuned configuration. Its goal is to produce a list of viable deployment candidates ranked by performance, so the user can compare the top recommendation against ranked alternatives.
 
-The optimization goal is user-owned and always `Pinned`; it is never a search dimension:
+The optimization goal is user-owned and `Pinned`; it is never a search dimension:
 
 - `optimization_target` defines what "better" means: `throughput`, `e2e_latency`, `goodput`, or `goodput_per_gpu`.
 - SLA targets (`ttft_ms`+`itl_ms`, or `e2e_ms`) are user constraints. `goodput` and `goodput_per_gpu` require an SLA target; `throughput` and `e2e_latency` may run without one.
-- The GPU budget (`gpu_budget`) is the deployment `budget` knob, not part of this structure; it is applied as a feasibility constraint in the gate below.
+- The GPU budget (`gpu_budget`) is the deployment `budget` knob, not part of the goal; it is applied as a feasibility constraint in the gate below.
 
-The goal is captured by a single structure, extracted from the DGDR spec (objective + SLA) and never mutated by the search. Field names follow the DGDR-aligned lowerCamelCase convention used by `replay_optimize.specs`:
-
-```python
-class OptimizationTarget(str, Enum):
-    THROUGHPUT = "throughput"            # maximize replay throughput
-    E2E_LATENCY = "e2e_latency"          # minimize mean end-to-end latency
-    GOODPUT = "goodput"                  # maximize SLA-satisfying throughput
-    GOODPUT_PER_GPU = "goodput_per_gpu"  # maximize goodput / used_gpus
-
-
-class SLATarget(BaseModel):
-    """Per-request latency bounds in ms. Set ttftMs+itlMs, or e2eMs."""
-    model_config = ConfigDict(extra="forbid")
-    ttftMs: float | None = None
-    itlMs: float | None = None
-    e2eMs: float | None = None
-
-
-class OptimizationGoal(BaseModel):
-    """User-owned objective and SLA. Pinned; never searched."""
-    model_config = ConfigDict(extra="forbid")
-    target: OptimizationTarget = OptimizationTarget.THROUGHPUT
-    sla: SLATarget | None = None  # required for goodput / goodput_per_gpu
-
-    @model_validator(mode="after")
-    def _require_sla_for_goodput(self) -> "OptimizationGoal":
-        needs_sla = self.target in (
-            OptimizationTarget.GOODPUT,
-            OptimizationTarget.GOODPUT_PER_GPU,
-        )
-        has_sla = self.sla is not None and (
-            self.sla.e2eMs is not None
-            or (self.sla.ttftMs is not None and self.sla.itlMs is not None)
-        )
-        if needs_sla and not has_sla:
-            raise ValueError(
-                f"{self.target.value} requires an SLA target (ttftMs+itlMs or e2eMs)"
-            )
-        return self
-```
+The goal is captured by the `OptimizationGoal` structure, defined alongside the other search inputs in [Internal Search API](#internal-search-api).
 
 Candidates are ranked in two stages:
 
-1. Feasibility gate — a candidate must pass candidate generation and preflight (legal parallel shape, memory fit, backend/SKU support, `gpu_budget`, and any user-pinned knobs) and, when an SLA is set, satisfy it under replay. Infeasible candidates are dropped with a structured reason instead of being scored.
-2. Objective ranking — feasible candidates are ordered by the `optimization_target` score computed from their replay report.
+1. Feasibility gate — a candidate must pass candidate generation and preflight (legal parallel shape, memory fit, backend/SKU support, `gpu_budget`, and any user-pinned knobs) and, when an SLA is set, satisfy it under replay. Infeasible candidates are dropped rather than scored.
+2. Objective ranking — feasible candidates are sorted by the `optimization_target` score from their replay report: `throughput`, `goodput`, and `goodput_per_gpu` pick the maximum; `e2e_latency` picks the minimum.
 
-If no candidate clears the feasibility gate, V2 reports `NoViableCandidate` rather than emitting an unproven configuration. The concrete per-candidate score that the Vizier main sweep optimizes for each objective is defined in [Main Sweep Optimization Goal](#main-sweep-optimization-goal).
+If no candidate clears the feasibility gate the search returns an empty list. The concrete per-candidate score for each objective is defined in [Main Sweep Optimization Goal](#main-sweep-optimization-goal).
 
 ## Deployment Knobs
 
@@ -279,32 +240,81 @@ where `err(pred, actual) = abs(log1p(max(pred, 0)) - log1p(max(actual, 0)))`. Th
 
 The selected predictor preset is emitted as pinned planner config for the main V2 candidate evaluation.
 
-## Internal Entrypoint
+## Internal Search API
 
-Profiler V2 is reached through the existing profiler entrypoint, not a separate V2 CLI or a parallel sweep-spec envelope. The user still submits a `DynamoGraphDeploymentRequestSpec` to `python -m dynamo.profiler --config <json-or-yaml>`; V2 is an internal, opt-in code path inside `run_profile`, so the DGDR contract stays the single source of truth and the operator wiring is unchanged.
-
-```bash
-# Opt-in flag routes run_profile() into the V2 smart-search path.
-python -m dynamo.profiler --config dgdr.yaml --smart-search
-```
-
-Dispatch:
-
-1. `run_profile(dgdr, ops)` parses and validates the same `DynamoGraphDeploymentRequestSpec` as V1.
-2. When the V2 opt-in is set (a `ProfilerOperationalConfig` flag exposed as `--smart-search`, off by default), `run_profile` delegates to the V2 module instead of the V1 AIC sweeper/picker, via `run_smart_search` (full API surface below).
-3. V2 reads `model_name`, `backend`, `hardware_sku`, workload, SLA, objective, and component-enablement directly off the DGDR spec — the same fields V1 already consumes. It does **not** introduce a parallel top-level YAML envelope (`load` / `objective` / `sweep` / `searchSpaceConfigs` / `searchSpaceOverrides`); when dynamic-workload inputs and pin/override controls are finalized they extend the DGDR spec contract itself, not a V2-only schema (out of scope for this plan).
-4. Sweep execution budget (max rounds, concurrent replay evaluations, candidates per round, random seed) is V2 run-control carried on `ProfilerOperationalConfig` / CLI flags, mirroring how V1 already exposes interpolation granularity and deployment timeouts. It is operational config, not part of the deployment request.
-5. For each decoded Vizier sample, V2 constructs a per-candidate `replay_optimize.ReplayOptimizeSpec` (`EngineSpec` model/backend/engine args, `HardwareSpec`, `WorkloadSpec`, `SLASpec`, `RouterSpec`) and evaluates it through `optimize_dense_agg_with_replay` / `optimize_dense_disagg_with_replay`. V2 owns search-space construction, candidate decoding, ranking, and report generation around those calls; AIC and replay stay lower-level providers.
-6. V2 writes its ranked-candidate report and `profiler_status.yaml` into `ops.output_dir`, exactly as V1 reports results, so the surrounding sidecar/controller flow needs no change.
-
-The full internal API surface: the input is the existing DGDR spec, and the output is the ranked-candidate contract — which carries the chosen deployment shape plus router and planner config (assembling the full DGD manifest is out of scope for this plan). `OptimizationGoal` is defined in [Optimization Goal](#optimization-goal):
+This is a pure internal search API. It takes a search space, an optimization goal, and a sweep config, runs the Vizier + replay sweep, and returns the evaluated candidates ranked by performance. It is decoupled from DGDR and k8s — how the search space and goal get populated (from a DGDR spec, a CLI, or a test) is out of scope here.
 
 ```python
 # components/src/dynamo/profiler/v2/__init__.py
 
+class SearchSpace(BaseModel):
+    """The knobs to sweep. Each list is the candidate set the optimizer samples
+    from; a single-element list pins that knob. Branch (agg vs disagg) is fixed
+    per study, so one space stays flat."""
+    model_config = ConfigDict(extra="forbid")
+
+    deploymentMode: str = "disagg"               # "agg" | "disagg"
+    gpuBudget: int = 32                          # max GPUs per candidate
+
+    # engine: backend + legal parallel shapes (TP/TEP/DEP, replicas from budget)
+    backend: list[str] = ["vllm"]                # vllm | sglang | trtllm
+    parallelConfigs: list[dict[str, Any]]        # generated legal shapes, branch-aware
+
+    # engine: scheduler batching capacity
+    maxNumBatchedTokens: list[int] = [8192, 16384, 32768]
+    maxNumSeqs: list[int] = [256, 512, 1024]
+
+    # router
+    routerMode: list[str] = ["kv_router", "round_robin"]
+    overlapScoreCredit: list[float] = [0.0, 0.5, 1.0]
+    prefillLoadScale: list[float] = [0.0, 0.5, 1.0, 2.0]
+    routerTemperature: list[float] = [0.0, 0.2]
+
+    # planner: preset ids expanded by the candidate generator
+    plannerScalingPolicy: list[str] = ["throughput_180_5", "hybrid_180_5"]
+    plannerFpmSampling: list[str] = ["default", "large"]
+
+
+class OptimizationTarget(str, Enum):
+    THROUGHPUT = "throughput"            # maximize replay throughput
+    E2E_LATENCY = "e2e_latency"          # minimize mean end-to-end latency
+    GOODPUT = "goodput"                  # maximize SLA-satisfying throughput
+    GOODPUT_PER_GPU = "goodput_per_gpu"  # maximize goodput / used_gpus
+
+
+class SLATarget(BaseModel):
+    """Per-request latency bounds in ms. Set ttftMs+itlMs, or e2eMs."""
+    model_config = ConfigDict(extra="forbid")
+    ttftMs: float | None = None
+    itlMs: float | None = None
+    e2eMs: float | None = None
+
+
+class OptimizationGoal(BaseModel):
+    """What "better" means + the SLA constraint. Pinned; never searched."""
+    model_config = ConfigDict(extra="forbid")
+    target: OptimizationTarget = OptimizationTarget.THROUGHPUT
+    sla: SLATarget | None = None  # required for goodput / goodput_per_gpu
+
+    @model_validator(mode="after")
+    def _require_sla_for_goodput(self) -> "OptimizationGoal":
+        needs_sla = self.target in (
+            OptimizationTarget.GOODPUT,
+            OptimizationTarget.GOODPUT_PER_GPU,
+        )
+        has_sla = self.sla is not None and (
+            self.sla.e2eMs is not None
+            or (self.sla.ttftMs is not None and self.sla.itlMs is not None)
+        )
+        if needs_sla and not has_sla:
+            raise ValueError(
+                f"{self.target.value} requires an SLA target (ttftMs+itlMs or e2eMs)"
+            )
+        return self
+
+
 class SweepConfig(BaseModel):
-    """V2 run-control. Operational, not part of the deployment request;
-    carried on ProfilerOperationalConfig and exposed as CLI flags."""
+    """Sweep run-control."""
     model_config = ConfigDict(extra="forbid")
     maxRounds: int = 20                    # total Vizier suggestion/evaluation rounds
     parallelEvals: int = 16                # concurrent CPU replay evaluations
@@ -312,47 +322,24 @@ class SweepConfig(BaseModel):
     randomSeed: int = 1
 
 
-class CandidateStatus(str, Enum):
-    VIABLE = "viable"    # passed the feasibility gate, scored
-    SKIPPED = "skipped"  # removed by candidate generation / preflight
-    FAILED = "failed"    # replay or evaluation error
-
-
 class Candidate(BaseModel):
-    """One evaluated deployment candidate and its generated artifacts."""
+    """One evaluated configuration and its replay performance."""
     model_config = ConfigDict(extra="forbid")
-    status: CandidateStatus
-    score: float | None = None             # objective score; None unless viable
-    deploymentMode: str                    # "agg" | "disagg"
-    backend: str                           # "vllm" | "sglang" | "trtllm"
-    replicaParallelConfig: dict[str, Any]  # decoded parallel shape + replica counts
+    config: dict[str, Any]     # the decoded knob assignment (engine/router/planner)
     usedGpus: int
-    routerConfig: dict[str, Any] | None = None
-    plannerConfig: dict[str, Any] | None = None
-    replayReportRef: str | None = None     # path/URI to the replay report
-    slaMetrics: dict[str, float] = Field(default_factory=dict)  # ttft/itl/e2e/goodput
-    reason: str | None = None              # set when status is skipped / failed
+    score: float               # objective score, normalized so higher is better
+    metrics: dict[str, float]  # replay performance: throughput, ttft, itl, e2e, goodput
 
 
-class RankedCandidates(BaseModel):
-    """V2 output contract. Selected candidate first; alternatives ranked."""
-    model_config = ConfigDict(extra="forbid")
-    goal: OptimizationGoal
-    candidates: list[Candidate]                             # viable, best-first
-    skipped: list[Candidate] = Field(default_factory=list)  # skipped + failed, with reasons
-    bindingConstraints: list[str] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
-
-
-async def run_smart_search(
-    dgdr: DynamoGraphDeploymentRequestSpec,  # existing V1 input, unchanged
-    ops: ProfilerOperationalConfig,          # carries SweepConfig + output_dir
-) -> RankedCandidates:
-    """Extract the OptimizationGoal from the DGDR spec, build the branch-aware
-    search space, run the Vizier + replay sweep, rank candidates, persist the
-    report into ops.output_dir, and return them. Raises NoViableCandidate when
-    no candidate clears the feasibility gate."""
+def run_smart_search(
+    search_space: SearchSpace,
+    goal: OptimizationGoal,
+    sweep: SweepConfig,
+) -> list[Candidate]:
+    """Run the Vizier + replay sweep over `search_space` and return the
+    evaluated candidates sorted best-first. Infeasible candidates (preflight
+    or SLA failures) are dropped; an empty list means nothing was viable."""
     ...
 ```
 
-This keeps V2 local/offline-first and strictly additive: it does not change V1 defaults, DGDR CR behavior, or the k8s controller/operator path, and it reuses the profiler's existing input contract instead of defining a second one. A user-facing sweep-control surface can be layered on later once the internal path is proven.
+Each returned `Candidate` carries its decoded knob assignment (`config`) and measured `metrics`. The list is sorted best-first by `score`, which normalizes objective direction so larger is always better: `throughput`, `goodput`, and `goodput_per_gpu` use the metric directly (pick the max), while `e2e_latency` uses its negative (pick the min latency). `goodput_per_gpu` divides goodput by `usedGpus`.
