@@ -1061,6 +1061,128 @@ impl Metrics {
     pub fn create_http_queue_guard(self: Arc<Self>, model: &str) -> HttpQueueGuard {
         HttpQueueGuard::new(self, model.to_string().to_lowercase())
     }
+
+    /// Drop every per-`model` Prometheus series whose `model` label equals
+    /// `model_name`. Runs the sweep immediately and again once in-flight
+    /// requests for the model have drained, since RAII metric writers
+    /// (`InflightGuard::drop`, `ResponseMetricCollector`) write per-model
+    /// series after the first sweep and would otherwise leave fresh
+    /// orphan series.
+    ///
+    /// Writers are inconsistent: request-path helpers lowercase, but
+    /// `update_metrics_from_mdc` writes `card.display_name` verbatim. The
+    /// sweep matches both raw and lowercased forms so mixed-case served
+    /// names do not leak series.
+    ///
+    /// Skipped: `inflight_gauge`, `active_requests_gauge`, `http_queue_gauge`
+    /// (balanced via RAII guards — removing mid-request would let Drop
+    /// recreate the series and decrement from zero). `tokenizer_latency` is
+    /// labelled by `operation`, not `model`.
+    pub fn cleanup_model_metrics(self: Arc<Self>, model_name: &str) {
+        self.sweep_model_series(model_name);
+
+        // Defer a second sweep until the inflight gauge for this model hits
+        // zero. RAII writers (InflightGuard, ResponseMetricCollector) flush
+        // their final per-model writes inside `Drop`, which fires after
+        // `inflight_gauge.dec()` reaches zero. Polling until zero (with a
+        // bounded deadline so a wedged request can't pin memory) gives those
+        // writes a chance to land before we sweep again.
+        let metrics = Arc::clone(&self);
+        let model = model_name.to_string();
+        tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+            while metrics.has_inflight_for(&model) {
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            metrics.sweep_model_series(&model);
+        });
+    }
+
+    /// Returns true if the inflight gauge has a non-zero series whose `model`
+    /// label matches `model_name` (raw or lowercased). Reads via `collect()`
+    /// so we do not accidentally materialise a zero series for a model we
+    /// are trying to drop.
+    fn has_inflight_for(&self, model_name: &str) -> bool {
+        use prometheus::core::Collector;
+        let lowered = model_name.to_lowercase();
+        let candidates: &[&str] = if lowered == model_name {
+            &[model_name]
+        } else {
+            &[model_name, lowered.as_str()]
+        };
+        for mf in self.inflight_gauge.collect() {
+            for m in mf.get_metric() {
+                if m.get_gauge().value() <= 0.0 {
+                    continue;
+                }
+                if m.get_label()
+                    .iter()
+                    .any(|l| l.name() == "model" && candidates.iter().any(|c| l.value() == *c))
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// One synchronous pass over every per-model metric vector, dropping
+    /// series whose `model` label matches `model_name` (raw or lowercased).
+    fn sweep_model_series(&self, model_name: &str) {
+        use prometheus::core::Collector;
+        use std::collections::HashMap;
+
+        let lowered = model_name.to_lowercase();
+        let candidates: &[&str] = if lowered == model_name {
+            &[model_name]
+        } else {
+            &[model_name, lowered.as_str()]
+        };
+
+        // prometheus 0.14 sorts LabelPairs returned by `collect()` alphabetically,
+        // but `remove_label_values` expects declaration order — mismatched orderings
+        // silently miss multi-label vectors like `request_counter`. Use the
+        // map-based `MetricVec::remove` to sidestep ordering entirely.
+        macro_rules! cleanup_by_model {
+            ($vec:expr) => {{
+                for mf in $vec.collect() {
+                    for m in mf.get_metric() {
+                        let labels = m.get_label();
+                        if labels.iter().any(|l| {
+                            l.name() == "model" && candidates.iter().any(|c| l.value() == *c)
+                        }) {
+                            let label_map: HashMap<&str, &str> =
+                                labels.iter().map(|l| (l.name(), l.value())).collect();
+                            let _ = $vec.remove(&label_map);
+                        }
+                    }
+                }
+            }};
+        }
+
+        cleanup_by_model!(self.request_started_counter);
+        cleanup_by_model!(self.request_counter);
+        cleanup_by_model!(self.request_duration);
+        cleanup_by_model!(self.input_sequence_length);
+        cleanup_by_model!(self.output_sequence_length);
+        cleanup_by_model!(self.cached_tokens);
+        cleanup_by_model!(self.time_to_first_token);
+        cleanup_by_model!(self.inter_token_latency);
+        cleanup_by_model!(self.output_tokens_counter);
+        cleanup_by_model!(self.model_total_kv_blocks);
+        cleanup_by_model!(self.model_max_num_seqs);
+        cleanup_by_model!(self.model_max_num_batched_tokens);
+        cleanup_by_model!(self.model_context_length);
+        cleanup_by_model!(self.model_kv_cache_block_size);
+        cleanup_by_model!(self.model_migration_limit);
+        cleanup_by_model!(self.model_migration_total);
+        cleanup_by_model!(self.model_migration_max_seq_len_exceeded_total);
+        cleanup_by_model!(self.model_cancellation_total);
+        cleanup_by_model!(self.model_rejection_total);
+    }
 }
 
 impl HttpQueueGuard {
@@ -2684,5 +2806,234 @@ mod tests {
             error: None,
         };
         assert!(run_event_converter(annotated).is_ok());
+    }
+
+    #[test]
+    fn test_cleanup_model_metrics_removes_only_matching_model() {
+        use prometheus::core::Collector;
+
+        let metrics = Metrics::new();
+        let foo = "foo/lora-1";
+        let bar = "bar/lora-2";
+
+        metrics
+            .request_counter
+            .with_label_values(&[foo, "chat", "stream", "success", ""])
+            .inc();
+        metrics
+            .request_counter
+            .with_label_values(&[bar, "chat", "stream", "success", ""])
+            .inc();
+
+        metrics
+            .request_started_counter
+            .with_label_values(&[foo, "chat", "stream"])
+            .inc();
+        metrics
+            .request_started_counter
+            .with_label_values(&[bar, "chat", "stream"])
+            .inc();
+
+        // Single-label vecs (the easy case).
+        metrics
+            .input_sequence_length
+            .with_label_values(&[foo])
+            .observe(42.0);
+        metrics
+            .input_sequence_length
+            .with_label_values(&[bar])
+            .observe(99.0);
+        metrics
+            .output_tokens_counter
+            .with_label_values(&[foo])
+            .inc_by(7);
+        metrics
+            .output_tokens_counter
+            .with_label_values(&[bar])
+            .inc_by(11);
+        metrics
+            .model_context_length
+            .with_label_values(&[foo])
+            .set(8192);
+        metrics
+            .model_context_length
+            .with_label_values(&[bar])
+            .set(4096);
+
+        metrics
+            .model_migration_total
+            .with_label_values(&[foo, "preempt"])
+            .inc();
+        metrics
+            .model_migration_total
+            .with_label_values(&[bar, "preempt"])
+            .inc();
+
+        let model_set = |vec: &dyn Collector| -> std::collections::HashSet<String> {
+            let mut set = std::collections::HashSet::new();
+            for mf in vec.collect() {
+                for m in mf.get_metric() {
+                    for l in m.get_label() {
+                        if l.name() == "model" {
+                            set.insert(l.value().to_string());
+                        }
+                    }
+                }
+            }
+            set
+        };
+        assert!(model_set(&metrics.request_counter).contains(foo));
+        assert!(model_set(&metrics.request_counter).contains(bar));
+
+        metrics.sweep_model_series(foo);
+
+        // After cleanup, `foo` must be gone from every per-model vec, `bar`
+        // must remain on every per-model vec.
+        for (name, vec) in [
+            (
+                "request_counter",
+                &metrics.request_counter as &dyn Collector,
+            ),
+            ("request_started_counter", &metrics.request_started_counter),
+            ("input_sequence_length", &metrics.input_sequence_length),
+            ("output_tokens_counter", &metrics.output_tokens_counter),
+            ("model_context_length", &metrics.model_context_length),
+            ("model_migration_total", &metrics.model_migration_total),
+        ] {
+            let models = model_set(vec);
+            assert!(
+                !models.contains(foo),
+                "{name}: foo should be removed, still present: {models:?}"
+            );
+            assert!(
+                models.contains(bar),
+                "{name}: bar should remain, missing: {models:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cleanup_model_metrics_handles_mixed_case() {
+        // update_metrics_from_mdc writes card.display_name verbatim while
+        // request-path writers lowercase. Cleanup must drop both forms when
+        // the watcher passes display_name.
+        use prometheus::core::Collector;
+
+        let metrics = Metrics::new();
+        let mixed = "Foo/Bar-Cased";
+        let lowered = "foo/bar-cased";
+
+        // MDC-style write: verbatim casing.
+        metrics
+            .model_context_length
+            .with_label_values(&[mixed])
+            .set(8192);
+        // Request-path style: lowercased.
+        metrics
+            .request_counter
+            .with_label_values(&[lowered, "chat", "stream", "success", ""])
+            .inc();
+
+        metrics.sweep_model_series(mixed);
+
+        let has_model = |vec: &dyn Collector, model: &str| -> bool {
+            vec.collect()
+                .iter()
+                .flat_map(|mf| mf.get_metric().to_vec())
+                .any(|m| {
+                    m.get_label()
+                        .iter()
+                        .any(|l| l.name() == "model" && l.value() == model)
+                })
+        };
+
+        assert!(
+            !has_model(&metrics.model_context_length, mixed),
+            "mixed-case MDC series must be removed"
+        );
+        assert!(
+            !has_model(&metrics.request_counter, lowered),
+            "lowercased request series must also be removed when cleanup is called with mixed case"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_model_metrics_preserves_raii_gauges() {
+        use prometheus::core::Collector;
+
+        let metrics = Metrics::new();
+        let foo = "foo/lora-raii";
+
+        metrics.inflight_gauge.with_label_values(&[foo]).set(3);
+        metrics
+            .active_requests_gauge
+            .with_label_values(&[foo])
+            .set(2);
+        metrics.http_queue_gauge.with_label_values(&[foo]).set(1);
+
+        metrics.sweep_model_series(foo);
+
+        let has_model = |vec: &dyn Collector, model: &str| -> bool {
+            vec.collect()
+                .iter()
+                .flat_map(|mf| mf.get_metric().to_vec())
+                .any(|m| {
+                    m.get_label()
+                        .iter()
+                        .any(|l| l.name() == "model" && l.value() == model)
+                })
+        };
+
+        assert!(
+            has_model(&metrics.inflight_gauge, foo),
+            "inflight_gauge must survive cleanup so RAII Drop stays balanced"
+        );
+        assert!(has_model(&metrics.active_requests_gauge, foo));
+        assert!(has_model(&metrics.http_queue_gauge, foo));
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_model_metrics_resweeps_after_raii_writes() {
+        use prometheus::core::Collector;
+
+        let metrics = Arc::new(Metrics::new());
+        let foo = "foo/lora-1";
+
+        Arc::clone(&metrics).cleanup_model_metrics(foo);
+
+        // Simulate a RAII writer that fires after the immediate sweep, e.g.
+        // InflightGuard::drop on a request that was already in flight when
+        // the model was unregistered.
+        metrics
+            .request_counter
+            .with_label_values(&[foo, "chat", "stream", "success", ""])
+            .inc();
+        metrics
+            .request_duration
+            .with_label_values(&[foo])
+            .observe(1.5);
+
+        // Inflight gauge is zero so the deferred sweep should fire shortly.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let has_model = |vec: &dyn Collector, model: &str| -> bool {
+            vec.collect()
+                .iter()
+                .flat_map(|mf| mf.get_metric().to_vec())
+                .any(|m| {
+                    m.get_label()
+                        .iter()
+                        .any(|l| l.name() == "model" && l.value() == model)
+                })
+        };
+
+        assert!(
+            !has_model(&metrics.request_counter, foo),
+            "request_counter series written after immediate sweep must be cleaned by the deferred sweep"
+        );
+        assert!(
+            !has_model(&metrics.request_duration, foo),
+            "request_duration series written after immediate sweep must be cleaned by the deferred sweep"
+        );
     }
 }

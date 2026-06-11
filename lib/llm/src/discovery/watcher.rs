@@ -348,6 +348,7 @@ impl ModelWatcher {
                         .await
                     {
                         Ok(Some(model_name)) => {
+                            Arc::clone(&self.metrics).cleanup_model_metrics(&model_name);
                             tracing::info!(model_name, "removed model");
                         }
                         Ok(None) => {
