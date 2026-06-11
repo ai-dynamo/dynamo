@@ -78,9 +78,10 @@ jobs:
           fi
           echo "image_ref=${ECR}/ai-dynamo/dynamo:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
           echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
-          # Compliance artifact name — mirror compliance-extract's suffix step.
-          if [ -n "${CUDA}" ]; then SUFFIX="${CUDA}-amd64-arm64"; else SUFFIX="cpu-amd64-arm64"; fi
-          echo "artifact=compliance-${{ inputs.target_tag_plain }}-${SUFFIX}-compliance" >> "$GITHUB_OUTPUT"
+          # Compliance artifact name — compliance-<git-sha>-<container>, matching
+          # compliance-extract's upload (target_tag_plain == container name). For
+          # PR (the only caller), git_sha == github.sha.
+          echo "artifact=compliance-${{ github.sha }}-${{ inputs.target_tag_plain }}" >> "$GITHUB_OUTPUT"
           # Baseline SBOM stem comes from the build job's output (it rendered the
           # Dockerfile with the deps it has), so the audit runner needs no
           # render.py / PyYAML / pip. Append -amd64 to match the amd64 scan.
@@ -118,7 +119,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
-          name: compliance-audit-${{ inputs.target_tag_plain }}-${{ steps.resolve.outputs.image_tag }}
+          # compliance-audit-<git-sha>-<container>[-cudaN] (image_tag already carries all three).
+          name: compliance-audit-${{ steps.resolve.outputs.image_tag }}
           path: /tmp/audit-report.txt
           retention-days: 7
           if-no-files-found: ignore

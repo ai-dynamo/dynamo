@@ -5,7 +5,7 @@ name: 'Compliance Extract'
 description: |
   Extract the unified inline-compliance tree (flat NOTICES-<Eco>.txt + the
   cross-ecosystem osrb-deps.csv + osrb.cdx.json delta SBOM) from an already-built
-  dynamo container image and upload it as a single `-compliance` artifact.
+  dynamo container image and upload it as a single `compliance-<git-sha>-<container>` artifact.
 
   Designed to run as a step INSIDE each <framework>-build job (after
   shared-build-image.yml's "Build and Push Image" step), reusing the
@@ -174,27 +174,15 @@ runs:
             -f ${{ steps.render.outputs.rendered }} \
             .
 
-    - name: Compute artifact suffix
-      id: suffix
-      shell: bash
-      run: |
-        # shared-build-image.yml passes the platform input through as the
-        # raw multi-platform string (e.g. "linux/amd64,linux/arm64") since
-        # one shared BuildKit invocation builds all arches. Normalize for
-        # use in artifact names: GitHub upload-artifact rejects '/' and ','.
-        ARCH=$(echo "${{ inputs.platform }}" | sed 's|linux/||g; s|,|-|g')
-        if [ -n "${{ inputs.cuda_version }}" ]; then
-          SUFFIX="${{ inputs.cuda_version }}-${ARCH}"
-        else
-          SUFFIX="cpu-${ARCH}"
-        fi
-        echo "suffix=${SUFFIX}" >> $GITHUB_OUTPUT
-
     - name: Upload compliance artifact (NOTICES + CSV + CycloneDX)
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       with:
-        name: compliance-${{ inputs.artifact_name_prefix }}-${{ steps.suffix.outputs.suffix }}-compliance
+        # compliance-<git-sha>-<container>. artifact_name_prefix == target_tag_plain
+        # == the container name (e.g. vllm-runtime, vllm-runtime-efa, dynamo-planner);
+        # it already encodes the cuda variant, and the artifact holds both arches as
+        # linux_<arch>/ subdirs, so no cuda/arch suffix is needed.
+        name: compliance-${{ inputs.git_sha }}-${{ inputs.artifact_name_prefix }}
         path: /tmp/compliance/
         retention-days: ${{ inputs.artifact_retention_days }}
 
@@ -202,6 +190,6 @@ runs:
       if: ${{ inputs.archive_sources == 'true' && always() }}
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       with:
-        name: compliance-${{ inputs.artifact_name_prefix }}-${{ steps.suffix.outputs.suffix }}-sources
+        name: compliance-${{ inputs.git_sha }}-${{ inputs.artifact_name_prefix }}-sources
         path: /tmp/sources/sources.zip
         retention-days: 365   # OSRB submissions retain longer than NOTICES/SBOMs

@@ -241,7 +241,10 @@ runs:
       if: ${{ (inputs.component == 'operator' || inputs.component == 'snapshot') && always() }}
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       with:
-        name: compliance-${{ inputs.component }}-${{ inputs.image_tag }}-compliance
+        # compliance-<git-sha>-<container>. image_tag is already <github.sha>-<container>
+        # (e.g. <sha>-vllm-placeholder, <sha>-operator), matching the framework
+        # images' compliance-<git-sha>-<container> naming from compliance-extract.
+        name: compliance-${{ inputs.image_tag }}
         path: /tmp/compliance/
         retention-days: 90
 
@@ -249,6 +252,6 @@ runs:
       if: ${{ (inputs.component == 'operator' || inputs.component == 'snapshot') && (github.event_name == 'push' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') && always() }}
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       with:
-        name: compliance-${{ inputs.component }}-${{ inputs.image_tag }}-sources
+        name: compliance-${{ inputs.image_tag }}-sources
         path: /tmp/sources/sources.zip
         retention-days: 365   # OSRB submissions retain longer than NOTICES/SBOMs
