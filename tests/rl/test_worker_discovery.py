@@ -22,10 +22,8 @@ from tests.utils.port_utils import ServicePorts, allocate_port, deallocate_port
 TEST_MODEL = QWEN
 
 pytestmark = [
-    # TEMPORARY: run in pre-merge to validate the GPU-mem-budget fix under real
-    # parallel bin-packing in this PR's CI. REVERT to post_merge before merging.
-    # Heavy e2e (model startup + admin flows, timeout 900s): normally post_merge only.
-    pytest.mark.pre_merge,
+    # Heavy e2e (model startup + admin flows, timeout 900s): keep out of pre-merge gating.
+    pytest.mark.post_merge,
     pytest.mark.e2e,
     pytest.mark.vllm,
     pytest.mark.core,
