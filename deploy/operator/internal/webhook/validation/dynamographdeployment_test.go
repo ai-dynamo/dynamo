@@ -43,8 +43,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		negativeReplicas = int32(-1)
 		validMinAvail    = int32(2)
 		zeroMinAvail     = int32(0)
-		negativeMinAvail = int32(-1)
-		tooHighMinAvail  = int32(4)
 		pvcName          = "test-pvc"
 		trueVal          = true
 		falseVal         = false
@@ -264,85 +262,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			groveEnabled: true,
 			wantErr:      true,
 			errMsg:       "spec.services[main].minAvailable requires the Grove pathway; remove or unset the \"nvidia.com/enable-grove\" annotation (currently \"false\")",
-		},
-		{
-			name:         "service minAvailable must be non-negative",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Replicas:     &validReplicas,
-							MinAvailable: &negativeMinAvail,
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.services[main].minAvailable must be non-negative",
-		},
-		{
-			name:         "service minAvailable zero requires zero replicas",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Replicas:     &validReplicas,
-							MinAvailable: &zeroMinAvail,
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.services[main].minAvailable may be 0 only when replicas is 0",
-		},
-		{
-			name:         "service minAvailable cannot exceed replicas",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							Replicas:     &validReplicas,
-							MinAvailable: &tooHighMinAvail,
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.services[main].minAvailable must be less than or equal to replicas",
-		},
-		{
-			name:         "service minAvailable cannot exceed default replicas",
-			groveEnabled: true,
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"main": {
-							MinAvailable: &validMinAvail,
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.services[main].minAvailable must be less than or equal to replicas",
 		},
 		{
 			name: "service with invalid ingress",

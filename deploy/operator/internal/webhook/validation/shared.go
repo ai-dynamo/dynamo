@@ -88,9 +88,6 @@ func (v *SharedSpecValidator) Validate(ctx context.Context) (admission.Warnings,
 	if v.spec.Replicas != nil && *v.spec.Replicas < 0 {
 		return nil, fmt.Errorf("%s.replicas must be non-negative", v.fieldPath)
 	}
-	if err := v.validateMinAvailable(); err != nil {
-		return nil, err
-	}
 
 	// Validate ingress configuration if enabled
 	if v.spec.Ingress != nil && v.spec.Ingress.Enabled {
