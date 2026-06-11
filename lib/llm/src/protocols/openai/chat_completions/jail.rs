@@ -1060,9 +1060,7 @@ impl JailedStream {
             return None;
         }
 
-        let Some(parser_name) = self.tool_call_parser.as_deref() else {
-            return None;
-        };
+        let parser_name = self.tool_call_parser.as_deref()?;
         let parser_map = get_tool_parser_map();
         let Some(ParserConfig::Json(config)) = parser_map
             .get(parser_name)
@@ -1154,9 +1152,7 @@ impl JailedStream {
     }
 
     fn marker_json_completion_base(&self, accumulated_content: &str) -> Option<usize> {
-        let Some(parser_name) = self.tool_call_parser.as_deref() else {
-            return None;
-        };
+        let parser_name = self.tool_call_parser.as_deref()?;
         let parser_map = get_tool_parser_map();
         let Some(ParserConfig::Json(config)) = parser_map
             .get(parser_name)

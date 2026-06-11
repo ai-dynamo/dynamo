@@ -352,7 +352,7 @@ fn try_parse_normal_text(input: &str, start_token: &str) -> String {
 /// than re-serializing a parsed `HashMap` / `Value`, which keeps them
 /// byte-identical to what the model emitted (required for KV-cache append-only
 /// prefix matching across multi-step tool use).
-fn make_tool_call(name: String, args: Box<RawValue>) -> ToolCallResponse {
+fn make_tool_call(name: String, args: &RawValue) -> ToolCallResponse {
     ToolCallResponse {
         id: format!("call-{}", Uuid::new_v4()),
         tp: ToolCallType::Function,
@@ -379,7 +379,7 @@ fn raw_call_to_tool_call(
         parameters.or(arguments)
     }?;
 
-    Some(make_tool_call(name, args))
+    Some(make_tool_call(name, args.as_ref()))
 }
 
 fn parse_calls(payload: &str) -> anyhow::Result<Option<Vec<ToolCallResponse>>> {
