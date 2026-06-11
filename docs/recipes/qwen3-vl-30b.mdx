@@ -60,7 +60,7 @@ kubectl wait --for=condition=Ready dynamographdeployment/qwen3-vl-agg -n ${NAMES
 
 ## Smoke Test
 
-Run a small request before starting the benchmark. The Dynamo operator creates the `qwen3-vl-agg-frontend` service for this deployment.
+Send a test request to verify the deployment serves traffic. The Dynamo operator creates the `qwen3-vl-agg-frontend` service for this deployment.
 
 ```bash
 kubectl port-forward svc/qwen3-vl-agg-frontend 8000:8000 -n ${NAMESPACE}

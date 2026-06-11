@@ -64,7 +64,7 @@ If you rename the ComputeDomain or its `resourceClaimTemplate`, mirror the chang
 
 ## Smoke Test
 
-Run a small request before starting the benchmark:
+Send a test request to verify the deployment serves traffic:
 
 ```bash
 kubectl port-forward svc/kimi-k25-disagg-kv-eagle-frontend 8000:8000 -n ${NAMESPACE}
