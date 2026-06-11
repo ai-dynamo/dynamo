@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rstest::rstest;
 use rstest_reuse::{self, *};
@@ -38,6 +38,13 @@ fn indexer_template(
 #[rstest]
 fn tree_size_indexer_template(
     #[values("single", "concurrent", "concurrent_compressed")] variant: &str,
+) {
+}
+
+#[template]
+#[rstest]
+fn compressed_tree_size_indexer_template(
+    #[values("single", "concurrent_compressed")] variant: &str,
 ) {
 }
 
@@ -101,9 +108,8 @@ fn make_approx_indexer(variant: &str, ttl: Duration) -> Box<dyn KvIndexerInterfa
     let prune_config = PruneConfig { ttl };
 
     match variant {
-        "single" => Box::new(KvIndexer::new_with_frequency(
+        "single" => Box::new(KvIndexer::new_with_pruning(
             token,
-            None,
             kv_block_size,
             metrics,
             Some(prune_config),
@@ -420,13 +426,10 @@ mod interface_tests {
         let continuation_remove = make_remove_event_with_parent(0, &[1, 2, 3], &[4, 5]);
         let prefix_remove = make_remove_event(0, &[1, 2, 3]);
 
-        // TODO: The non-compressed radix-family implementations still have a broader
-        // tree-size accounting gap after mid-chain removes because descendant
-        // lookup entries are cleaned up lazily. That means "store -> partial
-        // remove -> restore continuation" can still miscount restored coverage
-        // in single and concurrent. This test is intentionally scoped
-        // to duplicate store/remove replay so all tree-size variants share the
-        // same stable baseline.
+        // The uncompressed concurrent implementation still cleans descendant
+        // lookup entries lazily after mid-chain removes, so the shared matrix
+        // keeps this duplicate store/remove baseline. Compressed variants cover
+        // eager suffix cleanup in a focused test below.
 
         index.apply_event(prefix_event.clone()).await;
         index.flush().await;
@@ -506,6 +509,66 @@ mod interface_tests {
         assert!(duplicate_empty_scores.scores.is_empty());
         assert_eq!(index.tree_size_for_worker(worker).await, Some(0));
         assert!(index.snapshot_tree().await.is_empty());
+    }
+
+    #[tokio::test]
+    #[apply(compressed_tree_size_indexer_template)]
+    async fn test_mid_edge_remove_repairs_lookup_and_restores_explicitly(variant: &str) {
+        let mut index = TreeSizeTestIndexer::new(variant);
+        let worker = WorkerWithDpRank::new(0, 0);
+        let local_hashes = [1, 2, 3, 4, 5];
+        let sequence_hashes = compute_seq_hash_for_block(
+            &local_hashes
+                .iter()
+                .copied()
+                .map(LocalBlockHash)
+                .collect::<Vec<_>>(),
+        );
+
+        index
+            .apply_event(make_store_event(worker.worker_id, &local_hashes))
+            .await;
+        index.flush().await;
+        index
+            .assert_score_and_tree_size(&local_hashes, worker, 5, 5)
+            .await;
+
+        index
+            .apply_event(remove_event(
+                worker.worker_id,
+                1,
+                worker.dp_rank,
+                vec![ExternalSequenceBlockHash(sequence_hashes[2])],
+            ))
+            .await;
+        index.flush().await;
+        index
+            .assert_score_and_tree_size(&local_hashes, worker, 2, 2)
+            .await;
+
+        index
+            .apply_event(make_store_event_with_parent(
+                worker.worker_id,
+                &[1, 2],
+                &[3],
+            ))
+            .await;
+        index.flush().await;
+        index
+            .assert_score_and_tree_size(&local_hashes, worker, 3, 3)
+            .await;
+
+        index
+            .apply_event(make_store_event_with_parent(
+                worker.worker_id,
+                &[1, 2, 3],
+                &[4, 5],
+            ))
+            .await;
+        index.flush().await;
+        index
+            .assert_score_and_tree_size(&local_hashes, worker, 5, 5)
+            .await;
     }
 
     #[tokio::test]
@@ -2030,45 +2093,14 @@ mod long_sequence_tests {
 }
 
 // ============================================================================
-// Tests specific to tree-based implementations with frequency/pruning support.
-// These use features not available in PositionalIndexer
+// Tests specific to pruning behavior.
 // ============================================================================
-
-#[template]
-#[rstest]
-fn tree_indexer_template(#[values("single")] variant: &str) {}
-
-fn make_tree_indexer_with_frequency(
-    variant: &str,
-    expiration: Duration,
-) -> Box<dyn KvIndexerInterface> {
-    let token = CancellationToken::new();
-    let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-    let kv_block_size = 32;
-
-    match variant {
-        "single" => Box::new(KvIndexer::new_with_frequency(
-            token,
-            Some(expiration),
-            kv_block_size,
-            metrics,
-            None,
-        )),
-        _ => panic!("Unknown variant: {}", variant),
-    }
-}
 
 #[tokio::test]
 async fn test_routing_decision_assigns_first_seen_worker() {
     let token = CancellationToken::new();
     let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-    let index = KvIndexer::new_with_frequency(
-        token,
-        Some(Duration::from_secs(60)),
-        32,
-        metrics,
-        Some(PruneConfig::default()),
-    );
+    let index = KvIndexer::new_with_pruning(token, 32, metrics, Some(PruneConfig::default()));
     let worker = WorkerWithDpRank::new(42, 0);
     let local_hashes = vec![LocalBlockHash(11), LocalBlockHash(22)];
     let sequence_hashes = compute_seq_hash_for_block(&local_hashes);
@@ -2086,93 +2118,6 @@ async fn test_routing_decision_assigns_first_seen_worker() {
 
     let scores = query_scores(&index, &[11, 22]).await;
     assert!(!scores.scores.contains_key(&worker));
-}
-
-mod tree_specific_tests {
-    use super::*;
-    use rstest_reuse::apply;
-
-    #[tokio::test]
-    #[apply(tree_indexer_template)]
-    async fn test_frequency(variant: &str) {
-        const ONE_MILLIS: Duration = Duration::from_millis(1);
-
-        let expiration = Duration::from_millis(50);
-        let kv_indexer = make_tree_indexer_with_frequency(variant, expiration);
-
-        // The blocks
-        let block_hashes = vec![
-            LocalBlockHash(1),
-            LocalBlockHash(2),
-            LocalBlockHash(3),
-            LocalBlockHash(4),
-        ];
-
-        let overlap = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
-        assert_eq!(
-            overlap.frequencies.len(),
-            0,
-            "Should be no cached blocks yet"
-        );
-
-        // Blocks go in cache
-        let event = make_store_event(0, &[1, 2, 3, 4]);
-        kv_indexer.apply_event(event).await;
-
-        // First access - poll briefly since store event is applied async
-        let mut overlap = OverlapScores::default();
-        let timeout = Duration::from_millis(10);
-        let start = Instant::now();
-        while overlap.scores.is_empty() && Instant::now().duration_since(start) < timeout {
-            time::sleep(ONE_MILLIS).await;
-            overlap = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
-        }
-        assert_eq!(
-            overlap.scores.len(),
-            1,
-            "One worker has these blocks cached"
-        );
-        assert_eq!(
-            overlap.frequencies.len(),
-            0,
-            "Blocks have not previously been accessed"
-        );
-
-        // Second access
-        let overlap = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
-        assert_eq!(overlap.scores.len(), 1, "Still one worker matches");
-        assert_eq!(
-            overlap.frequencies,
-            vec![1, 1, 1, 1],
-            "We should see the first access now"
-        );
-
-        // Let those two accesses expire
-        time::sleep(expiration + Duration::from_millis(10)).await;
-
-        // New first access
-        let overlap = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
-        assert_eq!(
-            overlap.frequencies.len(),
-            0,
-            "Blocks were accessed too long ago"
-        );
-
-        // New second access
-        let _ = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
-
-        // Access only the first three blocks
-        let overlap = kv_indexer
-            .find_matches(block_hashes[0..3].to_vec())
-            .await
-            .unwrap();
-        // We see the previous two new accesses
-        assert_eq!(overlap.frequencies, vec![2, 2, 2]);
-
-        // The third access did not touch the last block
-        let overlap = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
-        assert_eq!(overlap.frequencies, vec![3, 3, 3, 2]);
-    }
 }
 
 // ============================================================================

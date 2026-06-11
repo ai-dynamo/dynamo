@@ -26,7 +26,7 @@ use dashmap::DashMap;
 use dynamo_backend_common::{
     AsyncEngineContext, BackendError, CommonArgs, ComponentSnapshot, DisaggregationMode,
     DynamoError, EngineConfig, ErrorType, GenerateContext, HEALTH_CHECK_KEY, KvEventSource,
-    LLMEngine, LLMEngineOutput, LLMEngineOutputExt, MetricsBindings, MetricsCtx,
+    LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, MetricsBindings, MetricsCtx,
     PreprocessedRequest, SnapshotPublisher, TopLogprob, WorkerConfig, chunk, usage,
 };
 use dynamo_mocker::common::protocols::{
@@ -341,19 +341,20 @@ impl LLMEngine for MockerBackend {
         Ok(EngineConfig {
             model: self.model_name.clone(),
             served_model_name: Some(self.model_name.clone()),
-            context_length: Some(self.context_length),
-            kv_cache_block_size: Some(self.engine_args.block_size as u32),
-            total_kv_blocks: Some(self.engine_args.num_gpu_blocks as u64),
-            max_num_seqs: self.engine_args.max_num_seqs.map(|v| v as u64),
-            max_num_batched_tokens: self.engine_args.max_num_batched_tokens.map(|v| v as u64),
-            data_parallel_size: None,
-            data_parallel_start_rank: None,
-            // Mocker has no real KV transport, so it never advertises a
-            // bootstrap address. Real prefill engines populate these in
-            // start() to publish ModelRuntimeConfig.disaggregated_endpoint.
-            bootstrap_host: None,
-            bootstrap_port: None,
             runtime_data: Default::default(),
+            llm: Some(LlmRegistration {
+                context_length: Some(self.context_length),
+                kv_cache_block_size: Some(self.engine_args.block_size as u32),
+                total_kv_blocks: Some(self.engine_args.num_gpu_blocks as u64),
+                max_num_seqs: self.engine_args.max_num_seqs.map(|v| v as u64),
+                max_num_batched_tokens: self.engine_args.max_num_batched_tokens.map(|v| v as u64),
+                data_parallel_size: None,
+                data_parallel_start_rank: None,
+                // Mocker has no real KV transport, so it never advertises a
+                // bootstrap address.
+                bootstrap_host: None,
+                bootstrap_port: None,
+            }),
         })
     }
 
@@ -692,10 +693,13 @@ mod tests {
         let engine = test_engine();
         let cfg = engine.start(0).await.unwrap();
         assert_eq!(cfg.model, "mocker-model");
-        assert_eq!(cfg.kv_cache_block_size, Some(64));
-        assert_eq!(cfg.total_kv_blocks, Some(16384));
-        assert_eq!(cfg.max_num_seqs, Some(256));
-        assert_eq!(cfg.context_length, Some(8192));
+        let llm = cfg
+            .llm
+            .expect("LLM engine advertises registration metadata");
+        assert_eq!(llm.kv_cache_block_size, Some(64));
+        assert_eq!(llm.total_kv_blocks, Some(16384));
+        assert_eq!(llm.max_num_seqs, Some(256));
+        assert_eq!(llm.context_length, Some(8192));
         engine.cleanup().await.unwrap();
     }
 

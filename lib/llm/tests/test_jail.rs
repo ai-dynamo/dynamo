@@ -766,6 +766,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_jailed_stream_mistral_parser_repeated_close_markers() {
+        // Framed Mistral call immediately followed by consecutive [/TOOL_CALLS]
+        // close markers. The jail must consume through ALL adjacent closers so
+        // none leak into trailing content. Regression for the streaming
+        // end-position only advancing past the first close marker.
+        // Input: "[TOOL_CALLS][{...}][/TOOL_CALLS][/TOOL_CALLS]" + " All set."
+        let chunks = vec![
+            create_mock_response_chunk("[TOOL_CALLS]".to_string(), 0),
+            create_mock_response_chunk("[{\"name\": \"get_time\", ".to_string(), 0),
+            create_mock_response_chunk("\"arguments\": {\"timezone\": \"UTC\"}}]".to_string(), 0),
+            create_mock_response_chunk("[/TOOL_CALLS][/TOOL_CALLS]".to_string(), 0),
+            create_mock_response_chunk(" All set.".to_string(), 0),
+        ];
+
+        let input_stream = stream::iter(chunks);
+
+        let jail = JailedStream::builder().tool_call_parser("mistral").build();
+
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        // Exactly one tool call; no [/TOOL_CALLS] marker leaks into content.
+        let reconstructed = test_utils::reconstruct_content(&results);
+        assert!(
+            !reconstructed.contains("[/TOOL_CALLS]"),
+            "repeated close markers must not leak into normal_text, got: {reconstructed:?}"
+        );
+        assert_eq!(
+            reconstructed.trim(),
+            "All set.",
+            "only the trailing prose should remain as content"
+        );
+        let tool_calls: Vec<_> = results
+            .iter()
+            .filter(|r| {
+                r.data
+                    .as_ref()
+                    .and_then(|d| d.inner.choices.first())
+                    .and_then(|c| c.delta.tool_calls.as_ref())
+                    .is_some_and(|tc| !tc.is_empty())
+            })
+            .collect();
+        assert_eq!(tool_calls.len(), 1, "should emit exactly one tool call");
+        test_utils::assert_tool_call(
+            tool_calls[0],
+            "get_time",
+            serde_json::json!({"timezone": "UTC"}),
+        );
+    }
+
+    #[tokio::test]
     async fn test_jailed_stream_phi4_parser() {
         // Tests Phi4 format tool call parsing with functools[ pattern
         // Input: "I'll analyze this data. " + "functools[{\"name\": \"analyze_data\", \"arguments\": {\"dataset\": \"sales_data\"}}]" + " Analysis complete."
