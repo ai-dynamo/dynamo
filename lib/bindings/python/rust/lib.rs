@@ -72,6 +72,8 @@ impl From<RouterMode> for RsRouterMode {
 }
 
 mod backend;
+#[cfg(feature = "bench-harness")]
+mod bench;
 mod context;
 mod engine;
 pub mod errors;
@@ -233,6 +235,12 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     errors::register_exceptions(m)?;
     parsers::add_to_module(m)?;
     backend::add_to_module(m)?;
+
+    #[cfg(feature = "bench-harness")]
+    {
+        m.add_function(wrap_pyfunction!(bench::bench_unified_python_engine, m)?)?;
+        m.add_function(wrap_pyfunction!(bench::bench_unified_rust_floor, m)?)?;
+    }
 
     m.add_class::<prometheus_metrics::RuntimeMetrics>()?;
 

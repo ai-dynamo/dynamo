@@ -144,6 +144,341 @@ impl std::fmt::Display for ConformanceFailure {
 
 impl std::error::Error for ConformanceFailure {}
 
+/// In-process microbenchmark driver for the unified-backend bridge.
+///
+/// Drives [`LLMEngine::generate`] through the production [`EngineAdapter`] with
+/// [`mock_context`]-style contexts — no NATS / etcd. Used by
+/// `benchmarks/unified_backend/` to isolate the Rust↔Python bridge + GIL cost:
+/// a `PyLLMEngine`-wrapped Python engine vs the GIL-free [`BenchFloorEngine`],
+/// both through the same path.
+pub mod bench {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    use async_stream::stream;
+    use async_trait::async_trait;
+    use futures::stream::{BoxStream, StreamExt};
+
+    use dynamo_runtime::pipeline::{AsyncEngine, Context};
+
+    use crate::adapter::EngineAdapter;
+    use crate::disagg::DisaggregationMode;
+    use crate::engine::{
+        EngineConfig, GenerateContext, LLMEngine, LLMEngineOutput, LLMEngineOutputExt,
+        OutputOptions, PreprocessedRequest, SamplingOptions, StopConditions, TopLogprob, chunk,
+        usage,
+    };
+    use crate::error::DynamoError;
+
+    /// Cap on synthesised top-k alternatives; matches `sample_engine.py`.
+    const MAX_LOGPROBS: u32 = 20;
+
+    /// One benchmark configuration point.
+    #[derive(Clone, Debug)]
+    pub struct BenchWorkload {
+        pub model: String,
+        /// Number of prompt token IDs to send.
+        pub prompt_len: usize,
+        /// Tokens each request generates.
+        pub max_tokens: u32,
+        /// Synthetic top-k logprobs per token, or `None` to omit logprobs.
+        pub logprobs_k: Option<u32>,
+        /// In-flight requests held concurrently (the GIL-contention knob).
+        pub concurrency: usize,
+        /// Total requests to run before the measurement window closes.
+        pub total_requests: usize,
+    }
+
+    /// Aggregated results of one [`run_load`] invocation.
+    #[derive(Clone, Debug)]
+    pub struct BenchStats {
+        pub requests: usize,
+        pub total_output_tokens: usize,
+        pub wall_seconds: f64,
+        pub tokens_per_sec: f64,
+        pub ttft_p50_ms: f64,
+        pub ttft_p99_ms: f64,
+        pub itl_p50_ms: f64,
+        pub itl_p99_ms: f64,
+    }
+
+    struct ReqStat {
+        /// `None` when the request produced no token-bearing chunks — kept out
+        /// of the TTFT pool rather than recorded as a spurious 0.0.
+        ttft_ms: Option<f64>,
+        itl_ms: Vec<f64>,
+        output_tokens: usize,
+    }
+
+    /// Nearest-rank percentile (matches `adapter::record_itl_distribution`).
+    fn nearest_rank(samples: &mut [f64], frac: f64) -> f64 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let idx = (((samples.len() - 1) as f64) * frac).round() as usize;
+        samples[idx]
+    }
+
+    fn build_request(w: &BenchWorkload) -> PreprocessedRequest {
+        let token_ids: Vec<u32> = (0..w.prompt_len as u32).map(|i| i % 32000).collect();
+        PreprocessedRequest::builder()
+            .model(w.model.clone())
+            .token_ids(token_ids)
+            .stop_conditions(StopConditions {
+                max_tokens: Some(w.max_tokens),
+                ..Default::default()
+            })
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions {
+                logprobs: w.logprobs_k,
+                ..Default::default()
+            })
+            .build()
+            .expect("build benchmark request")
+    }
+
+    /// Run a single request through the engine, recording TTFT, per-token
+    /// ITL, and the streamed token count. `None` on a setup error.
+    async fn run_one(adapter: &EngineAdapter, w: &BenchWorkload) -> Option<ReqStat> {
+        let input = Context::new(build_request(w));
+        let t0 = Instant::now();
+        let mut stream = match adapter.generate(input).await {
+            Ok(s) => s,
+            Err(e) => {
+                // Surface rather than silently drop — an excluded request would
+                // otherwise inflate the reported throughput with no diagnostic.
+                tracing::warn!(error = %e, "bench request generate() failed; excluded from sample");
+                return None;
+            }
+        };
+        let mut ttft_ms: Option<f64> = None;
+        let mut last = t0;
+        let mut itl_ms = Vec::new();
+        let mut output_tokens = 0usize;
+        while let Some(ann) = stream.next().await {
+            // Count only token-bearing chunks for TTFT/ITL, matching
+            // `EngineAdapter`'s ITL recording — a token-less chunk (e.g. an
+            // empty terminal or a bootstrap handshake) is not a token event.
+            let n = ann.data.as_ref().map_or(0, |c| c.token_ids.len());
+            if n == 0 {
+                continue;
+            }
+            let now = Instant::now();
+            match ttft_ms {
+                None => ttft_ms = Some((now - t0).as_secs_f64() * 1000.0),
+                Some(_) => itl_ms.push((now - last).as_secs_f64() * 1000.0),
+            }
+            last = now;
+            output_tokens += n;
+        }
+        Some(ReqStat {
+            ttft_ms,
+            itl_ms,
+            output_tokens,
+        })
+    }
+
+    /// Drive an `LLMEngine` through the production [`EngineAdapter`] (the
+    /// unified-backend path) holding `workload.concurrency` requests in flight
+    /// until `total_requests` complete, returning aggregated stats.
+    ///
+    /// Must be called from within a tokio runtime (uses `tokio::spawn`).
+    pub async fn run_load(
+        engine: Arc<dyn LLMEngine>,
+        mode: DisaggregationMode,
+        workload: BenchWorkload,
+    ) -> BenchStats {
+        let adapter = Arc::new(EngineAdapter::new(engine, mode));
+        let next = Arc::new(AtomicUsize::new(0));
+        let collected = Arc::new(Mutex::new(Vec::<ReqStat>::with_capacity(
+            workload.total_requests,
+        )));
+        let workload = Arc::new(workload);
+
+        let start = Instant::now();
+        let mut handles = Vec::with_capacity(workload.concurrency);
+        for _ in 0..workload.concurrency {
+            let adapter = adapter.clone();
+            let next = next.clone();
+            let collected = collected.clone();
+            let workload = workload.clone();
+            handles.push(tokio::spawn(async move {
+                loop {
+                    let idx = next.fetch_add(1, Ordering::Relaxed);
+                    if idx >= workload.total_requests {
+                        break;
+                    }
+                    if let Some(stat) = run_one(&adapter, &workload).await {
+                        collected
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(stat);
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            let _ = h.await;
+        }
+        let wall_seconds = start.elapsed().as_secs_f64();
+
+        let collected = Arc::try_unwrap(collected)
+            .map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()))
+            .unwrap_or_default();
+
+        let total_output_tokens: usize = collected.iter().map(|s| s.output_tokens).sum();
+        let mut ttfts: Vec<f64> = collected.iter().filter_map(|s| s.ttft_ms).collect();
+        let mut itls: Vec<f64> = collected
+            .iter()
+            .flat_map(|s| s.itl_ms.iter().copied())
+            .collect();
+
+        BenchStats {
+            requests: collected.len(),
+            total_output_tokens,
+            wall_seconds,
+            tokens_per_sec: if wall_seconds > 0.0 {
+                total_output_tokens as f64 / wall_seconds
+            } else {
+                0.0
+            },
+            ttft_p50_ms: nearest_rank(&mut ttfts, 0.50),
+            ttft_p99_ms: nearest_rank(&mut ttfts, 0.99),
+            itl_p50_ms: nearest_rank(&mut itls, 0.50),
+            itl_p99_ms: nearest_rank(&mut itls, 0.99),
+        }
+    }
+
+    /// Synthetic logprobs matching `sample_engine.py`'s shape, so the floor's
+    /// per-chunk payload size matches the Python engine's.
+    fn stamp_logprobs(out: &mut LLMEngineOutput, token_id: u32, top_k: u32) {
+        let top_k = top_k.min(MAX_LOGPROBS);
+        let selected_lp = -0.1 * f64::from(token_id % 10);
+        out.log_probs = Some(vec![selected_lp]);
+        if top_k > 0 {
+            let mut entries: Vec<TopLogprob> = Vec::with_capacity(top_k as usize + 1);
+            entries.push(TopLogprob {
+                rank: 1,
+                token_id,
+                token: Some(format!("token_id:{token_id}")),
+                logprob: selected_lp,
+                bytes: None,
+            });
+            for r in 1..=top_k {
+                let alt_id = (token_id + r) % 32000;
+                entries.push(TopLogprob {
+                    rank: r + 1,
+                    token_id: alt_id,
+                    token: Some(format!("token_id:{alt_id}")),
+                    logprob: selected_lp - 0.1 * f64::from(r),
+                    bytes: None,
+                });
+            }
+            out.top_logprobs = Some(vec![entries]);
+        }
+    }
+
+    /// GIL-free reference engine: emits `max_tokens` rotating token IDs (with
+    /// optional per-token delay and synthetic logprobs), mirroring
+    /// `sample_engine.py`'s output minus the Python. The delta vs the
+    /// `PyLLMEngine`-wrapped engine through [`run_load`] is the bridge + GIL cost.
+    pub struct BenchFloorEngine {
+        per_token_delay: Duration,
+    }
+
+    impl BenchFloorEngine {
+        /// `per_token_delay_ms` should match `sample_engine.py`'s `--delay`
+        /// for an apples-to-apples comparison; pass `0.0` to expose pure
+        /// bridge + GIL overhead with no pacing.
+        pub fn new(per_token_delay_ms: f64) -> Self {
+            Self {
+                per_token_delay: Duration::from_secs_f64((per_token_delay_ms / 1000.0).max(0.0)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LLMEngine for BenchFloorEngine {
+        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+            Ok(EngineConfig {
+                model: "bench-floor".to_string(),
+                ..Default::default()
+            })
+        }
+
+        async fn generate(
+            &self,
+            request: PreprocessedRequest,
+            ctx: GenerateContext,
+        ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
+            // Clamp to >= 1 so the stream always yields a terminal chunk
+            // (max_tokens == 0 would otherwise produce an empty stream).
+            let max_new = request.stop_conditions.max_tokens.unwrap_or(16).max(1);
+            let logprobs_k = request.output_options.logprobs;
+            let prompt_len = request.token_ids.len() as u32;
+            let delay = self.per_token_delay;
+
+            let s = stream! {
+                for i in 0..max_new {
+                    if ctx.is_stopped() {
+                        yield Ok(LLMEngineOutput::cancelled().with_usage(usage(prompt_len, i)));
+                        return;
+                    }
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
+                    let token_id = (i + 1) % 32000;
+                    let mut out = if i == max_new - 1 {
+                        LLMEngineOutput::length()
+                            .with_tokens(vec![token_id])
+                            .with_usage(usage(prompt_len, max_new))
+                    } else {
+                        chunk::token(token_id)
+                    };
+                    if let Some(k) = logprobs_k {
+                        stamp_logprobs(&mut out, token_id, k);
+                    }
+                    yield Ok(out);
+                }
+            };
+            Ok(Box::pin(s))
+        }
+
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// `run_load` drives the floor through the real `EngineAdapter`,
+        /// counts every streamed token, and reports positive throughput.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn floor_run_load_counts_all_tokens() {
+            let engine: Arc<dyn LLMEngine> = Arc::new(BenchFloorEngine::new(0.0));
+            let workload = BenchWorkload {
+                model: "bench-model".to_string(),
+                prompt_len: 16,
+                max_tokens: 8,
+                logprobs_k: Some(3),
+                concurrency: 4,
+                total_requests: 32,
+            };
+            let stats = run_load(engine, DisaggregationMode::Aggregated, workload).await;
+
+            assert_eq!(stats.requests, 32);
+            // Each request yields one token per step for `max_tokens` steps.
+            assert_eq!(stats.total_output_tokens, 32 * 8);
+            assert!(stats.tokens_per_sec > 0.0, "stats: {stats:?}");
+            assert!(stats.itl_p50_ms >= 0.0);
+        }
+    }
+}
+
 /// Run the full conformance suite against an engine.
 ///
 /// Takes a factory rather than a built engine so the kit can construct

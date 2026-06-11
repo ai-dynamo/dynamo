@@ -538,24 +538,31 @@ impl Worker {
 // PyLLMEngine — the actual bridge. Not a `#[pyclass]`; lives only in Rust.
 // ---------------------------------------------------------------------------
 
-struct PyLLMEngine {
+/// Per-request state the engine may need at `abort()` time. Stored in one map
+/// so each request takes a single lock + insert (and one removal), rather than
+/// two separate locked maps.
+#[derive(Clone)]
+struct RequestState {
+    trace_context: Option<DistributedTraceContext>,
+    metadata: BTreeMap<String, String>,
+}
+
+pub(crate) struct PyLLMEngine {
     // Wrapped in `Arc` so we can clone refcount-style without acquiring
     // the GIL — `PyObject::clone` would otherwise need to bump Python's
     // own refcount, which requires the GIL. Same pattern as
     // `PythonAsyncEngine` in `engine.rs`.
     engine: Arc<PyObject>,
     event_loop: Arc<PyObject>,
-    trace_contexts: Arc<StdMutex<HashMap<String, DistributedTraceContext>>>,
-    request_metadata: Arc<StdMutex<HashMap<String, BTreeMap<String, String>>>>,
+    request_state: Arc<StdMutex<HashMap<String, RequestState>>>,
 }
 
 impl PyLLMEngine {
-    fn new(engine: Arc<PyObject>, event_loop: Arc<PyObject>) -> Self {
+    pub(crate) fn new(engine: Arc<PyObject>, event_loop: Arc<PyObject>) -> Self {
         Self {
             engine,
             event_loop,
-            trace_contexts: Arc::new(StdMutex::new(HashMap::new())),
-            request_metadata: Arc::new(StdMutex::new(HashMap::new())),
+            request_state: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
@@ -587,17 +594,12 @@ impl PyLLMEngine {
 
 struct RequestStateGuard {
     request_id: String,
-    trace_contexts: Arc<StdMutex<HashMap<String, DistributedTraceContext>>>,
-    request_metadata: Arc<StdMutex<HashMap<String, BTreeMap<String, String>>>>,
+    request_state: Arc<StdMutex<HashMap<String, RequestState>>>,
 }
 
 impl Drop for RequestStateGuard {
     fn drop(&mut self) {
-        self.trace_contexts
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&self.request_id);
-        self.request_metadata
+        self.request_state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&self.request_id);
@@ -669,20 +671,19 @@ impl LLMEngine for PyLLMEngine {
         let event_loop = self.event_loop.clone();
         let trace_context = get_distributed_tracing_context();
         let request_id = ctx.id().to_string();
-        self.request_metadata
+        self.request_state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(request_id.clone(), ctx.metadata().clone());
-        if let Some(trace_context) = trace_context.as_ref() {
-            self.trace_contexts
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(request_id.clone(), trace_context.clone());
-        }
+            .insert(
+                request_id.clone(),
+                RequestState {
+                    trace_context: trace_context.clone(),
+                    metadata: ctx.metadata().clone(),
+                },
+            );
         let request_state_guard = RequestStateGuard {
             request_id,
-            trace_contexts: self.trace_contexts.clone(),
-            request_metadata: self.request_metadata.clone(),
+            request_state: self.request_state.clone(),
         };
 
         let first_token = ctx.first_token_sender().cloned();
@@ -801,19 +802,17 @@ impl LLMEngine for PyLLMEngine {
     async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
         let engine = self.engine.clone();
         let event_loop = self.event_loop.clone();
-        let trace_context = self
-            .trace_contexts
+        let state = self
+            .request_state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(ctx.id())
-            .cloned()
+            .cloned();
+        let trace_context = state
+            .as_ref()
+            .and_then(|s| s.trace_context.clone())
             .or_else(get_distributed_tracing_context);
-        let metadata = self
-            .request_metadata
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(ctx.id())
-            .unwrap_or_default();
+        let metadata = state.map(|s| s.metadata).unwrap_or_default();
 
         let res: Result<(), PyErr> = async move {
             let py_future = tokio::task::spawn_blocking(move || {
