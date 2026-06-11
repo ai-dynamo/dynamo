@@ -9,6 +9,8 @@
 
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
+ARG MODELEXPRESS_VERSION
+
 WORKDIR /workspace
 
 # Install NATS and ETCD
@@ -84,6 +86,16 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
         if [ -n "$GMS_WHEEL" ]; then pip install --no-cache-dir --break-system-packages "$GMS_WHEEL"; fi; \
     fi
+
+{% if context.sglang.enable_modelexpress == "true" %}
+# Install only the ModelExpress client package. --no-deps preserves the upstream
+# SGLang runtime dependency stack.
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    set -eux; \
+    export PIP_CACHE_DIR=/root/.cache/pip; \
+    pip install --break-system-packages --no-deps \
+        "modelexpress==${MODELEXPRESS_VERSION}"
+{% endif %}
 {% endif %}
 
 # Install nvtx pinned in container/deps/requirements.common.txt so DYN_NVTX=1

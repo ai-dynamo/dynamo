@@ -23,7 +23,7 @@ from dynamo.llm import (
     register_model,
 )
 from dynamo.sglang._compat import get_scheduler_info
-from dynamo.sglang.args import DynamoConfig
+from dynamo.sglang.args import DynamoConfig, use_modelexpress_remote_instance
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 
@@ -97,6 +97,7 @@ async def _register_model_with_runtime_config(
             custom_template_path=dynamo_args.custom_jinja_template,
             media_decoder=media_decoder,
             media_fetcher=media_fetcher,
+            ignore_weights=use_modelexpress_remote_instance(server_args),
         )
         logging.info("Successfully registered LLM with runtime config")
         return True
