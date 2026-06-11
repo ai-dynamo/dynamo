@@ -125,10 +125,11 @@ fn create_request_context(
     match parent_ctx {
         // If there is a parent context, link the request as a child context of it
         Some(parent_ctx) => {
-            let child_ctx = RsContext::with_id_and_metadata(
+            let child_ctx = RsContext::with_id_and_metadata_and_trace_context(
                 request,
                 parent_ctx.inner().id().to_string(),
                 parent_ctx.metadata_snapshot(),
+                parent_ctx.trace_context().cloned(),
             );
             parent_ctx.inner().link_child(child_ctx.context());
             if parent_ctx.inner().is_stopped() || parent_ctx.inner().is_killed() {

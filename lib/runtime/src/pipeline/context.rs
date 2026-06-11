@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use super::{AsyncEngineContext, AsyncEngineContextProvider, Data};
 use crate::engine::AsyncEngineController;
+use crate::logging::DistributedTraceContext;
 use async_trait::async_trait;
 
 use super::registry::Registry;
@@ -72,9 +73,18 @@ impl<T: Send + Sync + 'static> Context<T> {
         id: String,
         metadata: BTreeMap<String, String>,
     ) -> Self {
+        Self::with_id_and_metadata_and_trace_context(current, id, metadata, None)
+    }
+
+    pub fn with_id_and_metadata_and_trace_context(
+        current: T,
+        id: String,
+        metadata: BTreeMap<String, String>,
+        trace_context: Option<DistributedTraceContext>,
+    ) -> Self {
         Context {
             current,
-            controller: Arc::new(Controller::new(id)),
+            controller: Arc::new(Controller::new_with_trace_context(id, trace_context)),
             registry: Registry::new(),
             stages: Vec::new(),
             metadata,
@@ -109,6 +119,10 @@ impl<T: Send + Sync + 'static> Context<T> {
 
     pub fn insert_metadata<K: Into<String>, V: Into<String>>(&mut self, key: K, value: V) {
         self.metadata.insert(key.into(), value.into());
+    }
+
+    pub fn trace_context(&self) -> Option<DistributedTraceContext> {
+        self.controller.trace_context()
     }
 
     /// Insert an object into the registry with a specific key.
@@ -306,6 +320,10 @@ impl AsyncEngineContext for StreamContext {
         self.controller.id()
     }
 
+    fn trace_context(&self) -> Option<DistributedTraceContext> {
+        self.controller.trace_context()
+    }
+
     fn stop(&self) {
         self.controller.stop();
     }
@@ -366,6 +384,7 @@ enum State {
 #[derive(Debug)]
 pub struct Controller {
     id: String,
+    trace_context: Option<DistributedTraceContext>,
     tx: Sender<State>,
     rx: Receiver<State>,
     child_context: Mutex<Vec<Arc<dyn AsyncEngineContext>>>,
@@ -376,6 +395,21 @@ impl Controller {
         let (tx, rx) = channel(State::Live);
         Self {
             id,
+            trace_context: None,
+            tx,
+            rx,
+            child_context: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn new_with_trace_context(
+        id: String,
+        trace_context: Option<DistributedTraceContext>,
+    ) -> Self {
+        let (tx, rx) = channel(State::Live);
+        Self {
+            id,
+            trace_context,
             tx,
             rx,
             child_context: Mutex::new(Vec::new()),
@@ -399,6 +433,10 @@ impl AsyncEngineController for Controller {}
 impl AsyncEngineContext for Controller {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    fn trace_context(&self) -> Option<DistributedTraceContext> {
+        self.trace_context.clone()
     }
 
     fn is_stopped(&self) -> bool {
@@ -603,6 +641,34 @@ mod tests {
 
         assert_eq!(input.value, "Hello");
         assert_eq!(ctx.length, 5);
+    }
+
+    #[test]
+    fn test_trace_context_transfers_with_context() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "traceparent",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+                .parse()
+                .unwrap(),
+        );
+        headers.insert("x-request-id", "req-123".parse().unwrap());
+
+        let trace_context = crate::logging::request_trace_context_from_headers(&headers);
+        let ctx = Context::with_id_and_metadata_and_trace_context(
+            Input {
+                value: "Hello".to_string(),
+            },
+            "request-1".to_string(),
+            BTreeMap::new(),
+            trace_context,
+        );
+
+        let (_, ctx) = ctx.transfer(Processed { length: 5 });
+        let trace_context = ctx.trace_context().unwrap();
+        assert_eq!(trace_context.trace_id, "4bf92f3577b34da6a3ce929d0e0e4736");
+        assert_eq!(trace_context.span_id, "00f067aa0ba902b7");
+        assert_eq!(trace_context.x_request_id, Some("req-123".to_string()));
     }
 
     #[test]

@@ -347,8 +347,13 @@ where
         );
         tracing::trace!("received request: {:?}", request_t);
 
-        let request: context::Context<T> =
-            Context::with_id_and_metadata(request_t, control_msg.id, control_msg.metadata);
+        let trace_context = crate::logging::get_distributed_tracing_context();
+        let request: context::Context<T> = Context::with_id_and_metadata_and_trace_context(
+            request_t,
+            control_msg.id,
+            control_msg.metadata,
+            trace_context,
+        );
 
         Ok(ParsedRequest {
             request,
@@ -407,11 +412,14 @@ where
                 ))
             })?;
 
-        let request_context: context::Context<()> = context::Context::with_id_and_metadata(
-            (),
-            control_msg.id.clone(),
-            control_msg.metadata.clone(),
-        );
+        let trace_context = crate::logging::get_distributed_tracing_context();
+        let request_context: context::Context<()> =
+            context::Context::with_id_and_metadata_and_trace_context(
+                (),
+                control_msg.id.clone(),
+                control_msg.metadata.clone(),
+                trace_context,
+            );
         let context_arc: Arc<dyn AsyncEngineContext> = request_context.context();
 
         // Open the request stream (upstream → worker) up front. The shared

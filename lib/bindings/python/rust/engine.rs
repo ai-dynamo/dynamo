@@ -222,8 +222,9 @@ where
         let id = context.id().to_string();
         tracing::trace!("processing request: {}", id);
 
-        // Capture current trace context
-        let current_trace_context = get_distributed_tracing_context();
+        // Capture request trace context from the engine context first; it does not depend on
+        // logging-layer span extensions being installed.
+        let current_trace_context = ctx.trace_context().or_else(get_distributed_tracing_context);
         let metadata = context.metadata().clone();
 
         let stream = invoke_generator(

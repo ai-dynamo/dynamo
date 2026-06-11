@@ -12,7 +12,9 @@ use crate::discovery::EndpointInstanceId;
 use crate::dynamo_nvtx_range;
 use crate::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
 use crate::error::{DynamoError, ErrorType};
-use crate::logging::inject_trace_headers_into_map;
+use crate::logging::{
+    DistributedTraceContext, get_distributed_tracing_context, inject_trace_context_into_map,
+};
 use crate::metrics::frontend_perf::STAGE_DURATION_SECONDS;
 use crate::metrics::request_plane::{
     REQUEST_PLANE_INFLIGHT, REQUEST_PLANE_QUEUE_SECONDS, REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS,
@@ -517,7 +519,8 @@ impl AddressedPushRouter {
         REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
 
         let tx_start = Instant::now();
-        self.dispatch_buffer(address, buffer, context.id()).await?;
+        self.dispatch_buffer(address, buffer, context.id(), context.trace_context())
+            .await?;
         REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
 
         // Spawn the forwarder before awaiting the response prologue so request
@@ -634,9 +637,13 @@ impl AddressedPushRouter {
         address: String,
         buffer: bytes::Bytes,
         request_id: &str,
+        trace_context: Option<DistributedTraceContext>,
     ) -> Result<(), Error> {
         let mut headers = std::collections::HashMap::new();
-        inject_trace_headers_into_map(&mut headers);
+        inject_trace_context_into_map(
+            &mut headers,
+            trace_context.or_else(get_distributed_tracing_context),
+        );
         headers.insert("request-id".to_string(), request_id.to_string());
         let send_ts_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

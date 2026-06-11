@@ -66,7 +66,9 @@ use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
-use dynamo_runtime::logging::get_distributed_tracing_context;
+use dynamo_runtime::logging::{
+    get_distributed_tracing_context, request_trace_context_from_headers,
+};
 use tracing::Instrument;
 
 pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
@@ -513,7 +515,13 @@ fn context_from_headers<T: Send + Sync + 'static>(
 ) -> Result<Context<T>, ErrorResponse> {
     let metadata = extract_metadata_from_http(headers)
         .map_err(|err| ErrorMessage::request_headers_too_large(&err.to_string()))?;
-    let mut request = Context::with_id_and_metadata(request, request_id, metadata);
+    let trace_context = request_trace_context_from_headers(headers);
+    let mut request = Context::with_id_and_metadata_and_trace_context(
+        request,
+        request_id,
+        metadata,
+        trace_context,
+    );
     attach_x_request_id(&mut request, headers);
     Ok(request)
 }
@@ -861,10 +869,11 @@ async fn completions_batch(
 
         // Generate unique request_id for each prompt: original_id-{prompt_idx}
         let unique_request_id = format!("{}-{}", request.id(), prompt_idx);
-        let mut single_request_context = Context::with_id_and_metadata(
+        let mut single_request_context = Context::with_id_and_metadata_and_trace_context(
             single_request,
             unique_request_id,
             request.metadata().clone(),
+            request.trace_context(),
         );
         copy_x_request_id(&request, &mut single_request_context);
 

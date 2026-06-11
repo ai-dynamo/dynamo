@@ -210,6 +210,29 @@ impl DistributedTraceContext {
     }
 }
 
+pub fn request_trace_context_from_headers<H: GenericHeaders>(
+    headers: &H,
+) -> Option<DistributedTraceContext> {
+    if let Some(context) = get_distributed_tracing_context() {
+        return Some(context);
+    }
+
+    let trace_parent = TraceParent::from_headers(headers);
+    let trace_id = trace_parent.trace_id?;
+    let span_id = trace_parent.parent_id?;
+
+    Some(DistributedTraceContext {
+        trace_id,
+        span_id,
+        parent_id: None,
+        tracestate: trace_parent.tracestate,
+        start: None,
+        end: None,
+        x_request_id: trace_parent.x_request_id,
+        request_id: trace_parent.request_id,
+    })
+}
+
 /// Parse a traceparent string into its components
 pub fn parse_traceparent(traceparent: &str) -> (Option<String>, Option<String>) {
     let pieces: Vec<_> = traceparent.split('-').collect();
@@ -619,9 +642,11 @@ pub fn inject_current_trace_into_nats_headers(headers: &mut async_nats::HeaderMa
     inject_otel_context_into_nats_headers(headers, None);
 }
 
-// Inject trace headers into a generic HashMap for HTTP/TCP transports
-pub fn inject_trace_headers_into_map(headers: &mut std::collections::HashMap<String, String>) {
-    if let Some(trace_context) = get_distributed_tracing_context() {
+pub fn inject_trace_context_into_map(
+    headers: &mut std::collections::HashMap<String, String>,
+    trace_context: Option<DistributedTraceContext>,
+) {
+    if let Some(trace_context) = trace_context {
         // Inject W3C traceparent header
         headers.insert(
             "traceparent".to_string(),
@@ -641,6 +666,11 @@ pub fn inject_trace_headers_into_map(headers: &mut std::collections::HashMap<Str
             headers.insert("request-id".to_string(), request_id);
         }
     }
+}
+
+// Inject trace headers into a generic HashMap for HTTP/TCP transports
+pub fn inject_trace_headers_into_map(headers: &mut std::collections::HashMap<String, String>) {
+    inject_trace_context_into_map(headers, get_distributed_tracing_context());
 }
 
 /// Create a client_request span linked to the parent trace context
@@ -1485,6 +1515,34 @@ pub mod tests {
     use std::io::{BufRead, BufReader};
     use stdio_override::*;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_request_trace_context_from_headers_parses_traceparent() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "traceparent",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+                .parse()
+                .unwrap(),
+        );
+        headers.insert("tracestate", "test-state".parse().unwrap());
+        headers.insert("x-request-id", "req-123".parse().unwrap());
+        headers.insert(
+            "request-id",
+            "550e8400-e29b-41d4-a716-446655440000".parse().unwrap(),
+        );
+
+        let trace_context = request_trace_context_from_headers(&headers).unwrap();
+        assert_eq!(trace_context.trace_id, "4bf92f3577b34da6a3ce929d0e0e4736");
+        assert_eq!(trace_context.span_id, "00f067aa0ba902b7");
+        assert!(trace_context.parent_id.is_none());
+        assert_eq!(trace_context.tracestate, Some("test-state".to_string()));
+        assert_eq!(trace_context.x_request_id, Some("req-123".to_string()));
+        assert_eq!(
+            trace_context.request_id,
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string())
+        );
+    }
 
     static LOG_LINE_SCHEMA: &str = r#"
     {

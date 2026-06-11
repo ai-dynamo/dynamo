@@ -68,6 +68,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::logging::DistributedTraceContext;
 pub use async_trait::async_trait;
 use futures::stream::Stream;
 
@@ -116,6 +117,11 @@ pub trait AsyncEngineController: Send + Sync {}
 pub trait AsyncEngineContext: Send + Sync + Debug {
     /// Unique ID for the Stream
     fn id(&self) -> &str;
+
+    /// Distributed trace context associated with this stream, when available.
+    fn trace_context(&self) -> Option<DistributedTraceContext> {
+        None
+    }
 
     /// Returns true if `stop_generating()` has been called; otherwise, false.
     fn is_stopped(&self) -> bool;

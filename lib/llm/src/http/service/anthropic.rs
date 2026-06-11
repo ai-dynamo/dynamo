@@ -25,6 +25,7 @@ use axum::{
     routing::{get, post},
 };
 use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
+use dynamo_runtime::logging::request_trace_context_from_headers;
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
 use futures::StreamExt;
 use tracing::Instrument;
@@ -164,7 +165,12 @@ async fn handler_anthropic_messages(
             &err.to_string(),
         )
     })?;
-    let request = Context::with_id_and_metadata(request, request_id, metadata);
+    let request = Context::with_id_and_metadata_and_trace_context(
+        request,
+        request_id,
+        metadata,
+        request_trace_context_from_headers(&headers),
+    );
     let context = request.context();
 
     // Create connection handles
