@@ -4,6 +4,9 @@
 name: Build On Demand
 
 on:
+  push:
+    branches:
+      - snapshot-tp8-validation
   workflow_dispatch:
     inputs:
       build_vllm:
@@ -22,6 +25,26 @@ on:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
         default: false
+      build_frontend:
+        description: 'Build and push frontend image, tagged with commit SHA'
+        type: boolean
+        default: false
+      build_snapshot_agent:
+        description: 'Build and push snapshot-agent image, tagged with commit SHA'
+        type: boolean
+        default: false
+      build_snapshot_placeholder:
+        description: 'Build and push vLLM snapshot placeholder image from the built vLLM runtime'
+        type: boolean
+        default: false
+      criu_repo:
+        description: 'CRIU git repository for snapshot image builds'
+        type: string
+        default: 'https://github.com/dfeigin-nv/criu.git'
+      criu_ref:
+        description: 'CRIU git ref for snapshot image builds'
+        type: string
+        default: 'add-aio-and-parallel-memfd'
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -52,7 +75,7 @@ jobs:
   vllm-build:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [init]
-    if: inputs.build_vllm
+    if: github.event_name == 'push' || inputs.build_vllm
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
@@ -102,6 +125,87 @@ jobs:
       copy_timeout_minutes: 10
     secrets: inherit
 
+  frontend-build:
+    name: frontend
+    needs: [init]
+    if: github.event_name == 'push' || inputs.build_frontend
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: dynamo
+      target: frontend
+      cuda_version: '[""]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.init.outputs.builder_name }}
+      build_timeout_minutes: 45
+    secrets: inherit
+
+  frontend-copy-to-acr:
+    name: frontend
+    needs: [frontend-build]
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
+      cuda_version: '[""]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 10
+    secrets: inherit
+
+  snapshot-agent:
+    name: Snapshot Agent
+    needs: [init]
+    if: github.event_name == 'push' || inputs.build_snapshot_agent
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Build and push snapshot agent
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          image_tag: ${{ github.sha }}-snapshot-agent
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+          extra_build_args: |
+            CRIU_REPO=${{ inputs.criu_repo || 'https://github.com/dfeigin-nv/criu.git' }}
+            CRIU_REF=${{ inputs.criu_ref || 'add-aio-and-parallel-memfd' }}
+
+  snapshot-placeholder:
+    name: Snapshot Placeholder
+    needs: [init, vllm-copy-to-acr]
+    if: github.event_name == 'push' || inputs.build_snapshot_placeholder
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Build and push snapshot placeholder
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          target: placeholder
+          image_tag: ${{ github.sha }}-vllm-placeholder
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-placeholder
+          extra_build_args: |
+            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime
+            CRIU_REPO=${{ inputs.criu_repo || 'https://github.com/dfeigin-nv/criu.git' }}
+            CRIU_REF=${{ inputs.criu_ref || 'add-aio-and-parallel-memfd' }}
+
   sglang-copy-to-acr:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [sglang-build]
@@ -130,7 +234,7 @@ jobs:
 
   operator:
     needs: [init]
-    if: inputs.build_operator
+    if: github.event_name == 'push' || inputs.build_operator
     name: Operator
     runs-on: prod-default-v2
     env:
@@ -194,7 +298,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, operator]
+    needs: [init, vllm-build, sglang-build, trtllm-build, operator, frontend-build, snapshot-agent, snapshot-placeholder]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
