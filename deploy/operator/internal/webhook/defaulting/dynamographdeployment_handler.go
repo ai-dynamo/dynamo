@@ -90,8 +90,7 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	if grovePathway && req.Operation == admissionv1.Update && len(req.OldObject.Raw) > 0 {
 		oldDGD = &nvidiacomv1alpha1.DynamoGraphDeployment{}
 		if err := json.Unmarshal(req.OldObject.Raw, oldDGD); err != nil {
-			logger.Error(err, "failed to decode old DGD object, skipping minAvailable update normalization")
-			oldDGD = nil
+			return fmt.Errorf("failed to decode old DGD object: %w", err)
 		}
 	}
 	for name, svc := range dgd.Spec.Services {
@@ -104,7 +103,6 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 		}
 		if svc.Replicas == nil {
 			svc.Replicas = ptr.To(int32(1))
-			logger.V(1).Info("defaulted nil replicas to 1", "service", name)
 		}
 		if grovePathway && svc.MinAvailable == nil {
 			minAvailable := int32(1)
@@ -112,20 +110,16 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 				minAvailable = 0
 			}
 			svc.MinAvailable = ptr.To(minAvailable)
-			logger.V(1).Info("defaulted nil minAvailable", "service", name, "minAvailable", minAvailable)
 		}
-		if grovePathway && req.Operation == admissionv1.Update && svc.MinAvailable != nil && svc.Replicas != nil &&
-			oldSvc != nil && oldSvc.MinAvailable != nil {
+		if grovePathway && req.Operation == admissionv1.Update && oldSvc != nil && oldSvc.MinAvailable != nil {
 			oldReplicas := int32(1)
 			if oldSvc.Replicas != nil {
 				oldReplicas = *oldSvc.Replicas
 			}
 			if oldReplicas > 0 && *svc.Replicas == 0 && *svc.MinAvailable == *oldSvc.MinAvailable {
 				svc.MinAvailable = ptr.To(int32(0))
-				logger.V(1).Info("normalized minAvailable for zero replicas", "service", name)
 			} else if oldReplicas == 0 && *svc.Replicas > 0 && *svc.MinAvailable == 0 && *oldSvc.MinAvailable == 0 {
 				svc.MinAvailable = ptr.To(int32(1))
-				logger.V(1).Info("normalized minAvailable for non-zero replicas", "service", name)
 			}
 		}
 	}
