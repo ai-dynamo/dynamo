@@ -832,13 +832,9 @@ class RadixTree:
     release the Python GIL.
     """
 
-    def __init__(self, expiration_duration_secs: Optional[float] = None) -> None:
+    def __init__(self) -> None:
         """
         Create a new RadixTree instance.
-
-        Args:
-            expiration_duration_secs: Optional expiration duration in seconds for cached blocks.
-                                    If None, blocks never expire.
         """
         ...
 
