@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 title: "Deploying Dynamo 1.2 with NVIDIA AI Cluster Runtime"
 sidebar-title: Deploying Dynamo with AICR
-subtitle: "A validated Kubernetes runtime path for Dynamo inference - June 2026"
+subtitle: "Stefan Schimanski and Yuan Chen - June 2026"
 description: "How NVIDIA AI Cluster Runtime packages Dynamo 1.2 with the GPU, scheduling, health, observability, and routing components needed for Kubernetes inference."
 keywords: Dynamo, NVIDIA AI Cluster Runtime, AICR, Kubernetes, GPU Operator, EPP, NATS, KV cache routing, vLLM
 last-updated: June 11, 2026
