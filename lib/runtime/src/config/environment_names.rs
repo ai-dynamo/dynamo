@@ -311,6 +311,16 @@ pub mod llm {
     pub const DYN_ENABLE_STREAMING_REASONING_DISPATCH: &str =
         "DYN_ENABLE_STREAMING_REASONING_DISPATCH";
 
+    /// Enable parser debug mode (off by default). When enabled, the frontend emits
+    /// one structured tracing event per choice at stream end pairing the RAW model
+    /// completion text with the parsed result (reasoning_content / content /
+    /// tool_calls / finish_reason), so intermittent parse failures can be diagnosed
+    /// from logs (queryable under `DYN_LOGGING_JSONL=true`) instead of hand-captured.
+    ///
+    /// WARNING: raw completions carry user data — this is opt-in only. Unset / `0` /
+    /// `false` = off; any other value = on.
+    pub const DYN_PARSER_DEBUG: &str = "DYN_PARSER_DEBUG";
+
     /// Backend stream inactivity timeout in seconds.
     ///
     /// When set to a positive integer, the frontend will kill the engine context

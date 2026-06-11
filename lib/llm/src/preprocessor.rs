@@ -14,6 +14,7 @@
 #[cfg(feature = "mm-routing")]
 pub mod lightseek_mm;
 pub mod media;
+pub mod parser_debug;
 pub mod prompt;
 pub mod speculative_prefill;
 mod structural_tag;
@@ -1893,6 +1894,31 @@ impl OpenAIPreprocessor {
             && !suppress_reasoning_after_tool
             && !skip_reasoning_for_guided_json;
 
+        // Determine tool jailing up front (pure from request fields) so the
+        // parser-debug gate can be evaluated before the reasoning tap.
+        let has_tools = request
+            .inner
+            .tools
+            .as_ref()
+            .is_some_and(|tools| !tools.is_empty());
+        let should_jail = Self::should_apply_tool_jail(
+            self.tool_call_parser.as_ref(),
+            request.inner.tool_choice.as_ref(),
+            has_tools,
+        )?;
+
+        // Parser debug mode (opt-in via DYN_PARSER_DEBUG): capture the RAW pre-parse
+        // text at stream entry, before the reasoning parser rewrites delta content.
+        // The matching exit tap below emits one record per choice at stream end.
+        // Only active when a parser stage runs (otherwise raw == content).
+        let parser_debug_acc = (*parser_debug::PARSER_DEBUG_ENABLED
+            && (should_parse_reasoning || should_strip_disabled_reasoning_start || should_jail))
+            .then(parser_debug::RawAccumulator::new);
+        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = match parser_debug_acc.clone() {
+            Some(acc) => Box::pin(parser_debug::tap_raw(stream, acc)),
+            None => Box::pin(stream),
+        };
+
         // Reasoning Content Parsing Transformation Step
         // Current Solution:
         // This step operates on Deltas created by the transform_postprocessor_stream function
@@ -1914,20 +1940,6 @@ impl OpenAIPreprocessor {
         } else {
             Box::pin(stream)
         };
-
-        // Check if tools are present and if we should apply jail
-        let has_tools = request
-            .inner
-            .tools
-            .as_ref()
-            .is_some_and(|tools| !tools.is_empty());
-
-        // Determine if we should apply jail (do this before moving request)
-        let should_jail = Self::should_apply_tool_jail(
-            self.tool_call_parser.as_ref(),
-            request.inner.tool_choice.as_ref(),
-            has_tools,
-        )?;
 
         // Convert OpenAI tools to parser ToolDefinition format before applying jail
         let tool_definitions = request.inner.tools.as_ref().map(|tools| {
@@ -1952,6 +1964,18 @@ impl OpenAIPreprocessor {
             ))
         } else {
             Box::pin(stream)
+        };
+
+        // Parser debug exit tap: accumulate parsed outputs per choice and emit one
+        // record (raw vs parsed) at stream end. Shares the entry tap's accumulator.
+        let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> = match parser_debug_acc {
+            Some(acc) => Box::pin(parser_debug::tap_parsed_and_emit(
+                transformed_stream,
+                acc,
+                self.runtime_config.reasoning_parser.clone(),
+                self.tool_call_parser.clone(),
+            )),
+            None => transformed_stream,
         };
 
         Ok(transformed_stream)
