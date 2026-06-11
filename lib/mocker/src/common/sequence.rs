@@ -16,12 +16,15 @@ fn create_sequence_cache(
     enable_prefix_caching: bool,
 ) -> (Vec<UniqueBlock>, Vec<BlockHash>, Vec<PositionalLineageHash>) {
     let mut unique_blocks = Vec::with_capacity(tokens.blocks().len() + 1);
-    let mut block_hashes: Vec<BlockHash> = Vec::with_capacity(tokens.blocks().len());
+    let mut block_hashes = Vec::new();
+    if enable_prefix_caching {
+        block_hashes.reserve(tokens.blocks().len());
+    }
     let mut plhs = Vec::with_capacity(tokens.blocks().len());
 
     for (pos, block) in tokens.blocks().iter().enumerate() {
-        block_hashes.push(block.block_hash());
         if enable_prefix_caching {
+            block_hashes.push(block.block_hash());
             unique_blocks.push(UniqueBlock::FullBlock(block.sequence_hash()));
             plhs.push(block.positional_lineage_hash());
         } else {
@@ -101,7 +104,7 @@ impl ActiveSequence {
             num_input_tokens,
             num_allocated_tokens: 0,
             enable_prefix_caching,
-            emit_token_ids,
+            emit_token_ids: emit_token_ids && enable_prefix_caching,
         };
         seq.validate().expect("invalid ActiveSequence");
         seq
@@ -155,7 +158,9 @@ impl ActiveSequence {
         let hash_end = target_blocks.min(self.block_hashes.len());
         let hashes = self.block_hashes[hash_start..hash_end].to_vec();
         // Cached per-sequence PLHs (stable across calls).
-        let plhs = self.plhs[hash_start..hash_end].to_vec();
+        let plh_start = prev_blocks.min(self.plhs.len());
+        let plh_end = target_blocks.min(self.plhs.len());
+        let plhs = self.plhs[plh_start..plh_end].to_vec();
 
         let token_ids = if self.emit_token_ids && hash_start < hash_end {
             Some(
@@ -247,7 +252,9 @@ impl ActiveSequence {
             } else {
                 random::<u64>()
             };
-            let last_block_hash = last_complete.block_hash();
+            let last_block_hash = self
+                .enable_prefix_caching
+                .then(|| last_complete.block_hash());
             // Same randomization story as `last_seq_hash`: with prefix caching off,
             // two identical prompts must not share blocks, so the PLH we promote
             // with must also be unique — otherwise `process_promote`'s
@@ -255,14 +262,16 @@ impl ActiveSequence {
             let last_plh = if self.enable_prefix_caching {
                 last_complete.positional_lineage_hash()
             } else {
-                PositionalLineageHash::new(random::<u64>(), None, self.block_hashes.len() as u64)
+                PositionalLineageHash::new(random::<u64>(), None, self.plhs.len() as u64)
             };
             let promote_token_ids = if self.emit_token_ids {
                 Some(last_complete.tokens().to_vec())
             } else {
                 None
             };
-            self.block_hashes.push(last_block_hash);
+            if let Some(last_block_hash) = last_block_hash {
+                self.block_hashes.push(last_block_hash);
+            }
             self.plhs.push(last_plh);
             self.unique_blocks.pop();
 

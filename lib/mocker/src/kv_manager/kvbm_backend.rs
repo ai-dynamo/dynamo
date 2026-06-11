@@ -87,7 +87,7 @@ pub struct SwapInRegistrationOutcome {
 pub(crate) struct SwapInRegistrationBlock {
     pub(crate) seq_hash: SequenceHash,
     pub(crate) plh: PositionalLineageHash,
-    pub(crate) local_hash: BlockHash,
+    pub(crate) local_hash: Option<BlockHash>,
     pub(crate) token_ids: Option<Vec<u32>>,
 }
 
@@ -149,7 +149,7 @@ struct RegisteredBlockInfo {
     #[cfg_attr(not(feature = "kvbm-offload"), allow(dead_code))]
     parent_hash: Option<SequenceHash>,
     #[cfg_attr(not(feature = "kvbm-offload"), allow(dead_code))]
-    local_hash: BlockHash,
+    local_hash: Option<BlockHash>,
     #[cfg_attr(not(feature = "kvbm-offload"), allow(dead_code))]
     token_ids: Option<Vec<u32>>,
 }
@@ -424,7 +424,9 @@ impl KvManager {
                 },
             );
             stored_seq_hashes.push(entry.seq_hash);
-            stored_local_hashes.push(entry.local_hash);
+            if let Some(local_hash) = entry.local_hash {
+                stored_local_hashes.push(local_hash);
+            }
             metadata_parent_hash = Some(entry.seq_hash);
             consumed_entries += 1;
         }
@@ -454,7 +456,12 @@ impl KvManager {
         }
 
         let full_blocks = std::mem::take(stored_seq_hashes);
-        let local_hashes = std::mem::take(stored_local_hashes);
+        let local_hashes = if stored_local_hashes.len() == full_blocks.len() {
+            std::mem::take(stored_local_hashes)
+        } else {
+            stored_local_hashes.clear();
+            Vec::new()
+        };
         let token_ids = if stored_token_ids.len() == full_blocks.len() {
             Some(std::mem::take(stored_token_ids))
         } else {
@@ -641,9 +648,10 @@ impl KvManager {
         for event in events {
             match event {
                 G2RouterEvent::Stored(meta) => {
+                    let local_hashes = meta.local_hash.into_iter().collect::<Vec<_>>();
                     self.publish_kv_event_for_tier(
                         vec![meta.seq_hash],
-                        &[meta.local_hash],
+                        &local_hashes,
                         meta.parent_hash,
                         true,
                         meta.token_ids.map(|ids| vec![ids]),
@@ -1008,10 +1016,7 @@ impl KvManager {
                                     seq_hash: *seq_hash,
                                     block_id,
                                     parent_hash: metadata_parent_hash,
-                                    local_hash: local_hashes
-                                        .get(full_idx)
-                                        .copied()
-                                        .unwrap_or_default(),
+                                    local_hash: local_hashes.get(full_idx).copied(),
                                     token_ids: token_ids.and_then(|ids| ids.get(full_idx).cloned()),
                                 },
                             );
@@ -1090,8 +1095,8 @@ impl KvManager {
                         blocks_stored.push(*seq_hash);
                         let full_idx =
                             current_full_idx.expect("NewStore is only emitted for full blocks");
-                        if let Some(lh) = local_hashes.get(full_idx) {
-                            stored_local_hashes.push(*lh);
+                        if let Some(local_hash) = local_hashes.get(full_idx) {
+                            stored_local_hashes.push(*local_hash);
                         }
                         if let (Some(ref mut stids), Some(ids)) =
                             (stored_token_ids.as_mut(), token_ids)
@@ -1217,7 +1222,7 @@ impl KvManager {
         uuid: Uuid,
         seq_hash: SequenceHash,
         parent_hash: Option<u64>,
-        local_hash: BlockHash,
+        local_hash: Option<BlockHash>,
         plh: PositionalLineageHash,
         token_ids: Option<Vec<u32>>,
     ) {
@@ -1260,9 +1265,10 @@ impl KvManager {
         };
 
         if is_new {
+            let local_hashes = local_hash.into_iter().collect::<Vec<_>>();
             self.publish_kv_event(
                 vec![seq_hash],
-                &[local_hash],
+                &local_hashes,
                 parent_hash,
                 true,
                 token_ids.map(|t| vec![t]),
@@ -1597,7 +1603,7 @@ mod tests {
         let mut mgr = make_mgr(10, 16);
         let uuid = Uuid::new_v4();
         use_partial(&mut mgr, uuid);
-        mgr.process(&MoveBlock::Promote(uuid, 42, None, 0, plh(500), None));
+        mgr.process(&MoveBlock::Promote(uuid, 42, None, Some(0), plh(500), None));
         assert_eq!(mgr.num_active_blocks(), 1);
         assert!(mgr.active_partial.is_empty());
         assert!(mgr.active_full.contains_key(&42));
@@ -1611,7 +1617,7 @@ mod tests {
             Uuid::new_v4(),
             42,
             None,
-            0,
+            Some(0),
             plh(500),
             None,
         ));
@@ -2043,13 +2049,13 @@ mod tests {
             SwapInRegistrationBlock {
                 seq_hash: 12,
                 plh: plh(12),
-                local_hash: 120,
+                local_hash: Some(120),
                 token_ids: Some(vec![1; 16]),
             },
             SwapInRegistrationBlock {
                 seq_hash: 13,
                 plh: plh(13),
-                local_hash: 130,
+                local_hash: Some(130),
                 token_ids: Some(vec![2; 16]),
             },
         ];
@@ -2534,7 +2540,7 @@ mod tests {
             let entries = vec![SwapInRegistrationBlock {
                 seq_hash: 1,
                 plh: plh(1),
-                local_hash: 101,
+                local_hash: Some(101),
                 token_ids: Some(token_ids.clone()),
             }];
             let outcome = mgr.register_swapped_in_blocks(entries, None, slots);

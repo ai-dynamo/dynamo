@@ -270,6 +270,64 @@ pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> Opt
                 } else {
                     parser_key
                 };
+                // mistral's `[/TOOL_CALLS]` close marker is optional, so the
+                // streaming jail can't simply split at the JSON array `]`: if a
+                // `[/TOOL_CALLS]` arrives in a later chunk it would be stranded
+                // as leaked normal_text (TOOLCALLING.stream.1.b / .2 / .3). But
+                // it also can't just wait for the marker, because the bare
+                // `[TOOL_CALLS][...]` form is frequently followed by ordinary
+                // trailing prose that must still stream as content. Decide based
+                // on what trails the JSON body. Guarded to mistral so phi4
+                // (empty end token) and the marker-required families
+                // (hermes / nemotron_deci) keep their existing behavior.
+                // Only the framed form (an explicit `[TOOL_CALLS]` opener) can
+                // strand a later `[/TOOL_CALLS]`; the bare `[{...}]` form keeps
+                // the normal immediate-split behavior so trailing prose still
+                // streams as its own chunk.
+                let has_open_marker = json_config
+                    .tool_call_start_tokens
+                    .iter()
+                    .any(|t| !t.is_empty() && chunk.contains(t.as_str()));
+                if effective_parser == "mistral"
+                    && has_open_marker
+                    && let Some(marker) = json_config
+                        .tool_call_end_tokens
+                        .iter()
+                        .find(|t| !t.is_empty())
+                {
+                    // Full close marker already present: consume through it so
+                    // it is part of the jailed region, never leaked. Advance
+                    // past any consecutive close markers separated only by
+                    // whitespace (e.g. `[/TOOL_CALLS][/TOOL_CALLS]`) so a
+                    // repeated marker isn't stranded as trailing normal_text.
+                    // Mirrors the consecutive-block loop in the hermes branch of
+                    // `find_tool_call_end_position_json`.
+                    if let Some(pos) = chunk.find(marker.as_str()) {
+                        let mut cursor = pos + marker.len();
+                        loop {
+                            let rest = &chunk[cursor..];
+                            let trimmed = rest.trim_start();
+                            if !trimmed.starts_with(marker.as_str()) {
+                                break;
+                            }
+                            let trim_offset = rest.len() - trimmed.len();
+                            cursor += trim_offset + marker.len();
+                        }
+                        return Some(cursor);
+                    }
+                    let json_end =
+                        find_tool_call_end_position_json(chunk, effective_parser, json_config);
+                    let tail = chunk.get(json_end..).unwrap_or("").trim_start();
+                    // Tail empty, or a partial `[/TOOL_CALLS]` still arriving:
+                    // keep the jail open so the marker is consumed once complete
+                    // (or the call is recovered by `finalize()` if the stream
+                    // ends here). Real non-marker prose: split at the JSON body
+                    // end so the trailing content streams normally.
+                    if tail.is_empty() || marker.starts_with(tail) {
+                        return None;
+                    }
+                    return Some(json_end);
+                }
                 Some(find_tool_call_end_position_json(
                     chunk,
                     effective_parser,
@@ -924,7 +982,8 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
         let input = r#"Hey How are you? [TOOL_CALLS] [{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}]"#;
         let config = ToolCallConfig::mistral();
         let (result, content) = try_tool_call_parse(input, &config, None).await.unwrap();
-        assert_eq!(content, Some("Hey How are you?".to_string()));
+        // mistral preserves the boundary space before `[TOOL_CALLS]` (matches vLLM).
+        assert_eq!(content, Some("Hey How are you? ".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 1);
         let (name, args) = extract_name_and_args(result[0].clone());
@@ -977,7 +1036,8 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
         let input = r#"Hey How are you? [TOOL_CALLS] [{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}, {"name": "get_weather", "arguments": {"location": "New York, NY", "unit": "fahrenheit"}}]"#;
         let config = ToolCallConfig::mistral();
         let (result, content) = try_tool_call_parse(input, &config, None).await.unwrap();
-        assert_eq!(content, Some("Hey How are you?".to_string()));
+        // mistral preserves the boundary space before `[TOOL_CALLS]` (matches vLLM).
+        assert_eq!(content, Some("Hey How are you? ".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 2);
         let (name, args) = extract_name_and_args(result[0].clone());
