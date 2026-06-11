@@ -1685,21 +1685,8 @@ mod tests {
     /// When the router selects an instance that has deregistered between selection
     /// and transport resolution, it should fall back to another available instance
     /// rather than returning a 500 error.
-    #[test]
-    fn transport_resolution_falls_back_when_selected_instance_disappears() {
-        // Explicit runtime (not #[tokio::test]) so shutdown_timeout can bound teardown:
-        // generate()'s send to a worker-less instance leaves background work that would
-        // otherwise hang the test process under nextest's per-process isolation.
-        let tokio_rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap();
-        tokio_rt.block_on(transport_resolution_falls_back_body());
-        tokio_rt.shutdown_timeout(std::time::Duration::from_secs(2));
-    }
-
-    async fn transport_resolution_falls_back_body() {
+    #[tokio::test]
+    async fn transport_resolution_falls_back_when_selected_instance_disappears() {
         let rt = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
             .await
@@ -1717,41 +1704,26 @@ mod tests {
 
         let real_id = client.instance_ids()[0];
 
-        // Inject a stale ID into instance_avail that does NOT exist in
-        // instance_source. This simulates the race window where an instance
-        // deregistered after selection but before transport resolution.
+        // Inject a stale ID into instance_avail that does NOT exist in instance_source,
+        // simulating an instance that deregistered between selection and transport
+        // resolution.
         let stale_id = real_id + 1000;
         client.override_instance_avail(vec![stale_id, real_id]);
 
-        // Build a router and call direct() targeting the *real* instance to
-        // verify the router can still resolve transport for known instances.
         let router =
             PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::RoundRobin)
                 .await
                 .unwrap();
 
-        // Round robin should succeed — even if it picks stale_id first, the
-        // fallback logic should resolve transport via real_id.
-        // We cannot fully test the network send without a worker, but we can
-        // verify it doesn't fail at the transport resolution stage by checking
-        // that the error (if any) is a transport/network error, not
-        // "Instance not found".
-        let request = SingleIn::new(42u64);
-        // Bound the send: no worker is behind the resolved instance, so it never
-        // completes. A timeout still proves resolution fell back — a "not found"
-        // error would return immediately, before any send.
-        let result =
-            tokio::time::timeout(std::time::Duration::from_secs(5), router.generate(request)).await;
-
-        // Success or timeout both mean resolution worked; only an immediate
-        // "Instance not found" means the fallback failed.
-        if let Ok(Err(err)) = &result {
-            let msg = format!("{err}");
-            assert!(
-                !msg.contains("not found"),
-                "Transport resolution should have fallen back, but got: {msg}"
-            );
-        }
+        // Resolving the vanished instance must fall back to the real one. Assert on the
+        // resolved instance directly — no network send needed.
+        let (resolved_id, _address, _kind, _instance) = router
+            .resolve_transport(stale_id)
+            .expect("transport resolution should fall back to an available instance");
+        assert_eq!(
+            resolved_id, real_id,
+            "expected fallback to the real instance, resolved {resolved_id} instead"
+        );
 
         rt.shutdown();
     }
