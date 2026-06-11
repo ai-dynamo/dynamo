@@ -1010,6 +1010,7 @@ mod tests {
     /// `enable_nvext` is wired from the builder onto `State.nvext_enabled` and
     /// exposed via the accessor used by the openai handlers.
     #[test]
+    #[serial_test::serial]
     fn test_enable_nvext_propagates_through_builder_to_state() {
         let on = HttpService::builder().enable_nvext(true).build().unwrap();
         assert!(on.state.nvext_enabled());
@@ -1029,6 +1030,7 @@ mod tests {
     /// Falsey strings (`0` / `false` / `no` / `off`, case-insensitive) →
     /// off, regardless of what the builder asked for.
     #[test]
+    #[serial_test::serial]
     fn test_dyn_enable_frontend_nvext_env_var_mirror() {
         use dynamo_runtime::config::environment_names::llm::DYN_ENABLE_FRONTEND_NVEXT;
 
