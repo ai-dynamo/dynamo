@@ -1061,14 +1061,16 @@ def test_model_has_auto_map_returns_true_on_unexpected_error() -> None:
 
 
 def test_model_has_auto_map_returns_false_for_repo_not_found() -> None:
-    """RepositoryNotFoundError means the model doesn't exist — no custom code."""
-    from huggingface_hub.utils import RepositoryNotFoundError
-
+    """RepositoryNotFoundError means the model doesn't exist — no custom code.
+    The detection uses type(e).__name__ so no huggingface_hub import is needed."""
     from dynamo.profiler.utils.model_info import model_has_auto_map
+
+    class RepositoryNotFoundError(Exception):
+        pass
 
     with patch(
         "dynamo.profiler.utils.model_info.hf_hub_download",
-        side_effect=RepositoryNotFoundError("404", response=None),
+        side_effect=RepositoryNotFoundError("404"),
     ):
         result = model_has_auto_map("nonexistent/model")
 

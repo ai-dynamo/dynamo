@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Optional, Union
 
 from huggingface_hub import hf_hub_download, model_info
-from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
 from pydantic import BaseModel
 from transformers import AutoConfig
 
@@ -152,9 +151,17 @@ def model_has_auto_map(
                         token=token,
                     )
                 )
-            except (RepositoryNotFoundError, EntryNotFoundError):
-                # Model or config.json doesn't exist — no custom code.
-                return False
+            except Exception as e:
+                # RepositoryNotFoundError / EntryNotFoundError mean the model or
+                # config.json doesn't exist — no custom code to worry about.
+                # Checked by name to avoid importing specific exception types at
+                # module level (huggingface_hub submodule portability).
+                if type(e).__name__ in (
+                    "RepositoryNotFoundError",
+                    "EntryNotFoundError",
+                ):
+                    return False
+                raise
         with open(config_path) as f:
             cfg = json.load(f)
     except json.JSONDecodeError as e:
