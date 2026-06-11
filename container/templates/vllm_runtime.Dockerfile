@@ -23,6 +23,7 @@
 #
 
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+ARG MODELEXPRESS_VERSION
 
 ARG DEVICE
 WORKDIR /workspace
@@ -152,6 +153,16 @@ RUN wget https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.7/int
     echo "source /opt/intel/oneapi/setvars.sh --force" >> /etc/bash.bashrc && \
     rm -f /opt/intel/oneapi/ccl/latest && \
     ln -s /opt/intel/oneapi/ccl/2021.15 /opt/intel/oneapi/ccl/latest
+{% endif %}
+
+{% if context.vllm.enable_modelexpress == "true" %}
+# Install only the ModelExpress client package. --no-deps preserves the upstream
+# vLLM runtime dependency stack.
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    set -eux; \
+    export UV_CACHE_DIR=/root/.cache/uv; \
+    uv pip install --system --no-deps \
+        "modelexpress==${MODELEXPRESS_VERSION}"
 {% endif %}
 
 {% if device == "cpu" %}
