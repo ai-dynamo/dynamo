@@ -88,8 +88,9 @@ For the complete CRD spec, see the [API Reference](api-reference.md).
 
 Use `spec.overrides.dgd` when the generated `DynamoGraphDeployment` needs a
 field that DGDR does not expose directly. The value is a partial
-`nvidia.com/v1alpha1` DGD object that is merged into the profiler-generated
-deployment after Dynamo selects a configuration.
+DGD object that is merged into the profiler-generated deployment after Dynamo
+selects a configuration. The payload must match the generated DGD shape, so
+inspect the generated DGD first when overriding service-specific fields.
 
 For example, to inject an environment variable into every generated service:
 
@@ -104,7 +105,7 @@ spec:
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.0"  # dynamo-frontend for Dynamo < 1.1.0
   overrides:
     dgd:
-      apiVersion: nvidia.com/v1alpha1
+      apiVersion: nvidia.com/v1beta1
       kind: DynamoGraphDeployment
       spec:
         envs:
@@ -119,7 +120,7 @@ target a single service, override that service's `envs` entry instead:
 spec:
   overrides:
     dgd:
-      apiVersion: nvidia.com/v1alpha1
+      apiVersion: nvidia.com/v1beta1
       kind: DynamoGraphDeployment
       spec:
         services:
@@ -157,7 +158,7 @@ spec:
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
   overrides:
     dgd:
-      apiVersion: nvidia.com/v1alpha1
+      apiVersion: nvidia.com/v1beta1
       kind: DynamoGraphDeployment
       spec:
         services:
@@ -172,7 +173,8 @@ Use the same `Frontend` override for other frontend router modes, such as
 deployments, use `kv` when you want prefix-cache-aware routing and
 `round-robin` or `least-loaded` when you only want load balancing. Use
 `direct` only when an external router supplies explicit worker IDs in the
-request routing hints.
+request routing hints. For detailed mode definitions, see
+[Router Guide](../components/router/router-guide.md#routing-modes-router-mode).
 
 KV-aware routing has two independent pieces: the frontend must run in `kv`
 mode, and workers must publish KV cache events for event-driven prefix-cache
@@ -183,7 +185,7 @@ state. If worker event publication is not configured, keep
 spec:
   overrides:
     dgd:
-      apiVersion: nvidia.com/v1alpha1
+      apiVersion: nvidia.com/v1beta1
       kind: DynamoGraphDeployment
       spec:
         services:
@@ -208,7 +210,7 @@ arguments to that service while enabling the frontend KV router:
 spec:
   overrides:
     dgd:
-      apiVersion: nvidia.com/v1alpha1
+      apiVersion: nvidia.com/v1beta1
       kind: DynamoGraphDeployment
       spec:
         services:
