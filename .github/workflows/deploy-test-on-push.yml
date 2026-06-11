@@ -11,6 +11,7 @@ on:
   push:
     branches:
       - main
+      - deploy_test_static_ns
   workflow_dispatch:
     inputs:
       operator_tag:
@@ -43,7 +44,7 @@ jobs:
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: vllm
-      profiles: '["agg"]'
+      profiles: '["disagg"]'
       image_suffix: vllm-runtime
       image_tag: main
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
