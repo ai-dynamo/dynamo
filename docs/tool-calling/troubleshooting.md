@@ -105,6 +105,67 @@ output, before any tool-call parser touched it. That is the key piece for
 triage: it tells us what the model actually produced, separately from what
 the parser made of it.
 
+## Capturing token IDs instead of token strings
+
+If you need the exact generated token IDs rather than token strings and
+bytes, add `nvext.extra_fields: ["completion_token_ids"]` to the request:
+
+```json
+{
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "messages": [{"role": "user", "content": "What is the weather in NYC?"}],
+  "nvext": {
+    "extra_fields": ["completion_token_ids"]
+  }
+}
+```
+
+The response then carries the generated token IDs under a response-level
+`nvext` object. For example, a `gpt-oss-20b` tool call:
+
+```json
+{
+  "choices": [{
+    "index": 0,
+    "finish_reason": "tool_calls",
+    "message": {
+      "role": "assistant",
+      "content": null,
+      "reasoning_content": "We need to call get_weather function.",
+      "tool_calls": [{
+        "id": "call-1",
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "arguments": "{\"location\":\"NYC\"}"
+        }
+      }]
+    }
+  }],
+  "nvext": {
+    "completion_token_ids": [
+      200005, 35644, 200008, 2167, 1309, 316, 2421, 717, 170154, 1114, 13,
+      200007, 200006, 173781, 200005, 12606, 815, 316, 28, 44580, 775,
+      170154, 220, 200003, 4108, 200012
+    ]
+  }
+}
+```
+
+Detokenizing the IDs with the model's tokenizer
+reconstructs the same raw output as the logprobs recipe. Two properties make
+this useful as a complement to `logprobs: true`:
+
+- It is populated from the token stream the backend already sends the
+  frontend, so it does not go through the logprobs path. In particular it
+  works on SGLang workers without setting `DYN_SGL_ALLOW_TOP_LOGPROBS=1`.
+- It works for streaming requests: each chunk carries the token IDs for
+  that chunk, and aggregation concatenates them across chunks.
+
+It requires exactly one generated choice (`n == 1`); requests with multiple
+choices are rejected. See the
+[nvext reference](../components/frontend/nvext.md) for details.
+
 ## What to include when reporting an issue
 
 Share these four things in the bug report or issue thread:
