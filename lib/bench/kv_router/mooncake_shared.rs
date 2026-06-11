@@ -211,9 +211,8 @@ impl MooncakeIndexerConfig {
         prune_config: PruneConfig,
     ) -> anyhow::Result<Arc<dyn KvIndexerInterface + Send + Sync>> {
         let indexer: Arc<dyn KvIndexerInterface + Send + Sync> = match self.kind {
-            MooncakeIndexerKind::RadixTree => Arc::new(KvIndexer::new_with_frequency(
+            MooncakeIndexerKind::RadixTree => Arc::new(KvIndexer::new_with_pruning(
                 CancellationToken::new(),
-                None,
                 block_size,
                 metrics,
                 Some(prune_config),

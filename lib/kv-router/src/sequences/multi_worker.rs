@@ -22,7 +22,6 @@ use tokio::sync::watch;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-use super::PrefillTokenDeltas;
 use super::prefill_tracker::PrefillTimeLoad;
 #[cfg(any(test, feature = "bench"))]
 use super::prompt_membership_trie::lookup_live_hashes;
@@ -30,6 +29,7 @@ use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
 use super::request_maps::RequestIndex;
 use super::single::{ActiveSequences, PromptMembershipDelta, RequestId};
 use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTopologyError};
+use super::{PrefillTokenDeltas, WorkerLoadProjection};
 use crate::protocols::{
     ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerId,
     WorkerWithDpRank,
@@ -598,6 +598,34 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 num_workers,
                 total_us = total_elapsed.as_micros() as u64,
                 "potential_blocks_and_tokens completed"
+            );
+        }
+
+        result
+    }
+
+    pub fn project_worker_loads(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+    ) -> FxHashMap<WorkerWithDpRank, WorkerLoadProjection> {
+        #[cfg(feature = "bench")]
+        let start = tokio::time::Instant::now();
+
+        #[cfg(feature = "bench")]
+        let num_workers = self.workers.read().slots.len();
+
+        let result = self
+            .prompt_registry
+            .project_worker_loads(token_sequence, decay_now);
+
+        #[cfg(feature = "bench")]
+        {
+            let total_elapsed = start.elapsed();
+            tracing::info!(
+                num_workers,
+                total_us = total_elapsed.as_micros() as u64,
+                "project_worker_loads completed"
             );
         }
 
@@ -1475,9 +1503,26 @@ mod tests {
             &prefill_token_deltas,
             decay_now,
         );
+        let projections = sequences.project_worker_loads(Some(&prompt), decay_now);
 
         assert_eq!(actual.0, expected.0);
         assert_eq!(actual.1, expected.1);
+        assert_eq!(
+            projections.get(&worker_a).copied(),
+            Some(WorkerLoadProjection {
+                active_prefill_tokens: 0,
+                active_decode_blocks: 2,
+                additional_active_blocks: 1,
+            })
+        );
+        assert_eq!(
+            projections.get(&worker_b).copied(),
+            Some(WorkerLoadProjection {
+                active_prefill_tokens: 12,
+                active_decode_blocks: 3,
+                additional_active_blocks: 2,
+            })
+        );
     }
 
     #[test]

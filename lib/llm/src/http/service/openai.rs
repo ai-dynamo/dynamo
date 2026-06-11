@@ -2335,18 +2335,11 @@ async fn list_models_openai(
 
     let mut data = Vec::new();
 
-    let models: HashSet<String> = state.manager().model_display_names();
+    // Only list models whose worker set is complete in at least one namespace.
+    // A registered-but-broken deployment (e.g. decode-only with no prefill peer)
+    // is hidden until a peer joins.
+    let models: HashSet<String> = state.manager().serving_ready_display_names();
     for model_name in models {
-        // Only list models whose worker set is complete in at least one
-        // namespace. A registered-but-broken deployment (e.g. decode-only
-        // with no prefill peer) is hidden until a peer joins.
-        let serving_ready = state
-            .manager()
-            .get_model(&model_name)
-            .is_some_and(|m| m.has_ready_workers());
-        if !serving_ready {
-            continue;
-        }
         let context_window = cw_override.or_else(|| card_map.get(&model_name).map(|&cl| cl as u64));
         data.push(ModelListing {
             id: model_name.clone(),
@@ -2961,11 +2954,14 @@ async fn audio_speech(
 
     let streaming = false;
 
-    // model is optional in the request; fall back to the first registered model
+    // model is optional in the request; fall back to a model that can actually
+    // serve right now (complete worker set), not just any displayable one, so
+    // an incomplete deployment doesn't get picked as the implicit default while
+    // a ready model exists.
     let model = request.model.clone().unwrap_or_else(|| {
         state
             .manager()
-            .model_display_names()
+            .serving_ready_display_names()
             .into_iter()
             .next()
             .unwrap_or_default()

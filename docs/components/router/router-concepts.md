@@ -42,9 +42,17 @@ The router uses a cost function that considers both the prefill cost (influenced
 4. **Cost formula**:
 
 ```text
+excess_active_prefill_blocks =
+    (active_prefill_tokens - minimum_eligible_active_prefill_tokens)
+    / block_size
+normalized_excess = excess_active_prefill_blocks / request_blocks
+effective_overlap_score_credit =
+    overlap_score_credit
+    / (1 + overlap_score_credit_decay * normalized_excess)
+
 adjusted_prefill_blocks = max(
     prefill_blocks
-    - overlap_score_credit * device_overlap_blocks
+    - effective_overlap_score_credit * device_overlap_blocks
     - host_cache_hit_weight * host_overlap_blocks
     - disk_cache_hit_weight * disk_overlap_blocks
     - shared_cache_multiplier * shared_beyond_blocks,
@@ -55,7 +63,7 @@ cost = prefill_load_scale * adjusted_prefill_blocks + decode_blocks
 
 Lower costs indicate better routing choices.
 `overlap_score_credit` is the device-local prefix-overlap credit multiplier, from 0.0 to 1.0.
-Higher values favor cache reuse (improving TTFT), while lower values prioritize even load distribution (improving ITL). `prefill_load_scale` controls the weight of the adjusted prompt-side load relative to decode blocks.
+Higher values favor cache reuse (improving TTFT), while lower values prioritize even load distribution (improving ITL). `overlap_score_credit_decay` optionally reduces only the device-local credit on workers with excess active prefill load; its default of 0 preserves the fixed credit. `prefill_load_scale` controls the weight of the adjusted prompt-side load relative to decode blocks.
 
 ### Active Load Modeling
 

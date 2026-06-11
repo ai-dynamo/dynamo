@@ -568,15 +568,11 @@ impl<
     }
 
     /// Run the full scheduling pipeline for a single request:
-    /// compute potential load -> select worker -> book tracked state -> respond.
+    /// compute projected load -> select worker -> book tracked state -> respond.
     fn admit_one(&self, mut request: SchedulingRequest, decay_now: Instant) {
-        let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens_at(
-            request.token_seq.as_deref(),
-            &request.prefill_token_deltas(),
-            decay_now,
-        );
-        request.decode_blocks = decode_blocks;
-        request.prefill_tokens = prefill_tokens;
+        request.worker_loads = self
+            .slots
+            .project_worker_loads(request.token_seq.as_deref(), decay_now);
 
         let selection = {
             let workers = self.workers_with_configs.borrow();
@@ -867,9 +863,20 @@ mod tests {
 
             let mut best_worker = None;
             eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+                let load = request.worker_load_for(worker);
+                let potential_prefill_tokens = if request.track_prefill_tokens {
+                    load.active_prefill_tokens.saturating_add(
+                        request
+                            .isl_tokens
+                            .saturating_sub(request.effective_cached_tokens_for(worker)),
+                    )
+                } else {
+                    0
+                };
+                let potential_decode_blocks = load.potential_decode_blocks();
                 let key = (
-                    request.prefill_tokens_for(worker),
-                    request.decode_blocks.get(&worker).copied().unwrap_or(0),
+                    potential_prefill_tokens,
+                    potential_decode_blocks,
                     worker.worker_id,
                     worker.dp_rank,
                 );
@@ -1264,8 +1271,7 @@ mod tests {
             tier_overlap_blocks: Default::default(),
             effective_overlap_blocks: HashMap::new(),
             effective_cached_tokens: HashMap::new(),
-            decode_blocks: FxHashMap::default(),
-            prefill_tokens: FxHashMap::default(),
+            worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
             update_states: true,
@@ -1853,8 +1859,7 @@ mod tests {
             tier_overlap_blocks: Default::default(),
             effective_overlap_blocks: HashMap::new(),
             effective_cached_tokens: HashMap::new(),
-            decode_blocks: FxHashMap::default(),
-            prefill_tokens: FxHashMap::default(),
+            worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
             update_states: true,

@@ -65,8 +65,8 @@ vllm:
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   enable_kvbm: "true"
-  enable_modelexpress_p2p: "false"
-  modelexpress_ref: "76fc5d7f06c37121ee8789a29fac6f9b08c4743a"  # v0.3.0
+  enable_modelexpress: "true"
+  modelexpress_version: "0.4.0"
   # aws-sdk-cpp tag for the NIXL OBJ / S3 backend (built in wheel_builder).
   aws_sdk_cpp_version: "1.11.760"
 
@@ -96,6 +96,8 @@ sglang:
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_kvbm: "false"
+  enable_modelexpress: "true"
+  modelexpress_version: "0.4.0"
 
 trtllm:
   cuda13.1:

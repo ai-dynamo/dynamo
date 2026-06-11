@@ -49,6 +49,22 @@ def _prometheus_ssl_verify_default() -> bool:
     )
 
 
+def _gcd_seconds(values: list[float]) -> float:
+    """Return a millisecond-resolution gcd for second-based intervals."""
+    millis = [round(v * 1000.0) for v in values]
+    gcd_ms = millis[0]
+    for value in millis[1:]:
+        gcd_ms = math.gcd(gcd_ms, value)
+    return gcd_ms / 1000.0
+
+
+def _is_multiple_of(value: float, base: float) -> bool:
+    if base <= 0:
+        return False
+    ratio = value / base
+    return math.isclose(ratio, round(ratio), rel_tol=1e-9, abs_tol=1e-9)
+
+
 class PlannerPreDeploymentSweepMode(str, Enum):
     None_ = "none"
     Rapid = "rapid"
@@ -285,33 +301,15 @@ class GatewayConfig(BaseModel):
 class SchedulingConfig(BaseModel):
     """Planner-level scheduling config.
 
-    Controls which tick engine drives the planner and how long each
-    tick may run. Backwards compatible: all fields have safe defaults,
-    so existing deployments see no behaviour change until
-    ``use_orchestrator=True`` is set explicitly. Read by
-    ``NativePlannerBase`` at startup.
+    Controls plugin-pipeline scheduling and how long each tick may run.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    use_orchestrator: bool = Field(
-        default=False,
-        description=(
-            "Feature flag: when True, the planner drives ticks through "
-            "``LocalPlannerOrchestrator`` + real builtin plugins; when "
-            "False (default), uses the legacy ``PlannerStateMachine`` "
-            "path. Both paths are wired in ``NativePlannerBase`` via "
-            "``EngineProtocol``. Defaulted OFF so upgrade ≠ cutover — "
-            "operations control the enable timing."
-        ),
-    )
     tick_max_duration_seconds: float = Field(
         default=30.0,
         gt=0,
-        description=(
-            "Outermost deadline wrapping the entire 4-stage pipeline "
-            "(orchestrator path only)."
-        ),
+        description=("Outermost deadline wrapping the entire 4-stage plugin pipeline."),
     )
     external_plugins: list[ExternalPluginEntry] = Field(
         default_factory=list,
@@ -320,17 +318,12 @@ class SchedulingConfig(BaseModel):
             "is registered at planner startup via the same code path "
             "the gRPC gateway would use — so behaviour is "
             "identical between static-config and self-register models. "
-            "Per-entry register failures are logged but do not crash "
-            "the planner. Only used when ``use_orchestrator=True``; "
-            "ignored on the legacy PSM path."
+            "Per-entry register failures are logged but do not crash the planner."
         ),
     )
     gateway: GatewayConfig = Field(
         default_factory=GatewayConfig,
-        description=(
-            "gRPC registration gateway config. Default disabled. "
-            "Only used when ``use_orchestrator=True``."
-        ),
+        description=("gRPC registration gateway config. Default disabled."),
     )
     scale_interval_seconds: float = Field(
         default=5.0,
@@ -343,12 +336,7 @@ class SchedulingConfig(BaseModel):
             "which plugins actually fire each tick. Must be <= every "
             "plugin's ``execution_interval_seconds`` and a divisor of "
             "every plugin's ``observation_window_seconds`` so windows "
-            "align to tick boundaries. Ignored when "
-            "``use_orchestrator=False`` (PSM path uses its legacy "
-            "load_adjustment_interval_seconds / "
-            "throughput_adjustment_interval_seconds two-cadence model). "
-            "Surface added in PR #10124; full lazy-pull behaviour lands "
-            "in the engine_adapter rewrite commit later in this PR."
+            "align to tick boundaries."
         ),
     )
 
@@ -356,8 +344,8 @@ class SchedulingConfig(BaseModel):
 class PlannerConfig(BaseModel):
     """Pydantic configuration for the Dynamo Planner.
 
-    Replaces the argparse-based CLI. All fields mirror the former CLI flags
-    with defaults sourced from SLAPlannerDefaults.
+    Defines the JSON/YAML config consumed by ``python -m dynamo.planner``.
+    Defaults are sourced from SLAPlannerDefaults.
     """
 
     pre_deployment_sweeping_mode: Optional[PlannerPreDeploymentSweepMode] = Field(
@@ -559,6 +547,7 @@ class PlannerConfig(BaseModel):
     # Load-based scaling settings
     load_adjustment_interval_seconds: int = Field(
         default=SLAPlannerDefaults.load_adjustment_interval_seconds,
+        gt=0,
         validation_alias=AliasChoices(
             "load_adjustment_interval_seconds", "load_adjustment_interval"
         ),
@@ -665,10 +654,7 @@ class PlannerConfig(BaseModel):
     scheduling: SchedulingConfig = Field(
         default_factory=SchedulingConfig,
         description=(
-            "Tick-engine scheduling config — see ``SchedulingConfig`` "
-            "docstring. Default uses the legacy PSM path; set "
-            "``scheduling.use_orchestrator=true`` to opt into the "
-            "orchestrator path."
+            "Plugin-pipeline scheduling config — see ``SchedulingConfig`` " "docstring."
         ),
     )
 
@@ -685,6 +671,66 @@ class PlannerConfig(BaseModel):
             "K8s SA / SPIFFE JWT support lands in a follow-up PR."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_scale_interval_from_builtin_intervals(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        scheduling = data.get("scheduling")
+        if isinstance(scheduling, dict) and "scale_interval_seconds" in scheduling:
+            return data
+        if scheduling is not None and not isinstance(scheduling, dict):
+            return data
+
+        load_interval = data.get(
+            "load_adjustment_interval_seconds",
+            data.get(
+                "load_adjustment_interval",
+                SLAPlannerDefaults.load_adjustment_interval_seconds,
+            ),
+        )
+        if load_interval is None:
+            return data
+        raw_throughput_enabled = data.get(
+            "enable_throughput_scaling",
+            SLAPlannerDefaults.enable_throughput_scaling,
+        )
+        if isinstance(raw_throughput_enabled, str):
+            throughput_enabled = raw_throughput_enabled.lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+        else:
+            throughput_enabled = bool(raw_throughput_enabled)
+        optimization_target = data.get("optimization_target", "throughput")
+        throughput_enabled = throughput_enabled and optimization_target == "sla"
+        try:
+            intervals = [float(load_interval)]
+        except (TypeError, ValueError):
+            return data
+        if throughput_enabled:
+            throughput_interval = data.get(
+                "throughput_adjustment_interval_seconds",
+                data.get(
+                    "throughput_adjustment_interval",
+                    SLAPlannerDefaults.throughput_adjustment_interval_seconds,
+                ),
+            )
+            if throughput_interval is None:
+                return data
+            try:
+                intervals.append(float(throughput_interval))
+            except (TypeError, ValueError):
+                return data
+
+        updated = dict(data)
+        updated_scheduling = dict(scheduling or {})
+        updated_scheduling["scale_interval_seconds"] = _gcd_seconds(intervals)
+        updated["scheduling"] = updated_scheduling
+        return updated
 
     @model_validator(mode="after")
     def _validate_config(self) -> "PlannerConfig":
@@ -813,6 +859,22 @@ class PlannerConfig(BaseModel):
                 raise ValueError(
                     "aic_perf_model.decode_pick is required for decode/agg "
                     f"perf queries in mode={self.mode!r}"
+                )
+
+        intervals = [float(self.load_adjustment_interval_seconds)]
+        if self.enable_throughput_scaling:
+            if self.throughput_adjustment_interval_seconds <= 0:
+                raise ValueError(
+                    "throughput_adjustment_interval_seconds must be > 0 "
+                    "when throughput scaling is enabled"
+                )
+            intervals.append(float(self.throughput_adjustment_interval_seconds))
+        for interval in intervals:
+            if not _is_multiple_of(interval, self.scheduling.scale_interval_seconds):
+                raise ValueError(
+                    "scheduling.scale_interval_seconds must evenly divide "
+                    "load_adjustment_interval_seconds and, when throughput "
+                    "scaling is enabled, throughput_adjustment_interval_seconds"
                 )
 
         if self.enable_load_scaling:

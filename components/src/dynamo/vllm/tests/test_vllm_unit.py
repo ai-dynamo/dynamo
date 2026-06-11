@@ -97,75 +97,6 @@ def test_custom_jinja_template_env_var_expansion(monkeypatch, mock_vllm_cli):
     )
 
 
-@pytest.mark.parametrize("load_format", ["mx-source", "mx-target"])
-def test_model_express_url_from_cli_arg(mock_vllm_cli, load_format):
-    """Test that --model-express-url is stored when load format is mx-source/mx-target."""
-    mock_vllm_cli(
-        "--model",
-        "Qwen/Qwen3-0.6B",
-        "--load-format",
-        load_format,
-        "--model-express-url",
-        "http://mx-server:8080",
-    )
-    config = parse_args()
-    assert config.model_express_url == "http://mx-server:8080"
-
-
-@pytest.mark.parametrize("load_format", ["mx-source", "mx-target"])
-def test_model_express_url_from_env_var(monkeypatch, mock_vllm_cli, load_format):
-    """Test that MODEL_EXPRESS_URL env var is used as fallback."""
-    monkeypatch.setenv("MODEL_EXPRESS_URL", "http://env-mx:9090")
-    mock_vllm_cli(
-        "--model",
-        "Qwen/Qwen3-0.6B",
-        "--load-format",
-        load_format,
-    )
-    config = parse_args()
-    assert config.model_express_url == "http://env-mx:9090"
-
-
-@pytest.mark.parametrize("load_format", ["mx-source", "mx-target"])
-def test_model_express_url_cli_overrides_env(monkeypatch, mock_vllm_cli, load_format):
-    """Test that --model-express-url takes precedence over MODEL_EXPRESS_URL."""
-    monkeypatch.setenv("MODEL_EXPRESS_URL", "http://env-mx:9090")
-    mock_vllm_cli(
-        "--model",
-        "Qwen/Qwen3-0.6B",
-        "--load-format",
-        load_format,
-        "--model-express-url",
-        "http://cli-mx:8080",
-    )
-    config = parse_args()
-    assert config.model_express_url == "http://cli-mx:8080"
-
-
-@pytest.mark.parametrize("load_format", ["mx-source", "mx-target"])
-def test_model_express_url_missing_raises(monkeypatch, mock_vllm_cli, load_format):
-    """Test that missing server URL raises ValueError for mx load formats."""
-    monkeypatch.delenv("MODEL_EXPRESS_URL", raising=False)
-    mock_vllm_cli(
-        "--model",
-        "Qwen/Qwen3-0.6B",
-        "--load-format",
-        load_format,
-    )
-    with pytest.raises(
-        ValueError,
-        match=re.escape(f"--load-format={load_format}"),
-    ):
-        parse_args()
-
-
-def test_model_express_url_none_for_default_load_format(mock_vllm_cli):
-    """Test that model_express_url is None when load format is not mx-*."""
-    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
-    config = parse_args()
-    assert config.model_express_url is None
-
-
 # --endpoint flag tests
 
 
@@ -245,6 +176,32 @@ def test_env_var_dyn_connector_raises_error(monkeypatch, mock_vllm_cli):
     mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
     with pytest.raises(ValueError, match="no longer supported"):
         parse_args()
+
+
+def test_model_express_url_is_accepted_for_compatibility(mock_vllm_cli):
+    """Test that legacy ModelExpress manifests still parse."""
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--model-express-url",
+        "http://model-express:8080",
+    )
+
+    config = parse_args()
+
+    assert config.model_express_url == "http://model-express:8080"
+
+
+def test_model_express_url_env_is_accepted_for_compatibility(
+    monkeypatch, mock_vllm_cli
+):
+    """Test that legacy MODEL_EXPRESS_URL still maps to config."""
+    monkeypatch.setenv("MODEL_EXPRESS_URL", "http://model-express:8080")
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
+
+    config = parse_args()
+
+    assert config.model_express_url == "http://model-express:8080"
 
 
 def test_prefill_worker_without_kv_transfer_config_raises(mock_vllm_cli):
@@ -448,6 +405,57 @@ def test_unified_generate_passes_enable_rl_to_sampling_params(monkeypatch):
     asyncio.run(run_generate())
 
     assert captured["enable_rl"] is True
+
+
+def test_should_prefetch_model_for_default_load_format():
+    from dynamo.vllm.main import should_prefetch_model
+
+    config = SimpleNamespace(
+        model="Qwen/Qwen3-0.6B",
+        engine_args=SimpleNamespace(load_format="auto"),
+    )
+
+    assert should_prefetch_model(config) is True
+
+
+@pytest.mark.parametrize("load_format", ["modelexpress", "mx"])
+def test_should_not_prefetch_model_for_modelexpress_load_formats(load_format):
+    from dynamo.vllm.main import (
+        should_prefetch_model,
+        should_register_model_ignore_weights,
+        uses_modelexpress_load_format,
+    )
+
+    config = SimpleNamespace(
+        model="Qwen/Qwen3-0.6B",
+        engine_args=SimpleNamespace(load_format=load_format),
+    )
+
+    assert uses_modelexpress_load_format(config) is True
+    assert should_prefetch_model(config) is False
+    assert should_register_model_ignore_weights(config) is True
+
+
+def test_should_not_prefetch_existing_local_model(tmp_path):
+    from dynamo.vllm.main import should_prefetch_model
+
+    config = SimpleNamespace(
+        model=str(tmp_path),
+        engine_args=SimpleNamespace(load_format="auto"),
+    )
+
+    assert should_prefetch_model(config) is False
+
+
+def test_should_register_model_fetch_weights_for_default_load_format():
+    from dynamo.vllm.main import should_register_model_ignore_weights
+
+    config = SimpleNamespace(
+        model="Qwen/Qwen3-0.6B",
+        engine_args=SimpleNamespace(load_format="auto"),
+    )
+
+    assert should_register_model_ignore_weights(config) is False
 
 
 # --disaggregation-mode tests

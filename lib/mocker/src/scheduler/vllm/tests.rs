@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use dynamo_kv_router::indexer::METRIC_EVENT_STORED;
+use dynamo_kv_router::indexer::{METRIC_EVENT_REMOVED, METRIC_EVENT_STORED};
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, WorkerId};
 use rstest::rstest;
 use tokio::sync::mpsc;
@@ -934,6 +934,12 @@ mod live_scheduler {
         let _ = tokio::time::timeout(Duration::from_secs(2), forwarder_task).await;
         harness.flush().await;
         harness.assert_no_event_errors();
+        if enable_prefix_caching {
+            assert!(harness.ok_count(METRIC_EVENT_STORED) > 0);
+        } else {
+            assert_eq!(harness.ok_count(METRIC_EVENT_STORED), 0);
+            assert_eq!(harness.ok_count(METRIC_EVENT_REMOVED), 0);
+        }
         // NOTE: we do NOT assert `dump_events().is_empty()` here because
         // mocker's protocol does not emit router `Removed` events on
         // request completion.
