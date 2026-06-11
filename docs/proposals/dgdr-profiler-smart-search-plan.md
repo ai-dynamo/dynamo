@@ -334,11 +334,6 @@ class Candidate(BaseModel):
     reason: str | None = None              # set when status is skipped / failed
 
 
-class RecommendationMode(str, Enum):
-    ADVISORY = "advisory"
-    AUTO_APPLIED = "auto_applied"
-
-
 class RankedCandidates(BaseModel):
     """V2 output contract. Selected candidate first; alternatives ranked."""
     model_config = ConfigDict(extra="forbid")
@@ -347,7 +342,6 @@ class RankedCandidates(BaseModel):
     skipped: list[Candidate] = Field(default_factory=list)  # skipped + failed, with reasons
     bindingConstraints: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
-    recommendationMode: RecommendationMode = RecommendationMode.ADVISORY
 
 
 async def run_smart_search(
