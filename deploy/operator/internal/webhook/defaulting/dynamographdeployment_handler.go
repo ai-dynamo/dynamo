@@ -21,9 +21,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	operatorcommon "github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	admissionv1 "k8s.io/api/admission/v1"
@@ -148,7 +148,8 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 }
 
 func (d *DGDDefaulter) isGrovePathway(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) bool {
-	return operatorcommon.IsGrovePathway(d.GroveEnabled, dgd.Annotations)
+	return d.GroveEnabled && (dgd.Annotations == nil ||
+		strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse)
 }
 
 // RegisterWithManager registers the defaulting webhook with the manager.
