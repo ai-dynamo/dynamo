@@ -61,6 +61,48 @@ The optimization goal is user-owned and always `Pinned`; it is never a search di
 - SLA targets (`ttft_ms`+`itl_ms`, or `e2e_ms`) are user constraints. `goodput` and `goodput_per_gpu` require an SLA target; `throughput` and `e2e_latency` may run without one.
 - `gpu_budget` bounds the GPU footprint every candidate may use.
 
+The goal is captured by a single structure, extracted from the DGDR spec (objective + SLA + budget) and never mutated by the search. Field names follow the DGDR-aligned lowerCamelCase convention used by `replay_optimize.specs`:
+
+```python
+class OptimizationTarget(str, Enum):
+    THROUGHPUT = "throughput"            # maximize replay throughput
+    E2E_LATENCY = "e2e_latency"          # minimize mean end-to-end latency
+    GOODPUT = "goodput"                  # maximize SLA-satisfying throughput
+    GOODPUT_PER_GPU = "goodput_per_gpu"  # maximize goodput / used_gpus
+
+
+class SLATarget(BaseModel):
+    """Per-request latency bounds in ms. Set ttftMs+itlMs, or e2eMs."""
+    model_config = ConfigDict(extra="forbid")
+    ttftMs: float | None = None
+    itlMs: float | None = None
+    e2eMs: float | None = None
+
+
+class OptimizationGoal(BaseModel):
+    """User-owned objective + feasibility constraints. Pinned; never searched."""
+    model_config = ConfigDict(extra="forbid")
+    target: OptimizationTarget = OptimizationTarget.THROUGHPUT
+    sla: SLATarget | None = None  # required for goodput / goodput_per_gpu
+    gpuBudget: int                # max GPUs any single candidate may use
+
+    @model_validator(mode="after")
+    def _require_sla_for_goodput(self) -> "OptimizationGoal":
+        needs_sla = self.target in (
+            OptimizationTarget.GOODPUT,
+            OptimizationTarget.GOODPUT_PER_GPU,
+        )
+        has_sla = self.sla is not None and (
+            self.sla.e2eMs is not None
+            or (self.sla.ttftMs is not None and self.sla.itlMs is not None)
+        )
+        if needs_sla and not has_sla:
+            raise ValueError(
+                f"{self.target.value} requires an SLA target (ttftMs+itlMs or e2eMs)"
+            )
+        return self
+```
+
 Candidates are ranked in two stages:
 
 1. Feasibility gate — a candidate must pass candidate generation and preflight (legal parallel shape, memory fit, backend/SKU support, `gpu_budget`, and any user-pinned knobs) and, when an SLA is set, satisfy it under replay. Infeasible candidates are dropped with a structured reason instead of being scored.
@@ -250,22 +292,75 @@ python -m dynamo.profiler --config dgdr.yaml --smart-search
 Dispatch:
 
 1. `run_profile(dgdr, ops)` parses and validates the same `DynamoGraphDeploymentRequestSpec` as V1.
-2. When the V2 opt-in is set (a `ProfilerOperationalConfig` flag exposed as `--smart-search`, off by default), `run_profile` delegates to the V2 module instead of the V1 AIC sweeper/picker:
-
-```python
-# components/src/dynamo/profiler/v2/__init__.py
-async def run_smart_search(
-    dgdr: DynamoGraphDeploymentRequestSpec,
-    ops: ProfilerOperationalConfig,
-) -> RankedCandidates:
-    """Build the search space from the DGDR spec, run the Vizier+replay
-    sweep, rank candidates, and write the report into ops.output_dir."""
-    ...
-```
-
+2. When the V2 opt-in is set (a `ProfilerOperationalConfig` flag exposed as `--smart-search`, off by default), `run_profile` delegates to the V2 module instead of the V1 AIC sweeper/picker, via `run_smart_search` (full API surface below).
 3. V2 reads `model_name`, `backend`, `hardware_sku`, workload, SLA, objective, and component-enablement directly off the DGDR spec — the same fields V1 already consumes. It does **not** introduce a parallel top-level YAML envelope (`load` / `objective` / `sweep` / `searchSpaceConfigs` / `searchSpaceOverrides`); when dynamic-workload inputs and pin/override controls are finalized they extend the DGDR spec contract itself, not a V2-only schema (out of scope for this plan).
 4. Sweep execution budget (max rounds, concurrent replay evaluations, candidates per round, random seed) is V2 run-control carried on `ProfilerOperationalConfig` / CLI flags, mirroring how V1 already exposes interpolation granularity and deployment timeouts. It is operational config, not part of the deployment request.
 5. For each decoded Vizier sample, V2 constructs a per-candidate `replay_optimize.ReplayOptimizeSpec` (`EngineSpec` model/backend/engine args, `HardwareSpec`, `WorkloadSpec`, `SLASpec`, `RouterSpec`) and evaluates it through `optimize_dense_agg_with_replay` / `optimize_dense_disagg_with_replay`. V2 owns search-space construction, candidate decoding, ranking, and report generation around those calls; AIC and replay stay lower-level providers.
 6. V2 writes its ranked-candidate report and `profiler_status.yaml` into `ops.output_dir`, exactly as V1 reports results, so the surrounding sidecar/controller flow needs no change.
+
+The full internal API surface: the input is the existing DGDR spec, and the output is the ranked-candidate contract — which also carries the generated DGD, router, and planner config that the DEP output contract requires. `OptimizationGoal` is defined in [Optimization Goal](#optimization-goal):
+
+```python
+# components/src/dynamo/profiler/v2/__init__.py
+
+class SweepConfig(BaseModel):
+    """V2 run-control. Operational, not part of the deployment request;
+    carried on ProfilerOperationalConfig and exposed as CLI flags."""
+    model_config = ConfigDict(extra="forbid")
+    maxRounds: int = 20                    # total Vizier suggestion/evaluation rounds
+    parallelEvals: int = 16                # concurrent CPU replay evaluations
+    candidatesPerRound: int | None = None  # defaults to parallelEvals
+    randomSeed: int = 1
+
+
+class CandidateStatus(str, Enum):
+    VIABLE = "viable"    # passed the feasibility gate, scored
+    SKIPPED = "skipped"  # removed by candidate generation / preflight
+    FAILED = "failed"    # replay or evaluation error
+
+
+class Candidate(BaseModel):
+    """One evaluated deployment candidate and its generated artifacts."""
+    model_config = ConfigDict(extra="forbid")
+    status: CandidateStatus
+    score: float | None = None             # objective score; None unless viable
+    deploymentMode: str                    # "agg" | "disagg"
+    backend: str                           # "vllm" | "sglang" | "trtllm"
+    replicaParallelConfig: dict[str, Any]  # decoded parallel shape + replica counts
+    usedGpus: int
+    generatedDgd: dict[str, Any]           # DynamoGraphDeployment manifest
+    routerConfig: dict[str, Any] | None = None
+    plannerConfig: dict[str, Any] | None = None
+    replayReportRef: str | None = None     # path/URI to the replay report
+    slaMetrics: dict[str, float] = Field(default_factory=dict)  # ttft/itl/e2e/goodput
+    reason: str | None = None              # set when status is skipped / failed
+
+
+class RecommendationMode(str, Enum):
+    ADVISORY = "advisory"
+    AUTO_APPLIED = "auto_applied"
+
+
+class RankedCandidates(BaseModel):
+    """V2 output contract. Selected candidate first; alternatives ranked."""
+    model_config = ConfigDict(extra="forbid")
+    goal: OptimizationGoal
+    candidates: list[Candidate]                             # viable, best-first
+    skipped: list[Candidate] = Field(default_factory=list)  # skipped + failed, with reasons
+    bindingConstraints: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    recommendationMode: RecommendationMode = RecommendationMode.ADVISORY
+
+
+async def run_smart_search(
+    dgdr: DynamoGraphDeploymentRequestSpec,  # existing V1 input, unchanged
+    ops: ProfilerOperationalConfig,          # carries SweepConfig + output_dir
+) -> RankedCandidates:
+    """Extract the OptimizationGoal from the DGDR spec, build the branch-aware
+    search space, run the Vizier + replay sweep, rank candidates, persist the
+    report into ops.output_dir, and return them. Raises NoViableCandidate when
+    no candidate clears the feasibility gate."""
+    ...
+```
 
 This keeps V2 local/offline-first and strictly additive: it does not change V1 defaults, DGDR CR behavior, or the k8s controller/operator path, and it reuses the profiler's existing input contract instead of defining a second one. A user-facing sweep-control surface can be layered on later once the internal path is proven.
