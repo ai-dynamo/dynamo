@@ -151,7 +151,14 @@ tracing-subscriber = { version = "0.3", features = [
 tracing-opentelemetry = { version = "0.32.0" }
 opentelemetry = { version = "0.31.0", features = ["trace", "logs"] }
 opentelemetry_sdk = { version = "0.31.0", features = ["trace", "logs", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.31.0", features = ["trace", "logs", "grpc-tonic"] }
+opentelemetry-otlp = { version = "0.31.0", features = [
+    "trace",
+    "logs",
+    "grpc-tonic",
+    "http-proto",
+    "reqwest-client",
+    "reqwest-rustls",
+] }
 opentelemetry-appender-tracing = { version = "0.31.0" }
 validator = { version = "0.20.0", features = ["derive"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
