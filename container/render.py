@@ -227,9 +227,7 @@ def _resolve_compliance_inputs(framework, target, device_key, context):
             "frontend_baseline_sbom", ""
         )
     if target == "planner":
-        return "pre_planner", context.get("dynamo", {}).get(
-            "planner_baseline_sbom", ""
-        )
+        return "pre_planner", context.get("dynamo", {}).get("planner_baseline_sbom", "")
     # runtime / dev / local-dev / wheel_builder / base / framework
     return "pre_runtime", (
         context.get(framework, {}).get(device_key, {}).get("baseline_sbom", "")

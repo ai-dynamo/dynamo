@@ -55,9 +55,7 @@ def _dist_info_dir(names: list[str]) -> str | None:
     return None
 
 
-def _render_wheel_rust_notices(
-    wheel: Path, licenses_dir: Path | None
-) -> str | None:
+def _render_wheel_rust_notices(wheel: Path, licenses_dir: Path | None) -> str | None:
     """Extract the wheel's embedded SBOM(s) and render NOTICES-Rust text.
 
     Returns None when the wheel carries no cargo components (nothing to bundle).
@@ -95,7 +93,9 @@ def inject(wheel: Path, arcname: str, content: bytes) -> None:
             raise ValueError(f"{wheel}: no {record_name}")
         full_arcname = f"{di}/{arcname}"
         record_lines = [
-            ln for ln in zin.read(record_name).decode("utf-8").splitlines() if ln.strip()
+            ln
+            for ln in zin.read(record_name).decode("utf-8").splitlines()
+            if ln.strip()
         ]
         members = {n: zin.read(n) for n in names}
 

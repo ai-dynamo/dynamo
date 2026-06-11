@@ -86,25 +86,38 @@ def test_bundled_text_has_no_disclaimer():
 
 
 def test_go_module_path_escaping():
-    assert go_gen._escape_go_module_path("github.com/Azure/Foo") == "github.com/!azure/!foo"
+    assert (
+        go_gen._escape_go_module_path("github.com/Azure/Foo")
+        == "github.com/!azure/!foo"
+    )
     assert go_gen._escape_go_module_path("golang.org/x/sys") == "golang.org/x/sys"
 
 
 def test_rust_prefers_harvested_over_canonical(tmp_path):
     crate = tmp_path / "serde-1.0.0"
     crate.mkdir()
-    (crate / "LICENSE-MIT").write_text("MIT License\n\nCopyright (c) 2014 Serde Authors")
+    (crate / "LICENSE-MIT").write_text(
+        "MIT License\n\nCopyright (c) 2014 Serde Authors"
+    )
     comp = rust_gen._component_from_sbom_entry(
-        {"name": "serde", "version": "1.0.0",
-         "licenses": [{"license": {"id": "MIT"}}], "purl": "pkg:cargo/serde@1.0.0"},
+        {
+            "name": "serde",
+            "version": "1.0.0",
+            "licenses": [{"license": {"id": "MIT"}}],
+            "purl": "pkg:cargo/serde@1.0.0",
+        },
         licenses_dir=tmp_path,
     )
     assert "Serde Authors" in comp.license_text
     assert comp.license_text_is_canonical is False
     # un-harvested crate falls back to canonical
     comp2 = rust_gen._component_from_sbom_entry(
-        {"name": "tokio", "version": "1.0.0",
-         "licenses": [{"license": {"id": "MIT"}}], "purl": "pkg:cargo/tokio@1.0.0"},
+        {
+            "name": "tokio",
+            "version": "1.0.0",
+            "licenses": [{"license": {"id": "MIT"}}],
+            "purl": "pkg:cargo/tokio@1.0.0",
+        },
         licenses_dir=tmp_path,
     )
     assert comp2.license_text and comp2.license_text_is_canonical is True
@@ -115,9 +128,12 @@ def test_go_prefers_harvested_via_escaped_path(tmp_path):
     mod_dir.mkdir(parents=True)
     (mod_dir / "LICENSE").write_text("Apache License 2.0\n\nCopyright Azure")
     comp = go_gen._component_from_sbom_entry(
-        {"name": "github.com/Azure/foo", "version": "v1.0.0",
-         "licenses": [{"license": {"id": "Apache-2.0"}}],
-         "purl": "pkg:golang/github.com/Azure/foo@v1.0.0"},
+        {
+            "name": "github.com/Azure/foo",
+            "version": "v1.0.0",
+            "licenses": [{"license": {"id": "Apache-2.0"}}],
+            "purl": "pkg:golang/github.com/Azure/foo@v1.0.0",
+        },
         licenses_dir=tmp_path,
     )
     assert "Copyright Azure" in comp.license_text
@@ -170,9 +186,7 @@ def test_bundle_wheel_notices_injects_and_keeps_record_valid(tmp_path):
         ],
     }
     whl = tmp_path / "foo-1.0-py3-none-any.whl"
-    _make_wheel(
-        whl, di, {f"{di}/sboms/foo.cyclonedx.json": json.dumps(sbom).encode()}
-    )
+    _make_wheel(whl, di, {f"{di}/sboms/foo.cyclonedx.json": json.dumps(sbom).encode()})
 
     assert bundle_wheel_notices.process(whl, None) == 0
 
