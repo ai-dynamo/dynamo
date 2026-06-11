@@ -31,11 +31,11 @@ on:
         description: 'Plain image tag prefix from the build job (also the compliance artifact prefix)'
         required: true
         type: string
-      make_efa:
-        description: 'Match the build render (EFA images)'
+      baseline_sbom_file:
+        description: 'Baseline SBOM stem from the build job (needs.<fw>-build.outputs.baseline_sbom_file); we append -amd64.cdx.json. Empty = audit full image.'
         required: false
-        type: boolean
-        default: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -62,14 +62,6 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/bin"
           curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b "${RUNNER_TEMP}/bin"
           echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
-      - name: Install render deps
-        shell: bash
-        # render.py (used below to read back the baseline SBOM stem) needs PyYAML
-        # + Jinja2; this lightweight runner has python3 but not those. Try a
-        # normal install, falling back to --break-system-packages for PEP-668.
-        run: |
-          python3 -m pip install --quiet pyyaml jinja2 \
-            || python3 -m pip install --quiet --break-system-packages pyyaml jinja2
       - name: Resolve image ref, baseline + artifact name
         id: resolve
         shell: bash
@@ -89,14 +81,10 @@ jobs:
           # Compliance artifact name — mirror compliance-extract's suffix step.
           if [ -n "${CUDA}" ]; then SUFFIX="${CUDA}-amd64-arm64"; else SUFFIX="cpu-amd64-arm64"; fi
           echo "artifact=compliance-${{ inputs.target_tag_plain }}-${SUFFIX}-compliance" >> "$GITHUB_OUTPUT"
-          # Baseline SBOM stem — render the Dockerfile and read it back (same as
-          # the runtime licenses stage). amd64 baseline matches the amd64 scan.
-          RENDER_ARGS="--framework ${{ inputs.framework }} --target ${{ inputs.target }} --platform linux/amd64"
-          [ -n "${CUDA}" ] && RENDER_ARGS="${RENDER_ARGS} --cuda-version ${CUDA}"
-          [ "${{ inputs.make_efa }}" = "true" ] && RENDER_ARGS="${RENDER_ARGS} --make-efa"
-          python3 container/render.py ${RENDER_ARGS} --output-short-filename
-          STEM=$(grep -E '^ARG BASELINE_SBOM_FILE=' container/rendered.Dockerfile | head -1 \
-                 | sed -E 's/^ARG BASELINE_SBOM_FILE="?([^"]*)"?$/\1/')
+          # Baseline SBOM stem comes from the build job's output (it rendered the
+          # Dockerfile with the deps it has), so the audit runner needs no
+          # render.py / PyYAML / pip. Append -amd64 to match the amd64 scan.
+          STEM="${{ inputs.baseline_sbom_file }}"
           if [ -n "${STEM}" ] && [ -f "container/compliance/base_sboms/${STEM}-amd64.cdx.json" ]; then
             echo "baseline=container/compliance/base_sboms/${STEM}-amd64.cdx.json" >> "$GITHUB_OUTPUT"
           else

@@ -167,6 +167,9 @@ on:
       target_tag_plain:
         description: 'Plain runtime image tag prefix'
         value: ${{ jobs.build.outputs.target_tag_plain }}
+      baseline_sbom_file:
+        description: 'Baseline SBOM stem baked into the rendered Dockerfile (for the compliance-audit job)'
+        value: ${{ jobs.build.outputs.baseline_sbom_file }}
 
 jobs:
   build:
@@ -182,6 +185,7 @@ jobs:
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
       test_tag_plain: ${{ steps.calculate-target-tag.outputs.test_tag_plain }}
+      baseline_sbom_file: ${{ steps.gen-dockerfile.outputs.baseline_stem }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -410,6 +414,7 @@ jobs:
           flavor: ${{ steps.calculate-builder-flavor.outputs.builder_flavor }}
           arch: ${{ inputs.platform }}
       - name: Generate Dockerfile
+        id: gen-dockerfile
         shell: bash
         run: |
           echo "Generating Dockerfile for target: ${{ inputs.target }} and framework: ${{ inputs.framework }}"
@@ -432,6 +437,12 @@ jobs:
               ${MAKE_EFA_FLAG} \
               --show-result \
               --output-short-filename
+          # Emit the baseline SBOM stem (arch-independent) for the
+          # <framework>-compliance-audit job, so it doesn't need render.py (and
+          # thus PyYAML/Jinja2/pip) on the lightweight audit runner.
+          STEM=$(grep -E '^ARG BASELINE_SBOM_FILE=' container/rendered.Dockerfile | head -1 \
+                 | sed -E 's/^ARG BASELINE_SBOM_FILE="?([^"]*)"?$/\1/')
+          echo "baseline_stem=${STEM}" >> "$GITHUB_OUTPUT"
       - name: Apply nightly dev version
         if: inputs.dev_version_suffix != ''
         shell: bash

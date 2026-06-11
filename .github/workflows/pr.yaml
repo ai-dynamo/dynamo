@@ -573,6 +573,7 @@ jobs:
       target: runtime
       cuda_version: '13.0'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      baseline_sbom_file: ${{ needs.vllm-build.outputs.baseline_sbom_file }}
     secrets: inherit
 
   sglang-compliance-audit:
@@ -585,6 +586,7 @@ jobs:
       target: runtime
       cuda_version: '13.0'
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      baseline_sbom_file: ${{ needs.sglang-build.outputs.baseline_sbom_file }}
     secrets: inherit
 
   trtllm-compliance-audit:
@@ -597,6 +599,7 @@ jobs:
       target: runtime
       cuda_version: '13.1'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      baseline_sbom_file: ${{ needs.trtllm-build.outputs.baseline_sbom_file }}
     secrets: inherit
 
   planner-compliance-audit:
@@ -609,6 +612,7 @@ jobs:
       target: planner
       cuda_version: ''
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
+      baseline_sbom_file: ${{ needs.planner-build.outputs.baseline_sbom_file }}
     secrets: inherit
 
   frontend-compliance-audit:
@@ -625,6 +629,7 @@ jobs:
       target: frontend
       cuda_version: ''
       target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
+      baseline_sbom_file: ${{ needs.frontend-build.outputs.baseline_sbom_file }}
     secrets: inherit
 
   # ============================================================================
