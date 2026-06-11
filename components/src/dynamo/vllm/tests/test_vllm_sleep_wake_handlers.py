@@ -133,7 +133,7 @@ async def test_snapshot_quiesce_prepares_and_restores_checkpoint():
 
 
 @pytest.mark.asyncio
-async def test_snapshot_quiesce_without_level_skips_memory_sleep():
+async def test_snapshot_quiesce_without_level_uses_default_sleep():
     engine_client = SimpleNamespace(
         pause_generation=AsyncMock(),
         sleep=AsyncMock(),
@@ -150,12 +150,12 @@ async def test_snapshot_quiesce_without_level_skips_memory_sleep():
     assert changed is True
     assert resumed is True
     engine_client.pause_generation.assert_awaited_once()
-    engine_client.sleep.assert_not_awaited()
+    engine_client.sleep.assert_awaited_once_with()
     engine_client.snapshot_checkpoint_prepare.assert_awaited_once_with(
         "/snapshot-control"
     )
     engine_client.snapshot_checkpoint_restore.assert_awaited_once()
-    engine_client.wake_up.assert_not_awaited()
+    engine_client.wake_up.assert_awaited_once_with()
     engine_client.resume_generation.assert_awaited_once()
 
 

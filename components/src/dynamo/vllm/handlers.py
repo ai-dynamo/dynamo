@@ -360,12 +360,7 @@ class VllmEnginePauseController:
         await self._engine_client.pause_generation()
         self._generation_paused = True
         try:
-            if control_dir is not None and level is None:
-                logger.info(
-                    "Snapshot checkpoint pause: paused generation without vLLM "
-                    "memory sleep"
-                )
-            elif level is None:
+            if level is None:
                 await self._engine_client.sleep()
                 self._slept = True
             else:
