@@ -331,10 +331,14 @@ fn apply_request_template(
         if completion_request.inner.model.is_empty() {
             completion_request.inner.model = template.model.clone();
         }
-        if completion_request.inner.temperature.unwrap_or(0.0) == 0.0 {
+        // Only fill truly-unset (`None`) fields: an explicit `temperature = 0.0`
+        // (deterministic decoding) or `max_tokens = 0` is a deliberate caller
+        // choice and must not be clobbered by the template. Mirrors the
+        // `is_none()` checks used elsewhere (e.g. the Responses API handler).
+        if completion_request.inner.temperature.is_none() {
             completion_request.inner.temperature = Some(template.temperature);
         }
-        if completion_request.inner.max_tokens.unwrap_or(0) == 0 {
+        if completion_request.inner.max_tokens.is_none() {
             completion_request.inner.max_tokens = Some(template.max_completion_tokens);
         }
     }
@@ -1085,6 +1089,15 @@ mod infer_dispatch_tests {
         assert_eq!(req.inner.model, "user-model");
         assert_eq!(req.inner.temperature, Some(0.1));
         assert_eq!(req.inner.max_tokens, Some(42));
+
+        // Explicit zero values are deliberate (deterministic decoding /
+        // zero-length) and must be preserved, not treated as "unset".
+        let mut req = empty_completion_request();
+        req.inner.temperature = Some(0.0);
+        req.inner.max_tokens = Some(0);
+        apply_request_template(&mut req, Some(&t));
+        assert_eq!(req.inner.temperature, Some(0.0));
+        assert_eq!(req.inner.max_tokens, Some(0));
 
         // No template is a no-op.
         let mut req = empty_completion_request();
