@@ -11,19 +11,15 @@ This adapter sits between the bridge and the planner tick engine:
     EngineProtocol.tick() -> PlannerEffects
     Adapter -> Bridge.apply_scaling(prefill, decode)
 
-The tick engine is selected by ``config.scheduling.use_orchestrator``:
+The tick engine is the builtin orchestrator path:
+``OrchestratorEngineAdapter`` wrapping ``LocalPlannerOrchestrator`` +
+the builtin local-planner plugins. It preserves the planner's
+``PlannerEffects.scale_to`` replay contract while using plugin-aware
+observability (Prometheus metrics, audit events, diagnostics).
 
-- ``False`` (default): legacy PSM path — ``PlannerStateMachine`` +
-  ``_PSMEngineAdapter``. Byte-for-byte identical to pre-PR-8 replay.
-- ``True``: orchestrator path — ``OrchestratorEngineAdapter`` wrapping
-  ``LocalPlannerOrchestrator`` + the 5 builtin plugins. Produces the
-  same ``PlannerEffects.scale_to`` / ``next_tick`` as PSM (dual-path
-  parity test lock) with plugin-era observability (Prometheus metrics,
-  audit events, plugin-aware diagnostics).
-
-Replay keeps its sync ``run()`` API on both paths; async calls on the
-orchestrator path (``bootstrap_from_fpms`` / ``tick``) run inside a
-single replay-scoped event loop so callers don't need to change.
+Replay keeps its sync ``run()`` API; async orchestrator calls
+(``bootstrap_from_fpms`` / ``tick``) run inside a single replay-scoped
+event loop so callers don't need to change.
 
 Supports both aggregated and disaggregated topologies. No I/O, no
 runtime dependencies. Fully deterministic with offline replay.
@@ -42,8 +38,7 @@ from dynamo.common.forward_pass_metrics import (
     ScheduledRequestMetrics,
 )
 from dynamo.planner.config.planner_config import PlannerConfig
-from dynamo.planner.core.engine_protocol import EngineProtocol, _PSMEngineAdapter
-from dynamo.planner.core.state_machine import PlannerStateMachine
+from dynamo.planner.core.engine_protocol import EngineProtocol
 from dynamo.planner.core.types import (
     FpmObservations,
     PlannerEffects,
@@ -129,7 +124,7 @@ def _update_fpm_cache(
 
 
 class ReplayPlannerAdapter:
-    """Drives the planner state machine using the PlannerReplayBridge.
+    """Drives the plugin planner using the PlannerReplayBridge.
 
     Supports both ``mode="agg"`` and ``mode="disagg"``.
     """
@@ -146,41 +141,26 @@ class ReplayPlannerAdapter:
         self._capabilities = capabilities
         self._is_disagg = planner_config.mode == "disagg"
 
-        # Tick engine selected by the feature flag. On PSM path
-        # ``self._sm`` is the actual state machine (reused for helpers
-        # like ``warm_load_predictors``). On orchestrator path it is
-        # ``None``; a throwaway PSM inside ``OrchestratorEngineAdapter.
-        # bootstrap_from_fpms`` handles regression bootstrap instead.
-        use_orchestrator = planner_config.scheduling.use_orchestrator
-        self._use_orchestrator = use_orchestrator
-        self._sm: Optional[PlannerStateMachine] = None
         self._engine: EngineProtocol
-        if use_orchestrator:
-            # Inject a ``VirtualClock`` so plugin scheduler / circuit
-            # breaker / HOLD_LAST cache see *trace time*, not real
-            # wall-clock.  ``OrchestratorEngineAdapter.tick`` calls
-            # ``clock.advance`` at the start of every tick to keep this
-            # clock in sync with ``tick_input.now_s``.  Without this a
-            # fast-forward replay (e.g. 1hr trace in 10s real time)
-            # would leave plugins with ``execution_interval`` larger
-            # than the real-time duration never re-firing.
-            self._engine = OrchestratorEngineAdapter(
-                planner_config,
-                capabilities or WorkerCapabilities(),
-                clock=VirtualClock(),
-            )
-            # Replay's ``run()`` is synchronous; we own a scoped event
-            # loop to drive the async engine calls without forcing
-            # callers to use ``asyncio.run``.
-            self._loop = asyncio.new_event_loop()
-        else:
-            self._sm = PlannerStateMachine(planner_config, capabilities)
-            self._engine = _PSMEngineAdapter(self._sm)
-            self._loop = None  # type: ignore[assignment]
+        self._warmup_observations = list(warmup_observations or [])
+        self._orchestrator_bootstrapped = False
+        # Inject a ``VirtualClock`` so plugin scheduler / circuit breaker /
+        # HOLD_LAST cache see trace time, not real wall-clock.
+        self._engine = OrchestratorEngineAdapter(
+            planner_config,
+            capabilities or WorkerCapabilities(),
+            clock=VirtualClock(),
+        )
+        # Replay's ``run()`` is synchronous; we own a scoped event loop to
+        # drive the async engine calls without forcing callers to use
+        # ``asyncio.run``.
+        self._loop = asyncio.new_event_loop()
 
         # Last-seen FPM caches (separate for prefill/decode)
         self._prefill_fpm_cache: dict[tuple[str, int], ForwardPassMetrics] = {}
         self._decode_fpm_cache: dict[tuple[str, int], ForwardPassMetrics] = {}
+        self._pending_prefill_fpm_snaps: list[dict[str, Any]] = []
+        self._pending_decode_fpm_snaps: list[dict[str, Any]] = []
 
         # Scaling targets -- used as `expected` in WorkerCounts
         self._scaling_target_prefill: Optional[int] = None
@@ -199,20 +179,9 @@ class ReplayPlannerAdapter:
         self._last_tick_s: float = 0.0
         self._last_traffic: Metrics = Metrics()
 
-        # Warmup path: PSM exposes ``warm_load_predictors`` directly; on
-        # the orchestrator path we route the same list through
-        # ``bootstrap_plugins(historical_traffic=...)`` which primes the
-        # builtin predictor identically.
-        if warmup_observations:
-            if self._use_orchestrator:
-                self._run_sync(
-                    self._engine.bootstrap_plugins(  # type: ignore[union-attr]
-                        historical_traffic=warmup_observations
-                    )
-                )
-            else:
-                assert self._sm is not None
-                self._sm.warm_load_predictors(warmup_observations)
+        # Orchestrator Bootstrap is deferred until ``run()`` because replay
+        # installs benchmark FPMs after adapter construction and before the
+        # first tick.
 
     # ------------------------------------------------------------------
     # Sync/async bridging
@@ -224,6 +193,16 @@ class ReplayPlannerAdapter:
         assert self._loop is not None, "sync bridge only available on orchestrator path"
         return self._loop.run_until_complete(coro)
 
+    def _bootstrap_orchestrator_if_needed(self) -> None:
+        if self._orchestrator_bootstrapped:
+            return
+        self._run_sync(
+            self._engine.bootstrap_plugins(  # type: ignore[attr-defined]
+                historical_traffic=self._warmup_observations or None
+            )
+        )
+        self._orchestrator_bootstrapped = True
+
     def install_benchmark_fpms(
         self,
         *,
@@ -231,108 +210,93 @@ class ReplayPlannerAdapter:
         decode_fpms: Optional[list[ForwardPassMetrics]] = None,
         agg_fpms: Optional[list[ForwardPassMetrics]] = None,
     ) -> None:
-        """Install AIC benchmark FPMs into the regression model(s),
-        path-agnostically.
+        """Install AIC benchmark FPMs into the regression model(s).
 
-        - PSM path: ``PlannerStateMachine.load_benchmark_fpms``.
-        - Orchestrator path: ``OrchestratorEngineAdapter
-          .install_regressions_from_fpms`` (builds + installs on the
-          shared store; synchronous, does NOT re-bootstrap plugins —
-          plugins were already bootstrapped at adapter construction).
+        Normal replay uses ``OrchestratorEngineAdapter
+        .install_regressions_from_fpms``.
 
-        Without this on the orchestrator path the regressions were never
-        installed (``replay/main.py`` previously only fed ``adapter._sm``,
-        which is None under ``use_orchestrator``), so the throughput
-        regression stayed empty and orchestrator-replay scaling decisions
-        diverged from PSM."""
-        if self._use_orchestrator:
-            self._engine.install_regressions_from_fpms(  # type: ignore[attr-defined]
-                prefill_fpms=prefill_fpms,
-                decode_fpms=decode_fpms,
-                agg_fpms=agg_fpms,
-            )
-            return
-        assert self._sm is not None
-        kwargs: dict[str, list[ForwardPassMetrics]] = {}
-        if prefill_fpms is not None:
-            kwargs["prefill_fpms"] = prefill_fpms
-        if decode_fpms is not None:
-            kwargs["decode_fpms"] = decode_fpms
-        if agg_fpms is not None:
-            kwargs["agg_fpms"] = agg_fpms
-        if kwargs:
-            self._sm.load_benchmark_fpms(**kwargs)
+        Without this, replay's throughput regression stays empty and
+        planner-in-the-loop scaling decisions diverge from live planner
+        behavior."""
+        self._engine.install_regressions_from_fpms(  # type: ignore[attr-defined]
+            prefill_fpms=prefill_fpms,
+            decode_fpms=decode_fpms,
+            agg_fpms=agg_fpms,
+        )
 
     def run(self) -> ReplayPlannerReport:
         """Run the full replay with planner-in-the-loop."""
-        next_tick = self._engine.initial_tick(0.0)
-        scaling_events: list[ScalingEvent] = []
-        diagnostics_log: list[TickDiagnostics] = []
-        total_ticks = 0
+        try:
+            self._bootstrap_orchestrator_if_needed()
+            next_tick = self._engine.initial_tick(0.0)
+            scaling_events: list[ScalingEvent] = []
+            diagnostics_log: list[TickDiagnostics] = []
+            total_ticks = 0
 
-        while True:
-            tick_ms = next_tick.at_s * 1000.0
-            result = self._bridge.advance_to(tick_ms)
+            while True:
+                tick_ms = next_tick.at_s * 1000.0
+                result = self._bridge.advance_to(tick_ms)
 
-            if result["is_done"]:
-                break
+                if result["is_done"]:
+                    break
 
-            tick_input = self._build_tick_input(next_tick, result)
-            # ``EngineProtocol.tick`` is async. On PSM path the
-            # ``_PSMEngineAdapter`` wraps PSM's sync ``on_tick`` in an
-            # async-defined-but-never-awaits shim, so ``run_until_complete``
-            # returns synchronously without yielding to the loop. On
-            # orchestrator path it genuinely awaits the pipeline.
-            if self._use_orchestrator:
+                tick_input = self._build_tick_input(next_tick, result)
                 effects: PlannerEffects = self._run_sync(
                     self._engine.tick(next_tick, tick_input)
                 )
-            else:
-                # Fast path for PSM: skip the event-loop roundtrip.
-                assert self._sm is not None
-                effects = self._sm.on_tick(next_tick, tick_input)
-            diagnostics_log.append(effects.diagnostics)
-            total_ticks += 1
+                emit_diagnostics = self._should_emit_tick_diagnostics(
+                    next_tick, effects
+                )
+                if emit_diagnostics:
+                    diagnostics_log.append(effects.diagnostics)
+                total_ticks += 1
 
-            # Update GPU-hours and record diagnostics snapshot
-            self._record_diagnostics(tick_input, effects, result)
+                # Update GPU-hours and record diagnostics snapshot
+                self._record_diagnostics(tick_input, effects, result, emit_diagnostics)
 
-            # Clear scaling targets once active counts match
-            active_p = result["active_prefill_count"]
-            active_d = result["active_decode_count"]
-            if (
-                self._scaling_target_prefill is not None
-                and active_p == self._scaling_target_prefill
-            ):
-                self._scaling_target_prefill = None
-            if (
-                self._scaling_target_decode is not None
-                and active_d == self._scaling_target_decode
-            ):
-                self._scaling_target_decode = None
+                # Clear scaling targets once active counts match
+                active_p = result["active_prefill_count"]
+                active_d = result["active_decode_count"]
+                if (
+                    self._scaling_target_prefill is not None
+                    and active_p == self._scaling_target_prefill
+                ):
+                    self._scaling_target_prefill = None
+                if (
+                    self._scaling_target_decode is not None
+                    and active_d == self._scaling_target_decode
+                ):
+                    self._scaling_target_decode = None
 
-            if effects.scale_to is not None:
-                self._apply_scaling(effects, result, tick_input.now_s, scaling_events)
+                if effects.scale_to is not None:
+                    self._apply_scaling(
+                        effects, result, tick_input.now_s, scaling_events
+                    )
 
-            if effects.next_tick is None:
-                break
-            next_tick = effects.next_tick
+                if effects.next_tick is None:
+                    break
+                next_tick = effects.next_tick
 
-        trace_report = self._bridge.finalize()
-        html_report_path = self._recorder.finalize()
-        return ReplayPlannerReport(
-            trace_report=trace_report,
-            scaling_events=scaling_events,
-            diagnostics_log=diagnostics_log,
-            total_ticks=total_ticks,
-            html_report_path=html_report_path,
-        )
+            trace_report = self._bridge.finalize()
+            html_report_path = self._recorder.finalize()
+            return ReplayPlannerReport(
+                trace_report=trace_report,
+                scaling_events=scaling_events,
+                diagnostics_log=diagnostics_log,
+                total_ticks=total_ticks,
+                html_report_path=html_report_path,
+            )
+        finally:
+            if self._loop is not None:
+                self._run_sync(self._engine.shutdown())
+                self._loop.close()
 
     def _record_diagnostics(
         self,
         tick_input: TickInput,
         effects: PlannerEffects,
         result: dict[str, Any],
+        emit_diagnostics: bool,
     ) -> None:
         """Update GPU-hours tracking and feed the diagnostics recorder."""
         if not self._recorder.enabled:
@@ -348,11 +312,27 @@ class ReplayPlannerAdapter:
             self._cumulative_gpu_hours += (num_p * gpu_p + num_d * gpu_d) * dt_h
         self._last_tick_s = now_s
 
+        if not emit_diagnostics:
+            return
+
         self._recorder.record(
             tick_input,
             effects,
             self._last_traffic,
             self._cumulative_gpu_hours,
+        )
+
+    @staticmethod
+    def _should_emit_tick_diagnostics(
+        tick: ScheduledTick, effects: PlannerEffects
+    ) -> bool:
+        diag = effects.diagnostics
+        return (
+            tick.run_load_scaling
+            or tick.run_throughput_scaling
+            or effects.scale_to is not None
+            or bool(diag.audit_events)
+            or bool(diag.short_circuit_reason)
         )
 
     def _apply_scaling(
@@ -443,12 +423,9 @@ class ReplayPlannerAdapter:
         per worker (which will be added by _observe_fpm via fpm_observations).
         This avoids double-counting the cached snapshot.
 
-        Works on both paths via ``_get_regression(kind)`` so
-        orchestrator replay and PSM replay share identical snapshot
-        feeding. Returns early on easy mode (no regressions) or when
-        the requested regression slot isn't installed (the install gap
-        is fixed via the empty-regression bootstrap in
-        ``_install_benchmark_fpms``).
+        Works via ``_get_regression(kind)`` for orchestrator replay. Returns
+        early on easy mode (no regressions) or when the requested regression
+        slot isn't installed.
         """
         if self._is_easy_mode():
             return  # easy mode has no regression models
@@ -504,26 +481,25 @@ class ReplayPlannerAdapter:
 
     def _get_regression(self, kind: str):
         """Return the regression model for ``kind`` (``"agg"`` /
-        ``"prefill"`` / ``"decode"``) regardless of engine path.
+        ``"prefill"`` / ``"decode"``).
 
-        PSM path: read directly from ``self._sm.{_agg,_prefill,_decode}_regression``.
-        Orchestrator path: read from the orchestrator's shared store
-        (populated by ``install_benchmark_fpms`` →
-        ``OrchestratorEngineAdapter.install_regressions_from_fpms`` →
-        ``install_regressions``, driven from ``replay/main.py``).
+        Normal path: read from the orchestrator adapter's shared scaling
+        state. That state owns both benchmark-installed regressions and the
+        empty live-regression slots that replay must feed when no AIC data was
+        installed.
         """
-        if self._use_orchestrator:
-            # The adapter hides the orchestrator; access via its public
-            # bootstrap hook doesn't help — read through the underlying
-            # orchestrator attribute we know is there.
-            orch = getattr(self._engine, "_orchestrator", None)
-            if orch is None:
-                return None
-            return orch.get_regression(kind)
-        if self._sm is None:
-            return None
         attr = f"_{kind}_regression"
-        return getattr(self._sm, attr, None)
+        state = getattr(self._engine, "_scaling_state", None)
+        if state is not None:
+            regression = getattr(state, attr, None)
+            if regression is not None:
+                return regression
+        # Benchmark regressions are also published to the orchestrator so
+        # external plugins can read them during bootstrap hooks.
+        orch = getattr(self._engine, "_orchestrator", None)
+        if orch is None:
+            return None
+        return orch.get_regression(kind)
 
     def _build_tick_input(
         self, tick: ScheduledTick, result: dict[str, Any]
@@ -553,12 +529,29 @@ class ReplayPlannerAdapter:
                 ready_num_decode=active_d,
                 expected_num_prefill=expected_p if self._is_disagg else None,
                 expected_num_decode=expected_d,
+                prefill_scaling_in_progress=(
+                    self._is_disagg
+                    and self._scaling_target_prefill is not None
+                    and self._scaling_target_prefill != active_p
+                ),
+                decode_scaling_in_progress=(
+                    self._scaling_target_decode is not None
+                    and self._scaling_target_decode != active_d
+                ),
             )
 
         fpm_observations = None
+        if not hasattr(self, "_pending_prefill_fpm_snaps"):
+            self._pending_prefill_fpm_snaps = []
+        if not hasattr(self, "_pending_decode_fpm_snaps"):
+            self._pending_decode_fpm_snaps = []
+        self._pending_prefill_fpm_snaps.extend(result.get("prefill_fpm_snapshots", []))
+        self._pending_decode_fpm_snaps.extend(result.get("decode_fpm_snapshots", []))
         if tick.need_worker_fpm:
-            prefill_snaps = result.get("prefill_fpm_snapshots", [])
-            decode_snaps = result.get("decode_fpm_snapshots", [])
+            prefill_snaps = self._pending_prefill_fpm_snaps
+            decode_snaps = self._pending_decode_fpm_snaps
+            self._pending_prefill_fpm_snaps = []
+            self._pending_decode_fpm_snaps = []
 
             _update_fpm_cache(
                 self._prefill_fpm_cache, prefill_snaps, result["active_prefill_count"]
@@ -592,8 +585,8 @@ class ReplayPlannerAdapter:
                 num_req = float(t.get("num_req", 0))
                 # The mocker publishes avg_kv_hit_rate as 0.0 when the
                 # window had no admissions with non-zero ISL blocks;
-                # pass it through as-is so the state machine can decide
-                # whether to feed its predictor.
+                # pass it through as-is so the planner can distinguish
+                # "no datapoint" from an explicit zero hit rate.
                 traffic = TrafficObservation(
                     duration_s=duration_s,
                     num_req=num_req,

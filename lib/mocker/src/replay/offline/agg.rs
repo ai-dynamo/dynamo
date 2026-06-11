@@ -387,10 +387,7 @@ impl AggRuntime {
     /// Pick the next logical timestamp from either arrivals or scheduled worker completions.
     fn next_timestamp(&mut self) -> Option<f64> {
         let next_event_ms = self.events.peek().map(|event| event.at_ms);
-        let next = choose_next_timestamp(
-            self.admission.next_ready_time_ms(self.cluster_in_flight()),
-            next_event_ms,
-        );
+        let next = choose_next_timestamp(self.admission.next_ready_time_ms(), next_event_ms);
         #[cfg(feature = "kvbm-offload")]
         {
             return choose_next_timestamp(next, self.engine.earliest_offload_deadline());
@@ -1122,7 +1119,7 @@ mod tests {
     }
 
     #[test]
-    fn test_concurrency_workload_delayed_follow_up_does_not_bypass_other_ready_sessions() {
+    fn test_concurrency_workload_holds_session_slot_depth_first() {
         let args = fast_router_args();
         let (collector, stats) = run_concurrency_workload_multi_collect_with_stats(
             &args,
@@ -1138,7 +1135,67 @@ mod tests {
             .iter()
             .map(|uuid| collector.snapshot(*uuid).unwrap().input_length)
             .collect::<Vec<_>>();
-        assert_eq!(dispatch_input_lengths, vec![64, 128, 192]);
+        assert_eq!(dispatch_input_lengths, vec![64, 192, 128]);
+    }
+
+    #[test]
+    fn test_concurrency_ttft_excludes_cap_wait_and_think_time() {
+        // Deterministic TTFT-boundary check (no sleeps). cap=1, depth-first: session-a runs
+        // t0 (input 64) → 10ms inter-turn think-time → t1 (input 192); session-b (input 128)
+        // is cap-blocked the whole time. The collector defines TTFT = first_token - arrival,
+        // and concurrency stamps `arrival` at DISPATCH (now_ms) — the same dispatch-time
+        // stamping the online runtime uses (`live_runtime.rs`, Concurrency arm). So the cap
+        // wait and the think-time (both elapse BEFORE dispatch) are excluded from TTFT, while
+        // routing/prefill (AFTER dispatch) is included.
+        let args = fast_router_args();
+        let (collector, stats) = run_concurrency_workload_multi_collect_with_stats(
+            &args,
+            multiturn_trace(),
+            1,
+            2,
+            ReplayRouterMode::RoundRobin,
+        );
+
+        let snap = |input_len: usize| {
+            let uuid = stats
+                .dispatch_order
+                .iter()
+                .find(|u| collector.snapshot(**u).unwrap().input_length == input_len)
+                .expect("request with this input_length was dispatched");
+            collector.snapshot(*uuid).unwrap()
+        };
+        let a0 = snap(64); // session-a turn-0
+        let a1 = snap(192); // session-a turn-1 (behind 10ms think-time)
+        let b = snap(128); // session-b (cap-blocked behind session-a)
+
+        // TTFT (as the collector defines it: first_token - arrival) is positive for every
+        // request — i.e. it is measured from dispatch and *does* include the post-dispatch
+        // prefill/routing compute.
+        for s in [&a0, &a1, &b] {
+            assert!(
+                s.first_token_ms.unwrap() - s.arrival_time_ms > 0.0,
+                "prefill/routing time is included in TTFT"
+            );
+        }
+
+        // Think-time excluded: a.t1 is dispatched only after a.t0 completes + 10ms think-time,
+        // so that 10ms sits before a.t1's arrival and cannot be inside its TTFT.
+        assert!(
+            a1.arrival_time_ms >= a0.last_token_ms.unwrap() + 10.0,
+            "a.t1 is admitted only after the inter-turn think-time elapses"
+        );
+
+        // Cap wait excluded: session-b is blocked for the whole time session-a runs, so it is
+        // dispatched late (large arrival), yet its TTFT is only its own prefill — the long
+        // pre-dispatch wait is not folded in.
+        assert!(
+            b.arrival_time_ms >= a1.last_token_ms.unwrap(),
+            "b (cap-blocked) is admitted only after session-a fully completes"
+        );
+        assert!(
+            b.first_token_ms.unwrap() - b.arrival_time_ms < b.arrival_time_ms,
+            "the cap wait before b's dispatch is excluded from b's TTFT"
+        );
     }
 
     #[test]

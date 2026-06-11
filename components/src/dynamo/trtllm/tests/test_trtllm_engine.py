@@ -104,9 +104,10 @@ async def _check_start_populates_registration_metadata(started_engine):
     from ``from_args``'s parsed config through to ``EngineConfig`` —
     mismatches here surface as incorrect Rust-side routing decisions."""
     _engine, cfg = started_engine
-    assert cfg.context_length == 1024
-    assert cfg.kv_cache_block_size > 0
-    assert cfg.max_num_seqs == 4
+    assert cfg.llm is not None
+    assert cfg.llm.context_length == 1024
+    assert cfg.llm.kv_cache_block_size > 0
+    assert cfg.llm.max_num_seqs == 4
 
 
 async def _check_generate_streams_chunks_with_coherent_final_usage(started_engine):

@@ -26,8 +26,8 @@ use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
 use dynamo_runtime::DistributedRuntime;
-use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm as env_llm;
+use dynamo_runtime::config::{env_is_falsey, env_is_truthy};
 use dynamo_runtime::discovery::Discovery;
 use dynamo_runtime::logging::{make_inference_request_span, make_system_request_span};
 use dynamo_runtime::metrics::{
@@ -61,6 +61,7 @@ pub struct State {
     discovery_client: Arc<dyn Discovery>,
     flags: StateFlags,
     cancel_token: CancellationToken,
+    nvext_enabled: bool,
 }
 
 #[derive(Default, Debug)]
@@ -132,10 +133,20 @@ impl State {
         discovery_client: Arc<dyn Discovery>,
         cancel_token: CancellationToken,
     ) -> Self {
+        Self::new_with_nvext_enabled(manager, discovery_client, cancel_token, true)
+    }
+
+    pub fn new_with_nvext_enabled(
+        manager: Arc<ModelManager>,
+        discovery_client: Arc<dyn Discovery>,
+        cancel_token: CancellationToken,
+        nvext_enabled: bool,
+    ) -> Self {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
             discovery_client,
+            nvext_enabled,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
@@ -171,6 +182,13 @@ impl State {
     /// Check if the service is shutting down
     pub fn is_cancelled(&self) -> bool {
         self.cancel_token.is_cancelled()
+    }
+
+    /// Master switch for the `nvext` extension protocol (see
+    /// [`environment_names::llm::DYN_ENABLE_FRONTEND_NVEXT`]).
+    #[inline]
+    pub fn nvext_enabled(&self) -> bool {
+        self.nvext_enabled
     }
 
     /// Get the cancellation token
@@ -278,6 +296,17 @@ pub struct HttpServiceConfig {
     /// When true, serve the RL worker discovery API on `rl_port`.
     #[builder(default = "false")]
     enable_rl: bool,
+
+    /// Master switch for the `nvext` extension protocol. Default `true`,
+    /// env-falsey on `DYN_ENABLE_FRONTEND_NVEXT` overrides to `false`.
+    #[builder(default = "true")]
+    enable_nvext: bool,
+
+    /// Master switch for the frontend admin API surface (`GET` /
+    /// `POST /busy_threshold`). Default `true`, env-falsey on
+    /// `DYN_ENABLE_FRONTEND_ADMIN_API` overrides to `false`.
+    #[builder(default = "true")]
+    enable_admin_api: bool,
 
     /// Port for the RL worker discovery listener. Defaults to `DYN_RL_PORT` or 8001.
     #[builder(default = "default_rl_port()")]
@@ -567,7 +596,18 @@ impl HttpServiceConfigBuilder {
                 cancel_token.child_token(),
             )) as Arc<dyn Discovery>
         });
-        let state = Arc::new(State::new(model_manager, discovery_client, cancel_token));
+        // Env-falsey overrides the builder; unset preserves the builder default.
+        let nvext_enabled =
+            config.enable_nvext && !env_is_falsey(env_llm::DYN_ENABLE_FRONTEND_NVEXT);
+        let admin_api_enabled =
+            config.enable_admin_api && !env_is_falsey(env_llm::DYN_ENABLE_FRONTEND_ADMIN_API);
+
+        let state = Arc::new(State::new_with_nvext_enabled(
+            model_manager,
+            discovery_client,
+            cancel_token,
+            nvext_enabled,
+        ));
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
@@ -641,7 +681,7 @@ impl HttpServiceConfigBuilder {
         };
 
         // System routes (health, metrics, models) — debug-level spans
-        let system_routes = vec![
+        let mut system_routes = vec![
             metrics::router(
                 registry,
                 var(HTTP_SVC_METRICS_PATH_ENV).ok(),
@@ -657,8 +697,18 @@ impl HttpServiceConfigBuilder {
             },
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
-            super::busy_threshold::busy_threshold_router(state.clone(), None),
         ];
+        if admin_api_enabled {
+            system_routes.push(super::busy_threshold::busy_threshold_router(
+                state.clone(),
+                None,
+            ));
+        } else {
+            tracing::info!(
+                env = env_llm::DYN_ENABLE_FRONTEND_ADMIN_API,
+                "frontend admin API disabled — busy_threshold routes not registered"
+            );
+        }
         let mut system_router = axum::Router::new();
         for (route_docs, route) in system_routes {
             system_router = system_router.merge(route);
@@ -860,5 +910,108 @@ mod tests {
 
         // Clean up
         handle.abort();
+    }
+
+    /// `enable_admin_api=false` ⇒ `GET /busy_threshold` is not registered and
+    /// returns 404, not 503 or 405. Inference is unaffected (covered by other
+    /// tests).
+    #[tokio::test]
+    async fn test_admin_api_disabled_404s_busy_threshold() {
+        let cancel_token = Arc::new(CancellationToken::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder()
+            .port(port)
+            .enable_admin_api(false)
+            .build()
+            .unwrap();
+
+        let service_token = cancel_token.clone();
+        let handle = tokio::spawn(async move {
+            service
+                .run_with_listener((*service_token).clone(), listener)
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://localhost:{}/busy_threshold", port))
+            .send()
+            .await
+            .expect("request failed");
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+        // And /live still works (sanity: only the admin surface is gated).
+        let live = reqwest::Client::new()
+            .get(format!("http://localhost:{}/live", port))
+            .send()
+            .await
+            .expect("request failed");
+        assert_eq!(live.status(), reqwest::StatusCode::OK);
+
+        cancel_token.cancel();
+        handle.abort();
+    }
+
+    /// `enable_nvext` is wired from the builder onto `State.nvext_enabled` and
+    /// exposed via the accessor used by the openai handlers.
+    #[test]
+    fn test_enable_nvext_propagates_through_builder_to_state() {
+        let on = HttpService::builder().enable_nvext(true).build().unwrap();
+        assert!(on.state.nvext_enabled());
+
+        let off = HttpService::builder().enable_nvext(false).build().unwrap();
+        assert!(!off.state.nvext_enabled());
+
+        let default = HttpService::builder().build().unwrap();
+        assert!(
+            default.state.nvext_enabled(),
+            "default should preserve current behavior (nvext on)"
+        );
+    }
+
+    /// `DYN_ENABLE_FRONTEND_NVEXT` is the env-var mirror of the builder
+    /// flag. Unset → builder default wins (on). Truthy strings → on.
+    /// Falsey strings (`0` / `false` / `no` / `off`, case-insensitive) →
+    /// off, regardless of what the builder asked for.
+    #[test]
+    fn test_dyn_enable_frontend_nvext_env_var_mirror() {
+        use dynamo_runtime::config::environment_names::llm::DYN_ENABLE_FRONTEND_NVEXT;
+
+        // Unset → builder default (true) wins.
+        temp_env::with_var_unset(DYN_ENABLE_FRONTEND_NVEXT, || {
+            let svc = HttpService::builder().build().unwrap();
+            assert!(
+                svc.state.nvext_enabled(),
+                "unset env + default builder = on"
+            );
+        });
+
+        // Explicit truthy → on (builder default also on; env doesn't flip it off).
+        temp_env::with_var(DYN_ENABLE_FRONTEND_NVEXT, Some("true"), || {
+            let svc = HttpService::builder().build().unwrap();
+            assert!(svc.state.nvext_enabled(), "env=true + default builder = on");
+        });
+
+        // Explicit falsey → off, even though the builder default is on.
+        for falsey in ["false", "0", "no", "off", "FALSE"] {
+            temp_env::with_var(DYN_ENABLE_FRONTEND_NVEXT, Some(falsey), || {
+                let svc = HttpService::builder().build().unwrap();
+                assert!(
+                    !svc.state.nvext_enabled(),
+                    "env={falsey:?} should override builder default to off"
+                );
+            });
+        }
+
+        // Builder=false short-circuits regardless of env.
+        temp_env::with_var(DYN_ENABLE_FRONTEND_NVEXT, Some("true"), || {
+            let svc = HttpService::builder().enable_nvext(false).build().unwrap();
+            assert!(
+                !svc.state.nvext_enabled(),
+                "builder=false wins even if env=true"
+            );
+        });
     }
 }
