@@ -37,6 +37,8 @@ tokio-rustls = { workspace = true }
 # `net` for TcpListenerStream (serve_with_incoming), `sync` for ReceiverStream.
 # Declared explicitly rather than relying on workspace feature unification.
 tokio-stream = { workspace = true, features = ["net", "sync"] }
+tokio-util = { workspace = true }
+tmq = { workspace = true }
 tonic = { workspace = true }
 tonic-health = { workspace = true }
 tracing = { workspace = true }
