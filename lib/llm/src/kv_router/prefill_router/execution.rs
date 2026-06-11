@@ -115,7 +115,7 @@ impl PrefillRouter {
                         max_queued_isl_tokens,
                     };
                 }
-                Err(_) => return PrefillResolveDecision::Unavailable,
+                Err(e) => return classify_prefill_query_error(e),
             }
         };
 
@@ -429,6 +429,26 @@ impl PrefillRouter {
     }
 }
 
+/// Classify a worker-selection error from `query_prefill_worker`.
+///
+/// A `ResourceExhausted` error means all eligible prefill workers are overloaded
+/// (see `map_scheduler_error`); it must be surfaced verbatim as `Rejected` so the
+/// frontend returns a proper 503 backpressure signal. Collapsing it to
+/// `Unavailable` would fall back to the synchronous prefill path, which re-enters
+/// the saturated scheduler and masks the rejection as a generic 500 (DYN-3212).
+/// Any other error is a genuine lookup failure that should fall back.
+fn classify_prefill_query_error(error: anyhow::Error) -> PrefillResolveDecision {
+    if dynamo_runtime::error::match_error_chain(
+        error.as_ref(),
+        &[dynamo_runtime::error::ErrorType::ResourceExhausted],
+        &[],
+    ) {
+        PrefillResolveDecision::Rejected(error)
+    } else {
+        PrefillResolveDecision::Unavailable
+    }
+}
+
 fn prefill_worker_info(
     tracker: Option<&RequestTracker>,
     routing_data: Option<&RoutingData>,
@@ -670,6 +690,41 @@ mod tests {
         let room_b = compute_bootstrap_room(Some(7), Some(48), 123_456_789);
         assert_eq!(room_a, room_b);
         assert_eq!(room_a % 48, 7);
+    }
+
+    /// DYN-3212: a `ResourceExhausted` selection error (all eligible prefill
+    /// workers overloaded) must surface as `Rejected`, preserving the typed error
+    /// so the frontend returns 503 — not collapse to `Unavailable` (→ fallback →
+    /// generic 500).
+    #[test]
+    fn classify_prefill_query_error_maps_resource_exhausted_to_rejected() {
+        let err = dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::ResourceExhausted)
+            .message("all eligible workers are overloaded")
+            .build()
+            .into();
+
+        match classify_prefill_query_error(err) {
+            PrefillResolveDecision::Rejected(e) => {
+                assert!(dynamo_runtime::error::match_error_chain(
+                    e.as_ref(),
+                    &[dynamo_runtime::error::ErrorType::ResourceExhausted],
+                    &[],
+                ));
+            }
+            _ => panic!("ResourceExhausted error must map to Rejected"),
+        }
+    }
+
+    /// A non-overload error is a genuine lookup failure and must fall back to the
+    /// synchronous prefill path via `Unavailable`.
+    #[test]
+    fn classify_prefill_query_error_maps_generic_error_to_unavailable() {
+        let err = anyhow::anyhow!("no bootstrap endpoint");
+        assert!(matches!(
+            classify_prefill_query_error(err),
+            PrefillResolveDecision::Unavailable
+        ));
     }
 }
 

@@ -243,6 +243,13 @@ impl
                     topology_constraints,
                 )
             }
+            PrefillResolveDecision::Rejected(error) => {
+                // All eligible prefill workers are overloaded. Surface the typed
+                // (ResourceExhausted) rejection unchanged instead of falling back
+                // to the synchronous prefill path (DYN-3212).
+                drop(prefill_phase_barrier);
+                return Err(error);
+            }
             PrefillResolveDecision::Unavailable | PrefillResolveDecision::NotActivated => {
                 let topology_constraints =
                     self.preflight_kv_transfer_constraints(endpoint_id, None)?;

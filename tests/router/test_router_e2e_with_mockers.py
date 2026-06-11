@@ -28,6 +28,7 @@ from tests.router.common import (
     _test_remote_indexer_decisions,
     _test_router_basic,
     _test_router_decisions,
+    _test_disagg_router_overload_503,
     _test_router_decisions_disagg,
     _test_router_decisions_disagg_round_robin_prefill_dp_rank,
     _test_router_indexers_sync,
@@ -105,6 +106,38 @@ ROUTER_OVERLOAD_503_CASES = (
             "max_tokens": 1,
         },
         id="prefill-tokens",
+    ),
+)
+ROUTER_DISAGG_OVERLOAD_503_CASES = (
+    pytest.param(
+        {
+            "num_prefill": 2,
+            "num_decode": 1,
+            "max_tokens": 1,
+            # Gate the PREFILL pool only (DYN-3212: this was a silent no-op in
+            # disagg before the fix). Decode/queue thresholds disabled.
+            "thresholds": {
+                "blocks_threshold": "None",
+                "tokens_threshold": 1,
+                "tokens_threshold_frac": "None",
+                "router_queue_threshold": "None",
+            },
+        },
+        id="prefill-tokens",
+    ),
+    pytest.param(
+        {
+            "num_prefill": 1,
+            "num_decode": 1,
+            "max_tokens": 50,
+            # Gate the DECODE pool only; prefill threshold disabled.
+            "thresholds": {
+                "blocks_threshold": 0.2,
+                "tokens_threshold": "None",
+                "tokens_threshold_frac": "None",
+            },
+        },
+        id="decode-blocks",
     ),
 )
 ROUND_ROBIN_MOCKER_SKIP_REASON = (
@@ -934,6 +967,67 @@ def test_router_decisions_disagg(
             test_payload=TEST_PAYLOAD,
             request_plane="nats",
             enable_bootstrap=enable_disagg_bootstrap,
+        )
+
+
+@pytest.mark.parametrize(
+    "durable_kv_events", [False], ids=["nondurable"], indirect=True
+)  # Use NATS Core (local indexer)
+@pytest.mark.parametrize(
+    "overload_case", ROUTER_DISAGG_OVERLOAD_503_CASES
+)
+@pytest.mark.timeout(120)
+def test_mocker_disagg_router_overload_503(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    durable_kv_events,
+    monkeypatch,
+    overload_case,
+):
+    """Disaggregated load shedding: clients get 503 when the gated pool is busy.
+
+    - prefill-tokens: a low ``--active-prefill-tokens-threshold`` must gate the
+      PREFILL pool. This was a silent no-op in disagg before DYN-3212 (the
+      overloaded set landed on the decode pool and the prefill router never saw
+      it), so this case is the regression guard for that fix.
+    - decode-blocks: a low ``--active-decode-blocks-threshold`` must gate the
+      DECODE pool (the path that already worked).
+    """
+    monkeypatch.setenv("DYN_LOG", ROUTER_OVERLOAD_DEBUG_DYN_LOG)
+    logger.info("Starting disagg mocker router overload 503 test")
+
+    namespace_suffix = generate_random_suffix()
+    shared_namespace = f"test-namespace-{namespace_suffix}"
+
+    # Limited, slow workers so the gated pool saturates quickly.
+    mocker_args = {
+        "speedup_ratio": 0.01,
+        "block_size": 4,
+        "num_gpu_blocks": 64,
+        "durable_kv_events": durable_kv_events,
+    }
+
+    with _launch_disagg_workers(
+        request,
+        shared_namespace,
+        registration_order="prefill_first",
+        prefill_mocker_args=mocker_args,
+        decode_mocker_args=mocker_args,
+        num_prefill_mockers=overload_case["num_prefill"],
+        num_decode_mockers=overload_case["num_decode"],
+        enable_disagg_bootstrap=False,
+    ) as (prefill_workers, decode_workers):
+        frontend_port = get_unique_ports(request, num_ports=1)[0]
+        _test_disagg_router_overload_503(
+            prefill_workers=prefill_workers,
+            decode_workers=decode_workers,
+            block_size=4,
+            request=request,
+            frontend_port=frontend_port,
+            test_payload=TEST_PAYLOAD,
+            max_tokens=overload_case["max_tokens"],
+            **overload_case["thresholds"],
         )
 
 
