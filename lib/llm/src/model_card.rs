@@ -694,8 +694,8 @@ pub struct ModelDeploymentCard {
     /// Orthogonal to `model_type` (which describes endpoints exposed).
     ///
     /// Every worker must set this explicitly. `None` means the worker has
-    /// not declared a role and is treated as misconfiguration:
-    /// `Model::ws_role_and_needs` returns `None`, the serving-readiness
+    /// not declared a worker type and is treated as misconfiguration:
+    /// `Model::ws_type_and_needs` returns `None`, the serving-readiness
     /// gate refuses to vouch for the namespace, and `register_model`
     /// rejects such cards outright. The `Option<>` type and
     /// `#[serde(default)]` are kept so older cards still deserialize, but

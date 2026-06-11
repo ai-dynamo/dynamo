@@ -39,7 +39,7 @@ fn warn_legacy_readiness_once(model: &str, namespace: &str) {
             model = model,
             namespace = namespace,
             "Serving-readiness is using the legacy compat path: a worker registered \
-             without a `worker_type` (legacy binary). Disaggregated topology \
+             without a `worker_type` (legacy binary). Strict worker-type readiness \
              gating is disabled for such namespaces until all workers are upgraded \
              to register a worker_type. This compatibility shim will be removed in a \
              future release."
@@ -231,7 +231,7 @@ impl Model {
     // `worker_type` therefore comes from an old (pre-`worker_type`) worker;
     // a namespace containing such a legacy card falls back to the
     // cross-version compat path in `is_workers_ready` (ready if any worker is
-    // live) rather than being strictly topology-gated. See that method.
+    // live) rather than being strictly worker-type-gated. See that method.
 
     /// Distinct namespaces represented by this model's WorkerSets, sorted.
     /// Each namespace identifies one deployment of the model.
@@ -251,7 +251,7 @@ impl Model {
     /// pre-`worker_type` worker). The readiness path treats `None` as the
     /// signal to fall back to the cross-version compat path — see
     /// `is_workers_ready`.
-    fn ws_role_and_needs(
+    fn ws_type_and_needs(
         ws: &WorkerSet,
     ) -> Option<(
         crate::worker_type::WorkerType,
@@ -270,10 +270,10 @@ impl Model {
     ///
     /// **Cross-version compat:** if the namespace still contains a legacy card
     /// (a worker with no declared `worker_type`, i.e. an old pre-`worker_type`
-    /// binary), its disaggregated topology cannot be reconstructed — old decode
+    /// binary), its disaggregated worker types cannot be reconstructed — old decode
     /// and old aggregated workers are indistinguishable on the wire. Rather than
     /// hide the model, we fall back to legacy behavior and report ready as long
-    /// as some worker is live. Strict topology gating resumes automatically once
+    /// as some worker is live. Strict worker-type readiness gating resumes automatically once
     /// every worker in the namespace carries a `worker_type`. Remove this branch
     /// when the compat shim is retired.
     pub fn is_workers_ready(&self, namespace: &str) -> bool {
@@ -287,7 +287,7 @@ impl Model {
             if ws.namespace() != namespace {
                 continue;
             }
-            match Self::ws_role_and_needs(ws) {
+            match Self::ws_type_and_needs(ws) {
                 Some((wt, _needs)) => {
                     if ws.worker_count() > 0 {
                         present.insert(wt);
@@ -312,12 +312,12 @@ impl Model {
         }
 
         // Strict path: every WorkerSet must (a) have at least one live worker
-        // of its own role, and (b) have its `needs` DNF satisfied by the
-        // present roles. (a) is what rejects an Aggregated WorkerSet with
+        // of its own worker type, and (b) have its `needs` DNF satisfied by the
+        // present worker types. (a) is what rejects an Aggregated WorkerSet with
         // worker_count == 0: its `needs` is empty, but without a live worker
         // the namespace cannot serve traffic.
         for ws in &wsets {
-            let Some((wt, needs)) = Self::ws_role_and_needs(ws) else {
+            let Some((wt, needs)) = Self::ws_type_and_needs(ws) else {
                 return false;
             };
             if !present.contains(&wt) {
@@ -344,7 +344,7 @@ impl Model {
             .find(|ns| self.is_workers_ready(ns))
     }
 
-    /// Whether at least one set of workers (one topology) in this model is
+    /// Whether at least one set of workers (one worker set) in this model is
     /// ready to serve traffic.
     pub fn has_ready_workers(&self) -> bool {
         self.first_ready_workers().is_some()
@@ -414,10 +414,10 @@ impl Model {
             if !has_legacy {
                 for (wt, needs, count) in &wsets {
                     let Some(wt) = wt else { continue };
-                    // A typed role with no live workers is itself missing — record
+                    // A typed worker type with no live workers is itself missing — record
                     // it so the reason isn't an empty "missing worker types: ".
-                    // Only when the role is absent entirely: another live WorkerSet
-                    // of the same role makes it present, so fall through to the
+                    // Only when the worker type is absent entirely: another live WorkerSet
+                    // of the same worker type makes it present, so fall through to the
                     // `needs` check instead of falsely flagging it missing.
                     if *count == 0 {
                         if !present.contains(wt) {
@@ -450,7 +450,7 @@ impl Model {
             let reason = if ready {
                 if has_legacy {
                     Some(format!(
-                        "legacy worker(s) present (no worker_type); topology gating bypassed \
+                        "legacy worker(s) present (no worker_type); readiness gating bypassed \
                          (ready while {legacy_live_workers} worker(s) live) — compat window only"
                     ))
                 } else {
@@ -1105,7 +1105,7 @@ mod tests {
 
     /// Build a WorkerSet with an explicit worker_type / needs and a live
     /// worker count (via a watch channel).
-    fn ws_with_role(
+    fn ws_with_type(
         namespace: &str,
         mdcsum: &str,
         worker_type: WorkerType,
@@ -1132,14 +1132,14 @@ mod tests {
     #[test]
     fn readiness_pd_pair_ready() {
         let model = Model::new("llama".to_string());
-        let (prefill, _tx_p) = ws_with_role(
+        let (prefill, _tx_p) = ws_with_type(
             "dynamo",
             "mdc-p",
             WorkerType::Prefill,
             vec![vec![WorkerType::Decode]],
             vec![1],
         );
-        let (decode, _tx_d) = ws_with_role(
+        let (decode, _tx_d) = ws_with_type(
             "dynamo",
             "mdc-d",
             WorkerType::Decode,
@@ -1156,7 +1156,7 @@ mod tests {
     #[test]
     fn readiness_pd_missing_prefill_not_ready() {
         let model = Model::new("llama".to_string());
-        let (decode, _tx) = ws_with_role(
+        let (decode, _tx) = ws_with_type(
             "dynamo",
             "mdc-d",
             WorkerType::Decode,
@@ -1175,14 +1175,14 @@ mod tests {
         // P+D pair OR a single Aggregated peer). The second alternative is
         // satisfied here because Aggregated is present.
         let model = Model::new("llava".to_string());
-        let (agg, _tx_a) = ws_with_role(
+        let (agg, _tx_a) = ws_with_type(
             "dynamo",
             "mdc-a",
             WorkerType::Aggregated,
             vec![vec![WorkerType::Encode]],
             vec![1],
         );
-        let (enc, _tx_e) = ws_with_role(
+        let (enc, _tx_e) = ws_with_type(
             "dynamo",
             "mdc-e",
             WorkerType::Encode,
@@ -1203,21 +1203,21 @@ mod tests {
         // E-P-D pattern: separate Prefill + Decode + Encode workers.
         // Encode's first alternative (Prefill+Decode) is satisfied.
         let model = Model::new("llava".to_string());
-        let (prefill, _tx_p) = ws_with_role(
+        let (prefill, _tx_p) = ws_with_type(
             "dynamo",
             "mdc-p",
             WorkerType::Prefill,
             vec![vec![WorkerType::Decode, WorkerType::Encode]],
             vec![1],
         );
-        let (decode, _tx_d) = ws_with_role(
+        let (decode, _tx_d) = ws_with_type(
             "dynamo",
             "mdc-d",
             WorkerType::Decode,
             vec![vec![WorkerType::Prefill]],
             vec![2],
         );
-        let (enc, _tx_e) = ws_with_role(
+        let (enc, _tx_e) = ws_with_type(
             "dynamo",
             "mdc-e",
             WorkerType::Encode,
@@ -1238,7 +1238,7 @@ mod tests {
     fn readiness_encode_alone_not_ready() {
         // Encode alone: neither alternative in its needs DNF is satisfied.
         let model = Model::new("llava".to_string());
-        let (enc, _tx) = ws_with_role(
+        let (enc, _tx) = ws_with_type(
             "dynamo",
             "mdc-e",
             WorkerType::Encode,
@@ -1257,14 +1257,14 @@ mod tests {
     fn readiness_cross_namespace_isolation() {
         // Prefill in ns-old, Decode in ns-new: neither namespace is ready.
         let model = Model::new("llama".to_string());
-        let (p, _tp) = ws_with_role(
+        let (p, _tp) = ws_with_type(
             "ns-old",
             "mdc-p",
             WorkerType::Prefill,
             vec![vec![WorkerType::Decode]],
             vec![1],
         );
-        let (d, _td) = ws_with_role(
+        let (d, _td) = ws_with_type(
             "ns-new",
             "mdc-d",
             WorkerType::Decode,
@@ -1281,17 +1281,17 @@ mod tests {
 
     #[test]
     fn readiness_scale_down_flips_to_not_ready() {
-        // Decode worker_count drops to 0 → topology flips from ready to
+        // Decode worker_count drops to 0 → readiness flips from ready to
         // not-ready with no clearing hook (the point of live-compute).
         let model = Model::new("llama".to_string());
-        let (p, _tp) = ws_with_role(
+        let (p, _tp) = ws_with_type(
             "dynamo",
             "mdc-p",
             WorkerType::Prefill,
             vec![vec![WorkerType::Decode]],
             vec![1],
         );
-        let (d, tx_d) = ws_with_role(
+        let (d, tx_d) = ws_with_type(
             "dynamo",
             "mdc-d",
             WorkerType::Decode,
@@ -1307,7 +1307,7 @@ mod tests {
         tx_d.send(vec![]).unwrap();
         assert!(!model.is_workers_ready("dynamo"));
 
-        // Rejoin a decode worker — topology flips back to ready.
+        // Rejoin a decode worker — readiness flips back to ready.
         tx_d.send(vec![2]).unwrap();
         assert!(model.is_workers_ready("dynamo"));
     }
@@ -1315,11 +1315,11 @@ mod tests {
     // -- Cross-version compat: legacy cards (no worker_type) --
     //
     // A new frontend may see cards from old (pre-`worker_type`) workers that
-    // carry no `worker_type`. Their disaggregated topology can't be
+    // carry no `worker_type`. Their disaggregated worker types can't be
     // reconstructed (old
     // decode and old aggregated workers are wire-indistinguishable), so a
     // namespace containing any legacy card falls back to legacy behavior:
-    // ready iff some worker is live. Strict topology gating resumes once every
+    // ready iff some worker is live. Strict worker-type readiness gating resumes once every
     // worker carries a worker_type.
 
     #[test]
@@ -1351,7 +1351,7 @@ mod tests {
     #[test]
     fn readiness_legacy_disagg_pd_is_ready() {
         // COMPAT: old disaggregated deployment (prefill + decode, both legacy
-        // and cardless of worker_type) seen by a new frontend. The topology
+        // and cardless of worker_type) seen by a new frontend. The worker types
         // can't be reconstructed, so the namespace is ready as long as workers
         // are live — matching legacy behavior.
         let model = Model::new("llama".to_string());
@@ -1372,7 +1372,7 @@ mod tests {
         // (ready iff live), rather than strict-gating on the typed cards.
         let model = Model::new("llama".to_string());
         // Typed decode that, under strict rules, needs a Prefill peer (absent).
-        let (decode, _td) = ws_with_role(
+        let (decode, _td) = ws_with_type(
             "dynamo",
             "mdc-d",
             WorkerType::Decode,
@@ -1395,16 +1395,16 @@ mod tests {
     // -- namespace_readiness() (GET /v1/models/{model}/ready) --
 
     #[test]
-    fn topology_pd_pair_ready() {
+    fn readiness_detail_pd_pair_ready() {
         let model = Model::new("llama".to_string());
-        let (p, _tp) = ws_with_role(
+        let (p, _tp) = ws_with_type(
             "ns1",
             "mdc-p",
             WorkerType::Prefill,
             vec![vec![WorkerType::Decode]],
             vec![1],
         );
-        let (d, _td) = ws_with_role(
+        let (d, _td) = ws_with_type(
             "ns1",
             "mdc-d",
             WorkerType::Decode,
@@ -1435,9 +1435,9 @@ mod tests {
     }
 
     #[test]
-    fn topology_decode_only_reports_missing_prefill() {
+    fn readiness_detail_decode_only_reports_missing_prefill() {
         let model = Model::new("llama".to_string());
-        let (d, _td) = ws_with_role(
+        let (d, _td) = ws_with_type(
             "ns1",
             "mdc-d",
             WorkerType::Decode,
@@ -1460,11 +1460,11 @@ mod tests {
     }
 
     #[test]
-    fn topology_zero_worker_role_reported_missing() {
-        // A typed role registered with no live workers must surface as missing,
+    fn readiness_detail_zero_worker_type_reported_missing() {
+        // A typed worker type registered with no live workers must surface as missing,
         // not produce an empty "missing worker types: " reason.
         let model = Model::new("llama".to_string());
-        let (p, _tp) = ws_with_role(
+        let (p, _tp) = ws_with_type(
             "ns1",
             "mdc-p",
             WorkerType::Prefill,
@@ -1483,24 +1483,24 @@ mod tests {
     }
 
     #[test]
-    fn topology_zero_worker_role_not_missing_when_present_elsewhere() {
-        // Two WorkerSets of the same role in one namespace: one live, one with
-        // zero workers. The role is present via the live set, so it must NOT be
+    fn readiness_detail_zero_worker_type_not_missing_when_present_elsewhere() {
+        // Two WorkerSets of the same worker type in one namespace: one live, one with
+        // zero workers. The worker type is present via the live set, so it must NOT be
         // reported missing; the real gap (its unsatisfied peer) must surface.
         let model = Model::new("llama".to_string());
-        let (d_live, _tl) = ws_with_role(
+        let (d_live, _tl) = ws_with_type(
             "ns1",
             "mdc-d-live",
             WorkerType::Decode,
             vec![vec![WorkerType::Prefill]],
             vec![1, 2],
         );
-        let (d_dead, _td) = ws_with_role(
+        let (d_dead, _td) = ws_with_type(
             "ns1",
             "mdc-d-dead",
             WorkerType::Decode,
             vec![vec![WorkerType::Prefill]],
-            vec![], // zero live workers, same role
+            vec![], // zero live workers, same worker type
         );
         model.add_worker_set("ns1".to_string(), d_live);
         model.add_worker_set("ns1:dead".to_string(), d_dead);
@@ -1516,17 +1516,17 @@ mod tests {
     }
 
     #[test]
-    fn topology_multi_namespace_one_ready_one_partial() {
+    fn readiness_detail_multi_namespace_one_ready_one_partial() {
         let model = Model::new("llama".to_string());
         // ns-old: complete P/D pair.
-        let (p, _tp) = ws_with_role(
+        let (p, _tp) = ws_with_type(
             "ns-old",
             "mdc-p",
             WorkerType::Prefill,
             vec![vec![WorkerType::Decode]],
             vec![1],
         );
-        let (d, _td) = ws_with_role(
+        let (d, _td) = ws_with_type(
             "ns-old",
             "mdc-d",
             WorkerType::Decode,
@@ -1534,7 +1534,7 @@ mod tests {
             vec![2],
         );
         // ns-new: decode only (partial).
-        let (d2, _td2) = ws_with_role(
+        let (d2, _td2) = ws_with_type(
             "ns-new",
             "mdc-d2",
             WorkerType::Decode,
@@ -1557,7 +1557,7 @@ mod tests {
     }
 
     #[test]
-    fn topology_legacy_namespace_notes_bypass() {
+    fn readiness_detail_legacy_namespace_notes_bypass() {
         let model = Model::new("llama".to_string());
         let (legacy, _tl) = make_worker_set_with_count("ns1", "mdc-legacy", vec![1]);
         model.add_worker_set("ns1".to_string(), legacy);
@@ -1566,7 +1566,7 @@ mod tests {
         assert!(topo.ready);
         let ns = &topo.namespaces["ns1"];
         assert!(ns.ready);
-        // Legacy card has no worker_type → not keyed under roles; reason flags
+        // Legacy card has no worker_type → not keyed under worker_types; reason flags
         // the compat bypass.
         assert!(ns.worker_types.is_empty());
         assert!(ns.missing_worker_types.is_empty());
@@ -1574,7 +1574,7 @@ mod tests {
             ns.reason
                 .as_deref()
                 .unwrap_or("")
-                .contains("topology gating bypassed"),
+                .contains("readiness gating bypassed"),
             "legacy namespace reason should note the bypass, got {:?}",
             ns.reason
         );
@@ -1586,7 +1586,7 @@ mod tests {
         // considered ready: its `needs` is empty, but with no live worker
         // the namespace can't serve traffic.
         let model = Model::new("llama".to_string());
-        let (agg, _tx) = ws_with_role(
+        let (agg, _tx) = ws_with_type(
             "dynamo",
             "mdc-a",
             WorkerType::Aggregated,

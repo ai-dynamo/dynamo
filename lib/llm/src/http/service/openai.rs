@@ -227,9 +227,9 @@ impl ErrorMessage {
         )
     }
 
-    /// Service Unavailable with a structured message body. Used by topology
-    /// readiness to distinguish "model registered but topology incomplete"
-    /// from generic "service not ready".
+    /// Service Unavailable with a structured message body. Used by readiness
+    /// reporting to distinguish "model registered but not ready" from generic
+    /// "service not ready".
     pub fn service_unavailable_with_body(message: String) -> ErrorResponse {
         let code = StatusCode::SERVICE_UNAVAILABLE;
         let error_type = map_error_code_to_error_type(code);
@@ -514,7 +514,7 @@ async fn handler_completions(
     headers: HeaderMap,
     Json(mut request): Json<NvCreateCompletionRequest>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service or per-model topology is not ready
+    // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.inner.model)?;
 
@@ -942,7 +942,7 @@ async fn embeddings(
     headers: HeaderMap,
     Json(request): Json<NvCreateEmbeddingRequest>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service or per-model topology is not ready
+    // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.inner.model)?;
 
@@ -1798,7 +1798,7 @@ async fn handler_responses(
     headers: HeaderMap,
     Json(mut request): Json<NvCreateResponse>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service or per-model topology is not ready.
+    // return a 503 if the service or model is not ready.
     // Resolve the templated model first so empty/missing `model` fields
     // don't bypass the gate.
     check_ready(&state)?;
@@ -2227,7 +2227,7 @@ pub(crate) fn check_model_serving_ready(
     }
     Err(ErrorMessage::service_unavailable_with_body(format!(
         "Model `{model_name}` is registered but no namespace has a complete worker set. \
-         At least one prefill/decode/encode role required by a registered worker is missing. \
+         At least one prefill/decode/encode worker type required by a registered worker is missing. \
          Check worker startup logs for the affected namespace."
     )))
 }
@@ -2472,9 +2472,9 @@ fn get_model_retrieve(
     .into_response())
 }
 
-/// `GET /v1/models/{model}/ready` — structured per-namespace topology
-/// readiness detail (Mechanism 4). Deliberately *not* topology-gated: it exists
-/// to diagnose models that are not yet ready, so it returns 200 with the full
+/// `GET /v1/models/{model}/ready` — structured per-namespace worker readiness
+/// detail (Mechanism 4). Deliberately *not* readiness-gated: it exists to
+/// diagnose models that are not yet ready, so it returns 200 with the full
 /// breakdown regardless of whether the model would be served.
 fn get_model_readiness(
     state: &Arc<service_v2::State>,
@@ -2510,7 +2510,7 @@ async fn images(
     Json(request): Json<NvCreateImageRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
-    // (per-model topology check is deferred until after we resolve the
+    // (per-model readiness check is deferred until after we resolve the
     // ImageModel enum into a string; see below)
     check_ready(&state)?;
 
@@ -2647,7 +2647,7 @@ async fn videos(
     headers: HeaderMap,
     Json(request): Json<NvCreateVideoRequest>,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service or per-model topology is not ready
+    // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
 
@@ -2934,7 +2934,7 @@ async fn audio_speech(
     Json(request): Json<NvCreateAudioSpeechRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
-    // (per-model topology check is deferred until after we resolve the
+    // (per-model readiness check is deferred until after we resolve the
     // Option<String> model field; see below)
     check_ready(&state)?;
 
