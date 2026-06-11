@@ -11,15 +11,13 @@ This page explains how the Dynamo router evaluates workers, chooses a target, an
 
 KV cache routing optimizes large language model inference by directing requests using both reusable cache state and projected active load. Cache reuse reduces redundant prompt computation, while live prefill and decode accounting prevents cache-rich workers from becoming overloaded.
 
-![Request tokens are hashed and evaluated using KV indexer prefix hits and slot tracker active load before the router selects the lowest-cost worker. Worker KV events update the indexer through the event plane.](../../assets/img/router-kv-routing-overview.jpg)
-
 KV cache reuse introduces complexity to LLM serving load balancing. While it can significantly reduce computation costs, routing strategies that ignore worker-specific KV states can lead to:
 - Missed cache reuse opportunities due to suboptimal worker selection
 - System throughput degradation from uneven request distribution across workers
 
 ## Cost Calculation
 
-![Three-worker routing example showing existing and incoming prefill and decode load. Worker 2 has the lowest combined cost and is selected even though Worker 3 has more cached blocks.](../../assets/img/router-cost-example.jpg)
+![Request tokens are hashed and evaluated using KV indexer prefix hits and slot tracker active load before the router selects the lowest-cost worker. Worker KV events update the indexer through the event plane.](../../assets/img/router-kv-routing-overview.jpg)
 
 The cost function combines two worker-specific projections:
 
