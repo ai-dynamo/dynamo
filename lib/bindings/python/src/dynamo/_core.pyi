@@ -2958,11 +2958,9 @@ class backend:
         Prefill: "backend.DisaggregationMode"
         Decode: "backend.DisaggregationMode"
 
-    class EngineConfig:
+    class LlmRegistration:
         def __init__(
             self,
-            model: str,
-            served_model_name: Optional[str] = None,
             context_length: Optional[int] = None,
             kv_cache_block_size: Optional[int] = None,
             total_kv_blocks: Optional[int] = None,
@@ -2972,12 +2970,7 @@ class backend:
             data_parallel_start_rank: Optional[int] = None,
             bootstrap_host: Optional[str] = None,
             bootstrap_port: Optional[int] = None,
-            runtime_data: Optional[Dict[str, Any]] = None,
         ) -> None: ...
-        @property
-        def model(self) -> str: ...
-        @property
-        def served_model_name(self) -> Optional[str]: ...
         @property
         def context_length(self) -> Optional[int]: ...
         @property
@@ -2996,8 +2989,23 @@ class backend:
         def bootstrap_host(self) -> Optional[str]: ...
         @property
         def bootstrap_port(self) -> Optional[int]: ...
+
+    class EngineConfig:
+        def __init__(
+            self,
+            model: str,
+            served_model_name: Optional[str] = None,
+            runtime_data: Optional[Dict[str, Any]] = None,
+            llm: Optional["backend.LlmRegistration"] = None,
+        ) -> None: ...
+        @property
+        def model(self) -> str: ...
+        @property
+        def served_model_name(self) -> Optional[str]: ...
         @property
         def runtime_data(self) -> Dict[str, Any]: ...
+        @property
+        def llm(self) -> Optional["backend.LlmRegistration"]: ...
 
     class RuntimeConfig:
         def __init__(
@@ -3038,5 +3046,6 @@ class backend:
             engine: Any,
             config: "backend.WorkerConfig",
             event_loop: Any,
+            raw: bool = False,
         ) -> None: ...
         def run(self) -> Awaitable[None]: ...
