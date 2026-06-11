@@ -28,6 +28,62 @@ fn is_harmony_parser(parser: Option<&str>) -> bool {
     parser == Some("harmony")
 }
 
+/// Read response-level `nvext.completion_token_ids` without mutating.
+fn extract_completion_token_ids(nvext: Option<&serde_json::Value>) -> Vec<u32> {
+    nvext
+        .and_then(|v| v.get("completion_token_ids"))
+        .and_then(|ids| serde_json::from_value(ids.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// Remove and return `completion_token_ids` from a response-level nvext payload.
+fn take_completion_token_ids(nvext: &mut Option<serde_json::Value>) -> Vec<u32> {
+    let Some(serde_json::Value::Object(map)) = nvext else {
+        return Vec::new();
+    };
+    let Some(ids) = map.remove("completion_token_ids") else {
+        return Vec::new();
+    };
+    if map.is_empty() {
+        *nvext = None;
+    }
+    serde_json::from_value(ids).unwrap_or_default()
+}
+
+/// Re-attach token ids harvested from jailed (swallowed) chunks to the first
+/// emitted response, and strip the copies that `emit_choice_emissions` clones
+/// onto every other response built from the same base chunk — the downstream
+/// aggregator concatenates `completion_token_ids` across responses, so each id
+/// must appear exactly once.
+fn redistribute_completion_token_ids(
+    responses: &mut [Annotated<NvCreateChatCompletionStreamResponse>],
+    pending: &mut Vec<u32>,
+) {
+    let mut first = true;
+    for response in responses.iter_mut() {
+        let Some(data) = response.data.as_mut() else {
+            continue;
+        };
+        let own_ids = take_completion_token_ids(&mut data.nvext);
+        if !first {
+            continue;
+        }
+        first = false;
+        pending.extend(own_ids);
+        if pending.is_empty() {
+            continue;
+        }
+        let merged = std::mem::take(pending);
+        let nvext = data.nvext.get_or_insert_with(|| serde_json::json!({}));
+        if let Some(map) = nvext.as_object_mut() {
+            map.insert(
+                "completion_token_ids".to_string(),
+                serde_json::json!(merged),
+            );
+        }
+    }
+}
+
 fn contains_harmony_protocol(text: &str) -> bool {
     text.contains("<|channel|>")
 }
@@ -658,6 +714,11 @@ impl JailedStream {
             let mut last_stream_id = String::new();
             let mut last_stream_model = String::new();
             let mut last_stream_created: u32 = 0;
+            // Response-level nvext.completion_token_ids from chunks the jail swallows
+            // (accumulated but not emitted). Re-attached to the next emission so the
+            // aggregated id stream stays complete. Response-level state is safe here:
+            // completion_token_ids is validated to single-choice requests.
+            let mut pending_completion_token_ids: Vec<u32> = Vec::new();
 
             // Pin the stream for iteration (stack pinning is more efficient)
             tokio::pin!(stream);
@@ -783,6 +844,8 @@ impl JailedStream {
                             }
                         }
 
+                        let mut chunk_responses = Vec::new();
+
                         // Emit tool calls and content with preserved metadata
                         if !tool_content_emissions.is_empty() {
                             let preserved_metadata = (
@@ -790,10 +853,7 @@ impl JailedStream {
                                 last_annotated_event.clone(),
                                 last_annotated_comment.clone(),
                             );
-                            let responses = self.emit_choice_emissions(tool_content_emissions, chat_response, preserved_metadata);
-                            for emitted_response in responses {
-                                yield emitted_response;
-                            }
+                            chunk_responses.extend(self.emit_choice_emissions(tool_content_emissions, chat_response, preserved_metadata));
                         }
 
                         // Emit trailing content separately (always as individual chunks)
@@ -803,20 +863,27 @@ impl JailedStream {
                                 last_annotated_event.clone(),
                                 last_annotated_comment.clone(),
                             );
-                            let responses = self.emit_choice_emissions(trailing_emissions, chat_response, preserved_metadata);
-                            for emitted_response in responses {
-                                yield emitted_response;
-                            }
+                            chunk_responses.extend(self.emit_choice_emissions(trailing_emissions, chat_response, preserved_metadata));
                         }
 
                         // Emit pass-through content with current metadata
                         if !passthrough_emissions.is_empty() {
                             let current_metadata = (response.id.clone(), response.event.clone(), response.comment.clone());
-                            let responses = self.emit_choice_emissions(passthrough_emissions, chat_response, current_metadata);
-                            for emitted_response in responses {
-                                yield emitted_response;
-                            }
+                            chunk_responses.extend(self.emit_choice_emissions(passthrough_emissions, chat_response, current_metadata));
                         }
+
+                        // Every response above cloned this chunk's nvext; collapse the
+                        // duplicated completion_token_ids onto the first response and
+                        // fold in ids carried over from swallowed chunks.
+                        redistribute_completion_token_ids(&mut chunk_responses, &mut pending_completion_token_ids);
+                        for emitted_response in chunk_responses {
+                            yield emitted_response;
+                        }
+                    } else {
+                        // Chunk fully swallowed by the jail: keep its token ids so the
+                        // eventual emission carries the complete generation stream.
+                        pending_completion_token_ids
+                            .extend(extract_completion_token_ids(chat_response.nvext.as_ref()));
                     }
                 } else {
                     // No response data, pass through as-is
@@ -850,7 +917,9 @@ impl JailedStream {
                 };
 
                 let final_metadata = (last_annotated_id, last_annotated_event, last_annotated_comment);
-                let responses = self.emit_choice_emissions(final_emissions, &dummy_response, final_metadata);
+                let mut responses = self.emit_choice_emissions(final_emissions, &dummy_response, final_metadata);
+                // Attach token ids harvested from the swallowed chunks being released.
+                redistribute_completion_token_ids(&mut responses, &mut pending_completion_token_ids);
                 for emitted_response in responses {
                     yield emitted_response;
                 }
@@ -1996,6 +2065,89 @@ mod tests {
             names.contains(&"get_time"),
             "Missing get_time tool call. Got: {:?}",
             names
+        );
+    }
+
+    /// Helper: build a single-choice stream chunk carrying response-level
+    /// `nvext.completion_token_ids`, mirroring what the delta generator attaches
+    /// per backend chunk.
+    fn text_chunk_with_token_ids(
+        text: &str,
+        ids: &[u32],
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut chunk = text_chunk(text);
+        if let Some(ref mut data) = chunk.data {
+            data.nvext = Some(serde_json::json!({ "completion_token_ids": ids }));
+        }
+        chunk
+    }
+
+    /// Collect `nvext.completion_token_ids` concatenated across emitted responses,
+    /// in emission order (the same merge the non-streaming aggregator performs).
+    fn collect_completion_token_ids(
+        responses: &[Annotated<NvCreateChatCompletionStreamResponse>],
+    ) -> Vec<u32> {
+        responses
+            .iter()
+            .flat_map(|r| r.data.iter())
+            .filter_map(|d| d.nvext.as_ref())
+            .filter_map(|nvext| nvext.get("completion_token_ids"))
+            .filter_map(|ids| serde_json::from_value::<Vec<u32>>(ids.clone()).ok())
+            .flatten()
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_completion_token_ids_preserved_across_jailed_chunks() {
+        let jail = JailedStream::builder().tool_call_parser("hermes").build();
+
+        // c2 is swallowed by the jail (tool call start, no emission); c3 completes
+        // the tool call and also carries trailing text (two emissions from one base
+        // response — must not duplicate ids).
+        let chunks = vec![
+            text_chunk_with_token_ids("Hello ", &[1]),
+            text_chunk_with_token_ids("<tool_call>{\"name\": \"get_weather\", \"arguments\"", &[2, 3]),
+            text_chunk_with_token_ids(
+                ": {\"location\": \"SF\"}}</tool_call>\nDone!",
+                &[4, 5],
+            ),
+        ];
+
+        let input_stream = Box::pin(stream::iter(chunks));
+        let output_stream = jail.apply_with_finish_reason(input_stream);
+        let responses: Vec<_> = output_stream.collect().await;
+
+        let tool_calls = collect_tool_calls(&responses);
+        assert_eq!(tool_calls.len(), 1, "Expected 1 tool call: {:?}", tool_calls);
+
+        let ids = collect_completion_token_ids(&responses);
+        assert_eq!(
+            ids,
+            vec![1, 2, 3, 4, 5],
+            "completion_token_ids must be preserved exactly once, in generation order"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_completion_token_ids_preserved_when_stream_ends_jailed() {
+        let jail = JailedStream::builder().tool_call_parser("hermes").build();
+
+        // No end marker: the stream ends while jailed, so the accumulated content
+        // is released through the finalization path (dummy response).
+        let chunks = vec![
+            text_chunk_with_token_ids("<tool_call>{\"name\": \"get_weather\"", &[1, 2]),
+            text_chunk_with_token_ids(", \"arguments\": {\"location\": \"SF\"}}", &[3]),
+        ];
+
+        let input_stream = Box::pin(stream::iter(chunks));
+        let output_stream = jail.apply_with_finish_reason(input_stream);
+        let responses: Vec<_> = output_stream.collect().await;
+
+        let ids = collect_completion_token_ids(&responses);
+        assert_eq!(
+            ids,
+            vec![1, 2, 3],
+            "completion_token_ids from jailed chunks must survive stream-end finalization"
         );
     }
 
