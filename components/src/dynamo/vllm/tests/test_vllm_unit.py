@@ -921,9 +921,7 @@ def test_build_sampling_params_applies_nvext_routed_experts_prompt_start(shape):
         if shape == "nvext":
             request["nvext"] = {"routed_experts_prompt_start": value}
         else:
-            request["extra_args"] = {
-                "nvext": {"routed_experts_prompt_start": value}
-            }
+            request["extra_args"] = {"nvext": {"routed_experts_prompt_start": value}}
         return request
 
     sp = build_sampling_params(make_request(4), default_sampling_params={})
