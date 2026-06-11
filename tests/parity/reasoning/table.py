@@ -73,7 +73,10 @@ CASE_GROUPS = [
     ),
     ("Reasoning extraction", ("stream.2.a",)),
     ("Multi-span", ("stream.2.b", "stream.2.c")),
-    ("Chunk boundaries", ("stream.3.a", "stream.3.b", "stream.3.c")),
+    (
+        "Chunk boundaries",
+        ("stream.3.a", "stream.3.b", "stream.3.c", "stream.3.d", "stream.3.e"),
+    ),
 ]
 _CASE_GROUP_BY_CASE = {
     case_id: label for label, case_ids in CASE_GROUPS for case_id in case_ids

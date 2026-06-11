@@ -79,6 +79,32 @@ cases:
         normal_text: <think>plain <thesis answer
       vllm: *d_s6
       sglang: *d_s6
+  REASONING.stream.3.d:
+    description: End marker split across chunks at the lone '<' is still normal text
+    ref: dynamo
+    spec_ref: lib/parsers/REASONING_CASES.md
+    chunks:
+    - reasoning<
+    - /think>answer
+    expected:
+      dynamo: &d_s3d
+        reasoning_text: ''
+        normal_text: <think>reasoning</think>answer
+      vllm: *d_s3d
+      sglang: *d_s3d
+  REASONING.stream.3.e:
+    description: Re-entry start marker split across chunks at the lone '<' is still normal text
+    ref: dynamo
+    spec_ref: lib/parsers/REASONING_CASES.md
+    chunks:
+    - first</think>mid<
+    - think>second</think>end
+    expected:
+      dynamo: &d_s3e
+        reasoning_text: ''
+        normal_text: <think>first</think>mid<think>second</think>end
+      vllm: *d_s3e
+      sglang: *d_s3e
   REASONING.stream.1.b:
     description: Plain text is passed through after the synthetic opener
     ref: *upstream_ref

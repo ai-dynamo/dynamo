@@ -103,6 +103,44 @@ cases:
         normal_text: plain <thesis answer
       vllm: *d_s6
       sglang: *d_s6
+  REASONING.stream.3.d:
+    description: End marker split across chunks at the lone '<' (off-by-one from 3.b)
+    ref: dynamo
+    spec_ref: lib/parsers/REASONING_CASES.md
+    chunks:
+    - <think>thinking<
+    - /think>answer
+    expected:
+      dynamo:
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        reasoning_text: <think>thinking</think>answer
+        normal_text: ''
+        reason: Dynamo buffers a split end delimiter (incl. a lone '<' at the chunk boundary) and resumes normal_text after it; vLLM keeps the delimiter and answer in reasoning_text.
+      sglang:
+        reasoning_text: thinking</think>answer
+        normal_text: ''
+        reason: Dynamo reassembles an end marker split at the lone '<' and resumes normal_text after it; SGLang streams the partial delimiter as reasoning, so the answer stays in reasoning_text.
+  REASONING.stream.3.e:
+    description: Re-entry start marker split across chunks at the lone '<' (start-marker symmetric of 3.d) — a second <think> straddles the boundary, so the re-think must reassemble and not leak
+    ref: dynamo
+    spec_ref: lib/parsers/REASONING_CASES.md
+    chunks:
+    - <think>first</think>mid<
+    - think>second</think>end
+    expected:
+      dynamo:
+        reasoning_text: firstsecond
+        normal_text: midend
+      vllm:
+        reasoning_text: first
+        normal_text: "mid<think>second</think>end"
+        reason: Dynamo buffers a re-entry <think> split at the lone '<' and re-enters reasoning for the second span; vLLM does not re-enter, so the later complete span stays in normal_text.
+      sglang:
+        reasoning_text: first
+        normal_text: "mid<think>second</think>end"
+        reason: Dynamo reassembles the second <think> split at the lone '<' and concatenates both spans; SGLang exits at the first end marker and does not re-enter, leaving the later span in normal_text.
   REASONING.stream.1.b:
     description: Plain text never enters reasoning mode in Dynamo
     ref: *upstream_ref

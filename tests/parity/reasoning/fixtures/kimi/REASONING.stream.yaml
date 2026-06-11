@@ -88,6 +88,38 @@ cases:
       vllm:
         unavailable: vLLM has no Kimi reasoning parser for this delimiter family.
       sglang: *d_s6
+  REASONING.stream.3.d:
+    description: End marker split across chunks at the lone '◁' first character (off-by-one from 3.b)
+    ref: dynamo
+    spec_ref: lib/parsers/REASONING_CASES.md
+    chunks:
+    - ◁think▷thinking◁
+    - /think▷answer
+    expected:
+      dynamo:
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        unavailable: vLLM has no Kimi reasoning parser for this delimiter family.
+      sglang:
+        reasoning_text: thinking◁/think▷answer
+        normal_text: ''
+  REASONING.stream.3.e:
+    description: Re-entry start marker split across chunks at the lone '◁' first character (start-marker symmetric of 3.d)
+    ref: dynamo
+    spec_ref: lib/parsers/REASONING_CASES.md
+    chunks:
+    - ◁think▷first◁/think▷mid◁
+    - think▷second◁/think▷end
+    expected:
+      dynamo:
+        reasoning_text: firstsecond
+        normal_text: midend
+      vllm:
+        unavailable: vLLM has no Kimi reasoning parser for this delimiter family.
+      sglang:
+        reasoning_text: first
+        normal_text: mid◁think▷second◁/think▷end
   REASONING.stream.1.b:
     description: Plain text without reasoning markers
     ref: dynamo

@@ -96,6 +96,39 @@ cases:
       vllm: *d_s6
       sglang:
         unavailable: SGLang has no reasoning parser for family='granite'
+  REASONING.stream.3.d:
+    description: End marker split across chunks at the lone 'H' first character (off-by-one from 3.b)
+    dynamo_leak: true
+    ref: dynamo
+    spec_ref: lib/parsers/REASONING_CASES.md
+    chunks:
+    - 'Here is my thought process: thinking H'
+    - 'ere is my response: answer'
+    expected:
+      dynamo:
+        reasoning_text: ' thinking Here is my response: answer'
+        normal_text: ''
+      vllm:
+        reasoning_text: 'Here is my thought process: thinking H'
+        normal_text: ' answer'
+      sglang:
+        unavailable: SGLang has no reasoning parser for family='granite'
+  REASONING.stream.3.e:
+    description: Re-entry start marker split across chunks at the lone 'H' first character — granite does not re-enter, so the split marker text passes through to normal_text
+    ref: dynamo
+    spec_ref: lib/parsers/REASONING_CASES.md
+    chunks:
+    - 'Here is my thought process: first Here is my response: mid H'
+    - 'ere is my thought process: second Here is my response: end'
+    expected:
+      dynamo:
+        reasoning_text: ' first '
+        normal_text: ' mid Here is my thought process: second Here is my response: end'
+      vllm:
+        reasoning_text: 'st '
+        normal_text: ' mid Here is my thought process: second Here is my response: end'
+      sglang:
+        unavailable: SGLang has no reasoning parser for family='granite'
   REASONING.stream.1.b:
     description: Plain text never enters reasoning mode
     ref: *upstream_ref

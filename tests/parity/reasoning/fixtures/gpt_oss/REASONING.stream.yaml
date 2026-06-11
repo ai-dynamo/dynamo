@@ -92,6 +92,41 @@ cases:
         reasoning_text: ''
         normal_text: ''
       sglang: *id001
+  REASONING.stream.3.d:
+    description: Harmony end token split across chunks at the lone '<' (off-by-one from 3.b)
+    ref: dynamo
+    spec_ref: lib/parsers/REASONING_CASES.md
+    chunks:
+    - <|channel|>analysis<|message|>thinking<
+    - '|end|><|start|>assistant<|channel|>final<|message|>answer'
+    expected:
+      dynamo:
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        unavailable: vLLM gpt-oss streaming parity for a split Harmony end token needs explicit token_chunks; text-only chunks are not faithful.
+      sglang:
+        reasoning_text: thinking<|end|><|start|>assistant<|channel|>final<|message|>answer
+        normal_text: ''
+        reason: SGLang does not recognize the Harmony end marker split at the lone '<' in text-only streaming chunks, so the final-channel text remains in reasoning_text instead of being emitted as normal_text.
+  REASONING.stream.3.e:
+    description: Second analysis-channel start split across chunks at the lone '<' (start-marker symmetric of 3.d)
+    ref: dynamo
+    spec_ref: lib/parsers/REASONING_CASES.md
+    chunks:
+    - <|channel|>analysis<|message|>first<|end|><|start|>assistant<
+    - '|channel|>analysis<|message|>second<|end|><|start|>assistant<|channel|>final<|message|>done'
+    expected:
+      dynamo:
+        reasoning_text: "first\nsecond"
+        normal_text: done
+      vllm:
+        reasoning_text: "first\nsecond"
+        normal_text: done
+      sglang:
+        reasoning_text: firstsecond
+        normal_text: done
+        reason: SGLang concatenates multiple Harmony analysis spans without an inserted separator, while Dynamo/vLLM preserve the span boundary with a newline.
   REASONING.stream.4.a:
     description: Recipientless Harmony commentary is visible normal text across chunks
     ref: *upstream_ref

@@ -96,6 +96,40 @@ cases:
       sglang:
         reasoning_text: ''
         normal_text: plain [THESIS answer
+  REASONING.stream.3.d:
+    description: End marker split across chunks at the lone '[' (off-by-one from 3.b)
+    ref: dynamo
+    spec_ref: lib/parsers/REASONING_CASES.md
+    chunks:
+    - '[THINK]thinking['
+    - /THINK]answer
+    expected:
+      dynamo:
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        reasoning_text: '[THINK]thinking[/THINK]answer'
+        normal_text: ''
+      sglang:
+        reasoning_text: thinking[/THINK]answer
+        normal_text: ''
+  REASONING.stream.3.e:
+    description: Re-entry start marker split across chunks at the lone '[' (start-marker symmetric of 3.d)
+    ref: dynamo
+    spec_ref: lib/parsers/REASONING_CASES.md
+    chunks:
+    - '[THINK]first[/THINK]mid['
+    - THINK]second[/THINK]end
+    expected:
+      dynamo:
+        reasoning_text: firstsecond
+        normal_text: midend
+      vllm:
+        reasoning_text: first
+        normal_text: mid[THINK]second[/THINK]end
+      sglang:
+        reasoning_text: first
+        normal_text: mid[THINK]second[/THINK]end
   REASONING.stream.1.b:
     description: Plain text stays in force-reasoning mode until an end marker
     ref: *upstream_ref
