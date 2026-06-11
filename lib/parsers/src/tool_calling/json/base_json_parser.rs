@@ -711,6 +711,15 @@ pub fn detect_tool_call_start_basic_json(chunk: &str, config: &JsonParserConfig)
 mod repair_tests {
     use super::*;
 
+    fn marker_config(allow_eof_recovery: bool) -> JsonParserConfig {
+        JsonParserConfig {
+            tool_call_start_tokens: vec!["<tool_call>".to_string()],
+            tool_call_end_tokens: vec!["</tool_call>".to_string()],
+            allow_eof_recovery,
+            ..Default::default()
+        }
+    }
+
     // EOF inside an escape sequence (`{"k":"a\` → `{"k":"a\\"}`). Without
     // the `escape` guard, the appended `"` would itself be escaped and the
     // resulting JSON would still be invalid.
@@ -759,6 +768,67 @@ mod repair_tests {
             array_calls[0].function.arguments,
             r#"{"source":"arguments"}"#
         );
+    }
+
+    #[test]
+    fn test_multiple_marker_payloads_preserve_order_and_arguments() {
+        let config = marker_config(false);
+        let input = concat!(
+            r#"<tool_call>{"name":"first","arguments":{"x":1}}</tool_call>"#,
+            r#"<tool_call>{"name":"second","arguments":{"y":2}}</tool_call>"#,
+        );
+
+        let (calls, normal_text) = try_tool_call_parse_basic_json(input, &config, None).unwrap();
+
+        assert_eq!(normal_text.as_deref(), Some(""));
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].function.name, "first");
+        assert_eq!(calls[0].function.arguments, r#"{"x":1}"#);
+        assert_eq!(calls[1].function.name, "second");
+        assert_eq!(calls[1].function.arguments, r#"{"y":2}"#);
+    }
+
+    #[test]
+    fn test_marker_payload_preserves_normal_text_prefix() {
+        let config = marker_config(false);
+        let input =
+            r#"I will check. <tool_call>{"name":"lookup","arguments":{"q":"sf"}}</tool_call>"#;
+
+        let (calls, normal_text) = try_tool_call_parse_basic_json(input, &config, None).unwrap();
+
+        assert_eq!(normal_text.as_deref(), Some("I will check."));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "lookup");
+        assert_eq!(calls[0].function.arguments, r#"{"q":"sf"}"#);
+    }
+
+    #[test]
+    fn test_marker_eof_recovery_recovers_missing_end_token_when_enabled() {
+        let config = marker_config(true);
+        let input = r#"I will check. <tool_call>{"name":"lookup","arguments":{"q":"sf"}}"#;
+
+        let (calls, normal_text) = try_tool_call_parse_basic_json(input, &config, None).unwrap();
+
+        assert_eq!(normal_text.as_deref(), Some("I will check."));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "lookup");
+        assert_eq!(calls[0].function.arguments, r#"{"q":"sf"}"#);
+    }
+
+    #[test]
+    fn test_bare_json_with_text_prefix_preserves_prefix() {
+        let config = JsonParserConfig {
+            bare_json_mode: true,
+            ..Default::default()
+        };
+        let input = r#"Checking: {"name":"lookup","arguments":{"q":"sf"}}"#;
+
+        let (calls, normal_text) = try_tool_call_parse_basic_json(input, &config, None).unwrap();
+
+        assert_eq!(normal_text.as_deref(), Some("Checking:"));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "lookup");
+        assert_eq!(calls[0].function.arguments, r#"{"q":"sf"}"#);
     }
 }
 

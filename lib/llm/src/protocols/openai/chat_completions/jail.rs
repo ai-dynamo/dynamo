@@ -471,7 +471,6 @@ impl ChoiceJailState {
                         .check_jail_completion(
                             &self.accumulated_content,
                             &mut self.completion_progress,
-                            false,
                         )
                         .await;
                     self.partial_match_buffer.clear();
@@ -563,11 +562,7 @@ impl ChoiceJailState {
             self.accumulate(content, choice.logprobs.as_ref());
 
             let completion = jail_stream
-                .check_jail_completion(
-                    &self.accumulated_content,
-                    &mut self.completion_progress,
-                    false,
-                )
+                .check_jail_completion(&self.accumulated_content, &mut self.completion_progress)
                 .await;
 
             if let JailCompletion::Complete(completed) = completion {
@@ -1060,11 +1055,16 @@ impl JailedStream {
             .jail_end_sequences
             .iter()
             .filter(|seq| !seq.is_empty())
-            .find_map(|seq| {
-                accumulated_content[search_start..]
-                    .find(seq)
-                    .map(|pos| search_start + pos + seq.len())
-            });
+            .filter_map(|seq| {
+                accumulated_content[search_start..].find(seq).map(|pos| {
+                    let start = search_start + pos;
+                    (start, start + seq.len())
+                })
+            })
+            .min_by(|(start_a, end_a), (start_b, end_b)| {
+                start_a.cmp(start_b).then(end_b.cmp(end_a))
+            })
+            .map(|(_, end)| end);
 
         progress.next_end_search_start = accumulated_content.len();
         found
@@ -1143,20 +1143,9 @@ impl JailedStream {
         &self,
         accumulated_content: &str,
         progress: &mut JailCompletionProgress,
-        is_finalize: bool,
     ) -> JailCompletion {
         match &self.jail_mode {
             JailMode::MarkerBased => {
-                if is_finalize {
-                    let parse_result = self
-                        .parse_marker_tool_calls(accumulated_content, true)
-                        .await;
-                    return JailCompletion::Complete(CompletedJail {
-                        split_pos: accumulated_content.len(),
-                        marker_parse_result: Some(parse_result),
-                    });
-                }
-
                 if let Some(end_pos) =
                     self.find_incremental_end_marker(accumulated_content, progress)
                 {
@@ -2015,6 +2004,23 @@ mod tests {
             .flat_map(|d| d.inner.choices.iter())
             .map(|c| c.logprobs.clone())
             .collect()
+    }
+
+    #[test]
+    fn test_incremental_end_marker_selects_earliest_longest_marker() {
+        let jail = JailedStream::builder()
+            .tool_call_parser("hermes")
+            .jail_end_sequences(["<late>", "</tool", "</tool_call>"])
+            .build();
+        let mut progress = JailCompletionProgress::default();
+        let content = r#"<tool_call>{"name":"lookup","arguments":{}}</tool_call>visible<late>"#;
+
+        let expected = content.find("</tool_call>").unwrap() + "</tool_call>".len();
+
+        assert_eq!(
+            jail.find_incremental_end_marker(content, &mut progress),
+            Some(expected)
+        );
     }
 
     #[tokio::test]
