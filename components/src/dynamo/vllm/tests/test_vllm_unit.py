@@ -902,9 +902,42 @@ def test_build_sampling_params_maps_max_thinking_tokens():
     assert sp.thinking_token_budget == 1024
 
 
-def test_build_sampling_params_applies_nvext_routed_experts_prompt_start():
+@pytest.mark.parametrize("shape", ["nvext", "extra_args"])
+def test_build_sampling_params_applies_nvext_routed_experts_prompt_start(shape):
     """routed_experts_prompt_start rides nvext (not sampling_options) and is
-    applied onto SamplingParams so vLLM trims routing engine-side."""
+    applied onto SamplingParams so vLLM trims routing engine-side. The worker
+    accepts both the raw OpenAI shape (request["nvext"], used by SGLang/tests)
+    and the Rust-preprocessor shape (request["extra_args"]["nvext"])."""
+    if not hasattr(SamplingParams(), "routed_experts_prompt_start"):
+        pytest.skip("installed vLLM has no routed_experts_prompt_start support")
+
+    def make_request(value):
+        request = {
+            "token_ids": [1, 2, 3],
+            "sampling_options": {},
+            "stop_conditions": {},
+            "output_options": {},
+        }
+        if shape == "nvext":
+            request["nvext"] = {"routed_experts_prompt_start": value}
+        else:
+            request["extra_args"] = {
+                "nvext": {"routed_experts_prompt_start": value}
+            }
+        return request
+
+    sp = build_sampling_params(make_request(4), default_sampling_params={})
+    assert sp.routed_experts_prompt_start == 4
+
+    # negative / non-int / out-of-u32-range values are clamped to 0
+    for bad in (-1, True, 1.5, "4", 2**32):
+        sp = build_sampling_params(make_request(bad), default_sampling_params={})
+        assert sp.routed_experts_prompt_start == 0
+
+
+def test_build_sampling_params_routed_experts_raw_nvext_takes_precedence():
+    """When both nvext shapes carry the offset, the raw request["nvext"]
+    source wins (matches _iter_nvext_sources priority order)."""
     if not hasattr(SamplingParams(), "routed_experts_prompt_start"):
         pytest.skip("installed vLLM has no routed_experts_prompt_start support")
 
@@ -913,15 +946,11 @@ def test_build_sampling_params_applies_nvext_routed_experts_prompt_start():
         "sampling_options": {},
         "stop_conditions": {},
         "output_options": {},
-        "nvext": {"routed_experts_prompt_start": 4},
+        "nvext": {"routed_experts_prompt_start": 7},
+        "extra_args": {"nvext": {"routed_experts_prompt_start": 9}},
     }
     sp = build_sampling_params(request, default_sampling_params={})
-    assert sp.routed_experts_prompt_start == 4
-
-    # negative / bad values are clamped to 0
-    request["nvext"]["routed_experts_prompt_start"] = -1
-    sp = build_sampling_params(request, default_sampling_params={})
-    assert sp.routed_experts_prompt_start == 0
+    assert sp.routed_experts_prompt_start == 7
 
 
 def _make_dynamo_config(**overrides):

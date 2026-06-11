@@ -767,11 +767,15 @@ def build_sampling_params(
             break
 
     # routed_experts_prompt_start (RL capture offset) must be a non-negative
-    # int; reject bad client values so the worker emits a sane `start` instead
-    # of a bogus offset the consumer cannot align (vLLM clamps the upper bound).
+    # int within the frontend's u32 range; reject bad client values so the worker
+    # emits a sane `start` instead of a bogus offset the consumer cannot align
+    # (vLLM clamps the upper bound against the actual sequence length).
     reps = getattr(sampling_params, "routed_experts_prompt_start", None)
     if reps is not None and (
-        isinstance(reps, bool) or not isinstance(reps, int) or reps < 0
+        isinstance(reps, bool)
+        or not isinstance(reps, int)
+        or reps < 0
+        or reps > 0xFFFFFFFF
     ):
         logger.warning(
             "Ignoring invalid routed_experts_prompt_start=%r (want non-negative int)",
