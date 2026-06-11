@@ -101,19 +101,23 @@ serving graph, while the `dynamo-platform` chart provides the operator, CRDs, NA
 control-plane services.
 
 Dynamo is Kubernetes-native in this path. Frontends, vLLM workers, EPP components, and other Dynamo
-services discover each other through Kubernetes resources instead of an etcd deployment. The
-`dynamo-platform` chart still installs NATS because the event plane is separate from discovery:
-KV-aware routing needs live worker cache events, and the validated Kubernetes path uses NATS for
-those events.
+services discover each other through Kubernetes resources instead of an etcd deployment. NATS serves
+a different purpose: it is part of the Dynamo dataplane for real-time, high-throughput streaming of
+KV cache location updates. The `dynamo-platform` chart installs NATS so the router and EPP can track
+which workers hold which KV blocks as those blocks are stored and evicted.
 
 KV-aware routing is one of the main reasons to run Dynamo. Agentic workloads repeatedly append to a
 long prefix: system prompt, tool definitions, conversation history, tool results, and generated
 reasoning. If each turn lands on a worker that does not already hold the prefix, the system
 recomputes the same tokens again and again. Cache-aware placement keeps turns close to the workers
-that already hold their KV blocks. Together with disaggregated serving, this changes the shape of
-many long-running token workloads from repeated prefix recomputation toward reuse of already computed
-state. For sessions whose prompt grows turn by turn, that moves the dominant prefill work from
-quadratic growth toward linear reuse.
+that already hold their KV blocks.
+
+This separation of prefill and decode is disaggregated serving. It lets the expensive
+prompt-processing phase and the token-generation phase scale independently. With cached KV state on
+the decode path, long-running sessions can reuse previously computed prefixes instead of recomputing
+them on every turn. For prompts that grow turn by turn, KV-aware routing plus disaggregated serving
+avoid repeated quadratic prefill and enable linear reuse during the decode phase. That combination
+makes Dynamo well suited to datacenter-scale inference.
 
 > [!IMPORTANT]
 > The request plane and the KV event plane are separate. In Dynamo 1.2, the request plane defaults
