@@ -1484,6 +1484,63 @@ mod tests {
         rt.shutdown();
     }
 
+    /// Positive counterpart to the empty-pool test: with a real routable
+    /// instance present, the load-aware selection that the bidirectional
+    /// `generate` path uses (`select_load_aware_worker`) must return that
+    /// worker for every load-aware mode — not `None`/an error. This is the
+    /// behavior the ticket added; previously these modes fell through
+    /// `select_next_worker()`, which returns `None` for them.
+    #[tokio::test]
+    async fn bidirectional_load_aware_modes_select_available_worker() {
+        const RECONCILE: std::time::Duration = std::time::Duration::from_millis(50);
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+
+        for mode in [
+            RouterMode::PowerOfTwoChoices,
+            RouterMode::LeastLoaded,
+            RouterMode::DeviceAwareWeighted,
+        ] {
+            // Unique namespace per mode so a registered instance never leaks
+            // across iterations.
+            let ns = drt.namespace(format!("test_bidi_pos_{mode:?}")).unwrap();
+            let component = ns.component("test_component".to_string()).unwrap();
+            let endpoint = component.endpoint("test_endpoint".to_string());
+            let client = Client::with_reconcile_interval(endpoint.clone(), RECONCILE)
+                .await
+                .unwrap();
+
+            endpoint.register_endpoint_instance().await.unwrap();
+            let instances = client.wait_for_instances().await.unwrap();
+            let worker_id = instances[0].id();
+            // Wait until the client considers the worker routable (reconcile).
+            for _ in 0..20 {
+                if client.instance_ids_avail().contains(&worker_id) {
+                    break;
+                }
+                tokio::time::sleep(RECONCILE).await;
+            }
+
+            let router = PushRouter::<u64, TestResponse>::from_client(client.clone(), mode)
+                .await
+                .unwrap();
+
+            let (selected, _permit) = router
+                .select_load_aware_worker()
+                .await
+                .unwrap_or_else(|e| panic!("{mode:?} should select the available worker: {e:?}"));
+            assert!(
+                client.instance_ids_avail().contains(&selected),
+                "{mode:?} selected {selected}, which must be a routable instance: {:?}",
+                client.instance_ids_avail()
+            );
+        }
+
+        rt.shutdown();
+    }
+
     /// KV remains genuinely unsupported for bidirectional dispatch (content-aware
     /// selection vs. reserve-before-first-frame). Its error must clearly say so —
     /// distinct from the "no instances" message used for supported-but-empty modes.
