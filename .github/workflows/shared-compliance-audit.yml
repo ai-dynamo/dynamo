@@ -45,13 +45,16 @@ on:
 jobs:
   audit:
     name: Compliance audit
-    # syft pulls the FULL multi-GB image and catalogs it in memory, which
-    # exhausts prod-default-small-v2 on the large CUDA/frontend images (the
-    # runner dies mid-scan -> job failure that the step-level continue-on-error
-    # can't absorb). prod-default-v2 has the disk/RAM headroom to pull + scan.
-    runs-on: prod-default-v2
+    # syft pulls the FULL multi-GB image and catalogs it on disk. small-v2 died
+    # on every large image; prod-default-v2 fixed the small ones (frontend,
+    # planner) but the ~15-20GB CUDA runtime images (vllm, sglang, trtllm) still
+    # killed the runner mid-scan (hard runner-loss: job failure that step-level
+    # continue-on-error can't absorb, no log uploaded). prod-deploy-tester-v1 is
+    # provisioned to pull + RUN full runtime images, so it has the disk/RAM to
+    # hold one image and scan it.
+    runs-on: prod-deploy-tester-v1
     # Safety net: if a scan still runs away, fail cleanly instead of holding a
-    # runner for the 360-min default. Observed scans are 11-22 min.
+    # runner for the 360-min default. A healthy scan completes in <20 min.
     timeout-minutes: 45
     steps:
       - name: Checkout repository
@@ -109,8 +112,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Disk visibility: syft materializes the full image to disk. If a large
+          # CUDA image still exhausts the runner, this snapshot pinpoints it.
+          echo "::group::disk before scan"; df -h; echo "::endgroup::"
           syft "${{ steps.resolve.outputs.image_ref }}" --platform linux/amd64 \
             -o cyclonedx-json=/tmp/syft.cdx.json
+          echo "::group::disk after scan"; df -h; echo "::endgroup::"
           OUR_CSV=$(find /tmp/compliance -path '*linux_amd64*' -name 'osrb-*.csv' | head -1)
           [ -z "${OUR_CSV}" ] && OUR_CSV=$(find /tmp/compliance -name 'osrb-*.csv' | head -1)
           echo "auditing against ${OUR_CSV}"
