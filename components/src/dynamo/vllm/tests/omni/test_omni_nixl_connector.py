@@ -146,7 +146,9 @@ def test_nixl_connector_object_roundtrip(fake_nixl):
 def test_nixl_connector_cleanup_clears_pending(fake_nixl):
     connector = nixl_module.DynamoOmniNixlConnector(config={"pending_timeout_s": 60})
     try:
-        ok, _, _ = connector.put("0", "1", "req-clean", torch.tensor([1], dtype=torch.int64))
+        ok, _, _ = connector.put(
+            "0", "1", "req-clean", torch.tensor([1], dtype=torch.int64)
+        )
         assert ok is True
         assert "req-clean" in connector._pending
 
