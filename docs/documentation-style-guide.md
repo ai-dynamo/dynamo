@@ -22,7 +22,7 @@ rules, and no internal references. Treat everything else here as guidance, and d
 ## Frontmatter and title
 
 Fern generates the page H1 from the nav `page:` value (`docs/index.yml` and the versioned navs), so
-**do not add a body `# H1`** — it renders a second, duplicate title. Start the body at `##`.
+**do not add a body `# H1`**: it renders a second, duplicate title. Start the body at `##`.
 Frontmatter holds the SPDX header plus metadata, and **must contain at least one real YAML key**, or
 the SPDX `#` comments are read as body content and render as H1s.
 
@@ -37,7 +37,7 @@ subtitle: Router flags, event transport, and tuning guidance
 Intro paragraph (no body `# H1`), then `##` sections.
 ```
 
-- `title`: sets the page H1, the browser-tab `<title>`, and the sidebar label. Optional — if omitted,
+- `title`: sets the page H1, the browser-tab `<title>`, and the sidebar label. Optional; if omitted,
   Fern uses the nav `page:` value as the H1. Set it when the heading should differ from a short nav
   label (e.g. nav "Introduction", H1 "Introduction to Dynamo"), and pair with `sidebar-title`.
 - `subtitle` (**recommended**): renders as a visible subtitle under the H1 (and as the meta description).
@@ -78,11 +78,13 @@ the KV router architecture, is the most common docs smell. Split it and cross-li
 
 ## Headings and structure
 
-- Start the body at `##` — Fern generates the page H1 from the nav, so a body `# H1` duplicates it (see Frontmatter and title). Open with a short intro paragraph, then `##` sections.
+- Start the body at `##`: Fern generates the page H1 from the nav, so a body `# H1` duplicates it (see Frontmatter and title). Open with a short intro paragraph, then `##` sections.
 - Use a logical hierarchy (`##` → `###`); do not skip levels.
-- Headings use **Title Case** ("Routing Behavior", "KV Event Transport and Persistence"). This is a
-  deliberate Dynamo deviation from the Google/Microsoft sentence-case default, for consistency with
-  the existing docs.
+- Headings use **Title Case for short label / noun-phrase headings** ("Routing Behavior", "KV Event
+  Transport and Persistence"); a heading that reads as a **full phrase or clause** stays sentence case
+  ("Choosing a checkpoint flow"). Above all, be **consistent within a page**: don't mix the two
+  arbitrarily. The Title-Case-for-labels convention is a deliberate Dynamo deviation from the
+  Google/Microsoft sentence-case default.
 - No end punctuation on headings, or on short (≤3-word) list items; save periods for body copy.
 - Renaming a heading changes its anchor and breaks inbound links, so rename deliberately.
 
@@ -239,7 +241,7 @@ merge:
       link text describes the destination; every internal link and `#anchor` resolves
 - [ ] Code fences language-tagged, no shell prompts, output in `text`; admonitions GitHub-style
 - [ ] Lists typed by purpose; images have alt text and live under `assets/img/`
-- [ ] Title Case headings, no end punctuation; one page type (tutorial/how-to/reference/explanation)
+- [ ] Heading case is consistent within the page (Title Case for short labels, sentence case for full phrases); no end punctuation; one page type (tutorial/how-to/reference/explanation)
 - [ ] No internal or sensitive references (NVBug/JIRA/Linear IDs, internal hosts, secrets, TODO/FIXME)
 - [ ] Terminology: correct casing (vLLM / SGLang / TensorRT-LLM / Dynamo / Kubernetes), inclusive
       terms, acronyms expanded on first use, no needless jargon

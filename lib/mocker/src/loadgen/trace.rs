@@ -814,10 +814,10 @@ impl Trace {
         WorkloadDriver::new_trace(self, engine_block_size)
     }
 
-    pub fn into_concurrency_driver(self) -> Result<WorkloadDriver> {
+    pub fn into_concurrency_driver(self, max_in_flight: usize) -> Result<WorkloadDriver> {
         self.validate_for_concurrency_mode()?;
         let engine_block_size = self.block_size;
-        WorkloadDriver::new_concurrency(self, engine_block_size)
+        WorkloadDriver::new_concurrency(self, engine_block_size, max_in_flight)
     }
 
     pub fn into_trace_driver_with_block_size(
@@ -839,17 +839,19 @@ impl Trace {
     pub fn into_concurrency_driver_with_block_size(
         self,
         engine_block_size: usize,
+        max_in_flight: usize,
     ) -> Result<WorkloadDriver> {
         self.validate_for_concurrency_mode()?;
-        WorkloadDriver::new_concurrency(self, engine_block_size)
+        WorkloadDriver::new_concurrency(self, engine_block_size, max_in_flight)
     }
 
     pub fn into_delta_accumulating_concurrency_driver_with_block_size(
         self,
         engine_block_size: usize,
+        max_in_flight: usize,
     ) -> Result<WorkloadDriver> {
         self.validate_for_concurrency_mode()?;
-        WorkloadDriver::new_concurrency_accumulating_deltas(self, engine_block_size)
+        WorkloadDriver::new_concurrency_accumulating_deltas(self, engine_block_size, max_in_flight)
     }
 
     fn validate(&self, allow_missing_first_timestamp: bool) -> Result<()> {

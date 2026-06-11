@@ -7,17 +7,9 @@ Given a list of ``InProcessPluginSpec`` (see ``registry/config.py``),
 import the named module, instantiate the named class with ``kwargs``,
 and hand the instance to ``orchestrator.register_internal``.
 
-PR #1 deferred wiring
----------------------
-This helper is fully implemented + unit-tested but **not yet called**
-from any production startup path. ``planner.plugin_registration.in_process_plugins``
-config entries are silently ignored in PR #1. The wiring lands together
-with builtin plugins in PR #3, where ``OrchestratorEngineAdapter.bootstrap_plugins``
-will invoke ``load_in_process_plugins`` after registering builtins so
-operator-declared in-process plugins coexist with builtins. Tests in
-``tests/plugins/orchestrator/test_in_process_loader.py`` cover the
-helper's contract; the missing piece is the single call site, not the
-loader logic.
+``OrchestratorEngineAdapter.bootstrap_plugins`` invokes this helper after
+registering builtins and before the Bootstrap fan-out, so operator-declared
+in-process plugins coexist with builtins and receive the same lifecycle pass.
 """
 
 from __future__ import annotations

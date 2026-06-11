@@ -472,10 +472,7 @@ impl DisaggRuntime {
     /// Pick the next logical timestamp from arrivals, worker completions, or decode handoffs.
     fn next_timestamp(&mut self) -> Option<f64> {
         let next_event_ms = self.events.peek().map(|event| event.at_ms);
-        let next = choose_next_timestamp(
-            self.admission.next_ready_time_ms(self.cluster_in_flight()),
-            next_event_ms,
-        );
+        let next = choose_next_timestamp(self.admission.next_ready_time_ms(), next_event_ms);
         #[cfg(feature = "kvbm-offload")]
         {
             let next_offload = choose_next_timestamp(
@@ -1743,7 +1740,7 @@ mod tests {
     }
 
     #[test]
-    fn test_concurrency_workload_delayed_follow_up_does_not_bypass_other_ready_sessions() {
+    fn test_concurrency_workload_holds_session_slot_depth_first() {
         let (collector, _) = run_concurrency_workload_collect(
             &disagg_config(),
             multiturn_trace(),
@@ -1763,7 +1760,7 @@ mod tests {
                 .into_iter()
                 .map(|(_, input_length)| input_length)
                 .collect::<Vec<_>>(),
-            vec![64, 128, 192]
+            vec![64, 192, 128]
         );
     }
 }

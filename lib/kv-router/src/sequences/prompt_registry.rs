@@ -19,6 +19,34 @@ use super::single::PromptMembershipDelta;
 use super::topology::WorkerTopologyChange;
 use crate::protocols::WorkerWithDpRank;
 
+/// Ephemeral, request-specific view of worker load.
+///
+/// Values are materialized for one incoming request at a specific instant and
+/// should be passed to worker selection immediately. Do not persist, reuse, or
+/// publish this projection as durable worker state.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerLoadProjection {
+    pub active_prefill_tokens: usize,
+    pub active_decode_blocks: usize,
+    /// Request blocks not already shared with active sequences on this worker.
+    ///
+    /// These blocks may still exist in an inactive cache; this field describes
+    /// additional active block footprint, not cache misses.
+    pub additional_active_blocks: usize,
+}
+
+impl WorkerLoadProjection {
+    pub fn potential_decode_blocks(self) -> usize {
+        self.active_decode_blocks + self.additional_active_blocks
+    }
+}
+
+/// Reusable snapshot of a worker's currently tracked execution state.
+///
+/// `active_blocks` is the worker's unique active decode load in blocks.
+/// `prefill` retains the decay state needed to evaluate active prefill load in
+/// tokens at a caller-provided instant. Unlike [`WorkerLoadProjection`], this
+/// snapshot contains no incoming-request-specific state.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WorkerLoadSnapshot {
     pub(super) active_blocks: usize,
@@ -159,6 +187,32 @@ impl PromptRegistry {
         }
 
         (potential_blocks, potential_tokens)
+    }
+
+    pub(super) fn project_worker_loads(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+    ) -> FxHashMap<WorkerWithDpRank, WorkerLoadProjection> {
+        let query_len = token_sequence.map_or(0, |query| query.len());
+        let matched_depth = self.membership.compute_overlap_depths(token_sequence);
+        let mut projections = FxHashMap::with_capacity_and_hasher(self.loads.len(), FxBuildHasher);
+
+        for entry in &self.loads {
+            let worker = *entry.key();
+            let load = *entry.value();
+            let overlap_depth = matched_depth.get(&worker).copied().unwrap_or(0);
+            projections.insert(
+                worker,
+                WorkerLoadProjection {
+                    active_prefill_tokens: load.active_tokens(decay_now),
+                    active_decode_blocks: load.active_blocks,
+                    additional_active_blocks: query_len.saturating_sub(overlap_depth),
+                },
+            );
+        }
+
+        projections
     }
 
     pub(super) fn potential_blocks_and_tokens(
