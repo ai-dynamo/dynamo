@@ -95,9 +95,6 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             self._num_req_predictor = predictor_cls(config)
             self._isl_predictor = predictor_cls(config)
             self._osl_predictor = predictor_cls(config)
-            # KV hit rate has no good offline-trace proxy, so it is NOT warmed
-            # via ``warm_load_predictors``; it learns only from live observations.
-            self._kv_hit_rate_predictor = predictor_cls(config)
 
         self._num_p_workers: int = 0
         self._num_d_workers: int = 0
@@ -109,11 +106,14 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         self._throughput_lower_bound_p: int = 1
         self._throughput_lower_bound_d: int = 1
 
-        # Most recent observed KV hit rate from the router. Used by load-scaling
-        # to discount queued/avg prefill tokens in ``estimate_next_ttft``. Sticky
-        # across ticks because load-scaling and throughput-scaling cadences
-        # may differ. ``None`` means "no observation yet" -> no discount.
+        # Most recent observed KV hit rate from the router. Runtime metadata like
+        # this is intentionally last-value only, not fed through the traffic load
+        # predictor. ``None`` means "no observation yet" -> no discount.
         self._last_kv_hit_rate: Optional[float] = None
+        # Most recent speculative decode accept length. This uses last-value
+        # semantics as runtime metadata; FPM observations remain raw per-forward
+        # data and cold start/no observation falls back to 1.0.
+        self._last_accept_length: float = 1.0
 
         self._next_load_s: float = float("inf")
         self._next_throughput_s: float = float("inf")
@@ -141,6 +141,7 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
     def update_capabilities(self, capabilities: WorkerCapabilities) -> None:
         """Replace the current worker capabilities."""
         self._capabilities = capabilities
+        self._last_accept_length = self._clamp_accept_length(self._last_accept_length)
         if self._is_easy:
             return
         if self._is_agg and hasattr(self, "_agg_regression"):
@@ -375,16 +376,31 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             self._isl_predictor.add_data_point(traffic.isl)
             self._osl_predictor.add_data_point(traffic.osl)
         if traffic.kv_hit_rate is not None and not math.isnan(traffic.kv_hit_rate):
-            if self._config.enable_throughput_scaling:
-                # Mixed mode: feed the predictor; ``_last_kv_hit_rate`` will be
-                # overwritten with the predicted value inside
-                # ``_advance_throughput`` so load scaling consumes the smoothed
-                # forecast (not the raw per-window observation).
-                self._kv_hit_rate_predictor.add_data_point(traffic.kv_hit_rate)
-            else:
-                # Load-only mode: there is no predictor path, the load tick
-                # consumes the freshly observed average directly.
-                self._last_kv_hit_rate = traffic.kv_hit_rate
+            self._last_kv_hit_rate = traffic.kv_hit_rate
+
+        self._observe_accept_length(traffic.accept_length)
+
+    def _effective_speculative_nextn(self) -> int:
+        d_caps = self._capabilities.decode
+        if d_caps and d_caps.speculative_nextn and d_caps.speculative_nextn > 0:
+            return d_caps.speculative_nextn
+        return max(0, int(self._config.speculative_nextn))
+
+    def _clamp_accept_length(self, accept_length: Optional[float]) -> float:
+        nextn = self._effective_speculative_nextn()
+        if nextn <= 0:
+            return 1.0
+        if accept_length is None or not math.isfinite(accept_length):
+            return 1.0
+        return min(max(float(accept_length), 1.0), float(nextn + 1))
+
+    def _observe_accept_length(self, accept_length: Optional[float]) -> None:
+        if accept_length is None or not math.isfinite(accept_length):
+            return
+        self._last_accept_length = self._clamp_accept_length(accept_length)
+
+    def _current_decode_accept_length(self) -> float:
+        return self._clamp_accept_length(self._last_accept_length)
 
     # ------------------------------------------------------------------
     # Budget

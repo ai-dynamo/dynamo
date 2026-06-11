@@ -88,6 +88,27 @@ def test_aic_perf_moe_env_flows_to_binding_kwargs(monkeypatch) -> None:
     assert config.aic_perf_kwargs()["aic_attention_dp_size"] == 1
 
 
+def test_aic_mtp_cli_documents_conditional_rates_and_seed() -> None:
+    parser = argparse.ArgumentParser()
+    AicPerfArgGroup().add_arguments(parser)
+    args = parser.parse_args(
+        [
+            "--aic-nextn",
+            "3",
+            "--aic-nextn-accept-rates",
+            "1,0.5",
+            "--aic-mtp-seed",
+            "99",
+        ]
+    )
+
+    config = AicPerfConfigBase.from_cli_args(args)
+    assert config.aic_nextn == 3
+    assert config.aic_nextn_accept_rates == "1,0.5"
+    assert config.aic_mtp_seed == 99
+    assert "all earlier drafts were accepted" in parser.format_help()
+
+
 def test_overlap_score_credit_cli_uses_kv_router_config_field() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)

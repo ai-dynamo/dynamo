@@ -1325,6 +1325,7 @@ async fn build_local_model(
     };
 
     let rt_cfg = ModelRuntimeConfig {
+        context_length: llm.context_length,
         total_kv_blocks: llm.total_kv_blocks,
         max_num_seqs: llm.max_num_seqs,
         max_num_batched_tokens: llm.max_num_batched_tokens,
@@ -1345,7 +1346,6 @@ async fn build_local_model(
     let mut builder = LocalModelBuilder::default();
     builder
         .model_name(served_name)
-        .context_length(llm.context_length)
         .kv_cache_block_size(llm.kv_cache_block_size)
         .custom_template_path(config.custom_jinja_template.clone())
         .runtime_config(rt_cfg);
@@ -1592,6 +1592,7 @@ mod tests {
             )]
             .into(),
             llm: Some(crate::engine::LlmRegistration {
+                context_length: Some(32_768),
                 total_kv_blocks: Some(100),
                 max_num_seqs: Some(16),
                 max_num_batched_tokens: Some(8192),
@@ -1605,6 +1606,7 @@ mod tests {
             .unwrap();
         let runtime_config = local_model.runtime_config();
 
+        assert_eq!(runtime_config.context_length, Some(32_768));
         assert_eq!(runtime_config.total_kv_blocks, Some(100));
         assert_eq!(runtime_config.max_num_seqs, Some(16));
         assert_eq!(runtime_config.max_num_batched_tokens, Some(8192));

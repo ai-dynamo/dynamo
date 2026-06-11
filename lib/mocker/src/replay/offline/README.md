@@ -242,8 +242,10 @@ Both single and multi harnesses support two admission modes:
 
 - Concurrency mode
   - ignores original first-turn spacing
-  - keeps up to `max_in_flight` requests resident in the cluster
-  - for workloads, still unlocks follow-up turns only after completion plus inter-turn delay
+  - single-turn request lists: keeps up to `max_in_flight` requests in flight
+  - multi-turn session traces: `max_in_flight` caps active **sessions**, and a session holds
+    its slot across all its turns and inter-turn think-time (i.e. a new session starts only
+    when an active one finishes).
   - stamps synthetic arrival times as requests are admitted
 
 This split is why `lib/mocker/src/replay/offline/mod.rs` exposes both:

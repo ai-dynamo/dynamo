@@ -8,6 +8,7 @@
 
 mod active_set;
 pub(crate) mod cleanup;
+mod lookup_update;
 
 pub mod indexer;
 pub mod protocols;

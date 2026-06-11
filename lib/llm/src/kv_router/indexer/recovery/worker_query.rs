@@ -435,12 +435,20 @@ impl WorkerQueryClient {
                 events,
                 last_event_id,
             }) => {
+                let represented_blocks = events
+                    .iter()
+                    .map(|event| match &event.event.data {
+                        KvCacheEventData::Stored(store) => store.blocks.len(),
+                        _ => 0,
+                    })
+                    .sum::<usize>();
                 tracing::info!(
-                    "Got tree dump from worker {} dp_rank {} (range too old or unspecified), count: {}, last_event_id: {}",
-                    key.0,
-                    key.1,
-                    events.len(),
-                    last_event_id
+                    worker_id = key.0,
+                    dp_rank = key.1,
+                    event_count = events.len(),
+                    represented_block_count = represented_blocks,
+                    last_event_id,
+                    "Got tree dump (range too old or unspecified)"
                 );
                 self.apply_tree_dump_replace_locked(key.0, key.1, events)
                     .await;
