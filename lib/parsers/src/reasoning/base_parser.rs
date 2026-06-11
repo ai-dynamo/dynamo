@@ -398,12 +398,17 @@ impl ReasoningParser for BasicReasoningParser {
                         // No complete marker — check for partial at end of buffer.
                         // The partial could be a prefix of either <think> or </think>
                         // (both start with `<`), so check both and use the wider overlap.
-                        // Require overlap >= 2 so a lone `<` passes through for tool call
-                        // XML tags like `<invoke>` or `<minimax:tool_call>`.
+                        // Hold back ANY non-empty overlap, including a lone `<`. A re-entry
+                        // `<think>` (or a stray `</think>`) split at the `<` chunk boundary
+                        // must reassemble (DIS-2223); a `>= 2` threshold flushed the lone `<`,
+                        // so the marker leaked into normal_text and the re-think span was
+                        // misrouted. Holding a lone `<` is lossless: it is flushed merged with
+                        // the next chunk — so a tool-call tag like `<invoke>` still reaches the
+                        // jail intact, one chunk later — or by finish_reasoning_stream at EOF.
                         let ol_start = overlap(&current_text, &self.think_start_token);
                         let ol_end = overlap(&current_text, &self.think_end_token);
                         let ol = ol_start.max(ol_end);
-                        if ol >= 2 {
+                        if ol >= 1 {
                             let safe_end = current_text.len() - ol;
                             if safe_end > 0 {
                                 accumulated_normal.push_str(&current_text[..safe_end]);
@@ -506,7 +511,7 @@ mod tests {
         assert_eq!(result.reasoning_text, "with reasoning");
     }
 
-    #[test] // REASONING.stream.3.c — end token </think> split across chunks at the lone '<' boundary
+    #[test] // REASONING.stream.3.d — end token </think> split across chunks at the lone '<' boundary
     fn test_streaming_end_token_split_at_open_bracket() {
         // Repro for the Nemotron 3 Ultra tool-call leak (DIS-2223): nemotron3 /
         // nemotron_v3 / deepseek_r1 are force-reasoning, so the completion starts
@@ -532,6 +537,47 @@ mod tests {
             normal, "\n<tool_call>x</tool_call>",
             "content after a split </think> must reach normal_text (else the tool jail never sees the call)"
         );
+    }
+
+    #[test] // REASONING.stream.3.e — re-entry <think> split across chunks at the lone '<' boundary
+    fn test_streaming_reentry_start_token_split_at_open_bracket() {
+        // Symmetric to 3.d, on the START marker (DIS-2223). After a force-reasoning
+        // parser closes its block, a SECOND <think> whose '<' lands on a chunk
+        // boundary must reassemble so the re-think is parsed as reasoning — not
+        // leaked as raw <think> markup into normal_text, with its span misrouted.
+        // (Per the Harmony reading: an ambiguous re-think is parsed, info is kept.)
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), true, true);
+        let r1 = parser.parse_reasoning_streaming_incremental("first</think>mid<", &[]);
+        let r2 = parser.parse_reasoning_streaming_incremental("think>second</think>end", &[]);
+        let reasoning = format!("{}{}", r1.reasoning_text, r2.reasoning_text);
+        let normal = format!("{}{}", r1.normal_text, r2.normal_text);
+        assert_eq!(
+            reasoning, "firstsecond",
+            "a re-entry <think> split at the lone '<' must reassemble so the second span is reasoning"
+        );
+        assert_eq!(
+            normal, "midend",
+            "the <think> marker must not leak into normal_text when split at the '<' boundary"
+        );
+    }
+
+    #[test] // REASONING.batch.3.a — EOF flush of a held lone '<' (no-loss guarantee)
+    fn test_post_reasoning_dangling_open_bracket_flushed_at_eof() {
+        // A lone '<' held at end-of-stream (no next chunk to merge with) must be
+        // flushed as normal_text by finish_reasoning_stream — never dropped. This is
+        // what makes holding the lone '<' lossless for the downstream tool jail.
+        let mut parser =
+            BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+        let _ = parser.parse_reasoning_streaming_incremental("<think>x</think>", &[]);
+        let r = parser.parse_reasoning_streaming_incremental("<", &[]);
+        assert_eq!(
+            r.normal_text, "",
+            "lone '<' is held, not flushed mid-stream"
+        );
+        let f = parser.finish_reasoning_stream();
+        assert_eq!(f.normal_text, "<", "held '<' must be flushed at EOF");
+        assert_eq!(f.reasoning_text, "");
     }
 
     #[test] // REASONING.batch.6.a — multi-block
@@ -824,12 +870,14 @@ mod tests {
         assert_eq!(r3.normal_text, " final");
     }
 
-    #[test] // REASONING.batch.3.a
-    fn test_post_reasoning_angle_bracket_not_buffered() {
-        // After reasoning ends, a standalone `<` should pass through immediately
-        // as normal text. It must NOT be buffered as a potential prefix of <think>
-        // or </think>, because that would cause the downstream tool call jail to
-        // miss the `<` (e.g., `<invoke` becomes `invoke`).
+    #[test] // REASONING.batch.3.a, REASONING.stream.3.e
+    fn test_post_reasoning_angle_bracket_held_one_chunk_then_flushed() {
+        // After reasoning ends, a lone `<` could begin EITHER a re-entry `<think>`
+        // split at the `<` boundary OR a tool-call tag (`<invoke`). It is held back
+        // one chunk so a split start marker can reassemble (DIS-2223), then flushed
+        // merged with the next chunk — so the downstream tool-call jail still sees
+        // every byte (`<invoke` stays intact), one chunk later. The accumulated
+        // stream is byte-identical to flushing immediately.
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
 
@@ -839,14 +887,15 @@ mod tests {
         assert_eq!(r1.reasoning_text, "reasoning content");
         assert_eq!(r1.normal_text, "");
 
-        // After reasoning ends, a lone `<` must pass through as normal text
+        // A lone `<` is held one chunk (it could open a re-entry `<think>`).
         let r2 = parser.parse_reasoning_streaming_incremental("<", &[]);
-        assert_eq!(r2.normal_text, "<");
+        assert_eq!(r2.normal_text, "");
         assert_eq!(r2.reasoning_text, "");
 
-        // The next token should arrive independently (not merged with buffered `<`)
+        // The next chunk resolves it as a tool-call tag: the held `<` is flushed
+        // merged, so the jail receives `<invoke ...>` intact (nothing lost).
         let r3 = parser.parse_reasoning_streaming_incremental("invoke name=\"get_weather\">", &[]);
-        assert_eq!(r3.normal_text, "invoke name=\"get_weather\">");
+        assert_eq!(r3.normal_text, "<invoke name=\"get_weather\">");
         assert_eq!(r3.reasoning_text, "");
     }
 
@@ -871,12 +920,13 @@ mod tests {
         let r4 = parser.parse_reasoning_streaming_incremental("\n", &[]);
         assert_eq!(r4.normal_text, "\n");
 
-        // `<` arriving as a separate token after reasoning must NOT be buffered
+        // `<` arriving as a separate token after reasoning is held one chunk...
         let r5 = parser.parse_reasoning_streaming_incremental("<", &[]);
-        assert_eq!(r5.normal_text, "<");
+        assert_eq!(r5.normal_text, "");
 
+        // ...then flushed merged with the next chunk, so the jail still sees `<invoke`.
         let r6 = parser.parse_reasoning_streaming_incremental("invoke name=\"get_weather\">", &[]);
-        assert_eq!(r6.normal_text, "invoke name=\"get_weather\">");
+        assert_eq!(r6.normal_text, "<invoke name=\"get_weather\">");
     }
 
     #[test] // REASONING.stream.2.b, REASONING.batch.6.a, REASONING.batch.2.c
@@ -991,20 +1041,22 @@ mod tests {
 
     #[test] // REASONING.batch.3.a, helper
     fn test_lone_angle_bracket_between_reasoning_blocks() {
-        // A lone `<` between reasoning blocks should pass through (not buffer)
+        // A lone `<` between reasoning blocks is held one chunk (it could open a
+        // re-entry `<think>`), then flushed merged with the next chunk — lossless.
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
 
         let r1 = parser.parse_reasoning_streaming_incremental("<think>thought</think>", &[]);
         assert_eq!(r1.reasoning_text, "thought");
 
-        // Lone `<` must not be buffered — could be a tool call
+        // Lone `<` is held one chunk...
         let r2 = parser.parse_reasoning_streaming_incremental("<", &[]);
-        assert_eq!(r2.normal_text, "<");
+        assert_eq!(r2.normal_text, "");
         assert_eq!(r2.reasoning_text, "");
 
+        // ...and flushed merged when the next chunk proves it a tool-call tag.
         let r3 = parser.parse_reasoning_streaming_incremental("tool_call>", &[]);
-        assert_eq!(r3.normal_text, "tool_call>");
+        assert_eq!(r3.normal_text, "<tool_call>");
         assert_eq!(r3.reasoning_text, "");
 
         // But a real <think> should still work after
