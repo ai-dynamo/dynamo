@@ -45,7 +45,14 @@ on:
 jobs:
   audit:
     name: Compliance audit
-    runs-on: prod-default-small-v2
+    # syft pulls the FULL multi-GB image and catalogs it in memory, which
+    # exhausts prod-default-small-v2 on the large CUDA/frontend images (the
+    # runner dies mid-scan -> job failure that the step-level continue-on-error
+    # can't absorb). prod-default-v2 has the disk/RAM headroom to pull + scan.
+    runs-on: prod-default-v2
+    # Safety net: if a scan still runs away, fail cleanly instead of holding a
+    # runner for the 360-min default. Observed scans are 11-22 min.
+    timeout-minutes: 45
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
