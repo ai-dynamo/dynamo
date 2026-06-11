@@ -54,13 +54,15 @@
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:8df56b542526f4fffd5372f7f65a583c7852e50442c1f43c9c3feddfd93944a4",
-      "baseline_image": "lmsysorg/sglang",
-      "baseline_sbom": "sglang@8df56b54-amd64.cdx.json",
-      "baseline_tag": "v0.5.12.post1-cu130-runtime",
+      "baseline_digest": "sha256:8b2705ea7a8653ad3451b46ab835eced92d77b44e671b9cf3ad4f95fbb2efe5e",
+      "baseline_image": "nvidia/cuda",
+      "baseline_sbom": "cuda@8b2705ea-amd64.cdx.json",
+      "baseline_tag": "13.0.1-cudnn-devel-ubuntu24.04",
+      "capture_note": "lmsysorg/sglang is built on this nvidia/cuda cudnn-devel base; re-baselined from the prior sglang@8df56b54 self-baseline so the framework stack over the clean CUDA+cuDNN floor is attributed. Delta-validation skipped at capture (the from-image's imageio-ffmpeg GPL pip binary is replaced in the runtime Dockerfile); validated at runtime in CI.",
       "from_digest": "sha256:8df56b542526f4fffd5372f7f65a583c7852e50442c1f43c9c3feddfd93944a4",
       "from_image": "lmsysorg/sglang",
       "from_tag": "v0.5.12.post1-cu130-runtime",
+      "layer_prefix_check_skipped": true,
       "platform": "linux/amd64"
     },
     {
@@ -116,13 +118,15 @@
       "platform": "linux/arm64"
     },
     {
-      "baseline_digest": "sha256:8df56b542526f4fffd5372f7f65a583c7852e50442c1f43c9c3feddfd93944a4",
-      "baseline_image": "lmsysorg/sglang",
-      "baseline_sbom": "sglang@8df56b54-arm64.cdx.json",
-      "baseline_tag": "v0.5.12.post1-cu130-runtime",
+      "baseline_digest": "sha256:8b2705ea7a8653ad3451b46ab835eced92d77b44e671b9cf3ad4f95fbb2efe5e",
+      "baseline_image": "nvidia/cuda",
+      "baseline_sbom": "cuda@8b2705ea-arm64.cdx.json",
+      "baseline_tag": "13.0.1-cudnn-devel-ubuntu24.04",
+      "capture_note": "lmsysorg/sglang is built on this nvidia/cuda cudnn-devel base; re-baselined from the prior sglang@8df56b54 self-baseline so the framework stack over the clean CUDA+cuDNN floor is attributed. Delta-validation skipped at capture (the from-image's imageio-ffmpeg GPL pip binary is replaced in the runtime Dockerfile); validated at runtime in CI.",
       "from_digest": "sha256:8df56b542526f4fffd5372f7f65a583c7852e50442c1f43c9c3feddfd93944a4",
       "from_image": "lmsysorg/sglang",
       "from_tag": "v0.5.12.post1-cu130-runtime",
+      "layer_prefix_check_skipped": true,
       "platform": "linux/arm64"
     },
     {
@@ -148,6 +152,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 4 MB per file.",
-  "generated_at": "2026-06-10T21:22:30+00:00",
+  "generated_at": "2026-06-11T00:21:12+00:00",
   "schema_version": 2
 }

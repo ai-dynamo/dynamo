@@ -743,7 +743,7 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "binutils-aarch64-linux-gnu"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
