@@ -384,17 +384,85 @@ class Candidate(BaseModel):
     metrics: dict[str, float]  # replay performance: throughput, ttft, itl, e2e, goodput
 
 
-def run_smart_search(
-    search_space: SearchSpace,
-    goal: OptimizationGoal,
-    sweep: SweepConfig,
-) -> list[Candidate]:
-    """Run the Vizier + replay sweep over `search_space` and return the
-    evaluated candidates sorted best-first. Infeasible candidates (preflight
-    or SLA failures) are dropped; an empty list means nothing was viable."""
+class SmartSearchConfig(BaseModel):
+    """Top-level config integrating every search input, so a single YAML file
+    drives a whole run (`--config smart_sweep.yaml`)."""
+    model_config = ConfigDict(extra="forbid")
+    searchSpace: SearchSpace
+    goal: OptimizationGoal = Field(default_factory=OptimizationGoal)
+    sweep: SweepConfig = Field(default_factory=SweepConfig)
+
+    @classmethod
+    def from_yaml(cls, path: str) -> "SmartSearchConfig":
+        """Load + validate one YAML file into the nested config."""
+        ...
+
+
+def run_smart_search(config: SmartSearchConfig, *, evaluator: Any = None) -> list[Candidate]:
+    """Run the Vizier + replay sweep described by `config` and return the
+    evaluated candidates sorted best-first. `evaluator` defaults to the
+    Replay-backed whole-deployment evaluator (see AIC Integration); infeasible
+    candidates (preflight or SLA failures) are dropped; an empty list means
+    nothing was viable."""
     ...
 ```
 
 Each returned `Candidate` carries its decoded knob assignment (`config`) and measured `metrics`. The list is sorted best-first by `score`, which normalizes objective direction so larger is always better: `throughput`, `goodput`, and `goodput_per_gpu` use the metric directly (pick the max), while `e2e_latency` uses its negative (pick the min latency). `goodput_per_gpu` divides goodput by `usedGpus`.
 
 `SearchSpace` mirrors the deployment, engine, KV-manager, router, and planner inventories above: each group lists its `Search` / `Composite Search` dimensions (list-typed) followed by the `Pinned` knobs it needs (scalar). Planner load-predictor tuning is deliberately excluded — it runs as a separate deterministic grid sweep (see [Planner Load Predictor Independent Grid Sweep](#planner-load-predictor-independent-grid-sweep)), and its selected preset is pinned (`loadPredictorPreset`) before the main sweep.
+
+A single YAML maps to `SmartSearchConfig`, so the whole run is `--config`-driven:
+
+```yaml
+# smart_sweep.yaml
+searchSpace:
+  deploymentMode: [disagg, agg]
+  modelName: deepseek-ai/DeepSeek-V3
+  hardwareSku: h200_sxm
+  gpuBudget: 32
+  backend: [vllm]
+  routerMode: [kv_router, round_robin]
+  plannerScalingPolicy: [throughput_180_5, hybrid_180_5]
+  # other *Candidates omitted -> defaults apply
+goal:
+  target: goodput_per_gpu
+  sla: {ttftMs: 2000, itlMs: 30}
+sweep:
+  maxRounds: 40
+  parallelEvals: 16
+```
+
+Standalone, this is driven by `python -m dynamo.profiler.v2 --config smart_sweep.yaml` (Replay evaluator by default). The next section covers connecting the same config into AIC.
+
+## AIC Integration
+
+Profiler V2 is built standalone under `components/src/dynamo/profiler/v2/` first, then connected to AIConfigurator (AIC) **without inverting the dependency direction**: AIC stays the lower-layer forward-pass / memory provider, Replay (driven by Profiler V2) is the deployment evaluator, and AIC never imports Dynamo — Dynamo injects into AIC.
+
+AIC's `sweep` module already separates candidate enumeration from per-point evaluation and already injects a per-worker `Predictor` strategy. Two *additive* seams connect Profiler V2 without touching the existing analytic path or its V1/V2 parity tests.
+
+### Seam 1 — a smart sweep path
+
+AIC gains a `sweep_smart` path beside `sweep_agg` / `sweep_disagg`: a Vizier-driven driver that proposes candidate points, reuses the existing per-point evaluate primitive, scores by objective direction (`throughput` / `goodput` / `goodput_per_gpu` maximize, `e2e_latency` minimize), and returns the same candidate-set shape. It is registered as a new `Task` mode (e.g. `search_strategy: smart`); the grid paths are unchanged.
+
+### Seam 2 — an injectable deployment evaluator
+
+The per-worker `Predictor` cannot express whole-deployment Replay, so AIC adds a *separate* `DeploymentEvaluator` Protocol — not an extension of `Predictor`, so existing callers and parity stay untouched. AIC ships a default; Dynamo provides a `ReplayEvaluator` that wraps `replay_optimize` and is injected into `sweep_smart`. Replay still calls AIC for forward-pass timing, so the dependency direction is unchanged.
+
+### Config and output mapping
+
+`SmartSearchConfig` is the single input object (one YAML). Its leaf candidate fields map to AIC `Task` fields by name: engine/parallel reuse AIC's `tp/pp/dp/moe_*` + `*_candidates` convention; router/planner add new `*_candidates` of the same shape. Aligning leaf names to AIC snake_case (`router_mode_candidates`, `prefill_max_num_batched_tokens`, …) keeps the Task-field mapping mechanical. The returned `list[Candidate]` maps to AIC's `ColumnsAgg` / `ColumnsDisagg` DataFrame through a thin adapter, so AIC's downstream picking / Pareto views consume it unchanged.
+
+### CLI
+
+The smart sweep is reached through the existing AIC CLI as a new mode:
+
+```bash
+aiconfigurator cli smart --config smart_sweep.yaml --evaluator replay --save-dir ./out
+```
+
+`--config` is the `SmartSearchConfig` YAML. `--evaluator` is a CLI-selected strategy (default `analytic`; `replay` builds the Dynamo `ReplayEvaluator`) — the evaluator is a Python object and intentionally not YAML-expressible, matching how AIC already excludes strategy objects from YAML. `--evaluator replay` requires Dynamo installed in the same environment (lazy-imported for this mode only).
+
+### Phasing
+
+1. **Standalone** — `python -m dynamo.profiler.v2 --config smart_sweep.yaml` runs `run_smart_search` with the Replay evaluator by default; no AIC change.
+2. **Connected** — add the two seams above to AIC and register the `smart` mode. Because `SmartSearchConfig` already mirrors AIC `Task` field naming and the output adapts to AIC's DataFrame, promotion is mechanical wiring, not a re-spec.
