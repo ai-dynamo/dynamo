@@ -45,18 +45,18 @@ on:
 jobs:
   audit:
     name: Compliance audit
-    # syft pulls the FULL multi-GB image (from our ECR) and catalogs it on disk.
-    # Runner history: small-v2 died on every large image; prod-default-v2 fixed
-    # the small ones (frontend, planner) but the ~15-20GB CUDA runtime images
-    # (vllm, sglang, trtllm) still killed the runner mid-scan (disk too small).
-    # prod-deploy-tester-v1 was NOT the answer: its IRSA role lacks ECR (deploy
-    # tests pull from Azure ACR and the image is pulled inside a vCluster), so
-    # `aws ecr get-login-password` fails with NoCredentials. prod-builder-v3 is
-    # the build pool: its IRSA role HAS ECR (it pushes these images), and as a
-    # builder it carries large ephemeral disk for a 15-20GB pull. It builds via
-    # REMOTE BuildKit so it may have no usable local docker daemon — fine, the
-    # scan below is daemon-independent (syft pulls from the registry directly).
-    runs-on: prod-builder-v3
+    # syft pulls the FULL multi-GB image (from our ECR) and catalogs it.
+    # Runner history (every PR pool has a distinct wall for 15-20GB CUDA images):
+    #   small-v2       : disk too small (dies on all large images)
+    #   prod-default-v2: disk short for ~20GB (frontend/planner OK, big CUDA die)
+    #   deploy-tester-v1: IRSA role lacks ECR -> NoCredentials (Azure ACR + vCluster)
+    #   prod-builder-v3: 482GB disk but the runner pod OOMs syft on large images
+    #                    (sized to orchestrate REMOTE BuildKit, not scan locally)
+    # prod-tester-amd-v2 RUNS these images for tests, so it has the memory the
+    # builder lacked. Open risk: PR-path tester jobs pull via RUNNERS_REGISTRY
+    # (a mirror), not ECR, so ECR-IRSA here is unconfirmed — this run proves it.
+    # Non-GPU tester (syft needs no GPU); registry scan is daemon-independent.
+    runs-on: prod-tester-amd-v2
     # Safety net: if a scan still runs away, fail cleanly instead of holding a
     # runner for the 360-min default. A healthy scan completes in <20 min.
     timeout-minutes: 45
