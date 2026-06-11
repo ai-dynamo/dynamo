@@ -161,12 +161,37 @@ def test_resolve_lora_request_for_loaded_adapter():
     assert lora_request.lora_path == "/path/a"
 
 
-def test_resolve_lora_request_for_base_or_unknown_is_none():
+def test_resolve_lora_request_for_base_is_none(monkeypatch):
+    monkeypatch.setattr(llm_engine_mod, "get_lora_manager", lambda: MagicMock())
     engine = _make_lora_engine()
     engine.loaded_loras = {"adapterA": LoRAInfo(id=7, path="/path/a")}
 
+    # Base-model name (served name and the engine_args.model path) and the
+    # absent-model case both resolve to the base model (None), even with LoRA
+    # enabled.
     assert engine._resolve_lora_request("base-model") is None
+    assert engine._resolve_lora_request("/models/base") is None
     assert engine._resolve_lora_request(None) is None
+
+
+def test_resolve_lora_request_unknown_adapter_raises_when_lora_enabled(monkeypatch):
+    monkeypatch.setattr(llm_engine_mod, "get_lora_manager", lambda: MagicMock())
+    engine = _make_lora_engine(enable_lora=True)
+    engine.loaded_loras = {"adapterA": LoRAInfo(id=7, path="/path/a")}
+
+    # An unknown or just-unloaded adapter name must fail loudly rather than be
+    # silently served by the base model.
+    with pytest.raises(ValueError, match="unknown model or LoRA adapter"):
+        engine._resolve_lora_request("ghost-adapter")
+
+
+def test_resolve_lora_request_unknown_adapter_is_none_when_lora_disabled(monkeypatch):
+    monkeypatch.setattr(llm_engine_mod, "get_lora_manager", lambda: None)
+    engine = _make_lora_engine(enable_lora=False)
+
+    # With LoRA disabled there are no adapters, so a non-base name is left to
+    # the engine instead of being rejected here.
+    assert engine._resolve_lora_request("ghost-adapter") is None
 
 
 @pytest.mark.asyncio
@@ -666,3 +691,36 @@ async def test_load_lora_skips_publish_without_endpoint(monkeypatch):
     engine.engine_client.add_lora.assert_awaited_once()
     register.assert_not_awaited()
     assert engine.loaded_loras["adapterA"].id == 123
+
+
+@pytest.mark.asyncio
+async def test_cleanup_clears_endpoint_and_lora_state():
+    engine = _make_lora_engine(endpoint=object())
+    engine.engine_client.shutdown = MagicMock()
+    engine.loaded_loras = {"adapterA": LoRAInfo(id=7, path="/path/a")}
+    engine._published_loras = {"adapterA"}
+
+    await engine.cleanup()
+
+    # A shut-down engine must not retain a dangling endpoint reference or any
+    # stale adapter bookkeeping. The fixed stripe locks are process state, not
+    # per-adapter, so they are left intact.
+    assert engine._endpoint is None
+    assert engine.loaded_loras == {}
+    assert engine._published_loras == set()
+
+
+def test_get_lora_lock_is_stable_and_bounded():
+    from dynamo.vllm.llm_engine import _LORA_LOCK_STRIPES
+
+    engine = _make_lora_engine()
+
+    # The same name always maps to the same stripe lock: this is the
+    # serialization invariant load/unload depends on.
+    assert engine._get_lora_lock("adapterA") is engine._get_lora_lock("adapterA")
+
+    # The lock store is a fixed set of stripes, so it does not grow per distinct
+    # adapter name (bounded memory, no eviction needed).
+    for i in range(_LORA_LOCK_STRIPES * 4):
+        engine._get_lora_lock(f"adapter-{i}")
+    assert len(engine._lora_load_locks) == _LORA_LOCK_STRIPES

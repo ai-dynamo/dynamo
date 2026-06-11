@@ -13,7 +13,6 @@ import asyncio
 import logging
 import os
 import tempfile
-import threading
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any, Optional, cast
 
@@ -155,6 +154,13 @@ class _UnifiedStatLoggerFactory:
         return _UnifiedStatLogger(self, dp_rank)
 
 
+# Number of stripe locks serializing per-adapter LoRA load/unload. Fixed so
+# lock memory stays bounded no matter how many distinct adapter names are seen;
+# distinct names may share a stripe (harmless extra serialization on this
+# control-plane path).
+_LORA_LOCK_STRIPES = 32
+
+
 class VllmLLMEngine(LLMEngine):
     # Class-level default so ``__new__``-built instances (tests skipping
     # ``__init__``) still expose what ``generate()`` reads; ``start()`` sets it.
@@ -213,8 +219,12 @@ class VllmLLMEngine(LLMEngine):
         # states apart lets a retried load/unload reconcile the divergence
         # instead of short-circuiting as "already loaded" / "not found".
         self._published_loras: set[str] = set()
-        self._lora_load_locks: dict[str, asyncio.Lock] = {}
-        self._lora_load_locks_guard = threading.Lock()
+        # Striped locks serialize concurrent load/unload of the same adapter.
+        # A fixed array keyed by hash bounds lock memory (no per-name growth)
+        # and preserves the "same name -> same lock" invariant by construction,
+        # so there is no lock-eviction race. Relies only on per-process hash
+        # stability, which is all we need within a single worker.
+        self._lora_load_locks = [asyncio.Lock() for _ in range(_LORA_LOCK_STRIPES)]
 
     @classmethod
     async def from_args(
@@ -410,8 +420,9 @@ class VllmLLMEngine(LLMEngine):
             )
             local_dp_rank = None if rank is None else rank - dp_start
 
-        # Route to a loaded LoRA adapter when the request names one; base-model
-        # and unknown names resolve to None (no adapter).
+        # Route to a loaded LoRA adapter when the request names one; the base
+        # model resolves to None. With LoRA enabled, an unknown adapter name
+        # raises rather than silently falling back to the base model.
         lora_request = self._resolve_lora_request(request.get("model"))
 
         gen = self.engine_client.generate(
@@ -654,30 +665,40 @@ class VllmLLMEngine(LLMEngine):
         return await handler(body or {})
 
     def _resolve_lora_request(self, model_name: str | None) -> LoRARequest | None:
-        """Return a LoRARequest if model_name is a loaded adapter, else None."""
-        if model_name and (lora := self.loaded_loras.get(model_name)):
+        """Return a LoRARequest for a loaded adapter, or None for the base model.
+
+        Raises ValueError when LoRA is enabled and ``model_name`` is a non-base
+        name with no loaded adapter, so an unknown or just-unloaded adapter
+        fails loudly instead of being silently served by the base model. When
+        LoRA is disabled there are no adapters, so a non-base name is left to
+        the engine (current behavior) rather than rejected here.
+        """
+        if not model_name or model_name in (
+            self._served_model_name,
+            self.engine_args.model,
+        ):
+            return None
+        lora = self.loaded_loras.get(model_name)
+        if lora is not None:
             return LoRARequest(
                 lora_name=model_name,
                 lora_int_id=lora.id,
                 lora_path=lora.path,
             )
+        if self._lora_enabled():
+            raise ValueError(f"unknown model or LoRA adapter: '{model_name}'")
         return None
 
     def _get_lora_lock(self, lora_name: str) -> asyncio.Lock:
-        """Get/create the per-LoRA lock without eagerly allocating a new lock each call.
+        """Return the stripe lock that serializes load/unload for ``lora_name``.
 
-        Locks persist for the process lifetime: every load/unload for a given
-        ``lora_name`` must serialize on the *same* ``asyncio.Lock``. Evicting a
-        lock while another coroutine is still queued on it would let a later
-        caller create a second lock for the same name and run concurrently,
-        breaking mutual exclusion. The per-name memory cost is negligible.
+        A name always maps to the same stripe within the process, so every
+        load/unload for a given ``lora_name`` serializes on the *same* lock.
+        Because the stripe set is fixed, there is no per-name lock to evict and
+        thus no eviction race; the cost is that two distinct names sharing a
+        stripe serialize against each other (harmless on this control path).
         """
-        with self._lora_load_locks_guard:
-            lock = self._lora_load_locks.get(lora_name)
-            if lock is None:
-                lock = asyncio.Lock()
-                self._lora_load_locks[lora_name] = lock
-            return lock
+        return self._lora_load_locks[hash(lora_name) % _LORA_LOCK_STRIPES]
 
     async def _publish_lora_card(self, lora_name: str, lora_id: int) -> None:
         """Publish a LoRA adapter as a ModelDeploymentCard for discovery.
@@ -1273,6 +1294,15 @@ class VllmLLMEngine(LLMEngine):
         finally:
             self.engine_client = None
             self._pause_controller = None
+            # Drop the serving endpoint and dynamic-LoRA bookkeeping so a
+            # shut-down engine holds no dangling endpoint reference and no
+            # stale adapter state. Discovery cards published for the worker are
+            # reclaimed when the endpoint's lease expires on process exit. The
+            # stripe locks are fixed process state, not per-adapter, so they
+            # are left intact.
+            self._endpoint = None
+            self.loaded_loras.clear()
+            self._published_loras.clear()
             if self._prometheus_temp_dir is not None:
                 if (
                     os.environ.get("PROMETHEUS_MULTIPROC_DIR")
