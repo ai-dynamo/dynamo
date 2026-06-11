@@ -30,6 +30,11 @@ on:
         description: 'Operator image tag'
         type: string
         required: true
+      kube_context:
+        description: 'kubectl context to target (e.g. dynamo-aws-dev-02 or azure-ci). Defaults to kubeconfig current-context.'
+        type: string
+        required: false
+        default: ''
       image_tag:
         description: 'Image tag prefix (e.g. "main" for main-vllm-runtime, or a commit SHA). Defaults to github.sha.'
         type: string
@@ -51,6 +56,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Set kubectl context
+        shell: bash
+        run: kubectl config use-context "${{ inputs.kube_context || 'dynamo-aws-dev-02' }}"
       - name: Check if vCluster exists
         id: vcluster-check
         uses: ./.github/actions/check-vcluster-exists
