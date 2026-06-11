@@ -91,6 +91,8 @@ pub struct WorkloadDriver {
     in_flight: FxHashMap<Uuid, InFlightTurn>,
     ready_sessions: BinaryHeap<ReadySession>,
     max_in_flight: Option<usize>,
+    next_pending_session: usize,
+    active_count: usize,
     agentic_remaining_dependencies: Vec<usize>,
     agentic_ready_after_ms: Vec<f64>,
     agentic_dependents: FxHashMap<String, Vec<usize>>,
@@ -98,11 +100,13 @@ pub struct WorkloadDriver {
 
 impl WorkloadDriver {
     pub(crate) fn new_trace(trace: Trace, engine_block_size: usize) -> Result<Self> {
+        // Trace mode is arrival-driven and uncapped: the cap is `None`.
         Self::new(
             trace,
             engine_block_size,
             DriverMode::Trace,
             PromptMode::Full,
+            None,
         )
     }
 
@@ -115,27 +119,38 @@ impl WorkloadDriver {
             engine_block_size,
             DriverMode::Trace,
             PromptMode::DeltaCumulative,
+            None,
         )
     }
 
-    pub(crate) fn new_concurrency(trace: Trace, engine_block_size: usize) -> Result<Self> {
+    /// Build a closed-loop concurrency driver. `max_in_flight` is the *session* cap
+    /// (depth-first): a session holds its slot across all turns + think-time, and new
+    /// sessions are admitted only while fewer than `max_in_flight` are active.
+    pub(crate) fn new_concurrency(
+        trace: Trace,
+        engine_block_size: usize,
+        max_in_flight: usize,
+    ) -> Result<Self> {
         Self::new(
             trace,
             engine_block_size,
             DriverMode::Concurrency,
             PromptMode::Full,
+            Some(max_in_flight),
         )
     }
 
     pub(crate) fn new_concurrency_accumulating_deltas(
         trace: Trace,
         engine_block_size: usize,
+        max_in_flight: usize,
     ) -> Result<Self> {
         Self::new(
             trace,
             engine_block_size,
             DriverMode::Concurrency,
             PromptMode::DeltaCumulative,
+            Some(max_in_flight),
         )
     }
 
@@ -205,6 +220,8 @@ impl WorkloadDriver {
             in_flight: FxHashMap::default(),
             ready_sessions,
             max_in_flight: None,
+            next_pending_session: 0,
+            active_count: 0,
             agentic_remaining_dependencies: remaining_dependencies,
             agentic_ready_after_ms: ready_after_ms,
             agentic_dependents: dependents,
@@ -216,7 +233,15 @@ impl WorkloadDriver {
         engine_block_size: usize,
         mode: DriverMode,
         prompt_mode: PromptMode,
+        max_in_flight: Option<usize>,
     ) -> Result<Self> {
+        // `max_in_flight` is the session cap and is required iff the driver is in
+        // Concurrency mode; Trace- and AgenticTrace-mode drivers are uncapped (None).
+        debug_assert!(
+            (mode == DriverMode::Concurrency) == max_in_flight.is_some(),
+            "DriverMode::Concurrency requires max_in_flight (the session cap); \
+             Trace/AgenticTrace modes require None"
+        );
         if engine_block_size == 0 {
             bail!("engine_block_size must be greater than 0");
         }
@@ -227,13 +252,16 @@ impl WorkloadDriver {
             .sessions
             .into_iter()
             .map(|session| -> Result<SessionRuntime> {
-                let next_ready_at_ms = Some(match mode {
-                    DriverMode::Trace => session.first_arrival_timestamp_ms.unwrap_or(0.0),
-                    DriverMode::Concurrency => 0.0,
+                // Concurrency mode starts every session "pending" (not in the ready heap):
+                // sessions are admitted depth-first via `activate_pending`, gated by the
+                // session cap, so first-turns no longer flood the heap (breadth-first).
+                let next_ready_at_ms = match mode {
+                    DriverMode::Trace => Some(session.first_arrival_timestamp_ms.unwrap_or(0.0)),
+                    DriverMode::Concurrency => None,
                     DriverMode::AgenticTrace => {
                         unreachable!("agentic traces are constructed through new_agentic_trace")
                     }
-                });
+                };
                 let turns = session
                     .turns
                     .into_iter()
@@ -280,28 +308,51 @@ impl WorkloadDriver {
             })
             .collect();
 
-        Ok(Self {
+        let mut driver = Self {
             mode,
             prompt_mode,
             engine_block_size: engine_block_size_u32,
             sessions,
             in_flight: FxHashMap::default(),
             ready_sessions,
-            max_in_flight: None,
+            max_in_flight,
+            next_pending_session: 0,
+            active_count: 0,
             agentic_remaining_dependencies: Vec::new(),
             agentic_ready_after_ms: Vec::new(),
             agentic_dependents: FxHashMap::default(),
-        })
+        };
+        // Concurrency mode seeds an empty heap above; admit the initial cohort of sessions
+        // up to the cap here. The clock starts at 0 (concurrency ignores trace arrival
+        // timestamps), so the initial turn-0s are all eligible at sim start. No-op for
+        // Trace/Agentic (activate_pending is gated to Concurrency).
+        driver.activate_pending(0.0);
+        Ok(driver)
     }
 
-    /// Set a global in-flight cap. `pop_ready` will clamp by the remaining cap,
-    /// and `next_ready_time_ms` returns `None` while at cap.
-    pub fn set_max_in_flight(&mut self, cap: usize) {
-        debug_assert!(
-            self.in_flight.is_empty(),
-            "set_max_in_flight called on a driver with pending work"
-        );
-        self.max_in_flight = Some(cap);
+    /// Concurrency depth-first admission: start the next pending session(s) while fewer
+    /// than `max_in_flight` are active. A newly-activated turn-0 is stamped `ready_at = now_ms`
+    /// (the time its slot opened).
+    fn activate_pending(&mut self, now_ms: f64) {
+        if self.mode != DriverMode::Concurrency {
+            return;
+        }
+        let Some(cap) = self.max_in_flight else {
+            return;
+        };
+        while self.active_count < cap && self.next_pending_session < self.sessions.len() {
+            let session_index = self.next_pending_session;
+            self.next_pending_session += 1;
+            let session = &mut self.sessions[session_index];
+            let turn_index = session.next_turn_index;
+            session.next_ready_at_ms = Some(now_ms);
+            self.ready_sessions.push(ReadySession {
+                ready_at_ms: now_ms,
+                session_index,
+                turn_index,
+            });
+            self.active_count += 1;
+        }
     }
 
     /// Failure-path companion: release a cap slot and terminate the owning session.
@@ -319,7 +370,8 @@ impl WorkloadDriver {
             return;
         };
         let request_id = session.turns[in_flight.turn_index].request_id.clone();
-        if session.in_flight == Some(request_uuid) {
+        let released = session.in_flight == Some(request_uuid);
+        if released {
             session.in_flight = None;
             session.next_turn_index = session.turns.len();
             session.next_ready_at_ms = None;
@@ -328,6 +380,12 @@ impl WorkloadDriver {
             && let Some(request_id) = request_id
         {
             self.release_agentic_dependents(&request_id, now_ms);
+        }
+        // Concurrency: this session was active and is now terminated — free its slot and
+        // admit the next pending session.
+        if released && self.mode == DriverMode::Concurrency {
+            self.active_count = self.active_count.saturating_sub(1);
+            self.activate_pending(now_ms);
         }
     }
 
@@ -433,7 +491,9 @@ impl WorkloadDriver {
 
         session.in_flight = None;
         session.next_turn_index = in_flight.turn_index + 1;
-        if self.mode != DriverMode::AgenticTrace && session.next_turn_index < session.turns.len() {
+        let has_more_turns =
+            self.mode != DriverMode::AgenticTrace && session.next_turn_index < session.turns.len();
+        if has_more_turns {
             let ready_at_ms =
                 now_ms + session.turns[session.next_turn_index].delay_after_previous_ms;
             session.next_ready_at_ms = Some(ready_at_ms);
@@ -449,6 +509,10 @@ impl WorkloadDriver {
             && let Some(request_id) = session.turns[in_flight.turn_index].request_id.clone()
         {
             self.release_agentic_dependents(&request_id, now_ms);
+        }
+        if self.mode == DriverMode::Concurrency && !has_more_turns {
+            self.active_count = self.active_count.saturating_sub(1);
+            self.activate_pending(now_ms);
         }
         Ok(())
     }
@@ -570,10 +634,26 @@ mod tests {
         }
     }
 
+    /// A: 2 turns (turn-1 has a 5ms think-time). B, C: 1 turn each. Used for the cap>1
+    /// transition / cancellation tests (w/ a third session pending behind a cap of 2).
+    fn three_session_trace() -> Trace {
+        let mut trace = two_session_trace();
+        trace.sessions.push(SessionTrace {
+            session_id: "c".into(),
+            first_arrival_timestamp_ms: Some(0.0),
+            turns: vec![TurnTrace {
+                input_length: 2,
+                max_output_tokens: 1,
+                hash_ids: vec![7, 8],
+                delay_after_previous_ms: 0.0,
+            }],
+        });
+        trace
+    }
+
     #[test]
     fn cap_clamps_pop_ready_when_limit_is_unbounded() {
-        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1).unwrap();
-        driver.set_max_in_flight(1);
+        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1, 1).unwrap();
 
         let first = driver.pop_ready(0.0, usize::MAX);
         assert_eq!(first.len(), 1);
@@ -586,23 +666,148 @@ mod tests {
 
     #[test]
     fn pop_ready_admits_next_turn_after_on_complete() {
-        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1).unwrap();
-        driver.set_max_in_flight(1);
+        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1, 1).unwrap();
 
         let admitted = driver.pop_ready(0.0, usize::MAX);
         assert_eq!(admitted.len(), 1);
         let uuid = admitted[0].request_uuid;
         driver.on_complete(uuid, 10.0).unwrap();
 
-        let next = driver.pop_ready(10.0, usize::MAX);
+        // next admitted turn is *this* session's turn-1
+        // (ready at completion 10 + think-time 5 = 15)
+        let next = driver.pop_ready(15.0, usize::MAX);
         assert_eq!(next.len(), 1);
+        assert_eq!(next[0].turn_index, 1);
         assert_ne!(next[0].request_uuid, uuid);
     }
 
     #[test]
+    fn concurrency_is_depth_first_holding_slot_across_think_time() {
+        // Session A: 2 turns (turn-1 has a 5ms think-time). Session B: 1 turn. cap = 1.
+        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1, 1).unwrap();
+
+        // A.turn0 admitted; B is pending (not activated — cap is 1).
+        let a0 = driver.pop_ready(0.0, usize::MAX);
+        assert_eq!(a0.len(), 1);
+        assert_eq!(a0[0].turn_index, 0);
+        let a0_uuid = a0[0].request_uuid;
+        driver.on_complete(a0_uuid, 10.0).unwrap();
+
+        // During A's think-time (turn-1 ready at 10+5=15), B must NOT slip in: A holds the slot.
+        assert!(
+            driver.pop_ready(10.0, usize::MAX).is_empty(),
+            "B must not be admitted while A holds its slot in think-time"
+        );
+
+        // A.turn1 dispatches before B ever starts (depth-first).
+        let a1 = driver.pop_ready(15.0, usize::MAX);
+        assert_eq!(a1.len(), 1);
+        assert_eq!(a1[0].turn_index, 1);
+        driver.on_complete(a1[0].request_uuid, 20.0).unwrap();
+
+        // Only now that A is fully done is B activated.
+        let b0 = driver.pop_ready(20.0, usize::MAX);
+        assert_eq!(b0.len(), 1);
+        assert_eq!(b0[0].turn_index, 0);
+        assert_ne!(b0[0].request_uuid, a0_uuid);
+        assert!(!driver.is_drained(), "B still in flight");
+        driver.on_complete(b0[0].request_uuid, 30.0).unwrap();
+        assert!(driver.is_drained());
+    }
+
+    #[test]
+    fn concurrency_cap2_admits_pending_when_active_session_finishes() {
+        // cap = 2: A (2 turns) and B (1 turn) start active; C (1 turn) is pending.
+        let mut driver = WorkloadDriver::new_concurrency(three_session_trace(), 1, 2).unwrap();
+
+        // Initial cohort: A.t0 and B.t0 (the cap-2 set); C stays pending.
+        let first = driver.pop_ready(0.0, usize::MAX);
+        let mut ids: Vec<&str> = first.iter().map(|r| r.session_id.as_str()).collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["a", "b"],
+            "cap-2 admits exactly A and B; C pending"
+        );
+        let a0 = first
+            .iter()
+            .find(|r| r.session_id == "a")
+            .unwrap()
+            .request_uuid;
+        let b0 = first
+            .iter()
+            .find(|r| r.session_id == "b")
+            .unwrap()
+            .request_uuid;
+
+        // A finishes turn-0 → enters think-time (A.t1 ready at 10+5=15); A keeps its slot.
+        driver.on_complete(a0, 10.0).unwrap();
+        // B finishes its only turn → frees a slot → C is activated.
+        driver.on_complete(b0, 10.0).unwrap();
+
+        // At t=10 only C is admittable (its freed slot); A is mid-think-time and retains
+        // its slot — neither dropped nor re-admitted early.
+        let at_10 = driver.pop_ready(10.0, usize::MAX);
+        assert_eq!(at_10.len(), 1, "only C is admittable at t=10");
+        assert_eq!(at_10[0].session_id, "c");
+        assert_eq!(at_10[0].turn_index, 0);
+
+        // A's retained slot resumes once its think-time elapses (t=15), proving it was
+        // never evicted by C's admission.
+        let at_15 = driver.pop_ready(15.0, usize::MAX);
+        assert_eq!(at_15.len(), 1);
+        assert_eq!(
+            (at_15[0].session_id.as_str(), at_15[0].turn_index),
+            ("a", 1)
+        );
+    }
+
+    #[test]
+    fn release_cap_slot_terminates_inflight_session_and_admits_pending() {
+        // Mirrors an online InFlightGuard drop (cancellation), which calls release_cap_slot.
+        // cap = 2: A (2 turns) + B (1 turn) active, C (1 turn) pending. A is in think-time,
+        // B is in flight and gets cancelled.
+        let mut driver = WorkloadDriver::new_concurrency(three_session_trace(), 1, 2).unwrap();
+
+        let first = driver.pop_ready(0.0, usize::MAX);
+        let a0 = first
+            .iter()
+            .find(|r| r.session_id == "a")
+            .unwrap()
+            .request_uuid;
+        let b0 = first
+            .iter()
+            .find(|r| r.session_id == "b")
+            .unwrap()
+            .request_uuid;
+
+        // A → think-time (A.t1 ready at 15), retains its slot.
+        driver.on_complete(a0, 10.0).unwrap();
+        // B cancelled in flight: the online guard drop releases B's slot and terminates it.
+        driver.release_cap_slot(b0, 10.0);
+
+        // B's freed slot admits C; A's continuation is untouched.
+        let at_10 = driver.pop_ready(10.0, usize::MAX);
+        assert_eq!(at_10.len(), 1);
+        assert_eq!(
+            at_10[0].session_id, "c",
+            "C admitted into the slot freed by B's cancellation"
+        );
+        driver.on_complete(at_10[0].request_uuid, 12.0).unwrap();
+
+        // A's continuation survived the cancellation and resumes after its think-time.
+        let a1 = driver.pop_ready(15.0, usize::MAX);
+        assert_eq!(a1.len(), 1);
+        assert_eq!((a1[0].session_id.as_str(), a1[0].turn_index), ("a", 1));
+        driver.on_complete(a1[0].request_uuid, 20.0).unwrap();
+
+        // A (2 turns), B (cancelled/terminated), C (1 turn) all resolved → drained.
+        assert!(driver.is_drained());
+    }
+
+    #[test]
     fn next_ready_time_ms_returns_none_at_cap() {
-        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1).unwrap();
-        driver.set_max_in_flight(1);
+        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1, 1).unwrap();
 
         let admitted = driver.pop_ready(0.0, usize::MAX);
         assert_eq!(admitted.len(), 1);
@@ -620,34 +825,43 @@ mod tests {
     }
 
     #[test]
-    fn no_cap_preserves_caller_limit_behavior() {
-        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1).unwrap();
+    fn uncapped_concurrency_admits_all_sessions_up_to_caller_limit() {
+        // usize::MAX cap == effectively uncapped: every session is activated, so the
+        // caller's pop_ready limit is the only bound.
+        let mut driver =
+            WorkloadDriver::new_concurrency(two_session_trace(), 1, usize::MAX).unwrap();
 
         let admitted = driver.pop_ready(0.0, 5);
-        assert_eq!(admitted.len(), 2, "both sessions should admit with no cap");
+        assert_eq!(
+            admitted.len(),
+            2,
+            "both sessions should admit when uncapped"
+        );
         assert!(driver.next_ready_time_ms().is_none());
     }
 
     #[test]
     fn release_cap_slot_is_noop_after_on_complete() {
-        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1).unwrap();
-        driver.set_max_in_flight(1);
+        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1, 1).unwrap();
 
         let admitted = driver.pop_ready(0.0, usize::MAX);
         let uuid = admitted[0].request_uuid;
         driver.on_complete(uuid, 5.0).unwrap();
 
+        // release_cap_slot after on_complete is a no-op (the in-flight entry is already
+        // gone), so it must NOT double-decrement active_count. The session still holds its
+        // slot for turn-1 (ready at 5 + think-time 5 = 10)
         driver.release_cap_slot(uuid, 5.0);
 
-        let next = driver.pop_ready(5.0, usize::MAX);
+        let next = driver.pop_ready(10.0, usize::MAX);
         assert_eq!(next.len(), 1);
+        assert_eq!(next[0].turn_index, 1);
         assert_ne!(next[0].request_uuid, uuid);
     }
 
     #[test]
     fn release_cap_slot_recovers_cap_when_on_complete_was_skipped() {
-        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1).unwrap();
-        driver.set_max_in_flight(1);
+        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1, 1).unwrap();
 
         let admitted = driver.pop_ready(0.0, usize::MAX);
         assert_eq!(admitted.len(), 1);
@@ -664,8 +878,7 @@ mod tests {
 
     #[test]
     fn release_cap_slot_terminates_session_so_is_drained_completes() {
-        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1).unwrap();
-        driver.set_max_in_flight(1);
+        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1, 1).unwrap();
 
         let admitted = driver.pop_ready(0.0, usize::MAX);
         assert_eq!(admitted.len(), 1);
@@ -710,7 +923,7 @@ mod tests {
                 ],
             }],
         };
-        let mut driver = WorkloadDriver::new_concurrency_accumulating_deltas(trace, 4).unwrap();
+        let mut driver = WorkloadDriver::new_concurrency_accumulating_deltas(trace, 4, 1).unwrap();
 
         let first = driver.pop_ready(0.0, usize::MAX);
         assert_eq!(first.len(), 1);

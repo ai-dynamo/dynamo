@@ -6,7 +6,7 @@
 # node: two TP4 vLLM workers (GPUs 0-3 and 4-7) + the program-aware router +
 # the frontend on :8100. Hardcoded for that one config -- nothing else.
 #
-# Pair it with the pi + Harbor client (see README "Reproducing the MiniMax-M2
+# Pair it with the mini-SWE-agent client (see README "Reproducing the MiniMax-M2
 # results"). First launch JIT-warms the FP8 kernels and can take several
 # minutes before /v1/models responds.
 set -euo pipefail

@@ -52,9 +52,8 @@ impl SideIndexer {
         }
 
         let cancellation_token = component.drt().primary_token();
-        Some(Self::KvIndexer(KvIndexer::new_with_frequency(
+        Some(Self::KvIndexer(KvIndexer::new_with_pruning(
             cancellation_token,
-            None,
             block_size,
             metrics,
             prune_config,

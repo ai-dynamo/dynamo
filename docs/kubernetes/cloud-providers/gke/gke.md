@@ -4,8 +4,6 @@
 title: Google Kubernetes Engine (GKE)
 ---
 
-# Dynamo Deployment on GKE
-
 ## Pre-requisites
 
 ### Install gcloud CLI

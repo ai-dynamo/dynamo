@@ -232,7 +232,7 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
 <p class="legend summary-only">
   <strong>Overview:</strong>
   <span class="summary-key ok" aria-hidden="true"></span>green = selected implementation output is clean ·
-  <span class="summary-key problem" aria-hidden="true"></span>red = selected implementation leaks parser markup or has an expected error ·
+  <span class="summary-key problem" aria-hidden="true"></span>red = selected implementation leaks parser markup or has a parser exception ·
   <span class="summary-key na" aria-hidden="true"></span>gray = not applicable, unavailable, or missing fixture.
 </p>
 <p class="legend details-only">
@@ -251,8 +251,8 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
   (e.g. V?, S? — diverges with no <code>reason:</code> yet) ·
   <span style="color:#b00">↯</span> Dynamo leaks tool call markup into <code>normal_text</code>
   (<code>expected.dynamo.reason:</code> carries the explanation) ·
-  <span style="color:#b00">!</span> expected-error suffix
-  (e.g. V!, S! — engine crashes by design) ·
+  <span style="color:#b00">✗</span> parser exception
+  (e.g. V✗, S✗ — Python parser raised) ·
   <span style="color:#aaa">n/a</span> not applicable ·
   <span style="color:#8a6d3b">—</span> missing fixture coverage ·
   <span class="parser-suffix">†</span> = no vLLM peer tool calling parser for this family ·
@@ -298,7 +298,7 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
   (have <code>reason:</code>) ·
   <span style="color:#b00">{{ panel.stats.research }} research-needed</span>
   (no <code>reason:</code> yet) ·
-  <span style="color:#b00">{{ panel.stats.errors }} expected-errors</span>.
+  <span style="color:#b00">{{ panel.stats.errors }} parser errors</span>.
 </p>
 {% if panel.glossary_groups %}
 <div class="details-only">
