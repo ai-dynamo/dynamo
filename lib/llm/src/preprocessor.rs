@@ -1770,7 +1770,7 @@ impl OpenAIPreprocessor {
         request: &NvCreateEmbeddingRequest,
     ) -> Result<(PreprocessedEmbeddingRequest, HashMap<String, String>)> {
         let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
-        let mut annotations = HashMap::new();
+        let annotations = HashMap::new();
         let mut builder = PreprocessedEmbeddingRequest::builder();
 
         let all_token_ids = match &request.inner.input {
@@ -1802,13 +1802,7 @@ impl OpenAIPreprocessor {
             }
         };
 
-        // Handle annotations
-        if request.has_annotation(ANNOTATION_TOKEN_IDS) {
-            annotations.insert(
-                ANNOTATION_TOKEN_IDS.to_string(),
-                serde_json::to_string(&all_token_ids)?,
-            );
-        }
+        // Embeddings no longer carry per-request annotations (nvext removed).
 
         builder.token_ids(all_token_ids);
         builder.model(request.inner.model.clone());
@@ -1818,7 +1812,8 @@ impl OpenAIPreprocessor {
         }));
         builder.dimensions(request.inner.dimensions);
 
-        builder.annotations(request.annotations().unwrap_or_default());
+        // Embeddings don't carry per-request annotations (nvext removed).
+        builder.annotations(Vec::new());
         builder.mdc_sum(Some(self.mdcsum.clone()));
 
         Ok((builder.build()?, annotations))

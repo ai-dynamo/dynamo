@@ -291,7 +291,7 @@ pub mod llm {
     /// (`x-worker-instance-id`, `x-prefill-instance-id`, `x-dp-rank`,
     /// `x-prefill-dp-rank`), and silently ignore the response-side
     /// `extra_fields` opt-in.
-    pub const DYN_ENABLE_NVEXT: &str = "DYN_ENABLE_NVEXT";
+    pub const DYN_ENABLE_FRONTEND_NVEXT: &str = "DYN_ENABLE_FRONTEND_NVEXT";
 
     /// Master switch for the frontend's HTTP admin API surface.
     /// Default `true`. Falsy values prevent registration of `GET` /

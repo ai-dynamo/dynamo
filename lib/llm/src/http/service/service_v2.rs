@@ -185,7 +185,7 @@ impl State {
     }
 
     /// Master switch for the `nvext` extension protocol (see
-    /// [`environment_names::llm::DYN_ENABLE_NVEXT`]).
+    /// [`environment_names::llm::DYN_ENABLE_FRONTEND_NVEXT`]).
     #[inline]
     pub fn nvext_enabled(&self) -> bool {
         self.nvext_enabled
@@ -298,7 +298,7 @@ pub struct HttpServiceConfig {
     enable_rl: bool,
 
     /// Master switch for the `nvext` extension protocol. Default `true`,
-    /// env-falsey on `DYN_ENABLE_NVEXT` overrides to `false`.
+    /// env-falsey on `DYN_ENABLE_FRONTEND_NVEXT` overrides to `false`.
     #[builder(default = "true")]
     enable_nvext: bool,
 
@@ -597,7 +597,8 @@ impl HttpServiceConfigBuilder {
             )) as Arc<dyn Discovery>
         });
         // Env-falsey overrides the builder; unset preserves the builder default.
-        let nvext_enabled = config.enable_nvext && !env_is_falsey(env_llm::DYN_ENABLE_NVEXT);
+        let nvext_enabled =
+            config.enable_nvext && !env_is_falsey(env_llm::DYN_ENABLE_FRONTEND_NVEXT);
         let admin_api_enabled =
             config.enable_admin_api && !env_is_falsey(env_llm::DYN_ENABLE_FRONTEND_ADMIN_API);
 
@@ -968,5 +969,49 @@ mod tests {
             default.state.nvext_enabled(),
             "default should preserve current behavior (nvext on)"
         );
+    }
+
+    /// `DYN_ENABLE_FRONTEND_NVEXT` is the env-var mirror of the builder
+    /// flag. Unset → builder default wins (on). Truthy strings → on.
+    /// Falsey strings (`0` / `false` / `no` / `off`, case-insensitive) →
+    /// off, regardless of what the builder asked for.
+    #[test]
+    fn test_dyn_enable_frontend_nvext_env_var_mirror() {
+        use dynamo_runtime::config::environment_names::llm::DYN_ENABLE_FRONTEND_NVEXT;
+
+        // Unset → builder default (true) wins.
+        temp_env::with_var_unset(DYN_ENABLE_FRONTEND_NVEXT, || {
+            let svc = HttpService::builder().build().unwrap();
+            assert!(
+                svc.state.nvext_enabled(),
+                "unset env + default builder = on"
+            );
+        });
+
+        // Explicit truthy → on (builder default also on; env doesn't flip it off).
+        temp_env::with_var(DYN_ENABLE_FRONTEND_NVEXT, Some("true"), || {
+            let svc = HttpService::builder().build().unwrap();
+            assert!(svc.state.nvext_enabled(), "env=true + default builder = on");
+        });
+
+        // Explicit falsey → off, even though the builder default is on.
+        for falsey in ["false", "0", "no", "off", "FALSE"] {
+            temp_env::with_var(DYN_ENABLE_FRONTEND_NVEXT, Some(falsey), || {
+                let svc = HttpService::builder().build().unwrap();
+                assert!(
+                    !svc.state.nvext_enabled(),
+                    "env={falsey:?} should override builder default to off"
+                );
+            });
+        }
+
+        // Builder=false short-circuits regardless of env.
+        temp_env::with_var(DYN_ENABLE_FRONTEND_NVEXT, Some("true"), || {
+            let svc = HttpService::builder().enable_nvext(false).build().unwrap();
+            assert!(
+                !svc.state.nvext_enabled(),
+                "builder=false wins even if env=true"
+            );
+        });
     }
 }

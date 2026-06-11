@@ -161,8 +161,17 @@ The frontend exposes the following HTTP endpoints:
 | `GET` | `/metrics` | Prometheus metrics |
 | `GET` | `/openapi.json` | OpenAPI specification |
 | `GET` | `/docs` | Swagger UI |
-| `POST` | `/busy_threshold` | Set busy thresholds |
-| `GET` | `/busy_threshold` | Get current busy thresholds |
+| `POST` | `/busy_threshold` | Set busy thresholds (gated by `DYN_ENABLE_FRONTEND_ADMIN_API`, see below) |
+| `GET` | `/busy_threshold` | Get current busy thresholds (gated by `DYN_ENABLE_FRONTEND_ADMIN_API`, see below) |
+
+### Frontend feature switches
+
+Binary master switches that operators can flip to close off non-OpenAI-spec surfaces on a default-secure deployment. All default to `true`; an env value of `0` / `false` / `no` / `off` (case-insensitive) overrides to `false`. Unset env preserves the builder default.
+
+| Env Var | Default | Behavior when `false` |
+|---------|---------|------------------------|
+| `DYN_ENABLE_FRONTEND_NVEXT` | `true` | Frontend drops `request.nvext` at handler entry on `/v1/chat/completions`, `/v1/completions`, and `/v1/responses`; ignores routing-override headers (`x-worker-instance-id`, `x-prefill-instance-id`, `x-dp-rank`, `x-data-parallel-rank`, `x-prefill-dp-rank`); silently ignores the response-side `nvext.extra_fields` opt-in. Embeddings are unaffected (do not carry `nvext`). Note: disabling this breaks EPP / GAIE serving, Prime-RL-style training that uses `nvext.cache_salt`, multi-tenant agent platforms that forward `nvext.agent_hints` / `nvext.agent_context`, and clients that opt into response disclosure via `nvext.extra_fields`. |
+| `DYN_ENABLE_FRONTEND_ADMIN_API` | `true` | `GET /busy_threshold` and `POST /busy_threshold` are not registered (404 instead of 503). Inference, metrics, models, health, and liveness routes are unaffected. |
 
 ### Endpoint Path Customization
 
