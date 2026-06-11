@@ -16,7 +16,11 @@ from tests.serve.common import (
     run_prefill_drain_deployment,
     run_serve_deployment,
 )
-from tests.serve.lora_utils import DEFAULT_LORA_REPO, MinioLoraConfig
+from tests.serve.lora_utils import (
+    DEFAULT_LORA_REPO,
+    MinioBaseModelConfig,
+    MinioLoraConfig,
+)
 from tests.serve.multimodal_profiles.sglang import (
     SGLANG_MULTIMODAL_PROFILES,
     SGLANG_TOPOLOGY_SCRIPTS,
@@ -978,6 +982,58 @@ def test_sglang_lora_aggregated(
         timeout=158,
         env=minio_config.get_env_vars(),
         request_payloads=[lora_payload],
+    )
+
+    config = dataclasses.replace(
+        config, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    run_serve_deployment(
+        config,
+        request,
+        ports=dynamo_dynamic_ports,
+        extra_env=minio_config.get_env_vars(),
+    )
+
+
+@pytest.mark.e2e
+@pytest.mark.sglang
+@pytest.mark.gpu_1
+@pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.profiled_vram_gib(2.5)
+@pytest.mark.timeout(240)
+@pytest.mark.pre_merge
+def test_sglang_aggregated_s3_model_path(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    minio_base_model_service,
+    dynamo_dynamic_ports,
+):
+    """Aggregated SGLang with --model-path s3://... — covers the call path
+    that PR #10599 fixed (object-storage URI must route through SGLang's
+    maybe_pull_model_tokenizer_from_remote, not Dynamo's hub.rs/MX).
+
+    The fixture stages Qwen/Qwen3-0.6B (HF cache) into a local MinIO bucket
+    and yields the AWS_ENDPOINT_URL + credential env that runai-streamer +
+    sglang's S3Connector need. The launch script is the standard agg.sh —
+    no S3-specific plumbing in the launcher itself.
+    """
+    minio_config: MinioBaseModelConfig = minio_base_model_service
+
+    config = SGLangConfig(
+        name="test_sglang_aggregated_s3_model_path",
+        directory=sglang_dir,
+        script_name="agg.sh",
+        marks=[],
+        # --model-path s3://my-base-models/Qwen_Qwen3-0.6B
+        # SGLang sees this in ServerArgs.model_path; ModelConfig.__init__
+        # detects is_remote_url and pulls *config.json to a temp dir,
+        # rewriting model_config.model_path and setting model_weights.
+        model="Qwen/Qwen3-0.6B",
+        script_args=["--model-path", minio_config.get_s3_uri()],
+        timeout=180,
+        env=minio_config.get_env_vars(),
+        request_payloads=[chat_payload_default(model="Qwen/Qwen3-0.6B")],
     )
 
     config = dataclasses.replace(

@@ -311,6 +311,144 @@ class MinioService:
             shutil.rmtree(self.config.data_dir, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# Base-model (not LoRA) upload helpers — for testing --model s3://...
+# ---------------------------------------------------------------------------
+# Companion of MinioLoraConfig / MinioService. Reuses the same MinIO singleton
+# (port 9000, container `dynamo-minio-test`) but stages a full HF model
+# (tokenizer + config + safetensors) into a separate bucket so the LoRA and
+# base-model tests don't collide.
+#
+# Same caveat as the LoRA path: singleton container; concurrent test hosts
+# will race on `docker rm -f`. See top-of-file comment on MINIO_ENDPOINT.
+
+BASE_MODEL_BUCKET = "my-base-models"
+DEFAULT_BASE_MODEL_REPO = "Qwen/Qwen3-0.6B"
+
+
+@dataclass
+class MinioBaseModelConfig:
+    """Configuration for MinIO + a base model (full HF snapshot) upload."""
+
+    endpoint: str = MINIO_ENDPOINT
+    access_key: str = MINIO_ACCESS_KEY
+    secret_key: str = MINIO_SECRET_KEY
+    bucket: str = BASE_MODEL_BUCKET
+    model_repo: str = DEFAULT_BASE_MODEL_REPO
+    # S3 key prefix; defaults to a sanitized form of model_repo.
+    s3_prefix: Optional[str] = None
+    data_dir: Optional[str] = None
+
+    def __post_init__(self):
+        if self.s3_prefix is None:
+            self.s3_prefix = self.model_repo.replace("/", "_")
+
+    def get_s3_uri(self) -> str:
+        """Get the s3:// URI to pass as --model / --model-path."""
+        return f"s3://{self.bucket}/{self.s3_prefix}"
+
+    def get_env_vars(self) -> dict:
+        """Environment variables for the worker process.
+
+        - AWS_ENDPOINT_URL is the boto3 1.28+ standard env (used by sglang's
+          S3Connector which does `boto3.client("s3")` with no overrides).
+        - AWS_ENDPOINT is kept for parity with the LoRA fixture / other AWS
+          tooling that reads the older spelling.
+        - AWS_ALLOW_HTTP because MinIO is plain HTTP, not HTTPS.
+        - RUNAI_STREAMER_S3_ENDPOINT belt-and-suspenders for sglang's
+          set_runai_streamer_env (already mirrors AWS_ENDPOINT_URL there).
+        """
+        return {
+            "AWS_ENDPOINT_URL": self.endpoint,
+            "AWS_ENDPOINT": self.endpoint,
+            "AWS_ACCESS_KEY_ID": self.access_key,
+            "AWS_SECRET_ACCESS_KEY": self.secret_key,
+            "AWS_REGION": "us-east-1",
+            "AWS_ALLOW_HTTP": "true",
+            "RUNAI_STREAMER_S3_ENDPOINT": self.endpoint,
+        }
+
+
+class MinioBaseModelService:
+    """Stage a base model from HF cache into MinIO.
+
+    Reuses MinioService (singleton container) for container management.
+    Adds an upload step that's content-agnostic — works for any HF snapshot,
+    not just LoRA adapters.
+    """
+
+    def __init__(self, config: MinioBaseModelConfig):
+        self.config = config
+        self._logger = logging.getLogger(self.__class__.__name__)
+        # Delegate container management to MinioService — same singleton.
+        self._container = MinioService(
+            MinioLoraConfig(
+                endpoint=config.endpoint,
+                access_key=config.access_key,
+                secret_key=config.secret_key,
+                bucket=config.bucket,  # bucket override carried through
+                data_dir=config.data_dir,
+            )
+        )
+
+    def start(self) -> None:
+        self._container.start()
+
+    def stop(self) -> None:
+        self._container.stop()
+
+    def cleanup_temp(self) -> None:
+        self._container.cleanup_temp()
+
+    def create_bucket(self) -> None:
+        self._container.create_bucket()
+
+    def resolve_model_snapshot(self) -> str:
+        """Resolve the base-model snapshot from the HF cache (no network).
+
+        Skips via pytest.skip() when DYNAMO_MODELS_DIR is set, matching the
+        LoRA fixture's policy.
+        """
+        if os.environ.get("DYNAMO_MODELS_DIR"):
+            pytest.skip(
+                "--models-dir active (read-only cache mode): cannot stage base model. "
+                f"Pre-stage {self.config.model_repo} into the cache or omit --models-dir."
+            )
+        snapshot_path = snapshot_download(
+            self.config.model_repo,
+            local_files_only=True,
+        )
+        self._logger.info(
+            f"Resolved base model {self.config.model_repo} from HF cache at {snapshot_path}"
+        )
+        return snapshot_path
+
+    def upload_model(self, local_path: str) -> None:
+        """Upload all snapshot files under `local_path` to s3://bucket/s3_prefix/."""
+        self._logger.info(
+            f"Uploading base model to s3://{self.config.bucket}/{self.config.s3_prefix}"
+        )
+
+        s3_client = self._container._get_s3_client()
+        local_path_obj = Path(local_path)
+
+        n_files = 0
+        for file_path in local_path_obj.rglob("*"):
+            if not file_path.is_file():
+                continue
+            if ".git" in file_path.parts:
+                continue
+            relative_path = file_path.relative_to(local_path_obj).as_posix()
+            s3_key = f"{self.config.s3_prefix}/{relative_path}"
+            try:
+                s3_client.upload_file(str(file_path), self.config.bucket, s3_key)
+                n_files += 1
+            except ClientError as e:
+                raise RuntimeError(f"Failed to upload {file_path}: {e}") from e
+
+        self._logger.info(f"Base model upload completed ({n_files} files)")
+
+
 def load_lora_adapter(
     system_port: int, lora_name: str, s3_uri: str, timeout: int = 60
 ) -> None:

@@ -18,7 +18,7 @@ from tests.serve.common import (
     run_serve_deployment,
 )
 from tests.serve.conftest import MULTIMODAL_IMG_URL
-from tests.serve.lora_utils import MinioLoraConfig
+from tests.serve.lora_utils import MinioBaseModelConfig, MinioLoraConfig
 from tests.serve.multimodal_profiles.vllm import (
     VLLM_MULTIMODAL_PROFILES,
     VLLM_TOPOLOGY_SCRIPTS,
@@ -1197,3 +1197,54 @@ def test_embedding_multi_worker_multi_model_dispatch(
         config, frontend_port=dynamo_dynamic_ports.frontend_port
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
+@pytest.mark.e2e
+@pytest.mark.vllm
+@pytest.mark.gpu_1
+@pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.profiled_vram_gib(2.5)
+@pytest.mark.timeout(240)
+@pytest.mark.pre_merge
+def test_vllm_aggregated_s3_model(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    minio_base_model_service,
+    dynamo_dynamic_ports,
+):
+    """Aggregated vLLM with --model s3://... — covers the call path that
+    PR #10599 fixed (object-storage URI must route through vLLM's
+    maybe_pull_model_tokenizer_for_runai, not Dynamo's hub.rs/MX).
+
+    The fixture stages Qwen/Qwen3-0.6B (HF cache) into a local MinIO
+    bucket and yields AWS_ENDPOINT_URL + credential env that runai-streamer
+    needs. Launch script is the standard agg.sh.
+    """
+    minio_config: MinioBaseModelConfig = minio_base_model_service
+
+    config = VLLMConfig(
+        name="test_vllm_aggregated_s3_model",
+        directory=vllm_dir,
+        script_name="agg.sh",
+        marks=[],
+        # --model s3://my-base-models/Qwen_Qwen3-0.6B
+        # vLLM's ModelConfig.__post_init__ -> maybe_pull_model_tokenizer_for_runai
+        # detects is_runai_obj_uri, pulls *.json/*.py/*.model into a temp dir,
+        # rewrites model_config.model and sets model_weights = <original URI>.
+        model="Qwen/Qwen3-0.6B",
+        script_args=["--model", minio_config.get_s3_uri()],
+        timeout=180,
+        env=minio_config.get_env_vars(),
+        request_payloads=[chat_payload_default(model="Qwen/Qwen3-0.6B")],
+    )
+
+    config = dataclasses.replace(
+        config, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    run_serve_deployment(
+        config,
+        request,
+        ports=dynamo_dynamic_ports,
+        extra_env=minio_config.get_env_vars(),
+    )
