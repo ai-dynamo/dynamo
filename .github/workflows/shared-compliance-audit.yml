@@ -62,6 +62,14 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/bin"
           curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b "${RUNNER_TEMP}/bin"
           echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
+      - name: Install render deps
+        shell: bash
+        # render.py (used below to read back the baseline SBOM stem) needs PyYAML
+        # + Jinja2; this lightweight runner has python3 but not those. Try a
+        # normal install, falling back to --break-system-packages for PEP-668.
+        run: |
+          python3 -m pip install --quiet pyyaml jinja2 \
+            || python3 -m pip install --quiet --break-system-packages pyyaml jinja2
       - name: Resolve image ref, baseline + artifact name
         id: resolve
         shell: bash
