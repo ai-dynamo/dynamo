@@ -23,13 +23,7 @@ from dynamo.llm import (
     register_model,
 )
 from dynamo.sglang._compat import get_scheduler_info
-from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig, use_modelexpress_remote_instance
-from dynamo.sglang.capacity import (
-    get_spec_decode_runtime_data,
-    model_card_dp_rank_bounds,
-    runtime_capacity,
-)
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 
